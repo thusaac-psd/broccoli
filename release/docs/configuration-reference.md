@@ -5,18 +5,23 @@ Redis and object storage are, and the secrets. `install.sh` asks for those and
 writes them to the role's env file. Everything else is derived from the machine
 and the request, or has a default that suits a contest.
 
-Every setting reads from `config/config.toml` as `section.key` or from the
-environment as `BROCCOLI__SECTION__KEY`. In a Compose deployment, add an
-override to the role's env file (`.env.server`, `.env.worker`, ...) and restart
-the role: the whole env file reaches the container. A single-host install keeps
-every secret in `.env.single-host`, which no container gets whole; its overrides
-go in `.env.single-host.server` and `.env.single-host.worker`. A key no Broccoli
-binary reads, for example one that has been removed or is misspelled, is logged
-at boot as `Ignoring an unknown configuration key` and has no effect. So is an
-environment variable shaped like a setting but with one underscore after the
-prefix (`BROCCOLI_WORKER__TOOLS__DIR`): settings take two. A server key given to
-a worker, or the other way round, is ignored without a warning, so one config
-file can serve both.
+Every setting reads from the config file as `section.key` or from the
+environment as `BROCCOLI__SECTION__KEY`, and the environment wins. The server
+and the worker find the config file the same way: `BROCCOLI_CONFIG` names it
+without its extension (`/srv/broccoli/config/worker` reads `worker.toml`) and
+the binary refuses to start when that file is missing; unset, they read
+`config/config.toml` from the working directory when it exists. In a Compose
+deployment, add an override to the role's env file (`.env.server`,
+`.env.worker`, ...) and restart the role: the whole env file reaches the
+container. A single-host install keeps every secret in `.env.single-host`, which
+no container gets whole; its overrides go in `.env.single-host.server` and
+`.env.single-host.worker`. A key no Broccoli binary reads, for example one that
+has been removed or is misspelled, is logged at boot as
+`Ignoring an unknown configuration key` and has no effect. So is an environment
+variable shaped like a setting but with one underscore after the prefix
+(`BROCCOLI_WORKER__TOOLS__DIR`): settings take two. A server key given to a
+worker, or the other way round, is ignored without a warning, so one config file
+can serve both.
 
 ## Required
 
@@ -88,6 +93,7 @@ Leave these alone unless a measurement says otherwise.
 | Setting                                                                                         | Default               | Effect                                                                                                                                                                                     |
 | ----------------------------------------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `host`, `port`                                                                                  | `127.0.0.1`, `3000`   | Listen address                                                                                                                                                                             |
+| `id`                                                                                            | from the machine ID   | This replica's identity: its reply stream and the in-flight work it owns. Unique per replica, including two replicas on one host; a second live replica with the same id refuses to start  |
 | `public_base_url`                                                                               | from the request      | Origin for links the server hands out                                                                                                                                                      |
 | `trusted_proxies`                                                                               | none                  | CIDRs whose `X-Forwarded-*` headers are trusted (`install.sh` sets the gateway)                                                                                                            |
 | `cors.allow_origins`, `cors.max_age`                                                            | none, `3600`          | Cross-origin frontend                                                                                                                                                                      |
@@ -140,6 +146,7 @@ Leave these alone unless a measurement says otherwise.
 
 | Setting                                                                                                                                                             | Default                               | Effect                                                                                                                                                                                                                                                                                                                                                         |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`                                                                                                                                                                | from the machine ID                   | This worker's identity in the worker list and its private task stream. Unique per worker, including two workers on one host                                                                                                                                                                                                                                    |
 | `max_concurrency`                                                                                                                                                   | `1`                                   | Keep at 1: see Capacity Planning in the runbook. Scale by adding worker machines                                                                                                                                                                                                                                                                               |
 | `sandbox_backend`, `isolate_bin`, `enable_cgroups`, `allow_insecure_no_cgroups`                                                                                     | `isolate`, `isolate`, `true`, `false` | Sandbox                                                                                                                                                                                                                                                                                                                                                        |
 | `box_id_lock_dir`                                                                                                                                                   | system temp                           | One lock file per isolate box id; every worker container on one host must share it                                                                                                                                                                                                                                                                             |
