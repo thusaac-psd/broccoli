@@ -816,6 +816,7 @@
 'plugins.config.loading' = '加载中…'
 'plugins.config.saveSuccess' = '配置已保存。'
 'plugins.config.saveError' = '保存配置失败。'
+'plugins.config.serverFieldError' = '服务器拒绝：{message}'
 'plugins.config.loadError' = '加载配置失败。'
 'plugins.config.deleteSuccess' = '配置已重置为默认值。'
 'plugins.config.deleteError' = '删除配置失败。'

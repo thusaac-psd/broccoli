@@ -945,6 +945,7 @@ export const en: Record<string, string> = {
   'plugins.config.loading': 'Loading…',
   'plugins.config.saveSuccess': 'Configuration saved.',
   'plugins.config.saveError': 'Failed to save configuration.',
+  'plugins.config.serverFieldError': 'Refused by the server: {message}',
   'plugins.config.loadError': 'Failed to load configuration.',
   'plugins.config.deleteSuccess': 'Configuration reset to defaults.',
   'plugins.config.deleteError': 'Failed to delete configuration.',

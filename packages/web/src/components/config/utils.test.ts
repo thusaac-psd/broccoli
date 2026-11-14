@@ -6,6 +6,7 @@ import {
   deepMerge,
   extractDefaults,
   hasOwnDescendantValue,
+  serverFieldErrors,
   setAtPath,
   validateAll,
   validateField,
@@ -92,4 +93,33 @@ test('hasOwnDescendantValue ignores empty containers', () => {
   assert.equal(hasOwnDescendantValue({ nested: {} }, []), false);
   assert.equal(hasOwnDescendantValue({ nested: { x: 0 } }, ['nested']), true);
   assert.equal(hasOwnDescendantValue({ list: [] }, ['list']), false);
+});
+
+test('serverFieldErrors keys the server field errors like validateAll', () => {
+  const error = {
+    code: 'VALIDATION_ERROR',
+    details: {
+      fields: [
+        { path: 'penalty_minutes', message: 'expected integer, got string' },
+        { path: 'subtasks[1].max_score', message: 'must be at least 0' },
+        { path: '', message: 'expected an object, got array' },
+      ],
+    },
+  };
+  assert.deepEqual(serverFieldErrors(error), {
+    penalty_minutes: {
+      key: 'plugins.config.serverFieldError',
+      params: { message: 'expected integer, got string' },
+    },
+    'subtasks.1.max_score': {
+      key: 'plugins.config.serverFieldError',
+      params: { message: 'must be at least 0' },
+    },
+    '': {
+      key: 'plugins.config.serverFieldError',
+      params: { message: 'expected an object, got array' },
+    },
+  });
+  assert.deepEqual(serverFieldErrors({ code: 'NOT_FOUND' }), {});
+  assert.deepEqual(serverFieldErrors(null), {});
 });

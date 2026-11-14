@@ -209,6 +209,35 @@ export function validateAll(
   return errors;
 }
 
+/**
+ * The field problems of a refused save: the server checks every config
+ * against its schema and answers `VALIDATION_ERROR` with `details.fields`,
+ * each `{path, message}` where `path` reads `field.nested[2].leaf`. Keyed
+ * like `validateAll`, by dot path with array indices as segments. Empty when
+ * the error names no field.
+ */
+export function serverFieldErrors(
+  error: unknown,
+): Record<string, FieldProblem> {
+  const fields = (error as { details?: { fields?: unknown } } | null)?.details
+    ?.fields;
+  const errors: Record<string, FieldProblem> = {};
+  if (!Array.isArray(fields)) return errors;
+  for (const field of fields) {
+    const { path, message } = (field ?? {}) as {
+      path?: unknown;
+      message?: unknown;
+    };
+    if (typeof path !== 'string' || typeof message !== 'string') continue;
+    const key = path.replace(/\[(\d+)\]/g, '.$1');
+    errors[key] = {
+      key: 'plugins.config.serverFieldError',
+      params: { message },
+    };
+  }
+  return errors;
+}
+
 export function defaultForType(prop: JsonSchemaProperty): unknown {
   if (prop.default !== undefined) return prop.default;
   switch (prop.type) {
