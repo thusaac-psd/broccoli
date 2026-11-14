@@ -33,6 +33,10 @@ export default defineConfig(() => {
         '/assets': 'http://localhost:3000',
       },
     },
+    // A preview serves the build's own `/assets`, never a running server's.
+    preview: {
+      proxy: { '/api': 'http://localhost:3000' },
+    },
     build: {
       outDir: 'build/client',
     },

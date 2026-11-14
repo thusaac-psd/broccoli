@@ -8,7 +8,8 @@
     "build": "react-router build",
     "typecheck": "react-router typegen && tsc -b",
     "check:asset-hashes": "node --experimental-strip-types scripts/check-asset-hashes.ts",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@broccoli/web-sdk": "workspace:*",
@@ -30,6 +31,8 @@
     "web-vitals": "^5.3.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "@playwright/test": "1.63.0",
     "@react-router/dev": "^7.18.5",
     "@react-router/fs-routes": "^7.18.5",
     "@tailwindcss/vite": "^4.3.5",

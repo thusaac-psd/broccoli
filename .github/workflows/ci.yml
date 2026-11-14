@@ -102,7 +102,7 @@ jobs:
       - name: Documentation
         run: cargo doc --workspace --no-deps --locked
         env:
-          RUSTDOCFLAGS: "-D warnings"
+          RUSTDOCFLAGS: '-D warnings'
 
       # `cargo doc --workspace` does not reach plugin crates either.
       - name: Documentation (plugins)
@@ -154,13 +154,16 @@ jobs:
       # One test at a time: isolate box ids are a host-wide resource.
       - name: Worker isolate suite
         timeout-minutes: 20
-        run: cargo test -p worker --locked --test worker_isolate_sandbox -- --ignored --test-threads=1
+        run:
+          cargo test -p worker --locked --test worker_isolate_sandbox --
+          --ignored --test-threads=1
 
       - name: Server e2e on isolate
         timeout-minutes: 40
         env:
           E2E_SANDBOX_BACKEND: isolate
-        run: cargo test -p server --locked --test e2e -- --ignored --test-threads=1
+        run:
+          cargo test -p server --locked --test e2e -- --ignored --test-threads=1
 
   frontend:
     name: Frontend
@@ -201,6 +204,16 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # Accessibility (axe, WCAG A/AA), page titles, document language and
+      # phone layout of the main pages, in the built app against a mocked API.
+      - name: Install Chromium for the browser checks
+        run:
+          pnpm --filter @broccoli/web exec playwright install --with-deps
+          chromium
+
+      - name: Browser checks
+        run: pnpm --filter @broccoli/web test:e2e
+
       # The server caches `/assets/*` as `immutable`, so a file name that
       # ships new bytes would stay stale in browsers for a year. This rebuilds
       # the web app after edits that reach it through the shared-deps shims
@@ -236,7 +249,9 @@ jobs:
       # The vanilla `Rust` job already runs the full server test suite. Here we
       # only re-run the tests that exercise the cfg-gated `/downloads` routes.
       - name: Test downloads endpoint
-        run: cargo test -p server --features bundled-stress-test --locked --test integration -- downloads
+        run:
+          cargo test -p server --features bundled-stress-test --locked --test
+          integration -- downloads
 
   release-scripts:
     name: Release / installer scripts

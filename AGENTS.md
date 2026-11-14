@@ -132,6 +132,7 @@ pnpm format                       # just format
 pnpm format:check                 # just format-check
 pnpm test
 pnpm typecheck
+pnpm --filter @broccoli/web test:e2e   # browser checks of the built app (pnpm build first)
 ```
 
 ### Plugins and other recipes
