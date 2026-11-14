@@ -109,22 +109,15 @@ impl ServerRuntime {
             );
             crate::host_funcs::sql::disable_raw_plugin_sql();
         }
-        // Second, PRIVILEGED plugin pool (same URL, no `SET ROLE`), used only by
-        // the gated core-WRITE host fns (`host.submission.*`, `host.storage.*`,
-        // `config:write`). The `plugin_db` above is restricted to the read-only
-        // `broccoli_plugin` role for the raw `sql` capability (phase 2).
-        let privileged_plugin_db = crate::database::init_plugin_db_privileged(
+        // The host function pool: the SQL the host builds for plugins' host
+        // calls runs here, as the app role, apart from the main pool.
+        let host_fn_db = crate::database::connect_host_fn_pool(
             &app_config.database.url,
-            &crate::database::plugin_pool_spec(
-                pools.plugin_privileged,
-                app_config.plugin.call_timeout(),
-            ),
+            &crate::database::plugin_pool_spec(pools.host_fn, app_config.plugin.call_timeout()),
             &db_session,
         )
         .await?;
-        info!(
-            "Initialized isolated plugin host-function DB pools (restricted sql + privileged writes)"
-        );
+        info!("Initialized the plugin SQL and host function DB pools");
         let blob_store = create_blob_store(&app_config.storage, db.clone(), Some(metrics.clone()))
             .await
             .context("Failed to initialize blob storage")?;
@@ -314,7 +307,7 @@ impl ServerRuntime {
             app_config.plugin.clone(),
             HostFunctionSystemDeps {
                 db: plugin_db,
-                privileged_db: privileged_plugin_db,
+                host_db: host_fn_db,
                 mq: mq.clone(),
                 operation_batches: operation_batches.clone(),
                 operation_waiters: operation_waiters.clone(),

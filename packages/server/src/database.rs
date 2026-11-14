@@ -352,7 +352,7 @@ async fn connect_restricted_pool_with_fallback(
 ///    A plugin's OWN tables - created via raw `CREATE TABLE` under this role -
 ///    are owned by `broccoli_plugin`, so it keeps full DDL on those. The gated
 ///    `host.submission.*` / `host.storage.*` / `config:write` host fns still run
-///    on the PRIVILEGED pool ([`init_plugin_db_privileged`], which does NOT
+///    on the host function pool ([`connect_host_fn_pool`], which does NOT
 ///    `SET ROLE`) - server-owned structured writes, independent of what raw SQL
 ///    may now also do.
 ///
@@ -400,19 +400,14 @@ pub async fn init_plugin_db(
     common::db::connect_with(pool_options, connect_options).await
 }
 
-/// The PRIVILEGED plugin pool: identical to [`init_plugin_db`] (same isolation,
-/// same pool sizing/timeouts) but WITHOUT the `SET ROLE broccoli_plugin`
-/// downshift, so its connections run as the full app role.
-///
-/// The gated, server-owned structured host functions run here, NOT on the
-/// `broccoli_plugin` pool: `host.submission.*`, `host.storage.*`, and
-/// `config:write`. Each builds structured, plugin-scoped SQL owned by the server,
-/// and runs as the app role so it is not bound by the plugin role's boundaries
-/// (no schema DDL on core, no `plugin_login_secret`). That the raw `sql`
-/// capability may now also read/write data on its own pool does not change this:
-/// the structured path stays server-controlled and app-role. Both pools point at
-/// the same database URL; only the effective role differs.
-pub async fn init_plugin_db_privileged(
+/// The host function pool: the pool every database host function other than
+/// raw `sql` runs on (`host.submission.*`, `host.code_run.*`, `host.storage.*`,
+/// `host.timer.*`, `config:*`), along with the host services those functions
+/// start. Every statement on it is built by the host, with the guards those
+/// functions carry, so it runs as the app role. It is separate from the main
+/// pool so plugin traffic can neither exhaust the handlers' connections nor
+/// wait behind them.
+pub async fn connect_host_fn_pool(
     db_url: &str,
     spec: &PgPoolSpec,
     session: &PgSession,
@@ -455,7 +450,7 @@ pub async fn init_db_with_max_connections(
 /// so more calls can be in plugin SQL at once than there are tokens, up to
 /// the admitted-call caps, and those run to hundreds. No database has a
 /// connection for each, so the pools are sized from the tokens instead: one
-/// raw-SQL connection per token, one privileged connection per two, so plugin
+/// raw-SQL connection per token, one host function connection per two, so plugin
 /// statements reach Postgres about as concurrently as guests compute. Every
 /// admitted call is still served: a call that finds the pool busy waits,
 /// parked, and the plugin pools wait for a connection as long as
@@ -467,8 +462,8 @@ pub struct PoolSizes {
     pub main: u32,
     /// Raw plugin SQL (the restricted pool).
     pub plugin: u32,
-    /// The structured plugin write host functions (the privileged pool).
-    pub plugin_privileged: u32,
+    /// The host functions' own SQL (the host function pool).
+    pub host_fn: u32,
 }
 
 /// Connections a server holds outside its pools: the claim listener and the
@@ -480,7 +475,7 @@ pub const SERVER_UNPOOLED_CONNECTIONS: u32 = 2;
 const POOL_FLOOR: PoolSizes = PoolSizes {
     main: 8,
     plugin: 2,
-    plugin_privileged: 1,
+    host_fn: 1,
 };
 
 /// The other nodes sharing the database, as their liveness keys show them
@@ -512,13 +507,13 @@ impl PoolSizes {
         Self {
             main: clamp(cpus.saturating_mul(4), 16, 40),
             plugin: clamp(plugin_tokens, 4, 16),
-            plugin_privileged: clamp(plugin_tokens / 2, 2, 8),
+            host_fn: clamp(plugin_tokens / 2, 2, 8),
         }
     }
 
     /// Every connection a server with these pools holds at most.
     pub fn connections(&self) -> u32 {
-        self.main + self.plugin + self.plugin_privileged + SERVER_UNPOOLED_CONNECTIONS
+        self.main + self.plugin + self.host_fn + SERVER_UNPOOLED_CONNECTIONS
     }
 
     /// These pools, shrunk in proportion where they hold more than `share`
@@ -540,7 +535,7 @@ impl PoolSizes {
         let fitted = Self {
             main: grow(self.main, POOL_FLOOR.main),
             plugin: grow(self.plugin, POOL_FLOOR.plugin),
-            plugin_privileged: grow(self.plugin_privileged, POOL_FLOOR.plugin_privileged),
+            host_fn: grow(self.host_fn, POOL_FLOOR.host_fn),
         };
         Some(fitted)
     }
@@ -767,15 +762,9 @@ mod pool_size_tests {
     #[test]
     fn pools_grow_with_the_host_and_stay_within_a_fixed_budget() {
         let small = PoolSizes::derive(2, 2);
-        assert_eq!(
-            (small.main, small.plugin, small.plugin_privileged),
-            (16, 4, 2)
-        );
+        assert_eq!((small.main, small.plugin, small.host_fn), (16, 4, 2));
         let large = PoolSizes::derive(128, 256);
-        assert_eq!(
-            (large.main, large.plugin, large.plugin_privileged),
-            (40, 16, 8)
-        );
+        assert_eq!((large.main, large.plugin, large.host_fn), (40, 16, 8));
         assert_eq!(large.connections(), 66);
     }
 
@@ -1239,7 +1228,7 @@ mod tests {
         let app = init_db_with_max_connections(&url, 2, &session)
             .await
             .expect("migrate + main pool");
-        let privileged = init_plugin_db_privileged(&url, &PgPoolSpec::new(1, 2), &session)
+        let privileged = connect_host_fn_pool(&url, &PgPoolSpec::new(1, 2), &session)
             .await
             .expect("privileged plugin pool");
         let restricted = init_plugin_db(&url, &PgPoolSpec::new(1, 2), None, &session)
@@ -1311,7 +1300,7 @@ mod tests {
             .await
             .expect("restricted plugin pool");
         // PRIVILEGED pool: runs as the app role (no SET ROLE).
-        let privileged = init_plugin_db_privileged(&url, &PgPoolSpec::new(2, 2), &test_session())
+        let privileged = connect_host_fn_pool(&url, &PgPoolSpec::new(2, 2), &test_session())
             .await
             .expect("privileged plugin pool");
 

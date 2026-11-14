@@ -2,7 +2,7 @@
 //! writes the judgement or code run it was dispatched with
 //! (`host.submission.*` and `host.code_run.*`). The guest sends structured
 //! input; the host builds every statement (see `services::judging`), fenced on
-//! the unit and its epoch. The statements run on the privileged pool, through
+//! the unit and its epoch. The statements run on the host function pool, through
 //! the same argument parsing and statement typing as raw plugin SQL
 //! (`sql::execute_on_pool`).
 
