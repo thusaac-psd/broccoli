@@ -1054,15 +1054,33 @@ async fn disabling_the_contest_plugin_mid_judging_finalizes_the_submission() {
     assert!(res.status < 300, "disable failed: {}", res.text);
     app.resume_worker();
 
-    let res = app.wait_for_submission_terminal(sub_id, &admin, 60).await;
-    assert_eq!(res.body["status"], "SystemError", "{}", res.text);
-    let judgement = submission_judgement::Entity::find()
-        .filter(submission_judgement::Column::SubmissionId.eq(sub_id))
-        .one(&app.db)
-        .await
-        .expect("query judgement")
-        .expect("the submission has a judgement");
-    assert!(judgement.is_finalized);
+    // The judgement finalizes without its plugin. The submission itself is
+    // not served meanwhile: the plugin also decides what of it a viewer may
+    // see, and the host fails closed while it is not loaded.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let judgement = loop {
+        let judgement = submission_judgement::Entity::find()
+            .filter(submission_judgement::Column::SubmissionId.eq(sub_id))
+            .one(&app.db)
+            .await
+            .expect("query judgement")
+            .expect("the submission has a judgement");
+        if judgement.is_finalized {
+            break judgement;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the judgement never finalized: {:?}",
+            judgement.status
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    assert_eq!(judgement.status, SubmissionStatus::SystemError);
+    let res = app
+        .get_with_token(&format!("/api/v1/submissions/{sub_id}"), &admin)
+        .await;
+    assert_eq!(res.status, 503, "{}", res.text);
+    assert_eq!(res.body["code"], "PLUGIN_UNAVAILABLE", "{}", res.text);
     assert_eq!(
         judgement.error_code.as_deref(),
         Some("PLUGIN_SESSION_ABORTED")

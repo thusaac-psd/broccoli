@@ -732,7 +732,7 @@ pub async fn create_contest_submission(
     // this gate does not merge into them, and the cooldown/submission-limit
     // plugins' own rejections are untouched by it either.
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
-    if kernel
+    let decision = kernel
         .decide(
             Action::Submit,
             Resource::Problem {
@@ -740,9 +740,19 @@ pub async fn create_contest_submission(
                 problem_id,
             },
         )
-        .await?
-        .is_denied()
+        .await;
+    // A plugin the decision needs is missing because the fleet disabled the
+    // plugin of this contest's type: that is the answer, and it is not one to
+    // retry.
+    if matches!(decision, Err(AppError::PluginUnavailable))
+        && let Some(contest_type) = contest_model.contest_type.as_deref()
+        && state
+            .plugin_lifecycle
+            .is_contest_type_disabled(contest_type)
     {
+        return Err(AppError::ContestTypeDisabled(contest_type.to_string()));
+    }
+    if decision?.is_denied() {
         return Err(AppError::NotFound(
             "Problem not found in this contest".into(),
         ));
