@@ -134,17 +134,12 @@ export function useToggleReplyPublic(contestId: number) {
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (payload: {
-      clarificationId: number;
-      replyId: number;
-      includeQuestion?: boolean;
-    }) =>
+    mutationFn: (payload: { clarificationId: number; replyId: number }) =>
       toggleReplyPublic(
         apiClient,
         contestId,
         payload.clarificationId,
         payload.replyId,
-        payload.includeQuestion,
       ),
     onSuccess: (data) => {
       toast.success(

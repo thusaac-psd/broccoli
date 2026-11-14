@@ -13,10 +13,10 @@ source "$here/lib/envgen.sh"
 source "$here/lib/runtime.sh"
 
 usage() {
-  echo "Usage: build-bundle.sh --version V [--output DIR] [--lan-host H] [--tar] [--skip-images]"
+  echo "Usage: build-bundle.sh --version V [--output DIR] [--lan-host H] [--tar] [--skip-images] [--skip-sdk]"
 }
 
-VERSION="" OUTPUT="./dist" LAN_HOST="" TAR=0 SKIP_IMAGES=0
+VERSION="" OUTPUT="./dist" LAN_HOST="" TAR=0 SKIP_IMAGES=0 SKIP_SDK=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
@@ -24,6 +24,7 @@ while [ $# -gt 0 ]; do
     --lan-host) LAN_HOST="$2"; shift 2 ;;
     --tar) TAR=1; shift ;;
     --skip-images) SKIP_IMAGES=1; shift ;;
+    --skip-sdk) SKIP_SDK=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
   esac
@@ -201,6 +202,10 @@ if [ "$SKIP_IMAGES" = "0" ]; then
   cp "$repo/target/x86_64-unknown-linux-musl/release-cli/broccoli" "$B/cli/broccoli"
   chmod 0755 "$B/cli/broccoli"
 fi
+
+# 4b. Plugin SDKs with their crates.io closure, for plugin authors on the LAN
+#     (skipped for CI structural tests: vendoring fetches crates.io).
+[ "$SKIP_SDK" = 1 ] || "$repo/scripts/stage-sdk.sh" "$B"
 
 # 5. Provenance + integrity
 cat > "$B/bundle.json" <<JSON

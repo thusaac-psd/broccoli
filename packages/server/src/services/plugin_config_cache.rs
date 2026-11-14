@@ -163,63 +163,74 @@ impl PluginConfigCache {
     }
 }
 
-const FUNCTION: &str = "broccoli_plugin_config_changed";
+/// The change counter and triggers the cache relies on, as code. The
+/// migrations create them in every database; the schema test
+/// `the_migrations_create_the_schema_the_code_expects` runs [`expected::install`]
+/// against a migrated database and fails if it changes anything, so a change
+/// here ships with a migration that makes the same change.
+#[cfg(test)]
+pub(crate) mod expected {
+    use sea_orm::{ConnectionTrait, DbBackend, DbErr, Statement};
 
-/// Creates the change counter and its triggers. Boot runs this under the boot
-/// lock, after the schema exists.
-///
-/// The row trigger is a deferred constraint trigger, so the counter advances
-/// as the writing transaction commits rather than when it first writes: a
-/// reader can only see it advance once the change is about to be visible.
-/// `TRUNCATE` fires no row trigger, so a statement trigger covers it. Only
-/// the host writes `plugin_config`; plugins have no privilege on it or on the
-/// counter.
-pub async fn install_plugin_config_epoch<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
-    let channel = crate::services::judging::CLAIM_CHANNEL;
-    db.execute_unprepared(&format!(
-        "CREATE SEQUENCE IF NOT EXISTS {EPOCH_SEQUENCE}; \
-         SELECT nextval('{EPOCH_SEQUENCE}') WHERE NOT (SELECT is_called FROM {EPOCH_SEQUENCE})"
-    ))
-    .await?;
-    db.execute_unprepared(&format!(
-        "CREATE OR REPLACE FUNCTION {FUNCTION}() RETURNS trigger LANGUAGE plpgsql AS $$ \
-         BEGIN \
-           PERFORM nextval('{EPOCH_SEQUENCE}'); \
-           PERFORM pg_notify('{channel}', '{CHANGED}'); \
-           RETURN NULL; \
-         END $$"
-    ))
-    .await?;
-    for (name, ddl) in [
-        (
-            FUNCTION.to_string(),
-            format!(
-                "CREATE CONSTRAINT TRIGGER {FUNCTION} AFTER INSERT OR UPDATE OR DELETE \
-                 ON plugin_config DEFERRABLE INITIALLY DEFERRED \
-                 FOR EACH ROW EXECUTE FUNCTION {FUNCTION}()"
+    use super::{CHANGED, EPOCH_SEQUENCE};
+
+    const FUNCTION: &str = "broccoli_plugin_config_changed";
+
+    /// Creates the change counter and its triggers.
+    ///
+    /// The row trigger is a deferred constraint trigger, so the counter advances
+    /// as the writing transaction commits rather than when it first writes: a
+    /// reader can only see it advance once the change is about to be visible.
+    /// `TRUNCATE` fires no row trigger, so a statement trigger covers it. Only
+    /// the host writes `plugin_config`; plugins have no privilege on it or on the
+    /// counter.
+    pub async fn install<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
+        let channel = crate::services::judging::CLAIM_CHANNEL;
+        db.execute_unprepared(&format!(
+            "CREATE SEQUENCE IF NOT EXISTS {EPOCH_SEQUENCE}; \
+             SELECT nextval('{EPOCH_SEQUENCE}') WHERE NOT (SELECT is_called FROM {EPOCH_SEQUENCE})"
+        ))
+        .await?;
+        db.execute_unprepared(&format!(
+            "CREATE OR REPLACE FUNCTION {FUNCTION}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               PERFORM nextval('{EPOCH_SEQUENCE}'); \
+               PERFORM pg_notify('{channel}', '{CHANGED}'); \
+               RETURN NULL; \
+             END $$"
+        ))
+        .await?;
+        for (name, ddl) in [
+            (
+                FUNCTION.to_string(),
+                format!(
+                    "CREATE CONSTRAINT TRIGGER {FUNCTION} AFTER INSERT OR UPDATE OR DELETE \
+                     ON plugin_config DEFERRABLE INITIALLY DEFERRED \
+                     FOR EACH ROW EXECUTE FUNCTION {FUNCTION}()"
+                ),
             ),
-        ),
-        (
-            format!("{FUNCTION}_truncate"),
-            format!(
-                "CREATE TRIGGER {FUNCTION}_truncate AFTER TRUNCATE ON plugin_config \
-                 FOR EACH STATEMENT EXECUTE FUNCTION {FUNCTION}()"
+            (
+                format!("{FUNCTION}_truncate"),
+                format!(
+                    "CREATE TRIGGER {FUNCTION}_truncate AFTER TRUNCATE ON plugin_config \
+                     FOR EACH STATEMENT EXECUTE FUNCTION {FUNCTION}()"
+                ),
             ),
-        ),
-    ] {
-        let exists = db
-            .query_one_raw(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "SELECT 1 FROM pg_trigger WHERE tgname = $1",
-                [name.into()],
-            ))
-            .await?
-            .is_some();
-        if !exists {
-            db.execute_unprepared(&ddl).await?;
+        ] {
+            let exists = db
+                .query_one_raw(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT 1 FROM pg_trigger WHERE tgname = $1",
+                    [name.into()],
+                ))
+                .await?
+                .is_some();
+            if !exists {
+                db.execute_unprepared(&ddl).await?;
+            }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(test)]

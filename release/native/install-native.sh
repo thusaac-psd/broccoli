@@ -2,8 +2,8 @@
 # Native (non-Docker) installer for an offline Broccoli contest LAN on
 # Ubuntu 22.04 (x86_64). Mirrors the battery-verified staging deployment:
 # native Postgres + Redis + SeaweedFS + systemd-managed broccoli services,
-# isolate sandbox with cgroup-v2 delegation. No Docker, no internet required
-# (assumes pg/redis available via apt mirror or pre-installed).
+# isolate sandbox with cgroup-v2 delegation. No Docker, no internet required:
+# PostgreSQL, Redis and the toolchain install from the bundle's staged .debs.
 #
 # Roles:
 #   infra-server   box 1: Postgres + Redis + SeaweedFS + broccoli-server.
@@ -95,33 +95,40 @@ apt_ensure(){ # install pkgs only if missing (works against a local apt mirror)
     || die "apt install failed (${miss[*]}); on an airgap, point apt at a local mirror or pre-install these"
 }
 
+# install_bundled_set NAME PACKAGE: install the bundle's NAME/<VERSION_ID>/*.deb
+# set (stage-NAME.sh) with dpkg, offline. Returns 1 when the bundle has no set
+# for this Ubuntu version. A set that does not install, or leaves PACKAGE
+# anything but installed, stops the install with dpkg's own output.
+install_bundled_set(){
+  local name="$1" package="$2" ver debs log status
+  ver="$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}")"
+  debs="$BUNDLE/$name/$ver"
+  ls "$debs"/*.deb >/dev/null 2>&1 || return 1
+  echo ">> installing the bundled $name set for Ubuntu $ver ($debs)"
+  log="$(mktemp)"
+  if ! dpkg -i --skip-same-version "$debs"/*.deb >"$log" 2>&1; then
+    cat "$log" >&2
+    rm -f "$log"
+    die "dpkg could not install the bundled $name set in $debs (output above)"
+  fi
+  rm -f "$log"
+  status="$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)"
+  [ "$status" = "install ok installed" ] \
+    || die "dpkg left $package as '${status:-not installed}' after installing $debs"
+}
+
 # The message queue needs Redis 7 or newer (stream commands from 6.2 and 7.0);
 # Ubuntu 22.04 ships 6.0.
 redis_major(){ redis-server --version 2>/dev/null | sed -n 's/.* v=\([0-9]*\)\..*/\1/p'; }
 # Sources, in order: the bundled .debs for this Ubuntu version
 # (stage-redis.sh), then the system apt (24.04 and newer ship Redis 7, and a
 # LAN mirror may), then packages.redis.io. An air-gapped lab has only the
-# bundle, so the set ships in the release. A bundled set that does not install
-# stops the install with dpkg's own output.
+# bundle, so the set ships in the release.
 ensure_redis7(){
-  local ver debs log status
   [ "$(redis_major)" -ge 7 ] 2>/dev/null && return 0
-  ver="$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}")"
-  debs="$BUNDLE/redis/$ver"
-  if ls "$debs"/*.deb >/dev/null 2>&1; then
-    echo ">> installing bundled Redis 7 for Ubuntu $ver ($debs)"
-    log="$(mktemp)"
-    if ! dpkg -i --skip-same-version "$debs"/*.deb >"$log" 2>&1; then
-      cat "$log" >&2
-      rm -f "$log"
-      die "dpkg could not install the bundled Redis 7 set in $debs (output above)"
-    fi
-    rm -f "$log"
-    status="$(dpkg-query -W -f='${Status}' redis-server 2>/dev/null || true)"
-    [ "$status" = "install ok installed" ] \
-      || die "dpkg left redis-server as '${status:-not installed}' after installing $debs"
+  if install_bundled_set redis redis-server; then
     [ "$(redis_major)" -ge 7 ] 2>/dev/null \
-      || die "the bundled set in $debs installed Redis $(redis_major), not 7 or newer; restage it with ./stage-redis.sh"
+      || die "the bundled redis set installed Redis $(redis_major), not 7 or newer; restage it with ./stage-redis.sh"
     return 0
   fi
   apt_ensure redis-server
@@ -136,6 +143,22 @@ ensure_redis7(){
   fi
   [ "$(redis_major)" -ge 7 ] 2>/dev/null \
     || die "Broccoli needs Redis 7 or newer, found $(redis_major). Bundle it with ./stage-redis.sh, or install Redis 7 (packages.redis.io, or a LAN mirror) and re-run."
+}
+
+# PostgreSQL, from the bundled set for this Ubuntu version (stage-postgres.sh:
+# the major version the release's compose files run), else the system apt (a
+# LAN mirror). A box that already runs a PostgreSQL server keeps it.
+ensure_postgres(){
+  local set major
+  dpkg-query -W -f='${Package} ${Status}\n' 'postgresql-[0-9]*' 2>/dev/null \
+    | grep -q '^postgresql-[0-9]* install ok installed$' && return 0
+  set="$(ls "$BUNDLE/postgres/$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}")"/postgresql-[0-9]*_*.deb 2>/dev/null | head -n 1)"
+  if [ -n "$set" ]; then
+    major="$(basename "$set" | sed -n 's/^postgresql-\([0-9]*\)_.*/\1/p')"
+    install_bundled_set postgres "postgresql-$major"
+    return 0
+  fi
+  apt_ensure postgresql postgresql-client
 }
 
 # Provision the worker's C/C++/Python toolchain for offline / live-boot boxes.
@@ -193,7 +216,7 @@ install_infra_server(){
   local host="${BROCCOLI_INFRA_HOST:-}"
   [ -n "$host" ] || die "set BROCCOLI_INFRA_HOST=<this box's LAN IP> for infra-server"
   require_ubuntu; install_common_dirs
-  apt_ensure postgresql postgresql-client
+  ensure_postgres
   ensure_redis7
 
   # binaries
@@ -319,7 +342,7 @@ EOF
   echo
   echo ">> infra-server up on $host. admin password: $admin_pw"
   echo ">> connection.env written to $CONN_ENV -- copy it to every worker box's bundle dir."
-  echo ">> import problems with:  cd contest && ./import-problems.sh <archive>   (reads $CONN_ENV)"
+  echo ">> import problems with:  cd contest && sudo ./import-problems.sh <archive>"
 }
 
 # ---------------------------------------------------------------------- worker
@@ -327,6 +350,9 @@ install_worker(){
   [ -f "$CONN_ENV" ] || die "connection.env not found in $BUNDLE (copy it from the infra box)"
   # shellcheck disable=SC1090
   set -a; . "$CONN_ENV"; set +a
+  # Native workers always read blobs from the infra box's SeaweedFS.
+  BROCCOLI__STORAGE__BACKEND=object_storage env_require_role worker \
+    || die "fix $CONN_ENV (copy the one install-native.sh infra-server wrote)"
   local wid="${BROCCOLI__WORKER__ID:-$(node_id worker)}"
   require_ubuntu; install_common_dirs
   ensure_toolchain

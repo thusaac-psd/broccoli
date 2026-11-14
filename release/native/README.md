@@ -8,34 +8,36 @@ services + isolate. This mirrors the battery-verified staging deployment exactly
 Use this instead of the Docker bundle (`../install.sh`) when the lab machines
 have no Docker / no Docker Hub access (typical in mainland China).
 
-| File | Role |
-|------|------|
-| `build-native-bundle.sh` | Run on a **built** box to assemble the bundle tarball. |
+| File                     | Role                                                      |
+| ------------------------ | --------------------------------------------------------- |
+| `build-native-bundle.sh` | Run on a **built** box to assemble the bundle tarball.    |
 | `install-native.sh`      | Deploy a role on a fresh box: `infra-server` or `worker`. |
-| `systemd/`, `config/`    | Unit + config templates (filled in at install time). |
-| `contest/`               | Problem export/import (added into the bundle). |
-| `cli/broccoli`           | Contestant CLI binary — copy out to contestant machines. |
+| `systemd/`, `config/`    | Unit + config templates (filled in at install time).      |
+| `contest/`               | Problem export/import (added into the bundle).            |
+| `cli/broccoli`           | Contestant CLI binary — copy out to contestant machines.  |
 
 ## (A) Build the bundle — on a built x86_64 Ubuntu box (e.g. staging)
 
-The box must already have: compiled `target/release/{server,worker,broccoli-compare}`,
-installed `/usr/local/bin/{weed,isolate}`, built plugin `.wasm` under
-`plugins/*/`, and the server web build under `packages/web/build/client`.
+The box must already have: compiled
+`target/release/{server,worker,broccoli-compare}`, installed
+`/usr/local/bin/{weed,isolate}`, built plugin `.wasm` under `plugins/*/`, and
+the server web build under `packages/web/build/client`.
 
 ```bash
 cd release/native
-# for an air-gapped lab, pre-stage the C/C++/Python toolchain and Redis 7 as
-# offline .debs (needs Docker + internet, once):
+# for an air-gapped lab, pre-stage the C/C++/Python toolchain, PostgreSQL and
+# Redis 7 as offline .debs (needs Docker + internet, once):
 ./stage-toolchain.sh               # -> toolchain/{20.04,22.04,24.04}/*.deb
+./stage-postgres.sh                # -> postgres/{20.04,22.04,24.04}/*.deb
 ./stage-redis.sh                   # -> redis/{20.04,22.04,24.04}/*.deb
 ./build-native-bundle.sh v1        # -> broccoli-native-v1.tar.gz (+ .sha256)
 ```
 
 The bundle contains the binaries, the `.wasm` judge plugins, the server web UI,
 `weed` + `isolate`, the systemd unit + config templates, the export/import
-tooling, `stage-toolchain.sh`, `stage-redis.sh`, and any pre-staged
-`toolchain/` and `redis/` `.deb` sets.
-~700 MB (binaries carry line-table debug info for backtraces).
+tooling, the staging scripts, and any pre-staged `toolchain/`, `postgres/` and
+`redis/` `.deb` sets. ~700 MB (binaries carry line-table debug info for
+backtraces).
 
 > **testlib.h / special judges** ride inside each problem's `checker_source` in
 > the DB, so they survive export/import with no internet.
@@ -47,12 +49,16 @@ Extract to the same directory on each (`tar xzf broccoli-native-v1.tar.gz`).
 
 ## (C) Deploy — offline, on the LAN
 
-Lab boxes are Ubuntu 22.04. Broccoli needs Redis 7, which 22.04's archive does
-not carry (it ships 6.0), so the bundle ships the Redis 7 `.deb` set staged by
-`./stage-redis.sh` and the installer `dpkg -i`s it with no network. Online, it
-falls back to the packages.redis.io repository, then the system apt (24.04 and
-newer ship Redis 7). Postgres comes from apt: point it at a LAN mirror or
-pre-install `postgresql` on a fully air-gapped box.
+Lab boxes are Ubuntu 22.04. The infra box needs PostgreSQL and Redis 7, and
+neither comes from the network. The bundle ships the `.deb` sets
+`./stage-postgres.sh` and `./stage-redis.sh` staged for the box's Ubuntu
+version, each with its full dependency closure, and the installer `dpkg -i`s
+them offline. PostgreSQL is the major version the Docker deployments run
+(`POSTGRES_IMAGE` in `.env.infra.example`), from the PostgreSQL project's
+repository; a box that already runs a PostgreSQL server keeps it. Redis 7 comes
+from packages.redis.io, since 22.04's archive ships 6.0. Without a staged set,
+the installer falls back to the system apt (a LAN mirror) and, for Redis, to
+packages.redis.io.
 
 ### Box 1 — infra + server (Postgres, Redis, SeaweedFS, API)
 
@@ -66,16 +72,17 @@ bind + password), SeaweedFS (`weed`, S3 on `:8333`), and `broccoli-server`
 (systemd, port 80). SeaweedFS's master, volume and filer listen on loopback
 only; the LAN reaches just the credentialed S3 API, which
 `broccoli-weed-s3.socket` forwards from `<box1-LAN-IP>:8333`. Postgres (5432),
-Redis (6379) and S3 (8333) still accept LAN connections with passwords, so
-on a venue LAN, firewall them from contestant subnets and allow only the
-worker boxes. It **generates all secrets** on the first run (a re-run, e.g. to update the
-binaries, keeps them; `--rotate-secrets` makes new ones and then every worker
-needs the new `connection.env`), prints the admin password, and
-writes `connection.env` for the workers. The server auto-creates its schema and
-loads the plugins on first boot.
+Redis (6379) and S3 (8333) still accept LAN connections with passwords, so on a
+venue LAN, firewall them from contestant subnets and allow only the worker
+boxes. It **generates all secrets** on the first run (a re-run, e.g. to update
+the binaries, keeps them; `--rotate-secrets` makes new ones and then every
+worker needs the new `connection.env`), prints the admin password, and writes
+`connection.env` for the workers. The server migrates its database and loads the
+plugins on first boot.
 
 Then load the problems (exported from the authoring server with
-`contest/export-problems.sh`). The import reads the bundle's `connection.env`:
+`contest/export-problems.sh`). The import runs the installed server binary with
+its `config/config.toml`:
 
 ```bash
 cd contest
@@ -114,14 +121,16 @@ networking bridges to the real LAN (no NAT, unlike WSL2). **Box 1 must NOT be
 live-boot** — it holds the DB/problems/submissions and must survive a reboot;
 install it persistently (disk install or a USB with a persistence partition).
 
-The one gap: the Ubuntu **Desktop live ISO ships `python3` but not `gcc`/`g++`**.
-Provide the toolchain by one of:
+The one gap: the Ubuntu **Desktop live ISO ships `python3` but not
+`gcc`/`g++`**. Provide the toolchain by one of:
 
 - **Bundled `.debs` (offline):** pre-stage them once on any online machine with
   Docker — `./stage-toolchain.sh` writes `toolchain/{20.04,22.04,24.04}/*.deb`,
-  folded into the bundle by `build-native-bundle.sh`. On the live-boot worker the
-  installer auto-runs `dpkg -i toolchain/$(. /etc/os-release; echo $VERSION_ID)/*.deb`.
-- **apt / LAN mirror (online):** `sudo apt-get install -y build-essential python3`.
+  folded into the bundle by `build-native-bundle.sh`. On the live-boot worker
+  the installer auto-runs
+  `dpkg -i toolchain/$(. /etc/os-release; echo $VERSION_ID)/*.deb`.
+- **apt / LAN mirror (online):**
+  `sudo apt-get install -y build-essential python3`.
 - The installer falls back to apt automatically, then the compile-test gate.
 
 > The staged closure is resolved against a minimal base image, so it is a
@@ -139,9 +148,10 @@ sudo ./live-boot-preflight.sh <box1-LAN-IP>   # exit 0 = GO, nonzero = NO-GO
 ### Contestant CLI (optional, for contestants)
 
 The bundle ships `cli/broccoli` — a self-contained x86_64 client binary
-(`login`, `submit`, `test`, `contest`, `status`, `watch`, …). It links only
-glibc + libgcc, so it runs on any Ubuntu 22.04 lab machine with no extra
-packages. Distribute it to contestant machines over the LAN:
+(`login`, `submit`, `test`, `contest`, `status`, `watch`, …). It is linked
+statically against musl and needs no shared library, so it runs on any x86_64
+Linux lab machine with no extra packages. Distribute it to contestant machines
+over the LAN:
 
 ```bash
 scp broccoli-native-v1/cli/broccoli contestant-box:/usr/local/bin/broccoli
@@ -158,11 +168,12 @@ machine that has a printer; it polls the server, renders syntax-highlighted PDFs
 (CJK font bundled), and runs the print command. Verified end-to-end: PDF
 generation + folder sink + `lp`-style command invocation + job status reporting.
 
-1. In the web UI (admin → print plugin config, **plugin** scope), add one or more
-   **station tokens**.
+1. In the web UI (admin → print plugin config, **plugin** scope), add one or
+   more **station tokens**.
 2. On each station: copy `cli/print-client` + `cli/print-client.toml.example` →
    `print-client.toml`, set `[[server]].url`/`token` and `[[printer]].command`
-   (`lp -d <printer> {file}` for CUPS, or `folder:/path` to drop PDFs to a folder).
+   (`lp -d <printer> {file}` for CUPS, or `folder:/path` to drop PDFs to a
+   folder).
 3. `print-client doctor` to check connectivity, then `print-client run`.
 
 > Each rendered PDF is ~25 MB — the bundled CJK font is embedded un-subsetted.
@@ -174,12 +185,13 @@ From any LAN box: open `http://<box1-LAN-IP>/`, log in as admin, confirm the
 problem list, submit one solution, confirm a worker judges it.
 
 ## Notes / limitations
+
 - **Plugin web UIs**: the bundle ships every judge `.wasm` (judging works) plus
-  the **print** plugin's staff web UI (`plugins/print/frontend/dist/` — print queue
-  panel + print buttons) and its backend `.wasm`. The other plugins' optional
-  config-UI panels are only included if their frontends were built. Building any
-  plugin frontend requires building `packages/web-sdk` first (it emits
-  `dist/plugin.css` that every plugin frontend `@import`s), then
+  the **print** plugin's staff web UI (`plugins/print/frontend/dist/` — print
+  queue panel + print buttons) and its backend `.wasm`. The other plugins'
+  optional config-UI panels are only included if their frontends were built.
+  Building any plugin frontend requires building `packages/web-sdk` first (it
+  emits `dist/plugin.css` that every plugin frontend `@import`s), then
   `pnpm --filter <plugin> build`. Authors can configure plugins via the API
   meanwhile; rebuild the remaining frontends on a connected machine for full UI.
 - **SeaweedFS volumes**: if `import` fails with "not enough volumes", raise the

@@ -17,7 +17,6 @@ import {
   Check,
   CheckCircle2,
   Clock,
-  Globe,
   Lock,
   Mail,
   Megaphone,
@@ -38,7 +37,7 @@ interface ClarificationCardProps {
   /** Sends a reply; rejects (after reporting why) when it was not sent. */
   onReply: (content: string) => Promise<unknown>;
   onResolve: (resolved: boolean) => void;
-  onToggleReplyPublic: (replyId: number, includeQuestion: boolean) => void;
+  onToggleReplyPublic: (replyId: number) => void;
 }
 
 export function ClarificationCard({
@@ -122,10 +121,7 @@ export function ClarificationCard({
               locale={locale}
               isLast={idx === replies.length - 1}
               isAdmin={isAdmin}
-              questionIsPublic={clarification.is_public}
-              onTogglePublic={(includeQuestion) =>
-                onToggleReplyPublic(reply.id, includeQuestion)
-              }
+              onTogglePublic={() => onToggleReplyPublic(reply.id)}
             />
           ))}
         </div>
@@ -267,15 +263,13 @@ function ReplyMessage({
   locale,
   isLast,
   isAdmin,
-  questionIsPublic,
   onTogglePublic,
 }: {
   reply: ClarificationReply;
   locale: string;
   isLast: boolean;
   isAdmin: boolean;
-  questionIsPublic: boolean;
-  onTogglePublic: (includeQuestion: boolean) => void;
+  onTogglePublic: () => void;
 }) {
   const { t } = useTranslation();
 
@@ -321,23 +315,15 @@ function ReplyMessage({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 {reply.is_public ? (
-                  <DropdownMenuItem onClick={() => onTogglePublic(false)}>
+                  <DropdownMenuItem onClick={onTogglePublic}>
                     <Lock className="h-4 w-4 mr-2" />
                     {t('clarification.makePrivate')}
                   </DropdownMenuItem>
                 ) : (
-                  <>
-                    <DropdownMenuItem onClick={() => onTogglePublic(false)}>
-                      <Globe className="h-4 w-4 mr-2" />
-                      {t('clarification.publishReplyOnly')}
-                    </DropdownMenuItem>
-                    {!questionIsPublic && (
-                      <DropdownMenuItem onClick={() => onTogglePublic(true)}>
-                        <Megaphone className="h-4 w-4 mr-2" />
-                        {t('clarification.publishWithQuestion')}
-                      </DropdownMenuItem>
-                    )}
-                  </>
+                  <DropdownMenuItem onClick={onTogglePublic}>
+                    <Megaphone className="h-4 w-4 mr-2" />
+                    {t('clarification.publishWithQuestion')}
+                  </DropdownMenuItem>
                 )}
               </DropdownMenuContent>
             </DropdownMenu>

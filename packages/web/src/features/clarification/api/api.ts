@@ -77,7 +77,6 @@ export async function toggleReplyPublic(
   contestId: number,
   clarificationId: number,
   replyId: number,
-  includeQuestion?: boolean,
 ): Promise<ClarificationReply> {
   const { data, error } = await apiClient.POST(
     '/contests/{id}/clarifications/{clarification_id}/replies/{reply_id}/toggle-public',
@@ -88,7 +87,6 @@ export async function toggleReplyPublic(
           clarification_id: clarificationId,
           reply_id: replyId,
         },
-        query: includeQuestion ? { include_question: true } : undefined,
       },
     },
   );

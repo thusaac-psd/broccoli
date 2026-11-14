@@ -52,58 +52,32 @@ pub fn resolve_standard_language(input: String) -> FnResult<String> {
         .unwrap_or_default();
 
     let entry_point_config = load_entry_point_config(&host, req.problem_id, &req.language_id);
-    let extra_compile_flags = entry_point_config
+    let extra_flags = entry_point_config
         .as_ref()
         .and_then(|c| c.extra_compile_flags.as_deref())
         .unwrap_or(&[]);
 
-    let compiler = overrides
-        .compiler
-        .as_deref()
-        .or(lang_config.compiler.as_deref())
-        .unwrap_or("");
-    let flags = overrides
-        .flags
-        .as_deref()
-        .or(lang_config.flags.as_deref())
-        .unwrap_or(&[]);
-
-    let result = match req.language_id.as_str() {
-        "c" => resolve::resolve_c(
-            &req,
-            entry_point_config.as_ref(),
-            compiler,
-            flags,
-            extra_compile_flags,
-        ),
-        "cpp" => resolve::resolve_cpp(
-            &req,
-            entry_point_config.as_ref(),
-            compiler,
-            flags,
-            extra_compile_flags,
-        ),
-        "python3" => resolve::resolve_python3(
-            &req,
-            entry_point_config.as_ref(),
-            lang_config.interpreter.as_deref().unwrap_or(""),
-        ),
-        "java" => resolve::resolve_java(
-            &req,
-            entry_point_config.as_ref(),
-            compiler,
-            lang_config.runner.as_deref().unwrap_or(""),
-            flags,
-            extra_compile_flags,
-        ),
-        _ => {
-            return Err(extism_pdk::Error::msg(format!(
-                "Unsupported language: {}",
-                req.language_id
-            ))
-            .into());
-        }
+    let Some(language) = resolve::language(&req.language_id) else {
+        return Err(
+            extism_pdk::Error::msg(format!("Unsupported language: {}", req.language_id)).into(),
+        );
     };
+    let tools = resolve::Tools {
+        tool: overrides
+            .compiler
+            .as_deref()
+            .or(lang_config.compiler.as_deref())
+            .or(lang_config.interpreter.as_deref())
+            .unwrap_or(""),
+        runner: lang_config.runner.as_deref().unwrap_or(""),
+        flags: overrides
+            .flags
+            .as_deref()
+            .or(lang_config.flags.as_deref())
+            .unwrap_or(&[]),
+        extra_flags,
+    };
+    let result = language.resolve(&req, entry_point_config.as_ref(), &tools);
 
     Ok(serde_json::to_string(&result)?)
 }

@@ -3,7 +3,7 @@ use std::io::Cursor;
 
 use async_trait::async_trait;
 use sea_orm::entity::prelude::*;
-use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, QuerySelect, Schema, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, QuerySelect, Statement};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -11,18 +11,9 @@ use super::error::StorageError;
 use super::hash::ContentHash;
 use super::traits::{BlobStore, BoxReader};
 
-/// True when a Postgres error came from two connections concurrently
-/// running `CREATE TABLE IF NOT EXISTS` against the same fresh database.
-/// Postgres' DDL path through `pg_type` is not internally serialized,
-/// so the loser surfaces a unique-violation on `pg_type_typname_nsp_index`
-/// or a "type ... already exists" / "relation ... already exists" error even
-/// though `IF NOT EXISTS` was specified.
-pub fn is_concurrent_create_race(err: &DbErr) -> bool {
-    let msg = err.to_string();
-    msg.contains("pg_type_typname_nsp_index") || msg.contains("already exists")
-}
-
-mod blob_data {
+/// The `blob_data` table. The server's migrations create it; every node with
+/// the database backend reads and writes it.
+pub mod blob_data {
     use sea_orm::entity::prelude::*;
 
     #[sea_orm::model]
@@ -47,28 +38,6 @@ pub struct DatabaseBlobStore {
 impl DatabaseBlobStore {
     pub fn new(db: DatabaseConnection, max_size: u64) -> Self {
         Self { db, max_size }
-    }
-
-    pub async fn ensure_table(db: &DatabaseConnection) -> Result<(), StorageError> {
-        let backend = db.get_database_backend();
-        let schema = Schema::new(backend);
-        let mut create_stmt = schema.create_table_from_entity(blob_data::Entity);
-        create_stmt.if_not_exists();
-
-        if let Err(e) = db.execute(&create_stmt).await {
-            // Postgres `CREATE TABLE IF NOT EXISTS` is not race-safe. When two
-            // workers run init concurrently against a fresh database, one wins
-            // and the other fails inserting into the type catalog. Treat that
-            // as success since the table is now present.
-            if is_concurrent_create_race(&e) {
-                tracing::debug!(error = %e, "concurrent blob_data create race; treating as success");
-                return Ok(());
-            }
-            return Err(StorageError::Backend(format!(
-                "Failed to create blob_data table: {e}"
-            )));
-        }
-        Ok(())
     }
 
     async fn read_all_limited(
@@ -223,42 +192,5 @@ impl BlobStore for DatabaseBlobStore {
         }
 
         Ok(size as u64)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_concurrent_create_race;
-    use sea_orm::DbErr;
-
-    #[test]
-    fn classifies_pg_type_unique_violation_as_race() {
-        let err = DbErr::Custom(
-            "Execution Error: error returned from database: \
-             duplicate key value violates unique constraint \"pg_type_typname_nsp_index\""
-                .into(),
-        );
-        assert!(is_concurrent_create_race(&err));
-    }
-
-    #[test]
-    fn classifies_relation_already_exists_as_race() {
-        let err = DbErr::Custom(
-            "error returned from database: relation \"blob_data\" already exists".into(),
-        );
-        assert!(is_concurrent_create_race(&err));
-    }
-
-    #[test]
-    fn classifies_type_already_exists_as_race() {
-        let err =
-            DbErr::Custom("error returned from database: type \"blob_data\" already exists".into());
-        assert!(is_concurrent_create_race(&err));
-    }
-
-    #[test]
-    fn does_not_classify_unrelated_error_as_race() {
-        let err = DbErr::Custom("connection refused".into());
-        assert!(!is_concurrent_create_race(&err));
     }
 }

@@ -175,6 +175,20 @@ broccoli-dev plugin build my-plugin --install
 复制到 `entry` 指定的路径。`--install` 会把构建结果放到本地服务端加载的位置。添加
 `--release` 可得到优化后的模块。若清单包含 `[web]` 段，CLI 还会运行前端构建。
 
+## 无网络时构建
+
+发布包的 `sdk/` 目录附带了 SDK：`server-sdk/`、`broccoli-types/` 和已构建的 `web-sdk/`，布局与源码仓库的 `packages/` 相同；另有 `vendor/`，包含生成的后端所需的全部 crates.io crate。让脚手架指向它，再让 cargo 从 `vendor/` 读取 crate：
+
+```bash
+broccoli-dev plugin new my-plugin --sdk <bundle>/sdk
+mkdir -p my-plugin/.cargo
+sed 's|^directory = "vendor"|directory = "<bundle>/sdk/vendor"|' \
+  <bundle>/sdk/.cargo/config.toml > my-plugin/.cargo/config.toml
+CARGO_NET_OFFLINE=true broccoli-dev plugin build my-plugin --install
+```
+
+`<bundle>` 须写为绝对路径。工具链需已安装 `wasm32-wasip1` 目标。前端的构建工具（`tsdown`、`tailwindcss`、`typescript`）仍来自 npm，因此请在能访问 npm 源或局域网镜像的机器上构建前端。
+
 ## 对接运行中的服务端进行迭代
 
 先登录一次，然后监视目录。CLI 会在每次变更时重新构建并上传新的包：

@@ -281,25 +281,12 @@ exact path.
 
 ## Languages
 
-Broccoli picks the language from your file extension. Set `-l`, or your `language`
-default, when you want a different one. Which languages a contest accepts is up to
-its organizers.
-
-| Extension            | Language     |
-| -------------------- | ------------ |
-| `.c`                 | `c`          |
-| `.cpp` `.cc` `.cxx`  | `cpp`        |
-| `.py`                | `python3`    |
-| `.java`              | `java`       |
-| `.rs`                | `rust`       |
-| `.go`                | `go`         |
-| `.js`                | `javascript` |
-| `.ts`                | `typescript` |
-| `.kt`                | `kotlin`     |
-| `.swift`             | `swift`      |
-| `.rb`                | `ruby`       |
-| `.hs`                | `haskell`    |
-| `.cs`                | `csharp`     |
+Broccoli picks the language from your file extension, using the languages and
+extensions the contest server supports. Set `-l`, or your `language` default,
+when you want a different one. If Broccoli cannot tell the language, or the
+server does not accept the one you named, the message lists what the server
+supports. `test --local` remembers the list from the last time it reached the
+server, so it keeps working offline.
 
 ## Every command
 

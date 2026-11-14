@@ -352,7 +352,8 @@ pub async fn create_clarification(
     operation_id = "replyClarification",
     summary = "Reply to a clarification",
     description = "Users with `contest:manage` permission, the question author, or the DM recipient can reply. \
-                   Multiple replies are allowed. When `is_public` is true, the reply becomes visible to all participants.",
+                   Multiple replies are allowed. When an admin sets `is_public`, the reply and its question become visible to every participant; \
+                   `is_public` from anyone else is ignored.",
     params(
         ("id" = i32, Path, description = "Contest ID"),
         ("clarification_id" = i32, Path, description = "Clarification ID"),
@@ -420,9 +421,8 @@ pub async fn reply_clarification(
     // Only admins may publish a reply to ALL participants - the same gate the
     // create path and toggle_reply_public enforce. A non-admin author/recipient
     // may reply, but their supplied `is_public` is forced false; otherwise they
-    // could broadcast arbitrary content to every participant. Forcing it here (as
-    // the create path does) is why the documented `is_public` field had no effect:
-    // replies were pinned private and an admin had to make a second toggle call.
+    // could broadcast arbitrary content to every participant. A reply is only
+    // ever shown under its question, so a public reply publishes the question.
     let reply_public = is_admin && payload.is_public;
 
     let new_reply = clarification_reply::ActiveModel {
@@ -437,6 +437,9 @@ pub async fn reply_clarification(
 
     let mut active: clarification::ActiveModel = existing.into();
     active.updated_at = Set(now);
+    if reply_public {
+        active.is_public = Set(true);
+    }
     let model = active.update(&txn).await?;
 
     txn.commit().await?;
@@ -513,12 +516,12 @@ pub async fn reply_clarification(
     tag = "Clarifications",
     operation_id = "toggleReplyPublic",
     summary = "Toggle a reply's public visibility",
-    description = "Requires `contest:manage` permission. Promotes a private reply to a public announcement or reverts it. Optionally makes the parent question public as well.",
+    description = "Requires `contest:manage` permission. Publishes a private reply, which also publishes its question, or makes a public reply private again. \
+                   A question stays public once published.",
     params(
         ("id" = i32, Path, description = "Contest ID"),
         ("clarification_id" = i32, Path, description = "Clarification ID"),
         ("reply_id" = i32, Path, description = "Reply ID"),
-        ToggleReplyPublicQuery,
     ),
     responses(
         (status = 200, description = "Reply visibility toggled", body = ClarificationReplyResponse),
@@ -528,12 +531,11 @@ pub async fn reply_clarification(
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user, query))]
+#[instrument(skip(state, auth_user))]
 pub async fn toggle_reply_public(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
     AppPath((contest_id, clarification_id, reply_id)): AppPath<(i32, i32, i32)>,
-    Query(query): Query<ToggleReplyPublicQuery>,
 ) -> Result<Json<ClarificationReplyResponse>, AppError> {
     auth_user.require_permission(perm::CONTEST_MANAGE)?;
 
@@ -559,7 +561,9 @@ pub async fn toggle_reply_public(
     active.is_public = Set(new_is_public);
     let updated = active.update(&txn).await?;
 
-    if new_is_public && query.include_question.unwrap_or(false) && !parent.is_public {
+    // A reply is only ever shown under its question, so publishing the reply
+    // publishes the question (the same rule `reply_clarification` applies).
+    if new_is_public && !parent.is_public {
         let mut parent_active: clarification::ActiveModel = parent.into();
         parent_active.is_public = Set(true);
         parent_active.update(&txn).await?;

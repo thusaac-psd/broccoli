@@ -1,7 +1,149 @@
 use broccoli_server_sdk::types::{FileRef, OutputSpec, ResolveLanguageInput};
 
+use broccoli_server_sdk::types::ResolveLanguageOutput;
+
 use crate::EntryPointConfig;
-use crate::resolve;
+use crate::resolve::{self, Tools};
+
+fn resolve_with(
+    language: &str,
+    req: &ResolveLanguageInput,
+    entry_point: Option<&EntryPointConfig>,
+    tools: Tools<'_>,
+) -> ResolveLanguageOutput {
+    resolve::language(language)
+        .unwrap_or_else(|| panic!("{language} is registered"))
+        .resolve(req, entry_point, &tools)
+}
+
+fn resolve_cpp(
+    req: &ResolveLanguageInput,
+    entry_point: Option<&EntryPointConfig>,
+    compiler: &str,
+    flags: &[String],
+    extra_flags: &[String],
+) -> ResolveLanguageOutput {
+    let tools = Tools {
+        tool: compiler,
+        flags,
+        extra_flags,
+        ..Tools::default()
+    };
+    resolve_with("cpp", req, entry_point, tools)
+}
+
+fn resolve_c(
+    req: &ResolveLanguageInput,
+    entry_point: Option<&EntryPointConfig>,
+    compiler: &str,
+    flags: &[String],
+    extra_flags: &[String],
+) -> ResolveLanguageOutput {
+    let tools = Tools {
+        tool: compiler,
+        flags,
+        extra_flags,
+        ..Tools::default()
+    };
+    resolve_with("c", req, entry_point, tools)
+}
+
+fn resolve_python3(
+    req: &ResolveLanguageInput,
+    entry_point: Option<&EntryPointConfig>,
+    interpreter: &str,
+) -> ResolveLanguageOutput {
+    let tools = Tools {
+        tool: interpreter,
+        ..Tools::default()
+    };
+    resolve_with("python3", req, entry_point, tools)
+}
+
+fn resolve_java(
+    req: &ResolveLanguageInput,
+    entry_point: Option<&EntryPointConfig>,
+    compiler: &str,
+    runner: &str,
+    flags: &[String],
+    extra_flags: &[String],
+) -> ResolveLanguageOutput {
+    let tools = Tools {
+        tool: compiler,
+        runner,
+        flags,
+        extra_flags,
+    };
+    resolve_with("java", req, entry_point, tools)
+}
+
+/// The plugin.toml default of `compilation.<language>.<key>`.
+fn config_default(language: &str, key: &str) -> Option<toml::Value> {
+    let doc: toml::Value =
+        toml::from_str(include_str!("../plugin.toml")).expect("plugin.toml parses");
+    doc["config"]["compilation"]["properties"]
+        .get(language)?
+        .get("properties")?
+        .get(key)?
+        .get("default")
+        .cloned()
+}
+
+fn default_tool(language: &str, key: &str) -> String {
+    config_default(language, key)
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| panic!("plugin.toml has a compilation.{language}.{key} default"))
+}
+
+fn default_flags(language: &str) -> Vec<String> {
+    config_default(language, "flags")
+        .map(|v| {
+            v.as_array()
+                .expect("flags default is an array")
+                .iter()
+                .map(|f| f.as_str().expect("flag is a string").to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every registered language has its tools in the compilation config schema,
+/// so an admin can see and change them, and a resolution never runs an empty
+/// command.
+#[test]
+fn every_language_has_configurable_tools() {
+    for language in resolve::LANGUAGES {
+        let tool_key = match language.kind {
+            resolve::Kind::Interpreter { .. } => "interpreter",
+            _ => "compiler",
+        };
+        default_tool(language.id, tool_key);
+        if matches!(language.kind, resolve::Kind::Javac | resolve::Kind::Kotlinc) {
+            default_tool(language.id, "runner");
+        }
+    }
+}
+
+/// Resolves a language with its plugin.toml defaults.
+fn resolve_default(language: &str, files: Vec<&str>) -> ResolveLanguageOutput {
+    let meta = resolve::language(language).expect("registered");
+    let tool_key = match meta.kind {
+        resolve::Kind::Interpreter { .. } => "interpreter",
+        _ => "compiler",
+    };
+    let tool = default_tool(language, tool_key);
+    let runner = config_default(language, "runner")
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default();
+    let flags = default_flags(language);
+    let tools = Tools {
+        tool: &tool,
+        runner: &runner,
+        flags: &flags,
+        extra_flags: &[],
+    };
+    meta.resolve(&req(language, files), None, &tools)
+}
 
 fn req(lang: &str, files: Vec<&str>) -> ResolveLanguageInput {
     ResolveLanguageInput {
@@ -14,18 +156,8 @@ fn req(lang: &str, files: Vec<&str>) -> ResolveLanguageInput {
     }
 }
 
-/// The shipped default C++ compile flags, read from the SINGLE source of
-/// truth (`plugin.toml`) rather than duplicated as a literal — so this
-/// fixture can never silently drift from what the host actually applies.
 fn default_cpp_flags() -> Vec<String> {
-    let doc: toml::Value =
-        toml::from_str(include_str!("../plugin.toml")).expect("plugin.toml parses");
-    doc["config"]["compilation"]["properties"]["cpp"]["properties"]["flags"]["default"]
-        .as_array()
-        .expect("cpp flags default is an array")
-        .iter()
-        .map(|v| v.as_str().expect("flag is a string").to_string())
-        .collect()
+    default_flags("cpp")
 }
 
 #[test]
@@ -46,13 +178,13 @@ fn cpp_default_flags_are_o2_only_no_std_for_noi_parity() {
 }
 
 fn default_c_flags() -> Vec<String> {
-    vec!["-O2".into(), "-std=c17".into()]
+    default_flags("c")
 }
 
 // C++
 #[test]
 fn cpp_single_file() {
-    let result = resolve::resolve_cpp(
+    let result = resolve_cpp(
         &req("cpp", vec!["solution.cpp"]),
         None,
         "/usr/bin/g++",
@@ -69,7 +201,7 @@ fn cpp_single_file() {
 
 #[test]
 fn cpp_with_grader_stubs() {
-    let result = resolve::resolve_cpp(
+    let result = resolve_cpp(
         &req("cpp", vec!["solution.cpp", "grader.cpp", "grader.h"]),
         None,
         "/usr/bin/g++",
@@ -88,7 +220,7 @@ fn cpp_with_grader_stubs() {
 
 #[test]
 fn cpp_primary_matched_by_default_source_filename() {
-    let result = resolve::resolve_cpp(
+    let result = resolve_cpp(
         &req("cpp", vec!["grader.cpp", "solution.cpp"]),
         None,
         "/usr/bin/g++",
@@ -100,7 +232,7 @@ fn cpp_primary_matched_by_default_source_filename() {
 
 #[test]
 fn cpp_primary_prefers_source_extension_over_first_file() {
-    let result = resolve::resolve_cpp(
+    let result = resolve_cpp(
         &req("cpp", vec!["notes.txt", "main.cc"]),
         None,
         "/usr/bin/g++",
@@ -114,7 +246,7 @@ fn cpp_primary_prefers_source_extension_over_first_file() {
 
 #[test]
 fn python_primary_prefers_source_extension_over_first_file() {
-    let result = resolve::resolve_python3(
+    let result = resolve_python3(
         &req("python3", vec!["notes.txt", "main.py"]),
         None,
         "python3",
@@ -124,7 +256,7 @@ fn python_primary_prefers_source_extension_over_first_file() {
 
 #[test]
 fn cpp_compiler_override() {
-    let result = resolve::resolve_cpp(
+    let result = resolve_cpp(
         &req("cpp", vec!["solution.cpp"]),
         None,
         "/usr/local/bin/g++-13",
@@ -137,7 +269,7 @@ fn cpp_compiler_override() {
 #[test]
 fn cpp_flag_override_replaces_defaults() {
     let custom_flags = vec!["-O3".into(), "-std=c++20".into()];
-    let result = resolve::resolve_cpp(
+    let result = resolve_cpp(
         &req("cpp", vec!["solution.cpp"]),
         None,
         "/usr/bin/g++",
@@ -155,7 +287,7 @@ fn cpp_flag_override_replaces_defaults() {
 
 #[test]
 fn cpp_extra_compile_flags() {
-    let result = resolve::resolve_cpp(
+    let result = resolve_cpp(
         &req("cpp", vec!["solution.cpp"]),
         None,
         "/usr/bin/g++",
@@ -170,7 +302,7 @@ fn cpp_extra_compile_flags() {
 // C
 #[test]
 fn c_compiles_with_gcc() {
-    let result = resolve::resolve_c(
+    let result = resolve_c(
         &req("c", vec!["solution.c"]),
         None,
         "/usr/bin/gcc",
@@ -193,7 +325,7 @@ fn c_compiles_with_gcc() {
 // Python 3
 #[test]
 fn python_interpreted() {
-    let result = resolve::resolve_python3(
+    let result = resolve_python3(
         &req("python3", vec!["solution.py"]),
         None,
         "/usr/bin/python3",
@@ -205,7 +337,7 @@ fn python_interpreted() {
 
 #[test]
 fn python_with_grader() {
-    let result = resolve::resolve_python3(
+    let result = resolve_python3(
         &req("python3", vec!["solution.py", "grader.py"]),
         None,
         "/usr/bin/python3",
@@ -217,7 +349,7 @@ fn python_with_grader() {
 // Java
 #[test]
 fn java_uses_glob_output() {
-    let result = resolve::resolve_java(
+    let result = resolve_java(
         &req("java", vec!["Solver.java"]),
         None,
         "javac",
@@ -251,7 +383,7 @@ fn java_prefixes_sources_to_block_argfile_injection() {
         blob_hash: "opts-hash".into(),
         read_token: None,
     }];
-    let compile = resolve::resolve_java(&input, None, "javac", "java", &[], &[])
+    let compile = resolve_java(&input, None, "javac", "java", &[], &[])
         .compile
         .unwrap();
     // The `@opts` file is neutralized to `./@opts`, never a bare `@opts`.
@@ -269,7 +401,7 @@ fn java_prefixes_sources_to_block_argfile_injection() {
 
 #[test]
 fn entry_point_override_changes_primary() {
-    let result = resolve::resolve_python3(
+    let result = resolve_python3(
         &req("python3", vec!["solution.py", "grader.py"]),
         Some(&EntryPointConfig {
             entry_point: Some("grader.py".into()),
@@ -299,7 +431,7 @@ fn cpp_with_additional_file_refs() {
             read_token: None,
         },
     ];
-    let result = resolve::resolve_cpp(&input, None, "/usr/bin/g++", &default_cpp_flags(), &[]);
+    let result = resolve_cpp(&input, None, "/usr/bin/g++", &default_cpp_flags(), &[]);
     let compile = result.compile.unwrap();
     assert!(compile.command.contains(&"./grader.cpp".to_string()));
     assert!(compile.command.contains(&"./grader.h".to_string()));
@@ -307,4 +439,116 @@ fn cpp_with_additional_file_refs() {
         compile.cache_inputs,
         vec!["solution.cpp", "grader.cpp", "grader.h"]
     );
+}
+
+// Kotlin
+#[test]
+fn kotlin_builds_a_self_contained_jar_and_runs_it_on_the_jvm() {
+    let result = resolve_default("kotlin", vec!["solution.kt", "util.kt"]);
+    let compile = result.compile.unwrap();
+    assert_eq!(
+        compile.command,
+        vec![
+            "/usr/local/bin/kotlinc",
+            "-J-XX:ActiveProcessorCount=1",
+            "./solution.kt",
+            "./util.kt",
+            "-include-runtime",
+            "-d",
+            "solution.jar",
+        ]
+    );
+    assert_eq!(
+        compile.outputs,
+        vec![OutputSpec::File("solution.jar".into())]
+    );
+    assert_eq!(
+        result.run.command,
+        vec![
+            "/usr/bin/java",
+            "-XX:ActiveProcessorCount=1",
+            "-jar",
+            "solution.jar"
+        ]
+    );
+    assert_eq!(result.run.min_process_limit, Some(64));
+}
+
+// Rust
+#[test]
+fn rust_compiles_the_crate_root_only() {
+    let result = resolve_default("rust", vec!["solution.rs", "graph.rs"]);
+    let compile = result.compile.unwrap();
+    assert_eq!(
+        compile.command,
+        vec!["/usr/bin/rustc", "-O", "./solution.rs", "-o", "solution"]
+    );
+    assert_eq!(compile.cache_inputs, vec!["solution.rs", "graph.rs"]);
+    assert_eq!(result.run.command, vec!["./solution"]);
+}
+
+// Go
+#[test]
+fn go_builds_with_a_sandbox_cache_and_one_scheduler_thread() {
+    let result = resolve_default("go", vec!["solution.go", "grader.go"]);
+    let compile = result.compile.unwrap();
+    assert_eq!(
+        compile.command,
+        vec![
+            "/usr/bin/env",
+            "GOCACHE=/tmp/go-build",
+            "GOMAXPROCS=1",
+            "/usr/bin/go",
+            "build",
+            "-o",
+            "solution",
+            "./solution.go",
+            "./grader.go",
+        ]
+    );
+    assert_eq!(
+        result.run.command,
+        vec!["/usr/bin/env", "GOMAXPROCS=1", "./solution"]
+    );
+    assert_eq!(result.run.min_process_limit, Some(16));
+}
+
+// Pascal
+#[test]
+fn pascal_compiles_with_fpc() {
+    let result = resolve_default("pascal", vec!["solution.pas"]);
+    let compile = result.compile.unwrap();
+    assert_eq!(
+        compile.command,
+        vec!["/usr/bin/fpc", "-O2", "-osolution", "./solution.pas"]
+    );
+    assert_eq!(compile.outputs, vec![OutputSpec::File("solution".into())]);
+    assert_eq!(result.run.command, vec!["./solution"]);
+}
+
+// JavaScript
+#[test]
+fn javascript_runs_on_node_with_its_thread_floor() {
+    let result = resolve_default("javascript", vec!["solution.js"]);
+    assert!(result.compile.is_none());
+    assert_eq!(result.run.command, vec!["/usr/bin/node", "solution.js"]);
+    assert_eq!(result.run.min_process_limit, Some(16));
+}
+
+#[test]
+fn every_language_resolves_its_default_file_by_extension() {
+    for language in resolve::LANGUAGES {
+        let file = format!("main.{}", language.extensions[0]);
+        let result = resolve_default(language.id, vec!["notes.txt", &file]);
+        let mentions_source = |argv: &[String]| argv.iter().any(|a| a.ends_with(&file));
+        let compiled = result
+            .compile
+            .as_ref()
+            .is_some_and(|c| mentions_source(&c.command));
+        assert!(
+            compiled || mentions_source(&result.run.command),
+            "{} did not pick {file}",
+            language.id
+        );
+    }
 }

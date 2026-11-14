@@ -97,3 +97,77 @@ postgres_url() {
 redis_url() {
   printf 'redis://:%s@%s:%s' "$(url_encode "$1")" "$2" "$3"
 }
+
+# env_problem NAME VALUE: print why VALUE cannot be NAME's setting, or nothing
+# when it can. A value is refused when it is empty or still a change-me
+# placeholder from an example file; a connection URL also has to have the
+# shape its client parses (the database, MQ and S3 settings, by name).
+env_problem() {
+  local name="$1" value="$2"
+  case "$value" in
+    "") echo "$name is not set"; return ;;
+    *change-me*) echo "$name still holds a change-me placeholder from an example file"; return ;;
+  esac
+  case "$name" in
+    *__DATABASE__URL)
+      [[ "$value" =~ ^postgres(ql)?://[^@/]+@[^/@:]+(:[0-9]+)?/[^/?]+(\?.*)?$ ]] \
+        || echo "$name must look like postgres://USER:PASSWORD@HOST:PORT/DATABASE"
+      ;;
+    *__MQ__URL)
+      [[ "$value" =~ ^rediss?://([^@/]*@)?[^/@:]+(:[0-9]+)?(/[0-9]*)?$ ]] \
+        || echo "$name must look like redis://:PASSWORD@HOST:PORT"
+      ;;
+    *__OBJECT_STORAGE__ENDPOINT)
+      [[ "$value" =~ ^https?://[^/@:]+(:[0-9]+)?/?$ ]] \
+        || echo "$name must look like http://HOST:PORT"
+      ;;
+  esac
+}
+
+# env_role_settings ROLE OBJECT_STORAGE: the secrets and URLs a node of ROLE
+# (infra, server, worker, single-host, gateway) cannot run without.
+# OBJECT_STORAGE is 1 when the node uses the S3 blob store.
+env_role_settings() {
+  local role="$1" s3="$2"
+  case "$role" in
+    infra | single-host)
+      echo POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB BROCCOLI_DB_USER BROCCOLI_DB_PASSWORD \
+        REDIS_PASSWORD BROCCOLI__AUTH__JWT_SECRET BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD
+      [ "$s3" != 1 ] || echo BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET \
+        BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY
+      ;;
+    server | worker)
+      echo BROCCOLI__DATABASE__URL BROCCOLI__MQ__URL
+      [ "$role" != server ] || echo BROCCOLI__AUTH__JWT_SECRET BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD
+      [ "$s3" != 1 ] || echo BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT \
+        BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY
+      ;;
+    gateway) echo BROCCOLI_UPSTREAMS ;;
+    *) echo "env_role_settings: unknown role '$role'" >&2; return 2 ;;
+  esac
+}
+
+# env_require NAME...: fail, listing every problem, unless each named shell
+# variable holds a usable value (see env_problem).
+env_require() {
+  local name problem problems=""
+  for name in "$@"; do
+    problem="$(env_problem "$name" "${!name:-}")"
+    [ -z "$problem" ] || problems="$problems  $problem"$'\n'
+  done
+  [ -n "$problems" ] || return 0
+  printf 'error: these settings need a real value:\n%s' "$problems" >&2
+  return 1
+}
+
+# env_require_role ROLE: env_require the settings a ROLE node needs, read from
+# the shell variables (source the node's env files first). Every installer
+# calls this before it starts anything, so a node never comes up on a
+# placeholder secret or an address it cannot reach.
+env_require_role() {
+  local s3=0 names
+  [ "${BROCCOLI__STORAGE__BACKEND:-}" != object_storage ] || s3=1
+  names="$(env_role_settings "$1" "$s3")" || return 2
+  # shellcheck disable=SC2086 # names is a list of variable names
+  env_require $names
+}

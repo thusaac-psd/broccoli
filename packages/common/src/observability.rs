@@ -9,6 +9,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::ObservabilityConfig;
 
+mod json_log;
+
 pub struct TelemetryGuard {
     provider: Option<SdkTracerProvider>,
 }
@@ -49,14 +51,22 @@ pub fn init_tracing(config: &ObservabilityConfig) -> TelemetryGuard {
             let otel = tracing_opentelemetry::layer().with_tracer(p.tracer("broccoli"));
             tracing_subscriber::registry()
                 .with(EnvFilter::new(&filter_directive))
-                .with(tracing_subscriber::fmt::layer().json().with_target(false))
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .event_format(json_log::JsonLines),
+                )
                 .with(otel)
                 .init();
         }
         (true, None) => {
             tracing_subscriber::registry()
                 .with(EnvFilter::new(&filter_directive))
-                .with(tracing_subscriber::fmt::layer().json().with_target(false))
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .event_format(json_log::JsonLines),
+                )
                 .init();
         }
         (false, Some(p)) => {

@@ -2,53 +2,28 @@ import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { ConfigFormSlotProps } from '@broccoli/web-sdk/slot';
 import React from 'react';
 
-function buildCommand(parts: (string | undefined)[]): string {
-  return parts.filter(Boolean).join(' ');
+interface LanguageTools {
+  compiler?: string;
+  interpreter?: string;
+  flags?: string[];
 }
 
+/**
+ * One preview line per language in the compilation config: its compiler (or
+ * interpreter) and configured flags in front of the source file.
+ */
 function buildPreviews(values: Record<string, unknown>) {
-  const cpp = values.cpp as { compiler?: string; flags?: string[] } | undefined;
-  const c = values.c as { compiler?: string; flags?: string[] } | undefined;
-  const py = values.python3 as { interpreter?: string } | undefined;
-  const java = values.java as
-    | { compiler?: string; flags?: string[] }
-    | undefined;
-
-  return [
-    {
-      key: 'lang.cpp',
-      command: buildCommand([
-        cpp?.compiler,
-        ...(cpp?.flags ?? []),
-        '<source>',
-        '-o',
-        '<binary>',
-      ]),
-    },
-    {
-      key: 'lang.c',
-      command: buildCommand([
-        c?.compiler,
-        ...(c?.flags ?? []),
-        '<source>',
-        '-o',
-        '<binary>',
-        '-lm',
-      ]),
-    },
-    {
-      key: 'lang.python3',
-      command: buildCommand([py?.interpreter, '<source>']),
-    },
-    {
-      key: 'lang.java',
-      command: buildCommand([
-        java?.compiler,
-        ...(java?.flags ?? []),
-        '<source>',
-      ]),
-    },
-  ];
+  return Object.entries(values).map(([language, value]) => {
+    const tools = (value ?? {}) as LanguageTools;
+    const command = [
+      tools.compiler ?? tools.interpreter,
+      ...(tools.flags ?? []),
+      '<source>',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    return { key: `lang.${language}`, command };
+  });
 }
 
 export function CompileInfoBanner({ values }: ConfigFormSlotProps) {
@@ -63,7 +38,7 @@ export function CompileInfoBanner({ values }: ConfigFormSlotProps) {
       <div className="space-y-1">
         {previews.map((p) => (
           <div key={p.key} className="flex items-baseline gap-2 text-xs">
-            <span className="font-medium text-foreground w-16 shrink-0">
+            <span className="font-medium text-foreground w-20 shrink-0">
               {t(p.key)}
             </span>
             <code className="text-muted-foreground font-mono text-[11px] break-all">

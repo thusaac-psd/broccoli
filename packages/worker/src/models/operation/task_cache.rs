@@ -45,23 +45,6 @@ impl DatabaseTaskCacheStore {
     pub fn new(db: common::db::DatabaseConnection) -> Self {
         Self { db }
     }
-
-    pub async fn ensure_table(db: &common::db::DatabaseConnection) -> Result<(), String> {
-        use sea_orm::{ConnectionTrait, Schema};
-        let backend = db.get_database_backend();
-        let schema = Schema::new(backend);
-        let mut create_stmt = schema.create_table_from_entity(task_cache::Entity);
-        create_stmt.if_not_exists();
-
-        if let Err(e) = db.execute(&create_stmt).await {
-            if common::storage::database::is_concurrent_create_race(&e) {
-                tracing::debug!(error = %e, "concurrent task_cache create race; treating as success");
-                return Ok(());
-            }
-            return Err(format!("Failed to ensure task_cache table: {e}"));
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -339,9 +322,10 @@ mod tests {
         )
         .await
         .expect("connect");
-        DatabaseTaskCacheStore::ensure_table(&db)
-            .await
-            .expect("table");
+        // The server's migrations own the table; this test only needs one to lock.
+        let table = sea_orm::Schema::new(db.get_database_backend())
+            .create_table_from_entity(task_cache::Entity);
+        db.execute(&table).await.expect("table");
 
         let locker = db.begin().await.expect("begin");
         locker

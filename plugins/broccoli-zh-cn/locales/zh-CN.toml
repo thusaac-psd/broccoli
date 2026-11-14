@@ -957,7 +957,6 @@
 'clarification.dm.hint' = '此消息仅对所选参赛者可见。'
 'clarification.makePublic' = '设为公开'
 'clarification.makePrivate' = '设为私密'
-'clarification.publishReplyOnly' = '仅公开回复'
 'clarification.publishWithQuestion' = '连同问题一起公开'
 'clarification.madePublic' = '回复现已对所有人可见。'
 'clarification.madePrivate' = '回复现已设为私密。'
