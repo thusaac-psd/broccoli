@@ -175,7 +175,6 @@ class Topology:
                 "BROCCOLI__SERVER__PORT": str(3000 + i),
                 "BROCCOLI__SERVER__ID": f"perf-server-{i}",
                 "BROCCOLI__AUTH__JWT_SECRET": "perf-jwt-secret-perf-jwt-secret-perf-jwt-secret",
-                "BROCCOLI__AUTH__SECURE_COOKIES": "false",
                 "BROCCOLI__BOOTSTRAP__ADMIN_USERNAME": self.a.admin_username,
                 "BROCCOLI__BOOTSTRAP__ADMIN_PASSWORD": self.a.admin_password,
                 # Keep the per-submit rate-limit queries on the path, but never trip it.
