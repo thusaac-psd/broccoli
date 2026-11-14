@@ -353,6 +353,7 @@ async fn replies_reach_only_their_server_and_a_gone_server_drops_them() {
             task_type: None,
             operation: None,
             worker_id: None,
+            fault: None,
         },
     };
     for i in 0..3 {
@@ -403,6 +404,7 @@ fn completed(id: &str) -> TaskReply {
             task_type: None,
             operation: None,
             worker_id: None,
+            fault: None,
         },
     }
 }

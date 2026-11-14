@@ -188,6 +188,31 @@ pub fn deserialize_noting_ignored<T: serde::de::DeserializeOwned>(
     Ok((value, unknown))
 }
 
+/// The variable that names the config file, without its extension.
+pub const CONFIG_FILE_ENV: &str = "BROCCOLI_CONFIG";
+
+/// The config file read when [`CONFIG_FILE_ENV`] is unset, relative to the
+/// working directory, without its extension.
+pub const DEFAULT_CONFIG_FILE: &str = "config/config";
+
+/// The config file source of every Broccoli binary (see [`config_file_for`]).
+pub fn config_file() -> ::config::File<::config::FileSourceFile, ::config::FileFormat> {
+    config_file_for(std::env::var(CONFIG_FILE_ENV).ok())
+}
+
+/// The config file source for `named`, the value of [`CONFIG_FILE_ENV`]: the
+/// file it names, which must exist, or else [`DEFAULT_CONFIG_FILE`] when that
+/// exists. Every binary resolves its file this one way, so a server and a
+/// worker given the same environment read the same file.
+pub fn config_file_for(
+    named: Option<String>,
+) -> ::config::File<::config::FileSourceFile, ::config::FileFormat> {
+    match named.filter(|path| !path.trim().is_empty()) {
+        Some(path) => ::config::File::with_name(&path).required(true),
+        None => ::config::File::with_name(DEFAULT_CONFIG_FILE).required(false),
+    }
+}
+
 /// The environment prefix of every setting: `a.b` is `BROCCOLI__A__B`.
 pub const ENV_PREFIX: &str = "BROCCOLI";
 
@@ -257,6 +282,43 @@ pub fn warn_unknown_keys(keys: &[String]) {
             env,
             "Ignoring an unknown configuration key; it may have been removed or misspelled"
         );
+    }
+}
+
+#[cfg(test)]
+mod config_file_tests {
+    use super::*;
+
+    fn build(
+        source: ::config::File<::config::FileSourceFile, ::config::FileFormat>,
+    ) -> Result<::config::Config, ::config::ConfigError> {
+        ::config::Config::builder().add_source(source).build()
+    }
+
+    #[test]
+    fn a_named_config_file_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("node.toml"),
+            "[server]\nid = \"from-file\"\n",
+        )
+        .unwrap();
+        let named = dir.path().join("node").to_string_lossy().into_owned();
+        let config = build(config_file_for(Some(named))).unwrap();
+        assert_eq!(config.get_string("server.id").unwrap(), "from-file");
+    }
+
+    #[test]
+    fn a_named_config_file_that_is_missing_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let named = dir.path().join("absent").to_string_lossy().into_owned();
+        assert!(build(config_file_for(Some(named))).is_err());
+    }
+
+    #[test]
+    fn without_a_name_the_default_file_is_optional() {
+        assert!(build(config_file_for(None)).is_ok());
+        assert!(build(config_file_for(Some(String::new()))).is_ok());
     }
 }
 

@@ -115,6 +115,7 @@ mod worker_liveness {
             arch: None,
             cpu_count: None,
             pid: None,
+            missing_platform_tools: Vec::new(),
         };
         let _: () = conn
             .set_ex(
@@ -163,5 +164,47 @@ mod worker_liveness {
         };
         assert!(by_id("fresh")["seconds_since_last_seen"].as_u64().unwrap() <= 2);
         assert!(by_id("old")["seconds_since_last_seen"].as_u64().unwrap() >= 11);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_queue_is_reported_with_the_last_workers_marked_stale() {
+        let redis = common::test_util::redis_image()
+            .start()
+            .await
+            .expect("start redis");
+        let port = redis.get_host_port_ipv4(6379).await.unwrap();
+        let url = format!("redis://127.0.0.1:{port}");
+        let mut conn = redis::Client::open(url.as_str())
+            .unwrap()
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        let app = TestApp::spawn_with_options(SpawnOptions {
+            redis_url: Some(url),
+            ..Default::default()
+        })
+        .await;
+        let admin = app
+            .create_user_with_role("outage_admin", "pass1234", "admin")
+            .await;
+        write_heartbeat(&mut conn, "w1", TTL.as_secs()).await;
+
+        let res = app.get_with_token(routes::SYSTEM_OVERVIEW, &admin).await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        assert_eq!(res.body["queue_state"], "reachable", "{}", res.text);
+        assert_eq!(res.body["workers_stale"], false, "{}", res.text);
+        assert_eq!(res.body["workers"][0]["id"], "w1", "{}", res.text);
+
+        redis.stop().await.expect("stop redis");
+        let res = app.get_with_token(routes::SYSTEM_OVERVIEW, &admin).await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        assert_eq!(res.body["queue_state"], "unreachable", "{}", res.text);
+        assert_eq!(res.body["workers_stale"], true, "{}", res.text);
+        assert_eq!(
+            res.body["workers"][0]["id"], "w1",
+            "the last list read, not an empty one: {}",
+            res.text
+        );
+        assert_eq!(res.body["queues"], serde_json::json!([]), "{}", res.text);
     }
 }

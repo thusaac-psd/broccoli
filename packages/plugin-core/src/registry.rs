@@ -6,6 +6,7 @@ use matchit::Router;
 use serde::Serialize;
 
 use crate::error::{AssetError, PluginError};
+use crate::i18n::TranslationMap;
 use crate::manifest::{PluginManifest, RouteAccess, parse_manifest, resolve_schema_includes};
 use crate::pool::InstancePool;
 
@@ -36,6 +37,10 @@ pub struct PluginEntry {
     pub status: PluginStatus,
     pub runtime: Option<InstancePool>,
     pub router: Router<RouteMatchInfo>,
+    /// The manifest's translation files, read when the entry is built: what
+    /// the host serves for this plugin never depends on its files staying on
+    /// disk.
+    pub translations: Vec<(String, TranslationMap)>,
 }
 
 pub type PluginRegistry = Arc<RwLock<HashMap<String, PluginEntry>>>;
@@ -115,6 +120,7 @@ impl PluginEntry {
             status: PluginStatus::Unloaded,
             runtime: None,
             router,
+            translations: Vec::new(),
         })
     }
 
@@ -140,7 +146,9 @@ impl PluginEntry {
 
         resolve_schema_includes(&mut manifest, plugin_dir)?;
 
-        Self::new(id, plugin_dir.to_path_buf(), manifest)
+        let mut entry = Self::new(id, plugin_dir.to_path_buf(), manifest)?;
+        entry.translations = read_translations(plugin_dir, &entry.manifest)?;
+        Ok(entry)
     }
 
     pub fn resolve_web_asset(&self, relative_path: &str) -> Result<PathBuf, AssetError> {
@@ -169,6 +177,33 @@ impl PluginEntry {
 
         Ok(canonical_asset_path)
     }
+}
+
+/// Every translation file `manifest` declares, read from `root`.
+fn read_translations(
+    root: &Path,
+    manifest: &PluginManifest,
+) -> Result<Vec<(String, TranslationMap)>, PluginError> {
+    manifest
+        .translations
+        .iter()
+        .map(|(lang, path)| {
+            let path = root.join(path);
+            let content = std::fs::read_to_string(&path).map_err(|e| {
+                PluginError::LoadFailed(format!(
+                    "Failed to read translation file '{}': {e}",
+                    path.display()
+                ))
+            })?;
+            let map = toml::from_str(&content).map_err(|e| {
+                PluginError::LoadFailed(format!(
+                    "Invalid translation file syntax in '{}': {e}",
+                    path.display()
+                ))
+            })?;
+            Ok((lang.clone(), map))
+        })
+        .collect()
 }
 
 #[cfg(test)]

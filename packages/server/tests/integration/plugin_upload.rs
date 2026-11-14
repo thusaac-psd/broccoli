@@ -90,11 +90,17 @@ async fn row(app: &TestApp, plugin_id: &str) -> Option<plugin_entity::Model> {
 }
 
 /// The unpacked archives in `app`'s plugin cache.
+/// Where `app` unpacks uploaded archives.
+fn archives(app: &TestApp) -> PathBuf {
+    server::plugin_distribution::archive_cache_dir(&app.state)
+}
+
 fn cache_entries(app: &TestApp) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(app.plugin_cache.path())
-        .unwrap()
+    let Ok(entries) = std::fs::read_dir(archives(app)) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name != plugin_core::config::COMPILED_MODULES_ENTRY)
         .collect();
     names.sort();
     names
@@ -177,11 +183,7 @@ async fn an_upload_through_one_replica_reaches_the_other() {
     assert_eq!(published.archive_hash.as_deref(), Some(hash.as_str()));
     assert_eq!(published.version.as_deref(), Some("1.0.0"));
     assert_eq!(status(&a, UPLOAD_ONLY), Some(PluginStatus::Loaded));
-    assert!(
-        registered(&a, UPLOAD_ONLY)
-            .1
-            .starts_with(a.plugin_cache.path())
-    );
+    assert!(registered(&a, UPLOAD_ONLY).1.starts_with(archives(&a)));
 
     assert_eq!(status(&b, UPLOAD_ONLY), None, "B has not polled yet");
     let failures = plugin_lifecycle::reconcile(&b.state).await.unwrap();
@@ -190,7 +192,7 @@ async fn an_upload_through_one_replica_reaches_the_other() {
     let (version, root) = registered(&b, UPLOAD_ONLY);
     assert_eq!(version, "1.0.0");
     assert!(
-        root.starts_with(b.plugin_cache.path()),
+        root.starts_with(archives(&b)),
         "B loads its own unpacked copy, fetched from the blob store: {}",
         root.display()
     );
@@ -232,7 +234,7 @@ async fn an_upload_takes_precedence_over_the_bundled_copy() {
     for app in [&a, &b] {
         let (version, root) = registered(app, BUNDLED);
         assert_eq!(version, "0.2.0");
-        assert!(root.starts_with(app.plugin_cache.path()));
+        assert!(root.starts_with(archives(app)));
         assert_eq!(status(app, BUNDLED), Some(PluginStatus::Loaded));
     }
 
@@ -667,9 +669,7 @@ async fn a_damaged_cache_entry_is_fetched_again() {
     let body = upload(&a, &token, archive(UPLOAD_ONLY, "1.0.0")).await;
     let hash = body["archive_hash"].as_str().unwrap().to_string();
     plugin_lifecycle::reconcile(&b.state).await.unwrap();
-    let wasm = b
-        .plugin_cache
-        .path()
+    let wasm = archives(&b)
         .join(&hash)
         .join(UPLOAD_ONLY)
         .join("server_plugin.wasm");
@@ -697,6 +697,47 @@ async fn a_damaged_cache_entry_is_fetched_again() {
         "loaded",
         "{}",
         res.text
+    );
+}
+
+/// A plugin archive like [`archive`] that also ships an English translation.
+fn archive_with_translations(id: &str, version: &str) -> Vec<u8> {
+    let manifest = std::fs::read_to_string(fixture(BUNDLED).join("plugin.toml"))
+        .unwrap()
+        .replace("version = \"0.1.0\"", &format!("version = \"{version}\""))
+        + "\n[translations]\nen = \"i18n/en.toml\"\n";
+    let wasm = std::fs::read(fixture(BUNDLED).join("server_plugin.wasm")).unwrap();
+    tar_gz(&[
+        (&format!("{id}/plugin.toml"), manifest.as_bytes()),
+        (&format!("{id}/server_plugin.wasm"), &wasm),
+        (
+            &format!("{id}/i18n/en.toml"),
+            b"\"uploaded.greeting\" = \"Hello\"\n",
+        ),
+    ])
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_whose_cache_entry_vanished_fails_no_other_plugins_lifecycle() {
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    let body = upload(&a, &token, archive_with_translations(UPLOAD_ONLY, "1.0.0")).await;
+    let hash = body["archive_hash"].as_str().unwrap().to_string();
+    assert_eq!(status(&a, UPLOAD_ONLY), Some(PluginStatus::Loaded));
+    std::fs::remove_dir_all(archives(&a).join(&hash)).unwrap();
+
+    for path in [
+        routes::admin_plugin_disable(BUNDLED),
+        routes::admin_plugin_enable(BUNDLED),
+    ] {
+        let res = a.post_with_token(&path, &json!({}), &token).await;
+        assert_eq!(res.status, 200, "{path}: {}", res.text);
+    }
+    assert_eq!(status(&a, BUNDLED), Some(PluginStatus::Loaded));
+    let en = a.state.plugins.get_i18n_registry().get_translations("en");
+    assert!(
+        format!("{en:?}").contains("uploaded.greeting"),
+        "the vanished plugin's translations are still served: {en:?}"
     );
 }
 
@@ -925,7 +966,7 @@ async fn plugin_ids_from_the_url_must_be_valid() {
     let token = admin(&a).await;
     let body = upload(&a, &token, archive(UPLOAD_ONLY, "1.0.0")).await;
     let hash = body["archive_hash"].as_str().unwrap();
-    let cache = a.plugin_cache.path().display().to_string();
+    let cache = archives(&a).display().to_string();
     let escape = format!("..{cache}/{hash}/{UPLOAD_ONLY}").replace('/', "%2F");
 
     for path in [

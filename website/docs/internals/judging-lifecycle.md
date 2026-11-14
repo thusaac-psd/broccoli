@@ -151,6 +151,19 @@ are keyed on it.
   last rejudge, against `server.max_system_error_retries`. Each such retry
   starts the judgement with a fresh dispatch budget. A rejudge resets it.
 
+Only a failure of judging the submission spends the system-error budget.
+Everything that works for one dispatch (its plugin calls, their operations,
+evaluate batches and detached sessions) shares one `DispatchFaults`, and
+whatever meets a platform fault records it there: a publish the queue
+refused (`QUEUE_UNREACHABLE`), an operation the queue lost
+(`OPERATION_LOST`), a worker without a platform tool
+(`PLATFORM_TOOL_MISSING`). A system error the dispatch then ends with
+carries that code, whatever the plugin reported, and the reaper treats it by
+its class (`SystemErrorClass`): a hand-back (the queue codes) is requeued
+spending nothing, a deterministic fault (a missing platform tool) stands after
+one attempt and is dead-lettered, and any other code is retried within the
+budget.
+
 ## Dead letters
 
 A unit that spends its dispatch retries is dead-lettered under its subject:

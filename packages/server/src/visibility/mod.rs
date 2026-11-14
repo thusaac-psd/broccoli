@@ -810,6 +810,7 @@ mod tests {
             prometheus_registry,
             dispatcher_permits: DispatcherSemaphore::new(true, 1, 0),
             worker_slots: Default::default(),
+            last_workers: Default::default(),
             plugin_lifecycle: Default::default(),
             plugin_sql: crate::plugin_db::PluginSqlPools::new(
                 db.clone(),

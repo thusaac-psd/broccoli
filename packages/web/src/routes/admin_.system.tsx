@@ -72,6 +72,22 @@ export default function AdminSystemPage() {
         </div>
       )}
 
+      {data?.queue_state === 'unreachable' && (
+        <Card className="mb-6 border-destructive">
+          <CardContent className="pt-6 flex items-start gap-3">
+            <AlertCircle className="h-5 w-5 text-destructive shrink-0" />
+            <div>
+              <p className="text-destructive font-medium">
+                {t('system.queueUnreachable.title')}
+              </p>
+              <p className="text-sm text-muted-foreground mt-1">
+                {t('system.queueUnreachable.hint')}
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {data && (
         <>
           <SystemHealthSummary
@@ -89,7 +105,9 @@ export default function AdminSystemPage() {
                   {t('system.workers.title')}
                 </CardTitle>
                 <CardDescription>
-                  {t('system.workers.description')}
+                  {data.workers_stale
+                    ? t('system.workers.stale')
+                    : t('system.workers.description')}
                 </CardDescription>
               </CardHeader>
               <CardContent>

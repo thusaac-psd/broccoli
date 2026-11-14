@@ -140,6 +140,13 @@ pub enum StepKind {
     Checker,
 }
 
+/// The comparator behind the built-in checker formats.
+pub const COMPARE_TOOL: &str = "broccoli-compare";
+
+/// The platform tools every worker provides, from its `[worker.tools] dir`:
+/// the only names a [`MountSource::PlatformTool`] mount resolves.
+pub const PLATFORM_TOOLS: &[&str] = &[COMPARE_TOOL];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum MountSource {

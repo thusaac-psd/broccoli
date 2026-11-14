@@ -15,7 +15,7 @@ impl TranslationMap {
         Self(HashMap::new())
     }
 
-    fn extend(&mut self, other: TranslationMap) {
+    pub(crate) fn extend(&mut self, other: TranslationMap) {
         self.0.extend(other.0);
     }
 }
@@ -42,6 +42,11 @@ impl I18nRegistry {
 
     pub fn clear(&self) {
         self.data.write().clear();
+    }
+
+    /// Serve `data` from now on, in place of everything before.
+    pub fn replace(&self, data: I18nData) {
+        *self.data.write() = data;
     }
 
     pub fn merge(&self, lang: String, translation: TranslationMap) {

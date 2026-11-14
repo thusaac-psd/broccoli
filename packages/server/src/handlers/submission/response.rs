@@ -21,6 +21,7 @@ use crate::extractors::auth::AuthUser;
 use crate::models::shared::{PageWindow, Pagination};
 use crate::models::submission::*;
 use crate::utils::contest::compile_output_public;
+use crate::utils::diagnostics::{Diagnostics, is_system_error};
 use crate::utils::judging::files_from_json;
 use crate::utils::test_case_body::{
     RESPONSE_BODY_PREVIEW_BYTES, read_test_case_body_preview_with_limit,
@@ -82,6 +83,9 @@ pub(super) async fn build_submission_list_items(
 pub(super) struct VisibilityContext {
     pub(super) viewer_id: i32,
     pub(super) has_view_all: bool,
+    /// Whether the viewer operates the platform (`system:view`): only they see
+    /// a system error's diagnostics (see [`Diagnostics`]).
+    pub(super) sees_diagnostics: bool,
 }
 
 impl VisibilityContext {
@@ -97,9 +101,15 @@ impl VisibilityContext {
         Self {
             viewer_id: auth_user.user_id,
             has_view_all: auth_user.has_permission(perm::SUBMISSION_VIEW_ALL),
+            sees_diagnostics: auth_user.has_permission(perm::SYSTEM_VIEW),
         }
     }
+
+    pub(super) fn diagnostics(&self) -> Diagnostics {
+        Diagnostics::shown_if(self.sees_diagnostics)
+    }
 }
+
 pub(super) const RESULT_PAGE_SIZE: u64 = 20;
 const RESULT_PREVIEW_CHARS: usize = 240;
 const RESULT_PREVIEW_LINES: usize = 5;
@@ -212,6 +222,7 @@ async fn load_result_page(
     submission_id: i32,
     judgement_id: Option<i32>,
     show_test_details: bool,
+    diagnostics: Diagnostics,
     query: Option<&SubmissionResultQuery>,
 ) -> Result<(Vec<TestCaseResultResponse>, Pagination), AppError> {
     let default_query = SubmissionResultQuery::default();
@@ -241,6 +252,10 @@ async fn load_result_page(
     };
     // Rows, their testcase previews and the total in one statement.
     let shown = format!("{show_test_details} OR COALESCE(test_case.is_sample, false)");
+    let output_shown = format!(
+        "({shown}) AND {}",
+        diagnostics.sql_result_shown("test_case_result")
+    );
     let mut page = select
         .clone()
         .join(
@@ -258,12 +273,16 @@ async fn load_result_page(
         ])
         .column_as(test_case::Column::IsSample, "is_sample")
         .column_as(Expr::cust("COUNT(*) OVER ()"), "total");
-    for (column, alias) in [
-        ("test_case_result.stdout", "stdout"),
-        ("test_case_result.stderr", "stderr"),
-        ("test_case_result.checker_output", "checker_output"),
-        ("test_case.input", "input"),
-        ("test_case.expected_output", "expected_output"),
+    for (column, alias, shown) in [
+        ("test_case_result.stdout", "stdout", &output_shown),
+        ("test_case_result.stderr", "stderr", &output_shown),
+        (
+            "test_case_result.checker_output",
+            "checker_output",
+            &output_shown,
+        ),
+        ("test_case.input", "input", &shown),
+        ("test_case.expected_output", "expected_output", &shown),
     ] {
         page = page.column_as(
             Expr::cust(format!(
@@ -444,6 +463,9 @@ pub(super) async fn build_submission_response_with_cases(
         .as_ref()
         .is_some_and(|ctx| ctx.viewer_id == sub.user_id);
     let has_view_all = visibility.as_ref().is_some_and(|ctx| ctx.has_view_all);
+    let diagnostics = visibility
+        .as_ref()
+        .map_or(Diagnostics::Hidden, VisibilityContext::diagnostics);
     let show_source_code = has_view_all || is_owner;
 
     let show_compile_output =
@@ -460,6 +482,7 @@ pub(super) async fn build_submission_response_with_cases(
             sub.id,
             current_judgement_id,
             has_view_all || context.show_test_details,
+            diagnostics,
             Some(query),
         )
         .await?;
@@ -478,6 +501,7 @@ pub(super) async fn build_submission_response_with_cases(
                 test_case_results,
             })
         } else {
+            let system_error = is_system_error(&sub.status, sub.verdict.as_ref());
             Some(JudgeResultResponse {
                 judgement_id: current_judgement_id,
                 test_case_pagination: Some(pagination),
@@ -490,11 +514,10 @@ pub(super) async fn build_submission_response_with_cases(
                 } else {
                     None
                 },
-                error_message: if show_compile_output {
-                    sub.error_message.clone()
-                } else {
-                    None
-                },
+                error_message: diagnostics.filter(
+                    system_error,
+                    sub.error_message.clone().filter(|_| show_compile_output),
+                ),
                 judged_at: sub.judged_at,
                 test_case_results,
             })
@@ -533,6 +556,7 @@ pub(super) async fn build_judgement_response(
     judgement: submission_judgement::Model,
     show_compile_output: bool,
     show_test_details: bool,
+    diagnostics: Diagnostics,
     query: Option<&SubmissionResultQuery>,
 ) -> Result<SubmissionJudgementResponse, AppError> {
     let (test_case_results, pagination) = load_result_page(
@@ -541,9 +565,11 @@ pub(super) async fn build_judgement_response(
         judgement.submission_id,
         Some(judgement.id),
         show_test_details,
+        diagnostics,
         query,
     )
     .await?;
+    let system_error = is_system_error(&judgement.status, judgement.verdict.as_ref());
     let score = submission_score_for_status(&judgement.status, judgement.score);
 
     Ok(SubmissionJudgementResponse {
@@ -563,16 +589,14 @@ pub(super) async fn build_judgement_response(
         } else {
             None
         },
-        error_code: if show_compile_output {
-            judgement.error_code
-        } else {
-            None
-        },
-        error_message: if show_compile_output {
-            judgement.error_message
-        } else {
-            None
-        },
+        error_code: diagnostics.filter(
+            system_error,
+            judgement.error_code.filter(|_| show_compile_output),
+        ),
+        error_message: diagnostics.filter(
+            system_error,
+            judgement.error_message.filter(|_| show_compile_output),
+        ),
         judge_epoch: judgement.judge_epoch,
         target_worker_id: judgement.target_worker_id,
         created_at: judgement.created_at,

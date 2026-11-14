@@ -47,6 +47,7 @@ impl Worker {
                         task_type: None,
                         operation: None,
                         worker_id: None,
+                        fault: None,
                     }
                 }
             }
@@ -60,6 +61,7 @@ impl Worker {
                 task_type: None,
                 operation: None,
                 worker_id: None,
+                fault: None,
             });
         };
 

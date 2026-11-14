@@ -296,7 +296,7 @@ export interface paths {
     };
     /**
      * Aggregated system health
-     * @description Returns workers, queue depths, in-progress submissions, and unresolved DLQ count in a single response. Requires `system:view` permission.
+     * @description Returns workers, queue depths, in-progress submissions, and unresolved DLQ count in a single response. While the message queue is unreachable, `queue_state` is `unreachable`, `queues` is empty and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.
      */
     get: operations['getSystemOverview'];
     put?: never;
@@ -3989,6 +3989,11 @@ export interface components {
       /** @example operation_tasks */
       name: string;
     };
+    /**
+     * @description Whether this server reached the message queue (Redis) for a response.
+     * @enum {string}
+     */
+    QueueState: 'reachable' | 'unreachable';
     QueuesResponse: {
       queues: components['schemas']['QueueInfo'][];
     };
@@ -4480,6 +4485,9 @@ export interface components {
        * @example 0
        */
       dlq_unresolved_count: number;
+      /** @description Whether the worker list and queue depths below were read just now. */
+      queue_state: components['schemas']['QueueState'];
+      /** @description Queue depths; empty while the queue is unreachable. */
       queues: components['schemas']['QueueInfo'][];
       /**
        * Format: int64
@@ -4487,7 +4495,13 @@ export interface components {
        * @example 0
        */
       submissions_in_progress: number;
+      /**
+       * @description The live workers. While the queue is unreachable: the list this server
+       *     last read, and `workers_stale` is true.
+       */
       workers: components['schemas']['WorkerInfo'][];
+      /** @description `workers` is the last list read before the queue became unreachable. */
+      workers_stale: boolean;
     };
     TestCaseListItem: {
       /**
@@ -4944,6 +4958,12 @@ export interface components {
       last_seen: string;
       /** Format: int32 */
       max_concurrency?: number | null;
+      /**
+       * @description Platform tools the worker found missing at boot: every job that needs
+       *     one fails on it with `PLATFORM_TOOL_MISSING`. Empty on a healthy worker.
+       * @example []
+       */
+      missing_platform_tools: string[];
       /**
        * @description Operating system family (e.g. `linux`, `macos`).
        * @example linux

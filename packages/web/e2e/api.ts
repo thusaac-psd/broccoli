@@ -233,6 +233,8 @@ const ROUTES: [string, RegExp, Handler][] = [
     'GET',
     /^\/admin\/system\/overview$/,
     () => ({
+      queue_state: 'reachable',
+      workers_stale: false,
       workers: [],
       queues: [
         {

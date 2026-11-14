@@ -154,6 +154,7 @@ fn callback_path_decodes_operation_results_from_task_result_output() {
         task_type: Some("operation".to_string()),
         operation: Some("operation".to_string()),
         worker_id: Some("worker-1".to_string()),
+        fault: None,
     };
 
     let decoded = operation_results_from_task_results(vec![task_result]).unwrap();
@@ -172,6 +173,7 @@ fn callback_path_rejects_task_result_without_operation_output() {
         task_type: Some("operation".to_string()),
         operation: Some("operation".to_string()),
         worker_id: Some("worker-1".to_string()),
+        fault: None,
     };
 
     let err = operation_results_from_task_results(vec![task_result]).unwrap_err();

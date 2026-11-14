@@ -192,7 +192,7 @@ pub async fn start_operation_batch(
             }
             deps.operation_waiters.insert(
                 correlation_id.clone(),
-                OperationWaiter::new(op_tx, evaluate_case),
+                OperationWaiter::new(op_tx, evaluate_case, deps.faults.clone()),
             );
             spawn_waiter_forwarder(correlation_id.clone(), op_rx, batch_tx);
 
@@ -248,6 +248,12 @@ pub async fn start_operation_batch(
                 },
                 publish_start,
             );
+            if let (Err(e), Some(faults)) = (&publish_result, &deps.faults) {
+                faults.record(
+                    common::worker::OperationFault::QueueUnreachable,
+                    format!("the message queue refused operation {correlation_id}: {e}"),
+                );
+            }
             publish_result.with_context(|| "MQ publish error")?;
             if let Some(mut waiter) = deps.operation_waiters.get_mut(&correlation_id) {
                 waiter.published = true;
@@ -412,6 +418,7 @@ impl WindowedSession for OperationDriver {
             &self.plugin_id,
             &self.callback_fn,
             input,
+            &self.deps,
         )
         .await?;
         Ok(SessionDecision {
@@ -475,6 +482,7 @@ async fn call_detached_operation_callback(
     plugin_id: &str,
     callback_fn: &str,
     input: DetachedOperationCallbackInput,
+    deps: &OperationHostDeps,
 ) -> anyhow::Result<DetachedOperationCallbackOutput> {
     let input_bytes = serde_json::to_vec(&input)
         .with_context(|| "Failed to serialize detached operation callback input")?;
@@ -483,7 +491,7 @@ async fn call_detached_operation_callback(
             plugin_id,
             callback_fn,
             input_bytes,
-            plugin_manager.get_config().background_call(),
+            deps.call_options(plugin_manager.get_config().background_call()),
         )
         .await
         .with_context(|| "Detached operation callback failed")?;
@@ -684,6 +692,7 @@ fn spawn_waiter_forwarder(
             task_type: Some("operation".to_string()),
             operation: Some("operation".to_string()),
             worker_id: None,
+            fault: None,
         });
         batch_tx.deliver(result);
     });
@@ -765,6 +774,7 @@ mod tests {
             task_type: None,
             operation: None,
             worker_id: None,
+            fault: None,
         }
     }
 
@@ -841,6 +851,7 @@ mod tests {
             task_type: Some("operation".to_string()),
             operation: Some("compile".to_string()),
             worker_id: Some("worker-a".to_string()),
+            fault: None,
         };
 
         let labels = operation_result_e2e_labels(&result, "delivered");
@@ -912,6 +923,7 @@ mod tests {
             metrics: None,
             evaluate_batches,
             judgement: None,
+            faults: None,
         }
     }
 
@@ -924,7 +936,7 @@ mod tests {
     }
 
     fn waiter(evaluate_case: Option<EvaluateCaseRef>) -> OperationWaiter {
-        OperationWaiter::new(tokio::sync::oneshot::channel().0, evaluate_case)
+        OperationWaiter::new(tokio::sync::oneshot::channel().0, evaluate_case, None)
     }
 
     #[tokio::test]

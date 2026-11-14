@@ -586,9 +586,7 @@ async fn forget(state: &AppState, applied: &mut HashMap<String, Applied>, plugin
     if let Ok(mut registry) = state.plugins.get_registry().write() {
         registry.remove(plugin_id);
     }
-    if let Err(e) = state.plugins.update_translations() {
-        tracing::warn!(plugin_id, error = %e, "Failed to refresh translations after removing a plugin");
-    }
+    state.plugins.update_translations();
     applied.remove(plugin_id);
     state.plugin_lifecycle.forget(plugin_id);
     tracing::info!(plugin_id, "Plugin removed from the fleet; unloaded it here");
@@ -744,7 +742,8 @@ async fn deactivate(state: &AppState, plugin_id: &str) -> Result<(), PluginError
     purge_plugin_registrations(&state.registries, plugin_id).await;
     state.plugins.unload_plugin(plugin_id)?;
     state.plugin_sql.forget(plugin_id);
-    state.plugins.update_translations()
+    state.plugins.update_translations();
+    Ok(())
 }
 
 /// Record plugins found on this replica's disk that have no row yet, as

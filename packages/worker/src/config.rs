@@ -1,4 +1,4 @@
-use config::{Config, ConfigError, File};
+use config::{Config, ConfigError};
 use serde::{Deserialize, Serialize};
 
 pub use common::config::MqAppConfig;
@@ -253,9 +253,6 @@ impl WorkerAppConfig {
     }
 
     pub fn load() -> Result<Self, ConfigError> {
-        let config_path =
-            std::env::var("BROCCOLI_CONFIG").unwrap_or_else(|_| "config/config".to_string());
-
         let s = Config::builder()
             .set_default("worker.isolate_bin", "isolate")?
             .set_default("worker.enable_cgroups", true)?
@@ -285,7 +282,7 @@ impl WorkerAppConfig {
             // default takes precedence over the `#[serde(default)]`, so both must
             // agree - reference the function to avoid drift.
             .set_default("storage.max_cache_size", default_max_cache_size() as i64)?
-            .add_source(File::with_name(&config_path).required(false))
+            .add_source(common::config::config_file())
             .add_source(common::config::environment())
             .build()?;
 

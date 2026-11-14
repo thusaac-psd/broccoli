@@ -41,13 +41,13 @@ pub use hook_events::{
 pub use http::{PluginHttpAuth, PluginHttpRequest, PluginHttpResponse, error_code_for_status};
 pub use lifecycle::{ParseStatusError, StatusPhase, SubmissionLifecycle};
 pub use operation::{
-    Channel, DEFAULT_OPERATION_RESULT_TIMEOUT_MS, DetachedOperationCallbackAction,
+    COMPARE_TOOL, Channel, DEFAULT_OPERATION_RESULT_TIMEOUT_MS, DetachedOperationCallbackAction,
     DetachedOperationCallbackEvent, DetachedOperationCallbackInput,
     DetachedOperationCallbackOutput, DetachedOperationSession, DirectoryOptions, DirectoryRule,
     EnvRule, Environment, ExecutionResult, IOConfig, IOTarget, MountSource, MountSpec,
-    OperationResult, OperationTask, ResourceLimits, RunOptions, SandboxResult, SandboxStatus,
-    SessionFile, StartDetachedWindowedOperationInput, Step, StepCacheConfig, StepKind,
-    TaskExecutionResult,
+    OperationResult, OperationTask, PLATFORM_TOOLS, ResourceLimits, RunOptions, SandboxResult,
+    SandboxStatus, SessionFile, StartDetachedWindowedOperationInput, Step, StepCacheConfig,
+    StepKind, TaskExecutionResult,
 };
 pub use persistence::{
     CodeRunResultRow, CodeRunUpdate, SubmissionStatus, SubmissionUpdate, TestCaseResultRow,
