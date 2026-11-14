@@ -146,6 +146,7 @@ unit = "min"
 [config.task]
 description = "Per-task configuration: subtask definitions"
 scopes = ["contest_problem"]
+validate = "validate_task_config"
 
 [config.task.properties.subtasks]
 type = "array"

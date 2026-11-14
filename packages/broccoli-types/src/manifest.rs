@@ -510,6 +510,12 @@ pub struct ConfigNamespace {
     /// and nowhere else; a plugin declares at most one.
     #[serde(default)]
     pub checker_source: bool,
+    /// The plugin function that checks an admin's write to this namespace
+    /// beyond its schema (see `types::ConfigValidateInput`). The host stores
+    /// nothing it refuses, and lists stored configs it now refuses on the
+    /// problem's config issues. Requires a `[server]` entry.
+    #[serde(default)]
+    pub validate: Option<String>,
 }
 
 impl ConfigNamespace {

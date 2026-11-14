@@ -21,7 +21,10 @@ pub use checker::{
     ResolveCheckerInput,
 };
 pub use code_run::{OnCodeRunInput, OnCodeRunOutput};
-pub use config::{CascadeLevel, CascadeLevels, ConfigResult, ConfigSource, EffectiveConfig};
+pub use config::{
+    CascadeLevel, CascadeLevels, ConfigResult, ConfigSource, ConfigValidateInput,
+    ConfigValidateOutput, ConfigViolation, EffectiveConfig,
+};
 pub use contest::{ContestPhase, RouteContest};
 pub use evaluate::{
     BuildEvalOpsInput, CompileSpec, DEFAULT_EVALUATION_CHECKER_SLACK_S,

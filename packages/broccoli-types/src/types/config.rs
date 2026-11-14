@@ -78,3 +78,56 @@ impl EffectiveConfig {
         parse(&self.config)
     }
 }
+
+/// What the host asks a namespace's `validate` function: may an admin store
+/// `config` at this target? The host calls it after the value passed the
+/// namespace's schema, so the function checks only what a schema cannot say,
+/// such as whether the test labels a config names exist. It reads anything
+/// else it needs through its usual host functions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigValidateInput {
+    pub namespace: String,
+    pub scope: crate::manifest::ConfigScope,
+    /// The contest the config belongs to, at the `contest` and
+    /// `contest_problem` scopes.
+    pub contest_id: Option<i32>,
+    /// The problem the config belongs to, at the `problem` and
+    /// `contest_problem` scopes.
+    pub problem_id: Option<i32>,
+    /// The proposed value with every default its schema declares filled in,
+    /// as the plugin would read it once stored.
+    pub config: serde_json::Value,
+}
+
+impl ConfigValidateInput {
+    /// The proposed config as the plugin's config type.
+    pub fn parse<T: serde::de::DeserializeOwned>(&self) -> Result<T, SdkError> {
+        parse(&self.config)
+    }
+}
+
+/// A `validate` function's answer: the config is accepted when `errors` is
+/// empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigValidateOutput {
+    #[serde(default)]
+    pub errors: Vec<ConfigViolation>,
+}
+
+/// One reason a `validate` function refuses a config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigViolation {
+    /// Where the offending value is, as `field.nested[2].leaf`; empty for the
+    /// config as a whole.
+    pub path: String,
+    pub message: String,
+}
+
+impl ConfigViolation {
+    pub fn new(path: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            message: message.into(),
+        }
+    }
+}

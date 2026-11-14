@@ -7,7 +7,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::error::AppError;
-use crate::services::plugin_config::{ConfigScope, validate_config};
+use crate::services::plugin_config::{ConfigScope, check_schema};
 use crate::services::plugin_config_cache::PluginConfigCache;
 use plugin_core::config_schema;
 
@@ -204,7 +204,9 @@ fn config_set_fn(
     validate_config_input(&input.scope, &ref_id, &namespace)?;
     let scope = ConfigScope::parse(&input.scope)
         .ok_or_else(|| extism::Error::msg(format!("Invalid scope '{}'", input.scope)))?;
-    validate_config(registry, scope, plugin_id, &input.namespace, &input.config).map_err(|e| {
+    // The plugin owns its own namespaces' values, so its writes are checked
+    // against the schema only, never handed back to its validate function.
+    check_schema(registry, scope, plugin_id, &input.namespace, &input.config).map_err(|e| {
         let why = match e {
             AppError::InvalidConfig(fields) => config_schema::describe(&fields),
             AppError::ConfigNamespaceNotFound(why) => why,

@@ -8,6 +8,7 @@ import {
   DialogTitle,
 } from '@broccoli/web-sdk/ui';
 
+import { ProblemConfigIssues } from '@/features/admin/components/ProblemConfigIssues';
 import { TestCaseList } from '@/features/admin/components/TestCaseList';
 
 export function TestCasesDialog({
@@ -28,6 +29,7 @@ export function TestCasesDialog({
           <DialogDescription>{problem.title}</DialogDescription>
         </DialogHeader>
         <div className="min-h-0 flex-1 overflow-y-auto">
+          <ProblemConfigIssues problemId={problem.id} />
           <TestCaseList problemId={problem.id} />
         </div>
       </DialogContent>

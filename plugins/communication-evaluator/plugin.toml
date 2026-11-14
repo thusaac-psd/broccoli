@@ -22,6 +22,7 @@ component = "ManagerLanguageSelector"
 [config.communication]
 description = "Communication evaluator settings"
 scopes = ["problem"]
+validate = "validate_communication_config"
 
 [config.communication.properties.num_processes]
 type = "integer"
