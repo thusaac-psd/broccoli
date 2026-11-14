@@ -103,30 +103,17 @@ fn json_strings(value: serde_json::Value) -> Result<Vec<String>, AppError> {
         .map_err(|e| AppError::Internal(format!("malformed grant row: {e}")))
 }
 
-/// Stored validators carry this prefix. Rows without it are argon2 hashes
-/// written before validators moved to SHA-256; they expire within
-/// [`refresh::REFRESH_TOKEN_EXPIRY_DAYS`] of the upgrade.
-///
-/// A validator is 256 bits from the OS RNG, not a human password, so a
-/// SHA-256 digest resists offline guessing as well as argon2 does and costs
-/// microseconds instead of tens of milliseconds of CPU on every refresh.
-const SHA256_VALIDATOR_PREFIX: &str = "sha256$";
-
+/// Stored validators are the SHA-256 hex digest of the validator. A validator
+/// is 256 bits from the OS RNG, not a human password, so a SHA-256 digest
+/// resists offline guessing as well as argon2 does and costs microseconds
+/// instead of tens of milliseconds of CPU on every refresh.
 fn hash_validator(validator: &str) -> String {
-    format!("{SHA256_VALIDATOR_PREFIX}{}", hash::sha256_hex(validator))
+    hash::sha256_hex(validator)
 }
 
-/// Whether `presented` matches the stored validator hash, in either format.
-async fn validator_matches(presented: &str, stored: &str) -> Result<bool, AppError> {
-    match stored.strip_prefix(SHA256_VALIDATOR_PREFIX) {
-        Some(digest) => Ok(hash::constant_time_eq(
-            hash::sha256_hex(presented).as_bytes(),
-            digest.as_bytes(),
-        )),
-        None => hash::verify_password_off_thread(presented.to_owned(), Some(stored.to_owned()))
-            .await
-            .map_err(|e| AppError::Internal(format!("Refresh token verify error: {e}"))),
-    }
+/// Whether `presented` matches the stored validator digest, in constant time.
+fn validator_matches(presented: &str, stored: &str) -> bool {
+    hash::constant_time_eq(hash_validator(presented).as_bytes(), stored.as_bytes())
 }
 
 /// Seconds after a refresh token is rotated during which presenting it again
@@ -262,7 +249,7 @@ async fn find_presented<C: ConnectionTrait>(
         return Ok(None);
     };
     let stored: String = row.try_get("", "validator")?;
-    if !validator_matches(validator, &stored).await? {
+    if !validator_matches(validator, &stored) {
         return Ok(None);
     }
     let state = if row.try_get("", "rotated")? {
