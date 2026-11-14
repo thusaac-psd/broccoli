@@ -121,7 +121,8 @@ export const en: Record<string, string> = {
   'submissions.bulkRejudge.exitMode': 'Cancel Rejudge',
   'submissions.bulkRejudge.noSelection':
     'Select at least one submission first.',
-  'submissions.bulkRejudge.queued': 'Queued {count} submissions for rejudge.',
+  'submissions.bulkRejudge.queued':
+    'Queued {count, plural, one {# submission} other {# submissions}} for rejudge.',
   'submissions.bulkRejudge.error': 'Failed to bulk rejudge submissions.',
   'submissions.bulkRejudge.applyImmediately': 'Apply immediately',
   'submissions.inContest': '· contest #{id}',
@@ -278,9 +279,10 @@ export const en: Record<string, string> = {
   'submissionDetail.scoreDelta': 'Score {value}',
   'submissionDetail.timeDelta': 'Time {value} ms',
   'submissionDetail.memoryDelta': 'Memory {value} KB',
-  'submissionDetail.caseChanges': '{count} case changes vs current',
+  'submissionDetail.caseChanges':
+    '{count, plural, one {# case change} other {# case changes}} vs current',
   'submissionDetail.caseChangesUnknown':
-    '{count} case(s) hidden - cannot verify change vs current',
+    '{count, plural, one {# case hidden} other {# cases hidden}} - cannot verify change vs current',
   'submissionDetail.changedFromCase': 'Changed from {verdict}, {score} pts',
   'submissionDetail.maskedCaseDiff': 'Result hidden - cannot verify change',
   'submissionDetail.hiddenValue': 'hidden',
@@ -330,12 +332,6 @@ export const en: Record<string, string> = {
   'contests.loadProblemsError': 'Failed to load contest problems.',
   'contests.problemsAvailableAfterStart':
     'Problems will be available after the contest starts.',
-  'contests.inDays': 'in {count} days',
-  'contests.inHours': 'in {count} hours',
-  'contests.inMinutes': 'in {count} min',
-  'contests.daysAgo': '{count} days ago',
-  'contests.hoursAgo': '{count} hours ago',
-  'contests.minutesAgo': '{count} min ago',
 
   // Contest countdown
   'countdown.startsIn': 'Starts In',
@@ -465,10 +461,12 @@ export const en: Record<string, string> = {
     'Leave blank to generate a password, or enter 8–128 bytes.',
   'users.create.bulkHint':
     'Import 1–100 usernames or objects with username, optional display_name and password. Existing usernames reject the entire import.',
-  'users.create.preview': '{count} users will be created.',
+  'users.create.preview':
+    '{count, plural, one {# user will be created.} other {# users will be created.}}',
   'users.create.suppliedPassword': 'Supplied password',
   'users.create.confirm': 'Create all users',
-  'users.create.success': 'Created {count} users.',
+  'users.create.success':
+    'Created {count, plural, one {# user} other {# users}}.',
   'users.create.error': 'Failed to create users.',
   'users.create.tooMany': 'Import at most 100 users at a time.',
   'users.create.fileTooLarge': 'JSON files must be smaller than 100 KB.',
@@ -555,7 +553,7 @@ export const en: Record<string, string> = {
   'warm.start': 'Warm caches',
   'warm.rewarm': 'Warm again',
   'warm.warming': 'Warming…',
-  'warm.testFiles': '{{count}} test files',
+  'warm.testFiles': '{count, plural, one {# test file} other {# test files}}',
   'warm.judgesReady': '{{ready}} of {{total}} judges ready',
   'warm.noJudges': 'No judges are online. Start a judge, then warm.',
   'warm.notStarted': 'Caches have not been warmed for this contest yet.',
@@ -574,7 +572,8 @@ export const en: Record<string, string> = {
   'admin.participants.tabBulk': 'Bulk Import',
   'admin.participants.searchEnrolled': 'Search enrolled participants...',
   'admin.participants.searchUsers': 'Search users to add...',
-  'admin.participants.totalCount': '{count} participants',
+  'admin.participants.totalCount':
+    '{count, plural, one {# participant} other {# participants}}',
   'admin.participants.unenrolledCount': '{count} available',
   'admin.participants.empty': 'No participants enrolled yet.',
   'admin.participants.noSearchResults': 'No matching results.',
@@ -684,10 +683,12 @@ export const en: Record<string, string> = {
   'admin.additionalFiles.language': 'Language',
   'admin.additionalFiles.path': 'Virtual path (optional)',
   'admin.additionalFiles.pathPlaceholder': 'e.g., include/grader.h',
-  'admin.additionalFiles.fileCount': '{count} files',
+  'admin.additionalFiles.fileCount':
+    '{count, plural, one {# file} other {# files}}',
   'admin.additionalFiles.uploading': 'Uploading {filename}...',
   'admin.additionalFiles.noLanguages': 'No languages configured.',
-  'admin.additionalFiles.staged': '{count} files ready to upload',
+  'admin.additionalFiles.staged':
+    '{count, plural, one {# file ready to upload} other {# files ready to upload}}',
   'admin.additionalFiles.uploadAll': 'Upload All',
   'admin.additionalFiles.clear': 'Clear',
   'admin.additionalFiles.upload': 'Upload',
@@ -705,11 +706,13 @@ export const en: Record<string, string> = {
   'admin.attachments.deleteError': 'Failed to delete file.',
   'admin.attachments.deleted': 'File deleted successfully.',
   'admin.attachments.downloadError': 'Failed to download file.',
-  'admin.attachments.staged': '{count} files ready to upload',
+  'admin.attachments.staged':
+    '{count, plural, one {# file ready to upload} other {# files ready to upload}}',
   'admin.attachments.uploadAll': 'Upload All',
   'admin.attachments.clear': 'Clear',
   'admin.attachments.upload': 'Upload',
-  'admin.attachments.fileCount': '{count} files',
+  'admin.attachments.fileCount':
+    '{count, plural, one {# file} other {# files}}',
   'admin.attachments.copyMarkdown': 'Copy Markdown',
   'admin.attachments.markdownCopied': 'Markdown reference copied.',
   'admin.attachments.dropImageHint': 'Drop files here to upload',
@@ -738,11 +741,13 @@ export const en: Record<string, string> = {
   'admin.checkerSource.deleteError': 'Failed to delete checker source.',
   'admin.checkerSource.deleted': 'File removed.',
   'admin.checkerSource.cleared': 'Checker source cleared.',
-  'admin.checkerSource.staged': '{count} files ready to upload',
+  'admin.checkerSource.staged':
+    '{count, plural, one {# file ready to upload} other {# files ready to upload}}',
   'admin.checkerSource.upload': 'Upload',
   'admin.checkerSource.clear': 'Clear',
   'admin.checkerSource.clearAll': 'Clear All',
-  'admin.checkerSource.fileCount': '{count} files',
+  'admin.checkerSource.fileCount':
+    '{count, plural, one {# file} other {# files}}',
 
   // Test Cases (admin)
   'admin.manageTestCases': 'Manage Test Cases',
@@ -846,7 +851,7 @@ export const en: Record<string, string> = {
   'toast.submission.outcomeUnknown':
     'An earlier attempt to submit this code was interrupted and may have gone through. Check your submissions before submitting it again.',
   'toast.submission.fannedOut':
-    'Code pinned to {count} worker(s). Comparing results below.',
+    'Code pinned to {count, plural, one {# worker} other {# workers}}. Comparing results below.',
   'toast.submission.fanOutWithheld':
     "Submission created on {workerId}, but you don't have permission to view it.",
   'submit.pinTo': 'Pin to:',
@@ -854,7 +859,8 @@ export const en: Record<string, string> = {
   'submit.addWorker': '+ Add worker…',
   'submit.addAnother': '+ Add another',
   'submit.removeWorker': 'Remove {id}',
-  'pinnedGroup.title': 'Pinned submission · {count} workers',
+  'pinnedGroup.title':
+    'Pinned submission · {count, plural, one {# worker} other {# workers}}',
   'pinnedGroup.diverges': 'Verdicts disagree',
   'pinnedGroup.divergesHint':
     'At least one worker produced a different verdict from the others.',
@@ -1088,8 +1094,6 @@ export const en: Record<string, string> = {
   'result.score': 'Score: {value}',
   'result.timeHeader': 'Time',
   'result.memoryHeader': 'Mem',
-  'result.justNow': 'just now',
-  'result.secondsAgo': '{count}s ago',
 
   // Common
   'common.cancel': 'Cancel',
@@ -1149,10 +1153,6 @@ export const en: Record<string, string> = {
   'system.worker.online': 'online',
   'system.worker.inFlight': 'In-flight',
   'system.worker.uptime': 'up {time}',
-  'system.worker.justNow': 'just now',
-  'system.worker.secondsAgo': '{count}s ago',
-  'system.worker.minutesAgo': '{count}m ago',
-  'system.worker.hoursAgo': '{count}h ago',
   'system.worker.secondsUptime': '{count}s',
   'system.worker.minutesUptime': '{count}m',
   'system.worker.hoursUptime': '{count}h',
@@ -1160,7 +1160,7 @@ export const en: Record<string, string> = {
   'system.worker.hostname': 'Host',
   'system.worker.ip': 'IP',
   'system.worker.system': 'System',
-  'system.worker.cpus': '{count} CPUs',
+  'system.worker.cpus': '{count, plural, one {# CPU} other {# CPUs}}',
   'system.worker.pid': 'pid {pid}',
 
   // Dead Letter Queue
@@ -1185,7 +1185,8 @@ export const en: Record<string, string> = {
   'dlq.list.empty.title': 'Nothing in the DLQ',
   'dlq.list.empty.hint':
     'Messages land here only after exhausting their configured retry budget.',
-  'dlq.list.pageOf': 'Page {page} of {total} · {count} messages',
+  'dlq.list.pageOf':
+    'Page {page} of {total} · {count, plural, one {# message} other {# messages}}',
   'dlq.list.prev': 'Previous',
   'dlq.list.next': 'Next',
   'dlq.filter.all': 'All',
@@ -1201,10 +1202,6 @@ export const en: Record<string, string> = {
   'dlq.row.resolved': 'Resolved',
   'dlq.row.recovered': 'Recovered',
   'dlq.row.unresolved': 'Unresolved',
-  'dlq.row.secondsAgo': '{count}s ago',
-  'dlq.row.minutesAgo': '{count}m ago',
-  'dlq.row.hoursAgo': '{count}h ago',
-  'dlq.row.daysAgo': '{count}d ago',
   'dlq.detail.title': 'Message Details',
   'dlq.detail.description':
     'Full payload, retry history, and resolution actions for this message.',
@@ -1264,12 +1261,15 @@ export const en: Record<string, string> = {
   'extension.componentMissing':
     'A plugin registered this route, but its component {component} is missing.',
   'table.resultOne': '1 result',
-  'table.results': '{count} results',
+  'table.results': '{count, plural, one {# result} other {# results}}',
   'table.loading': 'loading...',
   'dateTime.time': 'Time:',
   'dateTime.hours': 'Hours',
   'dateTime.minutes': 'Minutes',
   'dateTime.clear': 'Clear',
+  'dateTime.placeholder': 'Pick date & time',
+  'dateTime.previousMonth': 'Previous month',
+  'dateTime.nextMonth': 'Next month',
   'fileDrop.label': 'Upload files',
   'fileDrop.prompt': 'Drop files here or click to browse',
 };

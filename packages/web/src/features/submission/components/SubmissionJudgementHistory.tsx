@@ -1,13 +1,12 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   SUBMISSION_REJUDGE,
   SYSTEM_ADMIN,
 } from '@broccoli/web-sdk/permissions';
 import type { SubmissionJudgement } from '@broccoli/web-sdk/submission';
 import { Badge, Button, TextPreview } from '@broccoli/web-sdk/ui';
-import { formatRelativeDatetime } from '@broccoli/web-sdk/utils';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Check,
@@ -260,6 +259,7 @@ function JudgementRow({
   onDiscard: () => void;
 }) {
   const { t } = useTranslation();
+  const format = useFormat();
   const { label, variant } = getVerdictBadge(
     judgement.verdict ?? null,
     judgement.status,
@@ -322,7 +322,7 @@ function JudgementRow({
           </Badge>
         )}
         <span className="text-xs text-muted-foreground">
-          {formatRelativeDatetime(judgement.created_at, t)}
+          {format.relative(judgement.created_at)}
         </span>
         {judgement.score != null && (
           <span className="ml-auto font-mono tabular-nums">

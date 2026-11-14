@@ -1,5 +1,5 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
   Button,
@@ -12,7 +12,6 @@ import {
   DropdownMenuTrigger,
   useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
-import { formatDateTime } from '@broccoli/web-sdk/utils';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   MoreHorizontal,
@@ -32,17 +31,16 @@ import type { ManagedUserRow } from '@/features/user-management/types';
 import { useTableSearchParams } from '@/hooks/use-table-search-params';
 
 function useUserColumns({
-  locale,
   onEdit,
   onManageRoles,
   onDelete,
 }: {
-  locale: string;
   onEdit: (user: ManagedUserRow) => void;
   onManageRoles: (user: ManagedUserRow) => void;
   onDelete: (user: ManagedUserRow) => void;
 }): DataTableColumn<ManagedUserRow>[] {
   const { t } = useTranslation();
+  const format = useFormat();
 
   return useMemo(
     () => [
@@ -100,7 +98,7 @@ function useUserColumns({
         accessorKey: 'created_at',
         header: t('admin.field.createdAt'),
         sortKey: 'created_at',
-        cell: ({ row }) => formatDateTime(row.original.created_at, locale),
+        cell: ({ row }) => format.dateTime(row.original.created_at),
       },
       {
         id: 'actions',
@@ -137,12 +135,12 @@ function useUserColumns({
         ),
       },
     ],
-    [locale, onDelete, onEdit, onManageRoles, t],
+    [format, onDelete, onEdit, onManageRoles, t],
   );
 }
 
 export function UsersManagementTab() {
-  const { t, locale } = useTranslation();
+  const { t } = useTranslation();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const [confirm, confirmDialog] = useConfirmDialog();
@@ -185,7 +183,6 @@ export function UsersManagementTab() {
   }
 
   const columns = useUserColumns({
-    locale,
     onEdit: handleEditUser,
     onManageRoles: handleManageRoles,
     onDelete: handleDeleteUser,

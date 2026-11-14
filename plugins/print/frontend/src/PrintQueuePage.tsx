@@ -1,7 +1,7 @@
 import { getErrorMessage, type IdempotentResult } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { unsettledMessageKey, useAsyncSubmit } from '@broccoli/web-sdk/hooks';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
   DataTable,
@@ -47,6 +47,7 @@ const PER_PAGE = 25;
 
 export function PrintQueuePage() {
   const { t } = useTranslation();
+  const format = useFormat();
   const { user } = useAuth();
   const api = usePrintApi();
 
@@ -291,7 +292,7 @@ export function PrintQueuePage() {
         header: t('print.queue.col.created'),
         cell: ({ row }) => (
           <span className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">
-            {formatRelative(row.original.created_at)}
+            {formatRelative(format, row.original.created_at)}
           </span>
         ),
       },
@@ -398,7 +399,7 @@ export function PrintQueuePage() {
         },
       },
     ],
-    [t, api, act, selected, toggleOne, handleViewCode, printerNames],
+    [t, format, api, act, selected, toggleOne, handleViewCode, printerNames],
   );
 
   const filterSelect = (

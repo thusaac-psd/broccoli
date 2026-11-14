@@ -9,30 +9,8 @@ import {
 
 import { useApiClient } from '@/api';
 import { I18nContext } from '@/i18n/i18n-context';
+import { formatMessage } from '@/i18n/message';
 import type { TranslationMap } from '@/i18n/types';
-
-const PLACEHOLDER_PATTERN =
-  /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}|\{\s*([a-zA-Z0-9_]+)\s*\}/g;
-
-function interpolateTranslation(
-  value: string,
-  params?: Record<string, string | number>,
-) {
-  if (!params) {
-    return value;
-  }
-
-  return value.replaceAll(
-    PLACEHOLDER_PATTERN,
-    (match, doubleKey, singleKey) => {
-      const key = doubleKey || singleKey;
-      if (!Object.hasOwn(params, key)) {
-        return match;
-      }
-      return String(params[key]);
-    },
-  );
-}
 
 /** localStorage key where the active locale is persisted. */
 export const LOCALE_STORAGE_KEY = 'broccoli-locale';
@@ -125,7 +103,7 @@ export function I18nProvider({
         fallbackPluginTranslations[key] ??
         coreI18n[defaultLocale]?.[key] ??
         key;
-      return interpolateTranslation(value, params);
+      return formatMessage(value, locale, params);
     },
     [
       locale,

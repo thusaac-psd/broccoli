@@ -2,6 +2,12 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 import * as React from 'react';
 import { DayPicker } from 'react-day-picker';
 
+import {
+  formatLongDate,
+  formatMonthYear,
+  formatWeekday,
+  useTranslation,
+} from '@/i18n';
 import { buttonVariants } from '@/ui/button';
 import { cn } from '@/utils';
 
@@ -12,14 +18,44 @@ function CalendarChevron({ orientation }: { orientation?: string }) {
   return <Icon className="h-4 w-4" />;
 }
 
+type WeekDay = 0 | 1 | 2 | 3 | 4 | 5 | 6;
+type FirstDay = { firstDay: number };
+
+/** The first day of the week in `locale` as DayPicker counts (Sunday is 0). */
+function weekStart(locale: string): WeekDay | undefined {
+  try {
+    const info = new Intl.Locale(locale) as Intl.Locale & {
+      getWeekInfo?: () => FirstDay;
+      weekInfo?: FirstDay;
+    };
+    const firstDay = (info.getWeekInfo?.() ?? info.weekInfo)?.firstDay;
+    return firstDay === undefined ? undefined : ((firstDay % 7) as WeekDay);
+  } catch {
+    return undefined;
+  }
+}
+
 function Calendar({
   className,
   classNames,
   showOutsideDays = true,
   ...props
 }: CalendarProps) {
+  const { t, locale } = useTranslation();
   return (
     <DayPicker
+      lang={locale}
+      weekStartsOn={weekStart(locale)}
+      formatters={{
+        formatCaption: (month) => formatMonthYear(month, locale),
+        formatWeekdayName: (day) => formatWeekday(day, locale),
+      }}
+      labels={{
+        labelNext: () => t('dateTime.nextMonth'),
+        labelPrevious: () => t('dateTime.previousMonth'),
+        labelDayButton: (day) => formatLongDate(day, locale),
+        labelGrid: (month) => formatMonthYear(month, locale),
+      }}
       showOutsideDays={showOutsideDays}
       className={cn('p-3', className)}
       classNames={{

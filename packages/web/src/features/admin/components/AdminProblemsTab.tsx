@@ -10,7 +10,7 @@ import {
   useAsyncDialog,
   useIdempotentRequest,
 } from '@broccoli/web-sdk/hooks';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import type { ProblemSummary } from '@broccoli/web-sdk/problem';
 import {
   Badge,
@@ -30,7 +30,7 @@ import {
   DropdownMenuTrigger,
   useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
-import { formatDateTime, formatKibibytes } from '@broccoli/web-sdk/utils';
+import { formatKibibytes } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   FileCode,
@@ -383,7 +383,8 @@ function useProblemColumns({
   onManageCheckerSource: (problem: ProblemSummary) => void;
   onConfigure: (problem: ProblemSummary) => void;
 }): DataTableColumn<ProblemSummary>[] {
-  const { t, locale } = useTranslation();
+  const { t } = useTranslation();
+  const format = useFormat();
   return [
     { accessorKey: 'id', header: '#', size: 60 },
     {
@@ -444,7 +445,7 @@ function useProblemColumns({
       sortKey: 'created_at',
       cell: ({ row }) => (
         <span className="text-muted-foreground">
-          {formatDateTime(row.original.created_at, locale)}
+          {format.dateTime(row.original.created_at)}
         </span>
       ),
     },

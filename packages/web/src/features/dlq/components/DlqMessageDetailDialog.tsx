@@ -1,5 +1,5 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
   Button,
@@ -27,6 +27,7 @@ interface Props {
 
 export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
   const { t } = useTranslation();
+  const format = useFormat();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const open = messageId !== null;
@@ -118,17 +119,17 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
               </Field>
               <Field label={t('dlq.detail.firstFailedAt')}>
                 <span className="font-mono text-xs">
-                  {new Date(data.first_failed_at).toLocaleString()}
+                  {format.dateTime(data.first_failed_at)}
                 </span>
               </Field>
               <Field label={t('dlq.detail.lastFailedAt')}>
                 <span className="font-mono text-xs">
-                  {new Date(data.last_failed_at).toLocaleString()}
+                  {format.dateTime(data.last_failed_at)}
                 </span>
               </Field>
               <Field label={t('dlq.detail.createdAt')}>
                 <span className="font-mono text-xs">
-                  {new Date(data.created_at).toLocaleString()}
+                  {format.dateTime(data.created_at)}
                 </span>
               </Field>
               {data.submission_id != null && (

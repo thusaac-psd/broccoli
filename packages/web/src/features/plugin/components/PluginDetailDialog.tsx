@@ -1,5 +1,5 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import type { PluginFullDetail, UploadRemoval } from '@broccoli/web-sdk/plugin';
 import {
   Badge,
@@ -120,7 +120,8 @@ const REPLICA_BADGE: Record<
 };
 
 function FleetSection({ fleet }: { fleet: PluginFleet }) {
-  const { t, locale } = useTranslation();
+  const { t } = useTranslation();
+  const format = useFormat();
 
   return (
     <Section
@@ -159,7 +160,7 @@ function FleetSection({ fleet }: { fleet: PluginFleet }) {
               {r.retry_at && (
                 <p className="text-muted-foreground">
                   {t('plugins.detail.retryAt', {
-                    time: new Date(r.retry_at).toLocaleTimeString(locale),
+                    time: format.time(r.retry_at),
                   })}
                 </p>
               )}

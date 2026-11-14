@@ -1,9 +1,8 @@
-import { format } from 'date-fns';
 import { CalendarIcon, X } from 'lucide-react';
 import * as React from 'react';
 
 import { serverNow } from '@/api/server-clock';
-import { useTranslation } from '@/i18n';
+import { formatDateTime, useTranslation } from '@/i18n';
 import { Button } from '@/ui/button';
 import { Calendar } from '@/ui/calendar';
 import { Input } from '@/ui/input';
@@ -21,11 +20,11 @@ export interface DateTimePickerProps {
 function DateTimePicker({
   value,
   onChange,
-  placeholder = 'Pick date & time',
+  placeholder,
   disabled = false,
   className,
 }: DateTimePickerProps) {
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const [open, setOpen] = React.useState(false);
 
   const hours = value ? String(value.getHours()).padStart(2, '0') : '00';
@@ -78,7 +77,11 @@ function DateTimePicker({
           )}
         >
           <CalendarIcon className="mr-2 h-4 w-4" />
-          {value ? format(value, 'PPP HH:mm') : <span>{placeholder}</span>}
+          {value ? (
+            formatDateTime(value, locale, { timeZoneName: true })
+          ) : (
+            <span>{placeholder ?? t('dateTime.placeholder')}</span>
+          )}
         </Button>
       </PopoverTrigger>
       <PopoverContent className="w-auto p-0" align="start">

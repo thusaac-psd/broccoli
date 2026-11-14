@@ -1,14 +1,11 @@
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import type {
   SubmissionStatus,
   SubmissionSummary,
   Verdict,
 } from '@broccoli/web-sdk/submission';
 import { Badge } from '@broccoli/web-sdk/ui';
-import {
-  formatKibibytes,
-  formatRelativeDatetime,
-} from '@broccoli/web-sdk/utils';
+import { formatKibibytes } from '@broccoli/web-sdk/utils';
 
 import { useSubmissionNavigation } from '@/features/submission/hooks/use-submission-navigation';
 import type { SubmissionEntry } from '@/features/submission/hooks/use-submissions';
@@ -81,6 +78,7 @@ export function RecentSubmissionOverview({
   linkBuilder,
 }: RecentSubmissionOverviewProps) {
   const { t } = useTranslation();
+  const format = useFormat();
   const { openSubmission } = useSubmissionNavigation();
 
   // Bucket fan-out entries by groupKey so they render together as a single
@@ -265,7 +263,7 @@ export function RecentSubmissionOverview({
                 <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
                   <span>
                     {row.createdAt
-                      ? formatRelativeDatetime(row.createdAt, t)
+                      ? format.relative(row.createdAt)
                       : t('result.judging')}
                   </span>
                   {row.timeUsed != null && (

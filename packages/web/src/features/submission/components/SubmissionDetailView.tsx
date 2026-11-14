@@ -1,10 +1,7 @@
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import { isTerminalStatus } from '@broccoli/web-sdk/submission';
 import { Badge } from '@broccoli/web-sdk/ui';
-import {
-  formatKibibytes,
-  formatRelativeDatetime,
-} from '@broccoli/web-sdk/utils';
+import { formatKibibytes } from '@broccoli/web-sdk/utils';
 import { AlertCircle, ArrowLeft, Loader2 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router';
 
@@ -34,6 +31,7 @@ export function SubmissionDetailView({
   contestId,
 }: SubmissionDetailViewProps) {
   const { t } = useTranslation();
+  const format = useFormat();
   const { submission, isLoading, error } = useSubmissionDetail(submissionId);
 
   const returnTarget = useSubmissionReturn(submission, isLoading, contestId);
@@ -126,7 +124,7 @@ export function SubmissionDetailView({
             </MetaItem>
             <MetaItem label={t('overview.submitted')}>
               <span className="text-foreground">
-                {formatRelativeDatetime(submission.created_at, t)}
+                {format.relative(submission.created_at)}
               </span>
             </MetaItem>
             {submission.target_worker_id ? (

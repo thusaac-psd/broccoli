@@ -11,7 +11,7 @@ import {
   useIdempotentRequest,
   useRegistries,
 } from '@broccoli/web-sdk/hooks';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import type { ProblemSummary } from '@broccoli/web-sdk/problem';
 import { Slot } from '@broccoli/web-sdk/slot';
 import {
@@ -36,7 +36,7 @@ import {
   Separator,
   useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
-import { formatDateTime, formatKibibytes } from '@broccoli/web-sdk/utils';
+import { formatKibibytes } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Check,
@@ -815,7 +815,8 @@ function useContestColumns({
   onBulkParticipants: (contest: ContestSummary) => void;
   onConfigure: (contest: ContestSummary) => void;
 }): DataTableColumn<ContestSummary>[] {
-  const { t, locale } = useTranslation();
+  const { t } = useTranslation();
+  const format = useFormat();
   return [
     { accessorKey: 'id', header: '#', size: 60 },
     {
@@ -875,7 +876,7 @@ function useContestColumns({
       sortKey: 'start_time',
       cell: ({ row }) => (
         <span className="text-muted-foreground">
-          {formatDateTime(row.original.start_time, locale)}
+          {format.dateTime(row.original.start_time, { timeZoneName: true })}
         </span>
       ),
     },
@@ -885,7 +886,7 @@ function useContestColumns({
       size: 180,
       cell: ({ row }) => (
         <span className="text-muted-foreground">
-          {formatDateTime(row.original.end_time, locale)}
+          {format.dateTime(row.original.end_time, { timeZoneName: true })}
         </span>
       ),
     },

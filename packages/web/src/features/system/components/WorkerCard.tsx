@@ -1,5 +1,9 @@
 import { serverNow } from '@broccoli/web-sdk/api';
-import { type I18nContextValue, useTranslation } from '@broccoli/web-sdk/i18n';
+import {
+  type I18nContextValue,
+  useFormat,
+  useTranslation,
+} from '@broccoli/web-sdk/i18n';
 import { Badge } from '@broccoli/web-sdk/ui';
 import {
   CircleDot,
@@ -13,15 +17,6 @@ import type { WorkerInfo } from '@/features/system/types';
 
 interface Props {
   worker: WorkerInfo;
-}
-
-function formatRelative(seconds: number, t: I18nContextValue['t']) {
-  if (seconds < 5) return t('system.worker.justNow');
-  if (seconds < 60) return t('system.worker.secondsAgo', { count: seconds });
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return t('system.worker.minutesAgo', { count: minutes });
-  const hours = Math.floor(minutes / 60);
-  return t('system.worker.hoursAgo', { count: hours });
 }
 
 function formatUptime(startedAt: string, t: I18nContextValue['t']) {
@@ -40,6 +35,7 @@ function formatUptime(startedAt: string, t: I18nContextValue['t']) {
 
 export function WorkerCard({ worker }: Props) {
   const { t } = useTranslation();
+  const format = useFormat();
 
   const inFlightPct = worker.max_concurrency
     ? Math.min(100, (worker.in_flight / worker.max_concurrency) * 100)
@@ -85,7 +81,7 @@ export function WorkerCard({ worker }: Props) {
           </div>
         </div>
         <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-          {formatRelative(worker.seconds_since_last_seen, t)}
+          {format.relativeSeconds(-worker.seconds_since_last_seen)}
         </span>
       </div>
 

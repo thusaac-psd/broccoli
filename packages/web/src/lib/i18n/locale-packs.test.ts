@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 import { parse } from 'smol-toml';
 
+import { messageParameters } from '../../../../web-sdk/src/i18n/message.ts';
 import { en } from './en.ts';
 
 const PLUGINS_DIR = join(
@@ -23,10 +24,6 @@ function readCatalog(path: string): Catalog {
   return parse(readFileSync(path, 'utf8')) as Catalog;
 }
 
-function placeholders(text: string): string[] {
-  return [...text.matchAll(/\{+(\w+)\}+/g)].map((m) => m[1]).sort();
-}
-
 function compare(source: Catalog, pack: Catalog, label: string) {
   const missing = Object.keys(source).filter((key) => !(key in pack));
   const extra = Object.keys(pack).filter((key) => !(key in source));
@@ -34,7 +31,8 @@ function compare(source: Catalog, pack: Catalog, label: string) {
   assert.deepEqual(extra, [], `${label} has keys the source does not define`);
   const mismatched = Object.keys(source).filter(
     (key) =>
-      placeholders(source[key]).join() !== placeholders(pack[key]).join(),
+      messageParameters(source[key]).join() !==
+      messageParameters(pack[key]).join(),
   );
   assert.deepEqual(mismatched, [], `${label} changes placeholders`);
 }

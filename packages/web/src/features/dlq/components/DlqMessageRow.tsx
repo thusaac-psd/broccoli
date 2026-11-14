@@ -1,5 +1,4 @@
-import { serverNow } from '@broccoli/web-sdk/api';
-import { type I18nContextValue, useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Badge } from '@broccoli/web-sdk/ui';
 
 import type { DlqMessage } from '@/features/dlq/types';
@@ -10,22 +9,9 @@ interface Props {
   onClick: (id: number) => void;
 }
 
-function timeAgo(iso: string, t: I18nContextValue['t']) {
-  const seconds = Math.max(
-    0,
-    Math.floor((serverNow() - Date.parse(iso)) / 1000),
-  );
-  if (seconds < 60) return t('dlq.row.secondsAgo', { count: seconds });
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return t('dlq.row.minutesAgo', { count: minutes });
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return t('dlq.row.hoursAgo', { count: hours });
-  const days = Math.floor(hours / 24);
-  return t('dlq.row.daysAgo', { count: days });
-}
-
 export function DlqMessageRow({ message, onClick }: Props) {
   const { t } = useTranslation();
+  const format = useFormat();
   const meta = messageTypeMeta(message.message_type);
   const Icon = meta.icon;
 
@@ -64,7 +50,7 @@ export function DlqMessageRow({ message, onClick }: Props) {
         {message.retry_count}
       </td>
       <td className="p-3 align-top text-xs text-muted-foreground tabular-nums whitespace-nowrap">
-        {timeAgo(message.last_failed_at, t)}
+        {format.relative(message.last_failed_at)}
       </td>
       <td className="p-3 align-top">
         {message.resolved ? (

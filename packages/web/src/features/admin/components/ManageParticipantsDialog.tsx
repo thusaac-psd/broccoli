@@ -5,7 +5,7 @@ import {
 } from '@broccoli/web-sdk/api';
 import type { ContestSummary } from '@broccoli/web-sdk/contest';
 import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
   Button,
@@ -24,7 +24,6 @@ import {
   Textarea,
   useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
-import { formatDateTime } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Download,
@@ -89,7 +88,8 @@ function EnrolledTab({
   participants: ParticipantItem[];
   isLoading: boolean;
 }) {
-  const { t, locale } = useTranslation();
+  const { t } = useTranslation();
+  const format = useFormat();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
@@ -201,7 +201,7 @@ function EnrolledTab({
                     {p.is_deleted ? '—' : p.display_name}
                   </td>
                   <td className="px-3 py-2 text-muted-foreground">
-                    {formatDateTime(p.registered_at, locale)}
+                    {format.dateTime(p.registered_at)}
                   </td>
                   <td className="px-3 py-2 text-right">
                     <Button

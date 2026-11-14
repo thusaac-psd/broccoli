@@ -1,4 +1,4 @@
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import { cn } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
 import { MonitorSmartphone, Printer } from 'lucide-react';
@@ -8,6 +8,7 @@ import { formatRelative } from '../lib/format';
 
 export function StationsPanel() {
   const { t } = useTranslation();
+  const format = useFormat();
   const api = usePrintApi();
 
   const { data, isLoading } = useQuery({
@@ -102,7 +103,7 @@ export function StationsPanel() {
             </div>
 
             <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground tabular-nums">
-              <span>{formatRelative(s.last_seen)}</span>
+              <span>{formatRelative(format, s.last_seen)}</span>
               {s.version && (
                 <span className="font-mono">
                   {t('print.stations.version', { version: s.version })}

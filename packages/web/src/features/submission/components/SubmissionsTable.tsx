@@ -1,14 +1,11 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import type {
   Submission,
   SubmissionSummary,
 } from '@broccoli/web-sdk/submission';
 import { Badge, Button } from '@broccoli/web-sdk/ui';
-import {
-  formatKibibytes,
-  formatRelativeDatetime,
-} from '@broccoli/web-sdk/utils';
+import { formatKibibytes } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
 import {
   Check,
@@ -289,6 +286,7 @@ function SubmissionRow({
   rowClassName?: string;
 }) {
   const { t } = useTranslation();
+  const format = useFormat();
   const { onSubmissionClick } = useSubmissionNavigation();
   const { label: verdictLabel, variant: verdictVariant } = getVerdictBadge(
     submission.verdict ?? null,
@@ -429,7 +427,7 @@ function SubmissionRow({
         key="submitted"
         className={`${px} ${py} text-muted-foreground/50 text-right whitespace-nowrap ${compact ? 'pr-3' : ''}`}
       >
-        {formatRelativeDatetime(submission.created_at, t)}
+        {format.relative(submission.created_at)}
       </td>
     ),
   };

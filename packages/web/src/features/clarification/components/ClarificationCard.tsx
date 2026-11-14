@@ -3,7 +3,7 @@ import type {
   ClarificationReply,
 } from '@broccoli/web-sdk/clarification';
 import { useAsyncSubmit } from '@broccoli/web-sdk/hooks';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
   Button,
@@ -12,7 +12,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@broccoli/web-sdk/ui';
-import { formatTime } from '@broccoli/web-sdk/utils';
 import {
   Check,
   CheckCircle2,
@@ -51,7 +50,8 @@ export function ClarificationCard({
 }: ClarificationCardProps) {
   const [replyContent, setReplyContent] = useState('');
   const reply = useAsyncSubmit();
-  const { t, locale } = useTranslation();
+  const { t } = useTranslation();
+  const format = useFormat();
 
   const isAnnouncement = clarification.clarification_type === 'announcement';
   const isDirectMessage = clarification.clarification_type === 'direct_message';
@@ -95,7 +95,7 @@ export function ClarificationCard({
           )}
           <span className="text-muted-foreground text-xs flex items-center gap-1">
             <Clock className="h-3 w-3" />
-            {formatTime(clarification.created_at, locale)}
+            {format.time(clarification.created_at)}
           </span>
         </div>
         <StatusBadge
@@ -119,7 +119,6 @@ export function ClarificationCard({
             <ReplyMessage
               key={reply.id}
               reply={reply}
-              locale={locale}
               isLast={idx === replies.length - 1}
               isAdmin={isAdmin}
               questionIsPublic={clarification.is_public}
@@ -264,20 +263,19 @@ function StatusBadge({
 
 function ReplyMessage({
   reply,
-  locale,
   isLast,
   isAdmin,
   questionIsPublic,
   onTogglePublic,
 }: {
   reply: ClarificationReply;
-  locale: string;
   isLast: boolean;
   isAdmin: boolean;
   questionIsPublic: boolean;
   onTogglePublic: (includeQuestion: boolean) => void;
 }) {
   const { t } = useTranslation();
+  const format = useFormat();
 
   return (
     <div
@@ -292,7 +290,7 @@ function ReplyMessage({
         <div className="flex items-center gap-2 mb-1">
           <span className="text-sm font-medium">{reply.author_name}</span>
           <span className="text-xs text-muted-foreground">
-            {formatTime(reply.created_at, locale)}
+            {format.time(reply.created_at)}
           </span>
           {reply.is_public ? (
             <Badge

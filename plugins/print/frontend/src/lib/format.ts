@@ -1,4 +1,4 @@
-import { serverNow } from '@broccoli/web-sdk/api';
+import type { Formatters } from '@broccoli/web-sdk/i18n';
 
 import type { PrintStatus } from '../types';
 
@@ -16,21 +16,12 @@ export function estimatePages(source: string): number {
   return Math.max(1, Math.ceil(Math.max(1, visual) / LINES_PER_PAGE));
 }
 
-/**
- * Compact relative time from a server epoch-seconds value (e.g. "2m ago"),
- * measured by the server clock.
- */
-export function formatRelative(epochSecs: number | null | undefined): string {
-  if (!epochSecs) return '—';
-  const deltaSec = Math.max(0, serverNow() / 1000 - epochSecs);
-  if (deltaSec < 5) return 'just now';
-  if (deltaSec < 60) return `${Math.floor(deltaSec)}s ago`;
-  const min = Math.floor(deltaSec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ${min % 60}m ago`;
-  const day = Math.floor(hr / 24);
-  return `${day}d ago`;
+/** How long ago a server epoch-seconds value was, or a dash when unset. */
+export function formatRelative(
+  format: Formatters,
+  epochSecs: number | null | undefined,
+): string {
+  return epochSecs ? format.relative(epochSecs * 1000) : '—';
 }
 
 /**
