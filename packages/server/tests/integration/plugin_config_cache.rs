@@ -185,6 +185,11 @@ async fn set_plugin_group(app: &TestApp) -> String {
         .expect("a group role")
         .try_get("", "name")
         .expect("name");
+    // The app role administers the group; it joins it to step into it.
+    app.db
+        .execute_unprepared(&format!("GRANT \"{group}\" TO CURRENT_USER"))
+        .await
+        .expect("join the group");
     format!("SET LOCAL ROLE \"{group}\"")
 }
 
