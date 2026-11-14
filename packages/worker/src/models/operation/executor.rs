@@ -579,6 +579,7 @@ mod platform_tool_validation_tests {
             reply_to: "s".into(),
             operation_batch_id: None,
             trace_context: None,
+            judgement: None,
         };
         let result = executor
             .execute(task)

@@ -213,6 +213,7 @@ pub async fn start_operation_batch(
                 reply_to: deps.server_id.clone(),
                 operation_batch_id: None,
                 trace_context: common::observability::inject_trace_context(),
+                judgement: deps.judgement,
             };
 
             let publisher = deps
@@ -900,6 +901,7 @@ mod tests {
             blob_store,
             metrics: None,
             evaluate_batches,
+            judgement: None,
         }
     }
 

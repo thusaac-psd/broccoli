@@ -104,6 +104,6 @@ pub(crate) use plugin_writes::{
 };
 pub(crate) use unit::{
     Abandoned, ClaimedCodeRun, ClaimedJudgement, claim_code_runs, claim_judgements, fail_dispatch,
-    reclaim_abandoned, refresh_leases, retry_system_errors,
+    reclaim_abandoned, refresh_leases, resolve_if_settled, retry_system_errors,
 };
 pub use unit::{Unit, UnitCounts, count_in_flight, release_leases};

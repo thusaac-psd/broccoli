@@ -531,6 +531,7 @@ mod tests {
             reply_to: "server-1".to_string(),
             operation_batch_id: None,
             trace_context: None,
+            judgement: None,
         }
     }
 

@@ -241,6 +241,15 @@ async fn run_detached_windowed_evaluate(
         .filter(|tc| test_case_cheap_to_retain(tc))
         .map(|tc| (tc.test_case_id, tc.clone()))
         .collect();
+    // Every operation the session starts runs for its judgement.
+    let mut deps = deps;
+    deps.operation_deps.judgement =
+        submission_completion
+            .as_ref()
+            .map(|completion| common::worker::JudgementRef {
+                submission_id: completion.submission_id,
+                judgement_id: completion.judgement_id,
+            });
     let driver = EvaluateDriver {
         caller_plugin_id,
         session_id,

@@ -157,6 +157,15 @@ history, leaving the row open until the rejudge recovers. Nothing re-judges a
 stuck deferred judgement or code run, so an operator resolves those; discarding
 the judgement resolves its row. An operator resolution names the operator.
 
+An operation task that a worker dead-letters (its execution retries or its
+deliveries ran out) carries the judgement it ran for, so its row is filed
+under that submission (`submission_id`, with the judgement id in the
+payload). The statement that gives the submission a verdict that stands
+resolves these rows with the submission's own, and a row that reaches the
+database after that verdict (dead letters travel through the queue) is
+resolved as it is filed. An operation row with no submission ran for no
+judgement.
+
 ## Locks
 
 Rows are locked in one order: a submission, then its judgements, then dead

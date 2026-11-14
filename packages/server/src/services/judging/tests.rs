@@ -942,3 +942,49 @@ async fn queuing_a_unit_or_freeing_its_room_notifies_the_claim_fibers() {
         Some(ClaimWake::Queued)
     );
 }
+
+fn operation_letter(id: &str, submission_id: i32) -> common::DlqEnvelope {
+    common::DlqEnvelope {
+        message_id: id.into(),
+        message_type: DlqMessageType::OperationTask,
+        submission_id: Some(submission_id),
+        payload: serde_json::json!({}),
+        error_code: common::DlqErrorCode::MaxRetriesExceeded,
+        error_message: "boom".into(),
+        retry_history: vec![],
+    }
+}
+
+/// An operation's dead letter is filed under the submission it ran for and
+/// is resolved by the verdict that stands, whether it arrives before or
+/// after that verdict.
+#[tokio::test]
+async fn a_standing_verdict_resolves_its_submissions_operation_letters() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (s, j) = new_submission(&db).await;
+    claim_one(&db, "srv").await;
+    let dlq = crate::dlq::DlqService::new(&db);
+    let before = dlq
+        .send_to_dlq(&operation_letter("op-1", s.id))
+        .await
+        .unwrap();
+    assert!(!before.resolved, "the submission has no verdict yet");
+
+    finish(&db, &j, Verdict::Accepted).await;
+    mirror_status(&db, s.id).await;
+    let before = dead_letter_message::Entity::find_by_id(before.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(before.resolved, "the verdict resolves the earlier letter");
+
+    let after = dlq
+        .send_to_dlq(&operation_letter("op-2", s.id))
+        .await
+        .unwrap();
+    assert!(
+        after.resolved,
+        "a letter filed after the verdict is settled at once"
+    );
+}

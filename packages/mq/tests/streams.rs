@@ -33,6 +33,7 @@ fn task(id: &str) -> Task {
         reply_to: "server-1".into(),
         operation_batch_id: None,
         trace_context: None,
+        judgement: None,
     }
 }
 

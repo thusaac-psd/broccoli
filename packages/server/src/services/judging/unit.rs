@@ -109,9 +109,9 @@ impl Unit {
                  recovered AS (UPDATE dead_letter_message d \
                      SET resolved = TRUE, resolved_at = NOW(), resolved_by = NULL \
                      FROM moved j WHERE NOT d.resolved AND j.is_current AND {recovered} \
-                       AND d.message_id = {submission})",
+                       AND {settled})",
                 recovered = recovered("j"),
-                submission = DlqSubject::Submission(0).sql_message_id("j.submission_id"),
+                settled = settled_by_submission("d", "j"),
             ),
             Unit::CodeRun => String::new(),
         }
@@ -138,6 +138,46 @@ fn recovered(alias: &str) -> String {
         terminal = StatusPhase::Terminal.sql_list(),
         system_error = system_error(alias),
     )
+}
+
+/// SQL: the dead letter `d` is one that its submission's current judgement
+/// `j` settles once its verdict stands: the submission's own letter, or an
+/// operation task that ran for one of its judgements (a lost attempt, or an
+/// operation the attempt that stands re-ran).
+fn settled_by_submission(d: &str, j: &str) -> String {
+    format!(
+        "{d}.submission_id = {j}.submission_id \
+         AND ({d}.message_id = {submission} OR {d}.direction = '{operation}')",
+        submission = DlqSubject::Submission(0).sql_message_id(&format!("{j}.submission_id")),
+        operation = common::DlqMessageType::OperationTask.as_str(),
+    )
+}
+
+/// Resolves dead letter `id` at once if its submission's verdict already
+/// stands: a letter filed after the attempt that recovered (an operation's
+/// dead letter reaches the database through the queue, after its submission
+/// may have been judged again). Returns whether it did.
+pub(crate) async fn resolve_if_settled<C: ConnectionTrait>(
+    conn: &C,
+    id: i32,
+) -> Result<bool, DbErr> {
+    let n = conn
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!(
+                "UPDATE dead_letter_message d \
+                 SET resolved = TRUE, resolved_at = NOW(), resolved_by = NULL \
+                 FROM submission_judgement j \
+                 WHERE d.id = $1 AND NOT d.resolved AND j.is_current AND {recovered} \
+                   AND {settled}",
+                recovered = recovered("j"),
+                settled = settled_by_submission("d", "j"),
+            ),
+            [id.into()],
+        ))
+        .await?
+        .rows_affected();
+    Ok(n > 0)
 }
 
 /// The submission cache columns, each copied from its current judgement `j`.

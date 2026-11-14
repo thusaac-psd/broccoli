@@ -185,6 +185,7 @@ async fn operation_result_burst_has_no_missing_waiters() {
         ),
         metrics: Some(metrics.clone()),
         evaluate_batches,
+        judgement: None,
     };
 
     let batch_id = start_operation_batch(
@@ -357,6 +358,7 @@ async fn an_operation_a_stale_redis_snapshot_lost_fails_its_waiter() {
             reply_to: server_id.to_string(),
             operation_batch_id: None,
             trace_context: None,
+            judgement: None,
         };
         mq.publish_task(&task, None).await.unwrap();
     }
