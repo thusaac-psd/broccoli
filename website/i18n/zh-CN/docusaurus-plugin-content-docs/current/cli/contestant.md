@@ -53,7 +53,7 @@ echo 'source ~/.broccoli-completions.zsh' >> ~/.zshrc
 broccoli login --server https://judge.example.com
 ```
 
-这会打开浏览器进行授权，随后让你在后续命令中保持登录状态。你的登录信息会保存在本机，因此每个服务器只需登录一次。如果不带 `--server`，Broccoli 会连接位于 `http://localhost:3000` 的本地服务器，所以请传入你比赛的地址。你可以随时确认自己的身份。
+这会打开浏览器进行授权，随后让你在后续命令中保持登录状态。你的登录信息会保存在本机，因此每个服务器只需登录一次，而之后的所有命令都会使用你最近一次登录的服务器。地址需要以 `http://` 或 `https://` 开头，末尾是否带斜杠没有区别。如果不带 `--server`，Broccoli 依次使用你最近一次登录的服务器、配置中的 `server`，最后是位于 `http://localhost:3000` 的本地服务器。你可以随时确认自己的身份以及所在的服务器。
 
 ```bash
 broccoli whoami
@@ -69,6 +69,14 @@ broccoli login --server https://judge.example.com --no-browser
 
 ```bash
 broccoli login --server https://judge.example.com -u alice -p secret
+```
+
+登录失败时，提示会说明原因：该地址没有任何服务应答、该地址有应答但不是 Broccoli 服务器，或者用户名或密码错误。
+
+在共用的机器上，用完后请退出登录。这会删除当前服务器（或你用 `--server` 指定的服务器）保存在本机的登录信息。
+
+```bash
+broccoli logout
 ```
 
 ## 找到你的比赛
@@ -99,7 +107,7 @@ broccoli contest register "Spring Round"
 broccoli contest problems "Spring Round"
 ```
 
-每道题都有一个标号（例如 `A`）、一个编号和一个标题，其中任意一个都能指代该题。下载某道题，会把它的题面和样例保存为当前目录中的文件，方便离线阅读并据此测试。
+每道题都有一个标号（例如 `A`）、在比赛中的位置（例如 `1`）和一个标题（例如 `"Two Sum"`），其中任意一个都能指代该题：`-p A`、`-p 1` 和 `-p "Two Sum"` 都选中第一道题。若要使用题目的 id，请加上 `#`，例如 `-p #42`。Broccoli 会在测试或提交之前打印它选中的标号和标题，并拒绝可能指向两道题的写法。下载某道题，会把它的题面和样例保存为当前目录中的文件，方便离线阅读并据此测试。
 
 ```bash
 broccoli contest problems "Spring Round" -p A
@@ -113,7 +121,7 @@ broccoli contest problems "Spring Round" -p A
 broccoli test sol.cpp -c "Spring Round" -p A
 ```
 
-Broccoli 会根据文件扩展名识别语言，获取样例，逐个运行，并告诉你哪些通过了，对未通过的给出差异对比。加上 `--local` 可以在你自己的机器上运行而不是服务器上，这样更快，并且在你下载题目之后可以离线进行。
+Broccoli 会根据文件扩展名识别语言，获取样例，逐个运行，并告诉你哪些通过了，对未通过的给出差异对比。有样例未通过时，命令以状态码 3 退出，脚本可以据此区分答案错误与其他错误。加上 `--local` 可以在你自己的机器上运行而不是服务器上，这样更快，并且在你下载题目之后可以离线进行。
 
 ```bash
 broccoli test sol.cpp -c "Spring Round" -p A --local
@@ -133,7 +141,7 @@ broccoli test sol.cpp --local -i input.txt
 broccoli submit sol.cpp -c "Spring Round" -p A
 ```
 
-Broccoli 会识别语言，完成提交，并打印一个提交编号。需要时用 `-l` 覆盖语言。加上 `-w` 可以当场等待评测结果，而不必之后再查看。
+Broccoli 会识别语言，完成提交，并打印一个提交编号。需要时用 `-l` 覆盖语言。加上 `-w` 可以当场等待评测结果，而不必之后再查看。使用 `-w` 时，若结果不是 Accepted，命令以状态码 3 退出。
 
 ```bash
 broccoli submit sol.cpp -c "Spring Round" -p A -w
@@ -197,7 +205,7 @@ broccoli watch "Spring Round"
 就某场比赛向组织者提问。省略问题内容则进入交互式输入。
 
 ```bash
-broccoli clarifications ask "Spring Round" "Is the input always sorted?"
+broccoli clarifications ask "Is the input always sorted?" -c "Spring Round"
 ```
 
 用列表查看回答以及任何公告。
@@ -218,7 +226,7 @@ problem  = "A"
 language = "cpp"
 ```
 
-保存的默认值则在任何地方生效。设置一次比赛，之后就可以省略 `-c`。可设置的键是 `contest`、`language` 和 `server`，用 `broccoli config unset` 移除其中一个。
+保存的默认值则在任何地方生效。设置一次比赛，之后就可以省略 `-c`；省略比赛时，`contest info`、`contest problems`、`watch` 和 `clarifications` 也会使用它。可设置的键是 `contest`、`language`、`server` 和 `tls`，用 `broccoli config unset` 移除其中一个。这些命令只修改你自己的配置文件。如果机房机器的配置文件（`/etc/broccoli/config.toml`）也设置了某个键，你移除自己的值之后，它的值会重新生效，Broccoli 会提示你这一点。
 
 ```bash
 broccoli config set contest "Spring Round"
@@ -230,27 +238,20 @@ broccoli config set contest "Spring Round"
 broccoli config
 ```
 
-两个环境变量可以为单次运行覆盖保存的值，这在脚本中很有用。`BROCCOLI_URL` 设置服务器，`BROCCOLI_TOKEN` 设置登录令牌。你的登录信息和设置保存在你账户的配置目录中，旁边还有你下载的题目缓存。运行 `broccoli config` 查看确切路径。
+每个命令都接受 `--server` 和 `--token`，用于在单次运行中覆盖保存的值，这在脚本中很有用。环境变量 `BROCCOLI_URL` 和 `BROCCOLI_TOKEN` 的作用相同。你的登录信息和设置保存在你账户的配置目录中，旁边还有你下载的题目缓存。运行 `broccoli config` 查看确切路径。
 
 ## 语言
 
-Broccoli 根据你的文件扩展名识别语言。想用其他语言时，设置 `-l` 或你的 `language` 默认值。一场比赛接受哪些语言，由其组织者决定。
+Broccoli 根据你的文件扩展名，按照比赛服务器支持的语言及其扩展名来识别语言。想用其他语言时，设置 `-l` 或你的 `language` 默认值。如果 Broccoli 无法判断语言，或者服务器不接受你指定的语言，提示会列出服务器支持的语言。`test --local` 会记住上一次连上服务器时得到的语言列表，因此离线时也能使用。
 
-| 扩展名               | 语言         |
-| -------------------- | ------------ |
-| `.c`                 | `c`          |
-| `.cpp` `.cc` `.cxx`  | `cpp`        |
-| `.py`                | `python3`    |
-| `.java`              | `java`       |
-| `.rs`                | `rust`       |
-| `.go`                | `go`         |
-| `.js`                | `javascript` |
-| `.ts`                | `typescript` |
-| `.kt`                | `kotlin`     |
-| `.swift`             | `swift`      |
-| `.rb`                | `ruby`       |
-| `.hs`                | `haskell`    |
-| `.cs`                | `csharp`     |
+## 退出状态码
+
+| 状态码 | 含义                                                    |
+| ------ | ------------------------------------------------------- |
+| `0`    | 命令成功                                                |
+| `1`    | 出现错误，例如无法连接或尚未登录                        |
+| `2`    | 命令行无法解析                                          |
+| `3`    | `test` 有样例未通过，或 `submit -w` 的结果不是 Accepted |
 
 ## 全部命令
 
@@ -260,6 +261,7 @@ Broccoli 根据你的文件扩展名识别语言。想用其他语言时，设�
 | ----------------------------- | --------- | -------------------------- |
 | `broccoli login`              | `li`      | 登录到比赛服务器           |
 | `broccoli whoami`             | `me`      | 显示你当前的登录身份       |
+| `broccoli logout`             |           | 删除保存的登录信息         |
 | `broccoli contest list`       | `c ls`    | 列出比赛                   |
 | `broccoli contest info`       | `c i`     | 比赛详情与你的状态         |
 | `broccoli contest register`   | `c reg`   | 报名一场比赛               |

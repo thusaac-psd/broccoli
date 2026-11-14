@@ -8,19 +8,20 @@ services + isolate. This mirrors the battery-verified staging deployment exactly
 Use this instead of the Docker bundle (`../install.sh`) when the lab machines
 have no Docker / no Docker Hub access (typical in mainland China).
 
-| File | Role |
-|------|------|
-| `build-native-bundle.sh` | Run on a **built** box to assemble the bundle tarball. |
+| File                     | Role                                                      |
+| ------------------------ | --------------------------------------------------------- |
+| `build-native-bundle.sh` | Run on a **built** box to assemble the bundle tarball.    |
 | `install-native.sh`      | Deploy a role on a fresh box: `infra-server` or `worker`. |
-| `systemd/`, `config/`    | Unit + config templates (filled in at install time). |
-| `contest/`               | Problem export/import (added into the bundle). |
-| `cli/broccoli`           | Contestant CLI binary — copy out to contestant machines. |
+| `systemd/`, `config/`    | Unit + config templates (filled in at install time).      |
+| `contest/`               | Problem export/import (added into the bundle).            |
+| `cli/broccoli`           | Contestant CLI binary — copy out to contestant machines.  |
 
 ## (A) Build the bundle — on a built x86_64 Ubuntu box (e.g. staging)
 
-The box must already have: compiled `target/release/{server,worker,broccoli-compare}`,
-installed `/usr/local/bin/{weed,isolate}`, built plugin `.wasm` under
-`plugins/*/`, and the server web build under `packages/web/build/client`.
+The box must already have: compiled
+`target/release/{server,worker,broccoli-compare}`, installed
+`/usr/local/bin/{weed,isolate}`, built plugin `.wasm` under `plugins/*/`, and
+the server web build under `packages/web/build/client`.
 
 ```bash
 cd release/native
@@ -33,9 +34,9 @@ cd release/native
 
 The bundle contains the binaries, the `.wasm` judge plugins, the server web UI,
 `weed` + `isolate`, the systemd unit + config templates, the export/import
-tooling, `stage-toolchain.sh`, `stage-redis.sh`, and any pre-staged
-`toolchain/` and `redis/` `.deb` sets.
-~700 MB (binaries carry line-table debug info for backtraces).
+tooling, `stage-toolchain.sh`, `stage-redis.sh`, and any pre-staged `toolchain/`
+and `redis/` `.deb` sets. ~700 MB (binaries carry line-table debug info for
+backtraces).
 
 > **testlib.h / special judges** ride inside each problem's `checker_source` in
 > the DB, so they survive export/import with no internet.
@@ -66,13 +67,13 @@ bind + password), SeaweedFS (`weed`, S3 on `:8333`), and `broccoli-server`
 (systemd, port 80). SeaweedFS's master, volume and filer listen on loopback
 only; the LAN reaches just the credentialed S3 API, which
 `broccoli-weed-s3.socket` forwards from `<box1-LAN-IP>:8333`. Postgres (5432),
-Redis (6379) and S3 (8333) still accept LAN connections with passwords, so
-on a venue LAN, firewall them from contestant subnets and allow only the
-worker boxes. It **generates all secrets** on the first run (a re-run, e.g. to update the
-binaries, keeps them; `--rotate-secrets` makes new ones and then every worker
-needs the new `connection.env`), prints the admin password, and
-writes `connection.env` for the workers. The server auto-creates its schema and
-loads the plugins on first boot.
+Redis (6379) and S3 (8333) still accept LAN connections with passwords, so on a
+venue LAN, firewall them from contestant subnets and allow only the worker
+boxes. It **generates all secrets** on the first run (a re-run, e.g. to update
+the binaries, keeps them; `--rotate-secrets` makes new ones and then every
+worker needs the new `connection.env`), prints the admin password, and writes
+`connection.env` for the workers. The server auto-creates its schema and loads
+the plugins on first boot.
 
 Then load the problems (exported from the authoring server with
 `contest/export-problems.sh`). The import reads the bundle's `connection.env`:
@@ -114,14 +115,16 @@ networking bridges to the real LAN (no NAT, unlike WSL2). **Box 1 must NOT be
 live-boot** — it holds the DB/problems/submissions and must survive a reboot;
 install it persistently (disk install or a USB with a persistence partition).
 
-The one gap: the Ubuntu **Desktop live ISO ships `python3` but not `gcc`/`g++`**.
-Provide the toolchain by one of:
+The one gap: the Ubuntu **Desktop live ISO ships `python3` but not
+`gcc`/`g++`**. Provide the toolchain by one of:
 
 - **Bundled `.debs` (offline):** pre-stage them once on any online machine with
   Docker — `./stage-toolchain.sh` writes `toolchain/{20.04,22.04,24.04}/*.deb`,
-  folded into the bundle by `build-native-bundle.sh`. On the live-boot worker the
-  installer auto-runs `dpkg -i toolchain/$(. /etc/os-release; echo $VERSION_ID)/*.deb`.
-- **apt / LAN mirror (online):** `sudo apt-get install -y build-essential python3`.
+  folded into the bundle by `build-native-bundle.sh`. On the live-boot worker
+  the installer auto-runs
+  `dpkg -i toolchain/$(. /etc/os-release; echo $VERSION_ID)/*.deb`.
+- **apt / LAN mirror (online):**
+  `sudo apt-get install -y build-essential python3`.
 - The installer falls back to apt automatically, then the compile-test gate.
 
 > The staged closure is resolved against a minimal base image, so it is a
@@ -146,10 +149,15 @@ packages. Distribute it to contestant machines over the LAN:
 ```bash
 scp broccoli-native-v1/cli/broccoli contestant-box:/usr/local/bin/broccoli
 # on a contestant box:
-broccoli login                       # point at http://<box1-LAN-IP>/
-broccoli submit sol.cpp -p A -c <id> # submit
-broccoli test sol.cpp -p A -c <id>   # run samples locally/remote
+broccoli login -s http://<box1-LAN-IP> # later commands use this server
+broccoli submit sol.cpp -p A -c <id>   # submit
+broccoli test sol.cpp -p A -c <id>     # run samples locally/remote
+broccoli logout                        # at the end of a session on a shared box
 ```
+
+To preseed the server on every contestant machine instead, write
+`server = "http://<box1-LAN-IP>"` to `/etc/broccoli/config.toml`; a plain
+`broccoli login` then signs in there.
 
 ### Print stations (optional, for code printing)
 
@@ -158,11 +166,12 @@ machine that has a printer; it polls the server, renders syntax-highlighted PDFs
 (CJK font bundled), and runs the print command. Verified end-to-end: PDF
 generation + folder sink + `lp`-style command invocation + job status reporting.
 
-1. In the web UI (admin → print plugin config, **plugin** scope), add one or more
-   **station tokens**.
+1. In the web UI (admin → print plugin config, **plugin** scope), add one or
+   more **station tokens**.
 2. On each station: copy `cli/print-client` + `cli/print-client.toml.example` →
    `print-client.toml`, set `[[server]].url`/`token` and `[[printer]].command`
-   (`lp -d <printer> {file}` for CUPS, or `folder:/path` to drop PDFs to a folder).
+   (`lp -d <printer> {file}` for CUPS, or `folder:/path` to drop PDFs to a
+   folder).
 3. `print-client doctor` to check connectivity, then `print-client run`.
 
 > Each rendered PDF is ~25 MB — the bundled CJK font is embedded un-subsetted.
@@ -174,12 +183,13 @@ From any LAN box: open `http://<box1-LAN-IP>/`, log in as admin, confirm the
 problem list, submit one solution, confirm a worker judges it.
 
 ## Notes / limitations
+
 - **Plugin web UIs**: the bundle ships every judge `.wasm` (judging works) plus
-  the **print** plugin's staff web UI (`plugins/print/frontend/dist/` — print queue
-  panel + print buttons) and its backend `.wasm`. The other plugins' optional
-  config-UI panels are only included if their frontends were built. Building any
-  plugin frontend requires building `packages/web-sdk` first (it emits
-  `dist/plugin.css` that every plugin frontend `@import`s), then
+  the **print** plugin's staff web UI (`plugins/print/frontend/dist/` — print
+  queue panel + print buttons) and its backend `.wasm`. The other plugins'
+  optional config-UI panels are only included if their frontends were built.
+  Building any plugin frontend requires building `packages/web-sdk` first (it
+  emits `dist/plugin.css` that every plugin frontend `@import`s), then
   `pnpm --filter <plugin> build`. Authors can configure plugins via the API
   meanwhile; rebuild the remaining frontends on a connected machine for full UI.
 - **SeaweedFS volumes**: if `import` fails with "not enough volumes", raise the

@@ -46,6 +46,12 @@ broccoli-dev plugin new my-plugin --full
 使用 `--backend`、`--frontend` 或 `--full` 选择要生成的内容。若不带这些标志，命令会进行
 询问。骨架默认生成在 `./my-plugin`，也可通过 `-o <DIR>` 写入其他位置。
 
+骨架依赖 Broccoli SDK。在 Broccoli 源码仓库中创建时，它使用仓库的 `packages/` 目录，
+从而针对旁边的代码构建。在其他位置，传入 `--sdk <DIR>` 并指向某个仓库的 `packages/`
+目录，即可得到同样的本地依赖，构建时无需从任何地方获取 SDK。不带 `--sdk` 时，后端依赖
+已发布的 `broccoli-server-sdk` crate，版本与构建该 CLI 时所用的 SDK 一致；仓库之外的前端
+则必须使用 `--sdk`，并且需要先构建 `packages/web-sdk`（`pnpm --filter @broccoli/web-sdk build`）。
+
 ## 结构
 
 后端插件由三个文件定义。
@@ -168,24 +174,30 @@ pub fn check_cooldown(input: String) -> FnResult<String> {
 ## 构建与安装
 
 ```bash
-broccoli-dev plugin build my-plugin --install
+broccoli-dev plugin build my-plugin
 ```
 
 由于清单包含 `[server]` 段，CLI 会运行 `cargo build --target wasm32-wasip1`，并将产物
-复制到 `entry` 指定的路径。`--install` 会把构建结果放到本地服务端加载的位置。添加
-`--release` 可得到优化后的模块。若清单包含 `[web]` 段，CLI 还会运行前端构建。
+复制到插件目录中 `entry` 指定的路径。添加 `--release` 可得到优化后的模块。若清单包含
+`[web]` 段，CLI 还会运行前端构建；缺少 `node_modules` 时会先安装前端依赖，`--install`
+则在其已存在时也执行安装命令。服务端从其插件目录或上传的归档加载插件，`plugin watch`
+会替你完成上传。
 
 ## 对接运行中的服务端进行迭代
 
-先登录一次，然后监视目录。CLI 会在每次变更时重新构建并上传新的包：
+先登录一次，然后监视目录。CLI 会在每次编辑后重新构建并上传新的包，替换服务端在该插件
+id 下发布的版本。构建或上传失败时，它会等待你的下一次编辑，而不会反复重试：
 
 ```bash
 broccoli-dev login --server http://localhost:3000
 broccoli-dev plugin watch my-plugin --server http://localhost:3000
 ```
 
-`broccoli-dev login` 会将凭据存储在 `~/.config/broccoli/credentials.json`。你可以用
-`BROCCOLI_URL` 与 `BROCCOLI_TOKEN`，或用 `--server` 与 `--token` 覆盖它们。
+`broccoli-dev login` 会将凭据存储在所在平台配置目录下 `broccoli` 文件夹中的
+`credentials.json`（Linux 上为 `~/.config/broccoli`），并打印确切路径。在没有浏览器的
+机器上，可以用 `broccoli-dev login --server <URL> --token <TOKEN>` 保存从网页界面复制的
+令牌。你可以用 `BROCCOLI_URL` 与 `BROCCOLI_TOKEN`，或在 `plugin watch` 上用 `--server`
+与 `--token` 覆盖保存的登录信息。上传需要 `plugin:manage` 权限，并且服务端需开启插件上传。
 
 ## 后续方向
 
