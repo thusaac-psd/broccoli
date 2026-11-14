@@ -63,6 +63,7 @@ macro_rules! sandbox_suite {
             large_stdout_is_returned_as_capped_preview,
             a_collected_redirect_that_fits_inline_is_not_uploaded,
             a_collected_redirect_too_large_to_inline_is_uploaded,
+            a_collected_redirect_holding_nul_travels_inline_byte_for_byte,
             a_collected_redirect_the_inline_text_rewrites_is_uploaded,
             blob_input_fails_when_blob_storage_is_unavailable,
             platform_tool_mount_executes_tool_inside_box,
@@ -386,9 +387,20 @@ pub async fn a_collected_redirect_too_large_to_inline_is_uploaded<B: Backend>() 
     );
 }
 
-pub async fn a_collected_redirect_the_inline_text_rewrites_is_uploaded<B: Backend>() {
-    // The inline text replaces NUL, so it does not hold this file's bytes.
+pub async fn a_collected_redirect_holding_nul_travels_inline_byte_for_byte<B: Backend>() {
+    // Program output keeps NUL; the database handle owns replacing it.
     let result = run_with_blob_store::<B>(collected_stderr("printf 'a\\000b' >&2")).await;
+
+    let step = &result.task_results["step-1"];
+    assert!(step.success, "{step:?}");
+    assert_eq!(step.sandbox_result.stderr, "a\0b");
+    assert!(step.collected_outputs.is_empty(), "{step:?}");
+}
+
+pub async fn a_collected_redirect_the_inline_text_rewrites_is_uploaded<B: Backend>() {
+    // The inline text is UTF-8: an invalid byte becomes U+FFFD there, so it
+    // does not hold this file's bytes.
+    let result = run_with_blob_store::<B>(collected_stderr("printf 'a\\377b' >&2")).await;
 
     let step = &result.task_results["step-1"];
     assert!(step.success, "{step:?}");
