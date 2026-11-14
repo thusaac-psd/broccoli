@@ -1,3 +1,4 @@
+use crate::extractors::query::AppQuery;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::time::Duration;
@@ -5,7 +6,7 @@ use std::time::Duration;
 use axum::http::header::AUTHORIZATION;
 use axum::{
     body::{Body, to_bytes},
-    extract::{Query, State},
+    extract::State,
     http::{HeaderMap, Method, Response},
     response::{
         IntoResponse, Sse,
@@ -361,7 +362,7 @@ macro_rules! proxy_handler {
             AppPath((plugin_id, sub_path)): AppPath<(String, String)>,
             method: Method,
             headers: HeaderMap,
-            Query(query): Query<HashMap<String, String>>,
+            AppQuery(query): AppQuery<HashMap<String, String>>,
             body: String,
         ) -> Result<impl IntoResponse, AppError> {
             handle_plugin_request_impl(state, plugin_id, sub_path, method, headers, query, body).await
@@ -396,7 +397,7 @@ macro_rules! proxy_handler {
             AppPath((plugin_id, sub_path)): AppPath<(String, String)>,
             method: Method,
             headers: HeaderMap,
-            Query(query): Query<HashMap<String, String>>,
+            AppQuery(query): AppQuery<HashMap<String, String>>,
             body: String,
         ) -> Result<impl IntoResponse, AppError> {
             if method == Method::GET

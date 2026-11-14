@@ -2,10 +2,10 @@
 //!
 //! Compiled only when the `bundled-stress-test` cargo feature is enabled.
 
+use crate::extractors::path::AppPath;
 use axum::{
     Router,
     body::Body,
-    extract::Path,
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
@@ -156,7 +156,7 @@ pre{padding:1em;overflow-x:auto;}</style></head><body>
         .unwrap()
 }
 
-async fn serve(Path(file): Path<String>) -> Response {
+async fn serve(AppPath(file): AppPath<String>) -> Response {
     if let Some(platform) = file.strip_suffix(".sha256") {
         serve_sha256(platform)
     } else {

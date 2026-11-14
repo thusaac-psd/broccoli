@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 
 use axum::Json;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum_typed_multipart::BaseMultipart;
@@ -50,6 +50,7 @@ enum OnExistingLabel {
     responses(
         (status = 201, description = "Test cases uploaded", body = UploadTestCasesResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 413, description = "Request body over the endpoint's limit (PAYLOAD_TOO_LARGE)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
@@ -190,8 +191,8 @@ pub async fn upload_test_cases(
     ))
 }
 
-pub fn upload_body_limit() -> DefaultBodyLimit {
-    DefaultBodyLimit::max(LARGE_UPLOAD_LIMIT_BYTES)
+pub fn upload_body_limit() -> usize {
+    LARGE_UPLOAD_LIMIT_BYTES
 }
 
 struct ZipTestEntry {

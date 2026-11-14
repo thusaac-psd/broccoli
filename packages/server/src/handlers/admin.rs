@@ -1,7 +1,7 @@
-use axum::extract::DefaultBodyLimit;
+use crate::extractors::query::AppQuery;
 use axum::{
     Json,
-    extract::{Multipart, Query, State},
+    extract::{Multipart, State},
 };
 use broccoli_server_sdk::permissions as perm;
 use sea_orm::EntityTrait;
@@ -247,8 +247,8 @@ pub async fn reload_all_plugins(
 /// Room for the multipart framing around the archive.
 const MULTIPART_OVERHEAD_BYTES: usize = 1024 * 1024;
 
-pub fn upload_body_limit() -> DefaultBodyLimit {
-    DefaultBodyLimit::max(MAX_ARCHIVE_BYTES + MULTIPART_OVERHEAD_BYTES)
+pub fn upload_body_limit() -> usize {
+    MAX_ARCHIVE_BYTES + MULTIPART_OVERHEAD_BYTES
 }
 
 /// Read and validate the `plugin` field of an upload form.
@@ -506,7 +506,7 @@ pub async fn remove_plugin_upload(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<PluginId>,
-    Query(query): Query<RemoveUploadQuery>,
+    AppQuery(query): AppQuery<RemoveUploadQuery>,
 ) -> Result<Json<RemoveUploadResponse>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
     let outcome = crate::plugin_lifecycle::remove_upload(&state, &id, query.expect).await?;

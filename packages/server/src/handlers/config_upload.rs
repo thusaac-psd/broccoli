@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::extract::{DefaultBodyLimit, Multipart, State};
+use axum::extract::{Multipart, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
@@ -12,8 +12,8 @@ use crate::state::AppState;
 use crate::upload_limits::LARGE_UPLOAD_LIMIT_BYTES;
 use crate::utils::blob::{stream_field_to_store, take_required_file};
 
-pub fn config_upload_body_limit() -> DefaultBodyLimit {
-    DefaultBodyLimit::max(LARGE_UPLOAD_LIMIT_BYTES)
+pub fn config_upload_body_limit() -> usize {
+    LARGE_UPLOAD_LIMIT_BYTES
 }
 
 #[utoipa::path(
@@ -30,6 +30,7 @@ pub fn config_upload_body_limit() -> DefaultBodyLimit {
     responses(
         (status = 201, description = "Blob stored", body = ConfigBlobUploadResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 413, description = "Request body over the endpoint's limit (PAYLOAD_TOO_LARGE)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
     ),
@@ -50,11 +51,7 @@ pub async fn upload_config_blob(
     let mut file_result = None;
     let mut file_name = None;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::Validation(format!("Multipart error: {e}")))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(AppError::from)? {
         if field.name() == Some("file") {
             file_name = field.file_name().map(|s| s.to_string());
             file_result = Some(

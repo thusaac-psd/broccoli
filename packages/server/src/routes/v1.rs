@@ -12,6 +12,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::client_ip::ClientIp;
+use crate::extractors::body_limit::WithBodyLimit;
 use crate::handlers;
 use crate::state::AppState;
 
@@ -59,7 +60,7 @@ fn telemetry_routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(handlers::telemetry::report_error))
         .routes(routes!(handlers::telemetry::report_vitals))
-        .layer(handlers::telemetry::telemetry_body_limit())
+        .body_limit(handlers::telemetry::telemetry_body_limit())
 }
 
 /// Apply a per-client-IP POST quota: `burst` requests, then one more per
@@ -216,7 +217,7 @@ fn admin_routes() -> OpenApiRouter<AppState> {
             handlers::admin::get_plugin_upload_policy
         ))
         .routes(routes!(handlers::admin::inspect_plugin_archive))
-        .layer(handlers::admin::upload_body_limit());
+        .body_limit(handlers::admin::upload_body_limit());
 
     OpenApiRouter::new()
         .routes(routes!(handlers::admin::list_all_plugins))
@@ -252,7 +253,7 @@ fn plugin_global_config_routes() -> OpenApiRouter<AppState> {
 fn config_upload_routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(handlers::config_upload::upload_config_blob))
-        .layer(handlers::config_upload::config_upload_body_limit())
+        .body_limit(handlers::config_upload::config_upload_body_limit())
 }
 
 fn plugin_routes() -> OpenApiRouter<AppState> {
@@ -309,7 +310,7 @@ fn problem_routes(submission_max_size: usize) -> OpenApiRouter<AppState> {
 fn problem_submission_routes(submission_max_size: usize) -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(handlers::submission::create_submission))
-        .layer(handlers::submission::submission_body_limit(
+        .body_limit(handlers::submission::submission_body_limit(
             submission_max_size,
         ))
 }
@@ -321,7 +322,7 @@ fn checker_source_routes() -> OpenApiRouter<AppState> {
             handlers::problem::upload_checker_source,
             handlers::problem::delete_checker_source,
         ))
-        .layer(handlers::problem::checker_source_body_limit())
+        .body_limit(handlers::problem::checker_source_body_limit())
 }
 
 fn test_case_routes() -> OpenApiRouter<AppState> {
@@ -337,11 +338,11 @@ fn test_case_routes() -> OpenApiRouter<AppState> {
             handlers::problem::update_test_case,
             handlers::problem::delete_test_case,
         ))
-        .layer(handlers::problem::test_case_body_limit());
+        .body_limit(handlers::problem::test_case_body_limit());
 
     let upload = OpenApiRouter::new()
         .routes(routes!(handlers::problem::upload_test_cases))
-        .layer(handlers::problem::upload_body_limit());
+        .body_limit(handlers::problem::upload_body_limit());
 
     crud.merge(upload)
 }
@@ -356,7 +357,7 @@ fn attachment_routes() -> OpenApiRouter<AppState> {
 
     let upload = OpenApiRouter::new()
         .routes(routes!(handlers::attachment::upload_attachment))
-        .layer(handlers::attachment::attachment_upload_body_limit());
+        .body_limit(handlers::attachment::attachment_upload_body_limit());
 
     read_delete.merge(upload)
 }
@@ -371,7 +372,7 @@ fn additional_file_routes() -> OpenApiRouter<AppState> {
 
     let upload = OpenApiRouter::new()
         .routes(routes!(handlers::additional_file::upload_additional_file))
-        .layer(handlers::additional_file::additional_file_upload_body_limit());
+        .body_limit(handlers::additional_file::additional_file_upload_body_limit());
 
     read_delete.merge(upload)
 }
@@ -456,7 +457,7 @@ fn contest_problem_routes(submission_max_size: usize) -> OpenApiRouter<AppState>
 fn contest_problem_submission_routes(submission_max_size: usize) -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(handlers::submission::create_contest_submission))
-        .layer(handlers::submission::submission_body_limit(
+        .body_limit(handlers::submission::submission_body_limit(
             submission_max_size,
         ))
 }
@@ -522,13 +523,13 @@ fn code_run_routes() -> OpenApiRouter<AppState> {
 fn problem_code_run_routes(submission_max_size: usize) -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(handlers::code_run::run_code))
-        .layer(handlers::code_run::code_run_body_limit(submission_max_size))
+        .body_limit(handlers::code_run::code_run_body_limit(submission_max_size))
 }
 
 fn contest_problem_code_run_routes(submission_max_size: usize) -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(handlers::code_run::run_contest_code))
-        .layer(handlers::code_run::code_run_body_limit(submission_max_size))
+        .body_limit(handlers::code_run::code_run_body_limit(submission_max_size))
 }
 
 fn dlq_routes() -> OpenApiRouter<AppState> {

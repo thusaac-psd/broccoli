@@ -1,6 +1,7 @@
+use crate::extractors::query::AppQuery;
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
@@ -204,7 +205,7 @@ pub async fn rejudge_submission(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
-    Query(query): Query<RejudgeQuery>,
+    AppQuery(query): AppQuery<RejudgeQuery>,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission(perm::SUBMISSION_REJUDGE)?;

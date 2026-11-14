@@ -41,6 +41,7 @@ mod privilege_ceiling;
 mod problem;
 mod queue_outage;
 mod rejudge_visibility;
+mod request_rejections;
 mod scaling;
 mod shared_problem_contests;
 mod source_invariants;

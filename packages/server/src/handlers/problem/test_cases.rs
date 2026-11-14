@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
@@ -44,6 +44,7 @@ use super::{find_problem_for_update, require_problem_part_reachable};
     responses(
         (status = 201, description = "Test case created", body = TestCaseResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 413, description = "Request body over the endpoint's limit (PAYLOAD_TOO_LARGE)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
@@ -315,6 +316,7 @@ async fn get_test_case_in(
     responses(
         (status = 200, description = "Test case updated", body = TestCaseResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 413, description = "Request body over the endpoint's limit (PAYLOAD_TOO_LARGE)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Test case not found (NOT_FOUND)", body = ErrorBody),
@@ -564,8 +566,8 @@ pub async fn bulk_delete_test_cases(
     }))
 }
 
-pub fn test_case_body_limit() -> DefaultBodyLimit {
-    DefaultBodyLimit::max(LARGE_UPLOAD_LIMIT_BYTES)
+pub fn test_case_body_limit() -> usize {
+    LARGE_UPLOAD_LIMIT_BYTES
 }
 
 async fn find_test_case_for_problem<C: ConnectionTrait>(

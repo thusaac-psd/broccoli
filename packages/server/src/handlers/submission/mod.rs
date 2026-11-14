@@ -1,5 +1,6 @@
+use crate::extractors::query::AppQuery;
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
@@ -77,6 +78,7 @@ use response::{
     responses(
         (status = 201, description = "Submission created", body = SubmissionResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 413, description = "Request body over the endpoint's limit (PAYLOAD_TOO_LARGE)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
@@ -256,7 +258,7 @@ pub async fn create_submission(
 pub async fn list_submissions(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    Query(query): Query<SubmissionListQuery>,
+    AppQuery(query): AppQuery<SubmissionListQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     validate_sorting_params(
         query.sort_by.as_deref(),
@@ -409,7 +411,7 @@ pub async fn get_submission(
     auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
-    Query(query): Query<SubmissionResultQuery>,
+    AppQuery(query): AppQuery<SubmissionResultQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     // The kernel OWNS the subject: one kernel per request per subject.
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
@@ -622,7 +624,7 @@ pub async fn get_submission_judgement(
     auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath((id, judgement_id)): AppPath<(i32, i32)>,
-    Query(query): Query<SubmissionResultQuery>,
+    AppQuery(query): AppQuery<SubmissionResultQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
     if kernel
@@ -666,6 +668,7 @@ pub async fn get_submission_judgement(
     responses(
         (status = 201, description = "Submission created", body = SubmissionResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 413, description = "Request body over the endpoint's limit (PAYLOAD_TOO_LARGE)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Contest or problem not found (NOT_FOUND)", body = ErrorBody),
@@ -885,7 +888,7 @@ pub async fn list_contest_submissions(
     auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(contest_id): AppPath<i32>,
-    Query(query): Query<SubmissionListQuery>,
+    AppQuery(query): AppQuery<SubmissionListQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     validate_sorting_params(
         query.sort_by.as_deref(),
@@ -1021,8 +1024,8 @@ pub async fn list_contest_submissions(
     })))
 }
 
-pub fn submission_body_limit(max_size: usize) -> axum::extract::DefaultBodyLimit {
-    axum::extract::DefaultBodyLimit::max(crate::upload_limits::source_request_limit_bytes(max_size))
+pub fn submission_body_limit(max_size: usize) -> usize {
+    crate::upload_limits::source_request_limit_bytes(max_size)
 }
 
 #[cfg(test)]

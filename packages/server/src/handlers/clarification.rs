@@ -1,5 +1,6 @@
+use crate::extractors::query::AppQuery;
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
@@ -81,7 +82,7 @@ pub async fn list_clarifications(
     auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(contest_id): AppPath<i32>,
-    Query(query): Query<ClarificationListQuery>,
+    AppQuery(query): AppQuery<ClarificationListQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     // The kernel OWNS the subject: one kernel per request per subject.
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
@@ -533,7 +534,7 @@ pub async fn toggle_reply_public(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
     AppPath((contest_id, clarification_id, reply_id)): AppPath<(i32, i32, i32)>,
-    Query(query): Query<ToggleReplyPublicQuery>,
+    AppQuery(query): AppQuery<ToggleReplyPublicQuery>,
 ) -> Result<Json<ClarificationReplyResponse>, AppError> {
     auth_user.require_permission(perm::CONTEST_MANAGE)?;
 

@@ -317,6 +317,20 @@ impl From<AssetError> for AppError {
     }
 }
 
+/// A multipart body that could not be read: over the route's body limit (413),
+/// or malformed (400).
+impl From<axum::extract::multipart::MultipartError> for AppError {
+    fn from(err: axum::extract::multipart::MultipartError) -> Self {
+        if err.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            AppError::PayloadTooLarge(
+                "The request body is larger than this endpoint accepts".into(),
+            )
+        } else {
+            AppError::Validation(format!("Malformed multipart body: {err}"))
+        }
+    }
+}
+
 impl From<TypedMultipartError> for AppError {
     fn from(err: TypedMultipartError) -> Self {
         match err {
@@ -327,10 +341,8 @@ impl From<TypedMultipartError> for AppError {
             | TypedMultipartError::InvalidEnumValue { .. }
             | TypedMultipartError::NamelessField => AppError::Validation(err.to_string()),
             TypedMultipartError::FieldTooLarge { .. } => AppError::PayloadTooLarge(err.to_string()),
-            TypedMultipartError::InvalidRequest { .. }
-            | TypedMultipartError::InvalidRequestBody { .. } => {
-                AppError::Validation(err.to_string())
-            }
+            TypedMultipartError::InvalidRequestBody { source } => source.into(),
+            TypedMultipartError::InvalidRequest { .. } => AppError::Validation(err.to_string()),
             _ => AppError::Internal(err.to_string()),
         }
     }

@@ -8,3 +8,10 @@ disallowed-methods = [
   { path = "chrono::Local::now", reason = "use the platform clock (`common::clock::PlatformClock`) or SQL `now()`" },
   { path = "std::time::SystemTime::now", reason = "use the platform clock for wall time or `Instant` for durations" },
 ]
+
+# Every rejection a handler's extractor produces answers in the API's JSON
+# error shape (`{code, message}`); axum's own extractors answer text/plain.
+disallowed-types = [
+  { path = "axum::extract::Query", reason = "use `crate::extractors::query::AppQuery`" },
+  { path = "axum::extract::Path", reason = "use `crate::extractors::path::AppPath`" },
+]
