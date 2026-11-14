@@ -121,10 +121,9 @@ pub fn handle_print_submission(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let contest_id = path_i32(req, "contest_id")?;
+    let contest_id = req.contest()?.id;
     let submission_id = path_i32(req, "submission_id")?;
     let user_id = require_login(req)?;
-    contest::check_access(host, req, contest_id)?;
 
     let cfg = config::load_contest_config(host, contest_id);
     if !cfg.enabled {
@@ -134,14 +133,11 @@ pub fn handle_print_submission(
     let sub = jobs::fetch_submission(host, submission_id)?
         .ok_or_else(|| PluginHttpResponse::error(404, "Submission not found"))?;
 
+    // Someone else's submission is not found, exactly like one that does
+    // not exist, so the route cannot tell which ids are taken.
     let is_staff =
         req.has_permission(perm::CONTEST_MANAGE) || req.has_permission(perm::SUBMISSION_VIEW_ALL);
-    if sub.user_id != user_id && !is_staff {
-        return Err(
-            PluginHttpResponse::error(403, "You can only print your own submissions").into(),
-        );
-    }
-    if sub.contest_id != Some(contest_id) {
+    if (sub.user_id != user_id && !is_staff) || sub.contest_id != Some(contest_id) {
         return Err(PluginHttpResponse::error(404, "Submission not found").into());
     }
 
@@ -225,11 +221,10 @@ pub fn handle_print_arbitrary(
         return Err(PluginHttpResponse::error(413, "Document is too large to print").into());
     }
 
-    if let Some(cid) = body.contest_id {
-        contest::check_access(host, req, cid)?;
-    }
-    // Non-contest prints fall back to the global config.
-    let cfg = match body.contest_id {
+    // The contest route's contest, checked by the host; prints outside a
+    // contest use the global config.
+    let contest_id = req.contest.as_ref().map(|c| c.id);
+    let cfg = match contest_id {
         Some(cid) => config::load_contest_config(host, cid),
         None => config::load_global_config(host),
     };
@@ -249,7 +244,7 @@ pub fn handle_print_arbitrary(
     // Label the printout when the code was printed from a contest problem page.
     // Scoped by (contest_id, problem_id), so an unrelated problem id yields no
     // label rather than leaking one; contest access is already checked above.
-    let problem_label = match (body.contest_id, body.problem_id) {
+    let problem_label = match (contest_id, body.problem_id) {
         (Some(cid), Some(pid)) => jobs::fetch_problem_label(host, cid, pid)?.map(|r| {
             if r.label.trim().is_empty() {
                 models::problem_letter(r.position)
@@ -274,7 +269,7 @@ pub fn handle_print_arbitrary(
     jobs::insert_job(
         host,
         &NewJob {
-            contest_id: body.contest_id,
+            contest_id,
             user_id,
             username: username.clone(),
             display_name: Some(username),
@@ -481,6 +476,8 @@ mod tests {
             headers: HashMap::new(),
             body: None,
             auth: None,
+            contest: None,
+            problem_id: None,
         }
     }
 

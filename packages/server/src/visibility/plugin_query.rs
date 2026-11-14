@@ -3,10 +3,12 @@
 //!
 //! [`query_plugins`] fails in exactly one way: a querier that cannot answer
 //! right now ([`PluginError::is_unavailable`]: past the request's deadline,
-//! the server draining, the plugin between loads, no instance to run it) is
-//! [`AppError::PluginUnavailable`], a 503 the client retries. That is load on
-//! this server, never a decision, so it never turns into `Deny` (which would
-//! show an empty page, a 404 or a rejected cursor). Every other failure mode -
+//! the server draining, the plugin between loads, no instance to run it), or
+//! a resource governed by a visibility plugin that is not loaded here at all
+//! (see [`visibility_queriers`]), is [`AppError::PluginUnavailable`], a 503
+//! the client retries. That is the plugin missing, never a decision, so it
+//! never turns into `Deny` (which would show an empty page, a 404 or a
+//! rejected cursor) nor into the unmasked data. Every other failure mode -
 //! a poisoned plugin-registry lock, a plugin trap, non-JSON or unparseable
 //! output, a `decisions` vector whose length doesn't match the resource batch
 //! (in EITHER direction), or an unrecognized decision variant - is the
@@ -64,6 +66,16 @@ enum QuerierScope {
     /// Resources in contests of these types, and resources whose contest
     /// type the kernel could not tell.
     ContestTypes(std::collections::BTreeSet<String>),
+}
+
+/// What the kernel resolved about the contest one resource sits in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ResourceContest {
+    /// The resource's authoritative contest (see `resource_contest_id` in
+    /// the kernel), `None` outside any contest.
+    pub id: Option<i32>,
+    /// That contest's phase, when the batch read the contest.
+    pub phase: Option<crate::utils::contest::ContestPhase>,
 }
 
 /// The contest type a resource, or a whole list query, falls under.
@@ -138,24 +150,32 @@ impl Blind {
 /// Every currently-`Loaded` plugin that registered a `[[server.queries]]`
 /// entry with `topic = "visibility"`, plus what this replica is [`Blind`] to.
 ///
-/// A plugin that declares a visibility query, is enabled in the fleet's
-/// desired state, but is not `Loaded` on this replica (it failed to load
-/// here, its files are missing here, or this replica has not converged onto
-/// an enable yet) is enforced by every other replica; skipping it would let a
-/// request load-balanced onto this one read what the rest of the fleet hides.
-/// Its resources are therefore denied (fail closed), but only ITS resources:
-/// the contest types it registered, as recorded fleet-wide by the last
-/// replica that loaded it ([`crate::plugin_lifecycle::Governs`]). Standalone
-/// problems and other contest types stay readable, so one broken plugin
-/// cannot make every request on a replica 404. Whether a plugin missing from
-/// this replica's disk declares a visibility query comes from the same
-/// record, since there is no manifest here to read.
+/// A plugin that governs resources but is not `Loaded` here cannot narrow
+/// what they show, so this replica cannot decide them; serving them anyway
+/// would show what the plugin hides (a frozen scoreboard's verdicts, say).
+/// Two cases:
 ///
-/// A plugin that declares a visibility query but is NOT enabled is skipped:
-/// zero queriers is deliberately "no plugin has an opinion" and
-/// `query_plugins` returns `Decision::Allow` (`Allow` is the `meet` lattice's
-/// identity element) - a contest type with no visibility plugin at all relies
-/// on the exact same path.
+/// - It is enabled in the fleet's desired state (it failed to load here,
+///   its files are missing here, or this replica has not converged onto an
+///   enable yet): every other replica enforces it. Blind to what it
+///   governs, as recorded fleet-wide by the last replica that loaded it
+///   ([`crate::plugin_lifecycle::Governs`]), or to everything when no
+///   replica recorded contest types for it. Whether a plugin missing from
+///   this replica's disk declares a visibility query comes from the same
+///   record, since there is no manifest here to read.
+/// - It is disabled (or reloading) but last loaded as the visibility
+///   plugin of some contest types: their contests still depend on it.
+///   Blind to those contest types only; a disabled plugin that governed no
+///   contest type, or never loaded, governs nothing.
+///
+/// Only the governed resources are blind: standalone problems and other
+/// contest types stay readable, so one missing plugin cannot take every
+/// request on a replica down. [`query_plugins`] answers a blind resource
+/// with 503 `PLUGIN_UNAVAILABLE`.
+///
+/// A contest type with no visibility plugin at all has zero queriers, which
+/// is deliberately "no plugin has an opinion": `query_plugins` returns
+/// `Decision::Allow` (`Allow` is the `meet` lattice's identity element).
 ///
 /// Returns `Err(())` only if the registry's `RwLock` is poisoned; the caller
 /// denies the whole batch, since the set of queriers cannot be established.
@@ -184,31 +204,39 @@ fn visibility_queriers(state: &AppState) -> Result<(Vec<VisibilityQuerier>, Blin
     }
 
     let mut blind = Blind::Nothing;
-    for id in state.plugin_lifecycle.desired_enabled_ids() {
+    for (id, enabled) in state.plugin_lifecycle.desired_plugins() {
         let entry = registry.get(&id);
         if entry.is_some_and(|e| e.status == PluginStatus::Loaded) {
             continue;
         }
         let recorded = state.plugin_lifecycle.governs(&id);
-        let declares = match entry {
-            Some(e) => crate::plugin_lifecycle::declares_visibility(&e.manifest),
-            None => recorded.as_ref().is_some_and(|g| g.visibility),
-        };
-        if !declares {
-            continue;
-        }
-        let scope = match recorded {
-            Some(g) if !g.contest_types.is_empty() => {
-                Blind::ContestTypes(g.contest_types.into_iter().collect())
+        let scope = if enabled {
+            let declares = match entry {
+                Some(e) => crate::plugin_lifecycle::declares_visibility(&e.manifest),
+                None => recorded.as_ref().is_some_and(|g| g.visibility),
+            };
+            match recorded {
+                _ if !declares => continue,
+                Some(g) if !g.contest_types.is_empty() => {
+                    Blind::ContestTypes(g.contest_types.into_iter().collect())
+                }
+                _ => Blind::Everything,
             }
-            _ => Blind::Everything,
+        } else {
+            match recorded {
+                Some(g) if g.visibility && !g.contest_types.is_empty() => {
+                    Blind::ContestTypes(g.contest_types.into_iter().collect())
+                }
+                _ => continue,
+            }
         };
-        tracing::error!(
+        tracing::warn!(
             plugin_id = %id,
+            enabled,
             status = ?entry.map(|e| &e.status),
             scope = ?scope,
-            "plugin declares a visibility query and is enabled, but is not Loaded \
-             on this replica; denying what it governs until it loads"
+            "a visibility plugin is not Loaded on this replica; what it governs \
+             is unavailable until it loads"
         );
         blind.widen(scope);
     }
@@ -238,31 +266,31 @@ pub(super) fn scoped_querier_loaded(state: &AppState) -> bool {
     })
 }
 
-/// Deny the resources the missing plugins govern; leave the rest to the
-/// queriers. A resource is governed when it sits in a contest of one of
-/// `types`, judged from the core schema the host owns:
+/// Whether any of `resources` is governed by the missing plugins. A
+/// resource is governed when it sits in a contest of one of `types`, judged
+/// from the core schema the host owns:
 ///
-/// - with a contest (`resource_contest_ids`): that contest's type;
+/// - with a contest (`resource_contests`): that contest's type;
 /// - a problem, sample or attachment reached outside a contest: any contest
 ///   the problem belongs to (`contest_problem`), since a contest plugin may
 ///   hide its problems wherever they are read from;
 /// - a submission outside a contest: the contests its problem belongs to;
-/// - anything else without a contest: unknown, so denied.
+/// - anything else without a contest: unknown, so governed.
 ///
 /// One small query per kind present, made only while a visibility plugin is
-/// down on this replica. A lookup failure denies the whole batch.
-async fn blind_decisions(
+/// down on this replica.
+async fn governs_any(
     state: &AppState,
     types: &std::collections::BTreeSet<String>,
     resources: &[Resource],
-    resource_contest_ids: &[Option<i32>],
-) -> Vec<Decision> {
+    resource_contests: &[ResourceContest],
+) -> Result<bool, AppError> {
     let types: Vec<String> = types.iter().cloned().collect();
     let mut contests = Vec::new();
     let mut problems = Vec::new();
     let mut submissions = Vec::new();
-    for (resource, contest_id) in resources.iter().zip(resource_contest_ids) {
-        match (contest_id, resource) {
+    for (resource, contest) in resources.iter().zip(resource_contests) {
+        match (&contest.id, resource) {
             (Some(c), _) => contests.push(*c),
             (None, Resource::Submission(id)) => submissions.push(*id),
             (None, r) => problems.extend(r.wire_problem_id()),
@@ -309,32 +337,18 @@ async fn blind_decisions(
             .await?,
         ))
     };
-    let (contests, problems, submissions) = match lookups.await {
-        Ok(found) => found,
-        Err(e) => {
-            tracing::error!(error = %e, "governed-resource lookup failed; denying batch");
-            return vec![Decision::Deny; resources.len()];
-        }
-    };
-    resources
+    let (contests, problems, submissions) = lookups.await?;
+    Ok(resources
         .iter()
-        .zip(resource_contest_ids)
-        .map(|(resource, contest_id)| {
-            let denied = match (contest_id, resource) {
-                (Some(c), _) => contests.contains(c),
-                (None, Resource::Submission(id)) => submissions.contains(id),
-                (None, r) => match r.wire_problem_id() {
-                    Some(p) => problems.contains(&p),
-                    None => true,
-                },
-            };
-            if denied {
-                Decision::Deny
-            } else {
-                Decision::Allow
-            }
-        })
-        .collect()
+        .zip(resource_contests)
+        .any(|(resource, contest)| match (&contest.id, resource) {
+            (Some(c), _) => contests.contains(c),
+            (None, Resource::Submission(id)) => submissions.contains(id),
+            (None, r) => match r.wire_problem_id() {
+                Some(p) => problems.contains(&p),
+                None => true,
+            },
+        }))
 }
 
 /// Maximum number of dot-separated segments in one mask path.
@@ -489,14 +503,14 @@ fn meet_positionally(acc: Vec<Decision>, next: Vec<Decision>) -> Vec<Decision> {
 /// otherwise. It is a hint (e.g. useful to a plugin that wants to reject a
 /// query outright for an unrecognized contest), never the authority on any
 /// individual resource's contest — a batch can span several contests at
-/// once, which this single value cannot represent. `resource_contest_ids`
+/// once, which this single value cannot represent. `resource_contests`
 /// (positional with `resources`, same length - see the `debug_assert_eq!`
 /// below) is the authority: each entry becomes that resource's own
 /// `QueryResource.contest_id` on the wire, resolved by the caller
 /// (`VisibilityKernel::decide_batch`) from the resource
 /// itself (`Contest`/`Problem`/`Sample`) or from `host_decide`'s submission
 /// -> contest_id map (`Submission`). Do not re-derive a batch-wide
-/// `contest_id` from `resource_contest_ids` here or anywhere downstream -
+/// `contest_id` from `resource_contests` here or anywhere downstream -
 /// that is exactly the lossy inference this parameter exists to avoid.
 ///
 /// `resource_scopes` (positional with `resources`) routes each resource to
@@ -509,7 +523,7 @@ pub(crate) async fn query_plugins(
     action: Action,
     contest_id: Option<i32>,
     resources: &[Resource],
-    resource_contest_ids: &[Option<i32>],
+    resource_contests: &[ResourceContest],
     resource_scopes: &[ResourceScope],
 ) -> Result<Vec<Decision>, AppError> {
     if resources.is_empty() {
@@ -517,7 +531,7 @@ pub(crate) async fn query_plugins(
     }
     // Compiled out in release, and that is safe for the same reason as
     // `meet_positionally`'s — this has one call site
-    // (`VisibilityKernel::decide_batch`, `mod.rs`), where `target_contest_ids`
+    // (`VisibilityKernel::decide_batch`, `mod.rs`), where `target_contests`
     // is built as `plugin_targets.iter().map(...).collect()`: a `.map()` over
     // `plugin_targets` itself is length-preserving by construction,
     // unconditionally, in any build profile — not something a debug
@@ -526,8 +540,8 @@ pub(crate) async fn query_plugins(
     // preserve length.
     debug_assert_eq!(
         resources.len(),
-        resource_contest_ids.len(),
-        "resource_contest_ids must be positional with resources"
+        resource_contests.len(),
+        "resource_contests must be positional with resources"
     );
     debug_assert_eq!(
         resources.len(),
@@ -540,29 +554,33 @@ pub(crate) async fn query_plugins(
         Err(()) => return Ok(vec![Decision::Deny; resources.len()]),
     };
     let blind = match blind {
-        Blind::Everything => return Ok(vec![Decision::Deny; resources.len()]),
-        Blind::Nothing => None,
+        Blind::Nothing => false,
+        Blind::Everything => true,
         Blind::ContestTypes(types) => {
-            Some(blind_decisions(state, &types, resources, resource_contest_ids).await)
+            governs_any(state, &types, resources, resource_contests).await?
         }
     };
+    if blind {
+        return Err(AppError::PluginUnavailable);
+    }
 
     if queriers.is_empty() {
-        return Ok(blind.unwrap_or_else(|| vec![Decision::Allow; resources.len()]));
+        return Ok(vec![Decision::Allow; resources.len()]);
     }
 
     let query_resources: Vec<QueryResource> = resources
         .iter()
-        .zip(resource_contest_ids.iter())
-        .map(|(r, cid)| QueryResource {
+        .zip(resource_contests.iter())
+        .map(|(r, contest)| QueryResource {
             kind: r.wire_kind().to_string(),
             id: r.wire_id(),
-            contest_id: *cid,
+            contest_id: contest.id,
             problem_id: r.wire_problem_id(),
+            contest_phase: contest.phase,
         })
         .collect();
 
-    let mut combined = blind.unwrap_or_else(|| vec![Decision::Allow; resources.len()]);
+    let mut combined = vec![Decision::Allow; resources.len()];
     for querier in &queriers {
         let governed: Vec<usize> = (0..resources.len())
             .filter(|&i| querier.scope.governs(&resource_scopes[i]))
@@ -1204,14 +1222,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1), Resource::Submission(2)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1220,7 +1244,7 @@ mod tests {
         assert_eq!(result, vec![Decision::Allow, Decision::Allow]);
     }
 
-    async fn decide_with_failed_querier(enabled_in_fleet: bool) -> Vec<Decision> {
+    async fn decide_with_failed_querier(enabled_in_fleet: bool) -> Result<Vec<Decision>, AppError> {
         let mut entry = visibility_plugin_entry("declared-but-failed");
         entry.status = PluginStatus::Failed("deliberate test failure".to_string());
         let mut registry_map = HashMap::new();
@@ -1237,18 +1261,23 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1), Resource::Submission(2)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
-        .expect("plugins answered")
     }
 
     /// A plugin that DECLARES a `topic = "visibility"` query but is disabled
@@ -1260,7 +1289,9 @@ mod tests {
     async fn declared_querier_that_is_disabled_is_excluded_and_still_allows() {
         let _guard = crate::metrics_test_lock();
         assert_eq!(
-            decide_with_failed_querier(false).await,
+            decide_with_failed_querier(false)
+                .await
+                .expect("plugins answered"),
             vec![Decision::Allow, Decision::Allow]
         );
     }
@@ -1268,15 +1299,17 @@ mod tests {
     /// The same plugin while ENABLED fleet-wide but not `Loaded` on this
     /// replica (failed to load here, or not converged yet) must fail closed:
     /// every other replica is enforcing it, so allowing here would let a
-    /// load-balanced request read what the rest of the fleet hides.
+    /// load-balanced request read what the rest of the fleet hides. With no
+    /// recorded contest types it governs everything, so the batch is
+    /// unavailable.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn declared_querier_that_is_enabled_but_not_loaded_denies_whole_batch() {
+    async fn declared_querier_that_is_enabled_but_not_loaded_makes_the_batch_unavailable() {
         let _guard = crate::metrics_test_lock();
-        assert_eq!(
+        assert!(matches!(
             decide_with_failed_querier(true).await,
-            vec![Decision::Deny, Decision::Deny]
-        );
+            Err(AppError::PluginUnavailable)
+        ));
     }
 
     #[allow(clippy::await_holding_lock)]
@@ -1303,14 +1336,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1), Resource::Submission(2)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1342,14 +1381,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1389,14 +1434,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1455,14 +1506,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1511,14 +1568,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1565,14 +1628,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1610,14 +1679,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1654,7 +1729,10 @@ mod tests {
             Action::Read,
             Some(1),
             &resources,
-            &[Some(1)],
+            &[ResourceContest {
+                id: Some(1),
+                phase: None,
+            }],
             &[ResourceScope::Unknown],
         )
         .await;

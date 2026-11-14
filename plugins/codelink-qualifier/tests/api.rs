@@ -2,54 +2,21 @@ use broccoli_server_sdk::prelude::*;
 use codelink_qualifier::api::{handle_contest_info, handle_standings};
 use serde_json::json;
 
+/// A request to contest 7, as the host forwards it once it has checked the
+/// caller may read the contest.
 fn request() -> PluginHttpRequest {
+    request_at("running")
+}
+
+fn request_at(phase: &str) -> PluginHttpRequest {
     serde_json::from_value(json!({
-        "method": "GET", "params": {"contest_id": "7"}
+        "method": "GET", "params": {"contest_id": "7"},
+        "contest": {
+            "id": 7, "contest_type": "codelink-qualifier", "is_public": true,
+            "phase": phase, "participant": false
+        }
     }))
     .unwrap()
-}
-
-#[test]
-fn private_or_inactive_contests_do_not_expose_standings() {
-    for (is_public, is_active) in [(false, true), (true, false)] {
-        let host = Host::mock();
-        host.db.queue_query_result(json!([{
-            "contest_type": "codelink-qualifier", "is_public": is_public,
-            "is_active": is_active, "phase": "during"
-        }]));
-        let error = handle_standings(&host, &request())
-            .unwrap_err()
-            .into_response();
-        assert_eq!(error.status, 404);
-        assert_eq!(host.db.queries().len(), 1);
-    }
-}
-
-#[test]
-fn route_rejects_other_contest_types_and_malformed_ids() {
-    let host = Host::mock();
-    host.db.queue_query_result(json!([{
-        "contest_type": "ioi", "is_public": true, "is_active": true, "phase": "during"
-    }]));
-    assert_eq!(
-        handle_standings(&host, &request())
-            .unwrap_err()
-            .into_response()
-            .status,
-        404
-    );
-    let mut malformed = request();
-    malformed
-        .params
-        .insert("contest_id".into(), "invalid".into());
-    assert_eq!(
-        handle_standings(&host, &malformed)
-            .unwrap_err()
-            .into_response()
-            .status,
-        400
-    );
-    assert_eq!(host.db.queries().len(), 1);
 }
 
 #[test]
@@ -57,9 +24,6 @@ fn standings_show_global_slot_competition_and_unfinished_judgements() {
     let host = Host::mock();
     host.config
         .seed("contest_problem", "7:2", "problem", json!({"points": 2}));
-    host.db.queue_query_result(json!([{
-        "contest_type": "codelink-qualifier", "is_public": true, "is_active": true, "phase": "during"
-    }]));
     host.db.queue_query_result(json!([
         {"problem_id": 1, "label": "A"}, {"problem_id": 2, "label": "B"}
     ]));
@@ -111,9 +75,6 @@ fn standings_expose_only_pending_or_confirmed_verdicts_and_no_tentative_qualific
     let host = Host::mock();
     host.config
         .seed("contest_problem", "7:2", "problem", json!({"points": 2}));
-    host.db.queue_query_result(json!([{
-        "contest_type": "codelink-qualifier", "is_public": true, "is_active": true, "phase": "during"
-    }]));
     host.db.queue_query_result(json!([
         {"problem_id": 1, "label": "A"}, {"problem_id": 2, "label": "B"}
     ]));
@@ -160,17 +121,12 @@ fn rules_and_standings_use_the_same_contest_config_and_actual_problem_count() {
             "scoreboard_refresh_seconds": 0,
         }),
     );
-    let info = json!([{
-        "contest_type": "codelink-qualifier", "is_public": true, "is_active": true, "phase": "during"
-    }]);
-    host.db.queue_query_result(info.clone());
     host.db.queue_query_result(json!([{"problem_count": 1}]));
     let rules = handle_contest_info(&host, &request())
         .unwrap()
         .body
         .unwrap();
 
-    host.db.queue_query_result(info);
     host.db
         .queue_query_result(json!([{"problem_id": 1, "label": "A"}]));
     host.db.queue_query_result(json!([
@@ -215,17 +171,14 @@ fn rules_and_standings_use_the_same_contest_config_and_actual_problem_count() {
 #[test]
 fn final_advancement_is_available_only_after_the_contest_and_all_judging_finish() {
     for (phase, pending) in [
-        ("before", false),
-        ("during", false),
-        ("after", true),
-        ("after", false),
+        ("upcoming", false),
+        ("running", false),
+        ("ended", true),
+        ("ended", false),
     ] {
         let host = Host::mock();
         host.config
             .seed("contest_problem", "7:2", "problem", json!({"points": 2}));
-        host.db.queue_query_result(json!([{
-            "contest_type": "codelink-qualifier", "is_public": true, "is_active": true, "phase": phase
-        }]));
         host.db.queue_query_result(json!([
             {"problem_id": 1, "label": "A"}, {"problem_id": 2, "label": "B"}
         ]));
@@ -239,8 +192,11 @@ fn final_advancement_is_available_only_after_the_contest_and_all_judging_finish(
             {"submission_id": 3, "user_id": 2, "problem_id": 2, "submitted_at_us": 3000000, "accepted": true, "pending": false},
             {"submission_id": 4, "user_id": 3, "problem_id": 1, "submitted_at_us": 4000000, "accepted": !pending, "pending": pending}
         ]));
-        let body = handle_standings(&host, &request()).unwrap().body.unwrap();
-        if phase != "after" || pending {
+        let body = handle_standings(&host, &request_at(phase))
+            .unwrap()
+            .body
+            .unwrap();
+        if phase != "ended" || pending {
             assert!(body["advancement"].is_null());
         } else {
             assert_eq!(
@@ -259,9 +215,6 @@ fn invalid_problem_configuration_is_not_treated_as_a_one_point_problem() {
     let host = Host::mock();
     host.config
         .seed("contest_problem", "7:1", "problem", json!({"points": 3}));
-    host.db.queue_query_result(json!([{
-        "contest_type": "codelink-qualifier", "is_public": true, "is_active": true, "phase": "during"
-    }]));
     host.db
         .queue_query_result(json!([{"problem_id": 1, "label": "A"}]));
     assert_eq!(
@@ -271,29 +224,15 @@ fn invalid_problem_configuration_is_not_treated_as_a_one_point_problem() {
             .status,
         500
     );
-    assert_eq!(host.db.queries().len(), 2);
+    assert_eq!(host.db.queries().len(), 1);
 }
 
 #[test]
-fn rules_endpoint_checks_access_and_does_not_mask_bad_configuration() {
+fn rules_endpoint_does_not_mask_bad_configuration() {
     let host = Host::mock();
-    host.db.queue_query_result(json!([{
-        "contest_type": "codelink-qualifier", "is_public": false, "is_active": true, "phase": "during"
-    }]));
-    assert_eq!(
-        handle_contest_info(&host, &request())
-            .unwrap_err()
-            .into_response()
-            .status,
-        404
-    );
-
     host.config
         .seed("contest", "7", "contest", json!({"solves_to_qualify": 0}));
     for handler in [handle_contest_info, handle_standings] {
-        host.db.queue_query_result(json!([{
-            "contest_type": "codelink-qualifier", "is_public": true, "is_active": true, "phase": "during"
-        }]));
         let error = handler(&host, &request()).unwrap_err().into_response();
         assert_eq!(error.status, 500);
     }

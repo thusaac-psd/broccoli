@@ -60,11 +60,9 @@ pub(crate) fn handle_use_token(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let user_id = req
-        .require_user_id()
-        .map_err(|_| PluginHttpResponse::error(401, "Authentication required"))?;
-
-    let contest_id: i32 = req.param("contest_id")?;
+    let user_id = req.require_user_id()?;
+    let info = req.contest()?;
+    let contest_id = info.id;
     let submission_id: i32 = req.param("submission_id")?;
 
     #[derive(Deserialize)]
@@ -82,7 +80,7 @@ pub(crate) fn handle_use_token(
     let sub_info = host
         .db
         .query_one_with_args::<SubmissionInfo>(&sql, &p.into_args())?
-        .ok_or_else(|| SdkError::Other("Submission not found".into()))?;
+        .ok_or_else(|| PluginHttpResponse::error(404, "Submission not found"))?;
     if sub_info.user_id != user_id {
         return Ok(PluginHttpResponse::error(
             403,
@@ -110,9 +108,7 @@ pub(crate) fn handle_use_token(
     // best_tokened_or_last scoring, rewrite their final task score (and rank)
     // after results were published: `elapsed_minutes` keeps growing past the end
     // so the regenerating budget usually still shows tokens available in "after".
-    let info = contest::check_access(host, req, contest_id)?;
-    info.require_type("ioi")?;
-    if info.phase != "during" {
+    if info.phase != ContestPhase::Running {
         return Ok(PluginHttpResponse::error(
             403,
             "Tokens can only be used while the contest is running",
@@ -195,10 +191,7 @@ pub(crate) fn handle_contest_info(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let contest_id: i32 = req.param("contest_id")?;
-    let info = contest::check_access(host, req, contest_id)?;
-    info.require_type("ioi")?;
-
+    let contest_id = req.contest()?.id;
     let contest_config: ContestConfig = contest::load_config(host, contest_id)?;
 
     Ok(PluginHttpResponse {
@@ -219,20 +212,8 @@ pub(crate) fn handle_task_config(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let contest_id: i32 = req.param("contest_id")?;
-    let problem_id: i32 = req.param("problem_id")?;
-
-    let info = contest::check_access(host, req, contest_id)?;
-    info.require_type("ioi")?;
-    if !contest::has_problem(host, contest_id, problem_id)? {
-        return Ok(PluginHttpResponse::error(404, "Contest problem not found"));
-    }
-    if info.phase != "after" && req.user_id().is_none() {
-        return Ok(PluginHttpResponse::error(
-            401,
-            "Authentication required during contest",
-        ));
-    }
+    let contest_id = req.contest()?.id;
+    let problem_id = req.problem_id()?;
 
     let contest_config: ContestConfig = contest::load_config(host, contest_id)?;
     let task_config = load_task_config(host, contest_id, problem_id)?;
@@ -322,12 +303,9 @@ pub(crate) fn handle_submission_status(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let user_id = req
-        .require_user_id()
-        .map_err(|_| PluginHttpResponse::error(401, "Authentication required"))?;
-
-    let contest_id: i32 = req.param("contest_id")?;
-    let problem_id: i32 = req.param("problem_id")?;
+    let user_id = req.require_user_id()?;
+    let contest_id = req.contest()?.id;
+    let problem_id = req.problem_id()?;
 
     #[derive(Deserialize)]
     struct LastVerdict {
@@ -392,11 +370,8 @@ pub(crate) fn handle_token_status(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let user_id = req
-        .require_user_id()
-        .map_err(|_| PluginHttpResponse::error(401, "Authentication required"))?;
-
-    let contest_id: i32 = req.param("contest_id")?;
+    let user_id = req.require_user_id()?;
+    let contest_id = req.contest()?.id;
 
     let contest_config: ContestConfig = contest::load_config(host, contest_id)?;
 
@@ -458,12 +433,11 @@ pub(crate) fn handle_scoreboard(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let contest_id: i32 = req.param("contest_id")?;
+    let info = req.contest()?;
+    let contest_id = info.id;
+    let phase = info.phase.stage();
 
     let contest_config: ContestConfig = contest::load_config(host, contest_id)?;
-
-    let info = contest::check_access(host, req, contest_id)?;
-    let phase = &info.phase;
 
     #[derive(Deserialize)]
     struct ContestProblem {
@@ -713,18 +687,12 @@ pub(crate) fn handle_submission_subtask_scores(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let contest_id: i32 = req.param("contest_id")?;
+    let info = req.contest()?;
+    let contest_id = info.id;
+    let phase = info.phase.stage();
     let submission_id: i32 = req.param("submission_id")?;
 
     let contest_config: ContestConfig = contest::load_config(host, contest_id)?;
-
-    // Gate on the same access rule as every other IOI handler: contest:manage,
-    // or an active public/participant contest. `load_info` performs NO access
-    // check, which would expose any submission's subtask scores (including for
-    // private/inactive contests) to anonymous callers.
-    let info = contest::check_access(host, req, contest_id)?;
-    info.require_type("ioi")?;
-    let phase = &info.phase;
 
     #[derive(Deserialize)]
     struct SubInfo {
@@ -740,7 +708,7 @@ pub(crate) fn handle_submission_subtask_scores(
     let sub_info = host
         .db
         .query_one_with_args::<SubInfo>(&sql, &p.into_args())?
-        .ok_or_else(|| SdkError::Other("Submission not found".into()))?;
+        .ok_or_else(|| PluginHttpResponse::error(404, "Submission not found"))?;
     let problem_id = sub_info.problem_id;
 
     let can_view_all_submissions = can_view_privileged_submission_feedback(&req);

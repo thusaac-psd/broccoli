@@ -146,7 +146,6 @@ struct SubmissionVisibilityRow {
     submission_id: i32,
     user_id: i32,
     contest_type: Option<String>,
-    phase: String,
 }
 
 /// Core decision logic. Exercised directly by tests via `Host::mock()` (no
@@ -226,13 +225,11 @@ pub(crate) fn decide_visibility_decisions(
     let mut p = Params::new();
     let placeholders: Vec<String> = submission_ids.iter().map(|id| p.bind(*id)).collect();
     let sql = format!(
-        "SELECT s.id AS submission_id, s.user_id, c.contest_type, \
-                {phase} AS phase \
+        "SELECT s.id AS submission_id, s.user_id, c.contest_type \
          FROM submission s \
          JOIN contest c ON c.id = s.contest_id \
          WHERE s.id IN ({})",
         placeholders.join(","),
-        phase = broccoli_server_sdk::contest::phase_sql("c"),
     );
     let rows: Vec<SubmissionVisibilityRow> = host.db.query_with_args(&sql, &p.into_args())?;
     let rows_by_id: HashMap<i32, SubmissionVisibilityRow> =
@@ -326,7 +323,16 @@ pub(crate) fn decide_visibility_decisions(
             // submission endpoint. `feedback_level` alone would leak exactly
             // the data the scoreboard withholds, so force the None-level
             // mask regardless of the configured feedback_level.
-            if !full_scoreboard_visible_for_phase(&row.phase, false, config.scoreboard_visibility) {
+            // The host stamps the phase of every contest it resolved; one it
+            // did not resolve fails hidden.
+            let Some(phase) = resource.contest_phase else {
+                return mask_for_level(FeedbackLevel::None);
+            };
+            if !full_scoreboard_visible_for_phase(
+                phase.stage(),
+                false,
+                config.scoreboard_visibility,
+            ) {
                 return mask_for_level(FeedbackLevel::None);
             }
             mask_for_level(config.feedback_level)
@@ -440,15 +446,15 @@ mod visibility_tests {
             id: id.to_string(),
             contest_id: Some(contest_id),
             problem_id: None,
+            contest_phase: Some(ContestPhase::Running),
         }
     }
 
-    fn seed_row(host: &Host, submission_id: i32, user_id: i32, contest_type: &str, phase: &str) {
+    fn seed_row(host: &Host, submission_id: i32, user_id: i32, contest_type: &str) {
         host.db.queue_query_result(serde_json::json!([{
             "submission_id": submission_id,
             "user_id": user_id,
             "contest_type": contest_type,
-            "phase": phase,
         }]));
     }
 
@@ -523,12 +529,14 @@ mod visibility_tests {
                     id: "10".to_string(),
                     contest_id: Some(10),
                     problem_id: None,
+                    contest_phase: None,
                 },
                 QueryResource {
                     kind: "submission".to_string(),
                     id: "7".to_string(),
                     contest_id: None, // standalone submission, no contest.
                     problem_id: None,
+                    contest_phase: None,
                 },
             ],
         };
@@ -548,7 +556,7 @@ mod visibility_tests {
     #[test]
     fn decide_visibility_allows_a_submission_from_a_non_ioi_contest() {
         let host = Host::mock();
-        seed_row(&host, 7, 2, "icpc", "during");
+        seed_row(&host, 7, 2, "icpc");
 
         let req = VisibilityQueryInput {
             subject: subject(Some(99)),
@@ -620,7 +628,7 @@ mod visibility_tests {
     fn decide_visibility_allows_the_owner_at_full_feedback() {
         let host = Host::mock();
         seed_ioi_config(&host, 10, serde_json::json!({ "feedback_level": "full" }));
-        seed_row(&host, 7, 2, "ioi", "during");
+        seed_row(&host, 7, 2, "ioi");
 
         let req = VisibilityQueryInput {
             subject: subject(Some(2)), // viewer IS the submission owner.
@@ -642,7 +650,7 @@ mod visibility_tests {
             10,
             serde_json::json!({ "feedback_level": "subtask_scores" }),
         );
-        seed_row(&host, 7, 2, "ioi", "during");
+        seed_row(&host, 7, 2, "ioi");
 
         let req = VisibilityQueryInput {
             subject: subject(Some(2)),
@@ -673,7 +681,7 @@ mod visibility_tests {
             10,
             serde_json::json!({ "feedback_level": "total_only" }),
         );
-        seed_row(&host, 7, 2, "ioi", "during");
+        seed_row(&host, 7, 2, "ioi");
 
         let req = VisibilityQueryInput {
             subject: subject(Some(2)),
@@ -704,7 +712,7 @@ mod visibility_tests {
         // Redact, so `score` renders as `null` even for the submitter.
         let host = Host::mock();
         seed_ioi_config(&host, 10, serde_json::json!({ "feedback_level": "none" }));
-        seed_row(&host, 7, 2, "ioi", "during");
+        seed_row(&host, 7, 2, "ioi");
 
         let req = VisibilityQueryInput {
             subject: subject(Some(2)),
@@ -731,7 +739,7 @@ mod visibility_tests {
     fn decide_visibility_tokened_owner_bypasses_feedback_level() {
         let host = Host::mock();
         seed_ioi_config(&host, 10, serde_json::json!({ "feedback_level": "none" }));
-        seed_row(&host, 7, 2, "ioi", "during");
+        seed_row(&host, 7, 2, "ioi");
         host.storage
             .set(&[(
                 "tokens:10:2",
@@ -755,7 +763,7 @@ mod visibility_tests {
     fn decide_visibility_untokened_submission_is_unaffected_by_a_token_on_another_submission() {
         let host = Host::mock();
         seed_ioi_config(&host, 10, serde_json::json!({ "feedback_level": "none" }));
-        seed_row(&host, 7, 2, "ioi", "during");
+        seed_row(&host, 7, 2, "ioi");
         host.storage
             .set(&[(
                 "tokens:10:2",
@@ -790,7 +798,7 @@ mod visibility_tests {
                 "scoreboard_visibility": "admins_only",
             }),
         );
-        seed_row(&host, 7, 2, "ioi", "during");
+        seed_row(&host, 7, 2, "ioi");
 
         let req = VisibilityQueryInput {
             subject: subject(Some(99)), // NOT the owner.
@@ -827,7 +835,7 @@ mod visibility_tests {
                 "scoreboard_visibility": "all_contest_viewers",
             }),
         );
-        seed_row(&host, 7, 2, "ioi", "during");
+        seed_row(&host, 7, 2, "ioi");
 
         let req = VisibilityQueryInput {
             subject: subject(Some(99)),
@@ -854,7 +862,7 @@ mod visibility_tests {
                 "scoreboard_visibility": "all_contest_viewers",
             }),
         );
-        seed_row(&host, 7, 2, "ioi", "during");
+        seed_row(&host, 7, 2, "ioi");
 
         let req = VisibilityQueryInput {
             subject: subject(Some(99)),
@@ -884,9 +892,9 @@ mod visibility_tests {
         let host = Host::mock();
         seed_ioi_config(&host, 10, serde_json::json!({ "feedback_level": "none" }));
         host.db.queue_query_result(serde_json::json!([
-            { "submission_id": 7, "user_id": 2, "contest_type": "ioi", "phase": "during" },
-            { "submission_id": 8, "user_id": 3, "contest_type": "ioi", "phase": "during" },
-            { "submission_id": 9, "user_id": 4, "contest_type": "ioi", "phase": "during" },
+            { "submission_id": 7, "user_id": 2, "contest_type": "ioi" },
+            { "submission_id": 8, "user_id": 3, "contest_type": "ioi" },
+            { "submission_id": 9, "user_id": 4, "contest_type": "ioi" },
         ]));
 
         let req = VisibilityQueryInput {

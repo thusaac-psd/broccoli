@@ -15,86 +15,35 @@ use axum::{
 use plugin_core::http::{PluginHttpAuth, PluginHttpRequest, PluginHttpResponse};
 use tracing::{info, instrument, warn};
 
-use sea_orm::{ColumnTrait, QueryFilter, QuerySelect};
-
-// visibility-bypass-audited: `user` is used only by `is_token_fresh` below,
-// which selects a single `credentials_changed_at` column
-// (`select_only().into_tuple()`) and returns a bool - it structurally cannot
-// return a `user::Model` to a response body. It mirrors the same
-// iat-vs-credentials_changed_at freshness check `FreshAuthUser` performs on
-// core routes (pinned by
-// tests/integration/auth.rs::stale_access_token_rejected_on_mutation_but_accepted_on_reads),
-// duplicated here because the plugin proxy path authenticates via
-// `resolve_optional_auth_user` rather than an extractor.
-use crate::entity::user;
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::AuthUser;
+use crate::extractors::auth::{AuthUser, fresh_user};
 use crate::extractors::path::AppPath;
+use crate::services::plugin_route_access::authorize;
 use crate::state::AppState;
 use crate::utils::jwt;
-use crate::utils::soft_delete::SoftDeletable;
 
-/// Resolve the caller from the bearer token, returning the `AuthUser` plus the
-/// token's `iat` (issued-at). The `iat` is carried so a permission-gated plugin
-/// route can enforce credential freshness (see [`is_token_fresh`]).
+/// The caller of a plugin request, from its bearer token.
 ///
 /// No `Authorization` header, or a non-Bearer scheme (e.g. the print plugin's
-/// station secret), yields `None`: some plugin routes are public.
+/// station secret), yields `None`: public plugin routes take anonymous
+/// callers.
 ///
 /// A Bearer token that is PRESENT but fails verification (expired, bad
-/// signature, malformed) is `Err(TokenInvalid)` - a 401, exactly as core
-/// routes answer. Treating it as anonymous would turn an expired session into
-/// a 403 on routes that check permissions inside the plugin, and clients
-/// refresh their access token on 401, never on 403.
-fn resolve_optional_auth_user(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<Option<(AuthUser, i64)>, AppError> {
-    let auth_header = match headers.get(AUTHORIZATION) {
-        Some(value) => value,
-        None => return Ok(None),
-    };
-
-    let auth_header = match auth_header.to_str() {
-        Ok(h) => h,
-        Err(_) => return Ok(None),
-    };
-    let token = match auth_header.strip_prefix("Bearer ") {
-        Some(t) => t,
-        None => return Ok(None),
+/// signature, malformed) or is no longer fresh ([`fresh_user`]) is
+/// `Err(TokenInvalid)`, a 401, exactly as core routes answer. Clients
+/// refresh their access token on 401; treating such a token as anonymous
+/// would instead show the caller a page as if they were signed out.
+async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Option<AuthUser>, AppError> {
+    let Some(token) = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    else {
+        return Ok(None);
     };
     let claims = jwt::verify(token, &state.config.auth.jwt_secret, state.clock.now())
         .map_err(|_| AppError::TokenInvalid)?;
-
-    Ok(Some((
-        AuthUser {
-            user_id: claims.uid,
-            username: claims.sub,
-            roles: claims.roles,
-            permissions: claims.permissions,
-        },
-        claims.iat as i64,
-    )))
-}
-
-/// Whether the token is still fresh: the user is active AND the token was issued
-/// at or after the last credential change (`iat >= credentials_changed_at`),
-/// mirroring the `FreshAuthUser` extractor. A role/permission revoke or a user
-/// deactivation bumps `credentials_changed_at` (or drops the active-user row), so
-/// a stale token returns `false`. Returns `Err` only on a DB failure.
-async fn is_token_fresh(state: &AppState, user_id: i32, iat: i64) -> Result<bool, AppError> {
-    let credentials_changed_at: Option<chrono::DateTime<chrono::Utc>> = user::Entity::find_active()
-        .filter(user::Column::Id.eq(user_id))
-        .select_only()
-        .column(user::Column::CredentialsChangedAt)
-        .into_tuple()
-        .one(&state.db)
-        .await
-        .map_err(|e| AppError::Internal(format!("credential freshness lookup failed: {e}")))?;
-    match credentials_changed_at {
-        None => Ok(false), // user soft-deleted / deactivated
-        Some(changed_at) => Ok(iat >= changed_at.timestamp()),
-    }
+    fresh_user(state, claims).await.map(Some)
 }
 
 /// Whether a caller request header may be forwarded to a plugin handler.
@@ -141,23 +90,12 @@ async fn handle_plugin_request_impl(
         plugin_id, normalized_path
     );
 
-    let mut auth_user = resolve_optional_auth_user(&state, &headers)?;
+    // Every authenticated request is checked for freshness, not only routes
+    // with a manifest `permission`: a plugin also gates its own actions on the
+    // forwarded `auth.permissions`.
+    let auth_user = authenticate(&state, &headers).await?;
 
-    // Drop a stale/revoked identity to anonymous BEFORE any authorization decision.
-    // This must run for EVERY authenticated request, not only routes with a
-    // manifest `permission`, because a plugin can gate its own actions on the
-    // forwarded `auth.permissions` via `PluginHttpRequest::has_permission` (e.g.
-    // icpc `/reveal`). Zeroing the identity here means a revoked role / deactivated
-    // account fails both the manifest-permission check below AND any plugin-side
-    // permission check, matching FreshAuthUser on core routes. Anonymous requests
-    // (no token) are unaffected.
-    if let Some((user, iat)) = &auth_user
-        && !is_token_fresh(&state, user.user_id, *iat).await?
-    {
-        auth_user = None;
-    }
-
-    let (handler_name, required_permission, params) = {
+    let (handler_name, access, params) = {
         let registry = state
             .plugins
             .get_registry()
@@ -185,29 +123,16 @@ async fn handle_plugin_request_impl(
 
         (
             route_info.handler.clone(),
-            route_info.permission.clone(),
+            route_info.access.clone(),
             matched_route
                 .params
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
+                .collect::<HashMap<String, String>>(),
         )
     };
 
-    if let Some(ref permission) = required_permission {
-        // `auth_user` was already downgraded to None above if the token was stale
-        // or revoked, so a None here on a permission-gated route means no valid
-        // identity (missing/invalid/stale token).
-        let (user, _iat) = auth_user.as_ref().ok_or_else(|| {
-            warn!("Unauthorized access attempt to protected plugin route");
-            if headers.contains_key("Authorization") {
-                AppError::TokenInvalid
-            } else {
-                AppError::TokenMissing
-            }
-        })?;
-        user.require_permission(permission)?;
-    }
+    let resolved = authorize(&state, auth_user.as_ref(), &access, &params).await?;
 
     let request = PluginHttpRequest {
         method: method.to_string(),
@@ -220,12 +145,14 @@ async fn handle_plugin_request_impl(
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
             .collect(),
         body: serde_json::from_str(&body).ok(),
-        auth: auth_user.map(|(user, _iat)| PluginHttpAuth {
+        auth: auth_user.map(|user| PluginHttpAuth {
             user_id: user.user_id,
             username: user.username,
             roles: user.roles,
             permissions: user.permissions,
         }),
+        contest: resolved.contest,
+        problem_id: resolved.problem_id,
     };
 
     info!("Forwarding request to plugin handler: {}", handler_name);
@@ -243,6 +170,16 @@ async fn handle_plugin_request_impl(
         .await?;
     let response: PluginHttpResponse =
         serde_json::from_slice(&response).map_err(plugin_core::error::PluginError::from)?;
+    // A plugin answers client errors; a server error is the host's to
+    // answer, with its generic body, so no internal detail a plugin put in
+    // the body reaches the caller.
+    if response.status >= 500 {
+        return Err(AppError::Internal(format!(
+            "plugin '{plugin_id}' handler '{handler_name}' answered {}: {}",
+            response.status,
+            response.body.unwrap_or_default()
+        )));
+    }
 
     let mut builder = Response::builder().status(response.status);
 
@@ -339,7 +276,7 @@ macro_rules! proxy_handler {
             tag = "Plugins",
             operation_id = $op_id,
             summary = $summary,
-            description = "Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. The request is forwarded to the plugin's Wasm handler, and the response is returned to the client. Authorization is checked based on the permissions defined in the plugin manifest.",
+            description = "Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.",
             params(
                 ("plugin_id" = String, Path, description = "The unique identifier of the plugin"),
                 ("path" = String, Path, description = "The sub-path defined in plugin's manifest")
@@ -347,10 +284,12 @@ macro_rules! proxy_handler {
             request_body = $body_type,
             responses(
                 (status = 200, description = "Success", body = serde_json::Value),
-                (status = 401, description = "Unauthorized", body = ErrorBody),
+                (status = 400, description = "A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request", body = ErrorBody),
+                (status = 401, description = "Unauthorized: no token, or an invalid or stale one (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
                 (status = 403, description = "Forbidden", body = ErrorBody),
-                (status = 404, description = "Plugin or Route not found", body = ErrorBody),
+                (status = 404, description = "Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND)", body = ErrorBody),
                 (status = 405, description = "Method Not Allowed", body = ErrorBody),
+                (status = 500, description = "The plugin failed (INTERNAL_ERROR); the detail is logged, never returned", body = ErrorBody),
                 (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
             ),
             security(("jwt" = []))
@@ -375,17 +314,19 @@ macro_rules! proxy_handler {
             tag = "Plugins",
             operation_id = $op_id,
             summary = $summary,
-            description = "Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. The request is forwarded to the plugin's Wasm handler, and the response is returned to the client. Authorization is checked based on the permissions defined in the plugin manifest.",
+            description = "Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.",
             params(
                 ("plugin_id" = String, Path, description = "The unique identifier of the plugin"),
                 ("path" = String, Path, description = "The sub-path defined in plugin's manifest")
             ),
             responses(
                 (status = 200, description = "Success", body = serde_json::Value),
-                (status = 401, description = "Unauthorized", body = ErrorBody),
+                (status = 400, description = "A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request", body = ErrorBody),
+                (status = 401, description = "Unauthorized: no token, or an invalid or stale one (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
                 (status = 403, description = "Forbidden", body = ErrorBody),
-                (status = 404, description = "Plugin or Route not found", body = ErrorBody),
+                (status = 404, description = "Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND)", body = ErrorBody),
                 (status = 405, description = "Method Not Allowed", body = ErrorBody),
+                (status = 500, description = "The plugin failed (INTERNAL_ERROR); the detail is logged, never returned", body = ErrorBody),
                 (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
             ),
             security(("jwt" = []))

@@ -303,12 +303,18 @@ mod filter_tests {
         }
     }
 
+    /// A submission of a running contest, as the host sends it.
     fn submission_resource(id: i32, contest_id: i32) -> QueryResource {
+        submission_resource_at(id, contest_id, ContestPhase::Running)
+    }
+
+    fn submission_resource_at(id: i32, contest_id: i32, phase: ContestPhase) -> QueryResource {
         QueryResource {
             kind: "submission".to_string(),
             id: id.to_string(),
             contest_id: Some(contest_id),
             problem_id: None,
+            contest_phase: Some(phase),
         }
     }
 
@@ -322,7 +328,6 @@ mod filter_tests {
         submission_id: i32,
         user_id: i32,
         contest_type: &str,
-        phase: &str,
         duration_ms: i64,
         now_elapsed_ms: i64,
         submission_elapsed_ms: i64,
@@ -331,7 +336,6 @@ mod filter_tests {
             "submission_id": submission_id,
             "user_id": user_id,
             "contest_type": contest_type,
-            "phase": phase,
             "duration_ms": duration_ms as f64,
             "now_elapsed_ms": now_elapsed_ms as f64,
             "submission_elapsed_ms": submission_elapsed_ms as f64,
@@ -351,16 +355,7 @@ mod filter_tests {
                 "freeze_minutes": 60,
             }),
         );
-        seed_freeze_row(
-            &host,
-            7,
-            2,
-            "icpc",
-            "during",
-            DUR,
-            NOW_IN_WINDOW,
-            IN_FREEZE_SUB,
-        );
+        seed_freeze_row(&host, 7, 2, "icpc", DUR, NOW_IN_WINDOW, IN_FREEZE_SUB);
 
         let req = VisibilityQueryInput {
             subject: subject(Some(99)), // viewer is NOT the submission owner (2).
@@ -422,16 +417,7 @@ mod filter_tests {
                 "freeze_minutes": 60,
             }),
         );
-        seed_freeze_row(
-            &host,
-            7,
-            2,
-            "icpc",
-            "during",
-            DUR,
-            NOW_IN_WINDOW,
-            IN_FREEZE_SUB,
-        );
+        seed_freeze_row(&host, 7, 2, "icpc", DUR, NOW_IN_WINDOW, IN_FREEZE_SUB);
 
         let req = VisibilityQueryInput {
             subject: subject(Some(2)), // viewer IS the submission owner.
@@ -466,16 +452,7 @@ mod filter_tests {
                 "freeze_minutes": 0,
             }),
         );
-        seed_freeze_row(
-            &host,
-            7,
-            2,
-            "icpc",
-            "during",
-            DUR,
-            NOW_IN_WINDOW,
-            PRE_FREEZE_SUB,
-        );
+        seed_freeze_row(&host, 7, 2, "icpc", DUR, NOW_IN_WINDOW, PRE_FREEZE_SUB);
 
         let req = VisibilityQueryInput {
             subject: subject(Some(99)), // viewer is NOT the submission owner (2).
@@ -505,16 +482,7 @@ mod filter_tests {
                 "freeze_minutes": 0,
             }),
         );
-        seed_freeze_row(
-            &host,
-            7,
-            2,
-            "icpc",
-            "during",
-            DUR,
-            NOW_IN_WINDOW,
-            PRE_FREEZE_SUB,
-        );
+        seed_freeze_row(&host, 7, 2, "icpc", DUR, NOW_IN_WINDOW, PRE_FREEZE_SUB);
 
         let req = VisibilityQueryInput {
             subject: subject(Some(99)), // viewer is NOT the submission owner (2).
@@ -538,16 +506,7 @@ mod filter_tests {
         // contest type - ICPC must default to Allow rather than incorrectly
         // hiding another contest type's submissions.
         let host = Host::mock();
-        seed_freeze_row(
-            &host,
-            7,
-            2,
-            "ioi",
-            "during",
-            DUR,
-            NOW_IN_WINDOW,
-            IN_FREEZE_SUB,
-        );
+        seed_freeze_row(&host, 7, 2, "ioi", DUR, NOW_IN_WINDOW, IN_FREEZE_SUB);
 
         let req = VisibilityQueryInput {
             subject: subject(Some(99)),
@@ -575,12 +534,14 @@ mod filter_tests {
                     id: "10".to_string(),
                     contest_id: Some(10),
                     problem_id: None,
+                    contest_phase: None,
                 },
                 QueryResource {
                     kind: "submission".to_string(),
                     id: "7".to_string(),
                     contest_id: None, // standalone submission, no contest.
                     problem_id: None,
+                    contest_phase: None,
                 },
             ],
         };
@@ -665,19 +626,19 @@ mod filter_tests {
         host.db.queue_query_result(serde_json::json!([
             {
                 "submission_id": 7, "user_id": 2, "contest_type": "icpc",
-                "phase": "during", "duration_ms": DUR as f64,
+                "duration_ms": DUR as f64,
                 "now_elapsed_ms": NOW_IN_WINDOW as f64,
                 "submission_elapsed_ms": IN_FREEZE_SUB as f64,
             },
             {
                 "submission_id": 8, "user_id": 3, "contest_type": "icpc",
-                "phase": "during", "duration_ms": DUR as f64,
+                "duration_ms": DUR as f64,
                 "now_elapsed_ms": NOW_IN_WINDOW as f64,
                 "submission_elapsed_ms": PRE_FREEZE_SUB as f64,
             },
             {
                 "submission_id": 9, "user_id": 4, "contest_type": "icpc",
-                "phase": "during", "duration_ms": DUR as f64,
+                "duration_ms": DUR as f64,
                 "now_elapsed_ms": NOW_IN_WINDOW as f64,
                 "submission_elapsed_ms": PRE_FREEZE_SUB as f64,
             },
@@ -792,14 +753,14 @@ mod filter_tests {
         host.db.queue_query_result(serde_json::json!([
             {
                 "submission_id": 7, "user_id": 2, "contest_type": "icpc",
-                "phase": "after", "start_epoch_ms": START_EPOCH as f64,
+                "start_epoch_ms": START_EPOCH as f64,
                 "duration_ms": DUR as f64,
                 "now_elapsed_ms": (DUR + 60_000) as f64,
                 "submission_elapsed_ms": IN_FREEZE_SUB as f64,
             },
             {
                 "submission_id": 8, "user_id": 3, "contest_type": "icpc",
-                "phase": "after", "start_epoch_ms": START_EPOCH as f64,
+                "start_epoch_ms": START_EPOCH as f64,
                 "duration_ms": DUR as f64,
                 "now_elapsed_ms": (DUR + 60_000) as f64,
                 "submission_elapsed_ms": IN_FREEZE_SUB as f64,
@@ -810,7 +771,10 @@ mod filter_tests {
             subject: subject(Some(99)), // viewer owns neither submission.
             action: "view".to_string(),
             context: QueryContext { contest_id: None },
-            resources: vec![submission_resource(7, 10), submission_resource(8, 20)],
+            resources: vec![
+                submission_resource_at(7, 10, ContestPhase::Ended),
+                submission_resource_at(8, 20, ContestPhase::Ended),
+            ],
         };
         let decisions = decide_visibility_decisions(&host, &req).unwrap();
         assert_eq!(decisions.len(), 2);
@@ -850,6 +814,24 @@ mod filter_tests {
                 contest_id: Some(10),
             },
             resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(matches!(decisions[0], WireDecision::Redact { .. }));
+    }
+
+    #[test]
+    fn decide_visibility_fails_hidden_without_the_host_phase() {
+        let host = Host::mock();
+        seed_freeze_row(&host, 7, 2, "icpc", DUR, NOW_IN_WINDOW, PRE_FREEZE_SUB);
+        let mut resource = submission_resource(7, 10);
+        resource.contest_phase = None;
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)),
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![resource],
         };
         let decisions = decide_visibility_decisions(&host, &req).unwrap();
         assert!(matches!(decisions[0], WireDecision::Redact { .. }));
@@ -974,7 +956,6 @@ struct SubmissionFreezeRow {
     submission_id: i32,
     user_id: i32,
     contest_type: Option<String>,
-    phase: String,
     start_epoch_ms: Option<f64>,
     duration_ms: Option<f64>,
     now_elapsed_ms: Option<f64>,
@@ -1059,7 +1040,6 @@ fn decide_visibility_decisions(
     let placeholders: Vec<String> = submission_ids.iter().map(|id| p.bind(*id)).collect();
     let sql = format!(
         "SELECT s.id AS submission_id, s.user_id, c.contest_type, \
-                {phase} AS phase, \
                 EXTRACT(EPOCH FROM c.start_time) * 1000 AS start_epoch_ms, \
                 EXTRACT(EPOCH FROM (c.end_time - c.start_time)) * 1000 AS duration_ms, \
                 EXTRACT(EPOCH FROM (NOW() - c.start_time)) * 1000 AS now_elapsed_ms, \
@@ -1068,7 +1048,6 @@ fn decide_visibility_decisions(
          JOIN contest c ON c.id = s.contest_id \
          WHERE s.id IN ({})",
         placeholders.join(","),
-        phase = broccoli_server_sdk::contest::phase_sql("c"),
     );
     let rows: Vec<SubmissionFreezeRow> = host.db.query_with_args(&sql, &p.into_args())?;
     let rows_by_id: HashMap<i32, SubmissionFreezeRow> =
@@ -1147,6 +1126,13 @@ fn decide_visibility_decisions(
             let Some(contest_id) = resource.contest_id else {
                 return WireDecision::Allow {};
             };
+            // The host stamps the phase of every contest it resolved; one it
+            // did not resolve fails hidden.
+            let Some(phase) = resource.contest_phase else {
+                return WireDecision::Redact {
+                    fields: mask_fields.clone(),
+                };
+            };
             let config = configs.get(&contest_id).cloned().unwrap_or_default();
             let duration_ms = row.duration_ms.unwrap_or(0.0) as i64;
             let window = FreezeWindow::current(
@@ -1158,7 +1144,7 @@ fn decide_visibility_decisions(
             if must_hide_other_submission(
                 config.public_standings,
                 config.freeze_minutes,
-                &row.phase,
+                phase.stage(),
                 revealed,
                 duration_ms,
                 row.now_elapsed_ms.unwrap_or(0.0) as i64,
@@ -1355,9 +1341,7 @@ fn handle_contest_info(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let contest_id: i32 = req.param("contest_id")?;
-    let info = contest::check_access(host, req, contest_id)?;
-    info.require_type("icpc")?;
+    let contest_id = req.contest()?.id;
     let config: ContestConfig = contest::load_config(host, contest_id)?;
 
     Ok(PluginHttpResponse {
@@ -1428,17 +1412,9 @@ fn query_contest_times(host: &Host, contest_id: i32) -> Result<ContestTimes, Api
 /// again. Idempotent.
 #[cfg(target_arch = "wasm32")]
 fn handle_reveal(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpResponse, ApiError> {
-    let contest_id: i32 = req.param("contest_id")?;
-    let info = contest::check_access(host, req, contest_id)?;
-    info.require_type("icpc")?;
-    if !req.has_permission(perm::CONTEST_MANAGE) {
-        return Err(PluginHttpResponse::error(
-            403,
-            "Revealing the scoreboard requires contest:manage",
-        )
-        .into());
-    }
-    if info.phase != "after" {
+    let info = req.contest()?;
+    let contest_id = info.id;
+    if !info.phase.has_ended() {
         return Err(PluginHttpResponse::error(
             409,
             "The scoreboard can be revealed only after the contest ends",
@@ -1470,9 +1446,8 @@ fn handle_reveal(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRespo
 
 #[cfg(target_arch = "wasm32")]
 fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpResponse, ApiError> {
-    let contest_id: i32 = req.param("contest_id")?;
-    let info = contest::check_access(host, req, contest_id)?;
-    info.require_type("icpc")?;
+    let info = req.contest()?;
+    let contest_id = info.id;
     let config: ContestConfig = contest::load_config(host, contest_id)?;
 
     // Fetch contest problems in order
@@ -1512,7 +1487,7 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
 
     // Fetch participants (during before/during phase, only fetch the requesting user
     // unless they have contest:manage so organizers can supervise live scoring).
-    let phase = &info.phase;
+    let phase = info.phase.stage();
     let can_view_all = req.has_permission(perm::CONTEST_MANAGE);
     let restricted_user_id =
         match standings_restriction(phase, can_view_all, config.public_standings, req.user_id()) {

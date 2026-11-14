@@ -6,7 +6,7 @@ use matchit::Router;
 use serde::Serialize;
 
 use crate::error::{AssetError, PluginError};
-use crate::manifest::{PluginManifest, parse_manifest, resolve_schema_includes};
+use crate::manifest::{PluginManifest, RouteAccess, parse_manifest, resolve_schema_includes};
 use crate::pool::InstancePool;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -24,7 +24,9 @@ pub struct RouteMatchInfo {
 #[derive(Debug, Clone)]
 pub struct RouteMetaData {
     pub handler: String,
-    pub permission: Option<String>,
+    /// Who may call the route and what it addresses; the host enforces it
+    /// before the handler runs.
+    pub access: RouteAccess,
 }
 
 pub struct PluginEntry {
@@ -80,11 +82,17 @@ impl PluginEntry {
                     .or_insert(RouteMatchInfo {
                         methods: HashMap::new(),
                     });
+                let access = route.access().map_err(|e| {
+                    PluginError::LoadFailed(format!(
+                        "Invalid route {} {} in plugin '{}': {}",
+                        route.method, route.path, id, e
+                    ))
+                })?;
                 info.methods.insert(
                     route.method.to_uppercase(),
                     RouteMetaData {
                         handler: route.handler.clone(),
-                        permission: route.permission.clone(),
+                        access,
                     },
                 );
             }

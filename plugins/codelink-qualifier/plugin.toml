@@ -13,11 +13,15 @@ permissions = ["logger", "plugin:register", "sql", "submission", "evaluator:eval
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/codelink-qualifier/contests/{contest_id}/info"
+contest = "{contest_id}"
+contest_type = "codelink-qualifier"
 handler = "api_contest_info"
 
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/codelink-qualifier/contests/{contest_id}/standings"
+contest = "{contest_id}"
+contest_type = "codelink-qualifier"
 handler = "api_standings"
 
 [config.contest]

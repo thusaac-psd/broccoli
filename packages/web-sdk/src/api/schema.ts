@@ -1319,42 +1319,42 @@ export interface paths {
     };
     /**
      * GET proxy to plugin route
-     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. The request is forwarded to the plugin's Wasm handler, and the response is returned to the client. Authorization is checked based on the permissions defined in the plugin manifest.
+     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.
      */
     get: operations['getPluginRequest'];
     /**
      * PUT proxy to plugin route
-     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. The request is forwarded to the plugin's Wasm handler, and the response is returned to the client. Authorization is checked based on the permissions defined in the plugin manifest.
+     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.
      */
     put: operations['putPluginRequest'];
     /**
      * POST proxy to plugin route
-     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. The request is forwarded to the plugin's Wasm handler, and the response is returned to the client. Authorization is checked based on the permissions defined in the plugin manifest.
+     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.
      */
     post: operations['postPluginRequest'];
     /**
      * DELETE proxy to plugin route
-     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. The request is forwarded to the plugin's Wasm handler, and the response is returned to the client. Authorization is checked based on the permissions defined in the plugin manifest.
+     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.
      */
     delete: operations['deletePluginRequest'];
     /**
      * OPTIONS proxy to plugin route
-     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. The request is forwarded to the plugin's Wasm handler, and the response is returned to the client. Authorization is checked based on the permissions defined in the plugin manifest.
+     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.
      */
     options: operations['optionsPluginRequest'];
     /**
      * HEAD proxy to plugin route
-     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. The request is forwarded to the plugin's Wasm handler, and the response is returned to the client. Authorization is checked based on the permissions defined in the plugin manifest.
+     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.
      */
     head: operations['headPluginRequest'];
     /**
      * PATCH proxy to plugin route
-     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. The request is forwarded to the plugin's Wasm handler, and the response is returned to the client. Authorization is checked based on the permissions defined in the plugin manifest.
+     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.
      */
     patch: operations['patchPluginRequest'];
     /**
      * TRACE proxy to plugin route
-     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. The request is forwarded to the plugin's Wasm handler, and the response is returned to the client. Authorization is checked based on the permissions defined in the plugin manifest.
+     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.
      */
     trace: operations['tracePluginRequest'];
   };
@@ -3947,6 +3947,11 @@ export interface components {
       /** @example admin */
       role: string;
     };
+    /**
+     * @description The `access` key of a route.
+     * @enum {string}
+     */
+    RouteAccessLevel: 'public' | 'user' | 'participant';
     RunCodeRequest: {
       custom_test_cases: components['schemas']['CustomTestCaseInput'][];
       files: components['schemas']['SubmissionFileDto'][];
@@ -3984,11 +3989,36 @@ export interface components {
        */
       sql_read: string[];
     };
+    /**
+     * @description A `[[server.routes]]` entry, as written in `plugin.toml`. The host checks
+     *     who may call the route and reads the resources it addresses before the
+     *     plugin runs.
+     */
     ServerRouteConfig: {
+      /** @description Who may call the route. Defaults to `user`. */
+      access?: components['schemas']['RouteAccessLevel'];
+      /**
+       * @description The path parameter naming the contest the route acts on, as
+       *     `"{contest_id}"`. The caller must be able to read the contest.
+       */
+      contest?: string | null;
+      /**
+       * @description The contest type the route serves. A contest of another type is not
+       *     found.
+       */
+      contest_type?: string | null;
       handler: string;
       method: string;
       path: string;
+      /** @description A permission the caller must hold. */
       permission?: string | null;
+      /**
+       * @description The path parameter naming the problem the route acts on, as
+       *     `"{problem_id}"`: a problem of the route's `contest` when it declares
+       *     one, else a standalone problem. The caller must be able to read the
+       *     problem there.
+       */
+      problem?: string | null;
     };
     SubmissionFileDto: {
       /**
@@ -9129,7 +9159,16 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description Unauthorized */
+      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Unauthorized: no token, or an invalid or stale one (TOKEN_MISSING, TOKEN_INVALID) */
       401: {
         headers: {
           [name: string]: unknown;
@@ -9147,7 +9186,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin or Route not found */
+      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -9158,6 +9197,15 @@ export interface operations {
       };
       /** @description Method Not Allowed */
       405: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin failed (INTERNAL_ERROR); the detail is logged, never returned */
+      500: {
         headers: {
           [name: string]: unknown;
         };
@@ -9203,7 +9251,16 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description Unauthorized */
+      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Unauthorized: no token, or an invalid or stale one (TOKEN_MISSING, TOKEN_INVALID) */
       401: {
         headers: {
           [name: string]: unknown;
@@ -9221,7 +9278,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin or Route not found */
+      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -9232,6 +9289,15 @@ export interface operations {
       };
       /** @description Method Not Allowed */
       405: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin failed (INTERNAL_ERROR); the detail is logged, never returned */
+      500: {
         headers: {
           [name: string]: unknown;
         };
@@ -9277,7 +9343,16 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description Unauthorized */
+      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Unauthorized: no token, or an invalid or stale one (TOKEN_MISSING, TOKEN_INVALID) */
       401: {
         headers: {
           [name: string]: unknown;
@@ -9295,7 +9370,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin or Route not found */
+      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -9306,6 +9381,15 @@ export interface operations {
       };
       /** @description Method Not Allowed */
       405: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin failed (INTERNAL_ERROR); the detail is logged, never returned */
+      500: {
         headers: {
           [name: string]: unknown;
         };
@@ -9351,7 +9435,16 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description Unauthorized */
+      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Unauthorized: no token, or an invalid or stale one (TOKEN_MISSING, TOKEN_INVALID) */
       401: {
         headers: {
           [name: string]: unknown;
@@ -9369,7 +9462,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin or Route not found */
+      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -9380,6 +9473,15 @@ export interface operations {
       };
       /** @description Method Not Allowed */
       405: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin failed (INTERNAL_ERROR); the detail is logged, never returned */
+      500: {
         headers: {
           [name: string]: unknown;
         };
@@ -9421,7 +9523,16 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description Unauthorized */
+      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Unauthorized: no token, or an invalid or stale one (TOKEN_MISSING, TOKEN_INVALID) */
       401: {
         headers: {
           [name: string]: unknown;
@@ -9439,7 +9550,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin or Route not found */
+      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -9450,6 +9561,15 @@ export interface operations {
       };
       /** @description Method Not Allowed */
       405: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin failed (INTERNAL_ERROR); the detail is logged, never returned */
+      500: {
         headers: {
           [name: string]: unknown;
         };
@@ -9491,7 +9611,16 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description Unauthorized */
+      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Unauthorized: no token, or an invalid or stale one (TOKEN_MISSING, TOKEN_INVALID) */
       401: {
         headers: {
           [name: string]: unknown;
@@ -9509,7 +9638,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin or Route not found */
+      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -9520,6 +9649,15 @@ export interface operations {
       };
       /** @description Method Not Allowed */
       405: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin failed (INTERNAL_ERROR); the detail is logged, never returned */
+      500: {
         headers: {
           [name: string]: unknown;
         };
@@ -9565,7 +9703,16 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description Unauthorized */
+      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Unauthorized: no token, or an invalid or stale one (TOKEN_MISSING, TOKEN_INVALID) */
       401: {
         headers: {
           [name: string]: unknown;
@@ -9583,7 +9730,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin or Route not found */
+      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -9594,6 +9741,15 @@ export interface operations {
       };
       /** @description Method Not Allowed */
       405: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin failed (INTERNAL_ERROR); the detail is logged, never returned */
+      500: {
         headers: {
           [name: string]: unknown;
         };
@@ -9635,7 +9791,16 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description Unauthorized */
+      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Unauthorized: no token, or an invalid or stale one (TOKEN_MISSING, TOKEN_INVALID) */
       401: {
         headers: {
           [name: string]: unknown;
@@ -9653,7 +9818,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin or Route not found */
+      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -9664,6 +9829,15 @@ export interface operations {
       };
       /** @description Method Not Allowed */
       405: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin failed (INTERNAL_ERROR); the detail is logged, never returned */
+      500: {
         headers: {
           [name: string]: unknown;
         };

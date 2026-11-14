@@ -108,6 +108,8 @@ mod tests {
             headers,
             body: None,
             auth: None,
+            contest: None,
+            problem_id: None,
         }
     }
 

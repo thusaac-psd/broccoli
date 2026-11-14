@@ -18,11 +18,15 @@ scope = "resource"
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/submission-limit/contests/{contest_id}/problems/{problem_id}/status"
+access = "participant"
+contest = "{contest_id}"
+problem = "{problem_id}"
 handler = "get_limit_status"
 
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/submission-limit/problems/{problem_id}/status"
+problem = "{problem_id}"
 handler = "get_limit_status_standalone"
 
 [translations]

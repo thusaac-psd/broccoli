@@ -71,6 +71,12 @@ pub struct QueryResource {
     pub contest_id: Option<i32>,
     #[serde(default)]
     pub problem_id: Option<i32>,
+    /// The phase of the contest `contest_id` names, from the host's phase
+    /// function. Set whenever the host read that contest to decide the
+    /// batch, which it always does for a querier scoped to the contest
+    /// types it registered.
+    #[serde(default)]
+    pub contest_phase: Option<super::contest::ContestPhase>,
 }
 
 /// Plugin -> host. `decisions` is positional and MUST be the same length as the
@@ -147,11 +153,12 @@ mod tests {
             id: "42".to_string(),
             contest_id: Some(7),
             problem_id: None,
+            contest_phase: None,
         };
         let json = serde_json::to_string(&resource).unwrap();
         assert_eq!(
             json,
-            r#"{"kind":"submission","id":"42","contest_id":7,"problem_id":null}"#
+            r#"{"kind":"submission","id":"42","contest_id":7,"problem_id":null,"contest_phase":null}"#
         );
 
         let back: QueryResource = serde_json::from_str(&json).unwrap();
@@ -177,11 +184,12 @@ mod tests {
             id: 7.to_string(),
             contest_id: Some(7),
             problem_id: None,
+            contest_phase: None,
         };
         let json = serde_json::to_string(&resource).unwrap();
         assert_eq!(
             json,
-            r#"{"kind":"contest","id":"7","contest_id":7,"problem_id":null}"#
+            r#"{"kind":"contest","id":"7","contest_id":7,"problem_id":null,"contest_phase":null}"#
         );
     }
 
@@ -192,11 +200,12 @@ mod tests {
             id: "0196c1d2-3a4b-7c8d-9e0f-1a2b3c4d5e6f".to_string(),
             contest_id: None,
             problem_id: Some(11),
+            contest_phase: None,
         };
         let json = serde_json::to_string(&resource).unwrap();
         assert_eq!(
             json,
-            r#"{"kind":"attachment","id":"0196c1d2-3a4b-7c8d-9e0f-1a2b3c4d5e6f","contest_id":null,"problem_id":11}"#
+            r#"{"kind":"attachment","id":"0196c1d2-3a4b-7c8d-9e0f-1a2b3c4d5e6f","contest_id":null,"problem_id":11,"contest_phase":null}"#
         );
 
         let back: QueryResource = serde_json::from_str(&json).unwrap();
@@ -224,12 +233,14 @@ mod tests {
             id: uuid_a.to_string(),
             contest_id: None,
             problem_id: Some(1),
+            contest_phase: None,
         };
         let resource_b = QueryResource {
             kind: "attachment".to_string(),
             id: uuid_b.to_string(),
             contest_id: None,
             problem_id: Some(2),
+            contest_phase: None,
         };
 
         assert_ne!(resource_a.id, resource_b.id);

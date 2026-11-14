@@ -131,6 +131,9 @@ pub(crate) struct HostScopes {
     /// Input: submissions the caller already read, which Query 0 does not
     /// fetch again.
     pub known_submissions: HashMap<i32, submission::Model>,
+    /// Input: active contests the caller already read, which Query 1 does
+    /// not fetch again.
+    pub known_contests: HashMap<i32, contest::Model>,
     /// `submission_id -> submission.contest_id` for every `Resource::
     /// Submission` resolved by Query 0 (itself `None` for a contest-less
     /// submission). A `Resource::Submission`'s contest is otherwise
@@ -144,6 +147,12 @@ pub(crate) struct HostScopes {
     /// `contest_id -> contest_type` for every active contest the batch
     /// fetched.
     pub contest_types: HashMap<i32, Option<String>>,
+    /// `contest_id -> its phase at the batch's instant`, for every contest in
+    /// `contest_types`.
+    pub contest_phases: HashMap<i32, crate::utils::contest::ContestPhase>,
+    /// `contest_id -> whether the subject is registered in it`, for every
+    /// contest in `contest_types` when the subject is signed in.
+    pub participation: HashMap<i32, bool>,
 }
 
 /// See the module docs for the rules and the batching strategy. Returns one
@@ -319,20 +328,33 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     for cids in problem_contest_ids.values() {
         contest_ids.extend(cids.iter().copied());
     }
-    let contests: HashMap<i32, contest::Model> = if contest_ids.is_empty() {
-        HashMap::new()
-    } else {
-        contest::Entity::find_active()
-            .filter(contest::Column::Id.is_in(contest_ids.iter().copied().collect::<Vec<_>>()))
-            .all(db)
-            .await?
-            .into_iter()
-            .map(|c| (c.id, c))
-            .collect()
-    };
+    let mut contests: HashMap<i32, contest::Model> = contest_ids
+        .iter()
+        .filter_map(|id| scopes.known_contests.get(id).map(|c| (*id, c.clone())))
+        .collect();
+    let unknown_contest_ids: Vec<i32> = contest_ids
+        .iter()
+        .copied()
+        .filter(|id| !contests.contains_key(id))
+        .collect();
+    if !unknown_contest_ids.is_empty() {
+        contests.extend(
+            contest::Entity::find_active()
+                .filter(contest::Column::Id.is_in(unknown_contest_ids))
+                .all(db)
+                .await?
+                .into_iter()
+                .map(|c| (c.id, c)),
+        );
+    }
     scopes
         .contest_types
         .extend(contests.values().map(|c| (c.id, c.contest_type.clone())));
+    scopes.contest_phases.extend(
+        contests
+            .values()
+            .map(|c| (c.id, crate::utils::contest::contest_phase(c, now))),
+    );
 
     // Query 2: `contest_user` membership for this subject, across every
     // contest fetched above. Fetched unconditionally (whenever the subject
@@ -353,6 +375,11 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
             .collect(),
         _ => HashSet::new(),
     };
+    if subject.user_id.is_some() {
+        scopes
+            .participation
+            .extend(contests.keys().map(|id| (*id, member_of.contains(id))));
+    }
 
     // Query 3: `contest_problem` membership for the (contest_id,
     // problem_id) pairs referenced by problem parts that carry a concrete
