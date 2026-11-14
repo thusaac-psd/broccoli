@@ -1,11 +1,19 @@
-import type { RefreshedSession, RefreshOutcome } from '@/api/refresh-session';
+import type {
+  RefreshedSession,
+  RefreshOptions,
+  RefreshOutcome,
+} from '@/api/refresh-session';
 import type { User } from '@/auth/types';
 
 // The browser's sign-in session, owned by one store per API client.
 //
 // - `bootstrapping`: a page load with the session hint set, asking the
-//   server whether the refresh cookie still holds. `retryInMs` is set while
-//   the server is unreachable.
+//   server whether the refresh cookie still holds.
+// - `unreachable`: the bootstrap could not ask (the server is down or
+//   unreachable). Someone may well be signed in, but nobody is known, so no
+//   request is sent: each fails at once, as the network would. The bootstrap
+//   asks again in `retryInMs` (with backoff), and once it gets an answer
+//   whatever failed meanwhile is fetched again.
 // - `signedOut`: no session. Only a login leaves it; a refresh never does.
 //   `expired` is set when the server ended a session this tab had (the
 //   refresh cookie was refused), as opposed to a sign-out or nobody having
@@ -29,7 +37,8 @@ import type { User } from '@/auth/types';
 export const SESSION_REFRESH_INTERVAL_MS = 4.5 * 60 * 1000;
 
 export type SessionState =
-  | { status: 'bootstrapping'; epoch: number; retryInMs: number | null }
+  | { status: 'bootstrapping'; epoch: number }
+  | { status: 'unreachable'; epoch: number; retryInMs: number }
   | { status: 'signedOut'; epoch: number; expired: boolean }
   | {
       status: 'active';
@@ -50,7 +59,6 @@ export type SessionEvent =
 export const INITIAL_SESSION: SessionState = {
   status: 'bootstrapping',
   epoch: 0,
-  retryInMs: null,
 };
 
 function activate(epoch: number, session: RefreshedSession): SessionState {
@@ -96,9 +104,13 @@ export function transition(
         case 'rejected':
           return { status: 'signedOut', epoch: state.epoch + 1, expired: true };
         case 'unavailable':
-          return state.status === 'bootstrapping'
-            ? { ...state, retryInMs: outcome.retryInMs }
-            : { ...state, refreshInMs: outcome.retryInMs };
+          return state.status === 'active'
+            ? { ...state, refreshInMs: outcome.retryInMs }
+            : {
+                status: 'unreachable',
+                epoch: state.epoch,
+                retryInMs: outcome.retryInMs,
+              };
       }
     }
   }
@@ -107,10 +119,11 @@ export function transition(
 /** When the next background refresh is due, or null when none is. */
 export function nextRefreshInMs(state: SessionState): number | null {
   switch (state.status) {
-    case 'bootstrapping':
+    case 'unreachable':
       return state.retryInMs;
     case 'active':
       return state.refreshInMs;
+    case 'bootstrapping':
     case 'signedOut':
       return null;
   }
@@ -135,7 +148,7 @@ export function hintsSignedIn(hint: string | null): boolean {
  */
 export interface SessionEffects {
   hint: string | null;
-  queries: 'clear' | null;
+  queries: 'clear' | 'refetch' | null;
 }
 
 export function sessionEffects(
@@ -148,8 +161,12 @@ export function sessionEffects(
   }
   if (prev.status === 'bootstrapping' && next.status === 'active') {
     // Nothing ran without the token: requests wait for the bootstrap (see
-    // `Session.settled`).
+    // `Session.sendAs`).
     return { hint: sessionHint(next), queries: null };
+  }
+  if (prev.status === 'unreachable' && next.status === 'active') {
+    // Every request failed unsent meanwhile: ask again, with the token.
+    return { hint: sessionHint(next), queries: 'refetch' };
   }
   return { hint: null, queries: null };
 }
@@ -161,20 +178,22 @@ export interface Session {
   /** Listeners run synchronously on every state change. */
   subscribe: (listener: SessionListener) => () => void;
   /**
-   * The state once a started bootstrap has settled who is signed in; the
-   * current state when none is under way. Every request waits for it, so
-   * none is sent without the token a restored session is about to have, and
-   * none answers as the wrong viewer. Without an `AuthProvider` (the root
-   * error page) no bootstrap starts and nothing waits.
+   * The session a request goes out in, once a started bootstrap has settled
+   * who is signed in (at once when none is under way). Every request waits
+   * for it, so none is sent without the token a restored session is about to
+   * have, and none answers as the wrong viewer. While the server cannot
+   * restore the session it rejects with `SessionUnreachableError`: the
+   * request fails as the network would, unsent. Without an `AuthProvider`
+   * (the root error page) no bootstrap starts and nothing waits.
    */
-  settled: () => Promise<SessionState>;
+  sendAs: () => Promise<SentAs>;
   dispatch: (event: SessionEvent) => void;
   /**
    * Exchange the refresh cookie for a new token. Resolves to that token when
    * it renewed the current session, else null (signed out meanwhile, the
    * server unreachable, or the session rejected). Never signs anyone in.
    */
-  refresh: () => Promise<string | null>;
+  refresh: (options?: RefreshOptions) => Promise<string | null>;
   /**
    * The token to send again a request that was sent as `sent` and rejected
    * as expired, or null when it must not be sent again: the session it was
@@ -188,6 +207,17 @@ export interface Session {
    * rotating the cookie, so it revokes the cookie the browser ends up with.
    */
   signOut: (revoke: () => Promise<unknown>) => Promise<void>;
+}
+
+/**
+ * A request was not sent: the server could not be asked whether the session
+ * on this browser still holds, so nobody is known to send it as.
+ */
+export class SessionUnreachableError extends Error {
+  constructor() {
+    super('The server is unreachable: the session could not be restored');
+    this.name = 'SessionUnreachableError';
+  }
 }
 
 /** The session a request was sent in, and the token it carried. */
@@ -208,7 +238,7 @@ export type SessionView = Pick<Session, 'getState' | 'subscribe'>;
 
 export interface SessionDeps {
   /** The one shared refresh (see `refresh-session.ts`). */
-  refresh: () => Promise<RefreshOutcome>;
+  refresh: (options?: RefreshOptions) => Promise<RefreshOutcome>;
   /** Runs `run` once no refresh is rotating the cookie. */
   withSettledCookie: <T>(run: () => Promise<T>) => Promise<T>;
 }
@@ -227,11 +257,11 @@ export function createSession(deps: SessionDeps): Session {
 
   let bootstrapStarted = false;
 
-  const refresh = async () => {
+  const refresh = async (options?: RefreshOptions) => {
     const { epoch, status } = state;
     if (status === 'signedOut') return null;
     if (status === 'bootstrapping') bootstrapStarted = true;
-    const outcome = await deps.refresh();
+    const outcome = await deps.refresh(options);
     dispatch({ type: 'refresh-settled', epoch, outcome });
     return outcome.status === 'refreshed' &&
       state.status === 'active' &&
@@ -247,19 +277,25 @@ export function createSession(deps: SessionDeps): Session {
     };
   };
 
+  const settled = (): Promise<SessionState> =>
+    state.status !== 'bootstrapping' || !bootstrapStarted
+      ? Promise.resolve(state)
+      : new Promise((resolve) => {
+          const unsubscribe = subscribe((next) => {
+            if (next.status === 'bootstrapping') return;
+            unsubscribe();
+            resolve(next);
+          });
+        });
+
   return {
     getState: () => state,
     subscribe,
-    settled: () =>
-      state.status !== 'bootstrapping' || !bootstrapStarted
-        ? Promise.resolve(state)
-        : new Promise((resolve) => {
-            const unsubscribe = subscribe((next) => {
-              if (next.status === 'bootstrapping') return;
-              unsubscribe();
-              resolve(next);
-            });
-          }),
+    async sendAs() {
+      const current = await settled();
+      if (current.status === 'unreachable') throw new SessionUnreachableError();
+      return sentAs(current);
+    },
     dispatch,
     refresh,
     async tokenForRetry(sent) {

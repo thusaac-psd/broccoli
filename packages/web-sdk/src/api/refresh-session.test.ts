@@ -189,6 +189,18 @@ test('while unreachable, refreshes back off without sending requests', async () 
   });
 });
 
+test('a refresh a person asked for is sent inside the backoff window', async () => {
+  const url = freshUrl();
+  const d = deps([respond(502), respond(502)]);
+  await refreshSession(url, d.value);
+
+  d.advance(400);
+  d.push(respond(200, SESSION));
+  const asked = await refreshSession(url, d.value, { immediate: true });
+  assert.equal(asked.status, 'refreshed');
+  assert.equal(d.calls.length, 3);
+});
+
 test('the backoff is capped', async () => {
   const url = freshUrl();
   const d = deps([]);

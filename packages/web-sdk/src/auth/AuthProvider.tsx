@@ -59,6 +59,7 @@ export function AuthProvider({
           }
         }
         if (queries === 'clear') queryClient.clear();
+        if (queries === 'refetch') void queryClient.invalidateQueries();
       }),
     [session, sessionStatusKey, queryClient],
   );
@@ -81,10 +82,10 @@ export function AuthProvider({
     return () => window.removeEventListener('storage', handleStorage);
   }, [session, sessionStatusKey]);
 
-  // Bootstrap. While the server is unreachable the session stays
-  // `bootstrapping` and retries, rather than concluding nobody is signed in.
-  // A layout effect, so it starts before any query's (passive) effect sends
-  // a request: those wait for it (see `Session.settled`).
+  // Bootstrap. While the server is unreachable the session is `unreachable`
+  // and retries, rather than concluding nobody is signed in. A layout
+  // effect, so it starts before any query's (passive) effect sends a
+  // request: those wait for it (see `Session.sendAs`).
   useLayoutEffect(() => {
     if (session.getState().status !== 'bootstrapping') return;
     let hinted = false;
@@ -129,8 +130,9 @@ export function AuthProvider({
     [apiClient, session],
   );
 
+  // A person asked (a retry button, a saved profile): ask the server now.
   const refresh = useCallback(async () => {
-    await session.refresh();
+    await session.refresh({ immediate: true });
   }, [session]);
 
   const value = useMemo(
@@ -138,6 +140,7 @@ export function AuthProvider({
       user: state.status === 'active' ? state.user : null,
       accessToken: state.status === 'active' ? state.token : null,
       isLoading: state.status === 'bootstrapping',
+      unreachable: state.status === 'unreachable',
       sessionExpired: state.status === 'signedOut' && state.expired,
       login,
       logout,

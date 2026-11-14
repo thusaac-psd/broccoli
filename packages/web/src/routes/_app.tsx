@@ -8,6 +8,7 @@ import { AppLayout } from '@/components/AppLayout';
 import { BaseProviders } from '@/components/BaseProviders';
 import { DocumentTitle } from '@/components/DocumentTitle';
 import { SessionExpiredPrompt } from '@/components/SessionExpiredPrompt';
+import { SessionGate } from '@/components/SessionGate';
 import { SlotPermissionsBridge } from '@/components/SlotPermissionsBridge';
 import { appConfig } from '@/config';
 import { ContestProvider } from '@/features/contest/contexts/contest-context';
@@ -29,7 +30,9 @@ export default function AppShell() {
                     <SubmissionNavigationProvider>
                       <DocumentTitle />
                       <AppLayout>
-                        <Outlet />
+                        <SessionGate>
+                          <Outlet />
+                        </SessionGate>
                       </AppLayout>
                       <SessionExpiredPrompt />
                     </SubmissionNavigationProvider>
