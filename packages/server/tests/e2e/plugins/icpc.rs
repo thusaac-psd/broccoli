@@ -782,10 +782,11 @@ async fn icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organiz
     let sub_path = format!("/api/v1/submissions/{sub_id}");
 
     // Peer (contestant A) reading contestant B's submission during the
-    // freeze: the submission reads as still running, with no result at all.
+    // freeze: the submission's outcome is hidden, with no result at all.
     let peer_res = app.get_with_token(&sub_path, &contestant_a).await;
     assert_eq!(peer_res.status, 200, "Peer read failed: {}", peer_res.text);
-    assert_eq!(peer_res.body["status"], "Running", "{}", peer_res.text);
+    assert!(peer_res.body["status"].is_null(), "{}", peer_res.text);
+    assert_eq!(peer_res.body["withheld"], json!({"reason": "hidden"}));
     assert!(peer_res.body["result"].is_null(), "{}", peer_res.text);
 
     // Owner (contestant B) reading their own submission during the same
@@ -960,7 +961,8 @@ async fn icpc_freeze_hides_a_peer_submission_status_from_lists_filters_and_sorts
         .into_iter()
         .find(|r| r["id"] == frozen)
         .unwrap_or_else(|| panic!("the unfiltered list shows the row: {}", res.text));
-    assert_eq!(row["status"], "Running", "{row}");
+    assert!(row["status"].is_null(), "{row}");
+    assert_eq!(row["withheld"], json!({"reason": "hidden"}), "{row}");
     assert!(row["verdict"].is_null(), "{row}");
 
     for query in [
@@ -992,7 +994,7 @@ async fn icpc_freeze_hides_a_peer_submission_status_from_lists_filters_and_sorts
         .get_with_token(&format!("/api/v1/submissions/{frozen}"), &peer)
         .await;
     assert_eq!(detail.status, 200, "{}", detail.text);
-    assert_eq!(detail.body["status"], "Running", "{}", detail.text);
+    assert!(detail.body["status"].is_null(), "{}", detail.text);
     assert!(detail.body["result"].is_null(), "{}", detail.text);
 
     let history = app
@@ -1002,7 +1004,7 @@ async fn icpc_freeze_hides_a_peer_submission_status_from_lists_filters_and_sorts
     let judgements = history.body.as_array().cloned().unwrap_or_default();
     assert!(!judgements.is_empty(), "{}", history.text);
     for judgement in judgements {
-        assert_eq!(judgement["status"], "Running", "{judgement}");
+        assert!(judgement["status"].is_null(), "{judgement}");
         assert!(judgement["verdict"].is_null(), "{judgement}");
     }
 }

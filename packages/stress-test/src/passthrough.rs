@@ -307,8 +307,8 @@ async fn run_one(
     };
 
     match client.wait_for_submission(submitted.id, timeout).await {
-        Ok(final_resp) => {
-            let label = label_for(final_resp.status, terminal_verdict(&final_resp));
+        Ok((status, final_resp)) => {
+            let label = label_for(status, terminal_verdict(&final_resp));
             SubResult {
                 verdict_label: Some(label),
                 error: None,

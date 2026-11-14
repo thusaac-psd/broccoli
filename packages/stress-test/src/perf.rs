@@ -348,9 +348,10 @@ async fn one_submission(
     let deadline = t0 + Duration::from_secs(args.per_job_timeout_secs);
     let poll = Duration::from_millis(args.poll_interval_ms.max(1));
     let mut status = sub.status;
+    // A withheld status (`None`) is never terminal.
     let mut verdict = None;
     let mut polls = 0;
-    while !status.is_terminal() && Instant::now() < deadline {
+    while !status.is_some_and(|s| s.is_terminal()) && Instant::now() < deadline {
         tokio::time::sleep(poll).await;
         polls += 1;
         if let Ok(s) = client.get_submission(sub.id).await {
@@ -360,7 +361,7 @@ async fn one_submission(
     }
     Ok(SubResult {
         id: sub.id,
-        terminal: status.is_terminal(),
+        terminal: status.is_some_and(|s| s.is_terminal()),
         status: format!("{status:?}"),
         verdict: verdict.map_or_else(|| "-".to_string(), |v| format!("{v:?}")),
         submit_ms,

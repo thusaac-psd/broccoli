@@ -131,7 +131,7 @@ pub(super) async fn apply_filter_to_judgement_response(
             vec![]
         },
         language: sub.language.clone(),
-        status: response.status,
+        status: Some(response.status),
         user_id: sub.user_id,
         username: user_model.username.clone(),
         problem_id: sub.problem_id,
@@ -142,6 +142,7 @@ pub(super) async fn apply_filter_to_judgement_response(
         target_worker_id: response.target_worker_id.clone(),
         created_at: sub.created_at,
         result: result_response,
+        withheld: None,
     };
 
     let filtered_value = apply_filter_to_response(kernel, synthetic_submission).await?;
@@ -194,7 +195,8 @@ pub(super) async fn apply_filter_to_judgement_response(
     })?;
 
     obj.insert("status".into(), filtered_value["status"].clone());
-    if filtered_value["status"] == "Running" && masked_result.is_null() {
+    obj.insert("withheld".into(), filtered_value["withheld"].clone());
+    if !filtered_value["withheld"].is_null() {
         obj.insert("is_finalized".into(), serde_json::Value::Bool(false));
         obj.insert("finalized_at".into(), serde_json::Value::Null);
     }

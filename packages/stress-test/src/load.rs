@@ -311,8 +311,7 @@ pub async fn run(
 
             let polled = client.wait_for_submission(submitted.id, per_job_timeout).await;
             match polled {
-                Ok(final_resp) => {
-                    let actual_status = final_resp.status;
+                Ok((actual_status, final_resp)) => {
                     let actual_verdict = final_resp
                         .result
                         .as_ref()

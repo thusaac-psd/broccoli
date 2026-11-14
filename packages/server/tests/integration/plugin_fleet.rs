@@ -579,8 +579,8 @@ async fn a_replica_with_different_files_is_flagged_and_keeps_its_running_version
 /// A visibility plugin that is enabled but cannot run on this replica (here:
 /// its files are missing, so there is no manifest) fails closed for what it
 /// governs, as recorded by the replica that loaded it, and only for that:
-/// those contests answer a retryable 503, contests of other types stay
-/// readable.
+/// those contests' submissions are withheld as unavailable, contests of other
+/// types are untouched.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_missing_visibility_plugin_fails_closed_only_for_its_contest_types() {
     use sea_orm::{ConnectionTrait, DbBackend, Statement};
@@ -616,21 +616,16 @@ async fn a_missing_visibility_plugin_fails_closed_only_for_its_contest_types() {
     let res = b
         .get_with_token(&routes::contest(governed), &outsider)
         .await;
-    assert_eq!(
-        res.status, 503,
-        "B cannot decide it, so cannot serve it: {}",
-        res.text
-    );
-    assert_eq!(res.body["code"], "PLUGIN_UNAVAILABLE");
-    assert!(res.headers.contains_key("retry-after"));
+    assert_eq!(res.status, 200, "a contest is a host record: {}", res.text);
+    assert_eq!(res.body["plugin_outage"], json!({"state": "unavailable"}));
     let res = b.get_with_token(&routes::contest(other), &outsider).await;
     assert_eq!(res.status, 200, "outside the plugin's scope: {}", res.text);
 }
 
 /// A disabled visibility plugin still governs the contest types it
-/// registered: their contests' submissions are unavailable, never served
-/// without the plugin's masks (a frozen scoreboard's verdicts). Contests of
-/// other types stay readable.
+/// registered: their contests' submissions are listed with their outcome
+/// withheld, never served without the plugin's masks (a frozen scoreboard's
+/// verdicts). Contests of other types stay readable.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_disabled_visibility_plugin_fails_closed_for_its_contest_types() {
     use sea_orm::{ConnectionTrait, DbBackend, Statement};
@@ -657,14 +652,14 @@ async fn a_disabled_visibility_plugin_fails_closed_for_its_contest_types() {
     }
     plugin_lifecycle::reconcile(&a.state).await.unwrap();
 
-    for path in [
-        routes::contest(governed),
-        routes::contest_submissions(governed),
-    ] {
-        let res = a.get_with_token(&path, &outsider).await;
-        assert_eq!(res.status, 503, "{path}: {}", res.text);
-        assert_eq!(res.body["code"], "PLUGIN_UNAVAILABLE", "{path}");
-    }
+    let res = a
+        .get_with_token(&routes::contest(governed), &outsider)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(
+        res.body["plugin_outage"],
+        json!({"state": "disabled", "plugin_id": PLUGIN})
+    );
     let res = a
         .get_with_token(&routes::contest_submissions(other), &outsider)
         .await;

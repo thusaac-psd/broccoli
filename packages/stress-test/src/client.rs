@@ -368,18 +368,20 @@ impl Client {
         .await
     }
 
-    /// Poll a submission until it reaches a terminal status.
+    /// Poll a submission until it reaches a terminal status, and return it
+    /// with that status. A submission whose outcome is withheld from this
+    /// client never shows one, so it fails at once.
     pub async fn wait_for_submission(
         &self,
         id: i32,
         timeout: Duration,
-    ) -> StressResult<SubmissionResponse> {
+    ) -> StressResult<(SubmissionStatus, SubmissionResponse)> {
         self.wait_until_terminal(
             "submission",
             id,
             timeout,
             || self.get_submission(id),
-            |s| &s.status,
+            |s| s.status.as_ref(),
         )
         .await
     }
@@ -395,9 +397,10 @@ impl Client {
             id,
             timeout,
             || self.get_code_run(id),
-            |r| &r.status,
+            |r| Some(&r.status),
         )
         .await
+        .map(|(_, run)| run)
     }
 
     /// Fetch every [`TERMINAL_POLL_INTERVAL`] until `status` of the fetched
@@ -408,17 +411,21 @@ impl Client {
         id: i32,
         timeout: Duration,
         fetch: impl Fn() -> F,
-        status: impl Fn(&T) -> &SubmissionStatus,
-    ) -> StressResult<T>
+        status: impl Fn(&T) -> Option<&SubmissionStatus>,
+    ) -> StressResult<(SubmissionStatus, T)>
     where
         F: std::future::Future<Output = StressResult<T>>,
     {
         let deadline = Instant::now() + timeout;
         loop {
             let value = fetch().await?;
-            let last = status(&value);
+            let Some(last) = status(&value).copied() else {
+                return Err(StressError::Other(anyhow::anyhow!(
+                    "{what} {id}'s outcome is withheld from this client"
+                )));
+            };
             if last.is_terminal() {
-                return Ok(value);
+                return Ok((last, value));
             }
             if Instant::now() >= deadline {
                 return Err(StressError::Other(anyhow::anyhow!(

@@ -1054,9 +1054,9 @@ async fn disabling_the_contest_plugin_mid_judging_finalizes_the_submission() {
     assert!(res.status < 300, "disable failed: {}", res.text);
     app.resume_worker();
 
-    // The judgement finalizes without its plugin. The submission itself is
-    // not served meanwhile: the plugin also decides what of it a viewer may
-    // see, and the host fails closed while it is not loaded.
+    // The judgement finalizes without its plugin. Staff see it as it is;
+    // the contestant sees the submission with its outcome withheld, since the
+    // plugin decides what of it a viewer may see.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
     let judgement = loop {
         let judgement = submission_judgement::Entity::find()
@@ -1079,8 +1079,19 @@ async fn disabling_the_contest_plugin_mid_judging_finalizes_the_submission() {
     let res = app
         .get_with_token(&format!("/api/v1/submissions/{sub_id}"), &admin)
         .await;
-    assert_eq!(res.status, 503, "{}", res.text);
-    assert_eq!(res.body["code"], "PLUGIN_UNAVAILABLE", "{}", res.text);
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(res.body["status"], "SystemError", "{}", res.text);
+    let res = app
+        .get_with_token(&format!("/api/v1/submissions/{sub_id}"), &contestant)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(res.body["status"].is_null(), "{}", res.text);
+    assert_eq!(
+        res.body["withheld"],
+        json!({"reason": "plugin_outage", "outage": {"state": "disabled", "plugin_id": "ioi"}}),
+        "{}",
+        res.text
+    );
     assert_eq!(
         judgement.error_code.as_deref(),
         Some("PLUGIN_SESSION_ABORTED")

@@ -33,6 +33,7 @@ use crate::models::submission::SubmissionListQuery;
 use crate::services::submission_feedback::public_status_sql;
 use crate::state::AppState;
 use crate::visibility::{Action, Decision, Resource, VisibilityKernel};
+use broccoli_api_types::submission::SubmissionListItem;
 
 /// Most rows decided in one kernel batch. The first chunk is one page plus
 /// the look-ahead row, so a list nothing hides costs one query and one
@@ -72,9 +73,13 @@ struct Cursor {
 
 impl ListOrder {
     /// The order a list query asks for (already validated by
-    /// `validate_sorting_params`). `can_view_all` picks which status a
+    /// `validate_sorting_params`). `sees_withheld` picks which status a
     /// status sort compares: the one this viewer sees.
-    pub fn from_query(sort_by: Option<&str>, sort_order: Option<&str>, can_view_all: bool) -> Self {
+    pub fn from_query(
+        sort_by: Option<&str>,
+        sort_order: Option<&str>,
+        sees_withheld: bool,
+    ) -> Self {
         Self {
             key: match sort_by {
                 Some("status") => SortKey::Status,
@@ -84,7 +89,7 @@ impl ListOrder {
                 Some("asc") => SortDir::Asc,
                 _ => SortDir::Desc,
             },
-            can_view_all,
+            can_view_all: sees_withheld,
         }
     }
 
@@ -202,7 +207,10 @@ pub(super) async fn visible_page(
     let mut chunk = per_page + 1;
     let mut shown = Vec::with_capacity(wanted);
     let listed = |decision: &Decision| {
-        !decision.hides(order.key_field()) && !filtered_on.iter().any(|f| decision.hides(f))
+        !decision.hides::<SubmissionListItem>(order.key_field())
+            && !filtered_on
+                .iter()
+                .any(|f| decision.hides::<SubmissionListItem>(f))
     };
 
     loop {

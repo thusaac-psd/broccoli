@@ -56,6 +56,18 @@ impl Subject {
         }
     }
 
+    /// Whether visibility plugins narrow what this subject sees. Staff - a
+    /// holder of `contest:manage` or `submission:view_all` - see contests as
+    /// the host rules show them, so plugins are never consulted for them and
+    /// a plugin that cannot decide takes nothing from their view. Plugin
+    /// authors rely on this: a visibility query is never asked about staff.
+    pub fn narrowed_by_plugins(&self) -> bool {
+        use broccoli_server_sdk::permissions as perm;
+        !self.admin_override
+            && !self.has_permission(perm::CONTEST_MANAGE)
+            && !self.has_permission(perm::SUBMISSION_VIEW_ALL)
+    }
+
     pub fn is_admin_override(&self) -> bool {
         self.admin_override
     }
@@ -151,6 +163,21 @@ impl Resource {
     /// problem it belongs to.
     pub fn wire_problem_id(&self) -> Option<i32> {
         self.problem_scope().map(|scope| scope.problem_id)
+    }
+
+    /// Whether a plugin that cannot decide on this resource withholds part
+    /// of it ([`super::Decision::Withheld`]). A contest and a clarification are
+    /// host records the host decides alone, so they stay as the host rules
+    /// show them; whether a problem part may be read, and a submission's
+    /// outcome, are the contest plugin's to decide.
+    pub fn degrades_in_outage(&self) -> bool {
+        match self {
+            Resource::Contest(_) | Resource::Clarification(_) => false,
+            Resource::Problem { .. }
+            | Resource::Sample { .. }
+            | Resource::Attachment { .. }
+            | Resource::Submission(_) => true,
+        }
     }
 
     /// The `(contest scope, problem)` pair of a problem part: the problem
