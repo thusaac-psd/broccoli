@@ -12,6 +12,8 @@
 !packages/**
 !plugins/
 !plugins/**
+!third_party/
+!third_party/**
 !release/lib/plugins.sh
 !docker-entrypoint-worker.sh
 

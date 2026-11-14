@@ -3,6 +3,8 @@
 
 target/
 **/*.wasm
+# Vendored crates ship their wasm as source.
+!third_party/**/*.wasm
 
 node_modules/
 dist/
