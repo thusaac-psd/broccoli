@@ -49,8 +49,17 @@ pub struct MissingPlatformTool {
     pub why: String,
 }
 
-/// The tool every judging plan with a standard checker mounts.
-const COMPARE_TOOL: &str = "broccoli-compare";
+use broccoli_types::types::{COMPARE_TOOL, PLATFORM_TOOLS};
+
+/// The declared platform tools `tools_dir` does not hold, in declaration
+/// order: every one of them when there is no tools directory.
+pub fn missing_platform_tools(tools_dir: Option<&std::path::Path>) -> Vec<String> {
+    PLATFORM_TOOLS
+        .iter()
+        .filter(|name| !tools_dir.is_some_and(|dir| dir.join(name).is_file()))
+        .map(|name| name.to_string())
+        .collect()
+}
 
 /// Where platform tools are when `[worker.tools] dir` is unset, from where
 /// the running binary is: the first of `<bin>/tools`, `<bin>/../../tools`
@@ -179,6 +188,12 @@ impl OperationTaskExecutor {
                     tool: name.clone(),
                     why,
                 };
+                if !PLATFORM_TOOLS.contains(&name.as_str()) {
+                    return Err(missing(format!(
+                        "not a platform tool; the platform tools are {}",
+                        PLATFORM_TOOLS.join(", ")
+                    )));
+                }
                 let Some(tools_dir) = self.operation_executor.tools_dir() else {
                     return Err(missing("no platform tools directory".into()));
                 };
@@ -449,23 +464,25 @@ fn report_tools_dir(tools_dir: Option<&std::path::Path>) {
         );
         return;
     };
-    match std::fs::read_dir(dir) {
-        Ok(entries) => {
-            let tools: Vec<String> = entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect();
-            info!(
-                tools_dir = %dir.display(),
-                resolvable_platform_tools = ?tools,
-                "Platform tools directory"
-            );
-        }
-        Err(e) => error!(
+    let missing = missing_platform_tools(Some(dir));
+    let resolvable: Vec<&str> = PLATFORM_TOOLS
+        .iter()
+        .copied()
+        .filter(|name| !missing.iter().any(|m| m == name))
+        .collect();
+    if missing.is_empty() {
+        info!(
             tools_dir = %dir.display(),
-            error = %e,
-            "The platform tools directory is not readable; jobs that need a platform tool fail on this worker"
-        ),
+            resolvable_platform_tools = ?resolvable,
+            "Platform tools directory"
+        );
+    } else {
+        error!(
+            tools_dir = %dir.display(),
+            resolvable_platform_tools = ?resolvable,
+            missing_platform_tools = ?missing,
+            "The platform tools directory lacks platform tools; jobs that need them fail on this worker"
+        );
     }
 }
 
@@ -645,6 +662,40 @@ mod platform_tool_validation_tests {
         executor
             .validate_platform_tools(&operation)
             .expect("resolvable platform tool must pass validation");
+    }
+
+    #[test]
+    fn only_declared_platform_tools_resolve_from_the_tools_dir() {
+        // A cargo target directory holds far more than the platform tools.
+        let tmp = tempfile::tempdir().unwrap();
+        for file in [
+            "broccoli-compare",
+            "server",
+            "worker",
+            "libcommon.rlib",
+            ".cargo-lock",
+        ] {
+            std::fs::write(tmp.path().join(file), b"").unwrap();
+        }
+        let executor = executor_with_tools_dir(Some(tmp.path().to_path_buf()));
+        for name in ["server", "worker", ".cargo-lock"] {
+            let operation = operation_with_steps(vec![step_with_mounts(
+                "check",
+                vec![platform_tool_mount(name)],
+            )]);
+            let err = executor
+                .validate_platform_tools(&operation)
+                .expect_err("a file in the tools dir is not a platform tool");
+            assert!(err.to_string().contains("not a platform tool"), "{err}");
+        }
+        assert!(missing_platform_tools(Some(tmp.path())).is_empty());
+    }
+
+    #[test]
+    fn missing_platform_tools_lists_the_declared_tools_a_dir_lacks() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(missing_platform_tools(Some(tmp.path())), vec![COMPARE_TOOL]);
+        assert_eq!(missing_platform_tools(None), vec![COMPARE_TOOL]);
     }
 
     #[test]

@@ -40,8 +40,7 @@ const BUILTIN_CHECK_MEMORY_LIMIT_KB: u32 = 256 * 1024;
 /// evaluator adds the `depends_on` edge on `exec` when it splices the stage.
 pub(crate) const SOLUTION_EXEC_STEP_ID: &str = "exec";
 
-/// PlatformTool name + in-sandbox path for the native comparator binary.
-const BROCCOLI_COMPARE_TOOL: &str = "broccoli-compare";
+/// In-sandbox path of the native comparator (`COMPARE_TOOL`).
 const BROCCOLI_COMPARE_PATH: &str = "/tools/broccoli-compare";
 
 const ANSWER_FILE: &str = "answer.txt";
@@ -168,7 +167,7 @@ pub fn resolve_builtin(
         mounts: vec![MountSpec {
             inside_path: BROCCOLI_COMPARE_PATH.to_string(),
             source: MountSource::PlatformTool {
-                name: BROCCOLI_COMPARE_TOOL.to_string(),
+                name: COMPARE_TOOL.to_string(),
             },
         }],
     };
@@ -580,7 +579,7 @@ mod tests {
         assert_eq!(check.mounts.len(), 1);
         assert_eq!(check.mounts[0].inside_path, BROCCOLI_COMPARE_PATH);
         match &check.mounts[0].source {
-            MountSource::PlatformTool { name } => assert_eq!(name, BROCCOLI_COMPARE_TOOL),
+            MountSource::PlatformTool { name } => assert_eq!(name, COMPARE_TOOL),
             other => panic!("expected PlatformTool mount, got {other:?}"),
         }
 
