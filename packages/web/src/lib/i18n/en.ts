@@ -76,12 +76,13 @@ export const en = {
   'error.crash.title': 'Something went wrong',
   'error.crash.desc':
     'The page hit an unexpected error. Your submissions and contest data are safe on the server; reloading usually fixes it.',
+  'error.connection.title': 'Connection lost',
+  'error.connection.retrying':
+    'The server is not answering. This page keeps trying and continues by itself once it is back.',
   'error.chunk.title': 'Part of the page did not load',
   'error.chunk.desc':
     'The connection may have dropped, or the site was just updated. Your submissions and contest data are safe on the server; check your connection and reload.',
   'error.chunk.reloading': 'Reloading to get the latest version…',
-  'error.offline.desc':
-    'You are offline. Your submissions and contest data are safe on the server; the page reloads by itself once the connection is back.',
   'error.action.reload': 'Reload page',
   'error.action.retry': 'Try again',
   'error.action.back': 'Go back',

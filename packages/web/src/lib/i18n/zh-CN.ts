@@ -73,12 +73,13 @@ export const zhCN: Catalog = {
   'error.crash.title': '出错了',
   'error.crash.desc':
     '页面遇到了意外错误。你的提交和比赛数据都安全地保存在服务器上，重新加载通常即可解决。',
+  'error.connection.title': '连接已断开',
+  'error.connection.retrying':
+    '服务器暂时无响应。页面会持续重试，恢复后自动继续。',
   'error.chunk.title': '页面部分内容未能加载',
   'error.chunk.desc':
     '可能是网络连接中断，或网站刚刚更新。你的提交和比赛数据都安全地保存在服务器上，请检查网络连接后重新加载。',
   'error.chunk.reloading': '正在重新加载以获取最新版本…',
-  'error.offline.desc':
-    '当前处于离线状态。你的提交和比赛数据都安全地保存在服务器上，网络恢复后页面会自动重新加载。',
   'error.action.reload': '重新加载页面',
   'error.action.retry': '重试',
   'error.action.back': '返回',
