@@ -20,8 +20,9 @@ test('date-times follow the UI locale, not a hand-built pattern', () => {
   assert.match(en, /Nov 14, 2026/);
 });
 
-test('a date-time can name its time zone', () => {
-  assert.match(formatDateTime(AT, 'en', { timeZoneName: true }), /(UTC|GMT)/);
+test('every date-time names its time zone, in every locale', () => {
+  assert.match(formatDateTime(AT, 'en'), /(UTC|GMT)/);
+  assert.match(formatDateTime(AT, 'zh-CN'), /(UTC|GMT)/);
 });
 
 test('relative times use the locale plural rules and say now for a fresh one', () => {

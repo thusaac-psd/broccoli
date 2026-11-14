@@ -35,10 +35,8 @@ export function ContestSelector({ contests }: { contests: ContestSummary[] }) {
                 <div className="font-medium">{contest.title}</div>
                 <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1.5">
                   <CalendarDays className="h-3 w-3" />
-                  {format.dateTime(contest.start_time, {
-                    timeZoneName: true,
-                  })}{' '}
-                  — {format.dateTime(contest.end_time, { timeZoneName: true })}
+                  {format.dateTime(contest.start_time)} —{' '}
+                  {format.dateTime(contest.end_time)}
                 </div>
               </div>
               <Badge variant={variant} className="shrink-0">

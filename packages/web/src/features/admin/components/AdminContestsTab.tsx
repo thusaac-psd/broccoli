@@ -951,7 +951,7 @@ function useContestColumns({
       sortKey: 'start_time',
       cell: ({ row }) => (
         <span className="text-muted-foreground">
-          {format.dateTime(row.original.start_time, { timeZoneName: true })}
+          {format.dateTime(row.original.start_time)}
         </span>
       ),
     },
@@ -961,7 +961,7 @@ function useContestColumns({
       size: 180,
       cell: ({ row }) => (
         <span className="text-muted-foreground">
-          {format.dateTime(row.original.end_time, { timeZoneName: true })}
+          {format.dateTime(row.original.end_time)}
         </span>
       ),
     },

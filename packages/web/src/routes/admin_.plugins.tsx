@@ -171,8 +171,7 @@ export default function PluginsPage() {
                 <li key={contest.id}>
                   {contest.title}{' '}
                   <span className="text-muted-foreground">
-                    ({format.dateTime(contest.end_time, { timeZoneName: true })}
-                    )
+                    ({format.dateTime(contest.end_time)})
                   </span>
                 </li>
               ))}
