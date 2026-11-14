@@ -21,16 +21,23 @@ permissions = [
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/icpc/contests/{contest_id}/standings"
+contest = "{contest_id}"
+contest_type = "icpc"
 handler = "api_standings"
 
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/icpc/contests/{contest_id}/info"
+contest = "{contest_id}"
+contest_type = "icpc"
 handler = "api_contest_info"
 
 [[server.routes]]
 method = "POST"
 path = "/api/plugins/icpc/contests/{contest_id}/reveal"
+permission = "contest:manage"
+contest = "{contest_id}"
+contest_type = "icpc"
 handler = "api_reveal"
 
 [[server.queries]]

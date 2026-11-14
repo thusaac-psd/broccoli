@@ -34,31 +34,47 @@ function = "on_timer"
 [[server.routes]]
 method = "POST"
 path = "/api/plugins/codelink-bracket/contests/{contest_id}/setup"
+permission = "contest:manage"
+contest = "{contest_id}"
+contest_type = "codelink-bracket"
 handler = "api_setup"
 
 [[server.routes]]
 method = "POST"
 path = "/api/plugins/codelink-bracket/contests/{contest_id}/matches/{match_id}/order"
+access = "participant"
+contest = "{contest_id}"
+contest_type = "codelink-bracket"
 handler = "api_order"
 
 [[server.routes]]
 method = "POST"
 path = "/api/plugins/codelink-bracket/contests/{contest_id}/matches/{match_id}/start"
+permission = "contest:manage"
+contest = "{contest_id}"
+contest_type = "codelink-bracket"
 handler = "api_start"
 
 [[server.routes]]
 method = "POST"
 path = "/api/plugins/codelink-bracket/contests/{contest_id}/matches/{match_id}/force-decide"
+permission = "contest:manage"
+contest = "{contest_id}"
+contest_type = "codelink-bracket"
 handler = "api_force_decide"
 
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/codelink-bracket/contests/{contest_id}/bracket"
+contest = "{contest_id}"
+contest_type = "codelink-bracket"
 handler = "api_get_bracket"
 
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/codelink-bracket/contests/{contest_id}/matches/{match_id}"
+contest = "{contest_id}"
+contest_type = "codelink-bracket"
 handler = "api_get_match"
 
 [web]
@@ -130,4 +146,7 @@ mode = "optional"
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/codelink-bracket/contests/{contest_id}/setup"
+permission = "contest:manage"
+contest = "{contest_id}"
+contest_type = "codelink-bracket"
 handler = "api_get_setup"

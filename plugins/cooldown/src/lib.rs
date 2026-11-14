@@ -122,17 +122,11 @@ mod plugin {
         host: &Host,
         req: &PluginHttpRequest,
     ) -> Result<PluginHttpResponse, ApiError> {
-        let user_id = req
-            .require_user_id()
-            .map_err(|_| PluginHttpResponse::error(401, "Authentication required"))?;
-
-        let contest_id: Option<i32> = req.params.get("contest_id").and_then(|s| s.parse().ok());
-        let problem_id: i32 = req.param("problem_id")?;
-
-        // Contest access check (only when contest_id is present)
-        if let Some(contest_id) = contest_id {
-            contest::check_problem_access(host, req, contest_id, user_id, problem_id)?;
-        }
+        // The host checked the caller may reach the problem (as a
+        // participant, inside a contest) before this runs.
+        let user_id = req.require_user_id()?;
+        let contest_id = req.contest.as_ref().map(|c| c.id);
+        let problem_id = req.problem_id()?;
 
         let eff = host
             .config

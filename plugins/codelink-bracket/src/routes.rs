@@ -39,24 +39,18 @@ fn drive_error(error: DriveError) -> ApiError {
 
 /// Handle `POST /matches/{match_id}/start`. Staff only (`contest:manage`).
 pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpResponse, ApiError> {
-    let contest_id: i32 = req.param("contest_id")?;
+    let info = req.contest()?;
+    let contest_id = info.id;
     let match_id: u8 = req.param("match_id")?;
-    let info = contest::check_access(host, req, contest_id)?;
-    info.require_type("codelink-bracket")?;
-    if !req.has_permission(perm::CONTEST_MANAGE) {
-        return Err(
-            PluginHttpResponse::error(403, "Starting a match requires contest:manage").into(),
-        );
-    }
 
     let setup = storage::load_setup(host, contest_id)?
         .ok_or_else(|| PluginHttpResponse::error(400, "The bracket has not been set up yet"))?;
     let current = storage::load_match(host, contest_id, match_id)?
         .ok_or_else(|| PluginHttpResponse::error(404, "Match not found"))?;
-    if info.phase == "before" {
+    if info.phase.stage() == "before" {
         return Err(PluginHttpResponse::error(400, "The contest has not started yet").into());
     }
-    if info.phase == "after" {
+    if info.phase.stage() == "after" {
         return Err(PluginHttpResponse::error(400, "The contest has ended").into());
     }
     let event = if setup.is_scheduled(current.round) {
@@ -106,17 +100,8 @@ pub fn handle_force_decide(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let contest_id: i32 = req.param("contest_id")?;
+    let contest_id = req.contest()?.id;
     let match_id: u8 = req.param("match_id")?;
-    let info = contest::check_access(host, req, contest_id)?;
-    info.require_type("codelink-bracket")?;
-    if !req.has_permission(perm::CONTEST_MANAGE) {
-        return Err(PluginHttpResponse::error(
-            403,
-            "Force-deciding a match requires contest:manage",
-        )
-        .into());
-    }
 
     let body: ForceDecideRequest = match req.body.clone() {
         Some(v) => serde_json::from_value(v)
@@ -464,18 +449,15 @@ fn attach_player_names(host: &Host, views: &mut [MatchView]) {
 }
 
 /// Handle `GET /bracket`: every match created so far, visibility-filtered
-/// for the requesting viewer. Any contest participant (or, for a public
-/// contest, anyone) may call this -- `contest::check_access` is the only
-/// gate; per-problem visibility narrows what each viewer actually sees
-/// within the response, same division of labour as the `visibility` query
-/// topic itself.
+/// for the requesting viewer. Anyone who may read the contest may call this
+/// (the host checks it before the handler runs); per-problem visibility
+/// narrows what each viewer actually sees within the response, same
+/// division of labour as the `visibility` query topic itself.
 pub fn handle_get_bracket(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let contest_id: i32 = req.param("contest_id")?;
-    let info = contest::check_access(host, req, contest_id)?;
-    info.require_type("codelink-bracket")?;
+    let contest_id = req.contest()?.id;
 
     let Some(setup) = storage::load_setup(host, contest_id)? else {
         // Before /setup has run there is nothing to show yet -- an empty
@@ -520,10 +502,8 @@ pub fn handle_get_match(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let contest_id: i32 = req.param("contest_id")?;
+    let contest_id = req.contest()?.id;
     let match_id: u8 = req.param("match_id")?;
-    let info = contest::check_access(host, req, contest_id)?;
-    info.require_type("codelink-bracket")?;
 
     let setup = storage::load_setup(host, contest_id)?
         .ok_or_else(|| PluginHttpResponse::error(404, "The bracket has not been set up yet"))?;
@@ -603,7 +583,7 @@ fn attach_own_feedback(
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::{queue_bracket_contest_info, queue_now, seed, setup_two_rounds};
+    use crate::test_support::{bracket_contest, queue_now, seed, setup_two_rounds};
     use std::collections::HashMap;
 
     use super::*;
@@ -636,6 +616,8 @@ mod tests {
             headers: HashMap::new(),
             body: None,
             auth,
+            contest: Some(bracket_contest(contest_id, ContestPhase::Running)),
+            problem_id: None,
         }
     }
 
@@ -658,29 +640,8 @@ mod tests {
     }
 
     #[test]
-    fn handle_start_rejects_a_non_staff_caller() {
-        let host = Host::mock();
-        queue_bracket_contest_info(&host);
-        let setup = setup_two_rounds();
-        let mut m = match_in_ordering();
-        m.order_a = Some(vec![103, 101, 102]);
-        m.order_b = Some(vec![203, 201, 202]);
-        seed(&host, 7, &setup, storage::match_id_for(16, 1, 0), &m);
-
-        // Non-staff rejections come back as `Err(ApiError::Response(..))`, not
-        // `Ok(..)` -- see `ordering::handle_order`'s staff-check convention.
-        let err = handle_start(
-            &host,
-            &request(7, storage::match_id_for(16, 1, 0), Some(player_auth(10))),
-        )
-        .unwrap_err();
-        assert_eq!(err.into_response().status, 403);
-    }
-
-    #[test]
     fn staff_start_cannot_bypass_an_incomplete_previous_stage() {
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         let mut m = match_in_ordering();
         m.round = 2;
         let id = storage::match_id_for(16, 2, 0);
@@ -696,7 +657,6 @@ mod tests {
     #[test]
     fn handle_start_overrides_a_missing_ranking_with_the_listed_order() {
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         let setup = setup_two_rounds();
         let mut m = match_in_ordering();
         m.order_a = Some(vec![103, 101, 102]);
@@ -717,7 +677,6 @@ mod tests {
     #[test]
     fn handle_start_opens_the_first_xiaoju_and_schedules_its_deadline() {
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         let setup = setup_two_rounds();
         let mut m = match_in_ordering();
         m.order_a = Some(vec![103, 101, 102]);
@@ -745,24 +704,8 @@ mod tests {
     // -- handle_force_decide (host wiring) --
 
     #[test]
-    fn handle_force_decide_rejects_a_non_staff_caller() {
-        let host = Host::mock();
-        queue_bracket_contest_info(&host);
-        let setup = setup_two_rounds();
-        let mut m = match_in_ordering();
-        m.phase = Phase::NeedsAdjudication {
-            adjudication: crate::model::Adjudication::TiebreakExhausted,
-        };
-        seed(&host, 7, &setup, 0, &m);
-
-        let err = handle_force_decide(&host, &request(7, 0, Some(player_auth(10)))).unwrap_err();
-        assert_eq!(err.into_response().status, 403);
-    }
-
-    #[test]
     fn handle_force_decide_rejects_a_winner_who_is_not_a_participant() {
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         let setup = setup_two_rounds();
         let mut m = match_in_ordering();
         m.phase = Phase::NeedsAdjudication {
@@ -780,7 +723,6 @@ mod tests {
     #[test]
     fn handle_force_decide_with_an_explicit_winner_resolves_adjudication() {
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         let setup = setup_two_rounds();
         let mut m = match_in_ordering();
         m.phase = Phase::NeedsAdjudication {
@@ -807,7 +749,6 @@ mod tests {
     #[test]
     fn awarding_a_decided_match_again_is_a_conflict() {
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         let mut m = match_in_ordering();
         m.phase = Phase::Decided {
             winner: 10,
@@ -828,7 +769,6 @@ mod tests {
         // AC recorded, is decided scoreless exactly as if its deadline
         // wakeup had just fired.
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         let setup = setup_two_rounds();
         let mut m = match_in_ordering();
         m.phase = Phase::Playing;
@@ -1063,6 +1003,8 @@ mod tests {
             headers: HashMap::new(),
             body: None,
             auth,
+            contest: Some(bracket_contest(contest_id, ContestPhase::Running)),
+            problem_id: None,
         }
     }
 
@@ -1072,7 +1014,6 @@ mod tests {
         // (including a problem the owner has not reached yet) to the owner
         // themself.
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         seed_match_in_progress(&host, 7);
 
         let resp = handle_get_match(&host, &get_request(7, 0, Some(player_auth(10)))).unwrap();
@@ -1088,7 +1029,6 @@ mod tests {
     #[test]
     fn get_match_hides_the_opponents_group_after_ordering() {
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         seed_match_in_progress(&host, 7);
 
         let resp = handle_get_match(&host, &get_request(7, 0, Some(player_auth(20)))).unwrap();
@@ -1099,7 +1039,6 @@ mod tests {
     #[test]
     fn get_match_hides_everything_from_an_uninvolved_anonymous_viewer() {
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         seed_match_in_progress(&host, 7);
 
         let resp = handle_get_match(&host, &get_request(7, 0, None)).unwrap();
@@ -1114,7 +1053,6 @@ mod tests {
     #[test]
     fn get_match_view_all_sees_everything() {
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         seed_match_in_progress(&host, 7);
 
         let mut auth = player_auth(999);
@@ -1128,7 +1066,6 @@ mod tests {
     #[test]
     fn get_match_returns_404_for_a_match_that_was_never_created() {
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         host.storage
             .set(&[(
                 storage::setup_key(7).as_str(),
@@ -1150,13 +1087,14 @@ mod tests {
             headers: HashMap::new(),
             body: None,
             auth,
+            contest: Some(bracket_contest(contest_id, ContestPhase::Running)),
+            problem_id: None,
         }
     }
 
     #[test]
     fn get_bracket_returns_an_empty_list_before_setup_has_run() {
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         let resp = handle_get_bracket(&host, &bracket_request(7, Some(player_auth(10)))).unwrap();
         assert_eq!(resp.status, 200);
         assert_eq!(resp.body.unwrap()["matches"], serde_json::json!([]));
@@ -1165,7 +1103,6 @@ mod tests {
     #[test]
     fn get_bracket_masks_each_match_for_the_requesting_viewer() {
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         seed_match_in_progress(&host, 7);
 
         let resp = handle_get_bracket(&host, &bracket_request(7, Some(player_auth(10)))).unwrap();
@@ -1184,7 +1121,6 @@ mod tests {
             (Some("同名选手"), "同名选手"),
         ] {
             let host = Host::mock();
-            queue_bracket_contest_info(&host);
             seed_match_in_progress(&host, 7);
             host.db.queue_query_result(serde_json::json!([
                 { "user_id": 10, "username": "alice", "display_name": " 同名选手 " },
@@ -1204,7 +1140,6 @@ mod tests {
     #[test]
     fn get_bracket_still_renders_when_the_name_lookup_returns_nothing() {
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         seed_match_in_progress(&host, 7);
         host.db.queue_query_result(serde_json::json!([]));
 
