@@ -1677,6 +1677,7 @@ mod tests {
                     status: SubmissionStatus::Judged,
                     verdict: Some(verdict.clone()),
                     user_id: 7,
+                    display_name: "Alice".into(),
                     username: "alice".into(),
                     problem_id: *problem_id,
                     problem_title: title.to_string(),

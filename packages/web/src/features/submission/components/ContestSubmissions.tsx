@@ -276,7 +276,13 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
           {(result) => (
             <SubmissionsTable
               submissions={result.data}
-              columns={SubmissionsTable.fullColumns}
+              // Rows of other people (a public submissions list) say whose
+              // they are.
+              columns={
+                result.data.some((s) => s.user_id !== user?.id)
+                  ? SubmissionsTable.peerColumns
+                  : SubmissionsTable.fullColumns
+              }
               {...bulk.tableSelection}
               linkBuilder={(sub) =>
                 `/contests/${contestId}/submissions/${sub.id}`

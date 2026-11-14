@@ -6,7 +6,7 @@ import type {
   SubmissionSummary,
 } from '@broccoli/web-sdk/submission';
 import { Badge, Button, QueryView } from '@broccoli/web-sdk/ui';
-import { formatKibibytes } from '@broccoli/web-sdk/utils';
+import { formatKibibytes, getUserDisplayName } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
 import {
   Check,
@@ -58,7 +58,7 @@ const FULL_COLUMNS: SubmissionsTableColumn[] = [
   { key: 'submitted', align: 'right' },
 ];
 
-const ADMIN_COLUMNS: SubmissionsTableColumn[] = [
+const PEER_COLUMNS: SubmissionsTableColumn[] = [
   { key: 'problem', align: 'left' },
   { key: 'user', align: 'left' },
   { key: 'verdict', align: 'left' },
@@ -251,8 +251,8 @@ SubmissionsTable.fullColumns = FULL_COLUMNS;
 /** Columns for compact/panel view (no problem title). */
 SubmissionsTable.compactColumns = DEFAULT_COLUMNS;
 
-/** Columns for admin views (adds username next to problem). */
-SubmissionsTable.adminColumns = ADMIN_COLUMNS;
+/** The full columns and the submitter, for a list of several people's rows. */
+SubmissionsTable.peerColumns = PEER_COLUMNS;
 
 function SubmissionRow({
   submission,
@@ -332,7 +332,9 @@ function SubmissionRow({
     user: () => (
       <td key="user" className={`${px} ${py}`}>
         <div className="flex flex-col gap-0.5 min-w-0">
-          <span className="font-medium truncate">{submission.username}</span>
+          <span className="font-medium truncate">
+            {getUserDisplayName(submission)}
+          </span>
           <span className="text-[10px] font-mono text-muted-foreground">
             #{submission.user_id}
             {submission.contest_id != null && (

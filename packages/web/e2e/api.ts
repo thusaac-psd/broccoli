@@ -173,7 +173,7 @@ const contestProblems = PROBLEM_TITLES.map((title, i) => ({
   position: i,
 }));
 
-const submission = (id: number, userId: number, verdict: string) => ({
+export const submission = (id: number, userId: number, verdict: string) => ({
   id,
   contest_id: 1,
   contest_type: 'icpc',
@@ -181,6 +181,7 @@ const submission = (id: number, userId: number, verdict: string) => ({
   problem_title: PROBLEM_TITLES[id % 3],
   user_id: userId,
   username: userId === 1 ? 'admin' : 'alice',
+  display_name: userId === 1 ? 'Admin' : 'Alice',
   language: 'cpp',
   status: 'Judged',
   verdict,
@@ -198,7 +199,7 @@ const SUBMISSIONS = [
   submission(1, 2, 'TimeLimitExceeded'),
 ];
 
-const cursorPage = <T>(data: T[]) => ({
+export const cursorPage = <T>(data: T[]) => ({
   data,
   pagination: {
     has_more: false,

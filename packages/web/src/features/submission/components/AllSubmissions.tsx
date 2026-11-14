@@ -228,7 +228,7 @@ export function AllSubmissions() {
           {(result) => (
             <SubmissionsTable
               submissions={result.data}
-              columns={SubmissionsTable.adminColumns}
+              columns={SubmissionsTable.peerColumns}
               {...bulk.tableSelection}
               linkBuilder={(sub) =>
                 sub.contest_id

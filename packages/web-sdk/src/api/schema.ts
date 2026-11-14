@@ -4351,6 +4351,11 @@ export interface components {
        */
       created_at: string;
       /**
+       * @description The name the submitter shows to others.
+       * @example Alice
+       */
+      display_name: string;
+      /**
        * Format: int32
        * @example 1
        */
