@@ -4940,7 +4940,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description What the archive replaces (`replaces`) is no longer what is published: another change landed since the archive was inspected (CONFLICT) */
+      /** @description What the archive replaces (`replaces`) is no longer what is published: another change landed since the archive was inspected (CONFLICT); or `replaces` is `new` but a plugin with this id exists (PLUGIN_EXISTS) */
       409: {
         headers: {
           [name: string]: unknown;

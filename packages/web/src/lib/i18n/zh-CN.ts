@@ -1240,6 +1240,7 @@ export const zhCN: Catalog = {
   'apiError.TOKEN_INVALID': '登录已失效，请重新登录。',
   'apiError.PERMISSION_DENIED': '您没有执行此操作的权限。',
   'apiError.CONTEST_NOT_REGISTERED': '请先报名参加此比赛。',
+  'apiError.PLUGIN_EXISTS': '已存在同 ID 的插件，请以替换方式上传。',
   'apiError.USERNAME_TAKEN': '该用户名已被占用。',
   'apiError.PAYLOAD_TOO_LARGE': '上传内容过大。',
   'apiError.METHOD_NOT_ALLOWED': '不支持此操作。',

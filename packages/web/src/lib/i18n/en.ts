@@ -1324,6 +1324,8 @@ export const en = {
   'apiError.TOKEN_INVALID': 'Your session has ended. Sign in again.',
   'apiError.PERMISSION_DENIED': 'You do not have permission to do this.',
   'apiError.CONTEST_NOT_REGISTERED': 'Register for this contest first.',
+  'apiError.PLUGIN_EXISTS':
+    'A plugin with this id already exists. Upload it as a replacement instead.',
   'apiError.USERNAME_TAKEN': 'That username is already taken.',
   'apiError.PAYLOAD_TOO_LARGE': 'The upload is too large.',
   'apiError.METHOD_NOT_ALLOWED': 'This action is not supported.',

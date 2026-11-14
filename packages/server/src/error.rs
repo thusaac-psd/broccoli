@@ -33,6 +33,8 @@ pub enum AppError {
     MethodNotAllowed,
     Conflict(String),
     UsernameTaken,
+    /// An upload meant to add a new plugin, but one with its id exists.
+    PluginExists(String),
     PluginNotReady(String),
     /// A valid plugin archive whose plugin failed to load or initialize on
     /// the serving replica; nothing was published.
@@ -126,6 +128,16 @@ impl AppError {
             AppError::UsernameTaken => (
                 StatusCode::CONFLICT,
                 simple("USERNAME_TAKEN", "Username is already taken".into()),
+            ),
+            AppError::PluginExists(id) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    code: "PLUGIN_EXISTS".into(),
+                    message: format!(
+                        "Plugin '{id}' already exists; upload it as a replacement instead"
+                    ),
+                    details: Some(serde_json::json!({ "plugin_id": id })),
+                },
             ),
             AppError::PluginNotReady(msg) => {
                 (StatusCode::BAD_REQUEST, simple("PLUGIN_NOT_READY", msg))
