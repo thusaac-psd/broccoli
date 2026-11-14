@@ -29,7 +29,7 @@ for (const path of TABLE_PAGES) {
 
     const broken = await page.evaluate(() => {
       const found: string[] = [];
-      for (const cell of document.querySelectorAll('th, td')) {
+      for (const cell of Array.from(document.querySelectorAll('th, td'))) {
         const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
         for (let node = walker.nextNode(); node; node = walker.nextNode()) {
           const text = node.textContent?.trim() ?? '';
@@ -37,7 +37,9 @@ for (const path of TABLE_PAGES) {
           const range = document.createRange();
           range.selectNodeContents(node);
           const lines = new Set(
-            [...range.getClientRects()].map((rect) => Math.round(rect.top)),
+            Array.from(range.getClientRects()).map((rect) =>
+              Math.round(rect.top),
+            ),
           ).size;
           if (lines > text.split(/\s+/).length) found.push(text);
         }
