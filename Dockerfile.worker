@@ -308,11 +308,13 @@ RUN ( apt-get update || ( \
     fpc -iV | grep -Fq "3.0.4" || { echo "fpc != 3.0.4"; fpc -iV; exit 1; }
 
 # kotlin is not in focal apt -> install the pinned official compiler tarball
-# (keeps the language; JDK for kotlinc is inherited from runtime-icpc).
+# (keeps the language; JDK for kotlinc is inherited from runtime-icpc). It goes
+# under /usr: the sandbox mounts /usr but not /opt, so a compiler under /opt is
+# invisible to the compile step.
 RUN curl -fsSL -o /tmp/kotlin.zip \
       "https://github.com/JetBrains/kotlin/releases/download/v${KOTLIN_VERSION}/kotlin-compiler-${KOTLIN_VERSION}.zip" && \
-    unzip -q /tmp/kotlin.zip -d /opt && \
+    unzip -q /tmp/kotlin.zip -d /usr/local/lib && \
     rm /tmp/kotlin.zip && \
-    ln -s /opt/kotlinc/bin/kotlinc /usr/local/bin/kotlinc && \
-    ln -s /opt/kotlinc/bin/kotlin  /usr/local/bin/kotlin && \
+    ln -s /usr/local/lib/kotlinc/bin/kotlinc /usr/local/bin/kotlinc && \
+    ln -s /usr/local/lib/kotlinc/bin/kotlin  /usr/local/bin/kotlin && \
     kotlinc -version 2>&1 | grep -Fq "${KOTLIN_VERSION}" || { echo "kotlin != ${KOTLIN_VERSION}"; kotlinc -version; exit 1; }

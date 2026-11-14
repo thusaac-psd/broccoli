@@ -3,3 +3,8 @@
 'lang.c' = 'C'
 'lang.python3' = 'Python 3'
 'lang.java' = 'Java'
+'lang.kotlin' = 'Kotlin'
+'lang.rust' = 'Rust'
+'lang.go' = 'Go'
+'lang.pascal' = 'Pascal'
+'lang.javascript' = 'JavaScript'

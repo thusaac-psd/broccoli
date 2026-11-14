@@ -234,23 +234,19 @@ broccoli config
 
 ## 语言
 
-Broccoli 根据你的文件扩展名识别语言。想用其他语言时，设置 `-l` 或你的 `language` 默认值。一场比赛接受哪些语言，由其组织者决定。
+Broccoli 根据你的文件扩展名，在服务器提供的语言中识别语言。想用其他语言时，设置 `-l` 或你的 `language` 默认值。装有内置 standard-languages 插件的服务器提供下表中的语言，一场比赛接受其中哪些，由组织者决定。
 
-| 扩展名               | 语言         |
-| -------------------- | ------------ |
-| `.c`                 | `c`          |
-| `.cpp` `.cc` `.cxx`  | `cpp`        |
-| `.py`                | `python3`    |
-| `.java`              | `java`       |
-| `.rs`                | `rust`       |
-| `.go`                | `go`         |
-| `.js`                | `javascript` |
-| `.ts`                | `typescript` |
-| `.kt`                | `kotlin`     |
-| `.swift`             | `swift`      |
-| `.rb`                | `ruby`       |
-| `.hs`                | `haskell`    |
-| `.cs`                | `csharp`     |
+| 扩展名                     | 语言         |
+| -------------------------- | ------------ |
+| `.c`                       | `c`          |
+| `.cpp` `.cc` `.cxx` `.c++` | `cpp`        |
+| `.py`                      | `python3`    |
+| `.java`                    | `java`       |
+| `.kt`                      | `kotlin`     |
+| `.rs`                      | `rust`       |
+| `.go`                      | `go`         |
+| `.pas` `.pp`               | `pascal`     |
+| `.js`                      | `javascript` |
 
 ## 全部命令
 
