@@ -29,6 +29,7 @@ use crate::utils::contest::{
     find_contest, is_problem_in_contest, require_contest_participant, require_contest_running,
     required_contest_type,
 };
+use crate::utils::diagnostics::{Diagnostics, is_system_error};
 use crate::utils::judging::{files_from_json, files_to_json, validate_run_language};
 use crate::utils::problem::find_problem;
 use crate::utils::rate_limit::check_rate_limit;
@@ -37,6 +38,7 @@ use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 async fn build_code_run_response(
     db: &DatabaseConnection,
     cr: code_run::Model,
+    diagnostics: Diagnostics,
 ) -> Result<CodeRunResponse, AppError> {
     let user_model = user::Entity::find_by_id(cr.user_id)
         .one(db)
@@ -52,6 +54,7 @@ async fn build_code_run_response(
         serde_json::from_value(cr.custom_test_cases.clone()).unwrap_or_default();
 
     let is_running = cr.status == SubmissionStatus::Running;
+    let system_error = is_system_error(&cr.status, cr.verdict.as_ref());
     let show_results = cr.status.is_terminal() || is_running;
 
     let result_response = if show_results {
@@ -67,6 +70,7 @@ async fn build_code_run_response(
             .into_iter()
             .map(|r| {
                 let tc = custom_tcs.get(r.run_index as usize);
+                let system_error = r.verdict == common::Verdict::SystemError;
                 CodeRunResultResponse {
                     id: r.id,
                     verdict: r.verdict,
@@ -76,9 +80,9 @@ async fn build_code_run_response(
                     run_index: r.run_index,
                     input: tc.map(|t| t.input.clone()),
                     expected_output: tc.and_then(|t| t.expected_output.clone()),
-                    stdout: r.stdout,
-                    stderr: r.stderr,
-                    checker_output: r.checker_output,
+                    stdout: diagnostics.filter(system_error, r.stdout),
+                    stderr: diagnostics.filter(system_error, r.stderr),
+                    checker_output: diagnostics.filter(system_error, r.checker_output),
                 }
             })
             .collect();
@@ -101,7 +105,7 @@ async fn build_code_run_response(
                 time_used: cr.time_used,
                 memory_used: cr.memory_used,
                 compile_output: cr.compile_output.clone(),
-                error_message: cr.error_message.clone(),
+                error_message: diagnostics.filter(system_error, cr.error_message.clone()),
                 judged_at: cr.judged_at,
                 test_case_results,
             })
@@ -232,7 +236,8 @@ pub async fn run_code(
 
     let model = new_code_run.insert(&state.db).await?;
 
-    let response = build_code_run_response(&state.db, model).await?;
+    let response =
+        build_code_run_response(&state.db, model, Diagnostics::for_viewer(&auth_user)).await?;
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -322,7 +327,8 @@ pub async fn run_contest_code(
 
     let model = new_code_run.insert(&state.db).await?;
 
-    let response = build_code_run_response(&state.db, model).await?;
+    let response =
+        build_code_run_response(&state.db, model, Diagnostics::for_viewer(&auth_user)).await?;
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -361,7 +367,8 @@ pub async fn get_code_run(
         return Err(AppError::NotFound("Code run not found".into()));
     }
 
-    let response = build_code_run_response(&state.db, cr).await?;
+    let response =
+        build_code_run_response(&state.db, cr, Diagnostics::for_viewer(&auth_user)).await?;
     Ok(Json(response))
 }
 

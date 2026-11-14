@@ -397,6 +397,32 @@ async fn a_worker_without_platform_tools_fails_a_submission_once_with_the_cause(
         .wait_for_submission_terminal(sub_id, &contestant, 60)
         .await;
     assert_eq!(res.body["result"]["verdict"], "SystemError", "{}", res.text);
+    // The contestant sees the verdict and the judgement id to quote, never
+    // the platform's diagnostics.
+    let result = &res.body["result"];
+    assert!(result["judgement_id"].is_i64(), "{}", res.text);
+    assert!(result["error_message"].is_null(), "{}", res.text);
+    let case = &result["test_case_results"][0];
+    assert_eq!(case["verdict"], "SystemError", "{}", res.text);
+    assert!(case["checker_output"].is_null(), "{}", res.text);
+    assert!(!res.text.contains("BROCCOLI__WORKER"), "{}", res.text);
+    // The operator sees them.
+    let res = app
+        .get_with_token(&format!("/api/v1/submissions/{sub_id}"), &admin)
+        .await;
+    let operator = &res.body["result"];
+    assert!(
+        operator["error_message"]
+            .as_str()
+            .is_some_and(|m| m.contains("broccoli-compare")),
+        "{}",
+        res.text
+    );
+    assert!(
+        operator["test_case_results"][0]["checker_output"].is_string(),
+        "{}",
+        res.text
+    );
 
     let row = submission::Entity::find_by_id(sub_id)
         .one(&app.db)

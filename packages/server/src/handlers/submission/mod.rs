@@ -561,6 +561,7 @@ async fn build_visible_judgement(
         judgement,
         show_compile_output,
         show_test_details,
+        visibility.diagnostics(),
         query,
     )
     .await?;

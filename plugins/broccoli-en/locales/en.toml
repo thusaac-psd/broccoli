@@ -218,6 +218,7 @@
 'result.skipped' = "Skipped"
 'result.cancelled' = "Cancelled"
 'result.systemMessage' = "System Message"
+'result.systemErrorGeneric' = "The judging system failed on this submission; it is not a problem with your code. If it persists, tell the contest staff the reference J-{reference}."
 'result.memoryLimit' = "Memory Limit"
 'result.unknownVerdict' = "Unknown Verdict"
 'result.submitError' = "Failed to submit. Please try again."

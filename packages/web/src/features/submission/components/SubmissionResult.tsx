@@ -56,6 +56,8 @@ export function SubmissionResult({
   const result = submission.result;
   const isRunning = status === 'Running';
   const testCases = result?.test_case_results ?? [];
+  const isSystemError =
+    status === 'SystemError' || result?.verdict === 'SystemError';
 
   return (
     <div className="space-y-2">
@@ -80,14 +82,22 @@ export function SubmissionResult({
         </div>
       )}
 
-      {/* System error message */}
-      {status === 'SystemError' && result?.error_message && (
+      {/* System error: the operator's diagnostics, or for everyone else a
+          generic explanation with the judgement id to quote to staff. */}
+      {isSystemError && result?.error_message && (
         <div className="mb-4 text-sm text-destructive space-y-1">
           <div className="font-medium">{t('result.systemMessage')}</div>
           <TextPreview
             label={t('result.systemMessage')}
             text={result.error_message}
           />
+        </div>
+      )}
+      {isSystemError && !result?.error_message && (
+        <div className="mb-4 text-sm text-destructive">
+          {t('result.systemErrorGeneric', {
+            reference: result?.judgement_id ?? submission.id,
+          })}
         </div>
       )}
 

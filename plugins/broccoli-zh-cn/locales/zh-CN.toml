@@ -219,6 +219,7 @@
 'result.skipped' = "已跳过"
 'result.cancelled' = "已取消"
 'result.systemMessage' = "系统消息"
+'result.systemErrorGeneric' = "评测系统在处理此提交时出错，这不是你的代码的问题。如果问题持续，请将编号 J-{reference} 告知比赛工作人员。"
 'result.memoryLimit' = "内存超限"
 'result.unknownVerdict' = "未知结果"
 'result.submitError' = "提交失败，请重试。"
