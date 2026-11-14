@@ -13,6 +13,7 @@ use super::SystemErrorClass;
 use crate::dispatcher::prefer_local_handler;
 use crate::dlq::{DlqService, DlqSubject};
 use crate::entity::{code_run, submission, submission_judgement};
+use crate::plugin_lifecycle::contest_type_open;
 
 /// The kind of row the dispatcher judges.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,7 +35,7 @@ impl Unit {
 
     /// `FROM` clause of a scan: the unit as `u`, and for a judgement its
     /// submission as `s`.
-    fn scan_from(self) -> &'static str {
+    pub(crate) fn scan_from(self) -> &'static str {
         match self {
             Unit::Judgement => "submission_judgement u JOIN submission s ON s.id = u.submission_id",
             Unit::CodeRun => "code_run u",
@@ -52,7 +53,8 @@ impl Unit {
         }
     }
 
-    fn contest_type(self) -> &'static str {
+    /// The unit's contest type, as SQL over a [`Unit::scan_from`] scan.
+    pub(crate) fn contest_type(self) -> &'static str {
         match self {
             Unit::Judgement => "s.contest_type",
             Unit::CodeRun => "u.contest_type",
@@ -280,7 +282,7 @@ fn claim_statement(unit: Unit, server_id: &str, limit: u32, local: &[String]) ->
         Unit::CodeRun => "u.created_at",
     };
     b.statement(format!(
-        "WITH picked AS (SELECT u.id FROM {from} WHERE u.{queued} AND {handled} \
+        "WITH picked AS (SELECT u.id FROM {from} WHERE u.{queued} AND {handled} AND {open} \
                          ORDER BY {order} LIMIT {limit} {lock}), \
               moved AS (UPDATE {table} t SET status = '{pending}', owner_server_id = {owner}, \
                             lease_heartbeat_at = NOW(), leased_at = NOW() \
@@ -289,6 +291,7 @@ fn claim_statement(unit: Unit, server_id: &str, limit: u32, local: &[String]) ->
         from = unit.scan_from(),
         queued = crate::dispatcher::QUEUED_PREDICATE,
         handled = prefer_local_handler(unit.contest_type(), &local),
+        open = contest_type_open(unit.contest_type()),
         lock = unit.scan_lock(),
         table = unit.table(),
         pending = SubmissionStatus::Pending,
@@ -454,6 +457,8 @@ struct Picked {
     submission_id: Option<i32>,
     is_current: bool,
     dispatch_retries: i32,
+    /// Its contest type may be judged now ([`contest_type_open`]).
+    open: bool,
 }
 
 /// Locks up to `limit` rows of `unit` matching `filter` (SQL over `u`, and
@@ -477,7 +482,8 @@ async fn pick(
     };
     let rows = txn
         .query_all_raw(b.statement(format!(
-            "SELECT {columns} FROM {from} WHERE {filter} ORDER BY u.id {limit} {lock}",
+            "SELECT {columns}, {open} AS open FROM {from} WHERE {filter} ORDER BY u.id {limit} {lock}",
+            open = contest_type_open(unit.contest_type()),
             from = unit.scan_from(),
             lock = unit.scan_lock(),
         )))
@@ -489,6 +495,7 @@ async fn pick(
                 submission_id: r.try_get("", "submission_id")?,
                 is_current: r.try_get("", "is_current")?,
                 dispatch_retries: r.try_get("", "dispatch_retries")?,
+                open: r.try_get("", "open")?,
             })
         })
         .collect()
@@ -756,12 +763,17 @@ async fn reclaim_batch(
     );
     let picked = pick(&txn, unit, b, filter, Some(limit)).await?;
     let taken = picked.len();
+    // Work of a parked contest type lost its attempt to the disable: it goes
+    // back to wait for its provider without spending a retry.
+    let (parked, picked): (Vec<Picked>, Vec<Picked>) = picked.into_iter().partition(|p| !p.open);
+    let parked_ids: Vec<i32> = parked.iter().map(|p| p.id).collect();
+    let handed_back = requeue(&txn, unit, &parked_ids, Requeue::HandedBack).await?;
     let (retry, exhaust): (Vec<Picked>, Vec<Picked>) = picked
         .into_iter()
         .partition(|p| budget.allows(p.dispatch_retries));
 
     let retry_ids: Vec<i32> = retry.iter().map(|p| p.id).collect();
-    let requeued = requeue(&txn, unit, &retry_ids, Requeue::Abandoned).await?;
+    let requeued = handed_back + requeue(&txn, unit, &retry_ids, Requeue::Abandoned).await?;
     let (error_code, dlq_code, message) = abandoned.exhausted(budget);
     let exhausted = finalize_system_error(&txn, unit, &exhaust, error_code, &message).await?;
     for p in &exhaust {
@@ -891,11 +903,14 @@ pub(crate) async fn retry_system_errors(
     .await?;
     let handed_back = requeue(&txn, Unit::Judgement, &ids, Requeue::HandedBack).await?;
 
+    // A retry while the contest type is parked would only spend budget on
+    // an attempt nothing can judge: the error waits for its provider.
     let mut b = Binds::default();
     let filter = format!(
-        "{} AND s.system_error_retries < {}",
+        "{} AND s.system_error_retries < {} AND {}",
         class(SystemErrorClass::Judging),
-        b.bind(budget.max())
+        b.bind(budget.max()),
+        contest_type_open("s.contest_type"),
     );
     let ids = pick_current_system_errors(&txn, b, &filter, limit, local).await?;
     let requeued = requeue(&txn, Unit::Judgement, &ids, Requeue::SystemErrorRetry).await?;
@@ -1005,19 +1020,39 @@ pub(crate) async fn fail_dispatch(
     // does; the UPDATE joins the lock so it is taken before the row's.
     let (lock, from, guard) = match unit {
         Unit::Judgement => (
-            "WITH locked AS (SELECT s.id FROM submission s JOIN submission_judgement j \
-                             ON j.submission_id = s.id WHERE j.id = $1 FOR NO KEY UPDATE OF s), ",
+            "WITH locked AS (SELECT s.id, s.contest_type FROM submission s \
+                             JOIN submission_judgement j ON j.submission_id = s.id \
+                             WHERE j.id = $1 FOR NO KEY UPDATE OF s), ",
             "FROM locked",
             "AND t.submission_id = locked.id AND NOT t.is_finalized",
         ),
         Unit::CodeRun => ("WITH ", "", ""),
+    };
+    // A judgement that fails while its contest type is parked failed because
+    // its provider was disabled under it (or would be judged by nothing
+    // now): it is handed back under that cause, whatever the failure said,
+    // and waits for the provider without spending its budget.
+    let (code, message) = match unit {
+        Unit::Judgement => (
+            format!(
+                "CASE WHEN {open} THEN $3 ELSE '{disabled}' END",
+                open = contest_type_open("locked.contest_type"),
+                disabled = SystemErrorClass::PROVIDER_DISABLED,
+            ),
+            format!(
+                "CASE WHEN {open} THEN $4 ELSE {why} END",
+                open = contest_type_open("locked.contest_type"),
+                why = "'The contest plugin was disabled while this was judged; it is judged again once the plugin is enabled'",
+            ),
+        ),
+        Unit::CodeRun => ("$3".to_string(), "$4".to_string()),
     };
     let n = db
         .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             format!(
                 "{lock}moved AS (UPDATE {table} t SET status = '{system_error}', \
-                                     error_code = $3, error_message = $4, {finalize} {from} \
+                                     error_code = {code}, error_message = {message}, {finalize} {from} \
                                  WHERE t.id = $1 AND t.judge_epoch = $2 \
                                    AND t.status IN {in_flight} {guard} \
                                  RETURNING t.*){mirror} \

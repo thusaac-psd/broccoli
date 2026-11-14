@@ -1001,12 +1001,13 @@ async fn ioi_scoreboard_uses_time_taken_as_score_tiebreaker() {
 }
 
 /// Disabling the contest-type plugin while one of its submissions is being
-/// judged ends that judgement as `SystemError` as soon as the next result
-/// arrives for the plugin's (now gone) callback, instead of leaving it
-/// `Running` behind a live lease. A new submission to its contests is refused
-/// with `CONTEST_TYPE_DISABLED`, which is not a retry-later answer.
+/// judged hands that judgement back instead of failing it: it waits queued,
+/// spending neither retry budget, while the contestant sees its outcome
+/// withheld for the disabled plugin. A new submission to the contest is
+/// refused with `CONTEST_TYPE_DISABLED`, which is not a retry-later answer.
+/// Enabling the plugin again judges the parked submission to its verdict.
 #[tokio::test(flavor = "multi_thread")]
-async fn disabling_the_contest_plugin_mid_judging_finalizes_the_submission() {
+async fn a_submission_cut_by_disabling_its_contest_plugin_waits_and_is_judged_once_enabled() {
     let app = E2eTestApp::spawn().await;
     let admin = app
         .create_user_with_role("ioi_disable_admin", "password", "admin")
@@ -1030,15 +1031,10 @@ async fn disabling_the_contest_plugin_mid_judging_finalizes_the_submission() {
         .create_contest_submission(contest_id, problem_id, &contestant, "cpp", CPP_SUM)
         .await;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let judgement = submission_judgement::Entity::find()
-            .filter(submission_judgement::Column::SubmissionId.eq(sub_id))
-            .one(&app.db)
-            .await
-            .expect("query judgement")
-            .expect("the submission has a judgement");
+    let cut = loop {
+        let judgement = current_judgement(&app, sub_id).await;
         if judgement.status == SubmissionStatus::Compiling {
-            break;
+            break judgement;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -1046,7 +1042,7 @@ async fn disabling_the_contest_plugin_mid_judging_finalizes_the_submission() {
             judgement.status
         );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    };
 
     let res = app
         .post_with_token("/api/v1/admin/plugins/ioi/disable", &json!({}), &admin)
@@ -1054,33 +1050,38 @@ async fn disabling_the_contest_plugin_mid_judging_finalizes_the_submission() {
     assert!(res.status < 300, "disable failed: {}", res.text);
     app.resume_worker();
 
-    // The judgement finalizes without its plugin. Staff see it as it is;
-    // the contestant sees the submission with its outcome withheld, since the
-    // plugin decides what of it a viewer may see.
+    // The cut judgement goes back to the queue under a fresh epoch and stays
+    // there, with its submission, while the plugin is disabled.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
-    let judgement = loop {
-        let judgement = submission_judgement::Entity::find()
-            .filter(submission_judgement::Column::SubmissionId.eq(sub_id))
+    loop {
+        let judgement = current_judgement(&app, sub_id).await;
+        let shown = submission::Entity::find_by_id(sub_id)
             .one(&app.db)
             .await
-            .expect("query judgement")
-            .expect("the submission has a judgement");
-        if judgement.is_finalized {
-            break judgement;
+            .expect("query submission")
+            .expect("the submission");
+        if judgement.status == SubmissionStatus::Queued
+            && judgement.judge_epoch > cut.judge_epoch
+            && shown.status == SubmissionStatus::Queued
+        {
+            assert_eq!(shown.system_error_retries, 0);
+            assert_eq!(judgement.dispatch_retries, cut.dispatch_retries);
+            break;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the judgement never finalized: {:?}",
-            judgement.status
+            "the cut judgement never went back to the queue: {:?} / {:?}",
+            judgement.status,
+            shown.status
         );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    };
-    assert_eq!(judgement.status, SubmissionStatus::SystemError);
+    }
     let res = app
         .get_with_token(&format!("/api/v1/submissions/{sub_id}"), &admin)
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
     assert!(res.body["withheld"].is_null(), "{}", res.text);
+    assert_eq!(res.body["status"], "Queued", "{}", res.text);
     let res = app
         .get_with_token(&format!("/api/v1/submissions/{sub_id}"), &contestant)
         .await;
@@ -1091,10 +1092,6 @@ async fn disabling_the_contest_plugin_mid_judging_finalizes_the_submission() {
         json!({"reason": "plugin_outage", "outage": {"state": "disabled", "plugin_id": "ioi"}}),
         "{}",
         res.text
-    );
-    assert_eq!(
-        judgement.error_code.as_deref(),
-        Some("PLUGIN_SESSION_ABORTED")
     );
 
     let res = app
@@ -1113,6 +1110,47 @@ async fn disabling_the_contest_plugin_mid_judging_finalizes_the_submission() {
         !res.headers.contains_key("retry-after"),
         "a disabled contest type is not a retry-later answer"
     );
+
+    let res = app
+        .post_with_token("/api/v1/admin/plugins/ioi/enable", &json!({}), &admin)
+        .await;
+    assert!(res.status < 300, "enable failed: {}", res.text);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let shown = loop {
+        let shown = submission::Entity::find_by_id(sub_id)
+            .one(&app.db)
+            .await
+            .expect("query submission")
+            .expect("the submission");
+        if matches!(
+            shown.status,
+            SubmissionStatus::Judged
+                | SubmissionStatus::CompilationError
+                | SubmissionStatus::SystemError
+        ) {
+            break shown;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the parked submission was never judged: {:?}",
+            shown.status
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    assert_eq!(shown.status, SubmissionStatus::Judged, "{shown:?}");
+    assert_eq!(shown.verdict, Some(Verdict::Accepted), "{shown:?}");
+    assert_eq!(shown.system_error_retries, 0);
+    assert_eq!(current_judgement(&app, sub_id).await.dispatch_retries, 0);
+}
+
+async fn current_judgement(app: &E2eTestApp, sub_id: i32) -> submission_judgement::Model {
+    submission_judgement::Entity::find()
+        .filter(submission_judgement::Column::SubmissionId.eq(sub_id))
+        .filter(submission_judgement::Column::IsCurrent.eq(true))
+        .one(&app.db)
+        .await
+        .expect("query judgement")
+        .expect("the submission has a current judgement")
 }
 
 async fn create_labelled_test_case(

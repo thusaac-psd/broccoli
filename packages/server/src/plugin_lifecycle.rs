@@ -247,6 +247,10 @@ impl PluginLifecycle {
         providers.first().map(|id| (*id).clone())
     }
 
+    // `contest_type_open` below states the same rule in SQL over the rows
+    // this reads (`plugin.is_enabled`, `plugin.governs`); change them
+    // together.
+
     /// Why plugin `plugin_id`, known not to be loaded here, cannot serve:
     /// the fleet disabled it, or it is enabled and missing on this replica
     /// for now. This is the one place the two are told apart.
@@ -275,6 +279,20 @@ impl PluginLifecycle {
             g.remove(plugin_id);
         }
     }
+}
+
+/// SQL: whether work of the contest type `contest_type` (an SQL expression)
+/// may be judged now, as [`PluginLifecycle::disabled_provider`] decides it:
+/// unless every plugin that recorded the type is disabled fleet-wide. Work of
+/// a type whose provider was disabled on purpose is parked: it stays queued,
+/// unclaimed and unretried, and resumes once a provider is enabled again. A
+/// type no plugin ever recorded is open, so whoever takes it fails it
+/// visibly.
+pub(crate) fn contest_type_open(contest_type: &str) -> String {
+    format!(
+        "COALESCE((SELECT bool_or(p.is_enabled) FROM plugin p \
+                    WHERE p.governs->'contest_types' @> jsonb_build_array({contest_type})), TRUE)"
+    )
 }
 
 /// Why contests of `contest_type` cannot be served on this replica, if they

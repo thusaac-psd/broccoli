@@ -1224,3 +1224,128 @@ async fn a_missing_platform_tool_stands_after_one_attempt_and_is_dead_lettered()
         .unwrap();
     assert_eq!(pass, SystemErrorPass::default(), "decided once");
 }
+
+/// Records `standard` (the type [`new_submission`] uses) as provided by one
+/// plugin, enabled or not.
+async fn provider(db: &DatabaseConnection, enabled: bool) {
+    exec(
+        db,
+        &format!(
+            "INSERT INTO plugin (id, is_enabled, governs) \
+             VALUES ('std', {enabled}, '{{\"visibility\": false, \"contest_types\": [\"standard\"]}}') \
+             ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
+        ),
+    )
+    .await;
+}
+
+async fn claimable(db: &DatabaseConnection) -> usize {
+    claim_judgements(db, "srv", 10, NO_TYPES)
+        .await
+        .unwrap()
+        .units
+        .len()
+}
+
+/// A judgement cut by its contest plugin's disable is handed back under
+/// `PLUGIN_DISABLED`, spending neither budget, and waits queued while every
+/// provider of its type is disabled: nothing claims it and no retry is spent
+/// on it. It is claimed again once a provider is enabled.
+#[tokio::test]
+async fn work_of_a_disabled_contest_plugin_is_parked_until_it_is_enabled() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    provider(&db, true).await;
+    let (cut, _) = new_submission(&db).await;
+    let claimed = claim_one(&db, "srv").await;
+
+    provider(&db, false).await;
+    assert!(
+        fail_dispatch(
+            &db,
+            Unit::Judgement,
+            claimed.judgement.id,
+            claimed.judgement.judge_epoch,
+            "PLUGIN_SESSION_ABORTED",
+            "the callback is gone",
+        )
+        .await
+        .unwrap()
+    );
+    let j = judgement(&db, claimed.judgement.id).await;
+    assert_eq!(
+        j.error_code.as_deref(),
+        Some(SystemErrorClass::PROVIDER_DISABLED)
+    );
+
+    let pass = retry_system_errors(&db, RetryBudget::new(1), 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!((pass.handed_back, pass.requeued), (1, 0));
+    assert!(pass.confirmed.is_empty());
+    let j = judgement(&db, claimed.judgement.id).await;
+    assert_eq!(j.status, SubmissionStatus::Queued);
+    assert_eq!(j.dispatch_retries, claimed.judgement.dispatch_retries);
+    let s = sub(&db, cut.id).await;
+    assert_eq!(s.status, SubmissionStatus::Queued, "the submission follows");
+    assert_eq!(s.system_error_retries, 0);
+
+    // A new submission waits with it.
+    let (waiting, _) = new_submission(&db).await;
+    assert_eq!(claimable(&db).await, 0, "a parked type is not claimed");
+    assert_eq!(sub(&db, waiting.id).await.status, SubmissionStatus::Queued);
+
+    provider(&db, true).await;
+    assert_eq!(claimable(&db).await, 2, "both resume");
+}
+
+/// A failure judging the submission that is still awaiting its retry when
+/// the provider is disabled keeps its budget until the provider is back.
+#[tokio::test]
+async fn a_system_error_of_a_parked_type_is_retried_only_once_it_is_enabled() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    provider(&db, true).await;
+    let (s, _) = new_submission(&db).await;
+    let claimed = claim_one(&db, "srv").await;
+    fail_dispatch(
+        &db,
+        Unit::Judgement,
+        claimed.judgement.id,
+        claimed.judgement.judge_epoch,
+        "PLUGIN_ERROR",
+        "boom",
+    )
+    .await
+    .unwrap();
+
+    provider(&db, false).await;
+    let budget = RetryBudget::new(1);
+    let pass = retry_system_errors(&db, budget, 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(pass, SystemErrorPass::default());
+    assert_eq!(sub(&db, s.id).await.system_error_retries, 0);
+
+    provider(&db, true).await;
+    let pass = retry_system_errors(&db, budget, 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(pass.requeued, 1);
+    assert_eq!(sub(&db, s.id).await.system_error_retries, 1);
+}
+
+/// In-flight work of a parked type whose owner was lost goes back without
+/// spending a dispatch retry, even with the budget spent.
+#[tokio::test]
+async fn lapsed_work_of_a_parked_type_is_handed_back() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    provider(&db, true).await;
+    let (s, j) = new_submission(&db).await;
+    provider(&db, false).await;
+    abandon(&db, 0).await;
+    let reclaimed = steal(&db).await;
+    assert_eq!((reclaimed.requeued, reclaimed.exhausted), (1, 0));
+    let after = judgement(&db, j.id).await;
+    assert_eq!(after.status, SubmissionStatus::Queued);
+    assert_eq!(after.dispatch_retries, 0);
+    assert_eq!(sub(&db, s.id).await.status, SubmissionStatus::Queued);
+}

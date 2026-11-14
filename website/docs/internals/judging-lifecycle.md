@@ -96,6 +96,29 @@ type is disabled, a submission to its contests is refused with
 (with `Retry-After`) means only that the serving replica has not loaded the
 plugin yet.
 
+## A disabled contest plugin parks its work
+
+A contest type is parked while every plugin that recorded it (`plugin.governs`)
+is disabled fleet-wide; `contest_type_open` states that in SQL and
+`PluginLifecycle::disabled_provider` in Rust. Work of a parked type waits
+`Queued` and resumes once a provider is enabled again:
+
+- The claim statement takes no judgement or code run of a parked type, so
+  nothing is dispatched to a plugin that is not there.
+- A judgement that fails while its type is parked (its session aborted when
+  the plugin went away, or nothing was registered to dispatch it to) is
+  recorded under `PLUGIN_DISABLED`, whatever the failure said. That is a
+  hand-back: the reaper requeues it at once, spending no budget, and the
+  submission follows it to `Queued`.
+- The reaper retries no other system error of a parked type, so the budget
+  is not spent on attempts nothing can judge, and the stuck-job detector hands
+  back lapsed work of a parked type without spending a dispatch retry.
+
+A viewer whose submission the plugin governs sees its outcome withheld under
+the contest's `plugin_outage`; staff see it `Queued`. Once the plugin is
+enabled, the next claim pass (at most the claim fiber's 1 s fallback tick
+later) takes the parked work.
+
 ## The submission row is a cache
 
 `submission.status`, `judge_epoch`, `target_worker_id` and the judged output
@@ -159,7 +182,8 @@ refused (`QUEUE_UNREACHABLE`), an operation the queue lost
 (`OPERATION_LOST`), a worker without a platform tool
 (`PLATFORM_TOOL_MISSING`). A system error the dispatch then ends with
 carries that code, whatever the plugin reported, and the reaper treats it by
-its class (`SystemErrorClass`): a hand-back (the queue codes) is requeued
+its class (`SystemErrorClass`): a hand-back (the queue codes, and
+`PLUGIN_DISABLED`) is requeued
 spending nothing, a deterministic fault (a missing platform tool) stands after
 one attempt and is dead-lettered, and any other code is retried within the
 budget.
