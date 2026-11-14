@@ -571,3 +571,26 @@ export async function mockApi(
   });
   return unanswered;
 }
+
+/**
+ * Moves the page's clock forward `stepMs` at a time until `expectation`
+ * holds. A retry the page schedules runs on that clock, and its answer
+ * arrives only after the step that fired it, so a single jump can leave the
+ * page behind; stepping until the state shows lets the page catch up between
+ * steps, whatever the machine's load.
+ */
+export async function runClockUntil(
+  page: Page,
+  expectation: () => Promise<void>,
+  { stepMs = 16_000, steps = 30 }: { stepMs?: number; steps?: number } = {},
+): Promise<void> {
+  for (let step = 0; ; step += 1) {
+    try {
+      await expectation();
+      return;
+    } catch (error) {
+      if (step >= steps) throw error;
+    }
+    await page.clock.runFor(stepMs);
+  }
+}
