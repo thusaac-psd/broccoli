@@ -22,7 +22,7 @@ pub struct SubmitArgs {
     #[arg(short = 'c', long, conflicts_with = "no_contest")]
     pub contest: Option<String>,
 
-    /// Problem label, position, title or #<id> (e.g. A, 1, "Two Sum" or #42);
+    /// Problem label, position, title or #ID (e.g. A, 1, "Two Sum" or #42);
     /// with --no-contest, the problem id
     #[arg(short = 'p', long)]
     pub problem: Option<String>,

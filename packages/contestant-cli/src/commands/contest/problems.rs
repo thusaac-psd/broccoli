@@ -12,7 +12,7 @@ pub struct ProblemsArgs {
     pub contest: Option<String>,
 
     /// Problem to download (statement + samples): label (A), position (1),
-    /// title ("Two Sum"), or #<id>
+    /// title ("Two Sum"), or #ID
     #[arg(short = 'p', long)]
     pub problem: Option<String>,
 }

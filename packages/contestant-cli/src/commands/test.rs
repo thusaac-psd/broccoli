@@ -23,7 +23,7 @@ pub struct TestArgs {
     #[arg(required = true)]
     pub files: Vec<String>,
 
-    /// Problem label, position, title or #<id> (e.g. A, 1, "Two Sum" or #42)
+    /// Problem label, position, title or #ID (e.g. A, 1, "Two Sum" or #42)
     #[arg(short = 'p', long)]
     pub problem: Option<String>,
 
@@ -84,7 +84,7 @@ pub fn run(args: TestArgs) -> anyhow::Result<()> {
         .context("No problem specified. Use -p <id|label> (e.g. -p A).")?;
 
     // --local works offline from the cached samples: a contest id and a
-    // `#<id>` problem reference need no server to resolve.
+    // `#ID` problem reference need no server to resolve.
     let resolved = resolve::contest_id(&client, contest_ref).and_then(|c| {
         let p = resolve::problem(&client, &c, problem_ref)?;
         println!("{}  Problem {}", style("→").blue().bold(), style(&p).cyan());
@@ -102,7 +102,7 @@ pub fn run(args: TestArgs) -> anyhow::Result<()> {
                 Some((c, p)) => (c.to_string(), p.to_string()),
                 None => {
                     return Err(e.context(
-                        "Offline, --local needs a numeric contest id and a #<id> problem reference",
+                        "Offline, --local needs a numeric contest id and a #ID problem reference",
                     ));
                 }
             }

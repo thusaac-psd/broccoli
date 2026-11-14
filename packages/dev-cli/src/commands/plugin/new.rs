@@ -45,7 +45,7 @@ pub struct NewPluginArgs {
     #[arg(long, conflicts_with_all = ["backend", "frontend"])]
     pub full: bool,
 
-    /// Directory to create the plugin in [default: ./<NAME>]
+    /// Directory to create the plugin in [default: ./NAME]
     #[arg(long, short)]
     pub output: Option<PathBuf>,
 
