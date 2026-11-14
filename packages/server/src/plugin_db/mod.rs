@@ -73,10 +73,23 @@ struct Slot {
 
 /// Run on a plugin connection as it returns to its pool: releases the session
 /// advisory locks it took (a lock on the host's boot key would stall the next
-/// boot), stops its `LISTEN`s, and resets its session settings to what the
-/// connection started with. sqlx's prepared statements and the plugin's
-/// temporary tables, which are its own, stay.
-const SESSION_RESET: &str = "SELECT pg_advisory_unlock_all(); UNLISTEN *; RESET ALL";
+/// boot), stops its `LISTEN`s, puts the connection back on the plugin's login
+/// role, and resets its session settings to what the connection started with.
+/// `RESET ALL` leaves the role alone (Postgres exempts it), so `RESET ROLE`
+/// comes first. sqlx's prepared statements and the plugin's temporary tables,
+/// which are its own, stay.
+const SESSION_RESET: &str = "SELECT pg_advisory_unlock_all(); UNLISTEN *; RESET ROLE; RESET ALL";
+
+/// Drop the session state a plugin's statements left on `conn`
+/// ([`SESSION_RESET`]). The pools run it on every connection returning to
+/// them.
+pub async fn reset_session(
+    conn: &mut sea_orm::sqlx::PgConnection,
+) -> Result<(), sea_orm::sqlx::Error> {
+    sea_orm::sqlx::Executor::execute(conn, SESSION_RESET)
+        .await
+        .map(drop)
+}
 
 /// How long a plugin's SQL stays unavailable after its provisioning failed,
 /// before the next call tries again.
@@ -292,7 +305,7 @@ impl PluginSqlPools {
                 }
                 // Session state a statement left behind would outlive its
                 // call on the pooled connection: drop it before the next.
-                sea_orm::sqlx::Executor::execute(&mut *conn, SESSION_RESET).await?;
+                reset_session(conn).await?;
                 Ok(true)
             })
         });

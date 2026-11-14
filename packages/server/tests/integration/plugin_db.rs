@@ -183,22 +183,42 @@ async fn a_role_escape_lands_on_the_plugins_own_role() {
         &format!("{step_down}; SELECT password FROM plugin_login_secret"),
     )
     .await;
-    // A role change ends with the call: the connection returns to the pool
-    // as the plugin's own role.
-    exec(&pools, "print", &step_down).await.expect("step down");
+    // A role change ends with the call: the reset a connection gets on its
+    // way back to the pool puts it back on the plugin's own role. Driven on
+    // one held connection, so the reset runs on the connection that stepped
+    // down rather than whichever the next lease happens to get.
     let lease = pools.lease("print", &[], None).await.expect("lease");
-    let who = lease
+    let mut conn = lease
         .db
-        .query_one_raw(Statement::from_string(
-            DbBackend::Postgres,
-            "SELECT current_user::text",
-        ))
+        .as_sea_orm()
+        .get_postgres_connection_pool()
+        .acquire()
         .await
-        .expect("query")
-        .expect("row")
-        .try_get_by_index::<String>(0)
-        .expect("text");
-    assert_eq!(who, names.role);
+        .expect("a pooled connection");
+    sea_orm::sqlx::raw_sql(sea_orm::sqlx::AssertSqlSafe(step_down.clone()))
+        .execute(&mut *conn)
+        .await
+        .expect("step down");
+    assert_eq!(current_user(&mut conn).await, names.group);
+    server::plugin_db::reset_session(&mut conn)
+        .await
+        .expect("the release reset");
+    assert_eq!(current_user(&mut conn).await, names.role);
+    drop(conn);
+    drop(lease);
+    // Whichever connection serves the next call, it runs as the plugin.
+    exec(&pools, "print", &step_down).await.expect("step down");
+    assert_eq!(
+        text(&pools, "print", "SELECT current_user::text").await,
+        names.role
+    );
+}
+
+async fn current_user(conn: &mut sea_orm::sqlx::PgConnection) -> String {
+    sea_orm::sqlx::query_scalar::<_, String>("SELECT current_user::text")
+        .fetch_one(conn)
+        .await
+        .expect("current_user")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -647,35 +667,57 @@ async fn failed_provisioning_backs_off() {
 }
 
 /// Session state a plugin statement leaves does not outlive it on the pooled
-/// connection. The host waits on the plugin's advisory lock, which it gets
-/// only once the connection returning to the pool released it.
+/// connection: the reset a returning connection gets releases its advisory
+/// locks, its `LISTEN`s and its settings.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_returned_connection_drops_its_session_state() {
     let f = Fixture::new().await;
     let pools = f.pools(1);
-    exec(
-        &pools,
-        "print",
+    let lease = pools.lease("print", &[], None).await.expect("lease");
+    // One held connection, so the reset runs on the connection that holds the
+    // state rather than whichever the next lease happens to get.
+    let mut conn = lease
+        .db
+        .as_sea_orm()
+        .get_postgres_connection_pool()
+        .acquire()
+        .await
+        .expect("a pooled connection");
+    sea_orm::sqlx::raw_sql(
         "SELECT pg_advisory_lock(42); LISTEN plugin_channel; SET search_path = public",
     )
+    .execute(&mut *conn)
     .await
     .expect("session state");
-    tokio::time::timeout(
-        Duration::from_secs(30),
-        f.app.execute_unprepared("SELECT pg_advisory_lock(42)"),
+    let app_takes_the_lock = || async {
+        f.app
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT pg_try_advisory_lock(42)",
+            ))
+            .await
+            .expect("try lock")
+            .expect("row")
+            .try_get_by_index::<bool>(0)
+            .expect("bool")
+    };
+    assert!(!app_takes_the_lock().await, "the plugin holds the lock");
+    server::plugin_db::reset_session(&mut conn)
+        .await
+        .expect("the release reset");
+    assert!(
+        app_takes_the_lock().await,
+        "the plugin's lock is released when its connection returns"
+    );
+    let state = sea_orm::sqlx::query_as::<_, (String, i64)>(
+        "SELECT current_schema()::text, \
+         (SELECT COUNT(*) FROM pg_listening_channels())::bigint",
     )
+    .fetch_one(&mut *conn)
     .await
-    .expect("the plugin's lock is released when its connection returns")
-    .expect("lock");
-    f.app
-        .execute_unprepared("SELECT pg_advisory_unlock(42)")
-        .await
-        .expect("unlock");
-    // The search_path is the role's again: unqualified DDL lands in the
-    // plugin's schema.
-    exec(&pools, "print", "CREATE TABLE after_reset (v INT)")
-        .await
-        .expect("the reset search_path names the plugin's schema first");
+    .expect("session state");
+    // The search_path is the role's again, and the LISTEN is gone.
+    assert_eq!(state, (f.names("print").schema, 0));
 }
 
 /// A plugin removed from the fleet can no longer log in. Installing the same
