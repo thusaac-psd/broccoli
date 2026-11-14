@@ -31,11 +31,42 @@ const DEFAULT_MOCK_BOX_IDS: u32 = 1000;
 
 pub struct OperationTaskExecutor {
     operation_executor: OperationHandler,
-    /// Worker-local platform tools directory (`[worker.tools] dir`), mirrored
-    /// here so a job that requests a `MountSource::PlatformTool` this worker
-    /// cannot resolve is rejected *before* execution starts (see
-    /// [`Self::validate_platform_tools`]).
-    tools_dir: Option<PathBuf>,
+    /// The platform tools already reported missing, each logged once.
+    reported_missing: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+/// A job asked for a platform tool this worker does not have: a deployment
+/// mistake on this worker, never the job's fault and never fixed by running
+/// it again.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "step '{step}' requests platform tool '{tool}', which this worker does not have ({why}); \
+     set [worker.tools] dir (BROCCOLI__WORKER__TOOLS__DIR) to the directory holding it"
+)]
+pub struct MissingPlatformTool {
+    pub step: String,
+    pub tool: String,
+    pub why: String,
+}
+
+/// The tool every judging plan with a standard checker mounts.
+const COMPARE_TOOL: &str = "broccoli-compare";
+
+/// Where platform tools are when `[worker.tools] dir` is unset, from where
+/// the running binary is: the first of `<bin>/tools`, `<bin>/../../tools`
+/// (the native bundle's `<data>/target/release/worker` beside
+/// `<data>/tools`) and `<bin>` itself when it holds the tools (a cargo target
+/// directory, where `cargo build -p broccoli-compare` puts the comparator next
+/// to the worker), that holds the comparator.
+pub fn derived_tools_dir(binary: &std::path::Path) -> Option<PathBuf> {
+    let bin = binary.parent()?;
+    [
+        bin.join("tools"),
+        bin.join("../../tools"),
+        bin.to_path_buf(),
+    ]
+    .into_iter()
+    .find(|dir| dir.join(COMPARE_TOOL).is_file())
 }
 
 impl OperationTaskExecutor {
@@ -64,41 +95,9 @@ impl OperationTaskExecutor {
             .tools
             .dir
             .clone()
-            .map(std::path::PathBuf::from);
-
-        // Surface tool resolvability at startup so a deployment mistake is
-        // visible immediately instead of only when the first job needing a
-        // platform tool arrives.
-        match &tools_dir {
-            Some(dir) => match std::fs::read_dir(dir) {
-                Ok(entries) => {
-                    let tools: Vec<String> = entries
-                        .filter_map(|e| e.ok())
-                        .map(|e| e.file_name().to_string_lossy().into_owned())
-                        .collect();
-                    info!(
-                        tools_dir = %dir.display(),
-                        resolvable_platform_tools = ?tools,
-                        "Platform tools directory configured"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        tools_dir = %dir.display(),
-                        error = %e,
-                        "[worker.tools] dir is configured but not readable; \
-                         jobs requesting platform tools will be rejected as retryable errors"
-                    );
-                }
-            },
-            None => {
-                warn!(
-                    "no [worker.tools] dir configured; jobs requesting platform tools \
-                     (e.g. fused standard checkers using broccoli-compare) will be \
-                     rejected as retryable errors on this worker"
-                );
-            }
-        }
+            .map(PathBuf::from)
+            .or_else(|| derived_tools_dir(&std::env::current_exe().ok()?));
+        report_tools_dir(tools_dir.as_deref());
 
         Ok(Self {
             operation_executor: OperationHandler::with_compile_cache(
@@ -113,9 +112,9 @@ impl OperationTaskExecutor {
                 },
                 metrics,
             )
-            .with_tools_dir(tools_dir.clone())
+            .with_tools_dir(tools_dir)
             .with_box_ids(box_ids),
-            tools_dir,
+            reported_missing: Default::default(),
         })
     }
 
@@ -164,44 +163,58 @@ impl OperationTaskExecutor {
     }
 
     /// Reject an operation up front when it requests a platform tool this
-    /// worker cannot resolve (no `[worker.tools]` dir configured, or the tool
-    /// is missing from it).
-    ///
-    /// Without this guard the requesting step fails mid-plan with
-    /// `success = false`, which evaluator plugins interpret as a judging
-    /// outcome - a pure worker deployment mistake then surfaces as a wrong
-    /// contestant-visible verdict. Failing the whole job with an `Err` before
-    /// any environment or sibling task is launched means the consumer's
-    /// RetryTracker treats it as a transient/system error (bounded retries,
-    /// then DLQ/SystemError), and no concurrently launched step can block on
-    /// a channel whose peer never started.
-    fn validate_platform_tools(&self, operation: &OperationTask) -> Result<()> {
+    /// worker cannot resolve, before any environment or step is launched (so
+    /// no step can block on a channel whose peer never started).
+    fn validate_platform_tools(
+        &self,
+        operation: &OperationTask,
+    ) -> Result<(), MissingPlatformTool> {
         for step in &operation.tasks {
             for mount in &step.mounts {
                 let MountSource::PlatformTool { name } = &mount.source else {
                     continue;
                 };
-                let Some(tools_dir) = self.tools_dir.as_deref() else {
-                    anyhow::bail!(
-                        "step '{}' requests platform tool '{}' but no [worker.tools] dir \
-                         is configured on this worker; rejecting the job before execution",
-                        step.id,
-                        name
-                    );
+                let missing = |why: String| MissingPlatformTool {
+                    step: step.id.clone(),
+                    tool: name.clone(),
+                    why,
+                };
+                let Some(tools_dir) = self.operation_executor.tools_dir() else {
+                    return Err(missing("no platform tools directory".into()));
                 };
                 let tool_path = tools_dir.join(name);
                 if !tool_path.exists() {
-                    anyhow::bail!(
-                        "step '{}' requests platform tool '{}' but it is not present at {}; \
-                         rejecting the job before execution",
-                        step.id,
-                        name,
-                        tool_path.display()
-                    );
+                    return Err(missing(format!("not present at {}", tool_path.display())));
                 }
             }
         }
         Ok(())
+    }
+
+    /// The failed result of a job this worker cannot run for lack of a
+    /// platform tool. Failing it at once, without the execution retries, keeps
+    /// one misconfigured worker from holding every such job through its retry
+    /// budget: the server sees a failed operation (a `SystemError` for the
+    /// test case), and the error is logged once per tool.
+    fn missing_tool_result(&self, task_id: String, missing: &MissingPlatformTool) -> TaskResult {
+        let first = self
+            .reported_missing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(missing.tool.clone());
+        if first {
+            error!(error = %missing, "Failing jobs that need a platform tool this worker does not have");
+        }
+        let message = missing.to_string();
+        TaskResult {
+            task_id,
+            success: false,
+            output: serde_json::json!({ "error": message }),
+            error: Some(message),
+            task_type: None,
+            operation: None,
+            worker_id: None,
+        }
     }
 
     fn cache_leader_from_config(config: &WorkerAppConfig) -> Arc<dyn CacheLeaderElector> {
@@ -247,7 +260,7 @@ impl OperationTaskExecutor {
                 toolchain_fingerprint::ToolchainFingerprint::Known(String::new()),
                 metrics,
             ),
-            tools_dir: None,
+            reported_missing: Default::default(),
         }
     }
 
@@ -269,8 +282,9 @@ impl OperationTaskExecutor {
                 Box::new(NoopTaskCacheStore),
                 toolchain_fingerprint::ToolchainFingerprint::Known(String::new()),
                 metrics,
-            ),
-            tools_dir,
+            )
+            .with_tools_dir(tools_dir),
+            reported_missing: Default::default(),
         })
     }
 
@@ -401,9 +415,9 @@ impl Executor for OperationTaskExecutor {
         let operation: OperationTask = serde_json::from_value(task.payload.clone())
             .map_err(|e| anyhow::anyhow!("Failed to deserialize operation config: {}", e))?;
 
-        // Fail fast (as a retryable infra error, never a verdict) if this
-        // worker cannot resolve a platform tool the plan requires.
-        self.validate_platform_tools(&operation)?;
+        if let Err(missing) = self.validate_platform_tools(&operation) {
+            return Ok(self.missing_tool_result(task.id, &missing));
+        }
 
         match self.operation_executor.execute(&operation).await {
             Ok(result) => Ok(TaskResult {
@@ -435,6 +449,37 @@ impl Executor for OperationTaskExecutor {
     }
 }
 
+/// Report at boot where platform tools resolve from, so a deployment
+/// mistake shows before the first job that needs one.
+fn report_tools_dir(tools_dir: Option<&std::path::Path>) {
+    let Some(dir) = tools_dir else {
+        error!(
+            "No platform tools directory: [worker.tools] dir is unset and no {COMPARE_TOOL} \
+             was found beside the worker binary. Every job with a standard checker fails on \
+             this worker until BROCCOLI__WORKER__TOOLS__DIR names the directory holding it"
+        );
+        return;
+    };
+    match std::fs::read_dir(dir) {
+        Ok(entries) => {
+            let tools: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            info!(
+                tools_dir = %dir.display(),
+                resolvable_platform_tools = ?tools,
+                "Platform tools directory"
+            );
+        }
+        Err(e) => error!(
+            tools_dir = %dir.display(),
+            error = %e,
+            "The platform tools directory is not readable; jobs that need a platform tool fail on this worker"
+        ),
+    }
+}
+
 /// Best-effort container detection (Docker's `/.dockerenv`, Podman's
 /// `/run/.containerenv`). Only used to decide whether to warn.
 fn running_in_container() -> bool {
@@ -458,7 +503,7 @@ mod platform_tool_validation_tests {
             Box::new(MockSandboxManager::default()),
             metrics,
         );
-        executor.tools_dir = tools_dir;
+        executor.operation_executor = executor.operation_executor.with_tools_dir(tools_dir);
         executor
     }
 
@@ -509,31 +554,75 @@ mod platform_tool_validation_tests {
             .validate_platform_tools(&operation)
             .expect_err("job requiring a platform tool must be rejected up front");
         let msg = err.to_string();
+        assert!(msg.contains("broccoli-compare"), "names the tool: {msg}");
         assert!(
-            msg.contains("broccoli-compare"),
-            "message names the tool: {msg}"
+            msg.contains("BROCCOLI__WORKER__TOOLS__DIR"),
+            "names the setting: {msg}"
         );
-        assert!(
-            msg.contains("[worker.tools]"),
-            "message names the config key: {msg}"
+    }
+
+    /// A job this worker cannot run for lack of a platform tool fails at
+    /// once with a result, not an error the consumer would retry: one
+    /// misconfigured worker must not hold every such job through its retries.
+    #[tokio::test]
+    async fn a_job_needing_a_missing_tool_fails_at_once_without_retries() {
+        let executor = executor_with_tools_dir(None);
+        let operation = operation_with_steps(vec![step_with_mounts(
+            "check",
+            vec![platform_tool_mount("broccoli-compare")],
+        )]);
+        let task = Task {
+            id: "t".into(),
+            task_type: "operation".into(),
+            executor_name: "operation".into(),
+            payload: serde_json::to_value(&operation).unwrap(),
+            reply_to: "s".into(),
+            operation_batch_id: None,
+            trace_context: None,
+        };
+        let result = executor
+            .execute(task)
+            .await
+            .expect("a result, not an error");
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("broccoli-compare"));
+    }
+
+    #[test]
+    fn the_tools_dir_is_derived_from_the_release_layouts() {
+        let root = tempfile::tempdir().unwrap();
+        let place = |dir: &std::path::Path| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(COMPARE_TOOL), b"").unwrap();
+        };
+        // `tools` beside the binary.
+        let bin = root.path().join("a/bin");
+        place(&bin.join("tools"));
+        assert_eq!(
+            derived_tools_dir(&bin.join("worker")),
+            Some(bin.join("tools"))
         );
-        // The rejection must be classified as retryable by the worker (see
-        // is_permanent_execution_failure in models/worker.rs, which only
-        // treats blob-storage errors as permanent) so it surfaces as a
-        // SystemError, never a contestant-facing verdict.
-        let lower = msg.to_ascii_lowercase();
-        for permanent_marker in [
-            "blob not found",
-            "invalid content hash",
-            "exceeds size limit",
-            "blob storage is unavailable",
-        ] {
-            assert!(
-                !lower.contains(permanent_marker),
-                "missing-tools rejection must stay retryable, but message matches \
-                 permanent marker '{permanent_marker}': {msg}"
-            );
-        }
+        // The native bundle: `<data>/target/release/worker`, `<data>/tools`.
+        let data = root.path().join("b");
+        place(&data.join("tools"));
+        let release = data.join("target/release");
+        std::fs::create_dir_all(&release).unwrap();
+        let found = derived_tools_dir(&release.join("worker")).unwrap();
+        assert_eq!(
+            found.canonicalize().unwrap(),
+            data.join("tools").canonicalize().unwrap()
+        );
+        // A cargo target dir with the comparator built next to the worker.
+        let debug = root.path().join("c/target/debug");
+        place(&debug);
+        assert_eq!(
+            derived_tools_dir(&debug.join("worker")),
+            Some(debug.clone())
+        );
+        // Nothing found.
+        let bare = root.path().join("d");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert_eq!(derived_tools_dir(&bare.join("worker")), None);
     }
 
     #[test]

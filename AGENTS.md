@@ -116,7 +116,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings   # just clippy
 cargo fmt --all -- --check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo run -p server               # just server
-cargo run -p worker               # just worker
+cargo run -p worker               # just worker (builds broccoli-compare first)
 ```
 
 ### JavaScript

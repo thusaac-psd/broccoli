@@ -40,7 +40,8 @@ pub struct ServerRuntime {
 impl ServerRuntime {
     pub async fn build(mut app_config: AppConfig) -> anyhow::Result<Self> {
         let telemetry_guard = common::observability::init_tracing(&app_config.observability);
-        common::config::warn_unknown_keys(&app_config.unknown_keys, "BROCCOLI");
+        common::config::warn_unknown_keys(&app_config.unknown_keys);
+        common::config::warn_misnamed_env_settings();
 
         let server_id = resolve_server_id(&app_config.server.id)?;
         app_config.server.id = server_id.clone();
