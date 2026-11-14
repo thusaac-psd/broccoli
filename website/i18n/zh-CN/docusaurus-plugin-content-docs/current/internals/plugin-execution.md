@@ -80,7 +80,7 @@ extism 先向其计时线程发送 `TimerAction::Start`，然后才设置 store 
 
 `PluginError::is_unavailable` 对表示插件此刻无法回答、而与请求本身无关的错误为真：`Unavailable`（截止时间）、`ShuttingDown`（服务器正在排空）、`NotLoaded`（插件未在本机加载）和 `InstanceBuild`（无法构建实例）。
 
-- `visibility::query_plugins` 返回 `Result`。不可用的查询者变为 `AppError::PluginUnavailable`：带 `Retry-After: 2` 的 `503 PLUGIN_UNAVAILABLE`。它绝不会并入 `Deny`，否则列表会变成空页面、游标变成 400、单条读取变成 404。查询者的其他失败属于错误的回答，仍然拒绝整批资源。
+- `visibility::query_plugins` 返回 `Result`。不可用的查询者变为 `AppError::PluginUnavailable`：带 `Retry-After: 2` 的 `503 PLUGIN_UNAVAILABLE`。它绝不会并入 `Deny`，否则列表会变成空页面、游标变成 400、单条读取变成 404。由未加载的可见性插件管辖的资源同样返回该 503（参见[可见性](visibility.md)）。查询者的其他失败属于错误的回答，仍然拒绝整批资源。
 - 不可用的阻塞钩子同样返回 503，而不是失败关闭的拒绝；不可用的通知钩子被跳过。
 - 服务器端从不重试交互调用。Web 客户端把 503 视为临时状态（`packages/web-sdk/src/api/errors.ts` 中的 `isTemporaryApiError`），由 TanStack Query 退避重试。
 - 后台调用方保留各自的语义：在租约结束时被截断的定时器投递在租约过期后重试，到达截止时间的评测调用是一个系统错误，由 SystemError 回收器重新评测。

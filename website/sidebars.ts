@@ -33,7 +33,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Building plugins',
       collapsed: false,
-      items: ['building-plugins/getting-started'],
+      items: ['building-plugins/getting-started', 'building-plugins/routes'],
     },
     {
       type: 'category',
@@ -46,6 +46,7 @@ const sidebars: SidebarsConfig = {
         'internals/plugin-distribution',
         'internals/plugin-execution',
         'internals/plugin-database',
+        'internals/visibility',
         'internals/performance',
         'internals/sandbox-overhead',
       ],
