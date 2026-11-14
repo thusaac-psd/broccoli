@@ -15,6 +15,7 @@ const sidebars: SidebarsConfig = {
       label: 'Running contests',
       collapsed: false,
       items: [
+        'running-contests/contest-setup',
         {
           type: 'category',
           label: 'Contest formats',

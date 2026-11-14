@@ -287,6 +287,9 @@
 'contests.startTime' = '开始'
 'contests.endTime' = '结束'
 'contests.searchPlaceholder' = '搜索比赛…'
+'contests.draft' = '草稿（未激活）'
+'contests.scheduled' = '待激活'
+'contests.deactivated' = '已停用'
 'contests.upcoming' = '即将开始'
 'contests.running' = '进行中'
 'contests.ended' = '已结束'
@@ -604,6 +607,9 @@
 'admin.problemFallbackLabel' = '题目 {id}'
 'admin.contest.titlePlaceholder' = '周赛 #42'
 'admin.contest.descriptionPlaceholder' = '比赛描述（支持 Markdown）'
+'admin.contest.activateNow' = '立即激活'
+'admin.contest.notActivated' = '未激活（草稿）'
+'admin.contest.activateTimeHelp' = '选手从激活时间起才能看到比赛。未设置激活时间时，比赛保持为草稿，只有比赛管理者可见。'
 'admin.contest.contestTypeLocked' = '已固定：比赛已有提交，所有提交都按同一种比赛类型评测。'
 
 # Additional Files (admin)

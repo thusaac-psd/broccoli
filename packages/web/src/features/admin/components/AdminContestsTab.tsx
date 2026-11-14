@@ -1,6 +1,7 @@
 import {
   type ApiClient,
   getErrorMessage,
+  serverNow,
   useApiClient,
 } from '@broccoli/web-sdk/api';
 import type { ContestProblem, ContestSummary } from '@broccoli/web-sdk/contest';
@@ -393,12 +394,26 @@ function ContestForm({
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="space-y-2">
-            <Label>{t('admin.field.activateTime')}</Label>
+            <div className="flex items-center justify-between gap-2">
+              <Label>{t('admin.field.activateTime')}</Label>
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                className="h-auto p-0"
+                onClick={() => set('activateTime')(new Date(serverNow()))}
+              >
+                {t('admin.contest.activateNow')}
+              </Button>
+            </div>
             <DateTimePicker
               value={values.activateTime}
               onChange={set('activateTime')}
-              placeholder={t('admin.field.activateTime')}
+              placeholder={t('admin.contest.notActivated')}
             />
+            <p className="text-xs text-muted-foreground">
+              {t('admin.contest.activateTimeHelp')}
+            </p>
           </div>
           <div className="space-y-2">
             <Label>{t('admin.field.deactivateTime')}</Label>
@@ -865,11 +880,7 @@ function useContestColumns({
       header: t('contests.status'),
       size: 110,
       cell: ({ row }) => {
-        const { label, variant } = getContestStatus(
-          row.original.start_time,
-          row.original.end_time,
-          t,
-        );
+        const { label, variant } = getContestStatus(row.original, t);
         return <Badge variant={variant}>{label}</Badge>;
       },
     },
