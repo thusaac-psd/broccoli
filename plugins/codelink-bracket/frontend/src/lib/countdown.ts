@@ -1,13 +1,13 @@
 // Pure countdown/phase derivation for the Live 小局 view.
 //
-// Central principle (from the task spec): the countdown is a DISPLAY, not
+// Central principle: the countdown is a DISPLAY, not
 // an AUTHORITY. The server decides when a 小局 ends, not the client clock.
 // If the locally-computed time-until-deadline reaches zero before the
 // server has recorded a decision, the correct UI state is "waiting for the
 // server", never a fabricated result -- announcing an outcome the server
 // has not made would contradict the eventual official one.
 //
-// WIRE CONTRACT (commit 2378a986): `MatchView.current_xiaoju_deadline_ms`
+// WIRE CONTRACT: `MatchView.current_xiaoju_deadline_ms`
 // (plus `_index`/`_opened_at_ms`) carries the currently-open 小局's real
 // server deadline, all three `None`-together before the first 小局 opens.
 // See `xiaojuTimingFromMatch` below for how a real `MatchView` is turned
@@ -32,8 +32,8 @@ export interface XiaojuTiming {
  *
  * `decided` is derived from `state`, deliberately NOT from whether these
  * timing fields are present: the server does not clear
- * `MatchState::xiaoju` once a match concludes (`apply_force_decide` and the
- * natural win path both only flip `state`), so a decided match's deadline
+ * `MatchState::xiaoju` once a match concludes (force-decide's `Event::Award`
+ * and the natural win path both only flip `state`), so a decided match's deadline
  * fields can keep reporting the last-played 小局's now-stale deadline
  * rather than going back to `None`. Gating "decided" on `state` instead
  * means `deriveCountdownStatus` reports `{ kind: 'decided' }` correctly
@@ -133,9 +133,8 @@ export function formatDurationMs(ms: number): string {
 
 /**
  * Human-readable label for a `CountdownStatus`, shared by every component
- * that renders one so the exhaustiveness check lives in exactly one place
- * (see this task's requirement that no phase/status ever fall through to a
- * default branch). The `switch` below has no `default` arm on purpose: if a
+ * that renders one so the exhaustiveness check lives in exactly one place:
+ * no phase/status may ever fall through to a default branch. The `switch` below has no `default` arm on purpose: if a
  * future `CountdownStatus` variant is added without a case here, this stops
  * compiling instead of silently rendering nothing for it.
  */

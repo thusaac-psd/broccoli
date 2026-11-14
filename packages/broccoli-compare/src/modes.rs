@@ -5,8 +5,8 @@
 //!
 //! The `output` side is borrowed as `&mut impl Read` (rather than taken by
 //! value) so that `main` retains ownership of the underlying stdin reader and
-//! can keep draining it to EOF after the verdict is decided (Task 1.6 - avoids
-//! SIGPIPE-killing a still-running solution). The `answer` side is a file and
+//! can keep draining it to EOF after the verdict is decided, so a still-running
+//! solution is never killed by SIGPIPE. The `answer` side is a file and
 //! is taken by value; it does not need draining.
 
 use std::io::Read;
@@ -487,8 +487,7 @@ mod tests {
     }
 
     /// A `Read` that hands out at most one byte per call, to exercise the
-    /// carry-over logic across asymmetric chunk boundaries (mirrors the
-    /// chunk-size-1 streaming test in standard-checkers).
+    /// carry-over logic across asymmetric chunk boundaries.
     struct OneByteAtATime<'a> {
         bytes: &'a [u8],
         pos: usize,
@@ -519,8 +518,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // tokens - ports of plugins/standard-checkers/src/checkers/tokens.rs tests
-    // (and streaming.rs::compare_tokens). Verdict identity is pinned here.
+    // tokens
     // -----------------------------------------------------------------------
 
     fn tokens(output: &[u8], answer: &[u8]) -> Verdict {
@@ -530,31 +528,27 @@ mod tests {
 
     #[test]
     fn tokens_different_whitespace_same_tokens() {
-        // checkers/tokens.rs::different_whitespace_same_tokens
         assert_eq!(tokens(b"  1   2  3  \n", b"1 2 3"), Verdict::Accepted);
     }
 
     #[test]
     fn tokens_on_different_lines() {
-        // checkers/tokens.rs::tokens_on_different_lines
         assert_eq!(tokens(b"1\n2\n3\n", b"1 2 3"), Verdict::Accepted);
     }
 
     #[test]
     fn tokens_count_mismatch_is_wa() {
-        // checkers/tokens.rs::token_count_mismatch (output has fewer tokens)
+        // The output has fewer tokens.
         assert_eq!(tokens(b"1 2", b"1 2 3"), Verdict::WrongAnswer);
     }
 
     #[test]
     fn tokens_value_mismatch_is_wa() {
-        // checkers/tokens.rs::token_value_mismatch
         assert_eq!(tokens(b"1 X 3", b"1 2 3"), Verdict::WrongAnswer);
     }
 
     #[test]
     fn tokens_empty_vs_nonempty_is_wa() {
-        // checkers/tokens.rs::empty_vs_nonempty
         assert_eq!(tokens(b"", b"hello"), Verdict::WrongAnswer);
     }
 
@@ -573,8 +567,7 @@ mod tests {
 
     #[test]
     fn tokens_accepts_large_chunked_output() {
-        // streaming.rs::token_checker_accepts_large_chunked_output - token
-        // sequences are equal regardless of which whitespace separates them.
+        // Token sequences are equal regardless of which whitespace separates them.
         let expected = format!("{} tail", "123 ".repeat(100_000));
         let actual = format!("{} tail", "123\n".repeat(100_000));
         let mut actual_bytes = actual.as_bytes();
@@ -585,7 +578,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // tokens-case-insensitive - ports of checkers/tokens_case.rs tests
+    // tokens-case-insensitive
     // -----------------------------------------------------------------------
 
     fn tokens_ci(output: &[u8], answer: &[u8]) -> Verdict {
@@ -595,13 +588,11 @@ mod tests {
 
     #[test]
     fn tokens_ci_yes_vs_yes() {
-        // checkers/tokens_case.rs::yes_vs_yes_case_insensitive
         assert_eq!(tokens_ci(b"YES\n", b"yes"), Verdict::Accepted);
     }
 
     #[test]
     fn tokens_ci_hello_world() {
-        // checkers/tokens_case.rs::hello_world_case_insensitive
         assert_eq!(
             tokens_ci(b"Hello World\n", b"hello world"),
             Verdict::Accepted
@@ -610,13 +601,11 @@ mod tests {
 
     #[test]
     fn tokens_ci_different_tokens_regardless_of_case() {
-        // checkers/tokens_case.rs::different_tokens_regardless_of_case
         assert_eq!(tokens_ci(b"abc\n", b"xyz"), Verdict::WrongAnswer);
     }
 
     #[test]
     fn tokens_ci_unicode() {
-        // checkers/tokens_case.rs::unicode_case_insensitive
         assert_eq!(
             tokens_ci("Ü Ö Ä\n".as_bytes(), "ü ö ä".as_bytes()),
             Verdict::Accepted
@@ -624,7 +613,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // lines - ports of checkers/lines.rs and streaming.rs line tests
+    // lines
     // -----------------------------------------------------------------------
 
     fn lines(output: &[u8], answer: &[u8]) -> Verdict {
@@ -634,7 +623,6 @@ mod tests {
 
     #[test]
     fn lines_trailing_whitespace_per_line_ignored() {
-        // checkers/lines.rs::trailing_whitespace_per_line_ignored
         assert_eq!(
             lines(b"hello  \nworld  \n", b"hello\nworld\n"),
             Verdict::Accepted
@@ -643,13 +631,11 @@ mod tests {
 
     #[test]
     fn lines_trailing_empty_lines_ignored() {
-        // checkers/lines.rs::trailing_empty_lines_ignored
         assert_eq!(lines(b"hello\n\n\n", b"hello\n"), Verdict::Accepted);
     }
 
     #[test]
     fn lines_internal_whitespace_preserved() {
-        // checkers/lines.rs::internal_whitespace_preserved
         assert_eq!(
             lines(b"hello  world\n", b"hello world\n"),
             Verdict::WrongAnswer
@@ -658,19 +644,16 @@ mod tests {
 
     #[test]
     fn lines_different_line_count_is_wa() {
-        // checkers/lines.rs::different_line_count
         assert_eq!(lines(b"a\nb\n", b"a\nb\nc\n"), Verdict::WrongAnswer);
     }
 
     #[test]
     fn lines_first_diff_line_is_wa() {
-        // checkers/lines.rs::first_diff_line_reported
         assert_eq!(lines(b"a\nX\nc\n", b"a\nb\nc\n"), Verdict::WrongAnswer);
     }
 
     #[test]
     fn lines_preserves_internal_empty_lines_but_drops_trailing() {
-        // streaming.rs::lines_checker_preserves_internal_empty_lines_but_drops_trailing_empty_lines
         assert_eq!(lines(b"a\n\nb\n\n", b"a\n\nb\n"), Verdict::Accepted);
     }
 
@@ -687,7 +670,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // tokens-float - ports of checkers/tokens_float.rs tests
+    // tokens-float
     // -----------------------------------------------------------------------
 
     const ABS: f64 = 1e-9;
@@ -708,13 +691,12 @@ mod tests {
 
     #[test]
     fn float_exact_match() {
-        // checkers/tokens_float.rs::exact_match
         assert_eq!(float_default(b"3.14159", b"3.14159"), Verdict::Accepted);
     }
 
     #[test]
     fn float_within_abs_tolerance() {
-        // checkers/tokens_float.rs::within_abs_tolerance (default abs_tol = 1e-9)
+        // Default abs_tol = 1e-9.
         assert_eq!(
             float_default(b"1.0000000001", b"1.0000000000"),
             Verdict::Accepted
@@ -723,31 +705,26 @@ mod tests {
 
     #[test]
     fn float_within_rel_tolerance() {
-        // checkers/tokens_float.rs::within_rel_tolerance
         assert_eq!(float_default(b"1000.0005", b"1000.0000"), Verdict::Accepted);
     }
 
     #[test]
     fn float_outside_both_tolerances() {
-        // checkers/tokens_float.rs::outside_both_tolerances
         assert_eq!(float_default(b"1.0", b"2.0"), Verdict::WrongAnswer);
     }
 
     #[test]
     fn float_nan_vs_nan() {
-        // checkers/tokens_float.rs::nan_vs_nan
         assert_eq!(float_default(b"NaN", b"NaN"), Verdict::Accepted);
     }
 
     #[test]
     fn float_inf_vs_inf() {
-        // checkers/tokens_float.rs::inf_vs_inf
         assert_eq!(float_default(b"inf", b"inf"), Verdict::Accepted);
     }
 
     #[test]
     fn float_mixed_float_string_tokens() {
-        // checkers/tokens_float.rs::mixed_float_string_tokens
         assert_eq!(float_default(b"YES 3.14", b"YES 3.14"), Verdict::Accepted);
     }
 
@@ -759,8 +736,7 @@ mod tests {
 
     #[test]
     fn float_custom_abs_tol_overrides() {
-        // checkers/tokens_float.rs::custom_config_overrides_defaults - with
-        // abs_tol = 1.0 a diff of 0.5 is accepted. (The CLI's --epsilon maps to
+        // With abs_tol = 1.0 a diff of 0.5 is accepted. (The CLI's --epsilon maps to
         // abs_tol; rel_tol stays at its default.)
         let mut output = b"1.5".as_slice();
         let v = compare_tokens(
@@ -855,7 +831,7 @@ mod tests {
     // Multi-byte UTF-8 split across a read boundary. OneByteAtATime forces
     // CharStream to assemble each multi-byte code point from its partial-prefix
     // branch (fill() Err/valid_up_to path) - the path real piped stdin hits for
-    // any non-ASCII output, previously untested.
+    // any non-ASCII output.
     // -----------------------------------------------------------------------
 
     #[test]

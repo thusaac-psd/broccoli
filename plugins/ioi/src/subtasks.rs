@@ -255,7 +255,7 @@ mod tests {
     fn subtask_member_referenced_by_numeric_id_scores_via_label_keyed_map() {
         // tc id=42 has an explicit label "big_01"; the score map is keyed by
         // label. A subtask that references the member by its numeric id must
-        // still resolve it (regression for the id-vs-label lookup bug).
+        // still resolve it through the label.
         let tc = test_case(42, 30.0, false, Some("big_01"));
         let s = scores(&[("big_01", 1.0)]);
 

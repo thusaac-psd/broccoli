@@ -18,7 +18,7 @@
 //! included. `--idle-secs` measures them with no load for the same window
 //! first, and the report subtracts that idle rate.
 //!
-//! See `docs/internals/performance.md` for how to run the matrix.
+//! See `website/docs/internals/performance.md` for how to run the matrix.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;

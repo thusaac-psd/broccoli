@@ -74,10 +74,8 @@ impl SubmissionRejection {
     /// Produced by the host wiring below: the viewer DOES have a match for
     /// this round, but no game of it is open -- covers both "not started
     /// yet" (`Ordering`/`Preparing`), a break or a judging wait, and "no
-    /// longer accepting submissions" (`Decided`/`NeedsAdjudication`). The spec's
-    /// wording ("has not started") only names the former, but the latter is
-    /// just as much "not open for submission right now" and the plan does
-    /// not allocate it a fifth code.
+    /// longer accepting submissions" (`Decided`/`NeedsAdjudication`). Both
+    /// mean "not open for submission right now", so they share one code.
     fn match_not_started() -> Self {
         Self::new(
             "MATCH_NOT_STARTED",

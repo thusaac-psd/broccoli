@@ -26,7 +26,7 @@ rand = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true }
 
-# fault::* dependencies (merged from packages/fault-harness/).
+# fault::* dependencies.
 async-trait = { workspace = true }
 broccoli-api-types.workspace = true
 common = { workspace = true, features = ["test-util"] }

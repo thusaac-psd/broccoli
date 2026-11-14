@@ -54,7 +54,7 @@ const MESSAGE_FILE: &str = "check_msg.txt";
 
 /// `tokens-float` tolerance defaults, identical to broccoli-compare's own
 /// `tokens-float` defaults (`abs_tol = 1e-9`, `rel_tol = 1e-6`) so fused
-/// verdicts stay byte-identical to the legacy path.
+/// verdicts stay byte-identical to an unfused broccoli-compare run.
 const DEFAULT_ABS_TOL: f64 = 1e-9;
 const DEFAULT_REL_TOL: f64 = 1e-6;
 
@@ -280,7 +280,7 @@ pub fn build_testlib_checker_stage(
 }
 
 // ---------------------------------------------------------------------------
-// Interpret: turn the check step's small result into a verdict (Phase 5.4).
+// Interpret: turn the check step's small result into a verdict.
 // Runs server-side on tiny data; the 10 MB output was consumed worker-side.
 // ---------------------------------------------------------------------------
 
@@ -431,7 +431,7 @@ fn format_tol(tol: f64) -> String {
 /// Load the testlib checker source for a problem from this plugin's own
 /// per-problem config (`standard-checkers:checker_source`), set by the problem
 /// editor. The checker source is owned by the checker plugin, not the core
-/// problem model nor the evaluator; the host no longer inlines it.
+/// problem model nor the evaluator; the host does not inline it.
 #[cfg(target_arch = "wasm32")]
 fn load_checker_source(host: &Host, problem_id: Option<i32>) -> Result<Vec<SourceFile>, String> {
     let problem_id = problem_id

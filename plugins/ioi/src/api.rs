@@ -665,7 +665,7 @@ pub(crate) enum SubtaskScoresAccess {
 /// No host calls or I/O: `tokened_feedback` is the caller's precomputed
 /// answer to "does a spent token unlock full feedback for this submission
 /// right now", so the wasm shell can skip that storage read entirely when it
-/// cannot affect the outcome (mirrors the original short-circuit of
+/// cannot affect the outcome (the short-circuit of
 /// `can_view_all_submissions || phase == "after" || (... token check)`).
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn subtask_scores_access_decision(

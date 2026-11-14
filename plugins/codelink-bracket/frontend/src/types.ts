@@ -5,7 +5,7 @@
 //   - order/start/force-decide  -- plugins/codelink-bracket/src/{ordering,routes}.rs
 //
 // `current_xiaoju_index`/`current_xiaoju_deadline_ms`/
-// `current_xiaoju_opened_at_ms` (added by commit 2378a986) are read from a
+// `current_xiaoju_opened_at_ms` are read from a
 // single `xiaoju.last()` on the server, so they are all-`None` or all-`Some`
 // together -- never a mix. `None` before the first 小局 opens; see
 // `./lib/countdown.ts`'s `xiaojuTimingFromMatch` for how the UI turns these
