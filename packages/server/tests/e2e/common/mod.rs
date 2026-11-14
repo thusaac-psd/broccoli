@@ -16,6 +16,7 @@ use serde_json::Value;
 use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
 use worker::models::operation::OperationTaskExecutor;
+use worker::models::operation::executor::derived_tools_dir;
 use worker::models::operation::sandbox::isolate::IsolateSandboxManager;
 use worker::models::operation::sandbox::mock::MockSandboxManager;
 
@@ -91,25 +92,33 @@ fn plugins_dir() -> PathBuf {
     )
 }
 
-/// Worker platform-tools dir (`broccoli-compare`, ...). Judging fuses a
-/// `check` step that runs `broccoli-compare` as a `MountSource::PlatformTool`,
-/// in the mock sandbox as in isolate, so a worker without it fails the job.
-/// Resolution: `BROCCOLI_WORKER_TOOLS_DIR` if set; else, for the mock sandbox,
-/// the cargo target dir holding the built `broccoli-compare` (`cargo build -p
-/// broccoli-compare`); else the conventional deployment path when present.
+/// The in-process worker's platform tools (`broccoli-compare`, ...). Judging
+/// fuses a `check` step that runs `broccoli-compare` as a
+/// `MountSource::PlatformTool`, in the mock sandbox as in isolate, so a
+/// worker without it fails the job. The harness builds the tools once per
+/// run into `target/e2e-tools`, a target directory of their own so the build
+/// does not wait on the `cargo test` running it, and finds them there by the
+/// worker's own rule ([`derived_tools_dir`]).
 fn worker_tools_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("BROCCOLI_WORKER_TOOLS_DIR") {
-        return Some(PathBuf::from(dir));
-    }
-    if mock_sandbox() {
-        let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
-        return ["debug", "release"]
-            .into_iter()
-            .map(|profile| target.join(profile))
-            .find(|dir| dir.join("broccoli-compare").is_file());
-    }
-    let default = PathBuf::from("/opt/broccoli/tools");
-    default.is_dir().then_some(default)
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let target = root.join("target/e2e-tools");
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| env!("CARGO").to_string());
+        let status = std::process::Command::new(cargo)
+            .current_dir(&root)
+            .args(["build", "--offline", "--locked", "-p", "broccoli-compare"])
+            .arg("--target-dir")
+            .arg(&target)
+            .status()
+            .expect("run cargo to build the platform tools");
+        assert!(
+            status.success(),
+            "building broccoli-compare failed: {status}"
+        );
+        derived_tools_dir(&target.join("debug").join("worker"))
+    })
+    .clone()
 }
 
 #[allow(dead_code)]
