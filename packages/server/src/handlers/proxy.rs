@@ -170,6 +170,16 @@ async fn handle_plugin_request_impl(
         .await?;
     let response: PluginHttpResponse =
         serde_json::from_slice(&response).map_err(plugin_core::error::PluginError::from)?;
+    // A plugin answers client errors; a server error is the host's to
+    // answer, with its generic body, so no internal detail a plugin put in
+    // the body reaches the caller.
+    if response.status >= 500 {
+        return Err(AppError::Internal(format!(
+            "plugin '{plugin_id}' handler '{handler_name}' answered {}: {}",
+            response.status,
+            response.body.unwrap_or_default()
+        )));
+    }
 
     let mut builder = Response::builder().status(response.status);
 
@@ -266,7 +276,7 @@ macro_rules! proxy_handler {
             tag = "Plugins",
             operation_id = $op_id,
             summary = $summary,
-            description = "Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes.",
+            description = "Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.",
             params(
                 ("plugin_id" = String, Path, description = "The unique identifier of the plugin"),
                 ("path" = String, Path, description = "The sub-path defined in plugin's manifest")
@@ -274,11 +284,12 @@ macro_rules! proxy_handler {
             request_body = $body_type,
             responses(
                 (status = 200, description = "Success", body = serde_json::Value),
-                (status = 400, description = "A path parameter the route declares as an id is not one (VALIDATION_ERROR)", body = ErrorBody),
+                (status = 400, description = "A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request", body = ErrorBody),
                 (status = 401, description = "Unauthorized: no token, or an invalid or stale one (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
                 (status = 403, description = "Forbidden", body = ErrorBody),
                 (status = 404, description = "Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND)", body = ErrorBody),
                 (status = 405, description = "Method Not Allowed", body = ErrorBody),
+                (status = 500, description = "The plugin failed (INTERNAL_ERROR); the detail is logged, never returned", body = ErrorBody),
                 (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
             ),
             security(("jwt" = []))
@@ -303,18 +314,19 @@ macro_rules! proxy_handler {
             tag = "Plugins",
             operation_id = $op_id,
             summary = $summary,
-            description = "Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes.",
+            description = "Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.",
             params(
                 ("plugin_id" = String, Path, description = "The unique identifier of the plugin"),
                 ("path" = String, Path, description = "The sub-path defined in plugin's manifest")
             ),
             responses(
                 (status = 200, description = "Success", body = serde_json::Value),
-                (status = 400, description = "A path parameter the route declares as an id is not one (VALIDATION_ERROR)", body = ErrorBody),
+                (status = 400, description = "A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request", body = ErrorBody),
                 (status = 401, description = "Unauthorized: no token, or an invalid or stale one (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
                 (status = 403, description = "Forbidden", body = ErrorBody),
                 (status = 404, description = "Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND)", body = ErrorBody),
                 (status = 405, description = "Method Not Allowed", body = ErrorBody),
+                (status = 500, description = "The plugin failed (INTERNAL_ERROR); the detail is logged, never returned", body = ErrorBody),
                 (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
             ),
             security(("jwt" = []))

@@ -60,6 +60,21 @@ pub fn reflect(input: String) -> FnResult<String> {
     })?)
 }
 
+/// Answers a server error whose body carries internal text.
+#[plugin_fn]
+pub fn server_error(_input: String) -> FnResult<String> {
+    Ok(serde_json::to_string(&PluginHttpResponse {
+        status: 500,
+        body: Some(serde_json::json!({ "error": "permission denied for table submission" })),
+    })?)
+}
+
+/// Fails the call with internal text, as the SDK does for an internal error.
+#[plugin_fn]
+pub fn fail(_input: String) -> FnResult<String> {
+    Err(extism_pdk::Error::msg("permission denied for table submission").into())
+}
+
 /// Spends `millions` million loop iterations of guest CPU, then answers: a
 /// slow plugin route for load probes.
 #[plugin_fn]

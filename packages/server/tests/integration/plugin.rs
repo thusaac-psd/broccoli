@@ -712,4 +712,22 @@ mod route_access {
         assert_eq!(res.status, 401);
         assert_eq!(res.body["code"], "TOKEN_MISSING");
     }
+
+    /// A plugin's server error never carries its detail to the caller: the
+    /// host answers it with its generic body, whether the plugin built a 5xx
+    /// response or failed the call.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plugin_server_errors_reach_the_caller_without_detail() {
+        let app = TestApp::spawn_with_plugins().await;
+        for path in ["server-error", "fail"] {
+            let res = app.get_without_token(&proxy(path)).await;
+            assert_eq!(res.status, 500, "{path}");
+            assert_eq!(res.body["code"], "INTERNAL_ERROR", "{path}");
+            assert!(
+                !res.text.contains("permission denied"),
+                "{path} leaked: {}",
+                res.text
+            );
+        }
+    }
 }

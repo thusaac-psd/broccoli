@@ -35,7 +35,7 @@ pub use evaluate::{
 };
 pub use hook::HookResponse;
 pub use hook_events::{AfterJudgingEvent, AfterSubmissionEvent, BeforeSubmissionEvent, HookEvent};
-pub use http::{PluginHttpAuth, PluginHttpRequest, PluginHttpResponse};
+pub use http::{PluginHttpAuth, PluginHttpRequest, PluginHttpResponse, error_code_for_status};
 pub use lifecycle::{ParseStatusError, StatusPhase, SubmissionLifecycle};
 pub use operation::{
     Channel, DEFAULT_OPERATION_RESULT_TIMEOUT_MS, DetachedOperationCallbackAction,

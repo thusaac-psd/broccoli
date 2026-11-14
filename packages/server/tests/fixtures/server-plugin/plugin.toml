@@ -95,6 +95,18 @@ method = "GET"
 handler = "reflect"
 problem = "{problem_id}"
 
+[[server.routes]]
+path = "/server-error"
+method = "GET"
+access = "public"
+handler = "server_error"
+
+[[server.routes]]
+path = "/fail"
+method = "GET"
+access = "public"
+handler = "fail"
+
 [[server.queries]]
 topic = "visibility"
 function = "decide_visibility"
