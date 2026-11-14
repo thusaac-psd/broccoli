@@ -1,9 +1,11 @@
 use anyhow::Context;
-use chrono::{DateTime, Utc};
 use console::Term;
 use console::style;
 
+use broccoli_cli_core::api::contest::ContestPhase;
 use broccoli_cli_core::client::Client;
+
+use super::{local_time, phase_label};
 
 pub fn run() -> anyhow::Result<()> {
     let creds = crate::commands::credentials()?;
@@ -31,57 +33,50 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn status_label(
-    start: &DateTime<Utc>,
-    end: &DateTime<Utc>,
-) -> (String, console::StyledObject<&'static str>) {
-    let now = Utc::now();
-    if now < *start {
-        ("Upcoming".into(), style("Upcoming").cyan())
-    } else if now > *end {
-        ("Finished".into(), style("Finished").dim())
-    } else {
-        ("Running".into(), style("Running").green().bold())
+fn status_label(phase: ContestPhase) -> console::StyledObject<&'static str> {
+    let label = phase_label(phase);
+    match phase {
+        ContestPhase::Running => style(label).green().bold(),
+        ContestPhase::Upcoming => style(label).cyan(),
+        ContestPhase::Unactivated | ContestPhase::Ended | ContestPhase::Deactivated => {
+            style(label).dim()
+        }
     }
-}
-
-fn format_time(ts: &DateTime<Utc>) -> String {
-    ts.format("%Y-%m-%d %H:%M").to_string()
 }
 
 fn print_table(contests: &[broccoli_cli_core::api::contest::ContestListItem]) {
     println!(
-        "  {:<6} {:<40} {:<12} {:<20} {:<20}",
+        "  {:<6} {:<40} {:<15} {:<20} {:<20}",
         style("ID").bold(),
         style("Name").bold(),
         style("Status").bold(),
         style("Start").bold(),
         style("End").bold(),
     );
-    println!("  {}", style("-".repeat(98)).dim());
+    println!("  {}", style("-".repeat(101)).dim());
 
     for c in contests {
-        let (_status_str, styled_status) = status_label(&c.start_time, &c.end_time);
+        let styled_status = status_label(c.phase);
         println!(
-            "  {:<6} {:<40} {}   {:<20} {:<20}",
+            "  {:<6} {:<40} {:<15} {:<20} {:<20}",
             style(&c.id).yellow(),
             truncate(&c.title, 38),
             styled_status,
-            format_time(&c.start_time),
-            format_time(&c.end_time),
+            local_time(&c.start_time),
+            local_time(&c.end_time),
         );
     }
 }
 
 fn print_cards(contests: &[broccoli_cli_core::api::contest::ContestListItem]) {
     for (i, c) in contests.iter().enumerate() {
-        let (_status_str, styled_status) = status_label(&c.start_time, &c.end_time);
+        let styled_status = status_label(c.phase);
         println!("  {} {}", style("#").dim(), i + 1);
         println!("    ID:     {}", style(&c.id).yellow());
         println!("    Name:   {}", c.title);
         println!("    Status: {}", styled_status);
-        println!("    Start:  {}", format_time(&c.start_time));
-        println!("    End:    {}", format_time(&c.end_time));
+        println!("    Start:  {}", local_time(&c.start_time));
+        println!("    End:    {}", local_time(&c.end_time));
         println!();
     }
 }

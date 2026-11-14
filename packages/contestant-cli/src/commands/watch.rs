@@ -17,9 +17,13 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 
 use broccoli_cli_core::api::clarification::{ClarificationListResponse, ClarificationResponse};
+use broccoli_cli_core::api::contest::ContestProblemResponse;
 use broccoli_cli_core::api::submission::SubmissionListResponse;
 use broccoli_cli_core::backoff;
 use broccoli_cli_core::client::{Client, ClientError, ClientResult};
+use broccoli_cli_core::clock::ServerClock;
+
+use super::contest::{Countdown, local_time};
 use broccoli_cli_core::fmt;
 use broccoli_cli_core::model::{
     ClarificationKind, StatusDisplay, SubmissionStatus, Verdict, VerdictDisplay,
@@ -163,9 +167,11 @@ impl Overlay {
 struct AppData {
     contest_id: String,
     contest_title: String,
-    /// Contest end time for the live countdown.
+    /// The contest's timeline, for the header countdown.
+    start_time: DateTime<Utc>,
     end_time: DateTime<Utc>,
-    remaining: String,
+    /// The server's clock the countdown runs on.
+    clock: ServerClock,
     selected_tab: Tab,
     my_submissions: Vec<SubmissionRow>,
     problems: Vec<ProblemRow>,
@@ -274,6 +280,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 enum PollUpdate {
+    /// The contest's problems, polled until it has started and lists them.
+    Problems(Vec<ContestProblemResponse>),
     Submissions(SubmissionListResponse),
     Clarifications(ClarificationListResponse),
     /// How the most recent poll cycle ended.
@@ -375,24 +383,15 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
         uid.expect("loop sets uid or returns")
     };
 
-    let remaining = calculate_remaining(&contest.end_time);
-
     let mut app = AppData {
         contest_id: contest_id.clone(),
         contest_title: contest.title,
+        start_time: contest.start_time,
         end_time: contest.end_time,
-        remaining,
+        clock: client.clock().clone(),
         selected_tab: Tab::MySubmissions,
         my_submissions: Vec::new(),
-        problems: problems
-            .iter()
-            .map(|p| ProblemRow {
-                label: p.label.clone(),
-                title: p.problem_title.clone(),
-                problem_id: p.problem_id.to_string(),
-                solved: false,
-            })
-            .collect(),
+        problems: Vec::new(),
         clarifications: Vec::new(),
         sel_sub: 0,
         sel_prob: 0,
@@ -426,6 +425,9 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
     let poller_refresh = refresh_now.clone();
     let poll_client = Arc::clone(&client);
 
+    let mut problems_listed = !problems.is_empty();
+    set_problems(&mut app, &problems);
+
     let poller = thread::spawn(move || {
         let mut last = PollOutcome::Ok;
         let mut failures = 0u32;
@@ -438,6 +440,15 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
             {
                 uid = me.id;
                 if tx.send(PollUpdate::UserChanged).is_err() {
+                    break 'outer;
+                }
+            }
+            if !problems_listed
+                && let Ok(problems) = poll_client.list_contest_problems(&cid)
+                && !problems.is_empty()
+            {
+                problems_listed = true;
+                if tx.send(PollUpdate::Problems(problems)).is_err() {
                     break 'outer;
                 }
             }
@@ -525,6 +536,9 @@ fn run_event_loop(
         while let Ok(update) = rx.try_recv() {
             got_poll = true;
             match update {
+                PollUpdate::Problems(problems) => {
+                    set_problems(app, &problems);
+                }
                 PollUpdate::Submissions(d) => {
                     // Snapshot already-Accepted ids to spot a fresh AC after the update.
                     let was_accepted: HashSet<String> = app
@@ -577,8 +591,6 @@ fn run_event_loop(
                 }
             }
         }
-
-        app.remaining = calculate_remaining(&app.end_time);
 
         // Stamp a fresh flash, then fade it after a few seconds.
         if app.flash.is_none() {
@@ -815,13 +827,6 @@ fn colored(value: impl Into<String>, color: Color, bold: bool) -> Line<'static> 
     Line::from(Span::styled(value.into(), style))
 }
 
-/// A timestamp in local time.
-fn format_timestamp(ts: &DateTime<Utc>) -> String {
-    ts.with_timezone(&chrono::Local)
-        .format("%Y-%m-%d %H:%M")
-        .to_string()
-}
-
 fn build_submission_lines(
     sub: &broccoli_cli_core::api::submission::SubmissionResponse,
 ) -> Vec<Line<'static>> {
@@ -954,7 +959,7 @@ fn build_clarification_lines(row: &ClarificationRow) -> Vec<Line<'static>> {
         ),
     ]));
     lines.push(field("From", row.author.clone()));
-    lines.push(field("Asked", format_timestamp(&row.created_at)));
+    lines.push(field("Asked", local_time(&row.created_at)));
     if row.resolved
         && let Some(at) = row.resolved_at.as_ref()
     {
@@ -963,7 +968,7 @@ fn build_clarification_lines(row: &ClarificationRow) -> Vec<Line<'static>> {
             .as_deref()
             .map(|b| format!(" by {}", b))
             .unwrap_or_default();
-        lines.push(field("Resolved", format!("{}{}", format_timestamp(at), by)));
+        lines.push(field("Resolved", format!("{}{}", local_time(at), by)));
     }
 
     lines.push(plain(""));
@@ -991,7 +996,7 @@ fn build_clarification_lines(row: &ClarificationRow) -> Vec<Line<'static>> {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("  · {}", format_timestamp(&reply.created_at)),
+                    format!("  · {}", local_time(&reply.created_at)),
                     Style::default().fg(THEME.muted),
                 ),
             ];
@@ -1135,22 +1140,38 @@ fn find_executable(name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Seconds left until `end_time`, or `None` once the contest has ended.
-fn remaining_seconds(end_time: &DateTime<Utc>) -> Option<i64> {
-    let secs = (*end_time - Utc::now()).num_seconds();
-    (secs > 0).then_some(secs)
-}
-
-fn calculate_remaining(end_time: &DateTime<Utc>) -> String {
-    match remaining_seconds(end_time) {
-        // Seconds included so the header visibly ticks.
-        Some(secs) => format!(
-            "{}h {:02}m {:02}s remaining",
+/// The header's countdown at the server's time `now`, and its colour: the
+/// time to the end turns amber under five minutes and red under one. With
+/// no server time to count on, the header names the end time instead.
+fn header_countdown(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    now: Option<DateTime<Utc>>,
+) -> (String, Color) {
+    // Seconds included so the header visibly ticks.
+    let hms = |span: chrono::TimeDelta| {
+        let secs = span.num_seconds();
+        format!(
+            "{}h {:02}m {:02}s",
             secs / 3600,
             (secs % 3600) / 60,
             secs % 60
-        ),
-        None => "Finished".into(),
+        )
+    };
+    let Some(now) = now else {
+        return (format!("ends {}", local_time(&end)), THEME.muted);
+    };
+    match Countdown::at(start, end, now) {
+        Countdown::StartsIn(span) => (format!("starts in {}", hms(span)), THEME.primary),
+        Countdown::EndsIn(span) => {
+            let color = match span.num_seconds() {
+                s if s <= 60 => THEME.error,
+                s if s <= 300 => THEME.warning,
+                _ => THEME.primary,
+            };
+            (format!("{} remaining", hms(span)), color)
+        }
+        Countdown::Ended => ("Finished".into(), THEME.muted),
     }
 }
 
@@ -1169,7 +1190,25 @@ fn update_submissions(app: &mut AppData, data: &SubmissionListResponse) {
             memory_used: s.memory_used.map(i64::from),
         })
         .collect();
+    mark_solved(app);
+}
 
+/// Replace the problem list with `problems`, marking those the polled
+/// submissions solved.
+fn set_problems(app: &mut AppData, problems: &[ContestProblemResponse]) {
+    app.problems = problems
+        .iter()
+        .map(|p| ProblemRow {
+            label: p.label.clone(),
+            title: p.problem_title.clone(),
+            problem_id: p.problem_id.to_string(),
+            solved: false,
+        })
+        .collect();
+    mark_solved(app);
+}
+
+fn mark_solved(app: &mut AppData) {
     let solved_ids: HashSet<&str> = app
         .my_submissions
         .iter()
@@ -1288,15 +1327,9 @@ fn render(f: &mut Frame, app: &AppData) {
         ])
         .split(size);
 
-    // Countdown turns amber under 5 min, red under 1 min.
-    let clock_color = match remaining_seconds(&app.end_time) {
-        Some(s) if s <= 60 => THEME.error,
-        Some(s) if s <= 300 => THEME.warning,
-        Some(_) => THEME.primary,
-        None => THEME.muted,
-    };
+    let (countdown, clock_color) = header_countdown(app.start_time, app.end_time, app.clock.now());
     let mut header_spans = vec![Span::styled(
-        format!(" {} — {} ", app.contest_title, app.remaining),
+        format!(" {} — {} ", app.contest_title, countdown),
         Style::default()
             .fg(clock_color)
             .add_modifier(Modifier::BOLD),
@@ -1739,8 +1772,9 @@ mod tests {
         AppData {
             contest_id: "1".into(),
             contest_title: "Test Cup 2026".into(),
+            start_time: ts("2026-01-01T00:00:00Z"),
             end_time: ts("2099-01-01T00:00:00Z"),
-            remaining: "2h 30m remaining".into(),
+            clock: ServerClock::default(),
             selected_tab: Tab::MySubmissions,
             my_submissions: vec![
                 SubmissionRow {
@@ -2119,11 +2153,27 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_remaining() {
-        let r = calculate_remaining(&ts("2099-01-01T00:00:00Z"));
-        assert!(r.contains("remaining"));
-        assert!(r.contains('s'), "countdown shows seconds: {r}");
-        assert_eq!(calculate_remaining(&ts("2000-01-01T00:00:00Z")), "Finished");
+    fn the_header_counts_down_to_the_start_then_the_end_on_the_server_clock() {
+        let (start, end) = (ts("2030-01-01T10:00:00Z"), ts("2030-01-01T15:00:00Z"));
+        let at = |now: &str| header_countdown(start, end, Some(ts(now)));
+        assert_eq!(
+            at("2030-01-01T09:58:30Z"),
+            ("starts in 0h 01m 30s".into(), THEME.primary)
+        );
+        assert_eq!(
+            at("2030-01-01T12:29:59Z"),
+            ("2h 30m 01s remaining".into(), THEME.primary)
+        );
+        assert_eq!(at("2030-01-01T14:58:00Z").1, THEME.warning);
+        assert_eq!(at("2030-01-01T14:59:30Z").1, THEME.error);
+        assert_eq!(at("2030-01-01T15:00:00Z"), ("Finished".into(), THEME.muted));
+    }
+
+    #[test]
+    fn without_a_server_clock_the_header_shows_the_end_time() {
+        let end = ts("2030-01-01T15:00:00Z");
+        let (text, _) = header_countdown(ts("2030-01-01T10:00:00Z"), end, None);
+        assert_eq!(text, format!("ends {}", local_time(&end)));
     }
 
     #[test]

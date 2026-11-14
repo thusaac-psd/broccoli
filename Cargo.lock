@@ -787,6 +787,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "broccoli-api-types",
+ "chrono",
  "console",
  "crossterm",
  "dirs",

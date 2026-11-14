@@ -22,6 +22,9 @@ use broccoli_api_types::submission::{
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use std::time::Instant;
+
+use crate::clock::ServerClock;
 use crate::credentials::{CredentialsFile, StoredTokens};
 use crate::server::ServerUrl;
 use crate::session::{Exchange, Session, SessionError};
@@ -110,6 +113,7 @@ const REFRESH_COOKIE: &str = "broccoli_refresh";
 pub struct Client {
     session: Session,
     agent: ureq::Agent,
+    clock: ServerClock,
 }
 
 impl Client {
@@ -118,7 +122,11 @@ impl Client {
             Some(std::time::Duration::from_secs(10)),
             Some(std::time::Duration::from_secs(30)),
         );
-        Self { session, agent }
+        Self {
+            session,
+            agent,
+            clock: ServerClock::default(),
+        }
     }
 
     /// A client for the unauthenticated endpoints (login, device flow).
@@ -132,6 +140,25 @@ impl Client {
 
     pub fn server(&self) -> &ServerUrl {
         self.session.server()
+    }
+
+    /// The server's clock, estimated from the responses this client has
+    /// received.
+    pub fn clock(&self) -> &ServerClock {
+        &self.clock
+    }
+
+    /// Send the request `send` builds, timing it for the server clock.
+    fn timed(
+        &self,
+        send: impl FnOnce() -> Result<Response, ureq::Error>,
+    ) -> Result<Response, ureq::Error> {
+        let sent = Instant::now();
+        let resp = send()?;
+        let date = resp.headers().get(http::header::DATE);
+        self.clock
+            .observe_header(sent, Instant::now(), date.and_then(|d| d.to_str().ok()));
+        Ok(resp)
     }
 
     fn url(&self, path: &str) -> String {
@@ -153,24 +180,28 @@ impl Client {
         send: impl Fn(&str) -> Result<Response, ureq::Error>,
     ) -> ClientResult<Response> {
         let token = self.session.bearer()?;
-        let resp = send(&format!("Bearer {token}")).map_err(|e| self.network(e))?;
+        let resp = self
+            .timed(|| send(&format!("Bearer {token}")))
+            .map_err(|e| self.network(e))?;
         if resp.status().as_u16() != 401 || !self.session.can_refresh() {
             return Ok(resp);
         }
         self.session
             .refresh(&token, |refresh| self.exchange(refresh))?;
         let token = self.session.bearer()?;
-        send(&format!("Bearer {token}")).map_err(|e| self.network(e))
+        self.timed(|| send(&format!("Bearer {token}")))
+            .map_err(|e| self.network(e))
     }
 
     /// Present a refresh token to `POST /auth/cli-refresh`.
     fn exchange(&self, refresh_token: &str) -> Exchange {
-        let sent = self
-            .agent
-            .post(&self.url("/api/v1/auth/cli-refresh"))
-            .send_json(CliRefreshRequest {
-                refresh_token: refresh_token.to_string(),
-            });
+        let sent = self.timed(|| {
+            self.agent
+                .post(&self.url("/api/v1/auth/cli-refresh"))
+                .send_json(CliRefreshRequest {
+                    refresh_token: refresh_token.to_string(),
+                })
+        });
         let resp = match sent {
             Ok(resp) => resp,
             Err(e) => return Exchange::unreachable(e.to_string()),
@@ -217,9 +248,7 @@ impl Client {
 
     /// POST to an endpoint that needs no session.
     fn post_anonymous<B: Serialize>(&self, path: &str, body: &B) -> ClientResult<Response> {
-        self.agent
-            .post(&self.url(path))
-            .send_json(body)
+        self.timed(|| self.agent.post(&self.url(path)).send_json(body))
             .map_err(|e| self.network(e))
     }
 
@@ -357,10 +386,12 @@ impl Client {
     /// keeps it.
     pub fn logout(&self, refresh_token: &str) -> ClientResult<()> {
         let resp = self
-            .agent
-            .post(&self.url("/api/v1/auth/logout"))
-            .header("Cookie", format!("{REFRESH_COOKIE}={refresh_token}"))
-            .send_empty()
+            .timed(|| {
+                self.agent
+                    .post(&self.url("/api/v1/auth/logout"))
+                    .header("Cookie", format!("{REFRESH_COOKIE}={refresh_token}"))
+                    .send_empty()
+            })
             .map_err(|e| self.network(e))?;
         self.parse_empty(resp)
     }
@@ -758,6 +789,8 @@ mod tests {
 
     use super::*;
 
+    const SERVER_DATE: &str = "Tue, 01 Jan 2030 10:00:00 GMT";
+
     /// A server that answers one request with `status` and returns the
     /// request line and headers it received.
     fn answer_once(status: &str) -> (ServerUrl, std::thread::JoinHandle<Vec<String>>) {
@@ -782,12 +815,28 @@ mod tests {
             let mut stream = stream;
             write!(
                 stream,
-                "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                "HTTP/1.1 {status}\r\nDate: {SERVER_DATE}\r\nContent-Length: 0\r\n\
+                 Connection: close\r\n\r\n"
             )
             .unwrap();
             head
         });
         (url, handle)
+    }
+
+    #[test]
+    fn responses_set_the_server_clock() {
+        let (url, server) = answer_once("204 No Content");
+        let client = Client::anonymous(&url);
+        assert_eq!(client.clock().now(), None);
+        client.logout("refresh").unwrap();
+        server.join().unwrap();
+        let now = client.clock().now().unwrap();
+        let date = chrono::DateTime::parse_from_rfc2822(SERVER_DATE).unwrap();
+        assert!(
+            now >= date && now < date + chrono::TimeDelta::seconds(5),
+            "{now}"
+        );
     }
 
     #[test]

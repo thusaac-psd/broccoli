@@ -120,6 +120,11 @@ you are registered.
 broccoli contest info "Spring Round"
 ```
 
+Before the contest starts, it shows the start and end times, how long until the
+start, and whether you are registered. The problems appear once it starts.
+Every status and countdown follows the server's clock, so they stay right even
+when the clock on your computer is wrong.
+
 If a contest needs registration, register before you submit. You can leave one
 with `broccoli contest unregister` until it starts. After that your registration
 stays, so the standings keep your results.
@@ -238,7 +243,8 @@ broccoli watch "Spring Round"
 ```
 
 It refreshes on its own and has three tabs, your submissions, the problems, and
-clarifications, with a countdown to the end. Open any row for details, read a
+clarifications, with a countdown to the start and then to the end. Opened
+before the start, it lists the problems as soon as the contest starts. Open any row for details, read a
 problem in a pager, and ask a clarification without leaving the screen.
 
 | Key                | What it does                                  |
