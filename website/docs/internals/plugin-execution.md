@@ -140,8 +140,9 @@ lease, judging and operations `plugin.call_timeout_secs`.
 
 One process-wide thread (`packages/plugin-core/src/deadline.rs`) keeps a heap
 of `(Instant, CancelHandle)` for every running call and cancels a guest whose
-deadline passes. A guest parked in a host function traps when it returns to
-guest code.
+deadline passes. The guest traps at its next function entry or loop
+iteration; one parked in a host function traps once it returns to guest code
+and reaches one.
 
 The workspace patches extism (`third_party/extism`) so that a call's cancel
 and manifest timeout bound every piece of guest code the call runs. extism
@@ -150,7 +151,12 @@ before it instantiates the guest, so the guest's start function and
 `_initialize` run under the same cancel and timeout as the export; building
 an instance does not instantiate the main module; and after an
 instantiation that failed, a cancelled one included, the next call starts
-from a fresh store instead of a half-initialized instance. A cancelled call
+from a fresh store instead of a half-initialized instance. The same holds
+after any call whose guest did not return normally: a trap (cancel, timeout,
+out of fuel, a guest panic), a failed host function or a WASI exit leaves
+the guest's memory possibly half updated, so extism rebuilds the store before
+the instance's next call, and the instance stays in its pool. An error the
+guest returns through its output keeps the store. A cancelled call
 fails like any other, so the host maps it to `PluginError::Unavailable`.
 `packages/plugin-core/tests/extism_cancel.rs` checks these cases.
 

@@ -68,9 +68,9 @@ Extism 调用在发起它的线程上一直运行到客体返回，宿主函数�
 
 每个调用都有截止时间。交互调用使用请求的截止时间（`crate::request_deadline`，由包在请求超时外的中间件为每个请求设置为该超时之前 `PLUGIN_DEADLINE_MARGIN`（1 秒），使无法完成的调用在超时层返回 408 之前先返回 503），钩子取它与 30 秒中较早者，定时器使用其认领租约，评测和操作使用 `plugin.call_timeout_secs`。
 
-一个进程级线程（`packages/plugin-core/src/deadline.rs`）为每个运行中的调用维护 `(Instant, CancelHandle)` 堆，并在截止时间到达时取消客体。挂起在宿主函数中的客体在返回客体代码时陷入 trap。
+一个进程级线程（`packages/plugin-core/src/deadline.rs`）为每个运行中的调用维护 `(Instant, CancelHandle)` 堆，并在截止时间到达时取消客体。客体在下一次函数入口或循环迭代时陷入 trap；挂起在宿主函数中的客体在返回客体代码并到达这样的位置时陷入 trap。
 
-工作区为 extism 打了补丁（`third_party/extism`），使调用的取消和清单超时约束该调用运行的所有客体代码。extism 在实例化客体之前设置 store 的 epoch 截止时间并向其计时线程注册调用，因此客体的 start 函数和 `_initialize` 与导出函数受同一取消和超时约束；构建实例时不实例化主模块；实例化失败（包括被取消）之后，下一次调用从新的 store 开始，而不是使用初始化了一半的实例。被取消的调用与其他调用一样失败，宿主将其映射为 `PluginError::Unavailable`。`packages/plugin-core/tests/extism_cancel.rs` 检查这些情形。
+工作区为 extism 打了补丁（`third_party/extism`），使调用的取消和清单超时约束该调用运行的所有客体代码。extism 在实例化客体之前设置 store 的 epoch 截止时间并向其计时线程注册调用，因此客体的 start 函数和 `_initialize` 与导出函数受同一取消和超时约束；构建实例时不实例化主模块；实例化失败（包括被取消）之后，下一次调用从新的 store 开始，而不是使用初始化了一半的实例。任何客体未正常返回的调用之后也是如此：trap（取消、超时、燃料耗尽、客体 panic）、宿主函数失败或 WASI 退出都可能使客体内存处于更新了一半的状态，因此 extism 在该实例的下一次调用之前重建 store，实例仍留在池中。客体通过输出返回的错误保留 store。被取消的调用与其他调用一样失败，宿主将其映射为 `PluginError::Unavailable`。`packages/plugin-core/tests/extism_cancel.rs` 检查这些情形。
 
 在 extism 注册调用之前被处理的取消找不到要停止的调用。`deadline::watch` 在 `Plugin::call` 之前运行，extism 在持有实例并替换上一次调用留下的不可用 store 之后才注册调用；这段窗口内不运行客体代码。因此截止时间线程会持续重复调用的取消，间隔从 `CANCEL_RETRY` 起倍增至 `CANCEL_RETRY_MAX`，直到调用返回。清单超时（调用超时加 `TIMEOUT_BACKSTOP_MARGIN`）会结束截止时间线程从未取消的客体。
 

@@ -4,8 +4,9 @@
 //! interrupts it, so a deadline cannot be enforced by dropping the awaiting
 //! future: the guest keeps running. One process-wide thread instead keeps a
 //! heap of the deadlines of every running call and cancels a guest through its
-//! [`CancelHandle`] when its deadline passes. A guest parked in a host function
-//! traps as soon as it returns to guest code.
+//! [`CancelHandle`] when its deadline passes. The guest traps at its next
+//! function entry or loop iteration; one parked in a host function traps once
+//! it returns to guest code and reaches one.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
