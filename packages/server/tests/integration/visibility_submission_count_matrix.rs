@@ -25,7 +25,7 @@
 //! API-reachable state; and a pure participant who owns nothing in the
 //! contest) crossed with the contest's two independent flags
 //! (`is_public`, `submissions_visible`). Every viewer here is either
-//! `view_all` (bypasses `check_contest_access` per the handler) or a
+//! `view_all` (bypasses `check_contest_access_decision` per the handler) or a
 //! registered participant (`check_contest_access_decision` allows any
 //! member regardless of `is_public` - see `host_rules.rs`), so `is_public`
 //! never changes who can even reach the endpoint in this file; it is still

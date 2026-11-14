@@ -8,58 +8,40 @@
 //! which rule it pins; a failure means behaviour changed, not that the
 //! assertion needs "fixing" (unless the assertion itself is provably wrong).
 //!
-//! Full coverage selection (not the full 256-cell cross product):
+//! Coverage selection (not the full 256-cell cross product):
 //! - all 4 window states x all 4 viewer kinds on `list_contest_problems`
-//!   (the densest gate: `check_contest_access` + `require_contest_started`).
+//!   (the densest gate: `check_contest_access_decision` +
+//!   `require_contest_started_window_decision`).
 //! - anonymous / non-participant / participant / admin on each of the other
 //!   7 resources, held at a single representative window (private contest,
 //!   inside its activation window).
 //! - soft-delete pinning for contest, problem, and (the closest analogue
 //!   that exists) submission-via-contest.
-//! - a handful of additional cells added because reading the source
-//!   surfaced rules the above selection does not exercise (each is called
-//!   out with a `// NOTE:` and reported separately).
+//! - a handful of additional cells for rules the above selection does not
+//!   exercise (each is called out with a `// NOTE:`).
 //!
-//! A code-review pass on this file flagged that a PRIVATE contest cannot
-//! isolate the activation-window check from the participant check: both
-//! produce an identical `404 NOT_FOUND` for a non-participant, so a
-//! non-participant cell on a private contest cannot tell the difference
-//! between "denied by the window" and "denied because not enrolled" - and
-//! would stay green even if the window-gate block in `check_contest_access`
-//! were deleted outright. `contest_problem_list_matrix` therefore also has a
+//! A PRIVATE contest cannot isolate the activation-window check from the
+//! participant check: both produce an identical `404 NOT_FOUND` for a
+//! non-participant, so a non-participant cell on a private contest cannot
+//! tell "denied by the window" from "denied because not enrolled".
+//! `contest_problem_list_matrix` therefore also has a
 //! `window_gate_public_contest_*` group that repeats the 4 window states on
-//! a PUBLIC contest with a non-participant viewer, mirroring the existing
-//! precedent in `packages/server/src/utils/contest.rs`'s
-//! `contest_access_tests` (`public_but_deactivated_contest_is_not_found_for_unprivileged_user`,
-//! `public_not_yet_activated_contest_is_not_found_for_unprivileged_user`,
-//! `public_in_window_contest_is_accessible_to_any_user`) where `is_public`
+//! a PUBLIC contest with a non-participant viewer, where `is_public`
 //! removes the participant check entirely and the outcome flips purely on
-//! the window. The private-contest `non_participant_*` cells are kept
-//! because they legitimately pin a different rule (a private contest denies
-//! non-members no matter the window) but are named accordingly, not as
-//! window coverage.
+//! the window. The private-contest `non_participant_*` cells pin a
+//! different rule (a private contest denies non-members no matter the
+//! window) and are named accordingly, not as window coverage.
 //!
-//! Verifying that fix (per the reviewer's ask: temporarily delete
-//! `check_contest_access`'s window-gate block and confirm new cells fail)
-//! surfaced a SECOND, deeper masking: `require_contest_started`
-//! (`packages/server/src/utils/contest.rs`, right below `check_contest_access`)
-//! contains a byte-identical copy of the same window predicate
-//! (`activate_time.is_none_or(|at| at > now) || deactivate_time.is_some_and(|dt| dt <= now)`),
-//! and `list_contest_problems` calls BOTH `check_contest_access` and
-//! `require_contest_started` on the same contest/now. Because the two
-//! predicates are identical, they can never diverge for the same request -
-//! so no black-box cell on `list_contest_problems`, public contest or not,
-//! can isolate `check_contest_access`'s copy specifically; disabling ONLY
-//! `check_contest_access`'s block leaves `require_contest_started`'s copy
-//! fully enforcing the window and every `list_contest_problems` cell (public
-//! or private) keeps passing. The `window_gate_public_contest_*` group in
-//! `contest_problem_list_matrix` therefore pins the AGGREGATE window
-//! enforcement of that endpoint's full gate chain, not `check_contest_access`
-//! in isolation. The cells that genuinely isolate `check_contest_access`
-//! live in `contest_detail`'s `window_gate_isolated_public_contest_*` group,
-//! because `get_contest` calls `check_contest_access` alone (no
-//! `require_contest_started`) - those are the ones verified (see the task
-//! report) to flip from 404 to 200 when the block under test is deleted.
+//! `list_contest_problems` applies the window twice, through
+//! `check_contest_access_decision` and through
+//! `require_contest_started_window_decision` (both in `visibility/host_rules.rs`),
+//! on the same contest and clock, so the two can never diverge for one
+//! request. The `window_gate_public_contest_*` group therefore pins the
+//! AGGREGATE window enforcement of that endpoint's gate chain, not either
+//! check in isolation. The cells that isolate
+//! `check_contest_access_decision`'s window gate live in `contest_detail`'s
+//! `window_gate_isolated_public_contest_*` group, because `get_contest`
+//! applies that check alone.
 
 use serde_json::json;
 
@@ -69,9 +51,9 @@ use crate::common::{TestApp, routes};
 // Shared fixtures
 // ---------------------------------------------------------------------
 
-/// One of the 4 canonical contest activation windows from the brief.
-/// `hours` in the brief become fixed absolute timestamps here since the
-/// integration harness has no clock control - "now" is always real wall
+/// One of the 4 canonical contest activation windows. The windows are
+/// fixed absolute timestamps since the integration harness has no clock
+/// control - "now" is always real wall
 /// time (2026), so anchoring far in the past/future keeps the cell stable.
 #[derive(Clone, Copy)]
 struct Window {
@@ -105,7 +87,7 @@ const AFTER_DEACTIVATION: Window = Window {
     deactivate: Some("2020-01-03T00:00:00Z"),
 };
 
-/// `activate_time` is NULL. `check_contest_access` treats this as "never
+/// `activate_time` is NULL. `check_contest_access_decision` treats this as "never
 /// activated" (`is_none_or` on `None` is `true`), i.e. out of window,
 /// regardless of how far in the past `start_time`/`end_time` are.
 const NULL_ACTIVATE_TIME: Window = Window {
@@ -115,7 +97,7 @@ const NULL_ACTIVATE_TIME: Window = Window {
     deactivate: None,
 };
 
-/// Extra window (not one of the brief's 4) used only to pin
+/// Extra window (not one of the canonical 4) used only to pin
 /// `require_contest_started`, a rule the 4 canonical windows above never
 /// independently exercise (in all 4, activate<=now iff start<=now).
 const ACTIVATED_BUT_NOT_STARTED: Window = Window {
@@ -211,7 +193,7 @@ async fn submit_to_contest_problem(
 
 // ---------------------------------------------------------------------
 // Densest gate: list_contest_problems x {4 windows} x {4 viewer kinds}
-// Gate = check_contest_access + require_contest_started.
+// Gate = check_contest_access_decision + require_contest_started.
 // The primary fixture contest is private (is_public=false) so non-participant
 // and participant are meaningfully different for the participant/admin cells.
 // A SEPARATE public-contest fixture (`setup_public`, below) isolates the
@@ -232,7 +214,7 @@ mod contest_problem_list_matrix {
             .await;
         let contest_id = create_contest_window(&app, &admin, "Matrix Contest", false, window).await;
         enroll_participant(&app, &admin, contest_id, &participant).await;
-        // M1: without a real row, every 200 cell's body is `[]` regardless
+        // without a real row, every 200 cell's body is `[]` regardless
         // of authorization, so `is_array()` cannot distinguish "the real
         // list" from "everything redacted away" - both are `[]`. Adding a
         // problem here (an admin write, not gated by the window under test)
@@ -244,9 +226,9 @@ mod contest_problem_list_matrix {
     }
 
     /// Public-contest fixture used ONLY to isolate the window check
-    /// (`check_contest_access`'s window-gate block) from the participant
+    /// (`check_contest_access_decision`'s window-gate block) from the participant
     /// check. For a public contest, once the window-gate block is passed,
-    /// `check_contest_access` returns `Ok` unconditionally on `is_public`
+    /// `check_contest_access_decision` returns `Ok` unconditionally on `is_public`
     /// without ever looking up `contest_user` - so a non-participant's
     /// outcome flips purely on the window state, matching the precedent unit
     /// tests in `packages/server/src/utils/contest.rs::contest_access_tests`.
@@ -258,7 +240,7 @@ mod contest_problem_list_matrix {
         let non_participant = app.create_authenticated_user("outsider", "pass1234").await;
         let contest_id =
             create_contest_window(&app, &admin, "Public Window Gate Contest", true, window).await;
-        // M1: see the matching comment in `setup` above - gives
+        // see the matching comment in `setup` above - gives
         // `window_gate_public_contest_inside_window_is_200` a real row to
         // pin instead of only `[]`.
         let problem_id = app
@@ -272,7 +254,7 @@ mod contest_problem_list_matrix {
     // --- anonymous: these pin that authentication is mandatory, NOT the
     // window. `AuthUser` is a required axum extractor that rejects with
     // TOKEN_MISSING before the handler body - and therefore before
-    // check_contest_access - ever runs, so the outcome is identical in every
+    // check_contest_access_decision - ever runs, so the outcome is identical in every
     // window state. Four near-identical cells are kept (one per window) only
     // to document that the mandatory-auth extractor really does run first in
     // every window, not to claim window coverage. ---
@@ -318,7 +300,7 @@ mod contest_problem_list_matrix {
     }
 
     // --- non-participant on a PRIVATE contest: NOT_FOUND in every window.
-    // IMPORTANT: this does NOT pin the window gate. `check_contest_access`
+    // IMPORTANT: this does NOT pin the window gate. `check_contest_access_decision`
     // has two independent paths that both produce this exact 404 for a
     // private contest - the window-gate block, and (once inside the window)
     // the participant-check fallback - and a black-box HTTP test cannot tell
@@ -372,21 +354,17 @@ mod contest_problem_list_matrix {
     // --- window_gate_public_contest_*: a public contest removes the
     // participant-check fallback (`is_public` short-circuits before the
     // `contest_user` lookup), so these pin the AGGREGATE window enforcement
-    // of this endpoint's full gate chain (`check_contest_access` +
+    // of this endpoint's full gate chain (`check_contest_access_decision` +
     // `require_contest_started`) purely on window state, with no
     // participant-membership confound.
     //
-    // CAVEAT (found while verifying this fix bites, see task-1-report.md):
-    // these do NOT isolate `check_contest_access`'s window-gate block from
-    // `require_contest_started`'s block. Both functions contain the exact
-    // same window predicate applied to the exact same contest/now, and
-    // `list_contest_problems` calls both, so the two can never diverge for
-    // one request - deleting ONLY `check_contest_access`'s copy leaves
-    // `require_contest_started`'s copy still enforcing the window and these
-    // 4 cells keep passing unchanged. For a genuine isolation of
-    // `check_contest_access` alone, see `contest_detail`'s
-    // `window_gate_isolated_public_contest_*` group, which hits `get_contest`
-    // - an endpoint that calls `check_contest_access` only. ---
+    // CAVEAT: these do NOT isolate `check_contest_access_decision`'s window
+    // gate from `require_contest_started_window_decision`'s. Both apply the
+    // same window predicate to the same contest/now, and
+    // `list_contest_problems` applies both, so the two can never diverge for
+    // one request. For isolation of `check_contest_access_decision` alone,
+    // see `contest_detail`'s `window_gate_isolated_public_contest_*` group,
+    // which hits `get_contest` - an endpoint that applies only that check. ---
 
     #[tokio::test]
     async fn window_gate_public_contest_before_activation_is_404() {
@@ -408,7 +386,7 @@ mod contest_problem_list_matrix {
             res.status, 200,
             "positive control: a non-participant IS let in on a public in-window contest"
         );
-        // M1: `is_array()` alone also passes for `[]` (fully redacted) -
+        // `is_array()` alone also passes for `[]` (fully redacted) -
         // pin the one problem `setup_public` seeds.
         assert_eq!(res.body.as_array().unwrap().len(), 1);
     }
@@ -434,7 +412,7 @@ mod contest_problem_list_matrix {
     }
 
     // --- participant: NOT_FOUND outside the window (the window gate in
-    // check_contest_access runs BEFORE the participant/is_public check, so
+    // check_contest_access_decision runs BEFORE the participant/is_public check, so
     // being enrolled does not help outside the window), 200 inside it ---
 
     #[tokio::test]
@@ -457,7 +435,7 @@ mod contest_problem_list_matrix {
             .get_with_token(&routes::contest_problems(contest_id), &participant)
             .await;
         assert_eq!(res.status, 200);
-        // M1: pin the one problem `setup` seeds, not just array shape.
+        // pin the one problem `setup` seeds, not just array shape.
         assert_eq!(res.body.as_array().unwrap().len(), 1);
     }
 
@@ -492,7 +470,7 @@ mod contest_problem_list_matrix {
             .get_with_token(&routes::contest_problems(contest_id), &admin)
             .await;
         assert_eq!(res.status, 200);
-        // M1: pin the one problem `setup` seeds, not just array shape.
+        // pin the one problem `setup` seeds, not just array shape.
         assert_eq!(res.body.as_array().unwrap().len(), 1);
     }
 
@@ -503,7 +481,7 @@ mod contest_problem_list_matrix {
             .get_with_token(&routes::contest_problems(contest_id), &admin)
             .await;
         assert_eq!(res.status, 200);
-        // M1: pin the one problem `setup` seeds, not just array shape.
+        // pin the one problem `setup` seeds, not just array shape.
         assert_eq!(res.body.as_array().unwrap().len(), 1);
     }
 
@@ -514,7 +492,7 @@ mod contest_problem_list_matrix {
             .get_with_token(&routes::contest_problems(contest_id), &admin)
             .await;
         assert_eq!(res.status, 200);
-        // M1: pin the one problem `setup` seeds, not just array shape.
+        // pin the one problem `setup` seeds, not just array shape.
         assert_eq!(res.body.as_array().unwrap().len(), 1);
     }
 
@@ -525,12 +503,12 @@ mod contest_problem_list_matrix {
             .get_with_token(&routes::contest_problems(contest_id), &admin)
             .await;
         assert_eq!(res.status, 200);
-        // M1: pin the one problem `setup` seeds, not just array shape.
+        // pin the one problem `setup` seeds, not just array shape.
         assert_eq!(res.body.as_array().unwrap().len(), 1);
     }
 
     // --- extra rule not covered by the 4 canonical windows:
-    // require_contest_started, layered on top of check_contest_access ---
+    // require_contest_started, layered on top of check_contest_access_decision ---
 
     /// NOTE: activated-but-not-yet-started is a DIFFERENT denial than the
     /// window gate: it is a 400 VALIDATION_ERROR ("Contest has not started
@@ -558,7 +536,7 @@ mod contest_problem_list_matrix {
             res.status, 200,
             "contest:manage bypasses require_contest_started too"
         );
-        // M1: pin the one problem `setup` seeds, not just status.
+        // pin the one problem `setup` seeds, not just status.
         assert_eq!(res.body.as_array().unwrap().len(), 1);
     }
 }
@@ -645,13 +623,13 @@ mod contest_detail {
         assert_eq!(res.body["id"], f.contest_id);
     }
 
-    /// Public-contest fixture used ONLY to isolate `check_contest_access`'s
+    /// Public-contest fixture used ONLY to isolate `check_contest_access_decision`'s
     /// window-gate block from everything else. `get_contest` calls
-    /// `find_contest` + `check_contest_access` and NOTHING else - no
+    /// `find_contest` + `check_contest_access_decision` and NOTHING else - no
     /// `require_contest_started`, so (unlike `list_contest_problems`, see
     /// `contest_problem_list_matrix`'s `window_gate_public_contest_*`
     /// comment) there is no second, duplicate window check downstream to
-    /// mask a broken `check_contest_access`. Combined with `is_public`
+    /// mask a broken `check_contest_access_decision`. Combined with `is_public`
     /// removing the participant-check fallback, a non-participant's outcome
     /// here depends on NOTHING but the window-gate block under test.
     async fn setup_public(window: Window) -> (TestApp, String, i32) {
@@ -666,17 +644,9 @@ mod contest_detail {
     }
 
     // --- window_gate_isolated_public_contest_*: THIS is the group that
-    // genuinely isolates and pins `check_contest_access`'s window-gate block
-    // in isolation, verified as follows (see task-1-report.md for the actual
-    // numbers): with `packages/server/src/utils/contest.rs`'s window-gate
-    // block (the one inside `check_contest_access`) temporarily deleted, the
-    // 3 out-of-window cells below flip from 404 to 200 and FAIL, while
-    // restoring the block byte-identical makes the whole suite pass again.
-    // Mirrors the precedent in
-    // `packages/server/src/utils/contest.rs::contest_access_tests`
-    // (`public_but_deactivated_contest_is_not_found_for_unprivileged_user`,
-    // `public_not_yet_activated_contest_is_not_found_for_unprivileged_user`,
-    // `public_in_window_contest_is_accessible_to_any_user`). ---
+    // isolates and pins `check_contest_access_decision`'s window gate
+    // (`visibility/host_rules.rs`): without that gate, the 3 out-of-window
+    // cells below flip from 404 to 200. ---
 
     #[tokio::test]
     async fn window_gate_isolated_public_contest_before_activation_is_404() {
@@ -726,8 +696,8 @@ mod contest_problem_detail {
     //! There is no `GET /contests/{id}/problems/{problem_id}` single-item
     //! endpoint (only PATCH/DELETE exist there). The read path for a single
     //! contest problem's statement is the standalone `GET /problems/{id}`,
-    //! gated by `require_problem_read_access` -> `can_access_problem_via_contest`
-    //! for a non-public problem.
+    //! gated by `decide_standalone_problem_access` (host rule 9 for a non-public
+    //! problem).
     use super::*;
 
     struct Fixture {
@@ -897,7 +867,7 @@ mod contest_problem_sample {
             )
             .await;
         assert_eq!(res.status, 200);
-        // M1: a fully-redacted or empty body would still be 200 - pin the
+        // a fully-redacted or empty body would still be 200 - pin the
         // same content shape `participant_is_200` pins above.
         assert!(res.body["samples"].is_array());
         assert_eq!(res.body["samples"].as_array().unwrap().len(), 1);
@@ -906,9 +876,9 @@ mod contest_problem_sample {
     /// NOTE (docstring/behaviour mismatch): `getContestProblemSamples`'s
     /// OpenAPI description says "Requires the user to be a participant or
     /// have contest:manage permission", but the handler only calls
-    /// `check_contest_access` (no `is_contest_participant`/
+    /// `check_contest_access_decision` (no `is_contest_participant`/
     /// `require_contest_participant` call). For a PUBLIC contest,
-    /// `check_contest_access` grants any authenticated user - enrolled or
+    /// `check_contest_access_decision` grants any authenticated user - enrolled or
     /// not - as soon as the window is open. Samples for a public running
     /// contest are therefore readable by a logged-in non-participant.
     #[tokio::test]
@@ -923,7 +893,7 @@ mod contest_problem_sample {
             .await;
         assert_eq!(
             res.status, 200,
-            "check_contest_access does not require participation for a public contest"
+            "check_contest_access_decision does not require participation for a public contest"
         );
     }
 }
@@ -1015,7 +985,7 @@ mod problem_attachment_list {
             .get_with_token(&routes::attachments(f.problem_id), &f.admin)
             .await;
         assert_eq!(res.status, 200);
-        // M1: pin the same content shape `participant_is_200` pins above -
+        // pin the same content shape `participant_is_200` pins above -
         // status alone would also pass a fully-redacted/empty body.
         assert_eq!(res.body["total"], 1);
         assert_eq!(res.body["attachments"].as_array().unwrap().len(), 1);
@@ -1108,14 +1078,14 @@ mod contest_submission_list {
             .get_with_token(&routes::contest_submissions(f.contest_id), &f.admin)
             .await;
         assert_eq!(res.status, 200);
-        // M1: pin the same content shape `participant_is_200` pins above -
+        // pin the same content shape `participant_is_200` pins above -
         // status alone would also pass a fully-redacted/empty body.
         assert_eq!(res.body["data"].as_array().unwrap().len(), 1);
     }
 
     /// NOTE (permission-key asymmetry): every other contest read path in
     /// this file gates its admin bypass on `contest:manage`. This endpoint
-    /// instead bypasses `check_contest_access` entirely for anyone holding
+    /// instead bypasses `check_contest_access_decision` entirely for anyone holding
     /// `submission:view_all` (`can_view_all`) - a DIFFERENT permission. The
     /// `problem_setter` role has `submission:view_all` but NOT
     /// `contest:manage`, so a problem_setter can list a private, DEACTIVATED
@@ -1159,7 +1129,7 @@ mod contest_submission_list {
             patch.text
         );
 
-        // Sanity/baseline: check_contest_access denies EVERYONE once the
+        // Sanity/baseline: check_contest_access_decision denies EVERYONE once the
         // window closes, even an enrolled participant with no special
         // permission - participation only matters INSIDE the window (see
         // contest_problem_list_matrix::participant_after_deactivation_is_404).
@@ -1170,7 +1140,7 @@ mod contest_submission_list {
             .await;
         assert_eq!(
             baseline.status, 404,
-            "check_contest_access has no participant carve-out once the window is closed"
+            "check_contest_access_decision has no participant carve-out once the window is closed"
         );
         assert_eq!(baseline.body["code"], "NOT_FOUND");
 
@@ -1179,7 +1149,7 @@ mod contest_submission_list {
             .await;
         assert_eq!(
             res.status, 200,
-            "submission:view_all bypasses check_contest_access even without contest:manage"
+            "submission:view_all bypasses check_contest_access_decision even without contest:manage"
         );
         assert_eq!(res.body["data"].as_array().unwrap().len(), 1);
     }
@@ -1268,7 +1238,7 @@ mod submission_detail {
             .get_with_token(&routes::submission(f.submission_id), &f.admin)
             .await;
         assert_eq!(res.status, 200);
-        // M1: pin the same content shape `owner_participant_is_200` pins
+        // pin the same content shape `owner_participant_is_200` pins
         // above - status alone would also pass a fully-redacted body.
         assert_eq!(res.body["id"], f.submission_id);
     }
@@ -1298,7 +1268,7 @@ mod contest_clarification_list {
             create_contest_window(&app, &admin, "Clarification Fixture", false, INSIDE_WINDOW)
                 .await;
         enroll_participant(&app, &admin, contest_id, &participant).await;
-        // M1: without a real row, `data.is_array()` passes on BOTH a
+        // without a real row, `data.is_array()` passes on BOTH a
         // populated and an empty ("fully redacted") list - it caught the
         // exact "list_clarifications returns data: [] for every viewer"
         // regression documented in visibility_clarification_contents.rs's
@@ -1361,10 +1331,9 @@ mod contest_clarification_list {
             )
             .await;
         assert_eq!(res.status, 200);
-        // M1: `is_array()` alone passes for an empty list too - pin the
+        // `is_array()` alone passes for an empty list too - pin the
         // seeded announcement's count and content, which a full-body
-        // redaction (or the historical `data: []`-for-everyone regression)
-        // would break.
+        // redaction (or a `data: []`-for-everyone answer) would break.
         assert_eq!(res.body["data"].as_array().unwrap().len(), 1);
         assert_eq!(
             res.body["data"][0]["content"],
@@ -1396,7 +1365,7 @@ mod soft_delete {
     use super::*;
 
     /// NOTE: `find_contest` (used by `get_contest`) resolves the row via
-    /// `find_active_by_id` BEFORE `check_contest_access` runs its
+    /// `find_active_by_id` BEFORE `check_contest_access_decision` runs its
     /// `contest:manage` short-circuit. A soft-deleted contest is therefore
     /// NOT_FOUND even for a `contest:manage` admin - soft-delete is not
     /// bypassable by the same permission that bypasses the activation
@@ -1423,7 +1392,7 @@ mod soft_delete {
     }
 
     /// NOTE: same shape of surprise as above, for problems -
-    /// `require_problem_read_access` fetches via `find_active_by_id` before
+    /// `decide_standalone_problem_access` fetches via `find_active_by_id` before
     /// checking `problem:create`/`problem:edit`, so a soft-deleted problem
     /// is NOT_FOUND even for its own editor.
     #[tokio::test]
@@ -1450,18 +1419,17 @@ mod soft_delete {
     /// at all - `find_submission` is a raw `find_by_id`. There is no way to
     /// soft-delete a submission directly. The closest real analogue is
     /// soft-deleting the CONTEST a submission belongs to, which is
-    /// meaningful because `require_submission_visible`'s non-owner branch
+    /// meaningful because `decide_submission`'s non-owner branch
     /// re-resolves the contest via `find_contest` (soft-delete-aware) on
     /// every read.
     ///
-    /// The owner-bypass in `require_submission_visible`
+    /// The owner-bypass in `decide_submission`
     /// (`sub.user_id != auth_user.user_id`) means this contest lookup is
     /// SKIPPED ENTIRELY when the viewer owns the submission. The result: a
     /// participant can still read their own submission from a contest an
     /// admin has since soft-deleted, forever, while every other viewer
     /// (including one who was legitimately enrolled) is immediately
-    /// NOT_FOUND. This asymmetry is a strong candidate for a "will this
-    /// still be true" pin across the refactor.
+    /// NOT_FOUND. This test pins that asymmetry.
     #[tokio::test]
     async fn submission_owner_can_still_view_own_submission_after_contest_soft_deleted() {
         let app = TestApp::spawn().await;
@@ -1495,7 +1463,7 @@ mod soft_delete {
             .await;
         assert_eq!(
             res.status, 200,
-            "owner bypass in require_submission_visible skips the contest lookup entirely"
+            "owner bypass in decide_submission skips the contest lookup entirely"
         );
         assert_eq!(res.body["id"], submission_id);
     }
@@ -1503,7 +1471,7 @@ mod soft_delete {
     /// The mirror image of the above: a non-owner who WAS legitimately
     /// enrolled in the same (now soft-deleted) contest loses access to the
     /// owner's submission immediately, because the non-owner branch of
-    /// `require_submission_visible` re-resolves the contest via
+    /// `decide_submission` re-resolves the contest via
     /// `find_contest`.
     #[tokio::test]
     async fn submission_enrolled_non_owner_is_not_found_after_contest_soft_deleted() {

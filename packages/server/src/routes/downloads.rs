@@ -1,7 +1,6 @@
 //! Server-bundled stress-test binary downloads.
 //!
-//! Compiled only when the `bundled-stress-test` cargo feature is enabled. See
-//! `docs/plans/2026-05-03-stress-test-release-design.md` for the design.
+//! Compiled only when the `bundled-stress-test` cargo feature is enabled.
 
 use axum::{
     Router,

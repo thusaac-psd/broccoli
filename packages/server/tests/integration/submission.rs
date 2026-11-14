@@ -2105,7 +2105,7 @@ mod contest_submission_visibility {
     }
 
     /// Pagination-count leak fix: a PUBLIC, `submissions_visible=true`
-    /// contest is reachable (via `check_contest_access`'s `is_public`
+    /// contest is reachable (via `check_contest_access_decision`'s `is_public`
     /// branch) by an authenticated user who never registered. Before the
     /// fix, `can_see_all` was `can_view_all || contest.submissions_visible`
     /// with no participation check, so the SQL `total` counted every
@@ -2143,7 +2143,7 @@ mod contest_submission_visibility {
         .await;
 
         // Authenticated, but never registered for this contest. The contest
-        // is public, so the top-level `check_contest_access` gate still lets
+        // is public, so the top-level `check_contest_access_decision` gate still lets
         // the request through (no 404) - only the row-level filter and the
         // aggregate count are at stake here.
         let outsider_token = app.create_authenticated_user("outsider1", "pass1234").await;

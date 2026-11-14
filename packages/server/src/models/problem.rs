@@ -554,10 +554,9 @@ mod test_case_description_tests {
     }
 }
 
-// The checker source no longer lives on the problem model: it is problem-scoped
-// config owned by the checker plugin (`standard-checkers:checker_source`), served
-// only through the `problem:edit`-gated checker-source endpoints. The obsolete
-// `ProblemResponse` privacy test (which guarded a now-removed field) was dropped.
+// The checker source is not on the problem model: it is problem-scoped config
+// owned by the checker plugin (`standard-checkers:checker_source`), served only
+// through the `problem:edit`-gated checker-source endpoints.
 
 #[cfg(test)]
 mod checker_format_tests {

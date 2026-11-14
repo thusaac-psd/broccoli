@@ -1,17 +1,14 @@
-//! Batch A / item 3: `rejudge.rs`'s `apply_submission_judgement` and
-//! `rejudge_submission` built their response with a HARDCODED
-//! `VisibilityContext { has_view_all: true }` and shipped it straight
-//! through `Json(...)`, never through `VisibilityKernel`/`Visible<T>`.
-//! `submission:rejudge` is a permission documented as independent of
-//! `submission:view_all`/`contest:manage` (see
-//! `broccoli-types/src/permissions.rs`), and neither handler filtered its DB
-//! fetch by ownership or contest - so ANY user holding only
-//! `submission:rejudge` could exfiltrate full source/compile-output/verdict
-//! for ANY submission id, in any contest, frozen or not, just by triggering
-//! (or re-triggering) a rejudge on it. Confirmed present at the pre-fix
-//! commit `3dde5d42` - this predates the visibility-kernel branch.
+//! Responses of `rejudge.rs`'s `apply_submission_judgement`,
+//! `rejudge_submission` and `admin_fan_out_submission` must not leak what a
+//! `GET` would hide. `submission:rejudge` is a permission documented as
+//! independent of `submission:view_all`/`contest:manage` (see
+//! `broccoli-types/src/permissions.rs`), and none of these handlers filters
+//! its DB fetch by ownership or contest - so a response built without the
+//! kernel would let ANY user holding only `submission:rejudge` exfiltrate
+//! full source/compile-output/verdict for ANY submission id, in any contest,
+//! frozen or not, just by triggering (or re-triggering) a rejudge on it.
 //!
-//! These tests pin the fix: the response now goes through the same
+//! These tests pin that the response goes through the same
 //! `Resource::Submission` kernel Read decision `GET /submissions/{id}`
 //! would make for the SAME caller
 //! (`apply_filter_to_response_after_mutation`,
@@ -21,7 +18,7 @@
 //! acknowledgement instead. A plugin `Redact` blanks exactly the fields a
 //! `GET` would blank, never more, never less. A caller who ALSO holds
 //! `submission:view_all` still sees everything, same as `GET` would show
-//! them - the fix does not over-restrict a real admin.
+//! them - a real admin is not over-restricted.
 
 use broccoli_server_sdk::permissions as perm;
 use chrono::Utc;
@@ -104,7 +101,7 @@ async fn insert_judged_submission(app: &TestApp, problem_id: i32, owner_id: i32)
     submission.id
 }
 
-// == Regression: a `submission:rejudge`-only caller must not see content a
+// == A `submission:rejudge`-only caller must not see content a
 // == `GET` would deny them ===================================================
 
 #[tokio::test]
@@ -396,10 +393,9 @@ async fn rejudge_response_is_redacted_like_a_read_would_be() {
     assert_eq!(res.body["status"], "Judged");
 }
 
-// == admin_fan_out_submission: the third handler this fix touches, and the
-// == one that previously had zero coverage of its own - a partial revert of
-// == just this handler would have left the four tests above green
-// == =========================================================================
+// == admin_fan_out_submission: the third handler, covered on its own since
+// == the four tests above do not exercise it
+// == ==========================================================================
 
 /// `admin_fan_out_submission` requires a `target_worker_ids` entry to have a
 /// LIVE heartbeat (`handlers::system::live_worker_ids`), which reads

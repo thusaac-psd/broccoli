@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(v, json!({"scores": [null, null, null]}));
     }
 
-    // M3: a syntactically malformed path (empty/leading/trailing/doubled dot)
+    // A syntactically malformed path (empty/leading/trailing/doubled dot)
     // must still be a safe no-op — `has_empty_segment` only adds a debug-level
     // diagnostic, it never changes blanking behavior or rejects the mask.
 
