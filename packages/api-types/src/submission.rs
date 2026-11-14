@@ -30,7 +30,8 @@ pub struct SubmissionResponse {
     pub files: Vec<SubmissionFileDto>,
     #[schema(example = "cpp")]
     pub language: String,
-    pub status: SubmissionStatus,
+    /// `None` while `withheld` is set.
+    pub status: Option<SubmissionStatus>,
     #[schema(example = 1)]
     pub user_id: i32,
     #[schema(example = "alice")]
@@ -52,6 +53,9 @@ pub struct SubmissionResponse {
     #[schema(example = "2025-10-01T14:30:00Z")]
     pub created_at: DateTime<Utc>,
     pub result: Option<JudgeResultResponse>,
+    /// Set when the submission's outcome (status, verdict, score, result) is
+    /// left out of this response, with why.
+    pub withheld: Option<crate::visibility::Withheld>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -60,7 +64,8 @@ pub struct SubmissionListItem {
     pub id: i32,
     #[schema(example = "cpp")]
     pub language: String,
-    pub status: SubmissionStatus,
+    /// `None` while `withheld` is set.
+    pub status: Option<SubmissionStatus>,
     #[schema(value_type = Option<String>, example = "Accepted")]
     pub verdict: Option<Verdict>,
     #[schema(example = 1)]
@@ -86,6 +91,9 @@ pub struct SubmissionListItem {
     pub time_used: Option<i32>,
     #[schema(example = 1024)]
     pub memory_used: Option<i32>,
+    /// Set when the submission's outcome (status, verdict, score, times) is
+    /// left out of this row, with why.
+    pub withheld: Option<crate::visibility::Withheld>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

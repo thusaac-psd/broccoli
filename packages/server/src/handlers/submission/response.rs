@@ -59,7 +59,7 @@ pub(super) async fn build_submission_list_items(
         data.push(SubmissionListItem {
             id: sub.id,
             language: sub.language,
-            status: sub.status,
+            status: Some(sub.status),
             verdict: sub.verdict,
             user_id: sub.user_id,
             username: user_model.username,
@@ -73,6 +73,7 @@ pub(super) async fn build_submission_list_items(
             score,
             time_used: sub.time_used,
             memory_used: sub.memory_used,
+            withheld: None,
         });
     }
 
@@ -536,7 +537,7 @@ pub(super) async fn build_submission_response_with_cases(
         id: sub.id,
         files,
         language: sub.language,
-        status: sub.status,
+        status: Some(sub.status),
         user_id: sub.user_id,
         username: context.username,
         problem_id: sub.problem_id,
@@ -547,6 +548,7 @@ pub(super) async fn build_submission_response_with_cases(
         target_worker_id: sub.target_worker_id,
         created_at: sub.created_at,
         result: result_response,
+        withheld: None,
     })
 }
 
@@ -602,6 +604,7 @@ pub(super) async fn build_judgement_response(
         created_at: judgement.created_at,
         finalized_at: judgement.finalized_at,
         test_case_pagination: Some(pagination),
+        withheld: None,
         test_case_results,
     })
 }

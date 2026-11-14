@@ -32,6 +32,21 @@ export type CodeRunResult = components['schemas']['CodeRunResultResponse'];
 export type SubmissionStatusFilterValue = 'all' | SubmissionStatus;
 
 /**
+ * Why a submission's outcome (status, verdict, score, result) is left out of
+ * a response: the contest's plugin hides it for now, or cannot decide it.
+ */
+export type Withheld = components['schemas']['Withheld'];
+
+/** Why a plugin cannot serve what it provides right now. */
+export type PluginOutage = components['schemas']['PluginOutage'];
+
+/**
+ * A status as the server shows it to this viewer: `null` (or absent) while
+ * the outcome is withheld (see `Withheld`).
+ */
+export type ShownStatus = SubmissionStatus | null | undefined;
+
+/**
  * Error envelope returned by the server for failed submissions and code
  * runs. The `{ code, message, details? }` shape is an API contract shared
  * by all submission endpoints.

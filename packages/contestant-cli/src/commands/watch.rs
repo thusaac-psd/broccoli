@@ -88,7 +88,7 @@ struct SubmissionRow {
     id: String,
     problem_id: String,
     problem: String,
-    status: SubmissionStatus,
+    status: Option<SubmissionStatus>,
     verdict: Option<Verdict>,
     score: Option<f64>,
     time_used: Option<i64>,
@@ -388,7 +388,7 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
             .iter()
             .map(|p| ProblemRow {
                 label: p.label.clone(),
-                title: p.problem_title.clone(),
+                title: broccoli_cli_core::model::problem_title(p).to_string(),
                 problem_id: p.problem_id.to_string(),
                 solved: false,
             })
@@ -1674,7 +1674,7 @@ mod tests {
                 .map(|(id, problem_id, title, verdict)| SubmissionListItem {
                     id: *id,
                     language: "cpp".into(),
-                    status: SubmissionStatus::Judged,
+                    status: Some(SubmissionStatus::Judged),
                     verdict: Some(verdict.clone()),
                     user_id: 7,
                     username: "alice".into(),
@@ -1688,6 +1688,7 @@ mod tests {
                     score: Some(if verdict.is_accepted() { 100.0 } else { 0.0 }),
                     time_used: Some(41),
                     memory_used: Some(2048),
+                    withheld: None,
                 })
                 .collect(),
             pagination: pagination(items.len()),
@@ -1747,7 +1748,7 @@ mod tests {
                     id: "1001".into(),
                     problem_id: "1".into(),
                     problem: "A Plus B".into(),
-                    status: SubmissionStatus::Judged,
+                    status: Some(SubmissionStatus::Judged),
                     verdict: Some(Verdict::Accepted),
                     score: Some(100.0),
                     time_used: Some(41),
@@ -1757,7 +1758,7 @@ mod tests {
                     id: "1002".into(),
                     problem_id: "2".into(),
                     problem: "Subarrays".into(),
-                    status: SubmissionStatus::Judged,
+                    status: Some(SubmissionStatus::Judged),
                     verdict: Some(Verdict::WrongAnswer),
                     score: Some(0.0),
                     time_used: Some(33),

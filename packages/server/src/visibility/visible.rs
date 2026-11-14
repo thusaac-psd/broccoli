@@ -22,18 +22,44 @@
 //! which applies the `FieldMask` when the decision is `Redact` — a handler
 //! that filters a decision vector by hand can apply `Deny` but silently
 //! forget `Redact`; going through this type instead makes that impossible.
+use broccoli_api_types::visibility::Withheld;
 use broccoli_server_sdk::visibility::cap_submission_detail_texts;
 
 use super::Decision;
 use crate::error::AppError;
+use crate::services::submission_feedback::Feedback;
+
+/// A response shape the kernel can present with its plugin-governed fields
+/// withheld: while a plugin that governs the resource cannot decide
+/// ([`Decision::Withheld`]), or hides the resource's outcome from the viewer
+/// ([`Withheld::Hidden`]). Every shape that reaches a response body through
+/// [`Visible`] declares which of its fields the host decides alone, so a new
+/// field is withheld until someone decides otherwise.
+pub trait Governed {
+    /// The top-level fields shown while the rest is withheld; every other
+    /// field is `null` (an array, empty) and `withheld` says why. `None`: the
+    /// whole shape is plugin-governed, so a request for it fails with the
+    /// outage instead.
+    const HOST_DECIDED: Option<&'static [&'static str]>;
+
+    /// Whether the value at `path` is one the host decides alone.
+    fn host_decides(path: &str) -> bool {
+        let top = path.split('.').next().unwrap_or(path);
+        Self::HOST_DECIDED.is_some_and(|fields| fields.contains(&top))
+    }
+}
+
+impl<T: Governed> Governed for Option<T> {
+    const HOST_DECIDED: Option<&'static [&'static str]> = T::HOST_DECIDED;
+}
 
 pub struct Visible<T> {
     inner: T,
     decision: Decision,
-    feedback: Option<crate::services::submission_feedback::Feedback>,
+    feedback: Option<Feedback>,
 }
 
-impl<T: serde::Serialize> Visible<T> {
+impl<T: serde::Serialize + Governed> Visible<T> {
     /// Only reachable from within `visibility` (this module and `mod.rs`) —
     /// see the module docs for why that is the entire point of this type.
     pub(super) fn new(inner: T, decision: Decision) -> Self {
@@ -44,17 +70,15 @@ impl<T: serde::Serialize> Visible<T> {
         }
     }
 
-    pub(super) fn with_feedback(
-        mut self,
-        feedback: Option<crate::services::submission_feedback::Feedback>,
-    ) -> Self {
+    pub(super) fn with_feedback(mut self, feedback: Option<Feedback>) -> Self {
         self.feedback = feedback;
         self
     }
 
-    /// Serialize the entity, then apply the `FieldMask` if the decision was
-    /// `Redact`. This is the only way to turn a `Visible<T>` into JSON, so a
-    /// `Redact` decision can never be skipped at the serialization step.
+    /// Serialize the entity, withhold what the decision or the plugin's
+    /// feedback withholds, then apply the decision's `FieldMask`. This is the
+    /// only way to turn a `Visible<T>` into JSON, so no part of a decision can
+    /// be skipped at the serialization step.
     ///
     /// Also applies [`cap_submission_detail_texts`] here, unconditionally,
     /// after masking; plugins never see a response body to cap. The byte
@@ -69,15 +93,58 @@ impl<T: serde::Serialize> Visible<T> {
     pub fn into_masked_json(self) -> Result<serde_json::Value, AppError> {
         let mut value = serde_json::to_value(&self.inner)
             .map_err(|e| AppError::Internal(format!("visibility serialize: {e}")))?;
-        if let Some(feedback) = self.feedback {
-            crate::services::submission_feedback::project(&mut value, feedback);
+        let withheld = match (&self.decision, self.feedback) {
+            (Decision::Withheld { outage, .. }, _) => Some(Withheld::PluginOutage {
+                outage: outage.clone(),
+            }),
+            (_, Some(Feedback::Withheld)) => Some(Withheld::Hidden),
+            (_, Some(Feedback::Published(result))) => {
+                crate::services::submission_feedback::publish(&mut value, &result);
+                None
+            }
+            (_, None) => None,
+        };
+        if let Some(reason) = withheld {
+            withhold::<T>(&mut value, reason)?;
         }
-        if let Decision::Redact(mask) = &self.decision {
-            super::apply_mask(&mut value, mask);
+        match &self.decision {
+            Decision::Redact(mask) | Decision::Withheld { mask, .. } => {
+                super::apply_mask(&mut value, mask)
+            }
+            Decision::Allow | Decision::Deny => {}
         }
         cap_submission_detail_texts(&mut value);
         Ok(value)
     }
+}
+
+/// Blank every field of `value` but the ones `T` declares host-decided, and
+/// say why in its `withheld` field.
+fn withhold<T: Governed>(value: &mut serde_json::Value, reason: Withheld) -> Result<(), AppError> {
+    let Some(shown) = T::HOST_DECIDED else {
+        return Err(match reason {
+            Withheld::PluginOutage { outage } => outage.into(),
+            Withheld::Hidden => {
+                AppError::Internal("a shape without host-decided fields was hidden".into())
+            }
+        });
+    };
+    let Some(fields) = value.as_object_mut() else {
+        return Ok(());
+    };
+    for (name, field) in fields.iter_mut() {
+        if !shown.contains(&name.as_str()) {
+            *field = match field {
+                serde_json::Value::Array(_) => serde_json::Value::Array(Vec::new()),
+                _ => serde_json::Value::Null,
+            };
+        }
+    }
+    fields.insert(
+        "withheld".into(),
+        serde_json::to_value(reason).map_err(|e| AppError::Internal(e.to_string()))?,
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -102,6 +169,65 @@ mod tests {
     #[derive(Debug, Clone, Serialize)]
     struct FakeSubmissionDto {
         result: FakeJudgeResult,
+    }
+
+    impl Governed for SampleDto {
+        const HOST_DECIDED: Option<&'static [&'static str]> = Some(&["score"]);
+    }
+
+    impl Governed for FakeSubmissionDto {
+        const HOST_DECIDED: Option<&'static [&'static str]> = None;
+    }
+
+    #[test]
+    fn withheld_shows_only_the_host_decided_fields_and_says_why() {
+        use broccoli_api_types::visibility::PluginOutage;
+        let model = SampleDto {
+            verdict: Some("AC".to_string()),
+            score: Some(100),
+        };
+        let value = Visible::new(
+            model,
+            Decision::Withheld {
+                outage: PluginOutage::Unavailable,
+                mask: FieldMask::default(),
+            },
+        )
+        .into_masked_json()
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "verdict": null,
+                "score": 100,
+                "withheld": {"reason": "plugin_outage", "outage": {"state": "unavailable"}},
+            })
+        );
+    }
+
+    #[test]
+    fn a_shape_with_nothing_host_decided_fails_with_the_outage() {
+        use broccoli_api_types::visibility::PluginOutage;
+        let dto = FakeSubmissionDto {
+            result: FakeJudgeResult {
+                compile_output: None,
+            },
+        };
+        let err = Visible::new(
+            dto,
+            Decision::Withheld {
+                outage: PluginOutage::Disabled {
+                    plugin_id: "p".into(),
+                },
+                mask: FieldMask::default(),
+            },
+        )
+        .into_masked_json()
+        .unwrap_err();
+        assert!(
+            matches!(err, AppError::PluginDisabled(ref id) if id == "p"),
+            "{err:?}"
+        );
     }
 
     /// `into_masked_json` is the only caller of `cap_submission_detail_texts`.

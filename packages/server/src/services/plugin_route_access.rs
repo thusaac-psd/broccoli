@@ -49,12 +49,14 @@ pub async fn authorize(
         RouteTarget::Problem { problem } => {
             let problem_id = path_id(params, problem)?;
             let kernel = VisibilityKernel::new(state, Subject::from_auth_user(user));
-            if kernel
+            let decision = kernel
                 .decide(Action::Read, ProblemScope::standalone(problem_id).problem())
-                .await?
-                .is_denied()
-            {
+                .await?;
+            if decision.is_denied() {
                 return Err(AppError::NotFound("Problem not found".into()));
+            }
+            if let Some(outage) = decision.outage() {
+                return Err(outage.clone().into());
             }
             Ok(Resolved {
                 contest: None,
@@ -96,6 +98,11 @@ async fn resolve_contest(
     }
     if decisions.get(1).is_some_and(|d| d.is_denied()) {
         return Err(AppError::NotFound("Contest problem not found".into()));
+    }
+    // The route serves the problem as the plugin governing it would let the
+    // caller read it; while that plugin cannot decide, the route cannot run.
+    if let Some(outage) = decisions.iter().find_map(|d| d.outage()) {
+        return Err(outage.clone().into());
     }
 
     let participant = match kernel.participates(contest_id) {

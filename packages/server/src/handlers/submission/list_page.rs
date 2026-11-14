@@ -12,12 +12,17 @@
 //! A row the kernel shows may still have fields hidden from the caller. A
 //! list filtered or sorted by such a field would disclose its value through
 //! which rows match or where a row lands, so a row is shown in a list only
-//! when every field the list filters or sorts on is visible to the caller.
+//! when every field the list filters on is visible to the caller. A list
+//! sorted by status shows the rows whose status the caller cannot see as
+//! their own group after every other row, ordered by id alone: their place
+//! says nothing of their status.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sea_orm::sea_query::{Expr, SimpleExpr};
-use sea_orm::{Order, QueryFilter, QueryOrder, QuerySelect, Select};
+use std::collections::HashSet;
+
+use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Select};
 use serde::{Deserialize, Serialize};
 
 use super::filter::apply_filter_to_list;
@@ -33,6 +38,7 @@ use crate::models::submission::SubmissionListQuery;
 use crate::services::submission_feedback::public_status_sql;
 use crate::state::AppState;
 use crate::visibility::{Action, Decision, Resource, VisibilityKernel};
+use broccoli_api_types::submission::SubmissionListItem;
 
 /// Most rows decided in one kernel batch. The first chunk is one page plus
 /// the look-ahead row, so a list nothing hides costs one query and one
@@ -53,13 +59,24 @@ enum SortDir {
     Desc,
 }
 
+/// Which rows of a list a pass over it shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Group {
+    /// Rows whose sort key the caller sees, in the list's order.
+    Shown,
+    /// Rows of a status sort whose status is withheld from the caller, after
+    /// every shown row, by id in the list's direction.
+    Withheld,
+}
+
 /// The total order of a submission list: its sort key, then `id`, both in
 /// the requested direction.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ListOrder {
     key: SortKey,
     dir: SortDir,
-    can_view_all: bool,
+    sees_withheld: bool,
 }
 
 /// What a cursor encodes: the order it was issued for and the last row shown.
@@ -67,14 +84,19 @@ pub(super) struct ListOrder {
 struct Cursor {
     by: SortKey,
     order: SortDir,
+    group: Group,
     id: i32,
 }
 
 impl ListOrder {
     /// The order a list query asks for (already validated by
-    /// `validate_sorting_params`). `can_view_all` picks which status a
+    /// `validate_sorting_params`). `sees_withheld` picks which status a
     /// status sort compares: the one this viewer sees.
-    pub fn from_query(sort_by: Option<&str>, sort_order: Option<&str>, can_view_all: bool) -> Self {
+    pub fn from_query(
+        sort_by: Option<&str>,
+        sort_order: Option<&str>,
+        sees_withheld: bool,
+    ) -> Self {
         Self {
             key: match sort_by {
                 Some("status") => SortKey::Status,
@@ -84,7 +106,7 @@ impl ListOrder {
                 Some("asc") => SortDir::Asc,
                 _ => SortDir::Desc,
             },
-            can_view_all,
+            sees_withheld,
         }
     }
 
@@ -107,38 +129,60 @@ impl ListOrder {
     fn key_sql(&self, row: &str) -> String {
         match self.key {
             SortKey::CreatedAt => format!("{row}.created_at"),
-            SortKey::Status => public_status_sql(self.can_view_all, row),
+            SortKey::Status => public_status_sql(self.sees_withheld, row),
         }
     }
 
-    /// Rows strictly after submission `id` in this order. The position is
-    /// read from that row in the same statement.
-    fn after(&self, id: i32) -> SimpleExpr {
+    /// The groups a list in this order is shown in. Only a status sort for a
+    /// caller some outcome may be withheld from has a withheld group.
+    fn groups(&self) -> &'static [Group] {
+        match self.key {
+            SortKey::Status if !self.sees_withheld => &[Group::Shown, Group::Withheld],
+            SortKey::Status | SortKey::CreatedAt => &[Group::Shown],
+        }
+    }
+
+    /// The sort key as SQL for `group`: the withheld group is ordered by id
+    /// alone.
+    fn group_key_sql(&self, group: Group, row: &str) -> Option<String> {
+        match group {
+            Group::Shown => Some(self.key_sql(row)),
+            Group::Withheld => None,
+        }
+    }
+
+    /// Rows strictly after submission `id` of `group` in this order. The
+    /// position is read from that row in the same statement.
+    fn after(&self, group: Group, id: i32) -> SimpleExpr {
         let cmp = match self.dir {
             SortDir::Asc => ">",
             SortDir::Desc => "<",
         };
-        Expr::cust_with_values(
-            format!(
-                "({key}, submission.id) {cmp} ((SELECT {cursor_key} FROM submission c WHERE c.id = $1), $1)",
-                key = self.key_sql("submission"),
-                cursor_key = self.key_sql("c"),
+        match self.group_key_sql(group, "submission") {
+            Some(key) => Expr::cust_with_values(
+                format!(
+                    "({key}, submission.id) {cmp} ((SELECT {cursor_key} FROM submission c WHERE c.id = $1), $1)",
+                    cursor_key = self.key_sql("c"),
+                ),
+                [id],
             ),
-            [id],
-        )
+            None => Expr::cust_with_values(format!("submission.id {cmp} $1"), [id]),
+        }
     }
 
-    fn encode(&self, id: i32) -> String {
+    fn encode(&self, group: Group, id: i32) -> String {
         let cursor = Cursor {
             by: self.key,
             order: self.dir,
+            group,
             id,
         };
         URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor).expect("a cursor serializes"))
     }
 
-    /// The row id `raw` resumes after, if it was issued for this order.
-    fn decode(&self, raw: &str) -> Result<i32, AppError> {
+    /// The group and row id `raw` resumes after, if it was issued for this
+    /// order.
+    fn decode(&self, raw: &str) -> Result<(Group, i32), AppError> {
         let cursor: Cursor = URL_SAFE_NO_PAD
             .decode(raw)
             .ok()
@@ -149,7 +193,10 @@ impl ListOrder {
                 "cursor does not match sort_by/sort_order".into(),
             ));
         }
-        Ok(cursor.id)
+        if !self.groups().contains(&cursor.group) {
+            return Err(invalid_cursor());
+        }
+        Ok((cursor.group, cursor.id))
     }
 }
 
@@ -194,64 +241,108 @@ pub(super) async fn visible_page(
     per_page: u64,
     total: Option<u64>,
 ) -> Result<(Vec<serde_json::Value>, ListPagination), AppError> {
-    // The cursor row is decided with the first chunk: one hidden from the
-    // caller (or gone) is rejected like any malformed cursor.
-    let mut cursor_row = cursor.map(|raw| order.decode(raw)).transpose()?;
-    let mut after = cursor_row;
     let wanted = per_page as usize + 1;
-    let mut chunk = per_page + 1;
-    let mut shown = Vec::with_capacity(wanted);
-    let listed = |decision: &Decision| {
-        !decision.hides(order.key_field()) && !filtered_on.iter().any(|f| decision.hides(f))
+    let mut shown: Vec<(Group, (submission::Model, Option<user::Model>))> =
+        Vec::with_capacity(wanted);
+    // A status filter matches no withheld status, so only an unfiltered
+    // status sort has rows in the withheld group.
+    let groups: Vec<Group> = order
+        .groups()
+        .iter()
+        .copied()
+        .filter(|g| *g == Group::Shown || !filtered_on.contains(&"status"))
+        .collect();
+    let (start, mut cursor_row) = match cursor.map(|raw| order.decode(raw)).transpose()? {
+        Some((group, id)) => (group, Some(id)),
+        None => (Group::Shown, None),
     };
+    if !groups.contains(&start) {
+        return Err(invalid_cursor());
+    }
 
-    loop {
-        let mut rows = select.clone();
-        if let Some(id) = after {
-            rows = rows.filter(order.after(id));
-        }
-        let rows = rows
-            .find_also_related(user::Entity)
-            .order_by(Expr::cust(order.key_sql("submission")), order.order())
-            .order_by(submission::Column::Id, order.order())
-            .limit(chunk)
-            .all(&state.db)
-            .await?;
-        let exhausted = (rows.len() as u64) < chunk;
-
-        let mut resources: Vec<Resource> = rows
-            .iter()
-            .map(|(row, _)| Resource::Submission(row.id))
-            .collect();
-        if let Some(id) = cursor_row.take() {
-            resources.push(Resource::Submission(id));
-        }
-        let mut decisions = kernel.decide_batch(Action::Read, &resources).await?;
-        if resources.len() > rows.len() && decisions.pop().is_none_or(|d| !listed(&d)) {
-            return Err(invalid_cursor());
-        }
-
-        after = rows.last().map(|(row, _)| row.id).or(after);
-        for (row, decision) in rows.into_iter().zip(decisions) {
-            if listed(&decision) {
-                shown.push(row);
-            }
-        }
-        if shown.len() >= wanted || exhausted {
+    for &group in groups.iter().skip_while(|g| **g != start) {
+        if shown.len() >= wanted {
             break;
         }
-        chunk = (chunk * 2).min(MAX_CHUNK);
+        // The cursor row is decided with the first chunk of its group: one
+        // hidden from the caller (or gone) is rejected like any malformed
+        // cursor.
+        let mut after = cursor_row;
+        let mut chunk = per_page + 1;
+        loop {
+            let mut rows = select.clone();
+            if group == Group::Shown && order.groups().contains(&Group::Withheld) {
+                rows = rows.filter(Expr::cust(format!(
+                    "({}) IS NOT NULL",
+                    order.key_sql("submission")
+                )));
+            }
+            if let Some(id) = after {
+                rows = rows.filter(order.after(group, id));
+            }
+            let mut rows = rows.find_also_related(user::Entity);
+            if let Some(key) = order.group_key_sql(group, "submission") {
+                rows = rows.order_by(Expr::cust(key), order.order());
+            }
+            let rows = rows
+                .order_by(submission::Column::Id, order.order())
+                .limit(chunk)
+                .all(&state.db)
+                .await?;
+            let exhausted = (rows.len() as u64) < chunk;
+
+            let mut ids: Vec<i32> = rows.iter().map(|(row, _)| row.id).collect();
+            let cursor_id = cursor_row.take();
+            ids.extend(cursor_id);
+            let resources: Vec<Resource> = ids.iter().copied().map(Resource::Submission).collect();
+            let decisions = kernel.decide_batch(Action::Read, &resources).await?;
+            let held = match group {
+                Group::Shown => HashSet::new(),
+                Group::Withheld => withheld_ids(state, &order, &ids).await?,
+            };
+            let listed = |id: i32, decision: &Decision| {
+                let filters_shown = !filtered_on
+                    .iter()
+                    .any(|f| decision.hides::<SubmissionListItem>(f));
+                let key_hidden =
+                    decision.hides::<SubmissionListItem>(order.key_field()) || held.contains(&id);
+                filters_shown
+                    && match group {
+                        Group::Shown => !key_hidden,
+                        Group::Withheld => key_hidden,
+                    }
+            };
+            if let Some(id) = cursor_id
+                && !listed(id, &decisions[rows.len()])
+            {
+                return Err(invalid_cursor());
+            }
+
+            after = rows.last().map(|(row, _)| row.id).or(after);
+            for (row, decision) in rows.into_iter().zip(&decisions) {
+                if listed(row.0.id, decision) {
+                    shown.push((group, row));
+                }
+            }
+            if shown.len() >= wanted || exhausted {
+                break;
+            }
+            chunk = (chunk * 2).min(MAX_CHUNK);
+        }
     }
 
     let has_more = shown.len() > per_page as usize;
     shown.truncate(per_page as usize);
     let next_cursor = if has_more {
-        shown.last().map(|(row, _)| order.encode(row.id))
+        shown
+            .last()
+            .map(|(group, (row, _))| order.encode(*group, row.id))
     } else {
         None
     };
 
-    let items = build_submission_list_items(&state.db, shown).await?;
+    let rows = shown.into_iter().map(|(_, row)| row).collect();
+    let items = build_submission_list_items(&state.db, rows).await?;
     let data = apply_filter_to_list(kernel, items).await?;
     Ok((
         data,
@@ -265,24 +356,51 @@ pub(super) async fn visible_page(
     ))
 }
 
+/// Which of `ids` the caller sees no status of in SQL: the plugin withholds
+/// their feedback (see `submission_feedback::public_status`).
+async fn withheld_ids(
+    state: &AppState,
+    order: &ListOrder,
+    ids: &[i32],
+) -> Result<HashSet<i32>, AppError> {
+    if ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let rows = submission::Entity::find()
+        .select_only()
+        .column(submission::Column::Id)
+        .filter(submission::Column::Id.is_in(ids.to_vec()))
+        .filter(Expr::cust(format!(
+            "({}) IS NULL",
+            public_status_sql(order.sees_withheld, "submission")
+        )))
+        .into_tuple::<i32>()
+        .all(&state.db)
+        .await?;
+    Ok(rows.into_iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sea_orm::{DbBackend, EntityTrait, QueryTrait};
 
-    fn order(sort_by: &str, sort_order: &str, can_view_all: bool) -> ListOrder {
-        ListOrder::from_query(Some(sort_by), Some(sort_order), can_view_all)
+    fn order(sort_by: &str, sort_order: &str, sees_withheld: bool) -> ListOrder {
+        ListOrder::from_query(Some(sort_by), Some(sort_order), sees_withheld)
     }
 
     #[test]
     fn a_cursor_round_trips_for_its_own_order() {
         let order = order("created_at", "desc", true);
-        assert_eq!(order.decode(&order.encode(42)).unwrap(), 42);
+        assert_eq!(
+            order.decode(&order.encode(Group::Shown, 42)).unwrap(),
+            (Group::Shown, 42)
+        );
     }
 
     #[test]
     fn a_cursor_is_rejected_for_another_order() {
-        let issued = order("created_at", "desc", true).encode(42);
+        let issued = order("created_at", "desc", true).encode(Group::Shown, 42);
         for other in [
             order("created_at", "asc", true),
             order("status", "desc", true),
@@ -304,7 +422,7 @@ mod tests {
     fn the_keyset_compares_the_sort_key_then_id_in_the_sort_direction() {
         let sql = |order: ListOrder| {
             submission::Entity::find()
-                .filter(order.after(7))
+                .filter(order.after(Group::Shown, 7))
                 .build(DbBackend::Postgres)
                 .to_string()
         };
@@ -318,5 +436,34 @@ mod tests {
         let asc = sql(order("status", "asc", false));
         assert!(asc.contains(", submission.id) > ((SELECT CASE"), "{asc}");
         assert!(asc.contains("f.submission_id = c.id"), "{asc}");
+    }
+
+    #[test]
+    fn the_withheld_group_follows_by_id_alone_for_a_caller_outcomes_are_withheld_from() {
+        assert_eq!(
+            order("status", "asc", false).groups(),
+            &[Group::Shown, Group::Withheld]
+        );
+        assert_eq!(order("status", "asc", true).groups(), &[Group::Shown]);
+        assert_eq!(order("created_at", "asc", false).groups(), &[Group::Shown]);
+        let sql = submission::Entity::find()
+            .filter(order("status", "desc", false).after(Group::Withheld, 7))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("submission.id < 7"), "{sql}");
+        assert!(!sql.contains("CASE"), "{sql}");
+    }
+
+    #[test]
+    fn a_withheld_group_cursor_is_rejected_where_there_is_no_such_group() {
+        let issued = order("status", "asc", false).encode(Group::Withheld, 3);
+        assert_eq!(
+            order("status", "asc", false).decode(&issued).unwrap(),
+            (Group::Withheld, 3)
+        );
+        assert!(matches!(
+            order("status", "asc", true).decode(&issued),
+            Err(AppError::Validation(_))
+        ));
     }
 }

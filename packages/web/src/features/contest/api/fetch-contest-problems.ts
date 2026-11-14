@@ -28,7 +28,7 @@ export async function fetchContestProblems(
     .filter(
       (p: ContestProblem) =>
         !search ||
-        p.problem_title.toLowerCase().includes(search) ||
+        p.problem_title?.toLowerCase().includes(search) ||
         p.label.toLowerCase().includes(search),
     )
     .sort((a: ContestProblem, b: ContestProblem) => a.position - b.position);

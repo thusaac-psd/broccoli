@@ -2,8 +2,9 @@ import { useErrorMessage } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   isTerminalStatus,
-  type SubmissionStatus,
+  type ShownStatus,
   type Verdict,
+  type Withheld,
 } from '@broccoli/web-sdk/submission';
 import { Badge } from '@broccoli/web-sdk/ui';
 import { formatKibibytes } from '@broccoli/web-sdk/utils';
@@ -22,7 +23,8 @@ interface Props {
 interface Row {
   workerId: string;
   entry: SubmissionEntry;
-  status: SubmissionStatus;
+  status: ShownStatus;
+  withheld: Withheld | null;
   verdict: Verdict | null;
   timeUsed: number | null;
   memoryUsed: number | null;
@@ -33,7 +35,8 @@ function buildRow(entry: SubmissionEntry): Row {
   return {
     workerId: entry.targetWorkerId ?? '?',
     entry,
-    status: (sub?.status ?? 'Pending') as SubmissionStatus,
+    status: sub ? sub.status : 'Pending',
+    withheld: sub?.withheld ?? null,
     verdict: (sub?.result?.verdict as Verdict | null) ?? null,
     timeUsed: sub?.result?.time_used ?? null,
     memoryUsed: sub?.result?.memory_used ?? null,
@@ -99,6 +102,7 @@ export function PinnedSubmissionGroup({ entries, linkBuilder }: Props) {
             row.verdict,
             row.status,
             t,
+            row.withheld,
           );
           const isPolling =
             row.entry.status === 'submitting' || row.entry.status === 'polling';
@@ -135,7 +139,7 @@ export function PinnedSubmissionGroup({ entries, linkBuilder }: Props) {
                 {isPolling ? (
                   <span className="inline-flex items-center gap-1 text-muted-foreground">
                     <Loader2 className="h-3 w-3 animate-spin" />
-                    {row.status}
+                    {label}
                   </span>
                 ) : (
                   <Badge variant={variant} className="text-[10px]">

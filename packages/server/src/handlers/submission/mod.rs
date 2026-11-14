@@ -44,6 +44,7 @@ use crate::utils::problem::find_problem;
 use crate::utils::query::validate_sorting_params;
 use crate::utils::rate_limit::check_rate_limit;
 use crate::visibility::{Action, Resource, ResourceScope, Subject, VisibilityKernel};
+use broccoli_api_types::visibility::PluginOutage;
 
 mod dispatch;
 mod filter;
@@ -85,7 +86,7 @@ use response::{
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
         (status = 429, description = "Per-user rate limit or plugin rejection (RATE_LIMITED, PLUGIN_REJECTED)", body = ErrorBody),
-        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),
+        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -256,7 +257,6 @@ pub async fn create_submission(
         (status = 200, description = "List of submissions", body = SubmissionListResponse),
         (status = 400, description = "Invalid query or cursor (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
-        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -293,9 +293,12 @@ pub async fn list_submissions(
     if let Some(ref lang) = query.language {
         base_select = base_select.filter(submission::Column::Language.eq(lang.trim()));
     }
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    let sees_withheld = !kernel.narrowed_by_plugins();
     if let Some(status) = query.status {
         base_select = base_select.filter(
-            crate::services::submission_feedback::public_status(can_view_all)
+            crate::services::submission_feedback::public_status(sees_withheld)
                 .eq(status.to_string()),
         );
     }
@@ -340,8 +343,6 @@ pub async fn list_submissions(
         }
     }
 
-    // The kernel OWNS the subject: one kernel per request per subject.
-    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
     // Every row `base_select` matches is host-`Allow` for this viewer (a
     // non-`submission:view_all` caller is restricted to their own rows
     // above), so only a visibility plugin can hide a matching row. A count
@@ -356,7 +357,7 @@ pub async fn list_submissions(
     let order = list_page::ListOrder::from_query(
         query.sort_by.as_deref(),
         query.sort_order.as_deref(),
-        can_view_all,
+        sees_withheld,
     );
     let (data, pagination) = list_page::visible_page(
         &state,
@@ -409,7 +410,6 @@ async fn list_total(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Submission not found (NOT_FOUND)", body = ErrorBody),
-        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -470,7 +470,6 @@ pub async fn get_submission(
         (status = 200, description = "Submission judgement versions", body = Vec<SubmissionJudgementResponse>),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 404, description = "Submission not found (NOT_FOUND)", body = ErrorBody),
-        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -623,7 +622,6 @@ async fn build_visible_judgement(
         (status = 400, description = "Invalid result page", body = ErrorBody),
         (status = 401, description = "Unauthorized", body = ErrorBody),
         (status = 404, description = "Judgement not found", body = ErrorBody),
-        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -742,14 +740,10 @@ pub async fn create_contest_submission(
             },
         )
         .await;
-    // A plugin the decision needs is missing because the fleet disabled the
-    // plugin of this contest's type: that is the answer, and it is not one to
-    // retry.
-    if matches!(decision, Err(AppError::PluginUnavailable))
+    // A plugin the decision needs is disabled: for a submission that is the
+    // contest type being closed, and it is not an answer to retry.
+    if matches!(decision, Err(AppError::PluginDisabled(_)))
         && let Some(contest_type) = contest_model.contest_type.as_deref()
-        && state
-            .plugin_lifecycle
-            .is_contest_type_disabled(contest_type)
     {
         return Err(AppError::ContestTypeDisabled(contest_type.to_string()));
     }
@@ -798,13 +792,12 @@ pub async fn create_contest_submission(
     // accept the submission unchecked. Reject before any hook runs; a type
     // whose plugin the fleet disabled is closed, not briefly unavailable.
     let Some(handler) = handler else {
-        if state
-            .plugin_lifecycle
-            .is_contest_type_disabled(&contest_type)
-        {
-            return Err(AppError::ContestTypeDisabled(contest_type));
-        }
-        return Err(AppError::ContestTypeUnavailable(contest_type));
+        return Err(
+            match crate::plugin_lifecycle::contest_type_outage(&state, &contest_type).await {
+                Some(PluginOutage::Disabled { .. }) => AppError::ContestTypeDisabled(contest_type),
+                _ => AppError::ContestTypeUnavailable(contest_type),
+            },
+        );
     };
     let admission_owner = handler
         .submission_admission
@@ -908,7 +901,6 @@ pub async fn create_contest_submission(
         (status = 400, description = "Invalid query or cursor (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 404, description = "Contest not found (NOT_FOUND)", body = ErrorBody),
-        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -1014,9 +1006,10 @@ pub async fn list_contest_submissions(
     if let Some(ref lang) = query.language {
         base_select = base_select.filter(submission::Column::Language.eq(lang.trim()));
     }
+    let sees_withheld = !kernel.narrowed_by_plugins();
     if let Some(status) = query.status {
         base_select = base_select.filter(
-            crate::services::submission_feedback::public_status(can_view_all)
+            crate::services::submission_feedback::public_status(sees_withheld)
                 .eq(status.to_string()),
         );
     }
@@ -1035,7 +1028,7 @@ pub async fn list_contest_submissions(
     let order = list_page::ListOrder::from_query(
         query.sort_by.as_deref(),
         query.sort_order.as_deref(),
-        can_view_all,
+        sees_withheld,
     );
     let (data, pagination) = list_page::visible_page(
         &state,

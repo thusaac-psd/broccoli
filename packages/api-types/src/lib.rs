@@ -17,5 +17,6 @@ pub mod problem;
 pub mod shared;
 pub mod status;
 pub mod submission;
+pub mod visibility;
 
 pub use status::{StatusPhase, SubmissionStatus, Verdict};

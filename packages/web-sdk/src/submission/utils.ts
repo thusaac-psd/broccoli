@@ -1,8 +1,10 @@
 import type { I18nContextValue } from '@/i18n';
 import type {
+  ShownStatus,
   SubmissionError,
   SubmissionStatus,
   SubmissionStatusFilterValue,
+  Withheld,
 } from '@/submission/types';
 
 /**
@@ -12,8 +14,24 @@ import type {
 export const TERMINAL_STATUSES: ReadonlySet<SubmissionStatus> =
   new Set<SubmissionStatus>(['Judged', 'CompilationError', 'SystemError']);
 
-export function isTerminalStatus(status: SubmissionStatus): boolean {
-  return TERMINAL_STATUSES.has(status);
+/**
+ * Whether a status will never change again for this viewer. A withheld
+ * status is: the server says when it is released, and asking again in the
+ * meantime only shows it withheld again, so pollers stop.
+ */
+export function isTerminalStatus(status: ShownStatus): boolean {
+  return status == null || TERMINAL_STATUSES.has(status);
+}
+
+/** What a submission whose outcome is withheld shows in place of it. */
+export function withheldLabel(
+  withheld: Withheld | null | undefined,
+  t: I18nContextValue['t'],
+): string {
+  if (withheld?.reason !== 'plugin_outage') return t('submission.resultHidden');
+  return withheld.outage.state === 'disabled'
+    ? t('submission.resultUnavailableDisabled')
+    : t('submission.resultUnavailable');
 }
 
 function parseSubmissionErrorValue(value: unknown): SubmissionError | null {

@@ -85,6 +85,15 @@ const contest = (
 });
 
 const RUNNING = contest(1, 'Spring Training Contest 2026', -60, 240, 'running');
+/** A running contest whose contest-type plugin an administrator disabled. */
+const DISABLED = {
+  ...contest(3, 'Disabled Format Contest', -60, 240, 'running'),
+  plugin_outage: { state: 'disabled', plugin_id: 'icpc' },
+};
+const DISABLED_WITHHELD = {
+  reason: 'plugin_outage',
+  outage: DISABLED.plugin_outage,
+};
 const UPCOMING = contest(
   2,
   'Upcoming Qualifier',
@@ -143,6 +152,18 @@ const submission = (id: number, userId: number, verdict: string) => ({
   created_at: at(-id),
 });
 
+/** A submission of the disabled contest: its outcome is withheld. */
+const WITHHELD_SUBMISSION = {
+  ...submission(4, 2, 'Accepted'),
+  contest_id: 3,
+  status: null,
+  verdict: null,
+  score: null,
+  time_used: null,
+  memory_used: null,
+  withheld: DISABLED_WITHHELD,
+};
+
 const SUBMISSIONS = [
   submission(3, 2, 'Accepted'),
   submission(2, 2, 'WrongAnswer'),
@@ -182,6 +203,16 @@ const SUBMISSION_DETAIL = {
   },
 };
 
+/** An error answer, in the server's error shape. */
+class ErrorReply {
+  readonly status: number;
+  readonly json: { code: string; message: string };
+  constructor(status: number, json: { code: string; message: string }) {
+    this.status = status;
+    this.json = json;
+  }
+}
+
 type Handler = (url: URL, viewer: Viewer) => unknown;
 
 /** `METHOD path-pattern` to the body answered. */
@@ -200,8 +231,45 @@ const ROUTES: [string, RegExp, Handler][] = [
     /^\/contests$/,
     (_, viewer) => numberedPage(viewer === 'guest' ? [] : [UPCOMING, RUNNING]),
   ],
-  ['GET', /^\/contests\/1$/, () => RUNNING],
+  // Reading a contest takes signing in.
+  [
+    'GET',
+    /^\/contests\/1$/,
+    (_, viewer) =>
+      viewer === 'guest'
+        ? new ErrorReply(401, { code: 'TOKEN_MISSING', message: '' })
+        : RUNNING,
+  ],
   ['GET', /^\/contests\/2$/, () => UPCOMING],
+  ['GET', /^\/contests\/3$/, () => DISABLED],
+  [
+    'GET',
+    /^\/contests\/3\/problems$/,
+    () => [
+      {
+        contest_id: 3,
+        problem_id: 1,
+        problem_title: null,
+        label: 'A',
+        position: 0,
+        withheld: DISABLED_WITHHELD,
+      },
+    ],
+  ],
+  [
+    'GET',
+    /^\/contests\/3\/problems\/1$/,
+    () =>
+      new ErrorReply(503, {
+        code: 'PLUGIN_DISABLED',
+        message: "The plugin 'icpc' is disabled",
+      }),
+  ],
+  [
+    'GET',
+    /^\/contests\/3\/submissions$/,
+    () => cursorPage([WITHHELD_SUBMISSION]),
+  ],
   [
     'GET',
     /^\/contests\/(\d+)\/me$/,
@@ -326,7 +394,11 @@ export async function mockApi(page: Page, viewer: Viewer): Promise<string[]> {
         json: { code: 'NOT_FOUND', message: path },
       });
     }
-    return route.fulfill({ headers, json: match[2](url, viewer) });
+    const body = match[2](url, viewer);
+    if (body instanceof ErrorReply) {
+      return route.fulfill({ status: body.status, headers, json: body.json });
+    }
+    return route.fulfill({ headers, json: body });
   });
   return unanswered;
 }

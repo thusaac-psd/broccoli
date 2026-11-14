@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 
 /// Host -> plugin visibility query. Neutral by construction: the host never
 /// describes what a contest format is, only who is asking and about what.
+///
+/// The host never asks about staff (a subject holding `contest:manage` or
+/// `submission:view_all`): they see what the host rules show, and nothing a
+/// plugin decides is withheld from them while it is out.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VisibilityQueryInput {
     pub subject: QuerySubject,

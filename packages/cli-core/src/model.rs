@@ -70,6 +70,35 @@ impl StatusDisplay for SubmissionStatus {
     }
 }
 
+/// A status the server may withhold (`None`): the contest's plugin hides the
+/// outcome, or cannot decide it right now. A withheld status is final for
+/// this viewer, so nothing waits on it.
+impl StatusDisplay for Option<SubmissionStatus> {
+    fn human(&self) -> &str {
+        match self {
+            Some(status) => status.human(),
+            None => "Hidden",
+        }
+    }
+
+    fn is_in_progress(&self) -> bool {
+        self.is_some_and(|status| status.is_in_progress())
+    }
+
+    fn color(&self) -> Color {
+        match self {
+            Some(status) => status.color(),
+            None => THEME.muted,
+        }
+    }
+}
+
+/// A contest problem row's title, or what stands in for it while the
+/// contest's plugin withholds it.
+pub fn problem_title(p: &broccoli_api_types::contest::ContestProblemResponse) -> &str {
+    p.problem_title.as_deref().unwrap_or("(unavailable)")
+}
+
 /// The `clarification_type` string of a clarification.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ClarificationKind {

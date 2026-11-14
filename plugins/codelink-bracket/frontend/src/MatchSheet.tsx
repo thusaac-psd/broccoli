@@ -709,7 +709,11 @@ function SubmissionFeed({
                   <span className="w-12 shrink-0 font-mono font-medium">
                     {problems.get(s.problem_id)?.label ?? `#${s.problem_id}`}
                   </span>
-                  <VerdictBadge verdict={s.verdict ?? s.status} />
+                  <VerdictBadge
+                    verdict={
+                      s.verdict ?? s.status ?? t('submission.resultHidden')
+                    }
+                  />
                   <span className="ml-auto font-mono text-xs tabular-nums text-muted-foreground">
                     {new Date(s.created_at).toLocaleTimeString()}
                   </span>

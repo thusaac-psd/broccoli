@@ -17,11 +17,6 @@ use sea_orm::{
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-/// The status everyone but a submission's judges sees while its feedback is
-/// withheld. [`public_status`] applies it in SQL for filtering and sorting,
-/// [`project`] to response bodies.
-const WITHHELD_STATUS: common::SubmissionStatus = common::SubmissionStatus::Running;
-
 /// SQL predicate: the feedback row aliased `alias` is withheld.
 fn withheld_sql(alias: &str) -> String {
     format!(
@@ -31,7 +26,9 @@ fn withheld_sql(alias: &str) -> String {
 }
 
 /// The submission status a viewer sees, as a SQL expression over
-/// `submission`, for status filters and sorting.
+/// `submission`, for status filters and sorting: `NULL` while its feedback is
+/// withheld from the viewer, so no status filter matches it and a status
+/// sort cannot place it by its real status.
 pub fn public_status(can_view_all: bool) -> sea_orm::sea_query::Expr {
     sea_orm::sea_query::Expr::cust(public_status_sql(can_view_all, "submission"))
 }
@@ -42,7 +39,7 @@ pub fn public_status_sql(can_view_all: bool, row: &str) -> String {
         return format!("{row}.status");
     }
     format!(
-        "CASE WHEN EXISTS (SELECT 1 FROM submission_feedback f WHERE f.submission_id = {row}.id AND {}) THEN '{WITHHELD_STATUS}' ELSE {row}.status END",
+        "CASE WHEN EXISTS (SELECT 1 FROM submission_feedback f WHERE f.submission_id = {row}.id AND {}) THEN NULL ELSE {row}.status END",
         withheld_sql("f")
     )
 }
@@ -302,11 +299,11 @@ pub async fn update(
     Ok(result)
 }
 
-/// What a viewer without `submission:view_all` sees of a submission's
-/// plugin-owned feedback.
+/// What a viewer whom plugins narrow sees of a submission's plugin-owned
+/// feedback.
 #[derive(Clone, Debug)]
 pub enum Feedback {
-    /// Withheld: shown as still running, with no result.
+    /// Withheld: the outcome is not shown (`Withheld::Hidden`).
     Withheld,
     /// Released with a result that replaces the judged one.
     Published(SubmissionFeedbackResult),
@@ -340,28 +337,15 @@ pub async fn load(state: &AppState, ids: &[i32]) -> Result<HashMap<i32, Feedback
     Ok(feedback)
 }
 
-/// Presentation overlays use submission API fields, never contest-specific verdicts.
-pub fn project(value: &mut Value, feedback: Feedback) {
-    match feedback {
-        Feedback::Withheld => {
-            value["status"] = json!(WITHHELD_STATUS.as_str());
-            if value.get("result").is_some() {
-                value["result"] = Value::Null;
-            }
-            for key in ["verdict", "score", "time_used", "memory_used", "judged_at"] {
-                if value.get(key).is_some() {
-                    value[key] = Value::Null;
-                }
-            }
-        }
-        Feedback::Published(result) => {
-            apply_public_result(value, &result);
-            if value["result"].is_object() {
-                apply_public_result(&mut value["result"], &result);
-            }
-        }
+/// Overlay a released result on a submission shape's fields. Presentation
+/// overlays use submission API fields, never contest-specific verdicts.
+pub fn publish(value: &mut Value, result: &SubmissionFeedbackResult) {
+    apply_public_result(value, result);
+    if value["result"].is_object() {
+        apply_public_result(&mut value["result"], result);
     }
 }
+
 fn apply_public_result(value: &mut Value, result: &SubmissionFeedbackResult) {
     if value.get("verdict").is_some() {
         value["verdict"] = json!(result.verdict);
@@ -375,20 +359,14 @@ fn apply_public_result(value: &mut Value, result: &SubmissionFeedbackResult) {
 mod tests {
     use super::*;
     #[test]
-    fn withholding_hides_details_and_keeps_polling() {
-        let mut value = json!({"id":7,"status":"Judged","result":{"verdict":"Accepted","test_case_results":[{}]}});
-        project(&mut value, Feedback::Withheld);
-        assert_eq!(value, json!({"id":7,"status":"Running","result":null}));
-    }
-    #[test]
     fn public_results_support_arbitrary_plugin_verdicts() {
         let mut value = json!({"status":"Judged","result":{"verdict":"Accepted","score":1}});
-        project(
+        publish(
             &mut value,
-            Feedback::Published(SubmissionFeedbackResult {
+            &SubmissionFeedbackResult {
                 verdict: broccoli_server_sdk::types::Verdict::Other("ExampleResult".into()),
                 score: 7.0,
-            }),
+            },
         );
         assert_eq!(value["result"]["verdict"], "ExampleResult");
         assert_eq!(value["result"]["score"], 7.0);

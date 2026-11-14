@@ -16,7 +16,9 @@ import { useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 
 import type { EditorFile } from '@/components/CodeEditor';
+import { ContestOutageNotice } from '@/features/contest/components/ContestOutageNotice';
 import { ContestRegisterGate } from '@/features/contest/components/ContestRegisterGate';
+import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
 import { useContestProblems } from '@/features/contest/hooks/use-contest-problems';
 import { useRestoreSubmissionScroll } from '@/features/submission/hooks/use-submission-navigation';
 import { useSubmissions } from '@/features/submission/hooks/use-submissions';
@@ -50,6 +52,11 @@ export default function ProblemView({
   const { user } = useAuth();
   const authReady = useAuthReady();
   const presentation = useProblemPresentation(contestId, user?.id);
+  // While the contest's plugin is out, what it governs of the problem is
+  // unavailable and submissions are refused, so the page says so in place
+  // of both.
+  const { contest } = useContestInfo(contestId ?? Number.NaN);
+  const outage = contestId ? contest?.plugin_outage : undefined;
   const allowed =
     presentation.allowedProblemIds === null ||
     presentation.allowedProblemIds.includes(problemId);
@@ -371,6 +378,19 @@ export default function ProblemView({
     );
   }
 
+  if (error && !problem && outage) {
+    return (
+      <div className="flex flex-col flex-1 min-h-0">
+        <ProblemViewHeader
+          problem={undefined}
+          headerId={headerId}
+          contestId={contestId}
+        />
+        <ContestOutageNotice contest={contest} className="mx-4 md:mx-6" />
+      </div>
+    );
+  }
+
   if (error && !problem) {
     return (
       <QueryErrorState
@@ -419,6 +439,7 @@ export default function ProblemView({
           headerId={headerId}
           contestId={contestId}
         />
+        <ContestOutageNotice contest={contest} className="mx-4 mb-4 md:mx-6" />
 
         <ProblemContentTabs
           activeTab={activeTab}
@@ -442,37 +463,40 @@ export default function ProblemView({
             </div>
           }
           codingContent={
-            <ContestRegisterGate contestId={contestId}>
-              <ProblemCodingTab
-                isCodeFullscreen={isCodeFullscreen}
-                onToggleFullscreen={() =>
-                  setIsCodeFullscreen(!isCodeFullscreen)
-                }
-                onSubmit={handleSubmit}
-                onRun={handleRun}
-                latestRun={submissions.latestRun}
-                storageKey={storageKey}
-                contestType={effectiveContestType}
-                onContestTypeChange={!contestId ? setContestType : undefined}
-                contestTypes={
-                  !contestId ? (registries?.contest_types ?? []) : undefined
-                }
-                submissionFormat={problem?.submission_format}
-                latestSubmission={latestSubmission}
-                submissionHistory={submissionHistory}
-                submissionHistoryError={submissionHistoryError}
-                submissions={submissions.submissionEntries}
-                isSubmitting={isSubmitting}
-                overviewVisibleCount={RECENT_SUBMISSION_OVERVIEW_COUNT}
-                submissionDetailLinkBuilder={submissionDetailLinkBuilder}
-                contestId={contestId}
-                problemId={problemId}
-                targetWorkers={canPinWorker ? targetWorkers : null}
-                onTargetWorkersChange={
-                  canPinWorker ? setTargetWorkers : undefined
-                }
-              />
-            </ContestRegisterGate>
+            // Submissions are refused while the contest's plugin is out.
+            outage ? null : (
+              <ContestRegisterGate contestId={contestId}>
+                <ProblemCodingTab
+                  isCodeFullscreen={isCodeFullscreen}
+                  onToggleFullscreen={() =>
+                    setIsCodeFullscreen(!isCodeFullscreen)
+                  }
+                  onSubmit={handleSubmit}
+                  onRun={handleRun}
+                  latestRun={submissions.latestRun}
+                  storageKey={storageKey}
+                  contestType={effectiveContestType}
+                  onContestTypeChange={!contestId ? setContestType : undefined}
+                  contestTypes={
+                    !contestId ? (registries?.contest_types ?? []) : undefined
+                  }
+                  submissionFormat={problem?.submission_format}
+                  latestSubmission={latestSubmission}
+                  submissionHistory={submissionHistory}
+                  submissionHistoryError={submissionHistoryError}
+                  submissions={submissions.submissionEntries}
+                  isSubmitting={isSubmitting}
+                  overviewVisibleCount={RECENT_SUBMISSION_OVERVIEW_COUNT}
+                  submissionDetailLinkBuilder={submissionDetailLinkBuilder}
+                  contestId={contestId}
+                  problemId={problemId}
+                  targetWorkers={canPinWorker ? targetWorkers : null}
+                  onTargetWorkersChange={
+                    canPinWorker ? setTargetWorkers : undefined
+                  }
+                />
+              </ContestRegisterGate>
+            )
           }
         />
       </div>

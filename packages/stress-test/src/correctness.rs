@@ -122,8 +122,7 @@ async fn run_scenario(
         .wait_for_submission(submitted.id, per_job_timeout)
         .await
     {
-        Ok(final_resp) => {
-            let actual_status = final_resp.status;
+        Ok((actual_status, final_resp)) => {
             let actual_verdict = final_resp
                 .result
                 .as_ref()

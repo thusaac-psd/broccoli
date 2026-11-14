@@ -7,6 +7,7 @@ mod decision;
 mod host_rules;
 mod mask;
 mod plugin_query;
+mod shapes;
 mod subject;
 mod visible;
 
@@ -16,7 +17,7 @@ pub use mask::apply_mask;
 pub use plugin_query::ResourceScope;
 pub(crate) use plugin_query::{ResourceContest, query_plugins};
 pub use subject::{Action, ProblemScope, Resource, Subject};
-pub use visible::Visible;
+pub use visible::{Governed, Visible};
 
 use crate::error::AppError;
 use crate::state::AppState;
@@ -206,7 +207,14 @@ impl<'a> VisibilityKernel<'a> {
     /// rules in SQL counts exactly the rows the caller is shown; when it may,
     /// such a count would disclose rows the plugin hides.
     pub fn plugins_may_narrow(&self, scope: &ResourceScope) -> bool {
-        !self.subject.is_admin_override() && plugin_query::plugins_may_narrow(self.state, scope)
+        self.subject.narrowed_by_plugins() && plugin_query::plugins_may_narrow(self.state, scope)
+    }
+
+    /// Whether visibility plugins narrow what this kernel's subject sees
+    /// (see `Subject::narrowed_by_plugins`). A subject they do not narrow
+    /// sees every outcome, withheld feedback included.
+    pub fn narrowed_by_plugins(&self) -> bool {
+        self.subject.narrowed_by_plugins()
     }
 
     /// Batched, memoized, per-viewer reachability decision, for this
@@ -223,8 +231,9 @@ impl<'a> VisibilityKernel<'a> {
     ///    `contest_id` - needed by step 4 so each resource can be stamped
     ///    with its OWN authoritative contest scope (see
     ///    `resource_contest_id`) instead of a lossy batch-level guess.
-    /// 4. Unless `self.subject.is_admin_override()` - in which case plugins
-    ///    are never consulted at all, full stop - send only the misses the
+    /// 4. Unless plugins do not narrow the subject
+    ///    (`Subject::narrowed_by_plugins`) - in which case they are never
+    ///    consulted at all, full stop - send only the misses the
     ///    host did NOT already `Deny` to `query_plugins`, in their original
     ///    relative order, each carrying its own `contest_id` via
     ///    `resource_contest_id`. A host `Deny` is final (`meet(Deny, _)
@@ -273,7 +282,7 @@ impl<'a> VisibilityKernel<'a> {
 
         if !misses.is_empty() {
             let mut scopes = HostScopes {
-                resolve_contests: !self.subject.is_admin_override()
+                resolve_contests: self.subject.narrowed_by_plugins()
                     && plugin_query::scoped_querier_loaded(self.state),
                 known_submissions: self
                     .known_submissions
@@ -314,11 +323,11 @@ impl<'a> VisibilityKernel<'a> {
                 "host_decide must answer one Decision per resource, positionally"
             );
 
-            let final_decisions = if self.subject.is_admin_override() {
-                // Decision #1: admin_override short-circuits BEFORE plugins.
-                // host_decide already answered all-Allow above with zero
-                // queries; that answer is final and query_plugins is never
-                // called, for any resource in this batch.
+            let final_decisions = if !self.subject.narrowed_by_plugins() {
+                // Decision #1: plugins never narrow admin_override or staff
+                // (`Subject::narrowed_by_plugins`). The host decision is
+                // final and query_plugins is never called, for any resource
+                // in this batch.
                 host_decisions
             } else {
                 // Decision #2: never pay a WASM crossing to confirm a host
@@ -401,6 +410,14 @@ impl<'a> VisibilityKernel<'a> {
                 final_decisions
             };
 
+            // An action other than reading cannot be partly done: one a
+            // plugin cannot decide right now is refused with the outage.
+            if action != Action::Read
+                && let Some(outage) = final_decisions.iter().find_map(Decision::outage)
+            {
+                return Err(outage.clone().into());
+            }
+
             // Step 6: store. Re-locks (rather than holding the Step 2 guard
             // across the awaits above) for the same reason noted there.
             let mut memo = self.memo.lock().await;
@@ -429,7 +446,7 @@ impl<'a> VisibilityKernel<'a> {
     /// list by dropping `None` and render a detail 404 on `None` - a denied
     /// resource is never rendered as a placeholder, because a placeholder
     /// confirms it exists.
-    pub async fn fetch_visible<T: serde::Serialize>(
+    pub async fn fetch_visible<T: serde::Serialize + Governed>(
         &self,
         action: Action,
         resource: Resource,
@@ -447,7 +464,7 @@ impl<'a> VisibilityKernel<'a> {
 
     /// Batched form. Input and output are positionally aligned; denied
     /// entries come back as `None`.
-    pub async fn fetch_visible_batch<T: serde::Serialize>(
+    pub async fn fetch_visible_batch<T: serde::Serialize + Governed>(
         &self,
         action: Action,
         items: Vec<(Resource, T)>,
@@ -472,12 +489,7 @@ impl<'a> VisibilityKernel<'a> {
         &self,
         resources: &[Resource],
     ) -> Result<HashMap<i32, crate::services::submission_feedback::Feedback>, AppError> {
-        if self
-            .subject
-            .permissions
-            .iter()
-            .any(|p| p == broccoli_server_sdk::permissions::SUBMISSION_VIEW_ALL)
-        {
+        if !self.subject.narrowed_by_plugins() {
             return Ok(HashMap::new());
         }
         let ids: Vec<i32> = resources
@@ -497,11 +509,11 @@ impl<'a> VisibilityKernel<'a> {
 /// carries one, and a verdict, score or result implies it. A decision that
 /// hides a submission's status ([`SUBMISSION_STATUS_PATH`]) therefore
 /// withholds its whole outcome: the submission is presented exactly as one
-/// whose feedback is withheld, instead of carrying a `null` status no client
-/// can read.
+/// whose feedback is withheld (`Withheld::Hidden`), instead of carrying a
+/// `null` status with no reason.
 ///
 /// [`SUBMISSION_STATUS_PATH`]: broccoli_server_sdk::visibility::SUBMISSION_STATUS_PATH
-fn wrap_visible<T: serde::Serialize>(
+fn wrap_visible<T: serde::Serialize + Governed>(
     resource: &Resource,
     entity: T,
     decision: Decision,
@@ -509,19 +521,15 @@ fn wrap_visible<T: serde::Serialize>(
 ) -> Option<Visible<T>> {
     use crate::services::submission_feedback::Feedback;
     use broccoli_server_sdk::visibility::SUBMISSION_STATUS_PATH;
-    let (decision, presented) = match (resource, decision) {
+    let presented = match (resource, &decision) {
         (_, Decision::Deny) => return None,
-        // The withheld presentation sets the status the mask would blank.
         (Resource::Submission(_), Decision::Redact(mask))
             if mask.covers(SUBMISSION_STATUS_PATH) =>
         {
-            (
-                Decision::Redact(mask.without(SUBMISSION_STATUS_PATH)),
-                Some(Feedback::Withheld),
-            )
+            Some(Feedback::Withheld)
         }
-        (Resource::Submission(id), d) => (d, feedback.get(id).cloned()),
-        (_, d) => (d, None),
+        (Resource::Submission(id), _) => feedback.get(id).cloned(),
+        (_, _) => None,
     };
     Some(Visible::new(entity, decision).with_feedback(presented))
 }
@@ -1276,6 +1284,10 @@ mod tests {
         score: Option<i32>,
     }
 
+    impl Governed for ScoredEntity {
+        const HOST_DECIDED: Option<&'static [&'static str]> = Some(&["id"]);
+    }
+
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn fetch_visible_batch_aligns_positions_across_allow_redact_and_deny() {
@@ -1409,29 +1421,47 @@ mod tests {
         test_app_state(plugins, db).await
     }
 
+    /// A busy plugin withholds what it governs: the read is answered with
+    /// the host-decided fields and the reason, neither hidden as "not found"
+    /// nor shown unmasked.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn an_unavailable_plugin_fails_a_single_read_instead_of_hiding_it() {
+    async fn an_unavailable_plugin_withholds_a_submission_instead_of_hiding_it() {
         let _guard = crate::metrics_test_lock();
-        let state = busy_kernel_state(vec![contest_row(2, true, Some(-1), None, true)]).await;
+        // The owner reads their own submission: the host decides it without
+        // a query, and its feedback query finds nothing withheld.
+        let state = busy_kernel_state(Vec::new()).await;
         let kernel = VisibilityKernel::new(&state, subject(1));
-        let result = kernel
+        kernel.know_submission(submission_row(5, 1, Some(2)));
+        let json = kernel
             .fetch_visible(
                 Action::Read,
-                Resource::Contest(2),
-                ScoredEntity { id: 2, score: None },
+                Resource::Submission(5),
+                ScoredEntity {
+                    id: 5,
+                    score: Some(9),
+                },
             )
-            .await;
-        assert!(
-            matches!(result, Err(AppError::PluginUnavailable)),
-            "a busy plugin is a 503, not a 404: {:?}",
-            result.map(|v| v.is_some())
+            .await
+            .expect("answered")
+            .expect("not denied")
+            .into_masked_json()
+            .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "id": 5,
+                "score": null,
+                "withheld": {"reason": "plugin_outage", "outage": {"state": "unavailable"}},
+            })
         );
     }
 
+    /// A contest is a host record: a busy plugin takes nothing from a list of
+    /// them.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn an_unavailable_plugin_fails_a_list_instead_of_emptying_it() {
+    async fn an_unavailable_plugin_takes_nothing_from_a_contest_list() {
         let _guard = crate::metrics_test_lock();
         let state = busy_kernel_state(vec![
             contest_row(2, true, Some(-1), None, true),
@@ -1441,10 +1471,8 @@ mod tests {
         let kernel = VisibilityKernel::new(&state, subject(1));
         let result = kernel
             .decide_batch(Action::Read, &[Resource::Contest(2), Resource::Contest(3)])
-            .await;
-        assert!(
-            matches!(result, Err(AppError::PluginUnavailable)),
-            "a busy plugin is a 503, not an all-Deny page: {result:?}"
-        );
+            .await
+            .expect("answered");
+        assert_eq!(result, vec![Decision::Allow, Decision::Allow]);
     }
 }

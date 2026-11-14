@@ -9,6 +9,7 @@ import { PageLayout } from '@/components/PageLayout';
 import { ContestAdminActions } from '@/features/contest/components/ContestAdminActions';
 import { ContestCountdown } from '@/features/contest/components/ContestCountdown';
 import { ContestEnrollCard } from '@/features/contest/components/ContestEnrollCard';
+import { ContestOutageNotice } from '@/features/contest/components/ContestOutageNotice';
 import { ContestProblemsCard } from '@/features/contest/components/ContestProblemsCard';
 import { useContestEnroll } from '@/features/contest/hooks/use-contest-enroll';
 import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
@@ -65,6 +66,7 @@ export default function ContestOverviewPage() {
     >
       <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_20rem]">
         <div className="min-w-0 space-y-4">
+          <ContestOutageNotice contest={contest} />
           <ContestProblemsCard contestId={id} />
         </div>
         <div className="space-y-4 md:sticky md:top-6 h-fit">
