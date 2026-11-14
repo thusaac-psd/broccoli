@@ -229,38 +229,10 @@ fn watch_verdict(client: &Client, submission_id: i32) -> anyhow::Result<()> {
                 None => sub.status.human().to_string(),
             };
             let score = sub.result.as_ref().and_then(|r| r.score);
-
-            {
-                if accepted {
-                    if let Some(s) = score {
-                        println!(
-                            "{}  Accepted — {} points! ({:.1}s)",
-                            style("✓").green().bold(),
-                            fmt::score(s),
-                            elapsed.as_secs_f64()
-                        );
-                    } else {
-                        println!(
-                            "{}  Accepted! ({:.1}s)",
-                            style("✓").green().bold(),
-                            elapsed.as_secs_f64()
-                        );
-                    }
-                } else {
-                    let sym = style("✗").red().bold();
-                    if let Some(s) = score {
-                        println!(
-                            "{}  {} — {} points ({:.1}s)",
-                            sym,
-                            label,
-                            fmt::score(s),
-                            elapsed.as_secs_f64()
-                        );
-                    } else {
-                        println!("{}  {} ({:.1}s)", sym, label, elapsed.as_secs_f64());
-                    }
-                }
-            }
+            println!(
+                "{}",
+                verdict_line(&label, accepted, score, elapsed.as_secs_f64())
+            );
 
             if let Some(ref result) = sub.result {
                 if let Some(msg) = result.error_message.as_deref().filter(|m| !m.is_empty()) {
@@ -287,8 +259,30 @@ fn watch_verdict(client: &Client, submission_id: i32) -> anyhow::Result<()> {
     }
 }
 
+/// The line a judged submission ends on. The score appears only when the
+/// server reports one, as the bare number it sent: what it measures (points,
+/// a fraction, a count) depends on the contest, so no unit is added.
+fn verdict_line(label: &str, accepted: bool, score: Option<f64>, secs: f64) -> String {
+    let score = score.map_or(String::new(), |s| format!(", score {}", fmt::score(s)));
+    match accepted {
+        true => format!(
+            "{}  Accepted{score} ({secs:.1}s)",
+            style("✓").green().bold()
+        ),
+        false => format!("{}  {label}{score} ({secs:.1}s)", style("✗").red().bold()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_verdict_shows_the_score_the_server_reports_without_a_unit() {
+        let line = super::verdict_line("Accepted", true, Some(1.0), 2.0);
+        assert!(line.ends_with("Accepted, score 1 (2.0s)"), "{line}");
+        let line = super::verdict_line("Wrong Answer", false, None, 2.0);
+        assert!(line.ends_with("Wrong Answer (2.0s)"), "{line}");
+    }
+
     use super::single_required_filename;
     use std::collections::HashMap;
 

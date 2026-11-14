@@ -196,11 +196,14 @@ if [ "$SKIP_IMAGES" = "0" ]; then
   "$ENGINE" save "$swfs_img"  > "$B/images/seaweedfs.tar"
   "$ENGINE" save "$caddy_img" > "$B/images/caddy.tar"
 
-  # contestant CLI — static musl (per noi-parity-worker-image)
-  ( cd "$repo" && cargo build -p broccoli-contestant-cli --profile release-cli \
-      --target x86_64-unknown-linux-musl )
-  cp "$repo/target/x86_64-unknown-linux-musl/release-cli/broccoli" "$B/cli/broccoli"
-  chmod 0755 "$B/cli/broccoli"
+  # The contestant CLI and the plugin tool, static musl. broccoli-dev finds
+  # the bundle's sdk/ from cli/ (packages/dev-cli/src/template/sdk.rs).
+  ( cd "$repo" && cargo build -p broccoli-contestant-cli -p broccoli-dev-cli \
+      --profile release-cli --target x86_64-unknown-linux-musl )
+  for bin in broccoli broccoli-dev; do
+    cp "$repo/target/x86_64-unknown-linux-musl/release-cli/$bin" "$B/cli/$bin"
+    chmod 0755 "$B/cli/$bin"
+  done
 fi
 
 # 4b. Plugin SDKs with their crates.io closure, for plugin authors on the LAN

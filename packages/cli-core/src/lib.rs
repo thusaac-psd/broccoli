@@ -5,6 +5,7 @@ pub use broccoli_api_types as api;
 
 pub mod backoff;
 pub mod client;
+pub mod clock;
 pub mod config;
 pub mod credentials;
 pub mod fmt;

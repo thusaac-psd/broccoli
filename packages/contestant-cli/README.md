@@ -45,7 +45,7 @@ broccoli login                          # browser callback flow
 broccoli login -u alice -p '<password>' # direct username/password (no browser)
 broccoli login --server http://host:3000
 broccoli whoami                         # who am I logged in as? (alias: me)
-broccoli logout                         # forget the saved login (shared machines)
+broccoli logout                         # end the session on the server and forget it here
 ```
 
 Credentials are stored in `credentials.json` in the `broccoli` folder of the

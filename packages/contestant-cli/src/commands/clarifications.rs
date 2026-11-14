@@ -127,6 +127,22 @@ fn ask(client: &Client, contest: &str, message: Option<String>) -> anyhow::Resul
     if content.is_empty() {
         bail!("No question provided.");
     }
+    // `clar ask "Spring Round"` reads as naming the contest, not asking it
+    // something; posting that would publish the contest's name as a question.
+    let contests = client
+        .list_contests()
+        .context("Failed to list contests")?
+        .data;
+    if let Some(named) = resolve::contests_named(&contests, &content).first() {
+        bail!(
+            "'{}' names contest #{} ({}), so it is not sent as a question. Ask with \
+             `broccoli clarifications ask \"<question>\" -c {}`.",
+            content.trim(),
+            named.id,
+            named.title,
+            named.id
+        );
+    }
 
     let created = client
         .create_clarification(contest, &content)

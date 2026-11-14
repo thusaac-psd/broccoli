@@ -49,9 +49,10 @@ pub struct NewPluginArgs {
     #[arg(long, short)]
     pub output: Option<PathBuf>,
 
-    /// Directory holding the Broccoli SDKs (the packages/ directory of a
-    /// Broccoli checkout). Found automatically inside a checkout; elsewhere
-    /// the backend uses the published crate and a frontend needs this.
+    /// Directory holding the Broccoli SDKs: the sdk/ directory of a release
+    /// bundle or the packages/ directory of a Broccoli checkout. Found
+    /// automatically when the plugin is created inside a checkout or
+    /// broccoli-dev runs from a checkout or a bundle.
     #[arg(long, value_name = "DIR")]
     pub sdk: Option<PathBuf>,
 }

@@ -37,10 +37,11 @@ A plugin can add two kinds of behavior:
 - `pnpm`, if your plugin has a frontend.
 - A running Broccoli server to upload to.
 
-Install the CLI:
+Install the CLI from a Broccoli checkout, or use `cli/broccoli-dev` from an
+air-gap release bundle:
 
 ```bash
-cargo install broccoli-dev-cli
+cargo install --path packages/dev-cli
 ```
 
 ## Scaffold a plugin
@@ -53,14 +54,23 @@ Use `--backend`, `--frontend`, or `--full` to pick what gets generated. Without
 one of those flags the command asks. The scaffold lands in `./my-plugin`, or
 pass `-o <DIR>` to write it elsewhere.
 
-The scaffold depends on the Broccoli SDKs. Created inside a Broccoli checkout,
-it uses the checkout's `packages/` directory, so it builds against the code
-next to it. Elsewhere, pass `--sdk <DIR>` with the `packages/` directory of a
-checkout to get the same local dependencies, which build without fetching the
-SDKs from anywhere. Without `--sdk`, a backend depends on the published
-`broccoli-server-sdk` crate at the version the CLI was built with; a frontend
-outside a checkout needs `--sdk`, with `packages/web-sdk` built
-(`pnpm --filter @broccoli/web-sdk build`).
+The scaffold depends on the Broccoli SDKs through a local directory, so they
+are never fetched from anywhere. `--sdk <DIR>` names it: the `packages/`
+directory of a Broccoli checkout or the `sdk/` directory of a release bundle.
+Without `--sdk` the CLI looks above the plugin directory, then above its own
+executable, for either one. A plugin created inside a checkout uses that
+checkout, as does a CLI built and run from one, and `cli/broccoli-dev` from a
+bundle uses the bundle's `sdk/`. When none is found, the command stops and asks
+for `--sdk`.
+
+A frontend that is a member of the checkout's pnpm workspace depends on the web
+SDK as `workspace:*`. Any other frontend needs the package as published, since
+pnpm resolves the SDK's `catalog:` versions only inside the checkout's
+workspace. From a bundle it depends on `sdk/web-sdk`, which is staged that way.
+From a checkout, the scaffold runs `pnpm pack` on `packages/web-sdk` and
+depends on the tarball it writes next to the frontend's `package.json`, so
+build the web SDK first (`pnpm install`, then
+`pnpm --filter @broccoli/web-sdk build`).
 
 ## Anatomy
 
@@ -220,12 +230,13 @@ for you.
 ## Build without internet access
 
 A release bundle carries the SDKs in `sdk/`: `server-sdk/`, `broccoli-types/`
-and a built `web-sdk/`, laid out like a checkout's `packages/`, plus `vendor/`,
-every crates.io crate a scaffolded backend needs. Point the scaffold at it,
-then tell cargo to read crates from `vendor/`:
+and a packed, built `web-sdk/`, plus `vendor/`, every crates.io crate a
+scaffolded backend needs. `cli/broccoli-dev` in the air-gap bundle finds
+`sdk/` on its own; another `broccoli-dev` takes `--sdk <bundle>/sdk`. Then
+tell cargo to read crates from `vendor/`:
 
 ```bash
-broccoli-dev plugin new my-plugin --sdk <bundle>/sdk
+<bundle>/cli/broccoli-dev plugin new my-plugin
 mkdir -p my-plugin/.cargo
 sed 's|^directory = "vendor"|directory = "<bundle>/sdk/vendor"|' \
   <bundle>/sdk/.cargo/config.toml > my-plugin/.cargo/config.toml

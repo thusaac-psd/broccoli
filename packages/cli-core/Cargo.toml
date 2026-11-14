@@ -10,6 +10,7 @@ rust-version = "1.89"
 [dependencies]
 broccoli-api-types = { path = "../api-types" }
 anyhow.workspace = true
+chrono.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true

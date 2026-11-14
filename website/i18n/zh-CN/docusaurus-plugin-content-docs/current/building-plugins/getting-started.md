@@ -31,10 +31,10 @@ Broccoli 插件是一个运行在 Broccoli 服务端内部的 WebAssembly 模块
 - 若插件包含前端，则需要 `pnpm`。
 - 一个用于上传的运行中的 Broccoli 服务端。
 
-安装 CLI：
+在 Broccoli 源码仓库中安装 CLI，或直接使用离线发布包中的 `cli/broccoli-dev`：
 
 ```bash
-cargo install broccoli-dev-cli
+cargo install --path packages/dev-cli
 ```
 
 ## 生成插件骨架
@@ -46,11 +46,17 @@ broccoli-dev plugin new my-plugin --full
 使用 `--backend`、`--frontend` 或 `--full` 选择要生成的内容。若不带这些标志，命令会进行
 询问。骨架默认生成在 `./my-plugin`，也可通过 `-o <DIR>` 写入其他位置。
 
-骨架依赖 Broccoli SDK。在 Broccoli 源码仓库中创建时，它使用仓库的 `packages/` 目录，
-从而针对旁边的代码构建。在其他位置，传入 `--sdk <DIR>` 并指向某个仓库的 `packages/`
-目录，即可得到同样的本地依赖，构建时无需从任何地方获取 SDK。不带 `--sdk` 时，后端依赖
-已发布的 `broccoli-server-sdk` crate，版本与构建该 CLI 时所用的 SDK 一致；仓库之外的前端
-则必须使用 `--sdk`，并且需要先构建 `packages/web-sdk`（`pnpm --filter @broccoli/web-sdk build`）。
+骨架通过本地目录依赖 Broccoli SDK，因此从不从任何地方获取 SDK。`--sdk <DIR>` 指定该目录：
+Broccoli 源码仓库的 `packages/` 目录，或发布包的 `sdk/` 目录。不带 `--sdk` 时，CLI 先在插件
+目录的上级目录中查找二者之一，再在自身可执行文件的上级目录中查找。在源码仓库中创建的插件使用
+该仓库，从仓库构建并运行的 CLI 也是如此；发布包中的 `cli/broccoli-dev` 使用发布包的 `sdk/`。
+若都找不到，命令会停止并要求传入 `--sdk`。
+
+属于仓库 pnpm 工作区成员的前端以 `workspace:*` 依赖 web SDK。其他前端需要发布形式的包，
+因为 pnpm 只在仓库工作区内解析 SDK 的 `catalog:` 版本。使用发布包时，前端依赖已按发布形式
+暂存的 `sdk/web-sdk`。使用源码仓库时，骨架对 `packages/web-sdk` 运行 `pnpm pack`，并依赖其
+写在前端 `package.json` 旁的 tarball，因此请先构建 web SDK（先 `pnpm install`，再
+`pnpm --filter @broccoli/web-sdk build`）。
 
 ## 结构
 
@@ -184,10 +190,10 @@ broccoli-dev plugin build my-plugin
 
 ## 无网络时构建
 
-发布包的 `sdk/` 目录附带了 SDK：`server-sdk/`、`broccoli-types/` 和已构建的 `web-sdk/`，布局与源码仓库的 `packages/` 相同；另有 `vendor/`，包含生成的后端所需的全部 crates.io crate。让脚手架指向它，再让 cargo 从 `vendor/` 读取 crate：
+发布包的 `sdk/` 目录附带了 SDK：`server-sdk/`、`broccoli-types/` 和已打包、已构建的 `web-sdk/`；另有 `vendor/`，包含生成的后端所需的全部 crates.io crate。离线发布包中的 `cli/broccoli-dev` 会自行找到 `sdk/`；其他 `broccoli-dev` 需传入 `--sdk <bundle>/sdk`。然后让 cargo 从 `vendor/` 读取 crate：
 
 ```bash
-broccoli-dev plugin new my-plugin --sdk <bundle>/sdk
+<bundle>/cli/broccoli-dev plugin new my-plugin
 mkdir -p my-plugin/.cargo
 sed 's|^directory = "vendor"|directory = "<bundle>/sdk/vendor"|' \
   <bundle>/sdk/.cargo/config.toml > my-plugin/.cargo/config.toml

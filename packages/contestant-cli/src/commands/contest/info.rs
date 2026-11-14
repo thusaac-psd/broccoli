@@ -1,10 +1,11 @@
 use anyhow::Context;
-use chrono::Utc;
 use clap::Args;
 use console::style;
 
 use broccoli_cli_core::client::Client;
 use broccoli_cli_core::resolve;
+
+use super::{Countdown, local_time, phase_label, span_minutes};
 
 #[derive(Args)]
 pub struct InfoArgs {
@@ -31,43 +32,43 @@ pub fn run(args: InfoArgs) -> anyhow::Result<()> {
         .get_contest_my_info(&cid)
         .context("Failed to fetch registration status")?;
 
-    let problems = client
-        .list_contest_problems(&cid)
-        .context("Failed to fetch contest problems")?;
+    // Problems are listed once the contest has started.
+    let problems = match contest.phase.has_started() {
+        true => client
+            .list_contest_problems(&cid)
+            .context("Failed to fetch contest problems")?,
+        false => Vec::new(),
+    };
 
     println!();
     println!("  {}", style(&contest.title).bold().underlined());
     println!();
+    println!("  Status: {}", style(phase_label(contest.phase)).bold());
+    println!("  Start:  {}", local_time(&contest.start_time));
+    println!("  End:    {}", local_time(&contest.end_time));
 
-    let now = Utc::now();
-    let end = contest.end_time;
-
-    if now > end {
-        println!(
-            "  {} {}",
-            style("\u{2713}").green(),
-            style("Contest has ended.").dim()
-        );
-    } else {
-        let remaining = end - now;
-        let days = remaining.num_days();
-        let hours = remaining.num_hours() % 24;
-        let minutes = remaining.num_minutes() % 60;
-
-        let remaining_str = if days > 0 {
-            format!("{}d {}h {}m remaining", days, hours, minutes)
-        } else if hours > 0 {
-            format!("{}h {}m remaining", hours, minutes)
-        } else {
-            format!("{}m remaining", minutes)
+    // Counted on the server's clock; without one, the times above stand.
+    if let Some(now) = client.clock().now() {
+        let countdown = match Countdown::at(contest.start_time, contest.end_time, now) {
+            Countdown::StartsIn(span) => Some(format!("starts in {}", span_minutes(span))),
+            Countdown::EndsIn(span) => Some(format!("{} remaining", span_minutes(span))),
+            Countdown::Ended => None,
         };
-        println!("  {}  {}", style("\u{23F1}").cyan(), remaining_str);
+        if let Some(countdown) = countdown {
+            println!("  {}  {}", style("\u{23F1}").cyan(), countdown);
+        }
     }
 
     if my_info.is_registered {
         println!("  {}  Registered", style("\u{2713}").green().bold());
-    } else {
+    } else if contest.phase.has_ended() {
         println!("  {}  Not registered", style("\u{2717}").red());
+    } else {
+        println!(
+            "  {}  Not registered: `broccoli contest register {}` registers you",
+            style("\u{2717}").red(),
+            cid
+        );
     }
 
     if !problems.is_empty() {
