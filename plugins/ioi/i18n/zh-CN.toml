@@ -226,3 +226,4 @@
 'identifier.contestType.ioi' = 'IOI 赛制'
 'plugin.ioi.name' = 'IOI 赛制'
 'plugin.ioi.description' = 'IOI 赛制：子任务计分、多种提交模式与令牌。'
+'ioi.scoreboard.table' = '排行榜'

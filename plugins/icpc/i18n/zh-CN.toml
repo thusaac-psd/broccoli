@@ -31,3 +31,4 @@
 'identifier.contestType.icpc' = 'ICPC 赛制'
 'plugin.icpc.name' = 'ICPC 赛制'
 'plugin.icpc.description' = 'ICPC 赛制：按通过与否评判，并计罚时。'
+'icpc.scoreboard.table' = '排行榜'
