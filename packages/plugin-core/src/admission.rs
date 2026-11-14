@@ -38,6 +38,9 @@
 //!   taking. Either way the person gets a quick "busy, retry" instead of
 //!   waiting out the request's deadline, and a cheap function is never
 //!   refused for what a slow one costs.
+//! - One plugin's routes together hold at most [`Capacity::plugin_cap`]
+//!   admitted calls, every token but two, so a plugin with many slow routes
+//!   still leaves a token to the host and one to another plugin.
 //! - The host's own request path calls ([`CallKind::Request`]: visibility
 //!   queries, request hooks), which the core API depends on, take a freed
 //!   token ahead of plugin routes ([`CallKind::Route`]).
@@ -286,6 +289,16 @@ impl Capacity {
         (self.tokens / 2).max(1)
     }
 
+    /// Admitted [`CallKind::Route`] calls of one plugin at most, over all its
+    /// routes: every token but two (at least one). However many slow routes
+    /// one plugin has, one token stays for the host's [`CallKind::Request`]
+    /// calls and one for another plugin's routes. With two tokens a plugin's
+    /// routes hold at most one and the other is shared, the host's calls
+    /// taking it first.
+    pub fn plugin_cap(&self) -> usize {
+        self.tokens.saturating_sub(2).max(1)
+    }
+
     /// The same capacity with `kind` capped at `cap` (at least 1).
     pub fn with_cap(mut self, kind: CallKind, cap: usize) -> Self {
         self.caps.0[kind.index()] = cap.max(1);
@@ -312,6 +325,14 @@ impl LaneKey {
             function: kind
                 .is_request_path()
                 .then(|| Arc::new((plugin.into(), function.into()))),
+        }
+    }
+
+    /// The plugin whose route this lane is, for the plugin cap.
+    fn route_plugin(&self) -> Option<&str> {
+        match (self.kind, &self.function) {
+            (CallKind::Route, Some(function)) => Some(&function.0),
+            _ => None,
         }
     }
 
@@ -363,6 +384,8 @@ struct State {
     /// lanes are the plugin functions manifests declare, so there are
     /// boundedly many; an idle lane keeps its running average.
     lanes: HashMap<LaneKey, Lane>,
+    /// Admitted route calls per plugin with any, for the plugin cap.
+    routes: HashMap<Box<str>, usize>,
     /// Parked calls returning from a host function, per class. Within the
     /// class a token goes to, they go ahead of its queued calls.
     resuming: [VecDeque<SyncSender<Token>>; 2],
@@ -373,11 +396,14 @@ impl State {
         self.running.iter().sum()
     }
 
-    /// Whether a call of `key` may be admitted: its kind and its lane are
-    /// both under their caps.
+    /// Whether a call of `key` may be admitted: its kind, its lane and, for
+    /// a route, its plugin are all under their caps.
     fn has_room(&self, key: &LaneKey, lane: &Lane) -> bool {
         self.admitted[key.kind.index()] < self.capacity.caps.get(key.kind)
             && lane.admitted < key.cap(&self.capacity)
+            && key.route_plugin().is_none_or(|plugin| {
+                self.routes.get(plugin).copied().unwrap_or(0) < self.capacity.plugin_cap()
+            })
     }
 
     /// The lane of `class` whose queued call goes next: among lanes with
@@ -411,11 +437,22 @@ impl State {
     fn enter(&mut self, key: &LaneKey) {
         self.admitted[key.kind.index()] += 1;
         self.lanes.entry(key.clone()).or_default().admitted += 1;
+        if let Some(plugin) = key.route_plugin() {
+            *self.routes.entry(plugin.into()).or_default() += 1;
+        }
     }
 
     /// Count a call of `key` as no longer admitted; returns its lane.
     fn leave(&mut self, key: &LaneKey) -> &mut Lane {
         self.admitted[key.kind.index()] -= 1;
+        if let Some(plugin) = key.route_plugin()
+            && let Some(admitted) = self.routes.get_mut(plugin)
+        {
+            *admitted -= 1;
+            if *admitted == 0 {
+                self.routes.remove(plugin);
+            }
+        }
         let lane = self
             .lanes
             .get_mut(key)
@@ -462,6 +499,7 @@ impl Admission {
             admitted: [0; KINDS],
             next_waiter: 0,
             lanes: HashMap::new(),
+            routes: HashMap::new(),
             resuming: [VecDeque::new(), VecDeque::new()],
         })))
     }
@@ -889,6 +927,47 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_plugin_flooding_several_slow_routes_leaves_tokens_to_others() {
+        let a = Admission::new(Capacity::new(8));
+        let route = |plugin: &str, function: &str| {
+            futures::FutureExt::now_or_never(a.admit(CallKind::Route, plugin, function, far()))
+        };
+        // Three slow routes of one plugin, each flooded: the first fills its
+        // lane, the second runs up to the plugin's cap, the rest queue.
+        let mut running = Vec::new();
+        let mut queued = Vec::new();
+        for function in ["s1", "s2", "s3"] {
+            for _ in 0..6 {
+                match route("slow", function) {
+                    Some(Ok(call)) => running.push(call),
+                    Some(Err(Expired)) => panic!("nothing finished, so nothing is shed"),
+                    None => queued.push(tokio::spawn({
+                        let (a, function) = (a.clone(), function.to_owned());
+                        async move { a.admit(CallKind::Route, "slow", &function, far()).await }
+                    })),
+                }
+            }
+        }
+        while a.queued_kind(CallKind::Route) < queued.len() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(running.len(), a.capacity().plugin_cap());
+        assert_eq!(a.running(CallClass::Interactive), 6);
+        // Another plugin's cheap route and a host visibility query both run.
+        assert!(matches!(route("other", "page"), Some(Ok((_, Some(_))))));
+        let visibility = a.admit(CallKind::Request, "slow", "query", far());
+        assert!(matches!(
+            futures::FutureExt::now_or_never(visibility),
+            Some(Ok((_, Some(_))))
+        ));
+        // The flood's queued calls are refused once they waited the shed wait.
+        tokio::time::advance(SHED_WAIT).await;
+        for call in queued {
+            assert_eq!(call.await.unwrap().err(), Some(Expired));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_full_lane_holds_its_calls_while_other_lanes_run() {
         let a = Admission::new(roomy(4));
         let mut slow = vec![admit(&a, INTERACTIVE).await, admit(&a, INTERACTIVE).await];
@@ -1144,6 +1223,13 @@ mod tests {
         assert_eq!(Capacity::new(8).lane_cap(), 4);
         assert_eq!(Capacity::new(3).lane_cap(), 1);
         assert_eq!(Capacity::new(MIN_TOKENS).lane_cap(), 1);
+    }
+
+    #[test]
+    fn one_plugins_routes_leave_two_tokens_when_there_are_three_or_more() {
+        assert_eq!(Capacity::new(8).plugin_cap(), 6);
+        assert_eq!(Capacity::new(3).plugin_cap(), 1);
+        assert_eq!(Capacity::new(MIN_TOKENS).plugin_cap(), 1);
     }
 
     /// Park a resumer of `class` on its own thread; returns once it waits.

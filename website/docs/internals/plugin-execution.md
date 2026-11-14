@@ -54,6 +54,14 @@ never decides what happens to a cheap visibility query.
 - One lane holds at most `Capacity::lane_cap` admitted calls, `max(1, C/2)`.
   However many calls a slow function gets, the other half of the tokens stays
   free for every other function, including other routes of the same plugin.
+- One plugin's `Route` calls together, over all its routes, hold at most
+  `Capacity::plugin_cap` admitted calls, `max(1, C - 2)`. With three or more
+  tokens a plugin with many slow routes always leaves one token for the host's
+  `Request` calls and one for another plugin's routes. With two tokens its
+  routes hold at most one and the other is shared, host calls first. A
+  plugin's `Request` work (its visibility querier, its request hooks) is not
+  counted here: the host makes those calls for the core API, and its own lanes
+  bound them.
 - A request path call queues at most `admission::SHED_WAIT` (2 s), then fails
   with `PluginError::Unavailable`, a 503 `PLUGIN_UNAVAILABLE` with
   `Retry-After`. No call waits out the request's deadline in the queue, even
