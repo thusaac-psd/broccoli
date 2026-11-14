@@ -275,3 +275,211 @@ async fn the_plugin_pools_keep_to_one_budget() {
         .expect("third");
     drop((second, third));
 }
+
+/// What plugins may do with host relations: read the classified contest data,
+/// nothing else. Driven over every relation in schema `public`, so a host
+/// table added later is covered without a test change.
+mod grants {
+    use super::*;
+    use crate::migration::m0001_supplementary_schema::{PLUGIN_READABLE, PLUGIN_READABLE_COLUMNS};
+
+    /// Host relations no plugin may read at all: credentials, accounts and
+    /// roles, other plugins' host-held state, and host machinery.
+    const HIDDEN: &[&str] = &[
+        "blob_data",
+        "broccoli_schema_stamp",
+        "dead_letter_message",
+        "device_authorization",
+        "idempotency_key",
+        "plugin",
+        "plugin_config",
+        "plugin_login_secret",
+        "plugin_replica",
+        "plugin_storage",
+        "plugin_timer",
+        "refresh_tokens",
+        "role",
+        "role_permission",
+        "seaql_migrations",
+        "seeded_role_permission",
+        "submission_feedback",
+        "user_role",
+    ];
+
+    async fn strings(db: &DatabaseConnection, sql: &str) -> Vec<String> {
+        db.query_all_raw(Statement::from_string(DbBackend::Postgres, sql))
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"))
+            .iter()
+            .map(|r| r.try_get_by_index::<String>(0).expect("text"))
+            .collect()
+    }
+
+    /// The host's relations in `public`, the blob store's table included,
+    /// leaving out what an extension owns.
+    async fn host_relations(f: &Fixture) -> Vec<String> {
+        common::storage::database::DatabaseBlobStore::ensure_table(&f.app)
+            .await
+            .expect("blob table");
+        strings(
+            &f.app,
+            "SELECT c.relname::text FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \
+               AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = c.oid \
+                               AND d.deptype = 'e') \
+             ORDER BY 1",
+        )
+        .await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_host_relation_is_classified() {
+        let f = Fixture::new().await;
+        for relation in host_relations(&f).await {
+            let classified = PLUGIN_READABLE.contains(&relation.as_str())
+                || PLUGIN_READABLE_COLUMNS.iter().any(|(t, _)| *t == relation)
+                || HIDDEN.contains(&relation.as_str());
+            assert!(
+                classified,
+                "host relation {relation} is neither plugin-readable nor hidden: classify it \
+                 in m0001's PLUGIN_READABLE or in this test's HIDDEN"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_plugin_cannot_write_any_host_relation() {
+        let f = Fixture::new().await;
+        let pools = f.pools(1);
+        for relation in host_relations(&f).await {
+            let t = format!("public.\"{relation}\"");
+            let column = strings(
+                &f.app,
+                &format!(
+                    "SELECT attname::text FROM pg_attribute WHERE attrelid = '{t}'::regclass \
+                     AND attnum > 0 AND NOT attisdropped ORDER BY attnum LIMIT 1"
+                ),
+            )
+            .await
+            .remove(0);
+            let is_view = !strings(
+                &f.app,
+                &format!("SELECT relname::text FROM pg_class WHERE oid = '{t}'::regclass AND relkind = 'v'"),
+            )
+            .await
+            .is_empty();
+            let table_only: Vec<String> = if is_view {
+                Vec::new()
+            } else {
+                vec![
+                    format!("TRUNCATE {t}"),
+                    format!("DROP TABLE {t}"),
+                    format!(
+                        "CREATE TRIGGER planted BEFORE INSERT ON {t} FOR EACH ROW EXECUTE FUNCTION suppress_redundant_updates_trigger()"
+                    ),
+                ]
+            };
+            for sql in [
+                format!("INSERT INTO {t} DEFAULT VALUES"),
+                format!("UPDATE {t} SET \"{column}\" = \"{column}\""),
+                format!("DELETE FROM {t}"),
+                format!("ALTER TABLE {t} ADD COLUMN planted INT"),
+            ]
+            .into_iter()
+            .chain(table_only)
+            {
+                denied(&pools, "print", &sql).await;
+            }
+            // No privilege that writes, references or hooks the relation.
+            let held = text(
+                &pools,
+                "print",
+                &format!(
+                    "SELECT concat_ws(',', \
+                       CASE WHEN has_table_privilege('{t}', 'INSERT') THEN 'INSERT' END, \
+                       CASE WHEN has_table_privilege('{t}', 'UPDATE') THEN 'UPDATE' END, \
+                       CASE WHEN has_table_privilege('{t}', 'DELETE') THEN 'DELETE' END, \
+                       CASE WHEN has_table_privilege('{t}', 'TRUNCATE') THEN 'TRUNCATE' END, \
+                       CASE WHEN has_table_privilege('{t}', 'REFERENCES') THEN 'REFERENCES' END, \
+                       CASE WHEN has_table_privilege('{t}', 'TRIGGER') THEN 'TRIGGER' END, \
+                       CASE WHEN has_any_column_privilege('{t}', 'INSERT') THEN 'INSERT(col)' END, \
+                       CASE WHEN has_any_column_privilege('{t}', 'UPDATE') THEN 'UPDATE(col)' END, \
+                       CASE WHEN has_any_column_privilege('{t}', 'REFERENCES') THEN 'REFERENCES(col)' END)"
+                ),
+            )
+            .await;
+            assert_eq!(held, "", "{relation}: the plugin holds {held}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_plugin_cannot_use_host_sequences_or_create_in_public() {
+        let f = Fixture::new().await;
+        let pools = f.pools(1);
+        let sequences = strings(
+            &f.app,
+            "SELECT c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = 'public' AND c.relkind = 'S' ORDER BY 1",
+        )
+        .await;
+        assert!(!sequences.is_empty());
+        for sequence in sequences {
+            for sql in [
+                format!("SELECT nextval('public.\"{sequence}\"')"),
+                format!("SELECT setval('public.\"{sequence}\"', 1)"),
+                format!("SELECT last_value FROM public.\"{sequence}\""),
+            ] {
+                denied(&pools, "print", &sql).await;
+            }
+        }
+        for sql in [
+            "CREATE TABLE public.planted (v INT)",
+            "CREATE VIEW public.planted AS SELECT 1 AS v",
+            "CREATE FUNCTION public.planted() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+            "CREATE SCHEMA planted",
+        ] {
+            denied(&pools, "print", sql).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_plugin_reads_contest_data_but_no_secret() {
+        let f = Fixture::new().await;
+        let pools = f.pools(1);
+        for relation in PLUGIN_READABLE {
+            exec(
+                &pools,
+                "icpc",
+                &format!("SELECT * FROM public.\"{relation}\" LIMIT 1"),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{relation} must be readable: {e}"));
+        }
+        exec(
+            &pools,
+            "icpc",
+            "SELECT u.id, u.username, u.display_name, u.created_at, u.deleted_at \
+             FROM \"user\" u LIMIT 1",
+        )
+        .await
+        .expect("an account's public profile is readable");
+        for sql in [
+            "SELECT password FROM \"user\"",
+            "SELECT credentials_changed_at FROM \"user\"",
+            "SELECT * FROM \"user\"",
+        ] {
+            denied(&pools, "icpc", sql).await;
+        }
+        for relation in host_relations(&f).await {
+            if HIDDEN.contains(&relation.as_str()) {
+                denied(
+                    &pools,
+                    "icpc",
+                    &format!("SELECT 1 FROM public.\"{relation}\" LIMIT 1"),
+                )
+                .await;
+            }
+        }
+    }
+}

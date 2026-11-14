@@ -194,18 +194,18 @@ async fn the_plugin_role_cannot_move_the_counter() {
         );
         txn.rollback().await.expect("rollback");
     }
-    // A plugin's own config write still advances it, through the trigger.
-    let before = epoch(&app.db).await;
+    // Nor can it write the config the counter tracks: only host functions do.
     let txn = app.db.begin().await.expect("begin");
     txn.execute_unprepared("SET LOCAL ROLE broccoli_plugin")
         .await
         .unwrap();
-    txn.execute_unprepared(
-        "INSERT INTO plugin_config (scope, ref_id, namespace, config, position) \
-         VALUES ('plugin', 'cache-probe', 'by-plugin', '{}', 0)",
-    )
-    .await
-    .expect("a plugin may write plugin_config");
-    txn.commit().await.expect("commit");
-    assert!(epoch(&app.db).await > before);
+    let err = txn
+        .execute_unprepared(
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position) \
+             VALUES ('plugin', 'cache-probe', 'by-plugin', '{}', 0)",
+        )
+        .await
+        .expect_err("the plugin role must not write plugin_config");
+    assert!(err.to_string().contains("permission denied"), "{err}");
+    txn.rollback().await.expect("rollback");
 }

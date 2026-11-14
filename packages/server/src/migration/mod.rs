@@ -7,7 +7,7 @@ use common::db::DatabaseConnection;
 use sea_orm::{ConnectionTrait, Statement};
 use sea_orm_migration::prelude::*;
 
-mod m0001_supplementary_schema;
+pub(crate) mod m0001_supplementary_schema;
 
 /// The schema this build creates, as a stamp over its schema sources (see
 /// `build.rs`). m0001 records it; boot refuses a database recorded with any
