@@ -66,7 +66,9 @@ export function FeedbackLevelSelector({
       )}
 
       <Select value={selectedValue} onValueChange={(v) => onChange(v)}>
-        <SelectTrigger>
+        <SelectTrigger
+          aria-label={schema.title ?? t('ioi.feedbackLevel.label')}
+        >
           <SelectValue
             placeholder={inheritedDisplay ?? t('ioi.feedbackLevel.label')}
           />

@@ -207,7 +207,10 @@ export function ManageUserRolesDialog({
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
               {roleOptions.length > 0 ? (
                 <Select value={selectedRole} onValueChange={setSelectedRole}>
-                  <SelectTrigger className="w-full">
+                  <SelectTrigger
+                    aria-label={t('users.users.assignRole')}
+                    className="w-full"
+                  >
                     <SelectValue
                       placeholder={t('users.users.roleSelectPlaceholder')}
                     />
@@ -228,6 +231,7 @@ export function ManageUserRolesDialog({
                 </Select>
               ) : (
                 <Input
+                  aria-label={t('users.users.roleInputPlaceholder')}
                   value={manualRole}
                   onChange={(e) => setManualRole(e.target.value)}
                   placeholder={t('users.users.roleInputPlaceholder')}

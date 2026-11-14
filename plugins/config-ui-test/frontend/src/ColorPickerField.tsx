@@ -47,6 +47,9 @@ export function ColorPickerField({
       <div className="flex items-center gap-3">
         {/* Native color picker */}
         <input
+          aria-label={
+            schema.title ?? t('configUiTest.colorPicker.defaultTitle')
+          }
           type="color"
           value={displayColor}
           onChange={(e) => onChange(e.target.value)}
@@ -57,6 +60,9 @@ export function ColorPickerField({
         />
         {/* Hex text input */}
         <Input
+          aria-label={
+            schema.title ?? t('configUiTest.colorPicker.defaultTitle')
+          }
           type="text"
           value={showAsPlaceholder ? '' : displayColor}
           placeholder={

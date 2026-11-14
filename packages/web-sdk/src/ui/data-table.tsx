@@ -219,6 +219,7 @@ export function DataTable<TData>({
                 style={{ insetInlineStart: '0.625rem' }}
               />
               <Input
+                aria-label={searchPlaceholder ?? t('table.search')}
                 placeholder={searchPlaceholder ?? t('table.search')}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}

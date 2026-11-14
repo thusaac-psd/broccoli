@@ -836,6 +836,7 @@ function CodeEditorContent({
                   {t('editor.stdin')}
                 </label>
                 <textarea
+                  aria-label={t('editor.stdin')}
                   value={activeTc.input}
                   onChange={(e) =>
                     updateTestCase(activeTestCase, 'input', e.target.value)
@@ -853,6 +854,7 @@ function CodeEditorContent({
                   </span>
                 </label>
                 <textarea
+                  aria-label={t('editor.expectedOutput')}
                   value={activeTc.expectedOutput}
                   onChange={(e) =>
                     updateTestCase(

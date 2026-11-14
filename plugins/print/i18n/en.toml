@@ -41,6 +41,8 @@
 'print.queue.col.created' = 'Created'
 'print.queue.col.actions' = 'Actions'
 'print.queue.empty' = 'No print jobs yet'
+'print.queue.selectPage' = 'Select every job on this page'
+'print.queue.selectJob' = 'Select job #{id}'
 'print.queue.search' = 'Search by contestant, file, problem…'
 'print.queue.filter.allStatuses' = 'All statuses'
 'print.queue.action.approve' = 'Approve'

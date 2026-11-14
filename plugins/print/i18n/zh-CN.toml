@@ -41,6 +41,8 @@
 'print.queue.col.created' = '提交时间'
 'print.queue.col.actions' = '操作'
 'print.queue.empty' = '暂无打印任务'
+'print.queue.selectPage' = '选择本页所有任务'
+'print.queue.selectJob' = '选择任务 #{id}'
 'print.queue.search' = '搜索参赛者、文件名、题目…'
 'print.queue.filter.allStatuses' = '全部状态'
 'print.queue.action.approve' = '批准'

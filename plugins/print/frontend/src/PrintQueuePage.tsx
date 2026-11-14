@@ -188,6 +188,7 @@ export function PrintQueuePage() {
             pageIds.length > 0 && pageIds.every((id) => selected.has(id));
           return (
             <input
+              aria-label={t('print.queue.selectPage')}
               type="checkbox"
               className="h-4 w-4 cursor-pointer accent-primary"
               checked={allChecked}
@@ -204,6 +205,7 @@ export function PrintQueuePage() {
         },
         cell: ({ row }) => (
           <input
+            aria-label={t('print.queue.selectJob', { id: row.original.id })}
             type="checkbox"
             className="h-4 w-4 cursor-pointer accent-primary"
             checked={selected.has(row.original.id)}
@@ -389,6 +391,7 @@ export function PrintQueuePage() {
                   >
                     <SelectTrigger
                       className="h-7 w-7 px-0"
+                      aria-label={t('print.queue.action.pin')}
                       title={t('print.queue.action.pin')}
                     >
                       <Crosshair className="h-3.5 w-3.5" />
@@ -423,7 +426,7 @@ export function PrintQueuePage() {
       value={value || 'all'}
       onValueChange={(v) => onChange(v === 'all' ? '' : v)}
     >
-      <SelectTrigger className="h-7 w-32 text-xs">
+      <SelectTrigger aria-label={label} className="h-7 w-32 text-xs">
         <SelectValue placeholder={label} />
       </SelectTrigger>
       <SelectContent>
@@ -620,7 +623,10 @@ export function PrintQueuePage() {
           </DialogHeader>
           {batchConfirm?.type === 'pin' && printerNames.length > 0 && (
             <Select value={pinPrinter} onValueChange={setPinPrinter}>
-              <SelectTrigger className="h-8 text-sm">
+              <SelectTrigger
+                aria-label={t('print.queue.action.pinPlaceholder')}
+                className="h-8 text-sm"
+              >
                 <SelectValue
                   placeholder={t('print.queue.action.pinPlaceholder')}
                 />
@@ -716,6 +722,7 @@ export function PrintQueuePage() {
             </DialogDescription>
           </DialogHeader>
           <Textarea
+            aria-label={t('print.queue.action.viewCode')}
             className="h-96 resize-none font-mono text-xs leading-relaxed"
             value={codeSource ?? 'Loading…'}
             readOnly

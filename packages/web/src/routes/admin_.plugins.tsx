@@ -1,7 +1,12 @@
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { pollInterval } from '@broccoli/web-sdk/hooks';
-import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
+import {
+  pluginKeys,
+  useFormat,
+  usePluginText,
+  useTranslation,
+} from '@broccoli/web-sdk/i18n';
 import { PLUGIN_MANAGE } from '@broccoli/web-sdk/permissions';
 import type { PluginDetail, UploadRemoval } from '@broccoli/web-sdk/plugin';
 import { usePluginRegistry } from '@broccoli/web-sdk/plugin';
@@ -68,6 +73,7 @@ export default function PluginsPage() {
   const canManagePlugins = !!user?.permissions.includes(PLUGIN_MANAGE);
   const [confirm, confirmDialog] = useConfirmDialog();
   const format = useFormat();
+  const pluginText = usePluginText();
 
   const pluginsQuery = useQuery({
     queryKey: ['admin-plugins'],
@@ -148,7 +154,9 @@ export default function PluginsPage() {
       );
       const running = data?.running_contests ?? [];
       confirm({
-        title: t('plugins.disableConfirm.title', { name: plugin.name }),
+        title: t('plugins.disableConfirm.title', {
+          name: pluginText(pluginKeys.name(plugin.id), plugin.name),
+        }),
         description: error ? (
           errorMessage(error, t('plugins.disableConfirm.unknownContests'))
         ) : running.length === 0 ? (

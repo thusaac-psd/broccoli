@@ -54,6 +54,28 @@ test('selects need a label', () => {
   });
 });
 
+test('inputs need a name, not just a placeholder', () => {
+  tester.run('input-label', a11y.rules['input-label'], {
+    valid: [
+      '<Input aria-label={t("search")} placeholder={t("search")} />',
+      '<input type="checkbox" aria-label={t("select")} />',
+      '<Input id="name" />',
+      '<Label>{t("name")}<Input /></Label>',
+      '<label><input type="checkbox" />{t("all")}</label>',
+      '<input type="hidden" name="x" />',
+      '<input type="file" className="hidden" onChange={pick} />',
+      '<Switch {...props} />',
+    ],
+    invalid: [
+      '<Input placeholder={t("search")} />',
+      '<input type="checkbox" checked={on} />',
+      '<Switch checked={on} />',
+      '<Textarea placeholder={t("note")} />',
+      '<SelectTrigger><SelectValue placeholder={t("status")} /></SelectTrigger>',
+    ].map((code) => ({ code, errors: [{ messageId: 'missing' }] })),
+  });
+});
+
 test('text tokens keep their contrast', () => {
   tester.run('text-token-opacity', a11y.rules['text-token-opacity'], {
     valid: [

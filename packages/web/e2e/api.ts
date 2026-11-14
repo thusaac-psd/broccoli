@@ -233,6 +233,76 @@ const SUBMISSION_DETAIL = {
 
 type Handler = (url: URL, viewer: Viewer, plugins: RepoPlugin[]) => unknown;
 
+const PRINT_JOB = {
+  id: 1,
+  contest_id: 1,
+  user_id: 2,
+  username: 'alice',
+  display_name: 'Alice',
+  problem_label: 'A',
+  submission_id: 3,
+  language: 'cpp',
+  filename: 'main.cpp',
+  pages_est: 1,
+  pages: null,
+  location: 'Row 3',
+  target_printer: null,
+  status: 'pending',
+  claimed_by: null,
+  claimed_printer: null,
+  error: null,
+  created_at: Math.floor(NOW / 1000) - 60,
+  claimed_at: null,
+  printed_at: null,
+};
+
+/** Answers for the plugins of this repository that the browser suite serves. */
+export const PLUGIN_ROUTES: [string, RegExp, Handler][] = [
+  [
+    'GET',
+    /^\/p\/print\/api\/plugins\/print\/admin\/jobs$/,
+    () => ({
+      data: [PRINT_JOB],
+      pagination: { page: 1, per_page: 50, total: 1, total_pages: 1 },
+    }),
+  ],
+  [
+    'GET',
+    /^\/p\/print\/api\/plugins\/print\/admin\/stations$/,
+    () => ({ data: [] }),
+  ],
+  [
+    'GET',
+    /^\/p\/icpc\/api\/plugins\/icpc\/contests\/1\/info$/,
+    () => ({
+      penalty_minutes: 20,
+      count_compile_error: false,
+      show_test_details: false,
+    }),
+  ],
+  [
+    'GET',
+    /^\/p\/icpc\/api\/plugins\/icpc\/contests\/1\/standings$/,
+    () => ({
+      phase: 'during',
+      penalty_minutes: 20,
+      problem_labels: ['A', 'B', 'C'],
+      full_board: true,
+      rows: [
+        {
+          rank: 1,
+          user_id: 2,
+          username: 'alice',
+          display_name: 'Alice',
+          solved: 1,
+          penalty: 23,
+          problems: { A: { attempts: 2, solved: true, time: 3, penalty: 23 } },
+        },
+      ],
+    }),
+  ],
+];
+
 /** `METHOD path-pattern` to the body answered. */
 const ROUTES: [string, RegExp, Handler][] = [
   ['GET', /^\/i18n\/locales$/, () => ['en', 'zh-CN']],
@@ -309,7 +379,11 @@ const ROUTES: [string, RegExp, Handler][] = [
       dlq_unresolved_count: 0,
     }),
   ],
-  ['GET', /^\/admin\/plugins$/, () => [plugin]],
+  [
+    'GET',
+    /^\/admin\/plugins$/,
+    () => [plugin, { ...plugin, id: 'icpc', name: 'icpc', config_schemas: [] }],
+  ],
   [
     'GET',
     /^\/admin\/plugins\/upload$/,
@@ -343,7 +417,10 @@ const ROUTES: [string, RegExp, Handler][] = [
 export interface MockOptions {
   /** Plugins of this repository to serve, with their built frontends. */
   plugins?: string[];
-  /** Answers for the plugins' own API calls, `METHOD path` to the body. */
+  /**
+   * Answers for the plugins' own API calls, `METHOD path` to the body
+   * (`PLUGIN_ROUTES` unless given).
+   */
   pluginRoutes?: [string, RegExp, Handler][];
 }
 
@@ -355,7 +432,7 @@ export interface MockOptions {
 export async function mockApi(
   page: Page,
   viewer: Viewer,
-  { plugins: ids = [], pluginRoutes = [] }: MockOptions = {},
+  { plugins: ids = [], pluginRoutes = PLUGIN_ROUTES }: MockOptions = {},
 ): Promise<string[]> {
   const unanswered: string[] = [];
   const plugins = ids.map(repoPlugin);

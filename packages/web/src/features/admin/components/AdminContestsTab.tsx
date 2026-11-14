@@ -762,6 +762,7 @@ export function ContestProblemsDialog({
               style={{ insetInlineStart: '0.625rem' }}
             />
             <Input
+              aria-label={t('problems.searchPlaceholder')}
               placeholder={t('problems.searchPlaceholder')}
               value={search}
               onChange={(e) => setSearch(e.target.value)}

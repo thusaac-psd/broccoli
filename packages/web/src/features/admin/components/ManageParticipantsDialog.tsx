@@ -147,6 +147,7 @@ function EnrolledTab({
             style={{ insetInlineStart: '0.625rem' }}
           />
           <Input
+            aria-label={t('admin.participants.searchEnrolled')}
             placeholder={t('admin.participants.searchEnrolled')}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -320,6 +321,7 @@ function AddParticipantsTab({
             style={{ insetInlineStart: '0.625rem' }}
           />
           <Input
+            aria-label={t('admin.participants.searchUsers')}
             placeholder={t('admin.participants.searchUsers')}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -666,6 +668,7 @@ function BulkImportTab({
           onChange={handleReadJsonFile}
         />
         <Textarea
+          aria-label={t('admin.bulkParticipantsJsonLabel')}
           value={jsonText}
           onChange={(e) => {
             setJsonText(e.target.value);

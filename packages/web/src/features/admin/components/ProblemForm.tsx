@@ -463,6 +463,7 @@ export function ProblemForm({
 
                 <div className="flex gap-2">
                   <Input
+                    aria-label={t('admin.submissionFormat.filenamePlaceholder')}
                     value={newFilenameByLanguage[lang] ?? ''}
                     placeholder={t(
                       'admin.submissionFormat.filenamePlaceholder',
