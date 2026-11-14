@@ -20,3 +20,6 @@
 'cooldown.source.problem' = '来自题目'
 'cooldown.source.contest' = '来自比赛'
 'cooldown.source.contest_problem' = '覆盖'
+
+# Why a submission was refused, by the rejection's code
+'apiError.COOLDOWN_ACTIVE' = '请再等待 {remaining_seconds} 秒后提交。'

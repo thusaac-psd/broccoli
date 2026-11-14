@@ -458,6 +458,7 @@ mod contest_code_runs {
             .await;
 
         assert_eq!(res.status, 403);
+        assert_eq!(res.body["code"], "CONTEST_NOT_REGISTERED");
     }
 
     #[tokio::test]

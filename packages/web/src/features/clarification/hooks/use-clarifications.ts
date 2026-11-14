@@ -1,6 +1,7 @@
-import { useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import type { CreateClarificationBody } from '@broccoli/web-sdk/clarification';
 import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
+import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -25,10 +26,7 @@ function treatAlreadyDoneAsPosted(error: unknown): null {
  * An earlier send may have posted it, or is still posting it. No refetch is
  * needed here: `onSettled` refetches the list, which shows whether it was.
  */
-function reportedUnsettled(
-  error: unknown,
-  t: (key: string) => string,
-): boolean {
+function reportedUnsettled(error: unknown, t: I18nContextValue['t']): boolean {
   return toastUnsettled(error, t, {
     outcomeUnknownKey: 'clarification.outcomeUnknown',
   });
@@ -46,6 +44,7 @@ export function useClarifications(contestId: number, enabled: boolean) {
 
 export function useCreateClarification(contestId: number) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   // The key follows the clarification's content: a retry of the same text
@@ -59,9 +58,9 @@ export function useCreateClarification(contestId: number) {
     onSuccess: () => {
       toast.success(t('clarification.submitSuccess'));
     },
-    onError: (error: Error) => {
+    onError: (error: unknown) => {
       if (reportedUnsettled(error, t)) return;
-      toast.error(error.message || t('clarification.submitError'));
+      toast.error(errorMessage(error, t('clarification.submitError')));
     },
     onSettled: () => {
       queryClient.invalidateQueries({
@@ -73,6 +72,7 @@ export function useCreateClarification(contestId: number) {
 
 export function useReplyClarification(contestId: number) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const sendIdempotent = useIdempotentRequest();
@@ -90,9 +90,9 @@ export function useReplyClarification(contestId: number) {
     onSuccess: () => {
       toast.success(t('clarification.replySuccess'));
     },
-    onError: (error: Error) => {
+    onError: (error: unknown) => {
       if (reportedUnsettled(error, t)) return;
-      toast.error(error.message || t('clarification.replyError'));
+      toast.error(errorMessage(error, t('clarification.replyError')));
     },
     onSettled: () => {
       queryClient.invalidateQueries({
@@ -104,6 +104,7 @@ export function useReplyClarification(contestId: number) {
 
 export function useResolveClarification(contestId: number) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   return useMutation({
@@ -118,8 +119,8 @@ export function useResolveClarification(contestId: number) {
           : t('clarification.reopened'),
       );
     },
-    onError: (error: Error) => {
-      toast.error(error.message || t('clarification.resolveError'));
+    onError: (error: unknown) => {
+      toast.error(errorMessage(error, t('clarification.resolveError')));
     },
     onSettled: () => {
       queryClient.invalidateQueries({
@@ -131,6 +132,7 @@ export function useResolveClarification(contestId: number) {
 
 export function useToggleReplyPublic(contestId: number) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   return useMutation({
@@ -148,8 +150,8 @@ export function useToggleReplyPublic(contestId: number) {
           : t('clarification.madePrivate'),
       );
     },
-    onError: (error: Error) => {
-      toast.error(error.message || t('clarification.toggleError'));
+    onError: (error: unknown) => {
+      toast.error(errorMessage(error, t('clarification.toggleError')));
     },
     onSettled: () => {
       queryClient.invalidateQueries({

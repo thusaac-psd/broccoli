@@ -1,4 +1,5 @@
-import { useAuth } from '@broccoli/web-sdk/auth';
+import { useErrorMessage } from '@broccoli/web-sdk/api';
+import { registerPath, safeReturnPath, useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -13,23 +14,13 @@ import {
 import { type FormEvent, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 
-/**
- * Only same-origin relative paths are allowed as post-login redirect targets,
- * so a crafted `?next=https://evil.com` can't turn login into an open redirect.
- */
-function safeNext(next: string | null): string {
-  if (next && next.startsWith('/') && !next.startsWith('//')) {
-    return next;
-  }
-  return '/';
-}
-
 export default function LoginForm() {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const { login } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const next = safeNext(searchParams.get('next'));
+  const next = safeReturnPath(searchParams.get('next'));
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -45,11 +36,7 @@ export default function LoginForm() {
       await login({ username, password });
       navigate(next);
     } catch (err) {
-      const message =
-        err instanceof Error && err.message
-          ? err.message
-          : t('auth.invalidCredentials');
-      setError(message);
+      setError(errorMessage(err, t('auth.invalidCredentials')));
     } finally {
       setIsSubmitting(false);
     }
@@ -89,14 +76,7 @@ export default function LoginForm() {
           </Button>
           <p className="text-sm text-muted-foreground">
             {t('auth.noAccount')}{' '}
-            <Link
-              to={
-                next !== '/'
-                  ? `/register?next=${encodeURIComponent(next)}`
-                  : '/register'
-              }
-              className="text-primary underline"
-            >
+            <Link to={registerPath(next)} className="text-primary underline">
               {t('auth.register')}
             </Link>
           </p>

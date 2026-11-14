@@ -215,8 +215,8 @@ pub async fn require_contest_participant<C: sea_orm::ConnectionTrait>(
 
 /// The rule of [`require_contest_participant`] once the caller's
 /// registration is known: participants and `contest:manage` pass; anyone
-/// else gets 403 on a public contest and 404 on a private one, which they
-/// may not know exists.
+/// else gets 403 `CONTEST_NOT_REGISTERED` on a public contest and 404 on a
+/// private one, which they may not know exists.
 pub fn participant_gate(
     auth_user: &AuthUser,
     contest: &contest::Model,
@@ -225,7 +225,7 @@ pub fn participant_gate(
     if is_participant || auth_user.has_permission(perm::CONTEST_MANAGE) {
         Ok(())
     } else if contest.is_public {
-        Err(AppError::PermissionDenied)
+        Err(AppError::ContestNotRegistered)
     } else {
         Err(AppError::NotFound("Contest not found".into()))
     }

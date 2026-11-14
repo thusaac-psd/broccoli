@@ -1,6 +1,7 @@
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
+import { QueryErrorState } from '@broccoli/web-sdk/ui';
 import { Trophy } from 'lucide-react';
 import { useParams } from 'react-router';
 
@@ -17,7 +18,7 @@ export default function ContestOverviewPage() {
   const { user } = useAuth();
   const { contestId } = useParams();
   const id = Number(contestId);
-  const { contest } = useContestInfo(id);
+  const { contest, query: contestQuery } = useContestInfo(id);
   const canManageContest = !!user?.permissions.includes(CONTEST_MANAGE);
   const enrollState = useContestEnroll({
     contestId: id,
@@ -30,6 +31,24 @@ export default function ContestOverviewPage() {
       <div className="flex flex-col gap-4 p-6">
         <h1 className="text-2xl font-bold">{t('contests.notFound')}</h1>
       </div>
+    );
+  }
+
+  if (!contest && contestQuery.isError) {
+    return (
+      <PageLayout
+        pageId="contest-overview"
+        title={t('contests.title')}
+        icon={<Trophy className="h-6 w-6 text-primary" />}
+      >
+        <QueryErrorState
+          error={contestQuery.error}
+          retry={() => void contestQuery.refetch()}
+          retrying={contestQuery.isFetching}
+          notFound={t('contests.notFound')}
+          failure={t('contests.loadFailed')}
+        />
+      </PageLayout>
     );
   }
 

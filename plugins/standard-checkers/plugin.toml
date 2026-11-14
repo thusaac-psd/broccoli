@@ -2,6 +2,10 @@ name = "standard-checkers"
 version = "0.1.0"
 description = "Standard output comparison checkers for Broccoli judge. Depends on the standard-languages plugin for language resolution."
 
+[translations]
+en = "i18n/en.toml"
+zh-CN = "i18n/zh-CN.toml"
+
 [server]
 entry = "standard_checkers.wasm"
 permissions = ["logger", "plugin:register", "operations:dispatch", "config:read", "language:resolve"]

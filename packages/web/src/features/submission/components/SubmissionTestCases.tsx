@@ -4,7 +4,7 @@ import {
   type TestCaseResult,
   useTestCasePage,
 } from '@broccoli/web-sdk/submission';
-import { PaginatedList } from '@broccoli/web-sdk/ui';
+import { PaginatedList, QueryErrorState } from '@broccoli/web-sdk/ui';
 import { type ReactNode, useState } from 'react';
 
 import { TestCaseRow } from './TestCaseRow';
@@ -49,11 +49,15 @@ export function SubmissionTestCases({
         {t('result.loadingOutput')}
       </div>
     );
-  if (query.isError)
+  if (query.isError && !query.data)
     return (
-      <div className="py-3 text-sm text-destructive">
-        {t('result.caseLoadError')}
-      </div>
+      <QueryErrorState
+        className="py-3"
+        error={query.error}
+        retry={() => void query.refetch()}
+        retrying={query.isFetching}
+        failure={t('result.caseLoadError')}
+      />
     );
   return (
     <PaginatedList

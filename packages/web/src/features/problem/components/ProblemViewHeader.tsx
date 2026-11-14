@@ -1,5 +1,5 @@
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useIdentifierLabel, useTranslation } from '@broccoli/web-sdk/i18n';
 import { useProblemPresentation } from '@broccoli/web-sdk/problem';
 import { Slot } from '@broccoli/web-sdk/slot';
 import { formatKibibytes } from '@broccoli/web-sdk/utils';
@@ -28,6 +28,7 @@ export function ProblemViewHeader({
   contestId,
 }: ProblemViewHeaderProps) {
   const { t } = useTranslation();
+  const label = useIdentifierLabel();
   const { user } = useAuth();
   const { hideLabels } = useProblemPresentation(contestId, user?.id);
 
@@ -41,8 +42,8 @@ export function ProblemViewHeader({
           <ProblemHeader
             id={hideLabels ? undefined : headerId}
             title={problem?.title ?? t('problem.title')}
-            type={problem?.problem_type ?? '—'}
-            io="Standard Input / Output"
+            type={problem ? label('problemType', problem.problem_type) : '—'}
+            io={t('problem.standardIo')}
             timeLimit={timeLimit}
             memoryLimit={memoryLimit}
           />

@@ -1,11 +1,19 @@
 import {
   type ApiClient,
-  getErrorMessage,
   useApiClient,
+  useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import type { ContestSummary } from '@broccoli/web-sdk/contest';
-import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import {
+  isAlreadyDone,
+  queryState,
+  useIdempotentRequest,
+} from '@broccoli/web-sdk/hooks';
+import {
+  useFormat,
+  useIdentifierLabel,
+  useTranslation,
+} from '@broccoli/web-sdk/i18n';
 import {
   Badge,
   Button,
@@ -17,6 +25,8 @@ import {
   DialogTitle,
   Input,
   Label,
+  QueryErrorState,
+  QueryView,
   Tabs,
   TabsContent,
   TabsList,
@@ -24,7 +34,6 @@ import {
   Textarea,
   useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
-import { formatDateTime } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Download,
@@ -38,6 +47,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 
 import {
+  BulkUsersError,
+  bulkUsersProblem,
   normalizeBulkUsers,
   type ParsedBulkUser,
 } from '@/features/user-management/lib/bulk-users';
@@ -72,6 +83,8 @@ async function fetchParticipants(apiClient: ApiClient, contestId: number) {
   return data;
 }
 
+const NO_USERS: Awaited<ReturnType<typeof fetchAllUsers>> = [];
+
 async function fetchAllUsers(apiClient: ApiClient) {
   const { data, error } = await apiClient.GET('/users');
   if (error) throw error;
@@ -83,13 +96,12 @@ async function fetchAllUsers(apiClient: ApiClient) {
 function EnrolledTab({
   contest,
   participants,
-  isLoading,
 }: {
   contest: ContestSummary;
   participants: ParticipantItem[];
-  isLoading: boolean;
 }) {
-  const { t, locale } = useTranslation();
+  const { t } = useTranslation();
+  const format = useFormat();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
@@ -150,11 +162,7 @@ function EnrolledTab({
       </div>
 
       <div className="overflow-y-auto max-h-[420px] rounded-md border">
-        {isLoading ? (
-          <div className="py-8 text-center text-muted-foreground">
-            {t('admin.loading')}
-          </div>
-        ) : filtered.length === 0 ? (
+        {filtered.length === 0 ? (
           <div className="py-8 text-center text-sm text-muted-foreground">
             {participants.length === 0
               ? t('admin.participants.empty')
@@ -201,7 +209,7 @@ function EnrolledTab({
                     {p.is_deleted ? '—' : p.display_name}
                   </td>
                   <td className="px-3 py-2 text-muted-foreground">
-                    {formatDateTime(p.registered_at, locale)}
+                    {format.dateTime(p.registered_at)}
                   </td>
                   <td className="px-3 py-2 text-right">
                     <Button
@@ -234,16 +242,20 @@ function AddParticipantsTab({
   participants: ParticipantItem[];
 }) {
   const { t } = useTranslation();
+  const label = useIdentifierLabel();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const sendIdempotent = useIdempotentRequest();
   const [search, setSearch] = useState('');
   const [addingId, setAddingId] = useState<number | null>(null);
 
-  const { data: allUsers = [], isLoading: loadingUsers } = useQuery({
+  const usersQuery = useQuery({
     queryKey: ['all-users-for-participants'],
     queryFn: () => fetchAllUsers(apiClient),
   });
+  const usersState = queryState(usersQuery);
+  const allUsers = usersQuery.data ?? NO_USERS;
 
   const enrolledIds = useMemo(
     () => new Set(participants.map((p) => p.user_id)),
@@ -289,7 +301,7 @@ function AddParticipantsTab({
       return;
     }
     if (error && !isAlreadyDone(error)) {
-      toast.error(getErrorMessage(error, t('toast.participant.addError')));
+      toast.error(errorMessage(error, t('toast.participant.addError')));
     } else {
       toast.success(t('toast.participant.added'));
       queryClient.invalidateQueries({
@@ -322,7 +334,14 @@ function AddParticipantsTab({
       </div>
 
       <div className="overflow-y-auto max-h-[420px] rounded-md border">
-        {loadingUsers ? (
+        {usersState.status === 'error' ? (
+          <QueryErrorState
+            error={usersState.error}
+            retry={usersState.retry}
+            retrying={usersState.retrying}
+            failure={t('admin.participants.usersLoadFailed')}
+          />
+        ) : usersState.status === 'loading' ? (
           <div className="py-8 text-center text-muted-foreground">
             {t('admin.loading')}
           </div>
@@ -361,7 +380,7 @@ function AddParticipantsTab({
                   <td className="px-3 py-2 font-medium">{u.username}</td>
                   <td className="px-3 py-2">{u.display_name}</td>
                   <td className="px-3 py-2 text-muted-foreground">
-                    {u.roles.join(', ')}
+                    {u.roles.map((r) => label('role', r)).join(', ')}
                   </td>
                   <td className="px-3 py-2 text-right">
                     <Button
@@ -397,6 +416,7 @@ function PreviewUserTable({
   users: UserPreviewItem[];
 }) {
   const { t } = useTranslation();
+  const label = useIdentifierLabel();
   if (users.length === 0) return null;
   return (
     <div className="rounded-md border overflow-hidden">
@@ -429,7 +449,9 @@ function PreviewUserTable({
               <td className="px-3 py-2">{user.id}</td>
               <td className="px-3 py-2">{user.username}</td>
               <td className="px-3 py-2">{user.display_name}</td>
-              <td className="px-3 py-2">{user.roles.join(', ')}</td>
+              <td className="px-3 py-2">
+                {user.roles.map((r) => label('role', r)).join(', ')}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -446,6 +468,7 @@ function BulkImportTab({
   participants: ParticipantItem[];
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const sendIdempotent = useIdempotentRequest();
@@ -492,7 +515,7 @@ function BulkImportTab({
       const { data: users, error: usersError } = await apiClient.GET('/users');
 
       if (usersError || !users) {
-        throw new Error('admin.bulkParticipantsError');
+        throw new BulkUsersError('admin.bulkParticipantsError');
       }
 
       const allUsersMap = new Map<string, UserPreviewItem>();
@@ -551,36 +574,7 @@ function BulkImportTab({
         setErrorMsg(t('admin.bulkParticipantsExistingWithPassword'));
       }
     } catch (error) {
-      if (error instanceof Error) {
-        switch (error.message) {
-          case 'admin.bulkParticipantsError':
-            setErrorMsg(t('admin.bulkParticipantsError'));
-            break;
-          case 'admin.bulkParticipantsInvalidJson':
-            setErrorMsg(t('admin.bulkParticipantsInvalidJson'));
-            break;
-          case 'admin.bulkParticipantsInvalidUsername':
-            setErrorMsg(t('admin.bulkParticipantsInvalidUsername'));
-            break;
-          case 'admin.bulkParticipantsDuplicate':
-            setErrorMsg(t('admin.bulkParticipantsDuplicate'));
-            break;
-          case 'admin.bulkParticipantsEmpty':
-            setErrorMsg(t('admin.bulkParticipantsEmpty'));
-            break;
-          case 'admin.bulkParticipantsInvalidPassword':
-            setErrorMsg(t('admin.bulkParticipantsInvalidPassword'));
-            break;
-          case 'admin.bulkParticipantsInvalidDisplayName':
-            setErrorMsg(t('admin.bulkParticipantsInvalidDisplayName'));
-            break;
-          default:
-            setErrorMsg(t('admin.bulkParticipantsInvalidJson'));
-            break;
-        }
-      } else {
-        setErrorMsg(t('admin.bulkParticipantsInvalidJson'));
-      }
+      setErrorMsg(t(bulkUsersProblem(error)));
       setPreview(null);
     } finally {
       setLoadingPreview(false);
@@ -647,7 +641,7 @@ function BulkImportTab({
       setResult('already-done');
       toast.success(t('toast.participant.bulkAlreadyDone'));
     } else if (error || !data) {
-      const msg = getErrorMessage(error, t('admin.bulkParticipantsError'));
+      const msg = errorMessage(error, t('admin.bulkParticipantsError'));
       setErrorMsg(msg);
       toast.error(msg);
       return;
@@ -949,7 +943,7 @@ export function ManageParticipantsDialog({
   const apiClient = useApiClient();
   const [activeTab, setActiveTab] = useState('enrolled');
 
-  const { data: participants = [], isLoading } = useQuery({
+  const participantsQuery = useQuery({
     queryKey: ['contest-participants', contest.id],
     queryFn: () => fetchParticipants(apiClient, contest.id),
     enabled: open,
@@ -971,45 +965,51 @@ export function ManageParticipantsDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <Tabs
-          value={activeTab}
-          onValueChange={setActiveTab}
-          className="flex-1 min-h-0 flex flex-col"
+        <QueryView
+          query={participantsQuery}
+          failure={t('admin.participants.loadFailed')}
         >
-          <TabsList className="grid w-full grid-cols-3">
-            <TabsTrigger value="enrolled" className="text-xs sm:text-sm">
-              <Users className="h-3.5 w-3.5 mr-1.5" />
-              {t('admin.participants.tabEnrolled')}
-            </TabsTrigger>
-            <TabsTrigger value="add" className="text-xs sm:text-sm">
-              <UserPlus className="h-3.5 w-3.5 mr-1.5" />
-              {t('admin.participants.tabAdd')}
-            </TabsTrigger>
-            <TabsTrigger value="bulk" className="text-xs sm:text-sm">
-              <Upload className="h-3.5 w-3.5 mr-1.5" />
-              {t('admin.participants.tabBulk')}
-            </TabsTrigger>
-          </TabsList>
+          {(participants) => (
+            <Tabs
+              value={activeTab}
+              onValueChange={setActiveTab}
+              className="flex-1 min-h-0 flex flex-col"
+            >
+              <TabsList className="grid w-full grid-cols-3">
+                <TabsTrigger value="enrolled" className="text-xs sm:text-sm">
+                  <Users className="h-3.5 w-3.5 mr-1.5" />
+                  {t('admin.participants.tabEnrolled')}
+                </TabsTrigger>
+                <TabsTrigger value="add" className="text-xs sm:text-sm">
+                  <UserPlus className="h-3.5 w-3.5 mr-1.5" />
+                  {t('admin.participants.tabAdd')}
+                </TabsTrigger>
+                <TabsTrigger value="bulk" className="text-xs sm:text-sm">
+                  <Upload className="h-3.5 w-3.5 mr-1.5" />
+                  {t('admin.participants.tabBulk')}
+                </TabsTrigger>
+              </TabsList>
 
-          <TabsContent value="enrolled" className="flex-1 min-h-0 mt-4">
-            <EnrolledTab
-              contest={contest}
-              participants={participants}
-              isLoading={isLoading}
-            />
-          </TabsContent>
+              <TabsContent value="enrolled" className="flex-1 min-h-0 mt-4">
+                <EnrolledTab contest={contest} participants={participants} />
+              </TabsContent>
 
-          <TabsContent value="add" className="flex-1 min-h-0 mt-4">
-            <AddParticipantsTab contest={contest} participants={participants} />
-          </TabsContent>
+              <TabsContent value="add" className="flex-1 min-h-0 mt-4">
+                <AddParticipantsTab
+                  contest={contest}
+                  participants={participants}
+                />
+              </TabsContent>
 
-          <TabsContent
-            value="bulk"
-            className="flex-1 min-h-0 mt-4 overflow-y-auto px-0.5"
-          >
-            <BulkImportTab contest={contest} participants={participants} />
-          </TabsContent>
-        </Tabs>
+              <TabsContent
+                value="bulk"
+                className="flex-1 min-h-0 mt-4 overflow-y-auto px-0.5"
+              >
+                <BulkImportTab contest={contest} participants={participants} />
+              </TabsContent>
+            </Tabs>
+          )}
+        </QueryView>
       </DialogContent>
     </Dialog>
   );

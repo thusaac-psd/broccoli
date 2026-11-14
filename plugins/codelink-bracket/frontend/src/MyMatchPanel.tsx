@@ -1,4 +1,4 @@
-import { getErrorMessage } from '@broccoli/web-sdk/api';
+import { useErrorMessage } from '@broccoli/web-sdk/api';
 import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
@@ -174,6 +174,7 @@ function CurrentTask({
   side: Side;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const api = useBracketApi();
   const queryClient = useQueryClient();
   const { byId: problems } = useContestProblems(contestId);
@@ -227,7 +228,7 @@ function CurrentTask({
                 }
               } catch (err) {
                 setError(
-                  getErrorMessage(err, t('codelink-bracket.error.submitOrder')),
+                  errorMessage(err, t('codelink-bracket.error.submitOrder')),
                 );
               } finally {
                 await queryClient.invalidateQueries({

@@ -1,4 +1,8 @@
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import {
+  pluginKeys,
+  usePluginText,
+  useTranslation,
+} from '@broccoli/web-sdk/i18n';
 import type { PluginDetail } from '@broccoli/web-sdk/plugin';
 import { Slot } from '@broccoli/web-sdk/slot';
 import { Button, SheetFooter } from '@broccoli/web-sdk/ui';
@@ -80,6 +84,7 @@ function ConfigFormFields({
 }: ConfigFormProps & { initialStored: Record<string, unknown> }) {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
+  const pluginText = usePluginText();
   const jsonSchema = schema.json_schema as JsonSchema;
   const schemaDefaults = useMemo(
     () => extractDefaults(jsonSchema),
@@ -237,7 +242,12 @@ function ConfigFormFields({
     <form onSubmit={handleSubmit} className="space-y-5">
       {schema.description && (
         <p className="text-sm text-muted-foreground leading-relaxed">
-          {schema.description}
+          {pluginId
+            ? pluginText(
+                pluginKeys.configDescription(pluginId, schema.namespace),
+                schema.description,
+              )
+            : schema.description}
         </p>
       )}
 

@@ -1,6 +1,7 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { QueryLoading } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import { Trophy } from 'lucide-react';
 import { useEffect } from 'react';
@@ -13,7 +14,7 @@ import { useContest } from '@/features/contest/contexts/contest-context';
 
 export default function Index() {
   const { t } = useTranslation();
-  const { user } = useAuth();
+  const { user, isLoading: sessionLoading } = useAuth();
   const apiClient = useApiClient();
   const { contestId, setContest } = useContest();
   const navigate = useNavigate();
@@ -62,6 +63,11 @@ export default function Index() {
   // FIX: check permissions instead of roles
   if (user && user.roles.includes('admin')) {
     return <></>;
+  }
+
+  // Nobody is known until the session is restored.
+  if (sessionLoading) {
+    return <QueryLoading className="p-6" />;
   }
 
   // Not logged in

@@ -1,8 +1,8 @@
 import '@/lib/monaco-setup';
 
-import { useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useIdentifierLabel, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Slot } from '@broccoli/web-sdk/slot';
 import { useSubmitGating } from '@broccoli/web-sdk/submission';
 import { useTheme } from '@broccoli/web-sdk/theme';
@@ -160,6 +160,8 @@ function CodeEditorContent({
   supportedLanguages,
 }: CodeEditorProps & { supportedLanguages: Language[] }) {
   const { t } = useTranslation();
+  const label = useIdentifierLabel();
+  const errorMessage = useErrorMessage();
   const { user, isLoading: authLoading } = useAuth();
   // Scope the localStorage draft keys by the signed-in user so a shared contest
   // machine never surfaces one contestant's in-progress solution to the next.
@@ -574,7 +576,7 @@ function CodeEditorContent({
                 key={ct}
                 onClick={() => onContestTypeChange(ct)}
               >
-                {ct}
+                {label('contestType', ct)}
               </DropdownMenuItem>
             ))}
           </DropdownMenuContent>
@@ -857,11 +859,16 @@ function CodeEditorContent({
                 {t('editor.running')}
               </div>
             )}
-          {latestRun && latestRun.status === 'error' && latestRun.error && (
-            <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-              {latestRun.error.message}
-            </div>
-          )}
+          {latestRun &&
+            (latestRun.status === 'rejected' ||
+              latestRun.status === 'error') && (
+              <div
+                role="alert"
+                className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+              >
+                {errorMessage(latestRun.error, t('toast.submission.runError'))}
+              </div>
+            )}
           {runResult && latestRun?.status === 'done' && activeRunTc && (
             <div className="rounded-md border bg-muted/30 overflow-hidden">
               <div className="flex items-center gap-3 px-3 py-1.5 border-b bg-muted/50 text-xs">

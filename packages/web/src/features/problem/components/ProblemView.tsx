@@ -1,4 +1,4 @@
-import { useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { useRegistries } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -9,11 +9,14 @@ import {
 } from '@broccoli/web-sdk/problem';
 import type { SubmissionSummary } from '@broccoli/web-sdk/submission';
 import { SubmitGatingProvider } from '@broccoli/web-sdk/submission';
+import { QueryErrorState } from '@broccoli/web-sdk/ui';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router';
+import { toast } from 'sonner';
 
 import type { EditorFile } from '@/components/CodeEditor';
+import { ContestRegisterGate } from '@/features/contest/components/ContestRegisterGate';
 import { useContestProblems } from '@/features/contest/hooks/use-contest-problems';
 import { useRestoreSubmissionScroll } from '@/features/submission/hooks/use-submission-navigation';
 import { useSubmissions } from '@/features/submission/hooks/use-submissions';
@@ -28,6 +31,8 @@ import { ProblemViewHeader } from './ProblemViewHeader';
 const INLINE_SAMPLE_MAX_SIZE = 1024;
 const RECENT_SUBMISSION_OVERVIEW_COUNT = 3;
 type SampleContentMap = Record<number, { input?: string; output?: string }>;
+
+const NO_SAMPLE_CONTENTS: SampleContentMap = {};
 type CopiedNotice = { text: string; top: number; left: number } | null;
 type ProblemRouteTab = ProblemViewTab | 'edit';
 
@@ -41,6 +46,7 @@ export default function ProblemView({
   contestId,
 }: ProblemViewProps) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const { user } = useAuth();
   const authReady = useAuthReady();
   const presentation = useProblemPresentation(contestId, user?.id);
@@ -90,16 +96,13 @@ export default function ProblemView({
     setTargetWorkers([]);
   }, [problemId]);
 
-  const {
-    data: problem,
-    isLoading,
-    error,
-  } = useQuery({
+  const problemQuery = useQuery({
     queryKey: ['problem', problemId, contestId ?? null, viewerKey],
     enabled: authReady && allowed && Number.isFinite(problemId),
     queryFn: ({ signal }) =>
       fetchProblem(apiClient, problemId, contestId, signal),
   });
+  const { data: problem, isLoading, error } = problemQuery;
 
   useEffect(() => {
     if (allowed || !user) return;
@@ -113,9 +116,10 @@ export default function ProblemView({
   }, [allowed, problemId, queryClient, user]);
 
   useRestoreSubmissionScroll(!isLoading);
-  const { data: contestProblems = [] } = useContestProblems(contestId);
+  // Only for the problem's label; the page does not depend on it.
+  const contestProblems = useContestProblems(contestId).data ?? [];
 
-  const { data: submissionHistory = [] } = useQuery<SubmissionSummary[]>({
+  const historyQuery = useQuery<SubmissionSummary[]>({
     queryKey: ['problem-recent-submissions', contestId, problemId, user?.id],
     enabled: Number.isFinite(problemId) && !!user,
     queryFn: async () => {
@@ -137,7 +141,7 @@ export default function ProblemView({
             },
           },
         );
-        if (error || !data) return [];
+        if (error) throw error;
         return data.data;
       }
 
@@ -152,60 +156,64 @@ export default function ProblemView({
           },
         },
       });
-      if (error || !data) return [];
+      if (error) throw error;
       return data.data;
     },
   });
+  const submissionHistory = historyQuery.data ?? [];
+  const submissionHistoryError =
+    historyQuery.isError && !historyQuery.data
+      ? { error: historyQuery.error, retry: () => void historyQuery.refetch() }
+      : null;
 
-  const { data: sampleContents = {} as SampleContentMap } =
-    useQuery<SampleContentMap>({
-      queryKey: [
-        'problem-sample-contents',
-        problemId,
-        contestId ?? null,
-        viewerKey,
-        problem?.samples.map((sample) => [
-          sample.id,
-          sample.input_size,
-          sample.output_size,
-        ]),
-      ],
-      enabled: allowed && !error && Number.isFinite(problemId) && !!problem,
-      queryFn: async ({ signal }) => {
-        if (!problem) return {} as SampleContentMap;
+  const samplesQuery = useQuery<SampleContentMap>({
+    queryKey: [
+      'problem-sample-contents',
+      problemId,
+      contestId ?? null,
+      viewerKey,
+      problem?.samples.map((sample) => [
+        sample.id,
+        sample.input_size,
+        sample.output_size,
+      ]),
+    ],
+    enabled: allowed && !error && Number.isFinite(problemId) && !!problem,
+    queryFn: async ({ signal }) => {
+      if (!problem) return {} as SampleContentMap;
 
-        const entries = await Promise.all(
-          problem.samples.map(async (sample) => {
-            const shouldLoadInput = sample.input_size <= INLINE_SAMPLE_MAX_SIZE;
-            const shouldLoadOutput =
-              sample.output_size <= INLINE_SAMPLE_MAX_SIZE;
+      const entries = await Promise.all(
+        problem.samples.map(async (sample) => {
+          const shouldLoadInput = sample.input_size <= INLINE_SAMPLE_MAX_SIZE;
+          const shouldLoadOutput = sample.output_size <= INLINE_SAMPLE_MAX_SIZE;
 
-            if (!shouldLoadInput && !shouldLoadOutput) {
-              return [sample.id, {}] as const;
-            }
+          if (!shouldLoadInput && !shouldLoadOutput) {
+            return [sample.id, {}] as const;
+          }
 
-            const data = await fetchSampleCase(
-              apiClient,
-              problemId,
-              contestId,
-              sample.id,
-              signal,
-            );
-            if (!data) return [sample.id, {}] as const;
+          const data = await fetchSampleCase(
+            apiClient,
+            problemId,
+            contestId,
+            sample.id,
+            signal,
+          );
+          return [
+            sample.id,
+            {
+              input: shouldLoadInput ? data.input : undefined,
+              output: shouldLoadOutput ? data.expected_output : undefined,
+            },
+          ] as const;
+        }),
+      );
 
-            return [
-              sample.id,
-              {
-                input: shouldLoadInput ? data.input : undefined,
-                output: shouldLoadOutput ? data.expected_output : undefined,
-              },
-            ] as const;
-          }),
-        );
-
-        return Object.fromEntries(entries) as SampleContentMap;
-      },
-    });
+      return Object.fromEntries(entries) as SampleContentMap;
+    },
+  });
+  // A sample without inline content offers a download instead, so samples
+  // still work when their content could not be loaded here.
+  const sampleContents = samplesQuery.data ?? NO_SAMPLE_CONTENTS;
 
   const submissions = useSubmissions({ problemId, contestId });
 
@@ -216,8 +224,13 @@ export default function ProblemView({
 
   const onDownloadSample = useCallback(
     async (tcId: number, sampleIndex: number, type: 'input' | 'output') => {
-      const data = await getSampleCaseData(tcId);
-      if (!data) return;
+      let data;
+      try {
+        data = await getSampleCaseData(tcId);
+      } catch (err) {
+        toast.error(errorMessage(err, t('problem.sampleLoadFailed')));
+        return;
+      }
 
       const content = type === 'input' ? data.input : data.expected_output;
       const ext = type === 'input' ? 'in' : 'out';
@@ -231,7 +244,7 @@ export default function ProblemView({
       link.click();
       URL.revokeObjectURL(url);
     },
-    [getSampleCaseData],
+    [errorMessage, getSampleCaseData, t],
   );
 
   const onCopySample = useCallback(
@@ -244,8 +257,13 @@ export default function ProblemView({
     ) => {
       let content = inlineContent;
       if (content === undefined) {
-        const data = await getSampleCaseData(tcId);
-        if (!data) return;
+        let data;
+        try {
+          data = await getSampleCaseData(tcId);
+        } catch (err) {
+          toast.error(errorMessage(err, t('problem.sampleLoadFailed')));
+          return;
+        }
         content = type === 'input' ? data.input : data.expected_output;
       }
 
@@ -277,7 +295,7 @@ export default function ProblemView({
         );
       }, 1500);
     },
-    [getSampleCaseData, t],
+    [errorMessage, getSampleCaseData, t],
   );
 
   const effectiveContestType =
@@ -345,11 +363,24 @@ export default function ProblemView({
     );
   }
 
-  if (!allowed || error) {
+  if (!allowed) {
     return (
       <div className="p-6 text-sm text-muted-foreground">
         {t('problem.notAvailableNow')}
       </div>
+    );
+  }
+
+  if (error && !problem) {
+    return (
+      <QueryErrorState
+        className="p-6"
+        error={error}
+        retry={() => void problemQuery.refetch()}
+        retrying={problemQuery.isFetching}
+        notFound={t('problem.notFound')}
+        failure={t('problem.loadFailed')}
+      />
     );
   }
 
@@ -411,32 +442,37 @@ export default function ProblemView({
             </div>
           }
           codingContent={
-            <ProblemCodingTab
-              isCodeFullscreen={isCodeFullscreen}
-              onToggleFullscreen={() => setIsCodeFullscreen(!isCodeFullscreen)}
-              onSubmit={handleSubmit}
-              onRun={handleRun}
-              latestRun={submissions.latestRun}
-              storageKey={storageKey}
-              contestType={effectiveContestType}
-              onContestTypeChange={!contestId ? setContestType : undefined}
-              contestTypes={
-                !contestId ? (registries?.contest_types ?? []) : undefined
-              }
-              submissionFormat={problem?.submission_format}
-              latestSubmission={latestSubmission}
-              submissionHistory={submissionHistory}
-              submissions={submissions.submissionEntries}
-              isSubmitting={isSubmitting}
-              overviewVisibleCount={RECENT_SUBMISSION_OVERVIEW_COUNT}
-              submissionDetailLinkBuilder={submissionDetailLinkBuilder}
-              contestId={contestId}
-              problemId={problemId}
-              targetWorkers={canPinWorker ? targetWorkers : null}
-              onTargetWorkersChange={
-                canPinWorker ? setTargetWorkers : undefined
-              }
-            />
+            <ContestRegisterGate contestId={contestId}>
+              <ProblemCodingTab
+                isCodeFullscreen={isCodeFullscreen}
+                onToggleFullscreen={() =>
+                  setIsCodeFullscreen(!isCodeFullscreen)
+                }
+                onSubmit={handleSubmit}
+                onRun={handleRun}
+                latestRun={submissions.latestRun}
+                storageKey={storageKey}
+                contestType={effectiveContestType}
+                onContestTypeChange={!contestId ? setContestType : undefined}
+                contestTypes={
+                  !contestId ? (registries?.contest_types ?? []) : undefined
+                }
+                submissionFormat={problem?.submission_format}
+                latestSubmission={latestSubmission}
+                submissionHistory={submissionHistory}
+                submissionHistoryError={submissionHistoryError}
+                submissions={submissions.submissionEntries}
+                isSubmitting={isSubmitting}
+                overviewVisibleCount={RECENT_SUBMISSION_OVERVIEW_COUNT}
+                submissionDetailLinkBuilder={submissionDetailLinkBuilder}
+                contestId={contestId}
+                problemId={problemId}
+                targetWorkers={canPinWorker ? targetWorkers : null}
+                onTargetWorkersChange={
+                  canPinWorker ? setTargetWorkers : undefined
+                }
+              />
+            </ContestRegisterGate>
           }
         />
       </div>

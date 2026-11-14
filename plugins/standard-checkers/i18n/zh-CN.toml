@@ -1,0 +1,7 @@
+'identifier.checker.exact' = '完全匹配'
+'identifier.checker.lines' = '逐行比较'
+'identifier.checker.tokens' = '逐词比较'
+'identifier.checker.tokens-case-insensitive' = '逐词比较（忽略大小写）'
+'identifier.checker.tokens-float' = '逐词比较（浮点误差）'
+'identifier.checker.testlib' = 'Testlib 校验器'
+'identifier.checker.none' = '不校验'

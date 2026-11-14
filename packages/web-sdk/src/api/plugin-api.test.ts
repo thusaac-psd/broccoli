@@ -8,7 +8,8 @@ import {
   sendIdempotent,
   settleIdempotent,
 } from '../hooks/idempotency.ts';
-import { createPluginApi, PluginApiError } from './plugin-api.ts';
+import { RequestError } from './errors.ts';
+import { createPluginApi } from './plugin-api.ts';
 
 interface Sent {
   url: string;
@@ -86,7 +87,7 @@ test('a failed request rejects with its status, code and message', async () => {
     json(409, { code: 'TOKEN_EXHAUSTED', message: 'No tokens left' }),
   ]);
   await assert.rejects(api.post('/use'), (error: unknown) => {
-    assert.ok(error instanceof PluginApiError);
+    assert.ok(error instanceof RequestError);
     assert.equal(error.status, 409);
     assert.equal(error.code, 'TOKEN_EXHAUSTED');
     assert.equal(error.message, 'No tokens left');
@@ -107,6 +108,24 @@ test('a plugin error carries the host error shape', async () => {
     message: 'bad order',
     status: 400,
     code: 'VALIDATION_ERROR',
+  });
+});
+
+test('a request that gets no answer is a network error', async () => {
+  const api = createPluginApi({
+    fetch: () => Promise.reject(new TypeError('Failed to fetch')),
+    baseUrl: 'https://oj.example/api/v1',
+    pluginId: 'demo',
+    sendSettled: async (_operation, request) => ({
+      settled: true,
+      data: await request('key'),
+    }),
+  });
+  await assert.rejects(api.get('/x'), (error: unknown) => {
+    assert.ok(error instanceof RequestError);
+    assert.equal(error.status, null);
+    assert.equal(error.code, 'NETWORK_ERROR');
+    return true;
   });
 });
 

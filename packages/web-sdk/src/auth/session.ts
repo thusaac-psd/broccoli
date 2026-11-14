@@ -7,6 +7,9 @@ import type { User } from '@/auth/types';
 //   server whether the refresh cookie still holds. `retryInMs` is set while
 //   the server is unreachable.
 // - `signedOut`: no session. Only a login leaves it; a refresh never does.
+//   `expired` is set when the server ended a session this tab had (the
+//   refresh cookie was refused), as opposed to a sign-out or nobody having
+//   signed in: the user is asked to sign in again, and comes back.
 // - `active`: signed in. `refreshInMs` is when the token is renewed next: a
 //   full interval after a renewal, sooner (with backoff) while the server is
 //   unreachable.
@@ -27,7 +30,7 @@ export const SESSION_REFRESH_INTERVAL_MS = 4.5 * 60 * 1000;
 
 export type SessionState =
   | { status: 'bootstrapping'; epoch: number; retryInMs: number | null }
-  | { status: 'signedOut'; epoch: number }
+  | { status: 'signedOut'; epoch: number; expired: boolean }
   | {
       status: 'active';
       epoch: number;
@@ -69,14 +72,14 @@ export function transition(
   switch (event.type) {
     case 'no-session':
       return state.status === 'bootstrapping'
-        ? { status: 'signedOut', epoch: state.epoch }
+        ? { status: 'signedOut', epoch: state.epoch, expired: false }
         : state;
     case 'signed-in':
       return activate(state.epoch + 1, event.session);
     case 'signed-out':
       return state.status === 'signedOut'
         ? state
-        : { status: 'signedOut', epoch: state.epoch + 1 };
+        : { status: 'signedOut', epoch: state.epoch + 1, expired: false };
     case 'refresh-settled': {
       if (event.epoch !== state.epoch || state.status === 'signedOut') {
         return state;
@@ -91,7 +94,7 @@ export function transition(
             outcome.session,
           );
         case 'rejected':
-          return { status: 'signedOut', epoch: state.epoch + 1 };
+          return { status: 'signedOut', epoch: state.epoch + 1, expired: true };
         case 'unavailable':
           return state.status === 'bootstrapping'
             ? { ...state, retryInMs: outcome.retryInMs }

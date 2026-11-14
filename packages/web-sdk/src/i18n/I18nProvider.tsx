@@ -9,30 +9,10 @@ import {
 
 import { useApiClient } from '@/api';
 import { I18nContext } from '@/i18n/i18n-context';
+import { formatMessage, type MessageParams } from '@/i18n/message';
 import type { TranslationMap } from '@/i18n/types';
 
-const PLACEHOLDER_PATTERN =
-  /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}|\{\s*([a-zA-Z0-9_]+)\s*\}/g;
-
-function interpolateTranslation(
-  value: string,
-  params?: Record<string, string | number>,
-) {
-  if (!params) {
-    return value;
-  }
-
-  return value.replaceAll(
-    PLACEHOLDER_PATTERN,
-    (match, doubleKey, singleKey) => {
-      const key = doubleKey || singleKey;
-      if (!Object.hasOwn(params, key)) {
-        return match;
-      }
-      return String(params[key]);
-    },
-  );
-}
+const EMPTY_TRANSLATIONS: TranslationMap = {};
 
 /** localStorage key where the active locale is persisted. */
 export const LOCALE_STORAGE_KEY = 'broccoli-locale';
@@ -40,15 +20,20 @@ export const LOCALE_STORAGE_KEY = 'broccoli-locale';
 interface I18nProviderProps {
   children: ReactNode;
   localeKey?: string;
+  /** The locale every other one falls back to. */
   defaultLocale?: string;
-  coreI18n?: Record<string, TranslationMap>;
+  /**
+   * Catalogs the app ships with, by locale: what the UI speaks before (and
+   * without) the server. The translations the server serves override them.
+   */
+  embeddedCatalogs?: Record<string, TranslationMap>;
 }
 
 export function I18nProvider({
   children,
   localeKey = LOCALE_STORAGE_KEY,
   defaultLocale = 'en',
-  coreI18n = {},
+  embeddedCatalogs = {},
 }: I18nProviderProps) {
   const apiClient = useApiClient();
 
@@ -80,16 +65,19 @@ export function I18nProvider({
     [localeKey],
   );
 
-  const { data: availableLocales = [] } = useQuery({
+  // The bundled locales are offered before (and without) the server's list.
+  const { data: availableLocales } = useQuery({
     queryKey: ['i18n', 'locales'],
     queryFn: async () => {
       const { data: pluginLocales = [] } = await apiClient.GET('/i18n/locales');
-      const coreLocales = Object.keys(coreI18n);
+      const coreLocales = Object.keys(embeddedCatalogs);
       return Array.from(new Set([...coreLocales, ...pluginLocales]));
     },
   });
 
-  const { data: pluginTranslations = {}, isLoading } = useQuery({
+  // Plugin translations add to the bundled catalogs; until they arrive, or if
+  // they cannot be fetched, the bundled text is shown, which is correct.
+  const pluginQuery = useQuery({
     queryKey: ['i18n', 'translations', locale],
     queryFn: async () => {
       const { data } = await apiClient.GET('/i18n/translations/{locale}', {
@@ -100,12 +88,14 @@ export function I18nProvider({
     // Keep previous translations while loading new ones to prevent UI flickering
     placeholderData: (prev) => prev,
   });
+  const pluginTranslations = pluginQuery.data ?? EMPTY_TRANSLATIONS;
+  const isLoading = pluginQuery.isLoading;
 
   // Default-locale plugin translations, used as a fallback so plugin keys
   // missing from the active locale render the default-locale string instead
   // of the raw key. Shares the query key shape above, so the cache is reused
   // when the user switches back to the default locale.
-  const { data: fallbackPluginTranslations = {} } = useQuery({
+  const fallbackQuery = useQuery({
     queryKey: ['i18n', 'translations', defaultLocale],
     queryFn: async () => {
       const { data } = await apiClient.GET('/i18n/translations/{locale}', {
@@ -116,35 +106,52 @@ export function I18nProvider({
     enabled: locale !== defaultLocale,
     placeholderData: (prev) => prev,
   });
+  const fallbackPluginTranslations = fallbackQuery.data ?? EMPTY_TRANSLATIONS;
 
-  const t = useCallback(
-    (key: string, params?: Record<string, string | number>) => {
+  const lookup = useCallback(
+    (key: string, params?: MessageParams) => {
       const value =
         pluginTranslations[key] ??
-        coreI18n[locale]?.[key] ??
+        embeddedCatalogs[locale]?.[key] ??
         fallbackPluginTranslations[key] ??
-        coreI18n[defaultLocale]?.[key] ??
-        key;
-      return interpolateTranslation(value, params);
+        embeddedCatalogs[defaultLocale]?.[key];
+      return value === undefined
+        ? undefined
+        : formatMessage(value, locale, params);
     },
     [
       locale,
       defaultLocale,
       pluginTranslations,
       fallbackPluginTranslations,
-      coreI18n,
+      embeddedCatalogs,
     ],
+  );
+
+  // A key no catalog has renders as itself, so a gap is visible.
+  const t = useCallback(
+    (key: string, params?: MessageParams) => lookup(key, params) ?? key,
+    [lookup],
   );
 
   const value = useMemo(
     () => ({
       locale,
       setLocale,
-      availableLocales,
+      availableLocales: availableLocales ?? Object.keys(embeddedCatalogs),
       t,
+      lookup,
       isLoading,
     }),
-    [locale, setLocale, availableLocales, t, isLoading],
+    [
+      locale,
+      setLocale,
+      availableLocales,
+      embeddedCatalogs,
+      t,
+      lookup,
+      isLoading,
+    ],
   );
 
   return <I18nContext value={value}>{children}</I18nContext>;

@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useAsyncDialog } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -33,6 +33,7 @@ export function EditUserDialog({
   onOpenChange,
 }: EditUserDialogProps) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const { user: signedInUser, refresh } = useAuth();
@@ -85,7 +86,7 @@ export function EditUserDialog({
         body,
       });
       if (error) {
-        toast.error(getErrorMessage(error, t('users.users.updateUserError')));
+        toast.error(errorMessage(error, t('users.users.updateUserError')));
         throw error;
       }
       toast.success(t('users.users.updateUserSuccess'));

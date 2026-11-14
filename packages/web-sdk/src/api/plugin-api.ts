@@ -4,29 +4,7 @@
 
 import type { IdempotentResult } from '@/hooks/idempotency';
 
-/**
- * A failed plugin API request: its HTTP status, the error body's `code`, and
- * as `message` the body's message for the user, or an empty string when the
- * body has none. Callers show `getErrorMessage(error, <translated fallback>)`.
- */
-export class PluginApiError extends Error {
-  readonly status: number;
-  readonly code?: string;
-  readonly details?: unknown;
-
-  constructor(
-    message: string,
-    status: number,
-    code?: string,
-    details?: unknown,
-  ) {
-    super(message);
-    this.name = 'PluginApiError';
-    this.status = status;
-    this.code = code;
-    this.details = details;
-  }
-}
+import { RequestError } from './errors.ts';
 
 /** What a plugin request may send: JSON-serializable data, or a raw body. */
 export type PluginRequestBody = FormData | Blob | object | undefined;
@@ -40,7 +18,7 @@ export interface PluginApi {
    * where the operation stands: settled (with the reply, or no data when an
    * earlier send already succeeded), or not settled, which the caller must
    * handle by refetching and telling the user to check before sending again.
-   * Rejects with a `PluginApiError` when the request failed.
+   * Rejects with a `RequestError` when the request failed.
    */
   post<T>(path: string, body?: PluginRequestBody): Promise<IdempotentResult<T>>;
   /** The raw authenticated response, for streams and other non-JSON replies. */
@@ -68,25 +46,15 @@ async function readBody(response: Response): Promise<unknown> {
   } catch {
     const type = response.headers.get('content-type') ?? '';
     if (type.includes('json')) {
-      throw new PluginApiError('', response.status, 'INVALID_RESPONSE');
+      throw new RequestError(response.status, 'INVALID_RESPONSE');
     }
     return text;
   }
 }
 
-async function toError(response: Response): Promise<PluginApiError> {
-  const body = (await readBody(response).catch(() => undefined)) as
-    | { code?: unknown; message?: unknown; details?: unknown }
-    | string
-    | undefined;
-  const fields = typeof body === 'object' ? body : undefined;
-  const message = typeof fields?.message === 'string' ? fields.message : '';
-  return new PluginApiError(
-    message,
-    response.status,
-    typeof fields?.code === 'string' ? fields.code : undefined,
-    fields?.details,
-  );
+async function toError(response: Response): Promise<RequestError> {
+  const body = await readBody(response).catch(() => undefined);
+  return RequestError.fromBody(response.status, body);
 }
 
 function encode(body: PluginRequestBody): {
@@ -123,7 +91,12 @@ export function createPluginApi({
   const root = `${baseUrl.replace(/\/+$/, '')}/p/${encodeURIComponent(pluginId)}`;
 
   const send = (path: string, init?: RequestInit) =>
-    fetch(`${root}${path}`, init);
+    fetch(`${root}${path}`, init).catch((cause: unknown) => {
+      if (cause instanceof DOMException && cause.name === 'AbortError') {
+        throw cause;
+      }
+      throw RequestError.network(cause);
+    });
 
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await send(path, init);

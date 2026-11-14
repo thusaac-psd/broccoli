@@ -1,11 +1,14 @@
-import { useApiClient } from '@broccoli/web-sdk/api';
+import {
+  TranslatedError,
+  useApiClient,
+  useErrorMessage,
+} from '@broccoli/web-sdk/api';
 import { useSessionView } from '@broccoli/web-sdk/auth';
 import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   type CodeRun,
   isTerminalStatus,
-  parseSubmissionError,
   type Submission,
 } from '@broccoli/web-sdk/submission';
 import { sleep } from '@broccoli/web-sdk/utils';
@@ -80,6 +83,7 @@ export function useSubmissions({
   contestId,
 }: UseSubmissionsOptions): UseSubmissionsReturn {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const [entries, dispatch] = useReducer(entriesReducer, []);
@@ -135,7 +139,6 @@ export function useSubmissions({
         fetch: fetchOnce,
         sleep,
         dispatch,
-        toError: parseSubmissionError,
         isSignedOut: () => session.getState().status === 'signedOut',
       });
     }
@@ -239,12 +242,11 @@ export function useSubmissions({
               dispatch({
                 type: 'failed',
                 id: placeholder.id,
-                error: {
-                  code: 'SUBMISSION_WITHHELD',
-                  message: t('toast.submission.fanOutWithheld', {
+                error: new TranslatedError(
+                  t('toast.submission.fanOutWithheld', {
                     workerId: placeholder.targetWorkerId ?? pairing.workerId,
                   }),
-                },
+                ),
               });
               return;
             }
@@ -280,11 +282,10 @@ export function useSubmissions({
             setActiveEntryId(null);
             return;
           }
-          const error = parseSubmissionError(err);
           placeholderEntries.forEach((placeholder) =>
-            dispatch({ type: 'failed', id: placeholder.id, error }),
+            dispatch({ type: 'rejected', id: placeholder.id, error: err }),
           );
-          toast.error(t('toast.submission.error'));
+          toast.error(errorMessage(err, t('toast.submission.error')));
         }
         return;
       }
@@ -373,16 +374,19 @@ export function useSubmissions({
           setActiveEntryId(null);
           return;
         }
-        console.error('Submission failed:', err);
-        dispatch({
-          type: 'failed',
-          id: entryId,
-          error: parseSubmissionError(err),
-        });
-        toast.error(t('toast.submission.error'));
+        dispatch({ type: 'rejected', id: entryId, error: err });
+        toast.error(errorMessage(err, t('toast.submission.error')));
       }
     },
-    [apiClient, contestId, problemId, queryClient, sendIdempotent, t],
+    [
+      apiClient,
+      contestId,
+      errorMessage,
+      problemId,
+      queryClient,
+      sendIdempotent,
+      t,
+    ],
   );
 
   const run = useCallback(
@@ -441,16 +445,11 @@ export function useSubmissions({
         });
         toast.success(t('toast.submission.running'));
       } catch (err) {
-        console.error('Run failed:', err);
-        dispatch({
-          type: 'failed',
-          id: entryId,
-          error: parseSubmissionError(err),
-        });
-        toast.error(t('toast.submission.error'));
+        dispatch({ type: 'rejected', id: entryId, error: err });
+        toast.error(errorMessage(err, t('toast.submission.runError')));
       }
     },
-    [apiClient, contestId, problemId, t],
+    [apiClient, contestId, errorMessage, problemId, t],
   );
 
   const submissionEntries = entries.filter((e) => !e.isRun);

@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
@@ -14,6 +14,7 @@ const MAX_FILE_SIZE = 1024 * 1024 * 1024; // 1GB
 
 export function useAttachmentUpload(problemId: number) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
 
@@ -36,11 +37,11 @@ export function useAttachmentUpload(problemId: number) {
         });
         return attachment;
       } catch (err) {
-        toast.error(getErrorMessage(err, t('admin.attachments.uploadError')));
+        toast.error(errorMessage(err, t('admin.attachments.uploadError')));
         return null;
       }
     },
-    [apiClient, problemId, queryClient, t],
+    [errorMessage, apiClient, problemId, queryClient, t],
   );
 
   return { upload };

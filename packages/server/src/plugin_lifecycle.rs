@@ -995,6 +995,8 @@ enum ChangeError {
     /// Another replica published a different source for the plugin since
     /// this one read it.
     Stale(String),
+    /// An upload meant to add a new plugin, but a plugin with its id exists.
+    AlreadyExists(String),
 }
 
 impl std::fmt::Display for ChangeError {
@@ -1004,6 +1006,7 @@ impl std::fmt::Display for ChangeError {
             ChangeError::Db(e) => e.fmt(f),
             ChangeError::NotEnabled(id) => write!(f, "Plugin '{id}' is not enabled"),
             ChangeError::Stale(id) => write!(f, "Plugin '{id}' changed on another server"),
+            ChangeError::AlreadyExists(id) => write!(f, "Plugin '{id}' already exists"),
         }
     }
 }
@@ -1019,6 +1022,7 @@ impl From<ChangeError> for AppError {
             ChangeError::Stale(id) => AppError::Conflict(format!(
                 "Plugin '{id}' was changed through another server meanwhile; refresh and try again"
             )),
+            ChangeError::AlreadyExists(id) => AppError::PluginExists(id),
         }
     }
 }
@@ -1157,6 +1161,11 @@ async fn refused(state: &AppState, plugin_id: &str, change: Change<'_>) -> Chang
         if !enabled {
             return ChangeError::NotEnabled(plugin_id.to_string());
         }
+    }
+    // An upload of a new plugin is refused only when its row exists: the
+    // statement inserts whenever none does.
+    if change == Change::Upload(None) {
+        return ChangeError::AlreadyExists(plugin_id.to_string());
     }
     ChangeError::Stale(plugin_id.to_string())
 }

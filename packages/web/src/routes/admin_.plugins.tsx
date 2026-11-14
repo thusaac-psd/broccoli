@@ -1,6 +1,6 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import { PLUGIN_MANAGE } from '@broccoli/web-sdk/permissions';
 import type { PluginDetail, UploadRemoval } from '@broccoli/web-sdk/plugin';
 import { usePluginRegistry } from '@broccoli/web-sdk/plugin';
@@ -9,10 +9,12 @@ import {
   Card,
   CardContent,
   CardHeader,
+  QueryErrorState,
   Skeleton,
+  useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertCircle, Loader2, Puzzle, RefreshCw, Upload } from 'lucide-react';
+import { Loader2, Puzzle, RefreshCw, Upload } from 'lucide-react';
 import { useCallback, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { toast } from 'sonner';
@@ -25,6 +27,7 @@ import { PluginUploadDialog } from '@/features/plugin/components/PluginUploadDia
 
 export default function PluginsPage() {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const { user } = useAuth();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
@@ -59,12 +62,10 @@ export default function PluginsPage() {
   // runs before the early Unauthorized return, so without this an unauthorized
   // viewer would 403 on /admin/plugins.
   const canManagePlugins = !!user?.permissions.includes(PLUGIN_MANAGE);
+  const [confirm, confirmDialog] = useConfirmDialog();
+  const format = useFormat();
 
-  const {
-    data: plugins,
-    isLoading,
-    error,
-  } = useQuery({
+  const pluginsQuery = useQuery({
     queryKey: ['admin-plugins'],
     enabled: canManagePlugins,
     // Other servers apply a change within a few seconds: keep polling while
@@ -77,6 +78,7 @@ export default function PluginsPage() {
       return data;
     },
   });
+  const { data: plugins, isLoading, error } = pluginsQuery;
 
   const { data: uploadPolicy } = useQuery({
     queryKey: ['admin-plugin-upload-policy'],
@@ -94,7 +96,7 @@ export default function PluginsPage() {
     queryClient.invalidateQueries({ queryKey: ['i18n'] });
   }, [queryClient]);
 
-  const handleToggle = useCallback(
+  const applyToggle = useCallback(
     async (plugin: PluginDetail, enable: boolean) => {
       setTogglingIds((prev) => new Set(prev).add(plugin.id));
       try {
@@ -109,9 +111,7 @@ export default function PluginsPage() {
         // Refresh either way: a rejected toggle may mean the page was stale.
         invalidatePluginQueries();
         if (error) {
-          toast.error(
-            getErrorMessage(error, t('validation.pluginToggleError')),
-          );
+          toast.error(errorMessage(error, t('validation.pluginToggleError')));
         } else {
           // Unnecessary to load the plugin immediately, as it will be lazily
           // loaded when the user navigates to a page that uses it.
@@ -127,7 +127,51 @@ export default function PluginsPage() {
         });
       }
     },
-    [apiClient, invalidatePluginQueries, unloadPlugin, t],
+    [errorMessage, apiClient, invalidatePluginQueries, unloadPlugin, t],
+  );
+
+  // Disabling stops the contests in a format the plugin provides from
+  // accepting and judging submissions, so it is confirmed against the
+  // contests running now. When those cannot be read, the dialog says so
+  // rather than implying there are none.
+  const handleToggle = useCallback(
+    async (plugin: PluginDetail, enable: boolean) => {
+      if (enable) return applyToggle(plugin, true);
+      const { data, error } = await apiClient.GET(
+        '/admin/plugins/{id}/dependents',
+        { params: { path: { id: plugin.id } } },
+      );
+      const running = data?.running_contests ?? [];
+      confirm({
+        title: t('plugins.disableConfirm.title', { name: plugin.name }),
+        description: error ? (
+          errorMessage(error, t('plugins.disableConfirm.unknownContests'))
+        ) : running.length === 0 ? (
+          t('plugins.disableConfirm.noContests')
+        ) : (
+          <>
+            {t('plugins.disableConfirm.runningContests', {
+              count: running.length,
+            })}
+            <ul className="mt-2 list-disc pl-5">
+              {running.map((contest) => (
+                <li key={contest.id}>
+                  {contest.title}{' '}
+                  <span className="text-muted-foreground">
+                    ({format.dateTime(contest.end_time, { timeZoneName: true })}
+                    )
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </>
+        ),
+        confirmLabel: t('plugins.disableConfirm.confirm'),
+        destructive: true,
+        onConfirm: () => applyToggle(plugin, false),
+      });
+    },
+    [apiClient, applyToggle, confirm, errorMessage, format, t],
   );
 
   // Reload on every server. Also the retry for a plugin that failed to load:
@@ -141,7 +185,7 @@ export default function PluginsPage() {
         });
 
         if (error) {
-          toast.error(getErrorMessage(error, t('plugins.reloadError')));
+          toast.error(errorMessage(error, t('plugins.reloadError')));
         } else {
           await reloadPlugin(pluginId);
         }
@@ -155,7 +199,7 @@ export default function PluginsPage() {
         });
       }
     },
-    [apiClient, invalidatePluginQueries, reloadPlugin, t],
+    [errorMessage, apiClient, invalidatePluginQueries, reloadPlugin, t],
   );
 
   const handleReloadAll = useCallback(async () => {
@@ -164,7 +208,7 @@ export default function PluginsPage() {
       const { error } = await apiClient.POST('/admin/plugins/reload-all', {});
 
       if (error) {
-        toast.error(getErrorMessage(error, t('plugins.reloadError')));
+        toast.error(errorMessage(error, t('plugins.reloadError')));
       } else {
         await reloadAllPlugins();
       }
@@ -172,7 +216,7 @@ export default function PluginsPage() {
     } finally {
       setIsReloadingAll(false);
     }
-  }, [apiClient, invalidatePluginQueries, reloadAllPlugins, t]);
+  }, [errorMessage, apiClient, invalidatePluginQueries, reloadAllPlugins, t]);
 
   const handlePublished = useCallback(
     async (pluginId: string) => {
@@ -193,10 +237,16 @@ export default function PluginsPage() {
         );
         if (error || !data) {
           toast.error(
-            getErrorMessage(error, t('plugins.detail.removeUploadError')),
+            errorMessage(error, t('plugins.detail.removeUploadError')),
           );
         } else {
-          toast.success(data.message);
+          toast.success(
+            t(
+              data.outcome === 'removed'
+                ? 'plugins.detail.uploadRemoved'
+                : 'plugins.detail.uploadReplacedByBundle',
+            ),
+          );
           if (data.outcome === 'removed') {
             unloadPlugin(pluginId);
             setDetailPluginId(null);
@@ -210,6 +260,7 @@ export default function PluginsPage() {
       }
     },
     [
+      errorMessage,
       apiClient,
       invalidatePluginQueries,
       reloadPlugin,
@@ -278,13 +329,13 @@ export default function PluginsPage() {
         </div>
       )}
 
-      {error && (
-        <Card className="border-destructive">
-          <CardContent className="pt-6 text-center">
-            <AlertCircle className="mx-auto h-10 w-10 text-destructive mb-2" />
-            <p className="text-destructive">{t('plugins.loadError')}</p>
-          </CardContent>
-        </Card>
+      {error && !plugins && (
+        <QueryErrorState
+          error={error}
+          retry={() => void pluginsQuery.refetch()}
+          retrying={pluginsQuery.isFetching}
+          failure={t('plugins.loadError')}
+        />
       )}
 
       {plugins && plugins.length === 0 && (
@@ -329,6 +380,7 @@ export default function PluginsPage() {
         onOpenChange={setUploadOpen}
         onPublished={handlePublished}
       />
+      {confirmDialog}
     </PageLayout>
   );
 }

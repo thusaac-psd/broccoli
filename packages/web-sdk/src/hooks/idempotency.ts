@@ -311,7 +311,7 @@ export async function settleIdempotent<T>(
 /** The i18n key telling the user what an unsettled operation means. */
 export function unsettledMessageKey(
   outcome: 'outcome-unknown' | 'in-progress',
-): string {
+): 'toast.idempotency.inProgress' | 'toast.idempotency.outcomeUnknown' {
   return outcome === 'in-progress'
     ? 'toast.idempotency.inProgress'
     : 'toast.idempotency.outcomeUnknown';

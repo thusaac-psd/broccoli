@@ -157,13 +157,15 @@ export function TestCaseRow({
               testCase={testCase}
               field={field}
               label={t(
-                {
-                  checker_output: 'result.checkerOutput',
-                  input: 'result.input',
-                  expected_output: 'result.expectedOutput',
-                  stdout: 'result.stdout',
-                  stderr: 'result.stderr',
-                }[field],
+                (
+                  {
+                    checker_output: 'result.checkerOutput',
+                    input: 'result.input',
+                    expected_output: 'result.expectedOutput',
+                    stdout: 'result.stdout',
+                    stderr: 'result.stderr',
+                  } as const
+                )[field],
               )}
             />
           ))}

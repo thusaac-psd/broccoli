@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Generated from the language packs by scripts/language-packs.ts.
+src/lib/i18n/packs.gen.ts

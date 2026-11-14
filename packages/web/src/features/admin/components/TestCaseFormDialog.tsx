@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import {
   isAlreadyDone,
   useAsyncDialog,
@@ -150,6 +150,7 @@ function TestCaseForm({
   dialog: ReturnType<typeof useAsyncDialog>;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const sendIdempotent = useIdempotentRequest();
@@ -189,7 +190,7 @@ function TestCaseForm({
     if (toastUnsettled(result.error, t, { refetch })) throw result.error;
     if (result.error && !isAlreadyDone(result.error)) {
       toast.error(
-        getErrorMessage(
+        errorMessage(
           result.error,
           isEdit ? t('admin.editError') : t('admin.createError'),
         ),

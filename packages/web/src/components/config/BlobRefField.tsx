@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button, FileDropZone, Label } from '@broccoli/web-sdk/ui';
 import { File, Loader2, Upload, X } from 'lucide-react';
@@ -24,6 +24,7 @@ export function BlobRefField({
   isExplicit: boolean;
 }>) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,26 +48,20 @@ export function BlobRefField({
           },
         );
 
-        if (apiError) {
-          throw new Error(
-            getErrorMessage(apiError, t('config.blob.uploadFailed')),
-          );
-        }
+        if (apiError) throw apiError;
 
         onChange({
           filename: data.filename,
           hash: data.content_hash,
         });
       } catch (err) {
-        setError(
-          err instanceof Error ? err.message : t('config.blob.uploadFailed'),
-        );
+        setError(errorMessage(err, t('config.blob.uploadFailed')));
       } finally {
         setUploading(false);
         setUploadingName('');
       }
     },
-    [apiClient, onChange],
+    [apiClient, errorMessage, onChange, t],
   );
 
   const handleFilesSelected = useCallback(

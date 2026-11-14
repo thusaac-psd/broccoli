@@ -1,7 +1,7 @@
 import {
   type ApiClient,
-  getErrorMessage,
   useApiClient,
+  useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import { useAsyncSubmit } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -66,16 +66,19 @@ function ProblemEditFields({
   initial: ProblemFormData;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const navigate = useNavigate();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const saving = useAsyncSubmit();
 
   const [formData, setFormData] = useState(initial);
-  const { data: attachments = [] } = useQuery({
-    queryKey: attachmentsQueryKey(problemIdNum),
-    queryFn: () => fetchAttachments(apiClient, problemIdNum),
-  });
+  // Offered to the content editor for embedding only.
+  const attachments =
+    useQuery({
+      queryKey: attachmentsQueryKey(problemIdNum),
+      queryFn: () => fetchAttachments(apiClient, problemIdNum),
+    }).data ?? [];
 
   async function save() {
     const { error } = await apiClient.PATCH('/problems/{id}', {
@@ -86,7 +89,7 @@ function ProblemEditFields({
       ),
     });
     if (error) {
-      toast.error(getErrorMessage(error, t('admin.editError')));
+      toast.error(errorMessage(error, t('admin.editError')));
       throw error;
     }
     toast.success(t('toast.problem.updated'));

@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
@@ -12,7 +12,12 @@ import {
   type SubmissionStatusFilterValue,
   toSubmissionStatus,
 } from '@broccoli/web-sdk/submission';
-import { Button, FilterDropdown } from '@broccoli/web-sdk/ui';
+import {
+  Button,
+  FilterDropdown,
+  QueryView,
+  SignInPrompt,
+} from '@broccoli/web-sdk/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   BookOpen,
@@ -55,6 +60,7 @@ function parseStatus(value: string | null): SubmissionStatusFilterValue {
 
 export function ContestSubmissions({ contestId }: { contestId: number }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const { user } = useAuth();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
@@ -140,15 +146,16 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
     ],
   );
 
-  const { data: problems = [] } = useContestProblems(contestId);
+  // Filter options only; the list itself reports its own failure.
+  const problems = useContestProblems(contestId).data;
 
-  const { data: supportedLanguages = [] } = useQuery({
+  const { data: supportedLanguages } = useQuery({
     queryKey: ['supported-languages'],
     queryFn: () => fetchSupportedLanguages(apiClient),
     staleTime: 5 * 60 * 1000,
   });
 
-  const { data: submissionsResult, isLoading } = useQuery({
+  const submissionsQuery = useQuery({
     queryKey: [
       'contest-submissions-table',
       String(contestId),
@@ -172,20 +179,25 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
       }),
   });
 
-  const { data: allSubmissions = [], isLoading: isAllSubmissionsLoading } =
-    useQuery({
-      queryKey: [
-        'contest-submissions-bulk-source',
-        String(contestId),
-        String(scopedUserId ?? 'all'),
-      ],
-      enabled: !!user && canBulkRejudge && isBulkMode,
-      queryFn: () =>
-        fetchAllContestSubmissions(apiClient, {
-          contestId,
-          userId: scopedUserId,
-        }),
-    });
+  const bulkSourceQuery = useQuery({
+    queryKey: [
+      'contest-submissions-bulk-source',
+      String(contestId),
+      String(scopedUserId ?? 'all'),
+    ],
+    enabled: !!user && canBulkRejudge && isBulkMode,
+    queryFn: () =>
+      fetchAllContestSubmissions(apiClient, {
+        contestId,
+        userId: scopedUserId,
+      }),
+  });
+  // Selecting "all matched" needs the whole list; until it has loaded
+  // (or when it failed) the selection buttons stay off.
+  const allSubmissions = useMemo(
+    () => bulkSourceQuery.data ?? [],
+    [bulkSourceQuery.data],
+  );
 
   const bulkRejudgeMutation = useMutation({
     mutationFn: async (submissionIds: number[]) => {
@@ -223,17 +235,16 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
       });
     },
     onError: (error) => {
-      toast.error(getErrorMessage(error, t('submissions.bulkRejudge.error')));
+      toast.error(errorMessage(error, t('submissions.bulkRejudge.error')));
     },
   });
 
-  const submissions = submissionsResult?.data ?? [];
-  const pagination = submissionsResult?.pagination;
+  const pagination = submissionsQuery.data?.pagination;
 
   const problemOptions = useMemo(
     () => [
       { value: 'all', label: t('submissions.filters.allProblems') },
-      ...problems.map((p) => ({
+      ...(problems ?? []).map((p) => ({
         value: String(p.problem_id),
         label: `${p.label}. ${p.problem_title}`,
       })),
@@ -244,7 +255,7 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
   const languageOptions = useMemo(
     () => [
       { value: 'all', label: t('submissions.filters.allLanguages') },
-      ...supportedLanguages.map((l) => ({
+      ...(supportedLanguages ?? []).map((l) => ({
         value: l.id,
         label: l.name,
       })),
@@ -436,7 +447,7 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
             variant="outline"
             className="h-8"
             disabled={
-              isAllSubmissionsLoading || matchedSubmissionIds.length === 0
+              !bulkSourceQuery.isSuccess || matchedSubmissionIds.length === 0
             }
             onClick={selectMatched}
           >
@@ -446,7 +457,7 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
             variant="outline"
             className="h-8"
             disabled={
-              isAllSubmissionsLoading || matchedSubmissionIds.length === 0
+              !bulkSourceQuery.isSuccess || matchedSubmissionIds.length === 0
             }
             onClick={unselectMatched}
           >
@@ -500,45 +511,57 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
 
       {/* Table */}
       <div className="border rounded-lg overflow-hidden">
-        {isLoading ? (
-          <div className="flex items-center justify-center py-16">
-            <span className="h-5 w-5 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-          </div>
-        ) : (
-          <SubmissionsTable
-            submissions={submissions}
-            columns={SubmissionsTable.fullColumns}
-            selectable={canBulkRejudge && isBulkMode}
-            selectedSubmissionIds={selectedSubmissionIds}
-            onToggleSubmissionSelection={(submissionId, checked) => {
-              setSelectedSubmissionIds((prev) => {
-                const next = new Set(prev);
-                if (checked) {
-                  next.add(submissionId);
-                } else {
-                  next.delete(submissionId);
-                }
-                return next;
-              });
-            }}
-            onToggleSelectVisible={(submissionIds, checked) => {
-              setSelectedSubmissionIds((prev) => {
-                const next = new Set(prev);
-                for (const id of submissionIds) {
+        <QueryView
+          query={submissionsQuery}
+          loading={
+            <div
+              role="status"
+              aria-busy
+              className="flex items-center justify-center py-16"
+            >
+              <span className="sr-only">{t('common.loading')}</span>
+              <span className="h-5 w-5 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+            </div>
+          }
+          idle={<SignInPrompt />}
+          failure={t('submissions.loadFailed')}
+        >
+          {(result) => (
+            <SubmissionsTable
+              submissions={result.data}
+              columns={SubmissionsTable.fullColumns}
+              selectable={canBulkRejudge && isBulkMode}
+              selectedSubmissionIds={selectedSubmissionIds}
+              onToggleSubmissionSelection={(submissionId, checked) => {
+                setSelectedSubmissionIds((prev) => {
+                  const next = new Set(prev);
                   if (checked) {
-                    next.add(id);
+                    next.add(submissionId);
                   } else {
-                    next.delete(id);
+                    next.delete(submissionId);
                   }
-                }
-                return next;
-              });
-            }}
-            linkBuilder={(sub) =>
-              `/contests/${contestId}/submissions/${sub.id}`
-            }
-          />
-        )}
+                  return next;
+                });
+              }}
+              onToggleSelectVisible={(submissionIds, checked) => {
+                setSelectedSubmissionIds((prev) => {
+                  const next = new Set(prev);
+                  for (const id of submissionIds) {
+                    if (checked) {
+                      next.add(id);
+                    } else {
+                      next.delete(id);
+                    }
+                  }
+                  return next;
+                });
+              }}
+              linkBuilder={(sub) =>
+                `/contests/${contestId}/submissions/${sub.id}`
+              }
+            />
+          )}
+        </QueryView>
       </div>
 
       <SubmissionListPager

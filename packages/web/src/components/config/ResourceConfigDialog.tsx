@@ -1,8 +1,11 @@
 import { parseApiError, useApiClient } from '@broccoli/web-sdk/api';
+import { queryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { PluginDetail } from '@broccoli/web-sdk/plugin';
 import {
   Label,
+  QueryErrorState,
+  QueryLoading,
   Sheet,
   SheetContent,
   SheetDescription,
@@ -342,7 +345,7 @@ function usePluginScopeSchemas(
   scope: ConfigScope,
   open: boolean,
 ) {
-  const { data: plugins = EMPTY_PLUGIN_DETAILS } = useQuery({
+  const query = useQuery({
     queryKey: ['admin-plugins'],
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/admin/plugins');
@@ -351,12 +354,13 @@ function usePluginScopeSchemas(
     },
     enabled: open && scope.scope === 'plugin',
   });
+  const plugins = query.data ?? EMPTY_PLUGIN_DETAILS;
 
   // Depend on the primitive plugin id, not the scope object (callers pass
   // inline scope literals, so the object identity changes on every render).
   const scopePluginId = scope.scope === 'plugin' ? scope.pluginId : null;
 
-  return useMemo(() => {
+  const schemas = useMemo(() => {
     if (scopePluginId === null) return EMPTY_PLUGIN_SCHEMAS;
     return plugins
       .filter((p: PluginDetailResponse) => p.id === scopePluginId)
@@ -368,6 +372,7 @@ function usePluginScopeSchemas(
       }))
       .filter((e: { schemas: ConfigSchemaResponse[] }) => e.schemas.length > 0);
   }, [plugins, scopePluginId]);
+  return { schemas, query };
 }
 
 export function ResourceConfigDialog({
@@ -380,16 +385,22 @@ export function ResourceConfigDialog({
   const apiClient = useApiClient();
 
   // For plugin scope, use admin endpoint
-  const pluginSchemas = usePluginScopeSchemas(apiClient, scope, open);
-
-  // For resource scopes, use self-describing config list endpoint
-  const { data: configEntries = EMPTY_CONFIG_ENTRIES } = useResourceConfigList(
+  const { schemas: pluginSchemas, query: pluginsQuery } = usePluginScopeSchemas(
     apiClient,
     scope,
     open,
   );
 
+  // For resource scopes, use self-describing config list endpoint
+  const configQuery = useResourceConfigList(apiClient, scope, open);
+  const configEntries = configQuery.data ?? EMPTY_CONFIG_ENTRIES;
+
   const scopeKind = scope.scope;
+  // The query the schema list comes from, so a failed or unfinished load is
+  // never shown as "no settings".
+  const source = queryState<unknown>(
+    scopeKind === 'plugin' ? pluginsQuery : configQuery,
+  );
   const pluginsWithSchemas = useMemo(() => {
     if (scopeKind === 'plugin') return pluginSchemas;
     return configEntriesToPluginSchemas(configEntries);
@@ -434,7 +445,16 @@ export function ResourceConfigDialog({
         </SheetHeader>
 
         <div className="flex-1 overflow-y-auto px-6 py-5">
-          {pluginsWithSchemas.length === 0 ? (
+          {source.status === 'error' ? (
+            <QueryErrorState
+              error={source.error}
+              retry={source.retry}
+              retrying={source.retrying}
+              failure={t('config.loadFailed')}
+            />
+          ) : source.status === 'loading' ? (
+            <QueryLoading />
+          ) : pluginsWithSchemas.length === 0 ? (
             <div className="py-12 text-center text-muted-foreground text-sm">
               {t('config.noSchemas')}
             </div>

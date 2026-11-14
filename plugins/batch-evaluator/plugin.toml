@@ -2,6 +2,10 @@ name = "batch-evaluator"
 version = "0.1.0"
 description = "Batch problem evaluator for Broccoli judge — compile, run, check"
 
+[translations]
+en = "i18n/en.toml"
+zh-CN = "i18n/zh-CN.toml"
+
 [server]
 entry = "batch_evaluator.wasm"
 permissions = ["logger", "plugin:register", "operations:dispatch", "checker:resolve", "checker:interpret", "language:resolve", "config:read"]

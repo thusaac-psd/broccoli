@@ -1,7 +1,7 @@
 import {
-  getErrorMessage,
   type IdempotentResult,
   useApiClient,
+  useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import { useAuth, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
@@ -107,6 +107,7 @@ function MatchDetail({
   presentation: boolean;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const api = useBracketApi();
   const apiClient = useApiClient();
   const auth = useAuth();
@@ -161,7 +162,7 @@ function MatchDetail({
         setError(t(unsettledMessageKey(result.outcome)));
       }
     } catch (err) {
-      setError(getErrorMessage(err, t(failKey)));
+      setError(errorMessage(err, t(failKey)));
     } finally {
       await Promise.all([
         queryClient.invalidateQueries({

@@ -110,7 +110,7 @@ export function AuthProvider({
         body: data,
       });
 
-      if (error) throw new Error(error.message);
+      if (error) throw error;
       if (!resData) throw new Error('Unexpected login response');
 
       session.dispatch({ type: 'signed-in', session: resData });
@@ -136,6 +136,7 @@ export function AuthProvider({
       user: state.status === 'active' ? state.user : null,
       accessToken: state.status === 'active' ? state.token : null,
       isLoading: state.status === 'bootstrapping',
+      sessionExpired: state.status === 'signedOut' && state.expired,
       login,
       logout,
       refresh,

@@ -64,6 +64,7 @@
 # My Prints panel (contestant sidebar)
 'print.myPrints.title' = 'My Prints'
 'print.myPrints.empty' = 'No print jobs yet'
+'print.myPrints.loadFailed' = 'Could not load your print jobs.'
 'print.myPrints.noContest' = 'Open a contest problem to see print jobs'
 
 # Status labels
@@ -77,6 +78,7 @@
 
 # Stations panel
 'print.stations.empty' = 'No print stations have checked in'
+'print.stations.loadFailed' = 'Could not load the print stations.'
 'print.stations.online' = 'Online'
 'print.stations.offline' = 'Offline'
 'print.stations.col.name' = 'Station'

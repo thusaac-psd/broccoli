@@ -1,14 +1,12 @@
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useErrorMessage } from '@broccoli/web-sdk/api';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import type {
   SubmissionStatus,
   SubmissionSummary,
   Verdict,
 } from '@broccoli/web-sdk/submission';
-import { Badge } from '@broccoli/web-sdk/ui';
-import {
-  formatKibibytes,
-  formatRelativeDatetime,
-} from '@broccoli/web-sdk/utils';
+import { Badge, QueryErrorState } from '@broccoli/web-sdk/ui';
+import { formatKibibytes } from '@broccoli/web-sdk/utils';
 
 import { useSubmissionNavigation } from '@/features/submission/hooks/use-submission-navigation';
 import type { SubmissionEntry } from '@/features/submission/hooks/use-submissions';
@@ -16,12 +14,15 @@ import type { SubmissionEntry } from '@/features/submission/hooks/use-submission
 import { getSubmissionScoreDisplay } from '../utils/score-display';
 import { getVerdictBadge } from '../utils/verdict';
 import { PinnedSubmissionGroup } from './PinnedSubmissionGroup';
+import { SubmissionRejection } from './SubmissionResult';
 
 const DEFAULT_VISIBLE_COUNT = 5;
 
 interface RecentSubmissionOverviewProps {
   entries: SubmissionEntry[];
   history: SubmissionSummary[];
+  /** Set when the earlier submissions could not be loaded. */
+  historyError?: { error: unknown; retry: () => void } | null;
   isSubmitting?: boolean;
   visibleCount?: number;
   linkBuilder?: (submissionId: number) => string;
@@ -49,8 +50,6 @@ function getEntryStatus(entry: SubmissionEntry): SubmissionStatus {
       return 'Pending';
     case 'polling':
       return 'Running';
-    case 'error':
-      return 'SystemError';
     default:
       return 'Pending';
   }
@@ -76,11 +75,14 @@ function getScoreToneClass(variant: string): string {
 export function RecentSubmissionOverview({
   entries,
   history,
+  historyError = null,
   isSubmitting,
   visibleCount = DEFAULT_VISIBLE_COUNT,
   linkBuilder,
 }: RecentSubmissionOverviewProps) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
+  const format = useFormat();
   const { openSubmission } = useSubmissionNavigation();
 
   // Bucket fan-out entries by groupKey so they render together as a single
@@ -121,9 +123,33 @@ export function RecentSubmissionOverview({
     });
   }
 
+  // A refused attempt is not a submission: it shows as the reason it was
+  // refused, never as a row being judged. Entries are newest first.
+  const rejection = ungrouped.find((entry) => entry.status === 'rejected');
+  const unfollowable = ungrouped.find(
+    (entry) => entry.status === 'error' && !entry.submission,
+  );
+  const notices = (
+    <>
+      {rejection && (
+        <SubmissionRejection
+          error={rejection.error}
+          failure={t('toast.submission.error')}
+        />
+      )}
+      {unfollowable && (
+        <p role="alert" className="text-sm text-destructive py-2">
+          {errorMessage(unfollowable.error, t('submissions.loadFailed'))}
+        </p>
+      )}
+    </>
+  );
+
   const pendingRows: OverviewRow[] = [];
   for (const entry of ungrouped) {
+    if (entry.status === 'rejected') continue;
     if (!entry.submission) {
+      if (entry.status === 'error') continue;
       pendingRows.push({
         key: `entry-${entry.id}`,
         submissionId: null,
@@ -173,9 +199,21 @@ export function RecentSubmissionOverview({
         <h3 className="text-sm font-semibold">
           {t('result.latestOverviewTitle')}
         </h3>
-        <p className="mt-2 text-sm text-muted-foreground">
-          {isSubmitting ? t('result.judging') : t('result.latestOverviewEmpty')}
-        </p>
+        {notices}
+        {historyError && !isSubmitting ? (
+          <QueryErrorState
+            className="py-4"
+            error={historyError.error}
+            retry={historyError.retry}
+            failure={t('submissions.loadFailed')}
+          />
+        ) : (
+          <p className="mt-2 text-sm text-muted-foreground">
+            {isSubmitting
+              ? t('result.judging')
+              : t('result.latestOverviewEmpty')}
+          </p>
+        )}
       </section>
     );
   }
@@ -189,6 +227,7 @@ export function RecentSubmissionOverview({
       <h3 className="text-sm font-semibold">
         {t('result.latestOverviewTitle')}
       </h3>
+      {notices}
       <div className="mt-3 space-y-2">
         {groupBlocks.map(([key, groupEntries]) => (
           <PinnedSubmissionGroup
@@ -265,7 +304,7 @@ export function RecentSubmissionOverview({
                 <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
                   <span>
                     {row.createdAt
-                      ? formatRelativeDatetime(row.createdAt, t)
+                      ? format.relative(row.createdAt)
                       : t('result.judging')}
                   </span>
                   {row.timeUsed != null && (

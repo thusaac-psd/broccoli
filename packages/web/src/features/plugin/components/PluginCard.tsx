@@ -1,4 +1,8 @@
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import {
+  pluginKeys,
+  usePluginText,
+  useTranslation,
+} from '@broccoli/web-sdk/i18n';
 import type { PluginDetail } from '@broccoli/web-sdk/plugin';
 import {
   Badge,
@@ -42,6 +46,7 @@ export function PluginCard({
   onClick?: (plugin: PluginDetail) => void;
 }) {
   const { t } = useTranslation();
+  const pluginText = usePluginText();
   const [configOpen, setConfigOpen] = useState(false);
   // The fleet-wide desired state, not whether the server that answered has
   // it loaded: a plugin enabled but failing to load is still enabled.
@@ -59,7 +64,9 @@ export function PluginCard({
       >
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
-            <span className="truncate">{plugin.name}</span>
+            <span className="truncate">
+              {pluginText(pluginKeys.name(plugin.id), plugin.name)}
+            </span>
           </CardTitle>
           <CardDescription className="text-xs font-mono">
             {plugin.id}
@@ -74,7 +81,10 @@ export function PluginCard({
         <CardContent className="flex-1">
           {plugin.description && (
             <p className="text-sm text-muted-foreground mb-3">
-              {plugin.description}
+              {pluginText(
+                pluginKeys.description(plugin.id),
+                plugin.description,
+              )}
             </p>
           )}
           {failed && (

@@ -25,6 +25,7 @@ import { useServerTable } from '@/hooks/use-server-table';
 import { useTranslation } from '@/i18n';
 import { Button } from '@/ui/button';
 import { Input } from '@/ui/input';
+import { QueryErrorState } from '@/ui/query-view';
 import { Skeleton } from '@/ui/skeleton';
 
 // Re-export ColumnDef for consumers
@@ -101,9 +102,7 @@ function PaginationControls({
   return (
     <div className="flex items-center justify-between px-4 py-3 border-t">
       <span className="text-xs text-muted-foreground">
-        {total === 1
-          ? t('table.resultOne')
-          : t('table.results', { count: total })}
+        {t('table.results', { count: total })}
         {isFetching && ` · ${t('table.loading')}`}
       </span>
       <div className="flex items-center gap-1">
@@ -156,21 +155,22 @@ export function DataTable<TData>({
   queryKey,
   fetchFn,
   searchable = false,
-  searchPlaceholder = 'Search...',
+  searchPlaceholder,
   defaultPerPage = 20,
   defaultSortBy,
   defaultSortOrder = 'desc',
-  emptyMessage = 'No results found.',
+  emptyMessage,
   toolbar,
   state,
   onPageChange,
   onSearchChange,
   onSortChange,
 }: DataTableProps<TData>) {
+  const { t } = useTranslation();
   const {
     data,
+    view,
     pagination,
-    isLoading,
     isFetching,
     page,
     search,
@@ -211,7 +211,7 @@ export function DataTable<TData>({
                 style={{ insetInlineStart: '0.625rem' }}
               />
               <Input
-                placeholder={searchPlaceholder}
+                placeholder={searchPlaceholder ?? t('table.search')}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="h-8 text-sm"
@@ -275,7 +275,7 @@ export function DataTable<TData>({
             ))}
           </thead>
           <tbody>
-            {isLoading ? (
+            {view.status === 'loading' || view.status === 'idle' ? (
               Array.from({ length: 5 }).map((_, i) => (
                 <tr key={i} className="border-b">
                   {columns.map((_, j) => (
@@ -285,13 +285,23 @@ export function DataTable<TData>({
                   ))}
                 </tr>
               ))
+            ) : view.status === 'error' ? (
+              <tr>
+                <td colSpan={columns.length}>
+                  <QueryErrorState
+                    error={view.error}
+                    retry={view.retry}
+                    retrying={view.retrying}
+                  />
+                </td>
+              </tr>
             ) : table.getRowModel().rows.length === 0 ? (
               <tr>
                 <td
                   colSpan={columns.length}
                   className="px-3 py-12 text-center text-muted-foreground"
                 >
-                  {emptyMessage}
+                  {emptyMessage ?? t('table.noResults')}
                 </td>
               </tr>
             ) : (

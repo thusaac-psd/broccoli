@@ -9,15 +9,21 @@ import {
 } from '@broccoli/web-sdk/ui';
 import { ChevronUp, Languages } from 'lucide-react';
 
-const LOCALE_LABELS: Record<string, string> = {
-  en: 'English',
-  'zh-CN': '中文',
-};
+/** A language's name in that language ("English", "中文（中国）"). */
+function localeLabel(locale: string): string {
+  try {
+    return (
+      new Intl.DisplayNames([locale], { type: 'language' }).of(locale) ?? locale
+    );
+  } catch {
+    return locale;
+  }
+}
 
 export function LocaleSelector() {
   const { locale, setLocale, availableLocales } = useTranslation();
 
-  const currentLabel = LOCALE_LABELS[locale] ?? locale;
+  const currentLabel = localeLabel(locale);
 
   return (
     <SidebarMenuItem>
@@ -39,7 +45,7 @@ export function LocaleSelector() {
               onClick={() => setLocale(loc)}
               className={locale === loc ? 'bg-accent' : ''}
             >
-              {LOCALE_LABELS[loc] ?? loc}
+              {localeLabel(loc)}
             </DropdownMenuItem>
           ))}
         </DropdownMenuContent>

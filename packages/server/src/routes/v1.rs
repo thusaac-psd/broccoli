@@ -91,6 +91,7 @@ fn admin_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::admin::get_plugin_details))
         .routes(routes!(handlers::admin::enable_plugin))
         .routes(routes!(handlers::admin::disable_plugin))
+        .routes(routes!(handlers::admin::get_plugin_dependents))
         .routes(routes!(handlers::admin::reload_plugin))
         .routes(routes!(handlers::admin::reload_all_plugins))
         .routes(routes!(handlers::admin::remove_plugin_upload))

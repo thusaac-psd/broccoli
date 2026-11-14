@@ -7,6 +7,27 @@ use plugin_core::manifest::{ComponentMap, ServerRouteConfig, WebRouteConfig, Web
 use plugin_core::registry::{PluginInfo, PluginStatus};
 use serde::Serialize;
 
+/// A running contest whose format a plugin provides.
+#[derive(Serialize, utoipa::ToSchema, sea_orm::FromQueryResult)]
+pub struct RunningContestRef {
+    #[schema(example = 1)]
+    pub id: i32,
+    #[schema(example = "Spring Contest")]
+    pub title: String,
+    #[schema(example = "icpc")]
+    pub contest_type: String,
+    pub end_time: chrono::DateTime<chrono::Utc>,
+}
+
+/// What depends on a plugin right now.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct PluginDependentsResponse {
+    /// Contests running now (started, not ended) whose contest type this
+    /// plugin provides on the serving replica. Disabling the plugin stops
+    /// their submissions from being accepted and judged.
+    pub running_contests: Vec<RunningContestRef>,
+}
+
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct ActivePluginResponse {
     #[schema(example = "plugin-123")]

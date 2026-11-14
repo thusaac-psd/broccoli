@@ -1,8 +1,8 @@
 import {
   type ApiClient,
-  getErrorMessage,
   serverNow,
   useApiClient,
+  useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import type { ContestProblem, ContestSummary } from '@broccoli/web-sdk/contest';
 import {
@@ -12,7 +12,11 @@ import {
   useIdempotentRequest,
   useRegistries,
 } from '@broccoli/web-sdk/hooks';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import {
+  useFormat,
+  useIdentifierLabel,
+  useTranslation,
+} from '@broccoli/web-sdk/i18n';
 import type { ProblemSummary } from '@broccoli/web-sdk/problem';
 import { Slot } from '@broccoli/web-sdk/slot';
 import {
@@ -34,10 +38,11 @@ import {
   DropdownMenuTrigger,
   Input,
   Label,
+  QueryErrorState,
   Separator,
   useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
-import { formatDateTime, formatKibibytes } from '@broccoli/web-sdk/utils';
+import { formatKibibytes } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Check,
@@ -68,7 +73,11 @@ import { getContestStatus } from '@/features/contest/utils/status';
 import { fetchContestSubmissions } from '@/features/submission/api/fetch-contest-submissions';
 import { useTableSearchParams } from '@/hooks/use-table-search-params';
 import { changedFields } from '@/lib/changed-fields';
+import type { MessageKey } from '@/lib/i18n/catalog';
 import { toastUnsettled } from '@/lib/idempotency-feedback';
+
+const NO_CONTEST_PROBLEMS: ContestProblem[] = [];
+const NO_PROBLEMS: ProblemSummary[] = [];
 
 // -- Data fetcher --
 
@@ -218,7 +227,7 @@ function contestRequestBody(values: ContestFormValues) {
 }
 
 /** The i18n key of the first problem with `values`, or null when valid. */
-function contestFormProblem(values: ContestFormValues): string | null {
+function contestFormProblem(values: ContestFormValues): MessageKey | null {
   const { title, startTime, endTime, activateTime, deactivateTime } = values;
   if (!title.trim()) return 'validation.titleRequired';
   if (!startTime || !endTime) return 'validation.startEndTimeRequired';
@@ -291,6 +300,8 @@ function ContestForm({
   dialog: ReturnType<typeof useAsyncDialog>;
 }) {
   const { t } = useTranslation();
+  const label = useIdentifierLabel();
+  const errorMessage = useErrorMessage();
   const queryClient = useQueryClient();
   const apiClient = useApiClient();
   const sendIdempotent = useIdempotentRequest();
@@ -341,7 +352,7 @@ function ContestForm({
     if (toastUnsettled(result.error, t, { refetch })) throw result.error;
     if (result.error && !isAlreadyDone(result.error)) {
       toast.error(
-        getErrorMessage(
+        errorMessage(
           result.error,
           isEdit ? t('admin.editError') : t('admin.createError'),
         ),
@@ -458,7 +469,7 @@ function ContestForm({
             </option>
             {(registries?.contest_types ?? []).map((opt) => (
               <option key={opt} value={opt}>
-                {opt}
+                {label('contestType', opt)}
               </option>
             ))}
           </select>
@@ -532,26 +543,27 @@ export function ContestProblemsDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const queryClient = useQueryClient();
   const contestProblemsKey = ['contest-problems', contest.id];
   const apiClient = useApiClient();
   const sendIdempotent = useIdempotentRequest();
   const [confirm, confirmDialog] = useConfirmDialog();
 
-  const { data: contestProblems = [], isLoading: loadingContestProblems } =
-    useQuery({
-      queryKey: contestProblemsKey,
-      queryFn: async () => {
-        const { data, error } = await apiClient.GET('/contests/{id}/problems', {
-          params: { path: { id: contest.id } },
-        });
-        if (error) throw error;
-        return data;
-      },
-      enabled: open,
-    });
+  const contestProblemsQuery = useQuery({
+    queryKey: contestProblemsKey,
+    queryFn: async () => {
+      const { data, error } = await apiClient.GET('/contests/{id}/problems', {
+        params: { path: { id: contest.id } },
+      });
+      if (error) throw error;
+      return data;
+    },
+    enabled: open,
+  });
+  const contestProblems = contestProblemsQuery.data ?? NO_CONTEST_PROBLEMS;
 
-  const { data: allProblems = [], isLoading: loadingAllProblems } = useQuery({
+  const allProblemsQuery = useQuery({
     queryKey: ['all-problems-for-contest', contest.id],
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/problems', {
@@ -562,6 +574,7 @@ export function ContestProblemsDialog({
     },
     enabled: open,
   });
+  const allProblems = allProblemsQuery.data ?? NO_PROBLEMS;
 
   const [search, setSearch] = useState('');
   const [addingId, setAddingId] = useState<number | null>(null);
@@ -626,7 +639,7 @@ export function ContestProblemsDialog({
       return;
     }
     if (apiError && !isAlreadyDone(apiError)) {
-      toast.error(getErrorMessage(apiError, t('toast.problem.addError')));
+      toast.error(errorMessage(apiError, t('toast.problem.addError')));
     } else {
       toast.success(t('toast.problem.added'));
       queryClient.invalidateQueries({ queryKey: contestProblemsKey });
@@ -656,7 +669,12 @@ export function ContestProblemsDialog({
     });
   }
 
-  const isLoading = loadingContestProblems || loadingAllProblems;
+  const isLoading =
+    contestProblemsQuery.isLoading || allProblemsQuery.isLoading;
+  // Either list failing leaves the dialog unable to show what is added.
+  const failedQuery = [contestProblemsQuery, allProblemsQuery].find(
+    (query) => query.isError && query.data === undefined,
+  );
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -749,7 +767,14 @@ export function ContestProblemsDialog({
           {errorMsg && <p className="text-sm text-destructive">{errorMsg}</p>}
 
           <div className="overflow-y-auto max-h-64 rounded-md border">
-            {isLoading ? (
+            {failedQuery ? (
+              <QueryErrorState
+                error={failedQuery.error}
+                retry={() => void failedQuery.refetch()}
+                retrying={failedQuery.isFetching}
+                failure={t('admin.contestProblemsLoadFailed')}
+              />
+            ) : isLoading ? (
               <div className="py-8 text-center text-muted-foreground">
                 {t('common.loading')}
               </div>
@@ -859,7 +884,9 @@ function useContestColumns({
   onBulkParticipants: (contest: ContestSummary) => void;
   onConfigure: (contest: ContestSummary) => void;
 }): DataTableColumn<ContestSummary>[] {
-  const { t, locale } = useTranslation();
+  const { t } = useTranslation();
+  const label = useIdentifierLabel();
+  const format = useFormat();
   return [
     { accessorKey: 'id', header: '#', size: 60 },
     {
@@ -890,7 +917,9 @@ function useContestColumns({
       size: 120,
       cell: ({ row }) =>
         row.original.contest_type ? (
-          <Badge variant="outline">{row.original.contest_type}</Badge>
+          <Badge variant="outline">
+            {label('contestType', row.original.contest_type)}
+          </Badge>
         ) : (
           <span className="text-destructive">
             {t('admin.field.contestTypeMissing')}
@@ -915,7 +944,7 @@ function useContestColumns({
       sortKey: 'start_time',
       cell: ({ row }) => (
         <span className="text-muted-foreground">
-          {formatDateTime(row.original.start_time, locale)}
+          {format.dateTime(row.original.start_time, { timeZoneName: true })}
         </span>
       ),
     },
@@ -925,7 +954,7 @@ function useContestColumns({
       size: 180,
       cell: ({ row }) => (
         <span className="text-muted-foreground">
-          {formatDateTime(row.original.end_time, locale)}
+          {format.dateTime(row.original.end_time, { timeZoneName: true })}
         </span>
       ),
     },

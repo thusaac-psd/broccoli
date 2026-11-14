@@ -1,3 +1,4 @@
+import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
 import {
   getStatusLabel,
   type SubmissionStatus,
@@ -7,7 +8,7 @@ import type { BadgeProps } from '@broccoli/web-sdk/ui';
 
 type BadgeVariant = NonNullable<BadgeProps['variant']>;
 
-function getVerdictLabel(verdict: Verdict, t: (key: string) => string) {
+function getVerdictLabel(verdict: Verdict, t: I18nContextValue['t']) {
   const verdictText = verdictToString(verdict);
   switch (verdictText) {
     case 'Accepted':
@@ -56,7 +57,7 @@ function getVerdictVariant(verdict: Verdict): BadgeVariant {
 export function getVerdictBadge(
   verdict: Verdict | null | undefined,
   status: SubmissionStatus,
-  t: (key: string) => string,
+  t: I18nContextValue['t'],
 ): {
   label: string;
   variant: BadgeVariant;

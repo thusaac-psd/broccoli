@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
@@ -30,12 +30,15 @@ interface ManageUserRolesDialogProps {
   onOpenChange: (open: boolean) => void;
 }
 
+const NO_ROLES: string[] = [];
+
 export function ManageUserRolesDialog({
   user,
   open,
   onOpenChange,
 }: ManageUserRolesDialogProps) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
 
@@ -61,18 +64,19 @@ export function ManageUserRolesDialog({
     },
   });
 
-  const { data: roleOptions = [] } = useQuery({
-    queryKey: ['admin-role-options'],
-    enabled: open,
-    staleTime: 60_000,
-    queryFn: async () => {
-      const { data, error } = await apiClient.GET('/roles');
-      if (error) {
-        return [];
-      }
-      return data;
-    },
-  });
+  // Without the role list (not loaded, or not readable by this admin) the
+  // dialog takes a role name typed by hand instead.
+  const roleOptions =
+    useQuery({
+      queryKey: ['admin-role-options'],
+      enabled: open,
+      staleTime: 60_000,
+      queryFn: async () => {
+        const { data, error } = await apiClient.GET('/roles');
+        if (error) throw error;
+        return data;
+      },
+    }).data ?? NO_ROLES;
 
   const currentRoles = useMemo(
     () => userDetail?.roles ?? user?.roles ?? [],
@@ -112,7 +116,7 @@ export function ManageUserRolesDialog({
     setIsAssigning(false);
 
     if (error) {
-      toast.error(getErrorMessage(error, t('users.users.assignRoleError')));
+      toast.error(errorMessage(error, t('users.users.assignRoleError')));
       return;
     }
 

@@ -9,7 +9,7 @@
     "dev": "pnpm -r --parallel dev",
     "format": "pnpm prettier --write \"{.,packages/**,plugins/**}/*.{ts,tsx,css,scss,html,json,md}\"",
     "format:check": "pnpm prettier --check \"{.,packages/**,plugins/**}/*.{ts,tsx,css,scss,html,json,md}\"",
-    "lint": "pnpm eslint .",
+    "lint": "pnpm --filter @broccoli/web gen:language-packs && pnpm eslint .",
     "test": "node --experimental-strip-types --test $(find packages/web/src packages/web/plugins packages/web-sdk/src plugins -name '*.test.ts' -not -path '*/node_modules/*')",
     "typecheck": "pnpm -r typecheck",
     "prepare": "husky"

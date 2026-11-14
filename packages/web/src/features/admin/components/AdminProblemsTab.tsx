@@ -1,7 +1,7 @@
 import {
   type ApiClient,
-  getErrorMessage,
   useApiClient,
+  useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import type { ContestProblem } from '@broccoli/web-sdk/contest';
 import {
@@ -10,7 +10,11 @@ import {
   useAsyncDialog,
   useIdempotentRequest,
 } from '@broccoli/web-sdk/hooks';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import {
+  useFormat,
+  useIdentifierLabel,
+  useTranslation,
+} from '@broccoli/web-sdk/i18n';
 import type { ProblemSummary } from '@broccoli/web-sdk/problem';
 import {
   Badge,
@@ -30,7 +34,7 @@ import {
   DropdownMenuTrigger,
   useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
-import { formatDateTime, formatKibibytes } from '@broccoli/web-sdk/utils';
+import { formatKibibytes } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   FileCode,
@@ -157,17 +161,21 @@ function ProblemDialogForm({
   dialog: ReturnType<typeof useAsyncDialog>;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const queryClient = useQueryClient();
   const apiClient = useApiClient();
   const sendIdempotent = useIdempotentRequest();
   const [formData, setFormData] = useState(initial);
   const isEdit = problemId !== undefined;
 
-  const { data: attachments = [] } = useQuery({
-    queryKey: attachmentsQueryKey(problemId ?? 0),
-    queryFn: () => fetchAttachments(apiClient, problemId!),
-    enabled: isEdit,
-  });
+  // Offered to the content editor for embedding; the attachments section
+  // of the form reports its own load failure.
+  const attachments =
+    useQuery({
+      queryKey: attachmentsQueryKey(problemId ?? 0),
+      queryFn: () => fetchAttachments(apiClient, problemId!),
+      enabled: isEdit,
+    }).data ?? [];
 
   // `unsettled`: an earlier attempt to attach it is still running or was cut
   // off, so it may or may not be in the contest yet.
@@ -237,7 +245,7 @@ function ProblemDialogForm({
     }
     if (result.error && !isAlreadyDone(result.error)) {
       toast.error(
-        getErrorMessage(
+        errorMessage(
           result.error,
           isEdit ? t('admin.editError') : t('admin.createError'),
         ),
@@ -383,7 +391,9 @@ function useProblemColumns({
   onManageCheckerSource: (problem: ProblemSummary) => void;
   onConfigure: (problem: ProblemSummary) => void;
 }): DataTableColumn<ProblemSummary>[] {
-  const { t, locale } = useTranslation();
+  const { t } = useTranslation();
+  const label = useIdentifierLabel();
+  const format = useFormat();
   return [
     { accessorKey: 'id', header: '#', size: 60 },
     {
@@ -424,7 +434,9 @@ function useProblemColumns({
       header: t('admin.field.problemType'),
       size: 120,
       cell: ({ row }) => (
-        <Badge variant="outline">{row.original.problem_type}</Badge>
+        <Badge variant="outline">
+          {label('problemType', row.original.problem_type)}
+        </Badge>
       ),
     },
     {
@@ -433,7 +445,7 @@ function useProblemColumns({
       size: 120,
       cell: ({ row }) => (
         <span className="text-muted-foreground">
-          {row.original.checker_format}
+          {label('checker', row.original.checker_format)}
         </span>
       ),
     },
@@ -444,7 +456,7 @@ function useProblemColumns({
       sortKey: 'created_at',
       cell: ({ row }) => (
         <span className="text-muted-foreground">
-          {formatDateTime(row.original.created_at, locale)}
+          {format.dateTime(row.original.created_at)}
         </span>
       ),
     },
@@ -541,6 +553,7 @@ function useContestProblemColumns({
 
 export function AdminProblemsTab({ contestId }: { contestId?: number }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const [confirm, confirmDialog] = useConfirmDialog();
@@ -648,7 +661,7 @@ export function AdminProblemsTab({ contestId }: { contestId?: number }) {
       params: { path: { id: problemId } },
     });
     if (error || !data) {
-      toast.error(getErrorMessage(error, t('toast.problem.loadError')));
+      toast.error(errorMessage(error, t('toast.problem.loadError')));
       return undefined;
     }
     return data;

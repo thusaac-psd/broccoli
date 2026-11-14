@@ -1,4 +1,4 @@
-import { useAuth } from '@broccoli/web-sdk/auth';
+import { signInPath, useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -47,7 +47,7 @@ export default function CliAuthPage() {
   // Not signed in: delegate to the shared login page, returning here after.
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
-      navigate(`/login?next=${encodeURIComponent(returnTo)}`, {
+      navigate(signInPath(returnTo), {
         replace: true,
       });
     }
@@ -68,7 +68,7 @@ export default function CliAuthPage() {
     } catch {
       // Ignore logout failures; the redirect below still shows the login form.
     }
-    navigate(`/login?next=${encodeURIComponent(returnTo)}`, { replace: true });
+    navigate(signInPath(returnTo), { replace: true });
   };
 
   if (isLoading || !isAuthenticated) {

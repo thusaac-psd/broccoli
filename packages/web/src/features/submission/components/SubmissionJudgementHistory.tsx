@@ -1,13 +1,17 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   SUBMISSION_REJUDGE,
   SYSTEM_ADMIN,
 } from '@broccoli/web-sdk/permissions';
 import type { SubmissionJudgement } from '@broccoli/web-sdk/submission';
-import { Badge, Button, TextPreview } from '@broccoli/web-sdk/ui';
-import { formatRelativeDatetime } from '@broccoli/web-sdk/utils';
+import {
+  Badge,
+  Button,
+  QueryErrorState,
+  TextPreview,
+} from '@broccoli/web-sdk/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Check,
@@ -26,6 +30,8 @@ import { getVerdictBadge } from '../utils/verdict';
 import { SubmissionTestCases } from './SubmissionTestCases';
 import { testCaseDiffStatus } from './testCaseDiff';
 
+const NO_JUDGEMENTS: SubmissionJudgement[] = [];
+
 const PRESERVE_TARGET_WORKER = '__preserve__';
 
 interface Props {
@@ -34,6 +40,7 @@ interface Props {
 
 export function SubmissionJudgementHistory({ submissionId }: Props) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const { user } = useAuth();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
@@ -54,7 +61,7 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
   const { data: systemOverview } = useSystemOverview({ enabled: canPinWorker });
   const liveWorkers = systemOverview?.workers ?? [];
 
-  const { data: judgements = [], isLoading } = useQuery({
+  const judgementsQuery = useQuery({
     queryKey: ['submission-judgements', submissionId],
     enabled: canViewHistory,
     queryFn: async () => {
@@ -68,6 +75,8 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
       return data;
     },
   });
+  const isLoading = judgementsQuery.isLoading;
+  const judgements = judgementsQuery.data ?? NO_JUDGEMENTS;
 
   const currentJudgement = useMemo(
     () => judgements.find((judgement) => judgement.is_current) ?? null,
@@ -118,7 +127,7 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
       await invalidate();
     },
     onError: (error) => {
-      toast.error(getErrorMessage(error, t('submissionDetail.rejudgeError')));
+      toast.error(errorMessage(error, t('submissionDetail.rejudgeError')));
     },
   });
 
@@ -138,7 +147,7 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
       await invalidate();
     },
     onError: (error) => {
-      toast.error(getErrorMessage(error, t('submissionDetail.applyError')));
+      toast.error(errorMessage(error, t('submissionDetail.applyError')));
     },
   });
 
@@ -157,7 +166,7 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
       await invalidate();
     },
     onError: (error) => {
-      toast.error(getErrorMessage(error, t('submissionDetail.discardError')));
+      toast.error(errorMessage(error, t('submissionDetail.discardError')));
     },
   });
 
@@ -218,6 +227,15 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
         )}
       </div>
 
+      {judgementsQuery.isError && !judgementsQuery.data && (
+        <QueryErrorState
+          className="py-6"
+          error={judgementsQuery.error}
+          retry={() => void judgementsQuery.refetch()}
+          retrying={judgementsQuery.isFetching}
+          failure={t('submissionDetail.versionsLoadFailed')}
+        />
+      )}
       <div className="mt-4 divide-y">
         {judgements.map((judgement) => (
           <JudgementRow
@@ -260,6 +278,7 @@ function JudgementRow({
   onDiscard: () => void;
 }) {
   const { t } = useTranslation();
+  const format = useFormat();
   const { label, variant } = getVerdictBadge(
     judgement.verdict ?? null,
     judgement.status,
@@ -322,7 +341,7 @@ function JudgementRow({
           </Badge>
         )}
         <span className="text-xs text-muted-foreground">
-          {formatRelativeDatetime(judgement.created_at, t)}
+          {format.relative(judgement.created_at)}
         </span>
         {judgement.score != null && (
           <span className="ml-auto font-mono tabular-nums">

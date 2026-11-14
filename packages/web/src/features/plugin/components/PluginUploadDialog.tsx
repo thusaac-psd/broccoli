@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { PluginArchiveSummary } from '@broccoli/web-sdk/plugin';
 import {
@@ -55,6 +55,7 @@ export function PluginUploadDialog({
   onPublished: (pluginId: string) => void;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -91,7 +92,7 @@ export function PluginUploadDialog({
         },
       );
       if (error || !data) {
-        setError(getErrorMessage(error, t('plugins.upload.inspectError')));
+        setError(errorMessage(error, t('plugins.upload.inspectError')));
       } else {
         setSummary(data);
       }
@@ -110,7 +111,7 @@ export function PluginUploadDialog({
         bodySerializer: () => archiveForm(file, replaces),
       });
       if (error || !data) {
-        setError(getErrorMessage(error, t('plugins.upload.error')));
+        setError(errorMessage(error, t('plugins.upload.error')));
         return;
       }
       toast.success(

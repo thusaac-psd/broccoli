@@ -6,12 +6,12 @@ import {
   idempotencyOutcome,
   unsettledMessageKey,
 } from '@broccoli/web-sdk/hooks';
+import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
 import { toast } from 'sonner';
 
-type Translate = (
-  key: string,
-  params?: Record<string, string | number>,
-) => string;
+import type { MessageKey } from './i18n/catalog.ts';
+
+type Translate = I18nContextValue['t'];
 
 export interface UnsettledOptions {
   /**
@@ -23,7 +23,7 @@ export interface UnsettledOptions {
    * Message for an unknown outcome, ideally saying where to check. Defaults
    * to a generic one.
    */
-  outcomeUnknownKey?: string;
+  outcomeUnknownKey?: MessageKey;
 }
 
 /**

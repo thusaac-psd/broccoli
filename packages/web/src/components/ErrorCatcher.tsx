@@ -2,7 +2,6 @@ import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import {
   Activity,
-  AlertTriangle,
   Ban,
   CloudOff,
   Coffee,
@@ -17,15 +16,30 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router';
 
+/** The HTTP statuses this page has a title and description for. */
+type ErrorPageCode =
+  | '400'
+  | '401'
+  | '403'
+  | '404'
+  | '408'
+  | '418'
+  | '429'
+  | '500'
+  | '501'
+  | '502'
+  | '503'
+  | '504';
+
 interface ErrorPageProps {
-  code: number | string;
+  code: ErrorPageCode;
 }
 
 export function ErrorCatcher({ code }: ErrorPageProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
 
-  const Iconmap: Record<string, LucideIcon> = {
+  const ICONS: Record<ErrorPageCode, LucideIcon> = {
     '400': FileWarning,
     '401': Lock,
     '403': Ban,
@@ -38,18 +52,10 @@ export function ErrorCatcher({ code }: ErrorPageProps) {
     '502': CloudOff,
     '503': ServerCrash,
     '504': Timer,
-    default: AlertTriangle,
   };
-  const Icon = Iconmap[String(code)] || Iconmap['default'];
-
-  const getErrorContent = (code: string | number) => {
-    return {
-      title: t(`error.title.${code}`),
-      desc: t(`error.desc.${code}`),
-    };
-  };
-
-  const { title, desc } = getErrorContent(code);
+  const Icon = ICONS[code];
+  const title = t(`error.title.${code}`);
+  const desc = t(`error.desc.${code}`);
 
   return (
     <div className="flex flex-col items-center justify-center min-h-[60vh] px-4 text-center space-y-6">
