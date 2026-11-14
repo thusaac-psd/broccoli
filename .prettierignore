@@ -1,6 +1,9 @@
 build
 coverage
 dist
+# Playwright's output of a failed run.
+test-results
+playwright-report
 
 node_modules
 pnpm-lock.yaml
