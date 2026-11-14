@@ -24,8 +24,7 @@ use crate::upload_limits::{
     LARGE_UPLOAD_LIMIT_BYTES, LARGE_UPLOAD_LIMIT_MIB,
 };
 use crate::utils::filename::{is_sample_directory, split_dir_filename};
-use crate::utils::test_case_body::prepare_test_case_body;
-use crate::utils::text::reject_nul;
+use crate::utils::test_case_body::{TestCaseFile, prepare_test_case_file};
 
 use super::find_problem_for_update;
 use super::test_cases::{delete_unjudged_test_cases, next_test_case_position, tc_to_list_item};
@@ -44,7 +43,7 @@ enum OnExistingLabel {
     tag = "Test Cases",
     operation_id = "uploadTestCases",
     summary = "Upload test cases from a ZIP file",
-    description = "Bulk-creates test cases from a ZIP archive. Customizable file matching formats using `*` wildcard. A file matching both formats belongs to the more specific one (more literal characters, e.g. `*.a` over `*`); equally specific overlaps are rejected. Requires `problem:edit` permission. Files under `sample/` are marked as samples. Decompression limits: 1 GB per file, 4 GB total. Body limit: 1 GB.",
+    description = "Bulk-creates test cases from a ZIP archive. Customizable file matching formats using `*` wildcard. A file matching both formats belongs to the more specific one (more literal characters, e.g. `*.a` over `*`); equally specific overlaps are rejected. Requires `problem:edit` permission. Files under `sample/` are marked as samples. Files are bytes: one that is not UTF-8 text, holds a NUL or is 1 MiB or more is stored as a blob, byte for byte. Decompression limits: 1 GB per file, 4 GB total. Body limit: 1 GB.",
     params(("id" = i32, Path, description = "Problem ID")),
     request_body(content_type = "multipart/form-data", content = UploadTestCasesRequest),
     responses(
@@ -71,7 +70,18 @@ pub async fn upload_test_cases(
         ));
     }
 
-    let entries = parse_zip_test_cases(&data.file, &data.input_format, &data.output_format)?;
+    // Unpacking is blocking file I/O and decompression: off the async
+    // runtime, each entry into its own temporary file, so memory stays
+    // bounded whatever the archive holds.
+    let entries = {
+        let archive = data.file.contents;
+        let (input_format, output_format) = (data.input_format.clone(), data.output_format.clone());
+        tokio::task::spawn_blocking(move || {
+            parse_zip_test_cases(archive.as_file(), &input_format, &output_format)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("ZIP unpacking task failed: {e}")))??
+    };
     if entries.is_empty() {
         return Err(AppError::Validation(
             "ZIP contains no valid input/output file pairs matching the specified formats".into(),
@@ -116,9 +126,8 @@ pub async fn upload_test_cases(
 
     for entry in entries {
         let score = auto_score_for_uploaded_entry(&entry, &auto_scores);
-        let input_body = prepare_test_case_body(entry.input, state.blob_store.clone()).await?;
-        let output_body =
-            prepare_test_case_body(entry.expected_output, state.blob_store.clone()).await?;
+        let input_body = prepare_test_case_file(entry.input, &*state.blob_store).await?;
+        let output_body = prepare_test_case_file(entry.expected_output, &*state.blob_store).await?;
         if let Some(on_existing) = on_existing_label
             && let Some(existing) = existing_cases.remove(&entry.label)
         {
@@ -197,8 +206,8 @@ pub fn upload_body_limit() -> usize {
 
 struct ZipTestEntry {
     label: String,
-    input: String,
-    expected_output: String,
+    input: TestCaseFile,
+    expected_output: TestCaseFile,
     is_sample: bool,
     sort_key: (u8, String),
 }
@@ -298,16 +307,15 @@ fn classify_zip_entry<'a>(
 }
 
 fn parse_zip_test_cases(
-    data: &[u8],
+    archive: &std::fs::File,
     input_format: &str,
     output_format: &str,
 ) -> Result<Vec<ZipTestEntry>, AppError> {
-    let cursor = std::io::Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(cursor)
+    let mut archive = zip::ZipArchive::new(archive)
         .map_err(|e| AppError::Validation(format!("Invalid ZIP archive: {e}")))?;
 
-    let mut in_files: BTreeMap<String, (String, bool)> = BTreeMap::new();
-    let mut ans_files: BTreeMap<String, String> = BTreeMap::new();
+    let mut in_files: BTreeMap<String, (TestCaseFile, bool)> = BTreeMap::new();
+    let mut ans_files: BTreeMap<String, TestCaseFile> = BTreeMap::new();
     let mut total_decompressed: u64 = 0;
 
     for i in 0..archive.len() {
@@ -335,27 +343,24 @@ fn parse_zip_test_cases(
             continue;
         };
 
-        let mut buf = Vec::new();
-        file.take(MAX_DECOMPRESSED_FILE_SIZE + 1)
-            .read_to_end(&mut buf)
+        let mut body = tempfile::NamedTempFile::new()
+            .map_err(|e| AppError::Internal(format!("Failed to create a temporary file: {e}")))?;
+        let size = std::io::copy(&mut file.take(MAX_DECOMPRESSED_FILE_SIZE + 1), &mut body)
             .map_err(|e| AppError::Validation(format!("Failed to read '{name}': {e}")))?;
 
-        if buf.len() as u64 > MAX_DECOMPRESSED_FILE_SIZE {
+        if size > MAX_DECOMPRESSED_FILE_SIZE {
             return Err(AppError::Validation(format!(
                 "File '{name}' exceeds maximum decompressed size of {LARGE_UPLOAD_LIMIT_MIB}MB"
             )));
         }
 
-        total_decompressed += buf.len() as u64;
+        total_decompressed += size;
         if total_decompressed > MAX_TOTAL_DECOMPRESSED_SIZE {
             return Err(AppError::Validation(format!(
                 "Total decompressed ZIP content exceeds {BULK_TEST_CASE_MAX_TOTAL_DECOMPRESSED_MIB}MB limit"
             )));
         }
-
-        let content = String::from_utf8(buf)
-            .map_err(|_| AppError::Validation(format!("File '{name}' is not valid UTF-8")))?;
-        reject_nul(&format!("File '{name}'"), &content)?;
+        let content = TestCaseFile { file: body, size };
 
         match role {
             ZipEntryRole::Input(label) => {

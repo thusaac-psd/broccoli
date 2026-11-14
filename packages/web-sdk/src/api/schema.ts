@@ -1765,7 +1765,7 @@ export interface paths {
     put?: never;
     /**
      * Upload test cases from a ZIP file
-     * @description Bulk-creates test cases from a ZIP archive. Customizable file matching formats using `*` wildcard. A file matching both formats belongs to the more specific one (more literal characters, e.g. `*.a` over `*`); equally specific overlaps are rejected. Requires `problem:edit` permission. Files under `sample/` are marked as samples. Decompression limits: 1 GB per file, 4 GB total. Body limit: 1 GB.
+     * @description Bulk-creates test cases from a ZIP archive. Customizable file matching formats using `*` wildcard. A file matching both formats belongs to the more specific one (more literal characters, e.g. `*.a` over `*`); equally specific overlaps are rejected. Requires `problem:edit` permission. Files under `sample/` are marked as samples. Files are bytes: one that is not UTF-8 text, holds a NUL or is 1 MiB or more is stored as a blob, byte for byte. Decompression limits: 1 GB per file, 4 GB total. Body limit: 1 GB.
      */
     post: operations['uploadTestCases'];
     delete?: never;
@@ -4596,7 +4596,10 @@ export interface components {
     /** @enum {string} */
     UploadTestCasesMergeStrategy: 'abort' | 'skip' | 'overwrite' | 'replace';
     UploadTestCasesRequest: {
-      /** Format: binary */
+      /**
+       * Format: binary
+       * @description Streamed to a temporary file, never held in memory.
+       */
       file: Blob;
       /** @example input_*.txt */
       input_format: string;
