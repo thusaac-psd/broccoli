@@ -144,10 +144,9 @@ long ago the owner last showed it was alive.
   runs, because the refresh keeps it under 30 s idle. A crashed worker's tasks
   are redelivered 30 to 35 s after its last refresh.
 
-This replaces the worker dedup claims (`broccoli:dedup:<task>`) and the
-dead-worker operation reaper. Both existed because the old broker had no PEL:
-a popped task lived in a side list that nothing watched. With a PEL, the group
-delivers each entry to one consumer at a time, and redelivery happens only
+The PEL is the only claim on a task: there are no per-task dedup keys and no
+reaper for dead workers' operations. The group delivers each entry to one
+consumer at a time, and redelivery happens only
 through the idle threshold, so a worker that is alive keeps its task and a
 worker that is not loses it. Duplicate execution remains possible in two cases,
 both harmless: a worker stalled for more than 30 s (its late result reaches no
