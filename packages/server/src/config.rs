@@ -14,8 +14,8 @@ pub struct DatabaseConfig {
     #[serde(default = "default_database_url")]
     pub url: String,
     /// Server-side `statement_timeout` for every pooled connection, in seconds
-    /// (`0` disables it). Boot-time schema sync, migrations and seeding run on a
-    /// separate unbounded session. See `common::db`.
+    /// (`0` disables it). Boot-time migrations and seeding run on a separate
+    /// unbounded session. See `common::db`.
     #[serde(default = "common::db::default_statement_timeout_secs")]
     pub statement_timeout_secs: u64,
     /// Send server-side TCP keepalive settings on every connection. Turn this

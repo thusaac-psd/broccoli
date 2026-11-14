@@ -336,14 +336,18 @@ async fn end_to_end_concurrent_compile_runs_once() {
     let ((redis_url, _redis_container), (pg_url_str, _pg_container)) =
         tokio::join!(redis_url(), pg_url());
 
-    // Shared DB -> `DatabaseTaskCacheStore::ensure_table` creates the schema.
+    // Shared DB. The server's migrations own `task_cache`; this test creates
+    // the table from its entity.
     let db: common::db::DatabaseConnection = Database::connect(&pg_url_str)
         .await
         .expect("connect Postgres")
         .into();
-    DatabaseTaskCacheStore::ensure_table(&db)
-        .await
-        .expect("ensure task_cache table");
+    {
+        use sea_orm::ConnectionTrait;
+        let table = sea_orm::Schema::new(db.get_database_backend())
+            .create_table_from_entity(worker::models::operation::task_cache::task_cache::Entity);
+        db.execute(&table).await.expect("create task_cache");
+    }
     let task_cache: Arc<dyn TaskCacheStore> = Arc::new(DatabaseTaskCacheStore::new(db.clone()));
 
     // Shared filesystem-backed BlobStore. Per-handler local cache_dirs sit

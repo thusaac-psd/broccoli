@@ -371,22 +371,11 @@ impl OperationTaskExecutor {
             }
         };
 
-        let task_cache: Box<dyn TaskCacheStore> = match DatabaseTaskCacheStore::ensure_table(
-            &db_for_cache,
-        )
-        .await
-        {
-            Ok(()) => {
-                info!("DatabaseTaskCacheStore initialized");
-                Box::new(MemoizedTaskCacheStore::new(DatabaseTaskCacheStore::new(
-                    db_for_cache,
-                )))
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to ensure task_cache table, using NoopTaskCacheStore");
-                Box::new(NoopTaskCacheStore)
-            }
-        };
+        // The server's migrations create `task_cache`. Until a server has
+        // migrated a fresh database, a lookup fails and the step simply runs.
+        let task_cache: Box<dyn TaskCacheStore> = Box::new(MemoizedTaskCacheStore::new(
+            DatabaseTaskCacheStore::new(db_for_cache),
+        ));
 
         Ok((file_cacher, task_cache))
     }

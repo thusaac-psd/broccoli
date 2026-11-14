@@ -324,7 +324,6 @@ mod grants {
     /// roles, other plugins' host-held state, and host machinery.
     const HIDDEN: &[&str] = &[
         "blob_data",
-        "broccoli_schema_stamp",
         "dead_letter_message",
         "device_authorization",
         "idempotency_key",
@@ -341,6 +340,7 @@ mod grants {
         "seaql_migrations",
         "seeded_role_permission",
         "submission_feedback",
+        "task_cache",
         "user_role",
     ];
 
@@ -353,12 +353,8 @@ mod grants {
             .collect()
     }
 
-    /// The host's relations in `public`, the blob store's table included,
-    /// leaving out what an extension owns.
+    /// The host's relations in `public`, leaving out what an extension owns.
     async fn host_relations(f: &Fixture) -> Vec<String> {
-        common::storage::database::DatabaseBlobStore::ensure_table(&f.app)
-            .await
-            .expect("blob table");
         strings(
             &f.app,
             "SELECT c.relname::text FROM pg_class c \
