@@ -560,7 +560,7 @@ async fn admin_fan_out_to_a_contest_cannot_name_another_contest_type() {
     let admin_token = app
         .create_user_with_role("rjv_fanout_type_admin", "pass1234", "admin")
         .await;
-    let problem_id = insert_public_problem(&app, "Fan-out Type Problem").await;
+    let problem_id = app.insert_public_problem("Fan-out Type Problem").await;
     let contest_id = app.create_contest(&admin_token, "C", true, true).await;
     app.add_problem_to_contest(contest_id, problem_id, &admin_token)
         .await;
