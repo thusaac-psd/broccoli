@@ -83,22 +83,25 @@ pub async fn init_db_with_max_connections(
 /// `max_connections`.
 ///
 /// The plugin pools follow admission
-/// ([`plugin_core::admission::Capacity`]). Plugin SQL host functions are
-/// parked: a call waiting for a connection or for Postgres holds no CPU token,
-/// so more calls can be in plugin SQL at once than there are tokens, up to
-/// the admitted-call caps, and those run to hundreds. No database has a
-/// connection for each, so the pools are sized from the tokens instead: one
-/// raw-SQL connection per token, one host function connection per two, so plugin
-/// statements reach Postgres about as concurrently as guests compute. Every
-/// admitted call is still served: a call that finds the pool busy waits,
-/// parked, and the plugin pools wait for a connection as long as
+/// ([`plugin_core::admission::Capacity`]). Plugin host functions are parked:
+/// a call waiting for a connection or for Postgres holds no CPU token, so more
+/// calls can be in the database at once than there are tokens, up to the
+/// admitted-call caps, and those run to hundreds. No database has a connection
+/// for each, so both plugin pools are sized from the tokens, by one rule: one
+/// host function connection per token and one raw plugin SQL permit per two.
+/// The host function pool carries the judging path (every
+/// `host.submission.*` and `host.code_run.*` write, the evaluate-batch reads)
+/// and plugin provisioning; raw plugin SQL (scoreboards, submission gates)
+/// runs far less per judged submission. Every admitted call is still served:
+/// a call that finds the pool busy waits, parked, as long as
 /// `plugin.call_timeout_secs` (see [`plugin_pool_spec`]), so the pool never
 /// fails a call that its own deadline would have let finish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoolSizes {
     /// Handlers, the dispatcher and background loops.
     pub main: u32,
-    /// Raw plugin SQL (the restricted pool).
+    /// Raw plugin SQL: the permits all plugin pools share (see
+    /// [`crate::plugin_db`]).
     pub plugin: u32,
     /// The host functions' own SQL (the host function pool).
     pub host_fn: u32,
@@ -112,8 +115,8 @@ pub const SERVER_UNPOOLED_CONNECTIONS: u32 = 2;
 /// behind the dispatcher.
 const POOL_FLOOR: PoolSizes = PoolSizes {
     main: 8,
-    plugin: 2,
-    host_fn: 1,
+    plugin: 1,
+    host_fn: 2,
 };
 
 /// The other nodes sharing the database, as their liveness keys show them
@@ -144,8 +147,8 @@ impl PoolSizes {
         let clamp = |n: usize, lo: u32, hi: u32| u32::try_from(n).unwrap_or(hi).clamp(lo, hi);
         Self {
             main: clamp(cpus.saturating_mul(4), 16, 40),
-            plugin: clamp(plugin_tokens, 4, 16),
-            host_fn: clamp(plugin_tokens / 2, 2, 8),
+            plugin: clamp(plugin_tokens / 2, 2, 8),
+            host_fn: clamp(plugin_tokens, 4, 16),
         }
     }
 
@@ -400,9 +403,9 @@ mod pool_size_tests {
     #[test]
     fn pools_grow_with_the_host_and_stay_within_a_fixed_budget() {
         let small = PoolSizes::derive(2, 2);
-        assert_eq!((small.main, small.plugin, small.host_fn), (16, 4, 2));
+        assert_eq!((small.main, small.plugin, small.host_fn), (16, 2, 4));
         let large = PoolSizes::derive(128, 256);
-        assert_eq!((large.main, large.plugin, large.host_fn), (40, 16, 8));
+        assert_eq!((large.main, large.plugin, large.host_fn), (40, 8, 16));
         assert_eq!(large.connections(), 66);
     }
 
@@ -424,7 +427,11 @@ mod pool_size_tests {
         assert_eq!(wanted.connections(), 16 + 16 + 8 + 2);
         let fitted = wanted.fit(30).expect("above the floor");
         assert!(fitted.connections() <= 30, "{fitted:?}");
-        assert!(fitted.main >= POOL_FLOOR.main && fitted.plugin >= POOL_FLOOR.plugin);
+        assert!(
+            fitted.main >= POOL_FLOOR.main
+                && fitted.plugin >= POOL_FLOOR.plugin
+                && fitted.host_fn >= POOL_FLOOR.host_fn
+        );
         assert_eq!(wanted.fit(POOL_FLOOR.connections() - 1), None);
         let tight = wanted
             .fit(POOL_FLOOR.connections())
