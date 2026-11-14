@@ -33,6 +33,8 @@ const CANCEL_RETRY_MAX: Duration = Duration::from_secs(1);
 struct Entry {
     cancel: CancelHandle,
     fired: Arc<AtomicBool>,
+    /// When the call's deadline passes.
+    deadline: Instant,
     /// The gap before the next repeat of the cancel.
     retry: Duration,
 }
@@ -79,17 +81,44 @@ impl Deadlines {
                 continue;
             }
             state.heap.pop();
-            if let Some(entry) = state.live.get_mut(&id) {
-                entry.fired.store(true, Ordering::Release);
-                // Fails only once extism's timer thread is gone, and then
-                // there is no running guest left to cancel.
-                let _ = entry.cancel.cancel();
-                let retry = entry.retry;
-                entry.retry = (retry * 2).min(CANCEL_RETRY_MAX);
-                state.heap.push(Reverse((now + retry, id)));
-            }
+            fire(&mut state, id, now);
         }
     }
+}
+
+/// Fire the deadline of call `id` at `now`: cancel its guest and schedule the
+/// next repeat of the cancel.
+fn fire(state: &mut State, id: u64, now: Instant) {
+    if let Some(entry) = state.live.get_mut(&id) {
+        entry.fired.store(true, Ordering::Release);
+        // Fails only once extism's timer thread is gone, and then there is no
+        // running guest left to cancel.
+        let _ = entry.cancel.cancel();
+        let retry = entry.retry;
+        entry.retry = (retry * 2).min(CANCEL_RETRY_MAX);
+        state.heap.push(Reverse((now + retry, id)));
+    }
+}
+
+/// Fire, now, the deadline of every watched call whose deadline is
+/// `deadline`, as if it had passed: lets a test put a call past its deadline
+/// at a point of the test's choosing instead of racing a clock.
+#[cfg(test)]
+pub(crate) fn expire(deadline: Instant) {
+    let deadlines = *DEADLINES;
+    let mut state = deadlines.state.lock();
+    let ids: Vec<u64> = state
+        .live
+        .iter()
+        .filter(|(_, entry)| entry.deadline == deadline)
+        .map(|(id, _)| *id)
+        .collect();
+    let now = Instant::now();
+    for id in ids {
+        fire(&mut state, id, now);
+    }
+    drop(state);
+    deadlines.wake.notify_one();
 }
 
 /// Cancels the guest behind `cancel` at `deadline` while alive. Dropped once
@@ -114,6 +143,7 @@ pub(crate) fn watch(cancel: CancelHandle, deadline: Instant) -> DeadlineGuard {
         Entry {
             cancel,
             fired: fired.clone(),
+            deadline,
             retry: CANCEL_RETRY,
         },
     );
