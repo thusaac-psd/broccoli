@@ -5,3 +5,5 @@
 'identifier.checker.tokens-float' = '逐词比较（浮点误差）'
 'identifier.checker.testlib' = 'Testlib 校验器'
 'identifier.checker.none' = '不校验'
+'plugin.standard-checkers.name' = '标准校验器'
+'plugin.standard-checkers.description' = '标准输出校验器：完全匹配、逐行、逐词与 testlib 比较。'

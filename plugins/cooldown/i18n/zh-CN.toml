@@ -23,3 +23,5 @@
 
 # Why a submission was refused, by the rejection's code
 'apiError.COOLDOWN_ACTIVE' = '请再等待 {remaining_seconds} 秒后提交。'
+'plugin.cooldown.name' = '提交冷却'
+'plugin.cooldown.description' = '限制选手两次提交之间的最短间隔。'

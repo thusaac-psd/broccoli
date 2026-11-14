@@ -88,3 +88,5 @@
 'print.stations.col.version' = '版本'
 'print.stations.col.lastSeen' = '最后活跃'
 'print.stations.version' = 'v{version}'
+'plugin.print.name' = '打印'
+'plugin.print.description' = '比赛中按需打印代码：打印队列与打印站。'

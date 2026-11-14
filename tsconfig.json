@@ -5,6 +5,11 @@
     "allowJs": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["eslint.config.js", "prettier.config.ts", "eslint-rules"],
+  "include": [
+    "eslint.config.js",
+    "prettier.config.ts",
+    "eslint-rules",
+    "plugins/*.test.ts"
+  ],
   "exclude": ["node_modules", "dist"]
 }

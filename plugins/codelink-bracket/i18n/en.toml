@@ -274,3 +274,6 @@
 'codelink-bracket.notifications.reconnecting' = 'Connecting to game reminders…'
 'codelink-bracket.notifications.error' = 'The desktop notification could not be shown. Check your browser and system notification settings.'
 'codelink-bracket.notifications.view' = 'View my match'
+'plugin.codelink-bracket.name' = 'Codelink bracket'
+'plugin.codelink-bracket.description' = 'Codelink afternoon knockout: single elimination with problem sets ordered by the opponents.'
+'identifier.contestType.codelink-bracket' = 'Codelink bracket'

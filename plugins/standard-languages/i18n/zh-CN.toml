@@ -8,3 +8,5 @@
 'lang.go' = 'Go'
 'lang.pascal' = 'Pascal'
 'lang.javascript' = 'JavaScript'
+'plugin.standard-languages.name' = '标准语言'
+'plugin.standard-languages.description' = '评测镜像自带的语言：C、C++、Python 3、Java、Kotlin、Rust、Go、Pascal 与 JavaScript。'

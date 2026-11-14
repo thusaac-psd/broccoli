@@ -1246,3 +1246,4 @@
 'apiError.STUCK_JOB' = "评测耗时过长，已被终止。"
 'apiError.DISPATCH_RETRY_EXHAUSTED' = "多次尝试后仍无法开始评测。"
 'apiError.SUPERSEDED' = "此评测已被更新的评测取代。"
+'plugin.broccoli-zh-cn.name' = '简体中文'

@@ -88,3 +88,5 @@
 'print.stations.col.version' = 'Version'
 'print.stations.col.lastSeen' = 'Last seen'
 'print.stations.version' = 'v{version}'
+'plugin.print.name' = 'Printing'
+'plugin.print.description' = 'On-demand code printing for contests: a print queue and print stations.'

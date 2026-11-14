@@ -2,6 +2,10 @@ name = "communication-evaluator"
 version = "0.1.0"
 description = "CMS-style communication evaluator — manager + N contestant processes via FIFOs"
 
+[translations]
+en = "i18n/en.toml"
+zh-CN = "i18n/zh-CN.toml"
+
 [server]
 entry = "communication_evaluator.wasm"
 permissions = ["logger", "plugin:register", "operations:dispatch", "language:resolve", "config:read"]

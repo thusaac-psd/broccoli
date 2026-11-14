@@ -224,3 +224,5 @@
 
 # Names the host shows for what this plugin registers
 'identifier.contestType.ioi' = 'IOI'
+'plugin.ioi.name' = 'IOI'
+'plugin.ioi.description' = 'IOI-style contests: subtask scoring, submission modes and tokens.'
