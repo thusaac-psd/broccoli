@@ -46,7 +46,7 @@ use axum::response::{IntoResponse, Response};
 use opentelemetry::KeyValue;
 use tower::Service;
 use tower_http::services::{ServeDir, ServeFile};
-use tower_http::set_header::SetResponseHeader;
+use tower_http::set_header::{SetResponseHeader, SetResponseHeaderLayer};
 use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use tracing::{info, info_span};
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
@@ -290,10 +290,22 @@ fn frontend_assets_service(
     Error = std::convert::Infallible,
     Future: Send + 'static,
 > {
+    // The web build writes `.br` and `.gz` copies of its assets: a browser
+    // that accepts one gets it as is, compressed once at build time instead of
+    // on every request. The bytes then depend on `Accept-Encoding`, which a
+    // shared cache must know.
     tower::ServiceBuilder::new()
         .map_response(normalize_javascript_content_type)
         .map_response(cache_hashed_asset_forever)
-        .service(ServeDir::new(frontend_dist.as_ref().join("assets")))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::VARY,
+            HeaderValue::from_static("accept-encoding"),
+        ))
+        .service(
+            ServeDir::new(frontend_dist.as_ref().join("assets"))
+                .precompressed_br()
+                .precompressed_gzip(),
+        )
 }
 
 /// Host assets under `/assets/*` are content-hashed, and the web build's
@@ -710,6 +722,59 @@ mod tests {
                 .is_none(),
             "a missing chunk must not be cached"
         );
+    }
+
+    #[tokio::test]
+    async fn frontend_assets_service_sends_the_precompressed_copy_a_browser_accepts() {
+        let dist = tempfile::tempdir().unwrap();
+        let assets = dist.path().join("assets");
+        std::fs::create_dir(&assets).unwrap();
+        std::fs::write(assets.join("main.js"), "plain").unwrap();
+        std::fs::write(assets.join("main.js.br"), "brotli").unwrap();
+        std::fs::write(assets.join("main.js.gz"), "gzip").unwrap();
+        let service = frontend_assets_service(dist.path());
+
+        for (accept, encoding, body) in [
+            ("gzip, deflate, br", Some("br"), "brotli"),
+            ("gzip", Some("gzip"), "gzip"),
+            ("identity", None, "plain"),
+        ] {
+            let response = service
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/main.js")
+                        .header(axum::http::header::ACCEPT_ENCODING, accept)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .into_response();
+
+            assert_eq!(response.status(), StatusCode::OK, "{accept}");
+            let headers = response.headers();
+            assert_eq!(
+                headers
+                    .get(axum::http::header::CONTENT_ENCODING)
+                    .map(|v| v.to_str().unwrap()),
+                encoding,
+                "{accept}"
+            );
+            assert_eq!(
+                headers[axum::http::header::CONTENT_TYPE],
+                "application/javascript"
+            );
+            assert_eq!(
+                headers[axum::http::header::CACHE_CONTROL],
+                "public, max-age=31536000, immutable"
+            );
+            assert_eq!(headers[axum::http::header::VARY], "accept-encoding");
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(bytes, body.as_bytes(), "{accept}");
+        }
     }
 
     #[tokio::test]
