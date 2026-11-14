@@ -244,11 +244,19 @@ binaries warn about every key they do not read.
   follows expand/contract (see `release/docs/upgrade.md`).
 - When changing plugin execution behavior, check both manifest-level permissions
   and host-side registration/resolution.
+- Work of a contest type whose every provider is disabled fleet-wide is parked,
+  not failed: the claim, the system-error retry and the stuck detector all skip
+  or hand it back through one predicate (`plugin_lifecycle::contest_type_open`),
+  and it resumes when a provider is enabled. A new scan that hands out or
+  retries judging work uses that predicate too.
 - A plugin route declares its access in `plugin.toml` (`access`, `permission`,
   `contest`, `problem`); the proxy resolves the route's contest or problem
   through the visibility kernel and checks the token's freshness before the
   plugin runs, so a handler reads `req.contest()` / `req.problem_id()` instead
   of checking access itself.
+- A plugin's own words reach the UI in the user's language through its pack: a
+  `validate` refusal carries a key under the plugin's id (`ioi.config.…`) with
+  its params, and the host drops any other key so the message shows.
 - The host owns no plugin's records: what it stores or serves for plugins it
   finds through a manifest declaration (for example the problem-scoped config
   namespace a checker plugin marks `checker_source`), never through a plugin id.
@@ -295,7 +303,10 @@ on host and guest and nothing notices. Rules:
 - Run the narrowest relevant command first: `cargo test -p <crate>`, or one test
   file with `cargo test -p server --test integration <name>`.
 - Server tests start Postgres and Redis through testcontainers, so they need
-  Docker; plugin-loading tests need `just build-plugins` first.
+  Docker; plugin-loading tests need `just build-plugins` first. The e2e harness
+  builds the worker's platform tools (`broccoli-compare`) into
+  `target/e2e-tools` itself, so `E2E_SANDBOX_BACKEND=mock` is all a mock run
+  needs.
 - For frontend changes, run `pnpm lint`, `pnpm test` and the affected package's
   build or `pnpm typecheck`.
 - For plugin changes, run `just test-plugins` (or
