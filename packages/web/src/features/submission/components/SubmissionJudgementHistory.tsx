@@ -1,4 +1,8 @@
-import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
+import {
+  errorCodeKey,
+  useApiClient,
+  useErrorMessage,
+} from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
@@ -278,13 +282,18 @@ function JudgementRow({
   onApply: () => void;
   onDiscard: () => void;
 }) {
-  const { t } = useTranslation();
+  const { t, lookup } = useTranslation();
   const format = useFormat();
   const { label, variant } = getVerdictBadge(
     judgement.verdict ?? null,
     judgement.status,
     t,
   );
+
+  // The code's translation, when the packs have one.
+  const errorCodeText = judgement.error_code
+    ? lookup(errorCodeKey(judgement.error_code))
+    : undefined;
 
   const detailsVisible =
     judgement.compile_output ||
@@ -388,6 +397,7 @@ function JudgementRow({
               {judgement.error_code && (
                 <div className="text-xs text-muted-foreground">
                   {t('submissionDetail.errorCode')}: {judgement.error_code}
+                  {errorCodeText && <> ({errorCodeText})</>}
                 </div>
               )}
               {judgement.error_message && (
