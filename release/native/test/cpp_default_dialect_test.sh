@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prove the built worker image's g++ DEFAULT dialect is C++14 (gnu++14), not C++17
-# -- the Task-2 "drop -std, inherit gcc 9.3's default" parity guarantee.
+# -- the default C++ flags carry no -std, so submissions inherit gcc 9.3's
+# default, matching NOI Linux 2.0.
 #
 # Uses FRONT-END facts, not a library discriminator: libstdc++ keeps "removed"
 # templates (std::random_shuffle, std::auto_ptr) compilable past their standard via
