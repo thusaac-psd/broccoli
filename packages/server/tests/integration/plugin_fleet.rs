@@ -671,6 +671,49 @@ async fn a_disabled_visibility_plugin_fails_closed_for_its_contest_types() {
     assert_eq!(res.status, 200, "outside the plugin's scope: {}", res.text);
 }
 
+/// What depends on a plugin comes from the contest types it recorded fleet-wide
+/// when it last loaded, so the answer is the same whether it is enabled or
+/// disabled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_lists_its_running_contests_while_disabled() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    let running = a.create_contest(&token, "Running", true, true).await;
+    for sql in [
+        format!(
+            "UPDATE plugin SET governs = '{{\"visibility\": false, \"contest_types\": [\"fleet-only\"]}}' \
+             WHERE id = '{PLUGIN}'"
+        ),
+        format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {running}"),
+    ] {
+        a.db.execute_raw(Statement::from_string(DbBackend::Postgres, sql))
+            .await
+            .unwrap();
+    }
+    plugin_lifecycle::reconcile(&a.state).await.unwrap();
+    let dependents = async || {
+        let res = a
+            .get_with_token(&routes::admin_plugin_dependents(PLUGIN), &token)
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        res.body["running_contests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_i64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(dependents().await, vec![i64::from(running)]);
+
+    let res = a
+        .post_with_token(&routes::admin_plugin_disable(PLUGIN), &json!({}), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(dependents().await, vec![i64::from(running)]);
+}
+
 /// A contest submission served by a replica with no handler for the contest's
 /// type is rejected with a retryable 503, never inserted without the
 /// plugin's admission check (the handler owns admission).

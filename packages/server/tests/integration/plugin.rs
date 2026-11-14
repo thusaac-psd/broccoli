@@ -91,6 +91,8 @@ mod plugin_management {
         let admin = app
             .create_user_with_role("dependents_admin", "securepass", "admin")
             .await;
+        // `fmt-x` is served here, so contests of it can be created; what the
+        // plugin provides is what it recorded when it last loaded.
         app.state
             .registries
             .contest_type_registry
@@ -105,6 +107,16 @@ mod plugin_management {
                     submission_admission: false,
                 },
             );
+        sea_orm::ConnectionTrait::execute_raw(
+            &app.db,
+            sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Postgres,
+                "INSERT INTO plugin (id, is_enabled, governs) VALUES \
+                 ('fmt-plugin', true, '{\"visibility\": false, \"contest_types\": [\"fmt-x\"]}')",
+            ),
+        )
+        .await
+        .unwrap();
         let contest = |title: &str, contest_type: &str, start: &str, end: &str| {
             json!({
                 "title": title,
