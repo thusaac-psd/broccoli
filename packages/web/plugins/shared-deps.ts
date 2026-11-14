@@ -47,6 +47,14 @@ export const SDK_SHARED_DEPS: readonly string[] = [
     .sort(),
 ];
 
+/**
+ * The modules a plugin bundle imports from the host instead of bundling: the
+ * ones that hold state or context a plugin must share with the host (React,
+ * the router, the query client, every SDK subpath) and Monaco, which is too
+ * big to ship twice. A stateless library such as an icon set is not shared:
+ * a plugin bundles the few parts it uses, and the host never ships the whole
+ * library eagerly for a plugin's sake.
+ */
 export const SHARED_DEPS = [
   'react',
   'react/jsx-runtime',
@@ -56,7 +64,6 @@ export const SHARED_DEPS = [
   'react-router',
   '@tanstack/react-query',
   ...SDK_SHARED_DEPS,
-  'lucide-react',
   '@monaco-editor/react',
 ] as const;
 
