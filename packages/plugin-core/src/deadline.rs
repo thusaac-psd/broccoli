@@ -16,13 +16,15 @@ use std::time::{Duration, Instant};
 use extism::CancelHandle;
 use parking_lot::{Condvar, Mutex};
 
-/// The first repeat of a cancel past the deadline. extism registers a call
-/// with its timer thread only after it has reset the store and instantiated
-/// the guest inside `Plugin::call`, and a cancel handled before that finds no
-/// call to stop. Any cancel handled after it traps the guest, so the deadline
-/// thread keeps cancelling until the call returns, doubling the gap up to
-/// [`CANCEL_RETRY_MAX`] so a guest parked in a long host function after its
-/// cancel sees only a few more.
+/// The first repeat of a cancel past the deadline. `watch` runs just before
+/// `Plugin::call`, and extism registers the call with its timer thread a
+/// little later, once it holds the instance and has replaced a store the
+/// previous call left unusable; no guest code runs in that window, but a
+/// cancel handled in it finds no call to stop. Any cancel handled after
+/// registration traps the guest, instantiation and initialization included,
+/// so the deadline thread keeps cancelling until the call returns, doubling
+/// the gap up to [`CANCEL_RETRY_MAX`] so a guest parked in a long host
+/// function after its cancel sees only a few more.
 const CANCEL_RETRY: Duration = Duration::from_millis(10);
 /// The longest gap between repeated cancels.
 const CANCEL_RETRY_MAX: Duration = Duration::from_secs(1);

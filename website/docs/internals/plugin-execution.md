@@ -143,16 +143,25 @@ of `(Instant, CancelHandle)` for every running call and cancels a guest whose
 deadline passes. A guest parked in a host function traps when it returns to
 guest code.
 
-extism registers a call with its timer thread only after it has reset the
-store and instantiated the guest inside `Plugin::call`, and a cancel handled
-before that finds no call to stop. The deadline thread therefore repeats a
-call's cancel, doubling the gap from `CANCEL_RETRY` up to `CANCEL_RETRY_MAX`,
-until the call returns. Any cancel handled once the call is registered traps
-the guest: the workspace patches extism (`third_party/extism`) to arm the
-store's epoch deadline before it registers the call, and
-`packages/plugin-core/tests/extism_cancel.rs` checks a cancel delivered at
-that instant. The manifest timeout, the call timeout plus
-`TIMEOUT_BACKSTOP_MARGIN`, ends a guest the deadline thread never cancelled.
+The workspace patches extism (`third_party/extism`) so that a call's cancel
+and manifest timeout bound every piece of guest code the call runs. extism
+arms the store's epoch deadline and registers the call with its timer thread
+before it instantiates the guest, so the guest's start function and
+`_initialize` run under the same cancel and timeout as the export; building
+an instance does not instantiate the main module; and after an
+instantiation that failed, a cancelled one included, the next call starts
+from a fresh store instead of a half-initialized instance. A cancelled call
+fails like any other, so the host maps it to `PluginError::Unavailable`.
+`packages/plugin-core/tests/extism_cancel.rs` checks these cases.
+
+A cancel handled before extism registers the call finds no call to stop.
+`deadline::watch` runs just before `Plugin::call`, and extism registers the
+call once it holds the instance and has replaced a store the previous call
+left unusable; no guest code runs in that window. The deadline thread
+therefore repeats a call's cancel, doubling the gap from `CANCEL_RETRY` up to
+`CANCEL_RETRY_MAX`, until the call returns. The manifest timeout, the call
+timeout plus `TIMEOUT_BACKSTOP_MARGIN`, ends a guest the deadline thread
+never cancelled.
 
 The host's long waits end at the call's deadline too:
 `get_next_evaluate_result` and `get_next_operation_result` cut the wait a
