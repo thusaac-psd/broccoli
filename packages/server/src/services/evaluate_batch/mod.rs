@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use broccoli_server_sdk::types::{
     BuildEvalOpsInput, DetachedEvaluateCallbackAction, DetachedEvaluateCallbackEvent,
     DetachedEvaluateCallbackInput, DetachedEvaluateCallbackOutput, DetachedEvaluateSession,
-    EvaluateOperationResultInput, EvaluateOperationResultsInput, FileRef, JudgeFile,
-    OperationResult, OperationTask, PreparedEvaluateCase, StartDetachedWindowedEvaluateInput,
-    StartEvaluateBatchInput, StartEvaluateCaseInput, TestCaseBodyRef, TestCaseVerdict,
-    Verdict as SdkVerdict,
+    DetachedSubmissionCompletion, EvaluateOperationResultInput, EvaluateOperationResultsInput,
+    FileRef, JudgeFile, OperationResult, OperationTask, PreparedEvaluateCase,
+    StartDetachedWindowedEvaluateInput, StartEvaluateBatchInput, StartEvaluateCaseInput,
+    TestCaseBodyRef, TestCaseVerdict, Verdict as SdkVerdict,
 };
 use common::storage::{BlobStore, ContentHash};
 use opentelemetry::KeyValue;
@@ -26,7 +26,8 @@ use crate::services::batch_table::{BatchSender, Removal};
 use crate::services::batch_wait::{BatchWait, WaitCtx, WaitPolicy};
 use crate::services::submission_dispatch::fire_after_judging_hooks_for_detached_completion;
 use crate::services::windowed_session::{
-    SessionAction, SessionDecision, SlotEvent, SlotOutcome, WindowedSession, run_windowed_session,
+    SessionAction, SessionDecision, SessionEnd, SlotEvent, SlotOutcome, WindowedSession,
+    run_windowed_session,
 };
 
 const INLINE_TEST_INPUT_BLOB_THRESHOLD_BYTES: usize = 1_048_576;
@@ -70,20 +71,6 @@ fn body_cheap_to_retain(body: &TestCaseBodyRef) -> bool {
 
 fn test_case_cheap_to_retain(test_case: &StartEvaluateCaseInput) -> bool {
     body_cheap_to_retain(&test_case.input) && body_cheap_to_retain(&test_case.expected_output)
-}
-
-fn detached_evaluate_completion(
-    completion: Option<&broccoli_server_sdk::types::DetachedSubmissionCompletion>,
-    action: DetachedEvaluateCallbackAction,
-) -> Option<broccoli_server_sdk::types::DetachedSubmissionCompletion> {
-    match action {
-        DetachedEvaluateCallbackAction::Finish | DetachedEvaluateCallbackAction::Cancel => {
-            completion
-                .filter(|completion| completion.fire_after_judging)
-                .cloned()
-        }
-        DetachedEvaluateCallbackAction::Continue => None,
-    }
 }
 
 fn push_ready_case_for_callback<T>(pending: &mut Vec<T>, item: T) -> Option<Vec<T>> {

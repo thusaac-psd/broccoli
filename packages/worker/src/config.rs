@@ -1,4 +1,4 @@
-use config::{Config, ConfigError, Environment, File};
+use config::{Config, ConfigError, File};
 use serde::{Deserialize, Serialize};
 
 pub use common::config::MqAppConfig;
@@ -45,8 +45,10 @@ impl Default for DatabaseConfig {
 }
 
 /// Worker-local platform tools (e.g. the `broccoli-compare` static binary).
-/// `[worker.tools] dir = "/opt/broccoli/tools"` lets a `MountSource::PlatformTool`
-/// resolve a tool by logical name to `<dir>/<name>`, mounted read-only.
+/// A `MountSource::PlatformTool` resolves a tool by logical name to
+/// `<dir>/<name>`, mounted read-only. Unset, the directory is derived from
+/// where the worker binary is (see
+/// `models::operation::executor::derived_tools_dir`).
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct ToolsConfig {
     #[serde(default)]
@@ -289,11 +291,7 @@ impl WorkerAppConfig {
             // agree - reference the function to avoid drift.
             .set_default("storage.max_cache_size", default_max_cache_size() as i64)?
             .add_source(File::with_name(&config_path).required(false))
-            .add_source(
-                Environment::with_prefix("BROCCOLI")
-                    .separator("__")
-                    .try_parsing(true),
-            )
+            .add_source(common::config::environment())
             .build()?;
 
         let (mut config, unknown_keys): (Self, _) =

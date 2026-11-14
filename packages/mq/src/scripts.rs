@@ -8,38 +8,98 @@ use std::sync::LazyLock;
 
 use redis::Script;
 
-/// Publish a pinned task: to the worker's private stream if the worker is
-/// live, else to the shared stream.
+/// Records `ARGV[1]` in the publishing server's outstanding ledger (`KEYS[1]`),
+/// scored by Redis `TIME` in milliseconds, and keeps the ledger for
+/// `ARGV[2]` ms. Shared by both publish scripts, so a task and its ledger
+/// entry are written in one step and a Redis that loses one loses both.
+const RECORD_OUTSTANDING: &str = r#"
+local now = redis.call('TIME')
+redis.call('ZADD', KEYS[1], now[1] * 1000 + math.floor(now[2] / 1000), ARGV[1])
+redis.call('PEXPIRE', KEYS[1], ARGV[2])
+"#;
+
+/// Publish a task to the shared stream and record it as outstanding.
 ///
-/// KEYS: worker liveness key, private stream, shared stream, pinned set.
-/// ARGV: worker id, payload. Returns 1 when pinned, 0 when shared.
+/// KEYS: outstanding ledger, shared stream. ARGV: task id, ledger TTL ms,
+/// payload.
+pub(crate) static PUBLISH_SHARED: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(&format!(
+        r#"{RECORD_OUTSTANDING}
+redis.call('XADD', KEYS[2], '*', 'p', ARGV[3])
+"#
+    ))
+});
+
+/// Publish a pinned task: to the worker's private stream if the worker is
+/// live, else to the shared stream. Records it as outstanding either way.
+///
+/// KEYS: outstanding ledger, worker liveness key, private stream, shared
+/// stream, pinned set. ARGV: task id, ledger TTL ms, payload, worker id.
+/// Returns 1 when pinned, 0 when shared.
 pub(crate) static PUBLISH_PINNED: LazyLock<Script> = LazyLock::new(|| {
-    Script::new(
-        r#"
-if redis.call('EXISTS', KEYS[1]) == 1 then
-  redis.call('SADD', KEYS[4], ARGV[1])
-  redis.call('XADD', KEYS[2], '*', 'p', ARGV[2])
+    Script::new(&format!(
+        r#"{RECORD_OUTSTANDING}
+if redis.call('EXISTS', KEYS[2]) == 1 then
+  redis.call('SADD', KEYS[5], ARGV[4])
+  redis.call('XADD', KEYS[3], '*', 'p', ARGV[3])
   return 1
 end
-redis.call('XADD', KEYS[3], '*', 'p', ARGV[2])
+redis.call('XADD', KEYS[4], '*', 'p', ARGV[3])
 return 0
+"#
+    ))
+});
+
+/// Publish a reply if its server's reply stream exists, and take a completed
+/// task out of the server's outstanding ledger in the same step. A missing
+/// stream means its server is gone (or lost the stream, and with it every
+/// waiter). The reply is added first: a script error (Redis out of memory)
+/// stops the script before the ledger entry goes, so the ledger never loses a
+/// task whose reply was not written.
+///
+/// KEYS: reply stream, outstanding ledger. ARGV: payload, length cap, id of
+/// the completed task (empty for a start notification). Returns 1 (added) or
+/// 0 (dropped).
+pub(crate) static PUBLISH_REPLY: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r#"
+local added = 0
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  redis.call('XADD', KEYS[1], 'MAXLEN', '~', ARGV[2], '*', 'p', ARGV[1])
+  added = 1
+end
+if ARGV[3] ~= '' then
+  redis.call('ZREM', KEYS[2], ARGV[3])
+end
+return added
 "#,
     )
 });
 
-/// Publish a reply if its server's reply stream exists. A missing stream
-/// means its server is gone (or lost the stream, and with it every waiter).
+/// Check a server's outstanding operations against its ledger: which of the
+/// given task ids it no longer holds, and the id of the reply stream's last
+/// entry at that moment (its server deletes only entries it has read, so
+/// every unread reply is at or before it). Also keeps the ledger for `ARGV[1]` ms and drops
+/// entries older than `ARGV[2]` ms on the Redis clock (tasks the host
+/// cancelled, whose worker settled them without a reply).
 ///
-/// KEYS: reply stream. ARGV: payload, length cap. Returns 1 (added) or 0
-/// (dropped).
-pub(crate) static PUBLISH_REPLY: LazyLock<Script> = LazyLock::new(|| {
+/// KEYS: outstanding ledger, reply stream. ARGV: ledger TTL ms, max entry
+/// age ms, task ids... Returns `{missing ids, last entry id or false}`.
+pub(crate) static CHECK_OUTSTANDING: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         r#"
-if redis.call('EXISTS', KEYS[1]) == 1 then
-  redis.call('XADD', KEYS[1], 'MAXLEN', '~', ARGV[2], '*', 'p', ARGV[1])
-  return 1
+local now = redis.call('TIME')
+local now_ms = now[1] * 1000 + math.floor(now[2] / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', '(' .. (now_ms - tonumber(ARGV[2])))
+redis.call('PEXPIRE', KEYS[1], ARGV[1])
+local missing = {}
+for i = 3, #ARGV do
+  if not redis.call('ZSCORE', KEYS[1], ARGV[i]) then
+    table.insert(missing, ARGV[i])
+  end
 end
-return 0
+local last = redis.call('XREVRANGE', KEYS[2], '+', '-', 'COUNT', 1)[1]
+return {missing, last and last[1] or false}
 "#,
     )
 });

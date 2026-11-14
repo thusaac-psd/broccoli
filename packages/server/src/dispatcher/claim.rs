@@ -115,6 +115,7 @@ async fn claim_loop(
     ));
 
     let mut last_pass: Option<Instant> = None;
+    let mut queue_unreachable = false;
 
     loop {
         tokio::select! {
@@ -132,6 +133,19 @@ async fn claim_loop(
                 continue;
             }
         }
+        // Work claimed while the queue is unreachable could only fail its
+        // dispatch and burn its retries, so it stays `Queued` for a replica
+        // that can judge it. The result consumer's periodic ledger check
+        // reaches Redis again within its interval once Redis answers.
+        if state.mq.as_ref().is_some_and(|mq| !mq.is_reachable()) {
+            if !queue_unreachable {
+                warn!(server_id = %server_id, "The message queue is unreachable; not claiming until it answers");
+            }
+            queue_unreachable = true;
+            last_pass = Some(Instant::now());
+            continue;
+        }
+        queue_unreachable = false;
         common::deadline::bounded(
             "dispatcher.claim",
             common::deadline::BACKGROUND_STEP,

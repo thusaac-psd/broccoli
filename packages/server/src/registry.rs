@@ -100,6 +100,11 @@ pub struct OperationWaiter {
     pub evaluate_case: Option<EvaluateCaseRef>,
     /// When the operation was registered, just before its publish.
     pub published_at: Instant,
+    /// Set once the publish returned: from then on the queue holds the task
+    /// (or its reply), so the result consumer may check that it still does
+    /// (see `consumers::operation_result`). Before, the task may not be in
+    /// the queue yet.
+    pub published: bool,
 }
 
 impl OperationWaiter {
@@ -111,6 +116,7 @@ impl OperationWaiter {
             result_tx,
             evaluate_case,
             published_at: Instant::now(),
+            published: false,
         }
     }
 }

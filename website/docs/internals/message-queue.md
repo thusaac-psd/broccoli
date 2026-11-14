@@ -46,6 +46,7 @@ contain `:`, so every key below parses one way.
 | `<q>:worker:<worker_id>` | stream | `workers` | until drained after its worker dies |
 | `<q>:pinned` | set of worker ids | | members removed when drained |
 | `<q>:reply:<server_id>` | stream | none | TTL of the server's liveness key |
+| `<q>:outstanding:<server_id>` | sorted set of task ids | | 10 minutes after the server's last publish or check |
 | `<q>:dlq` | stream | `servers` | permanent |
 | `<q>:heartbeat:<role>:<id>` | string | | liveness TTL, 15 s (see Liveness) |
 
@@ -127,6 +128,39 @@ TTL. A server whose stream disappears while it runs (a Redis that lost its
 data, or a stall longer than 10 minutes) learns it from the renewal that
 recreates the stream, and fails every outstanding operation at once, so its
 plugins see failed operations instead of waiting out their timeouts.
+
+### The outstanding ledger
+
+A reply stream that survives does not prove the operations behind it are
+alive: a Redis that restarts from a snapshot taken a few seconds earlier
+keeps the stream but loses every task published after the snapshot. So each
+server has a ledger, `<q>:outstanding:<server_id>`, of the tasks it published
+and has no reply for, scored by their publish time on the Redis clock.
+
+- The script that publishes a task adds it to the ledger, so the task and its
+  ledger entry are written in one step: a Redis that loses one loses both.
+- The script that publishes a completed reply removes the task from the
+  ledger, also in one step. A start notification leaves it.
+- Nothing else removes a task: a task waiting in a stream, held in a worker's
+  pending list, requeued, or moved off a dead worker's private stream stays in
+  the ledger.
+
+Every 10 seconds (`OUTSTANDING_CHECK_INTERVAL`) the server's result consumer
+checks its published waiters against the ledger, 1024 ids per round trip, and
+notes the id of the reply stream's last entry in the same script. A missing
+task either has its reply at or before that entry, or was lost. The consumer
+keeps reading replies, and once its reads have passed the noted entry, any
+of those waiters still waiting fails at once with "the operation was lost
+from the queue". The plugin sees a failed operation, which its judging
+handles like any other (a `SystemError`, then the system-error retry). A
+waiter counts as published only once its publish returned, so a task still
+being published is never mistaken for a lost one.
+
+The check also renews the ledger's TTL (10 minutes, so a dead server's ledger
+expires with its reply stream) and drops entries older than two hours: tasks
+the host cancelled, which a worker settles without a reply. A server that
+cannot reach Redis stops claiming new work (see "Failure behaviour") until a
+command gets through again, which the next check does within its interval.
 
 ## Delivery, redelivery and liveness of in flight work
 
@@ -214,6 +248,9 @@ stream.
   read; a `NOGROUP` reply (the restart lost the group) makes the reader
   recreate its groups and read again. The server's next heartbeat recreates its
   reply stream.
+- While the last command on a server's queue connection failed to reach
+  Redis, its claim fiber claims nothing: the work would only fail its dispatch
+  and spend its retries, so it stays `Queued` for a replica that can judge it.
 
 ### What a Redis crash loses
 
@@ -221,11 +258,14 @@ The release template runs Redis with `appendonly yes` and `appendfsync
 everysec`, so a crash loses at most the last second of writes. For the queue
 that means:
 
-- A task published in that second is gone; its operation waiter times out and
-  the stuck-job detector recovers the submission.
+- A task published in that second is gone, and so is its ledger entry. The
+  server's next ledger check, within about 10 seconds, fails its waiter, and
+  the submission is judged again through the system-error retry.
 - An acknowledgement lost in that second redelivers a task that already ran.
   Its second result reaches no waiter.
-- A reply lost in that second is recovered the same way as a lost task.
+- A reply lost in that second puts its task back in the ledger with the
+  snapshot, and the task's entry back in its stream (or its worker's pending
+  list): the task runs again and replies again.
 - A Redis that comes back without its data (or after its stored TTLs passed)
   has no reply streams: each server's next renewal recreates its stream and
   fails every operation it was waiting for, and the plugins see them fail at

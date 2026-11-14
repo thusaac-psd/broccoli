@@ -55,7 +55,10 @@
 //! `submission.status`, `judge_epoch` and the judged-output columns are a
 //! projection of the current judgement, rewritten from it in the same
 //! statement or transaction as every transition of that judgement (see
-//! `mirror`). Nothing else writes them.
+//! `mirror`). Nothing else writes them. The one projection that waits is a
+//! system error the system-error retry may still re-judge: the submission
+//! keeps showing the attempt until `retry_system_errors` requeues it or
+//! confirms it, so a terminal status the submission shows is final.
 //!
 //! # Epochs
 //!
@@ -104,8 +107,9 @@ pub(crate) use open::{
 pub(crate) use plugin_writes::{
     SqlBindSink, code_run_write, code_run_write_fence, judgement_write, write_fence,
 };
+pub(crate) use unit::SystemErrorPass;
 pub(crate) use unit::{
     Abandoned, ClaimedCodeRun, ClaimedJudgement, claim_code_runs, claim_judgements, fail_dispatch,
-    reclaim_abandoned, refresh_leases, retry_system_errors,
+    reclaim_abandoned, refresh_leases, resolve_if_settled, retry_system_errors,
 };
 pub use unit::{Unit, UnitCounts, count_in_flight, release_leases};

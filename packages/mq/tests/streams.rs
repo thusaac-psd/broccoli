@@ -33,6 +33,7 @@ fn task(id: &str) -> Task {
         reply_to: "server-1".into(),
         operation_batch_id: None,
         trace_context: None,
+        judgement: None,
     }
 }
 
@@ -662,4 +663,144 @@ async fn a_lost_consumer_group_is_recreated() {
         ids(&reader.read(1).await.unwrap()),
         BTreeSet::from(["after-flush".into()])
     );
+}
+
+/// Copy of `keys` as Redis holds them now, to put back with [`restore`]: what
+/// a Redis that restarts from a snapshot taken at this moment comes back with.
+async fn snapshot(
+    conn: &mut redis::aio::MultiplexedConnection,
+    keys: &[String],
+) -> Vec<(String, Option<Vec<u8>>)> {
+    let mut out = Vec::new();
+    for key in keys {
+        let dump: Option<Vec<u8>> = redis::cmd("DUMP").arg(key).query_async(conn).await.unwrap();
+        out.push((key.clone(), dump));
+    }
+    out
+}
+
+async fn restore(
+    conn: &mut redis::aio::MultiplexedConnection,
+    snapshot: &[(String, Option<Vec<u8>>)],
+) {
+    for (key, dump) in snapshot {
+        let _: () = redis::cmd("DEL").arg(key).query_async(conn).await.unwrap();
+        if let Some(dump) = dump {
+            let _: () = redis::cmd("RESTORE")
+                .arg(key)
+                .arg(0)
+                .arg(dump)
+                .query_async(conn)
+                .await
+                .unwrap();
+        }
+    }
+}
+
+/// A published task stays in its server's outstanding ledger until its
+/// completed reply is published. A Redis that comes back from an older
+/// snapshot loses a task and its ledger entry together, so the check reports
+/// exactly the lost task, while the server's reply stream (in the snapshot)
+/// still exists and no stream-loss detection fires.
+#[tokio::test]
+async fn the_outstanding_ledger_reports_tasks_a_stale_snapshot_lost() {
+    let (_c, url) = redis().await;
+    let mq = Mq::connect(&url, BASE).await.unwrap();
+    let mut conn = admin(&url).await;
+    let t = mq.topology().clone();
+    // The server's reply stream exists, as its claim keeps it.
+    let _: String = redis::cmd("XADD")
+        .arg(t.reply("server-1"))
+        .arg("*")
+        .arg("init")
+        .arg("1")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    mq.publish_task(&task("kept"), None).await.unwrap();
+    mq.publish_task(&task("answered"), None).await.unwrap();
+    let saved = snapshot(
+        &mut conn,
+        &[t.shared(), t.outstanding("server-1"), t.reply("server-1")],
+    )
+    .await;
+    mq.publish_task(&task("lost"), None).await.unwrap();
+    restore(&mut conn, &saved).await;
+    assert_eq!(
+        xlen(&mut conn, &t.shared()).await,
+        2,
+        "the late task is gone"
+    );
+
+    let ids: Vec<String> = ["kept", "answered", "lost"].map(String::from).to_vec();
+    let found = mq.check_outstanding("server-1", &ids).await.unwrap();
+    assert_eq!(found.missing, ["lost"]);
+
+    assert_eq!(
+        mq.publish_reply("server-1", &completed("answered"))
+            .await
+            .unwrap(),
+        ReplyOutcome::Delivered
+    );
+    let found = mq.check_outstanding("server-1", &ids).await.unwrap();
+    assert_eq!(found.missing, ["answered", "lost"]);
+    let last: Vec<(String, Vec<(String, String)>)> = redis::cmd("XREVRANGE")
+        .arg(t.reply("server-1"))
+        .arg("+")
+        .arg("-")
+        .arg("COUNT")
+        .arg(1)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        found.replies_through.as_deref(),
+        Some(last[0].0.as_str()),
+        "the reply that answered it is at or before the noted id"
+    );
+}
+
+/// A reply Redis refuses (here for lack of memory) leaves its task in the
+/// ledger, so the server never takes the task for lost while its worker
+/// retries the publish.
+#[tokio::test]
+async fn a_refused_reply_keeps_its_task_in_the_ledger() {
+    let (_c, url) = redis().await;
+    let mq = Mq::connect(&url, BASE).await.unwrap();
+    let mut conn = admin(&url).await;
+    let _: String = redis::cmd("XADD")
+        .arg(mq.topology().reply("server-1"))
+        .arg("*")
+        .arg("init")
+        .arg("1")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    mq.publish_task(&task("pending"), None).await.unwrap();
+
+    let set = |key: &str, value: &str| {
+        redis::cmd("CONFIG")
+            .arg("SET")
+            .arg(key)
+            .arg(value)
+            .to_owned()
+    };
+    let _: () = set("maxmemory-policy", "noeviction")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let _: () = set("maxmemory", "1").query_async(&mut conn).await.unwrap();
+    assert!(
+        mq.publish_reply("server-1", &completed("pending"))
+            .await
+            .is_err()
+    );
+    let _: () = set("maxmemory", "0").query_async(&mut conn).await.unwrap();
+
+    let found = mq
+        .check_outstanding("server-1", &["pending".to_string()])
+        .await
+        .unwrap();
+    assert!(found.missing.is_empty(), "{found:?}");
 }

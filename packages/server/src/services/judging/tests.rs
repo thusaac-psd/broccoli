@@ -319,6 +319,36 @@ async fn a_lapsed_lease_requeues_under_a_new_epoch_and_spends_a_retry() {
 }
 
 #[tokio::test]
+async fn one_reclaim_takes_over_every_lapsed_unit_whatever_the_batch_size() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    for _ in 0..7 {
+        new_submission(&db).await;
+    }
+    claim_judgements(&db, "dead", 10, NO_TYPES).await.unwrap();
+    exec(
+        &db,
+        "UPDATE submission_judgement SET lease_heartbeat_at = NOW() - INTERVAL '2 minutes'",
+    )
+    .await;
+
+    let reclaimed = reclaim_abandoned(
+        &db,
+        Unit::Judgement,
+        Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
+        RetryBudget::new(5),
+        3,
+        NO_TYPES,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reclaimed.requeued, 7,
+        "batches repeat until one comes back short"
+    );
+    assert_eq!(count_in_flight(&db, "dead").await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn a_live_lease_is_left_alone() {
     let (_pg, db) = crate::test_support::postgres().await;
     new_submission(&db).await;
@@ -372,8 +402,8 @@ async fn a_spent_dispatch_budget_finalizes_and_dead_letters_once_per_submission(
     let s = sub(&db, s.id).await;
     assert_eq!(
         s.status,
-        SubmissionStatus::SystemError,
-        "the submission follows"
+        SubmissionStatus::Pending,
+        "the submission shows the attempt until the system-error retry decides"
     );
     let dlq = dead_letter_message::Entity::find()
         .filter(dead_letter_message::Column::SubmissionId.eq(s.id))
@@ -449,6 +479,11 @@ async fn releasing_requeues_own_work_without_spending_a_retry() {
     assert_eq!(sub(&db, theirs.id).await.status, SubmissionStatus::Pending);
 }
 
+/// A system error the retry will re-judge never shows on the submission:
+/// it keeps showing the attempt in flight until the reaper requeues it, so
+/// the status a client sees never goes from terminal back to judging. Once
+/// the budget is spent the reaper confirms the error, once, and only then
+/// does the submission show it.
 #[tokio::test]
 async fn a_system_error_is_retried_within_the_submission_budget() {
     let (_pg, db) = crate::test_support::postgres().await;
@@ -467,15 +502,18 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
         .await
         .unwrap()
     );
-    assert_eq!(sub(&db, s.id).await.status, SubmissionStatus::SystemError);
+    assert_eq!(
+        sub(&db, s.id).await.status,
+        SubmissionStatus::Pending,
+        "the submission still shows the attempt"
+    );
 
     let budget = RetryBudget::new(1);
-    assert_eq!(
-        retry_system_errors(&db, budget, 10, NO_TYPES)
-            .await
-            .unwrap(),
-        1
-    );
+    let pass = retry_system_errors(&db, budget, 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(pass.requeued, 1);
+    assert!(pass.confirmed.is_empty());
     let j = judgement(&db, claimed.judgement.id).await;
     assert_eq!(j.status, SubmissionStatus::Queued);
     assert!(!j.is_finalized);
@@ -488,7 +526,7 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
     assert_eq!(s.status, SubmissionStatus::Queued);
     assert_eq!(s.system_error_retries, 1);
 
-    // The budget is spent: the next SystemError stands.
+    // The budget is spent: the next SystemError stands, shown once confirmed.
     let again = claim_one(&db, "srv").await;
     fail_dispatch(
         &db,
@@ -500,12 +538,25 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
     )
     .await
     .unwrap();
+    assert_eq!(sub(&db, s.id).await.status, SubmissionStatus::Pending);
+    let pass = retry_system_errors(&db, budget, 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(pass.requeued, 0);
     assert_eq!(
-        retry_system_errors(&db, budget, 10, NO_TYPES)
-            .await
-            .unwrap(),
-        0
+        pass.confirmed
+            .iter()
+            .map(|c| c.submission_id)
+            .collect::<Vec<_>>(),
+        [s.id]
     );
+    let shown = sub(&db, s.id).await;
+    assert_eq!(shown.status, SubmissionStatus::SystemError);
+    assert_eq!(shown.error_code.as_deref(), Some("PLUGIN_ERROR"));
+    let pass = retry_system_errors(&db, budget, 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert!(pass.confirmed.is_empty(), "confirmed once");
 }
 
 #[tokio::test]
@@ -527,10 +578,15 @@ async fn a_contestant_verdict_or_a_plugin_refusal_is_never_retried() {
     .await
     .unwrap();
 
-    let n = retry_system_errors(&db, RetryBudget::new(5), 10, NO_TYPES)
+    let pass = retry_system_errors(&db, RetryBudget::new(5), 10, NO_TYPES)
         .await
         .unwrap();
-    assert_eq!(n, 0);
+    assert_eq!(pass, SystemErrorPass::default());
+    assert_eq!(
+        sub(&db, refused.submission.id).await.status,
+        SubmissionStatus::SystemError,
+        "a refusal shows at once"
+    );
 }
 
 #[tokio::test]
@@ -910,5 +966,51 @@ async fn queuing_a_unit_or_freeing_its_room_notifies_the_claim_fibers() {
     assert_eq!(
         ClaimWake::parse(&next_claim_wake(&mut listener).await),
         Some(ClaimWake::Queued)
+    );
+}
+
+fn operation_letter(id: &str, submission_id: i32) -> common::DlqEnvelope {
+    common::DlqEnvelope {
+        message_id: id.into(),
+        message_type: DlqMessageType::OperationTask,
+        submission_id: Some(submission_id),
+        payload: serde_json::json!({}),
+        error_code: common::DlqErrorCode::MaxRetriesExceeded,
+        error_message: "boom".into(),
+        retry_history: vec![],
+    }
+}
+
+/// An operation's dead letter is filed under the submission it ran for and
+/// is resolved by the verdict that stands, whether it arrives before or
+/// after that verdict.
+#[tokio::test]
+async fn a_standing_verdict_resolves_its_submissions_operation_letters() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (s, j) = new_submission(&db).await;
+    claim_one(&db, "srv").await;
+    let dlq = crate::dlq::DlqService::new(&db);
+    let before = dlq
+        .send_to_dlq(&operation_letter("op-1", s.id))
+        .await
+        .unwrap();
+    assert!(!before.resolved, "the submission has no verdict yet");
+
+    finish(&db, &j, Verdict::Accepted).await;
+    mirror_status(&db, s.id).await;
+    let before = dead_letter_message::Entity::find_by_id(before.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(before.resolved, "the verdict resolves the earlier letter");
+
+    let after = dlq
+        .send_to_dlq(&operation_letter("op-2", s.id))
+        .await
+        .unwrap();
+    assert!(
+        after.resolved,
+        "a letter filed after the verdict is settled at once"
     );
 }

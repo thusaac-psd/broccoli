@@ -677,7 +677,7 @@ pub async fn get_submission_judgement(
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Contest or problem not found (NOT_FOUND)", body = ErrorBody),
         (status = 429, description = "Per-user rate limit or plugin rejection (RATE_LIMITED, PLUGIN_REJECTED)", body = ErrorBody),
-        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest's type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or a plugin it needs could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),
+        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest's type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest's type is disabled (CONTEST_TYPE_DISABLED, no Retry-After); or a plugin it needs could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -781,8 +781,15 @@ pub async fn create_contest_submission(
         .cloned();
     // Contest types are plugin-provided, and the handler owns admission: a
     // replica without one (its plugin still loading or failed here) must not
-    // accept the submission unchecked. Reject before any hook runs.
+    // accept the submission unchecked. Reject before any hook runs; a type
+    // whose plugin the fleet disabled is closed, not briefly unavailable.
     let Some(handler) = handler else {
+        if state
+            .plugin_lifecycle
+            .is_contest_type_disabled(&contest_type)
+        {
+            return Err(AppError::ContestTypeDisabled(contest_type));
+        }
         return Err(AppError::ContestTypeUnavailable(contest_type));
     };
     let admission_owner = handler

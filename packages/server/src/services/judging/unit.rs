@@ -105,13 +105,15 @@ impl Unit {
         match self {
             Unit::Judgement => format!(
                 ", mirrored AS (UPDATE submission s SET {MIRROR_SETS} FROM moved j \
-                 WHERE s.id = j.submission_id AND j.is_current RETURNING s.id, s.status), \
+                 WHERE s.id = j.submission_id AND j.is_current AND NOT {undecided} \
+                 RETURNING s.id, s.status), \
                  recovered AS (UPDATE dead_letter_message d \
                      SET resolved = TRUE, resolved_at = NOW(), resolved_by = NULL \
                      FROM moved j WHERE NOT d.resolved AND j.is_current AND {recovered} \
-                       AND d.message_id = {submission})",
+                       AND {settled})",
+                undecided = awaits_retry_decision("j"),
                 recovered = recovered("j"),
-                submission = DlqSubject::Submission(0).sql_message_id("j.submission_id"),
+                settled = settled_by_submission("d", "j"),
             ),
             Unit::CodeRun => String::new(),
         }
@@ -130,6 +132,19 @@ fn system_error(alias: &str) -> String {
     )
 }
 
+/// SQL: the judgement `alias` finished as a system error that the
+/// system-error retry may still re-judge (anything but a plugin refusal).
+/// The submission keeps showing the attempt in flight instead of a terminal
+/// status that the retry would take back: [`retry_system_errors`], which owns
+/// the retry budget, either requeues the judgement or confirms the error.
+fn awaits_retry_decision(alias: &str) -> String {
+    format!(
+        "({alias}.is_finalized AND {system_error} AND {alias}.error_code IS DISTINCT FROM '{refused}')",
+        system_error = system_error(alias),
+        refused = SubmissionDlqErrorCode::PLUGIN_REFUSED,
+    )
+}
+
 /// SQL: the unit row `alias` finished with a verdict that stands, anything
 /// terminal but a system error. Its dead letters are resolved.
 fn recovered(alias: &str) -> String {
@@ -138,6 +153,46 @@ fn recovered(alias: &str) -> String {
         terminal = StatusPhase::Terminal.sql_list(),
         system_error = system_error(alias),
     )
+}
+
+/// SQL: the dead letter `d` is one that its submission's current judgement
+/// `j` settles once its verdict stands: the submission's own letter, or an
+/// operation task that ran for one of its judgements (a lost attempt, or an
+/// operation the attempt that stands re-ran).
+fn settled_by_submission(d: &str, j: &str) -> String {
+    format!(
+        "{d}.submission_id = {j}.submission_id \
+         AND ({d}.message_id = {submission} OR {d}.direction = '{operation}')",
+        submission = DlqSubject::Submission(0).sql_message_id(&format!("{j}.submission_id")),
+        operation = common::DlqMessageType::OperationTask.as_str(),
+    )
+}
+
+/// Resolves dead letter `id` at once if its submission's verdict already
+/// stands: a letter filed after the attempt that recovered (an operation's
+/// dead letter reaches the database through the queue, after its submission
+/// may have been judged again). Returns whether it did.
+pub(crate) async fn resolve_if_settled<C: ConnectionTrait>(
+    conn: &C,
+    id: i32,
+) -> Result<bool, DbErr> {
+    let n = conn
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!(
+                "UPDATE dead_letter_message d \
+                 SET resolved = TRUE, resolved_at = NOW(), resolved_by = NULL \
+                 FROM submission_judgement j \
+                 WHERE d.id = $1 AND NOT d.resolved AND j.is_current AND {recovered} \
+                   AND {settled}",
+                recovered = recovered("j"),
+                settled = settled_by_submission("d", "j"),
+            ),
+            [id.into()],
+        ))
+        .await?
+        .rows_affected();
+    Ok(n > 0)
 }
 
 /// The submission cache columns, each copied from its current judgement `j`.
@@ -645,18 +700,48 @@ pub(crate) struct Reclaimed {
     pub exhausted: u64,
 }
 
-/// Takes over up to `limit` in-flight units of `unit` that `abandoned`
-/// selects and this replica can judge: each with dispatch retries left is
-/// requeued (spending one), each without is finalized as `SystemError` and
-/// dead-lettered.
+impl std::ops::AddAssign for Reclaimed {
+    fn add_assign(&mut self, other: Self) {
+        self.requeued += other.requeued;
+        self.exhausted += other.exhausted;
+    }
+}
+
+/// Takes over every in-flight unit of `unit` that `abandoned` selects and
+/// this replica can judge, `batch` rows per transaction: each with dispatch
+/// retries left is requeued (spending one), each without is finalized as
+/// `SystemError` and dead-lettered. Batches repeat until one comes back
+/// short, so a dead server's whole in-flight set is recovered in one scan
+/// however large it is. Every batch takes its rows out of flight, so the
+/// loop ends.
 pub(crate) async fn reclaim_abandoned(
+    db: &DatabaseConnection,
+    unit: Unit,
+    abandoned: Abandoned,
+    budget: RetryBudget,
+    batch: u32,
+    local: &[String],
+) -> Result<Reclaimed, DbErr> {
+    let batch = batch.max(1);
+    let mut total = Reclaimed::default();
+    loop {
+        let (taken, reclaimed) = reclaim_batch(db, unit, abandoned, budget, batch, local).await?;
+        total += reclaimed;
+        if taken < batch as usize {
+            return Ok(total);
+        }
+    }
+}
+
+/// One batch of [`reclaim_abandoned`]: returns how many rows it took.
+async fn reclaim_batch(
     db: &DatabaseConnection,
     unit: Unit,
     abandoned: Abandoned,
     budget: RetryBudget,
     limit: u32,
     local: &[String],
-) -> Result<Reclaimed, DbErr> {
+) -> Result<(usize, Reclaimed), DbErr> {
     let txn = db.begin().await?;
     let mut b = Binds::default();
     let predicate = abandoned.predicate(&mut b);
@@ -667,6 +752,7 @@ pub(crate) async fn reclaim_abandoned(
         handled = prefer_local_handler(unit.contest_type(), &local),
     );
     let picked = pick(&txn, unit, b, filter, Some(limit)).await?;
+    let taken = picked.len();
     let (retry, exhaust): (Vec<Picked>, Vec<Picked>) = picked
         .into_iter()
         .partition(|p| budget.allows(p.dispatch_retries));
@@ -679,10 +765,13 @@ pub(crate) async fn reclaim_abandoned(
         dead_letter(&txn, unit, p, dlq_code, &message).await?;
     }
     txn.commit().await?;
-    Ok(Reclaimed {
-        requeued,
-        exhausted,
-    })
+    Ok((
+        taken,
+        Reclaimed {
+            requeued,
+            exhausted,
+        },
+    ))
 }
 
 /// Finalizes the locked `rows` as `SystemError` with `error_code`.
@@ -744,26 +833,43 @@ async fn dead_letter(
         .await
 }
 
-/// Requeues up to `limit` current judgements that finalized as a
-/// `SystemError` in any shape (a plugin's `SystemError` verdict, or a
-/// `SystemError` status from a dispatch failure or exhaustion), while their
-/// submission has system-error retries left. A deterministic plugin refusal
-/// (`PLUGIN_REFUSED`) can only fail again and is left standing.
+/// A submission whose system error now stands, as the reaper confirmed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConfirmedSystemError {
+    pub submission_id: i32,
+    pub user_id: i32,
+    pub problem_id: i32,
+    pub contest_id: Option<i32>,
+}
+
+/// What one system-error retry pass did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SystemErrorPass {
+    /// Judgements requeued for another attempt.
+    pub requeued: u64,
+    /// Submissions whose system error stands: their budget is spent.
+    pub confirmed: Vec<ConfirmedSystemError>,
+}
+
+/// Decides up to `limit` current judgements that finalized as a system error
+/// in any shape (a plugin's `SystemError` verdict, or a `SystemError` status
+/// from a dispatch failure or exhaustion), which the submission row has not
+/// shown (see [`awaits_retry_decision`]). One with system-error retries left
+/// on its submission is requeued. One whose budget is spent is confirmed: the
+/// submission shows it from now on. A deterministic plugin refusal
+/// (`PLUGIN_REFUSED`) can only fail again; the submission shows it at once
+/// and it is never retried.
 pub(crate) async fn retry_system_errors(
     db: &DatabaseConnection,
     budget: RetryBudget,
     limit: u32,
     local: &[String],
-) -> Result<u64, DbErr> {
+) -> Result<SystemErrorPass, DbErr> {
     let txn = db.begin().await?;
     let mut b = Binds::default();
     let filter = format!(
-        "u.is_current AND u.is_finalized \
-         AND {system_error} \
-         AND u.error_code IS DISTINCT FROM {refused} \
-         AND s.system_error_retries < {max} AND {handled}",
-        system_error = system_error("u"),
-        refused = b.bind(SubmissionDlqErrorCode::PLUGIN_REFUSED),
+        "u.is_current AND {undecided} AND s.system_error_retries < {max} AND {handled}",
+        undecided = awaits_retry_decision("u"),
         max = b.bind(budget.max()),
         handled = {
             let local = b.bind(local.to_vec());
@@ -775,9 +881,51 @@ pub(crate) async fn retry_system_errors(
         .into_iter()
         .map(|p| p.id)
         .collect();
-    let n = requeue(&txn, Unit::Judgement, &ids, Requeue::SystemErrorRetry).await?;
+    let requeued = requeue(&txn, Unit::Judgement, &ids, Requeue::SystemErrorRetry).await?;
+
+    // Spent budgets: the submission shows the error, once. Any replica may
+    // confirm, whatever it can judge.
+    let mut b = Binds::default();
+    let filter = format!(
+        "u.is_current AND {undecided} AND s.system_error_retries >= {max} \
+         AND (s.judge_epoch IS DISTINCT FROM u.judge_epoch OR s.status IS DISTINCT FROM u.status)",
+        undecided = awaits_retry_decision("u"),
+        max = b.bind(budget.max()),
+    );
+    let ids: Vec<i32> = pick(&txn, Unit::Judgement, b, filter, Some(limit))
+        .await?
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    let confirmed = if ids.is_empty() {
+        Vec::new()
+    } else {
+        txn.query_all_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!(
+                "UPDATE submission s SET {MIRROR_SETS} FROM submission_judgement j \
+                 WHERE j.id = ANY($1) AND s.id = j.submission_id \
+                 RETURNING s.id, s.user_id, s.problem_id, s.contest_id"
+            ),
+            [ids.into()],
+        ))
+        .await?
+        .iter()
+        .map(|r| {
+            Ok(ConfirmedSystemError {
+                submission_id: r.try_get("", "id")?,
+                user_id: r.try_get("", "user_id")?,
+                problem_id: r.try_get("", "problem_id")?,
+                contest_id: r.try_get("", "contest_id")?,
+            })
+        })
+        .collect::<Result<_, DbErr>>()?
+    };
     txn.commit().await?;
-    Ok(n)
+    Ok(SystemErrorPass {
+        requeued,
+        confirmed,
+    })
 }
 
 /// Finalizes a unit whose dispatch failed as `SystemError`, fenced on its

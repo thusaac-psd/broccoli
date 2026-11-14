@@ -1,26 +1,66 @@
+use std::time::{Duration, Instant};
+
 use crate::registry::{EvaluateBatches, OperationWaiters};
 use common::metrics::Metrics;
 use common::worker::{TaskReply, TaskResult};
-use mq::ReplyInbox;
+use mq::{Mq, ReplyInbox};
 use opentelemetry::KeyValue;
 use tracing::{debug, error, info, warn};
 
+/// How often the result consumer checks this server's outstanding operations
+/// against its ledger in the queue (see [`OutstandingCheck`]).
+pub const OUTSTANDING_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+
+/// The error a lost operation fails with.
+pub const OPERATION_LOST: &str =
+    "the operation was lost from the queue (Redis restarted without it); the result cannot arrive";
+
+/// Proof that every operation this server waits for is still alive.
+///
+/// The queue keeps a ledger per server of the tasks it published that have no
+/// reply yet: a task enters it in the script that publishes it and leaves it
+/// in the script that publishes its completed reply (see
+/// `mq::Mq::check_outstanding`). A task the queue holds anywhere (unread, in a
+/// worker's pending list, requeued or moved off a dead worker) is in the
+/// ledger, so a published operation missing from it either has its reply in
+/// the reply stream or was lost with a Redis that came back from an older
+/// snapshot. Every `interval` the consumer checks all published waiters in one
+/// round trip per [`mq::CHECK_CHUNK`] ids and notes the reply stream's last id;
+/// once its reads have passed that id, any of them still waiting has no reply
+/// coming and fails at once, into the plugin's normal failure handling.
+pub struct OutstandingCheck {
+    pub mq: Mq,
+    pub server_id: String,
+    pub interval: Duration,
+}
+
+/// Operations found missing from the ledger, waiting for the inbox to read
+/// past every reply that could still answer them.
+struct Suspects {
+    ids: Vec<String>,
+    replies_through: Option<String>,
+}
+
 /// Deliver this server's replies to their waiters, for the life of the
-/// process. One reader is enough: handling a reply is a map lookup and a
-/// channel send, and each read returns up to [`mq::REPLY_BATCH`] replies.
+/// process, and fail the waiters whose operation the queue lost. One reader is
+/// enough: handling a reply is a map lookup and a channel send, and each read
+/// returns up to [`mq::REPLY_BATCH`] replies.
 pub async fn consume_operation_results(
     mut inbox: ReplyInbox,
+    check: OutstandingCheck,
     waiters: OperationWaiters,
     evaluate_batches: EvaluateBatches,
     metrics: Metrics,
 ) {
     info!(stream = %inbox.key(), "Starting operation result consumer");
+    let mut suspects: Option<Suspects> = None;
+    let mut next_check = Instant::now() + check.interval;
     loop {
         let batch = match inbox.next_batch().await {
             Ok(batch) => batch,
             Err(e) => {
                 warn!(stream = %inbox.key(), error = %e, "Reading replies failed; retrying");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
         };
@@ -35,7 +75,64 @@ pub async fn consume_operation_results(
                 Err(e) => error!(error = %e, "Dropping an undecodable reply"),
             }
         }
+        if let Some(found) =
+            suspects.take_if(|s| inbox.has_read_through(s.replies_through.as_deref()))
+        {
+            let failed = found
+                .ids
+                .iter()
+                .filter(|id| fail_waiter(&waiters, id, OPERATION_LOST))
+                .count();
+            if failed > 0 {
+                error!(failed, "Failed operations the queue lost");
+            }
+        }
+        if suspects.is_none() && Instant::now() >= next_check {
+            next_check = Instant::now() + check.interval;
+            suspects = find_missing(&check, &waiters).await;
+        }
     }
+}
+
+/// The published operations the ledger no longer holds, if any.
+async fn find_missing(check: &OutstandingCheck, waiters: &OperationWaiters) -> Option<Suspects> {
+    let published: Vec<String> = waiters
+        .iter()
+        .filter(|w| w.published)
+        .map(|w| w.key().clone())
+        .collect();
+    match check
+        .mq
+        .check_outstanding(&check.server_id, &published)
+        .await
+    {
+        Ok(found) if found.missing.is_empty() => None,
+        Ok(found) => Some(Suspects {
+            ids: found.missing,
+            replies_through: found.replies_through,
+        }),
+        Err(e) => {
+            warn!(error = %e, "Checking outstanding operations failed; retrying next interval");
+            None
+        }
+    }
+}
+
+/// Fail one waiter with `reason`; whether it was still waiting.
+fn fail_waiter(waiters: &OperationWaiters, task_id: &str, reason: &str) -> bool {
+    let Some((task_id, waiter)) = waiters.remove(task_id) else {
+        return false;
+    };
+    let _ = waiter.result_tx.send(TaskResult {
+        task_id,
+        success: false,
+        output: serde_json::json!({}),
+        error: Some(reason.to_string()),
+        task_type: None,
+        operation: None,
+        worker_id: None,
+    });
+    true
 }
 
 /// Fail every outstanding operation now: their replies cannot arrive any
@@ -44,22 +141,10 @@ pub async fn consume_operation_results(
 /// timeouts. Returns how many were failed.
 pub fn fail_all_waiters(waiters: &OperationWaiters, reason: &str) -> usize {
     let ids: Vec<String> = waiters.iter().map(|w| w.key().clone()).collect();
-    let mut failed = 0;
-    for task_id in ids {
-        let Some((_, waiter)) = waiters.remove(&task_id) else {
-            continue;
-        };
-        let _ = waiter.result_tx.send(TaskResult {
-            task_id,
-            success: false,
-            output: serde_json::json!({}),
-            error: Some(reason.to_string()),
-            task_type: None,
-            operation: None,
-            worker_id: None,
-        });
-        failed += 1;
-    }
+    let failed = ids
+        .iter()
+        .filter(|id| fail_waiter(waiters, id, reason))
+        .count();
     if failed > 0 {
         error!(failed, reason, "Failed every outstanding operation");
     }

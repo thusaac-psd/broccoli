@@ -23,7 +23,7 @@ current judgement from the moment it exists.
 | claim | `Queued` | `Pending`, owned, lease stamped | claim fiber |
 | progress | in flight | `Compiling`, `Running` | plugin (`host.submission.update`, `host.code_run.update`) |
 | finish | in flight | `Judged`, `CompilationError` (finalized) | plugin |
-| fail | in flight | `SystemError` (finalized) | dispatch (`fail_dispatch`) |
+| fail | in flight | `SystemError` (finalized) | dispatch, an ended judging session (`fail_dispatch`) |
 | requeue | in flight | `Queued`, new epoch, no owner | `release_leases`, `reclaim_abandoned` |
 | exhaust | in flight | `SystemError` (finalized), dead-lettered | `reclaim_abandoned` |
 | system-error retry | finalized `SystemError`, current | `Queued`, new epoch | `retry_system_errors` |
@@ -40,6 +40,11 @@ recovery is a requeue:
   (`reclaim_abandoned`);
 - the SystemError-retry reaper requeues a current judgement that finalized as
   a `SystemError` (`retry_system_errors`).
+
+One lease-steal or stuck-job scan takes over everything it selects: it works
+in transactions of `steal_batch_size` rows (256 for the detector) and repeats
+them until one comes back short, so a dead server's whole in-flight set is
+requeued within one scan interval however large it is.
 
 Every lease age is compared on the database clock: claims and refreshes stamp
 `NOW()`, and the scans compare against `NOW()`.
@@ -67,6 +72,30 @@ work. A one-second fallback tick covers notifications lost while the
 listening connection was down; every reconnect also wakes the
 fiber.
 
+## Judging sessions end in a verdict
+
+A contest plugin judges a submission in a detached session: the host runs its
+test cases and calls the plugin back with each result (see
+`services/windowed_session.rs`). The plugin records the verdict from a
+callback. The session loop returns how it ended, a `SessionEnd`, on every
+exit, and the evaluate driver acts on it once:
+
+- `Decided`: the plugin ended the session (finish, cancel, or its answer to
+  the last result). A judgement it left open is finalized as `SystemError`
+  with `PLUGIN_NO_VERDICT`.
+- `Aborted`: a callback failed, or the plugin is gone (disabled, unloaded).
+  The judgement is finalized as `SystemError` with `PLUGIN_SESSION_ABORTED`.
+- `Interrupted`: this server is shutting down. Nothing is recorded; the
+  shutdown releases the judgement and a peer judges it again.
+
+Both finalizations go through `fail_dispatch`, fenced on the judgement's
+epoch and on it being open, so a verdict the plugin already wrote stands. The
+after-judging hooks fire after either. While the plugin providing a contest
+type is disabled, a submission to its contests is refused with
+`503 CONTEST_TYPE_DISABLED` and no `Retry-After`; `CONTEST_TYPE_UNAVAILABLE`
+(with `Retry-After`) means only that the serving replica has not loaded the
+plugin yet.
+
 ## The submission row is a cache
 
 `submission.status`, `judge_epoch`, `target_worker_id` and the judged output
@@ -74,6 +103,16 @@ columns are a projection of the current judgement. Each transition of a
 current judgement rewrites them in the same statement or transaction. A
 plugin's result write is one statement that writes the judgement and the
 submission together.
+
+One projection waits: a current judgement that finalized as a system error
+the system-error retry may still re-judge (anything but `PLUGIN_REFUSED`).
+The submission keeps showing the attempt in flight until the reaper decides
+it within one scan (5 s): it requeues the judgement while the submission has
+retries left, so the submission goes on to `Queued` and the next attempt; or
+it confirms the error once the budget is spent, which projects it and fires
+the after-judging hooks. A client therefore never sees a terminal status
+that a retry takes back: within an attempt the statuses only move forward,
+and a terminal status is final.
 
 ## Judge epochs
 
@@ -127,6 +166,15 @@ submission whose verdict is a `SystemError` and records the retry in the
 history, leaving the row open until the rejudge recovers. Nothing re-judges a
 stuck deferred judgement or code run, so an operator resolves those; discarding
 the judgement resolves its row. An operator resolution names the operator.
+
+An operation task that a worker dead-letters (its execution retries or its
+deliveries ran out) carries the judgement it ran for, so its row is filed
+under that submission (`submission_id`, with the judgement id in the
+payload). The statement that gives the submission a verdict that stands
+resolves these rows with the submission's own, and a row that reaches the
+database after that verdict (dead letters travel through the queue) is
+resolved as it is filed. An operation row with no submission ran for no
+judgement.
 
 ## Locks
 
