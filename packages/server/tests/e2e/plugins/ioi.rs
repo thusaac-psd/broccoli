@@ -1103,3 +1103,123 @@ async fn disabling_the_contest_plugin_mid_judging_finalizes_the_submission() {
         "a disabled contest type is not a retry-later answer"
     );
 }
+
+async fn create_labelled_test_case(
+    app: &E2eTestApp,
+    problem_id: i32,
+    label: &str,
+    token: &str,
+) -> i32 {
+    let res = app
+        .post_with_token(
+            &format!("/api/v1/problems/{problem_id}/test-cases"),
+            &json!({
+                "input": "1 2",
+                "expected_output": "3",
+                "score": 50,
+                "is_sample": false,
+                "label": label,
+            }),
+            token,
+        )
+        .await;
+    assert_eq!(res.status, 201, "create test case: {}", res.text);
+    res.id()
+}
+
+/// A subtask naming a test case the problem does not have would score 0 for
+/// every submission, so the write is refused with the field that names it and
+/// nothing is stored.
+#[tokio::test(flavor = "multi_thread")]
+async fn ioi_task_config_naming_a_missing_test_case_is_refused() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_validate_admin", "password", "admin")
+        .await;
+    let problem_id = app.create_problem(&admin, "IOI Validate").await;
+    create_labelled_test_case(&app, problem_id, "t1", &admin).await;
+    let contest_id = app
+        .create_typed_contest(&admin, "IOI Validate Contest", "ioi", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    let path = format!("/api/v1/contests/{contest_id}/problems/{problem_id}/config/ioi/task");
+    let subtasks = |members: &[&str]| {
+        json!({ "config": { "subtasks": [{
+            "name": "S",
+            "scoring_method": "sum",
+            "max_score": 100,
+            "test_cases": members,
+        }]}})
+    };
+
+    let res = app
+        .put_with_token(&path, &subtasks(&["nope"]), &admin)
+        .await;
+    assert_eq!(res.status, 400, "{}", res.text);
+    assert_eq!(res.body["code"], "VALIDATION_ERROR", "{}", res.text);
+    assert_eq!(
+        res.body["details"]["fields"][0]["path"], "subtasks[0].test_cases[0]",
+        "{}",
+        res.text
+    );
+    let stored = app.get_with_token(&path, &admin).await;
+    assert_eq!(stored.status, 404, "{}", stored.text);
+
+    let res = app.put_with_token(&path, &subtasks(&["t1"]), &admin).await;
+    assert_eq!(res.status, 200, "{}", res.text);
+}
+
+/// Test data can change under a stored config: once a test case a subtask
+/// names is deleted, the problem's config issues list that config.
+#[tokio::test(flavor = "multi_thread")]
+async fn ioi_task_config_left_naming_a_deleted_test_case_is_listed_as_an_issue() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_issue_admin", "password", "admin")
+        .await;
+    let problem_id = app.create_problem(&admin, "IOI Issues").await;
+    create_labelled_test_case(&app, problem_id, "t1", &admin).await;
+    let t2 = create_labelled_test_case(&app, problem_id, "t2", &admin).await;
+    let contest_id = app
+        .create_typed_contest(&admin, "IOI Issues Contest", "ioi", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    let res = app
+        .put_with_token(
+            &format!("/api/v1/contests/{contest_id}/problems/{problem_id}/config/ioi/task"),
+            &json!({ "config": { "subtasks": [
+                { "name": "S1", "test_cases": ["t1"] },
+                { "name": "S2", "test_cases": ["t2"] },
+            ]}}),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let issues_path = format!("/api/v1/problems/{problem_id}/config/issues");
+    let issues = app.get_with_token(&issues_path, &admin).await;
+    assert_eq!(issues.status, 200, "{}", issues.text);
+    assert_eq!(issues.body, json!([]));
+
+    let res = app
+        .delete_with_token(
+            &format!("/api/v1/problems/{problem_id}/test-cases/{t2}"),
+            &admin,
+        )
+        .await;
+    assert!(res.status < 300, "{}", res.text);
+
+    let issues = app.get_with_token(&issues_path, &admin).await;
+    assert_eq!(issues.status, 200, "{}", issues.text);
+    let issues = issues.body.as_array().expect("an array");
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(issues[0]["plugin_id"], "ioi");
+    assert_eq!(issues[0]["scope"], "contest_problem");
+    assert_eq!(issues[0]["ref_id"], format!("{contest_id}:{problem_id}"));
+    assert_eq!(issues[0]["namespace"], "task");
+    assert_eq!(
+        issues[0]["errors"][0]["path"], "subtasks[1].test_cases[0]",
+        "{issues:?}"
+    );
+}
