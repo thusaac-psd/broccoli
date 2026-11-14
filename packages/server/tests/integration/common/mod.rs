@@ -621,7 +621,13 @@ impl TestApp {
                 test_support::shared_redis_port().await
             ),
         };
-        let mq = mq::Mq::lazy(&mq_url, database.name()).expect("valid redis url");
+        // A test with its own Redis (`redis_url`) has it to itself and keeps
+        // the default namespace; on the shared one each database gets its own.
+        let mq_namespace = match options.redis_url {
+            Some(_) => common::config::default_operation_queue_name(),
+            None => database.name().to_string(),
+        };
+        let mq = mq::Mq::lazy(&mq_url, &mq_namespace).expect("valid redis url");
 
         let plugin_cache = tempfile::tempdir().expect("plugin cache dir");
         let mut app_config = AppConfig {
@@ -691,7 +697,7 @@ impl TestApp {
             storage: BlobStoreConfig::default(),
             mq: MqAppConfig {
                 url: mq_url.clone(),
-                operation_queue_name: database.name().to_string(),
+                operation_queue_name: mq_namespace.clone(),
                 ..Default::default()
             },
             observability: common::config::ObservabilityConfig::default(),

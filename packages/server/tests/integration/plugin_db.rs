@@ -335,6 +335,7 @@ mod grants {
         "plugin_replica",
         "plugin_storage",
         "plugin_timer",
+        "platform_setting",
         "refresh_tokens",
         "role",
         "role_permission",
