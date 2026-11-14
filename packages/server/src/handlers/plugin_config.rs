@@ -370,9 +370,8 @@ pub async fn get_problem_config(
         (status = 200, description = "Config upserted", body = PluginConfigResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = crate::error::ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = crate::error::ErrorBody),
-        (status = 404, description = "Problem not found (NOT_FOUND)", body = crate::error::ErrorBody),
         (status = 400, description = "Validation error (VALIDATION_ERROR): the config breaks the namespace's schema; `details.fields` lists each broken field as `{path, message}`", body = crate::error::ErrorBody),
-        (status = 404, description = "The plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND)", body = crate::error::ErrorBody),
+        (status = 404, description = "Problem not found (NOT_FOUND), or the plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND)", body = crate::error::ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -530,9 +529,8 @@ pub async fn get_contest_problem_config(
         (status = 200, description = "Config upserted", body = PluginConfigResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = crate::error::ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = crate::error::ErrorBody),
-        (status = 404, description = "Contest problem not found (NOT_FOUND)", body = crate::error::ErrorBody),
         (status = 400, description = "Validation error (VALIDATION_ERROR): the config breaks the namespace's schema; `details.fields` lists each broken field as `{path, message}`", body = crate::error::ErrorBody),
-        (status = 404, description = "The plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND)", body = crate::error::ErrorBody),
+        (status = 404, description = "Contest problem not found (NOT_FOUND), or the plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND)", body = crate::error::ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -686,9 +684,8 @@ pub async fn get_contest_config(
         (status = 200, description = "Config upserted", body = PluginConfigResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = crate::error::ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = crate::error::ErrorBody),
-        (status = 404, description = "Contest not found (NOT_FOUND)", body = crate::error::ErrorBody),
         (status = 400, description = "Validation error (VALIDATION_ERROR): the config breaks the namespace's schema; `details.fields` lists each broken field as `{path, message}`", body = crate::error::ErrorBody),
-        (status = 404, description = "The plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND)", body = crate::error::ErrorBody),
+        (status = 404, description = "Contest not found (NOT_FOUND), or the plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND)", body = crate::error::ErrorBody),
     ),
     security(("jwt" = [])),
 )]

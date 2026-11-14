@@ -411,7 +411,7 @@ pub struct PluginUploadResponse {
     pub archive_hash: String,
     pub message: String,
     /// Stored configs of this plugin that the published version's config
-    /// schemas refuse (see [`PluginArchiveSummary::incompatible_configs`]).
+    /// schemas refuse, as inspecting the archive reports them.
     pub incompatible_configs: Vec<crate::services::plugin_config::IncompatibleConfig>,
 }
 
