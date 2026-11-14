@@ -828,7 +828,7 @@ use crate::evaluate::{
 #[cfg(target_arch = "wasm32")]
 use crate::standings::{
     StandingsSubmission, compute_first_solvers, compute_pending, compute_problem_states,
-    counts_as_live,
+    counts_as_live, shared_board_ranks,
 };
 
 // -- Plugin entry points -------------------------------------------------
@@ -1513,6 +1513,19 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     // always sees their OWN submissions un-frozen (real verdicts on their row), so
     // only OTHER teams are hidden. When not frozen, freeze_start_ms = i64::MAX so
     // everything is live and this is a no-op.
+    // Ranks come from the board every viewer shares, and only a board of
+    // every team can place a team among the others: a view restricted to the
+    // viewer's own row carries no rank.
+    let ranks = restricted_user_id.is_none().then(|| {
+        let user_ids: Vec<i32> = participants.iter().map(|p| p.user_id).collect();
+        shared_board_ranks(
+            &standings_submissions,
+            &user_ids,
+            freeze_start_ms,
+            config.count_compile_error,
+            config.penalty_minutes,
+        )
+    });
     let own_uid = req.user_id();
     let (pre_freeze, during_freeze): (Vec<StandingsSubmission>, Vec<StandingsSubmission>) =
         standings_submissions
@@ -1546,7 +1559,7 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
 
     #[derive(Serialize)]
     struct StandingsEntry {
-        rank: usize,
+        rank: Option<usize>,
         user_id: i32,
         username: String,
         display_name: String,
@@ -1607,7 +1620,9 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         }
 
         entries.push(StandingsEntry {
-            rank: 0,
+            rank: ranks
+                .as_ref()
+                .and_then(|ranks| ranks.get(&participant.user_id).copied()),
             user_id: participant.user_id,
             username: participant.username.clone(),
             display_name: participant.display_label().to_owned(),
@@ -1630,25 +1645,12 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         }
     }
 
-    // Sort: solved DESC, penalty ASC, username ASC
+    // Board order: rank, then username.
     entries.sort_by(|a, b| {
-        b.solved
-            .cmp(&a.solved)
-            .then_with(|| a.penalty.cmp(&b.penalty))
+        a.rank
+            .cmp(&b.rank)
             .then_with(|| a.username.cmp(&b.username))
     });
-
-    // Assign ranks (ties get same rank)
-    for i in 0..entries.len() {
-        if i > 0
-            && entries[i].solved == entries[i - 1].solved
-            && entries[i].penalty == entries[i - 1].penalty
-        {
-            entries[i].rank = entries[i - 1].rank;
-        } else {
-            entries[i].rank = i + 1;
-        }
-    }
 
     Ok(PluginHttpResponse {
         status: 200,

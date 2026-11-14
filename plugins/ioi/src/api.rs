@@ -506,7 +506,9 @@ pub(crate) fn handle_scoreboard(
 
     #[derive(Serialize)]
     struct RankEntry {
-        rank: usize,
+        /// `None` on a board restricted to the viewer's own row, which cannot
+        /// place that row among the others.
+        rank: Option<usize>,
         user_id: i32,
         username: String,
         display_name: String,
@@ -567,7 +569,7 @@ pub(crate) fn handle_scoreboard(
         };
 
         entries.push(RankEntry {
-            rank: 0,
+            rank: None,
             user_id: participant.user_id,
             username: participant.username.clone(),
             display_name: participant.display_label().to_owned(),
@@ -590,19 +592,20 @@ pub(crate) fn handle_scoreboard(
         )
     });
 
-    for i in 0..entries.len() {
-        if i > 0
-            && scoreboard_entries_tied(
-                entries[i].total_score,
-                entries[i].total_time_seconds,
-                entries[i - 1].total_score,
-                entries[i - 1].total_time_seconds,
-                contest_config.scoreboard_tiebreaker,
-            )
-        {
-            entries[i].rank = entries[i - 1].rank;
-        } else {
-            entries[i].rank = i + 1;
+    if full_scoreboard_visible {
+        for i in 0..entries.len() {
+            entries[i].rank = if i > 0
+                && scoreboard_entries_tied(
+                    entries[i].total_score,
+                    entries[i].total_time_seconds,
+                    entries[i - 1].total_score,
+                    entries[i - 1].total_time_seconds,
+                    contest_config.scoreboard_tiebreaker,
+                ) {
+                entries[i - 1].rank
+            } else {
+                Some(i + 1)
+            };
         }
     }
 

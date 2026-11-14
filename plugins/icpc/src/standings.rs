@@ -95,6 +95,47 @@ pub fn counts_as_live(
     sub.elapsed_ms < freeze_start_ms || Some(sub.user_id) == own_user_id
 }
 
+/// Each team's rank on the board every viewer of it may see, keyed by user
+/// id: submissions made before `freeze_start_ms` (`i64::MAX` when the board
+/// is not frozen) only, so a contestant's own frozen-window results, which
+/// only they see, never move a rank. Teams with more solved problems rank
+/// higher, then those with less penalty; equal teams share a rank and the
+/// next rank skips past them.
+pub fn shared_board_ranks(
+    submissions: &[StandingsSubmission],
+    user_ids: &[i32],
+    freeze_start_ms: i64,
+    count_compile_error: bool,
+    penalty_minutes: i32,
+) -> HashMap<i32, usize> {
+    let visible_to_all: Vec<StandingsSubmission> = submissions
+        .iter()
+        .filter(|s| s.elapsed_ms < freeze_start_ms)
+        .cloned()
+        .collect();
+    let states = compute_problem_states(&visible_to_all, count_compile_error);
+    let mut totals: HashMap<i32, (i32, i32)> = user_ids.iter().map(|&uid| (uid, (0, 0))).collect();
+    for (&(user_id, _), state) in &states {
+        if let Some((solved, penalty)) = totals.get_mut(&user_id)
+            && state.solved
+        {
+            *solved += 1;
+            *penalty += state.penalty_minutes(penalty_minutes);
+        }
+    }
+    // Better first: more solved, then less penalty.
+    let key = |&(solved, penalty): &(i32, i32)| (std::cmp::Reverse(solved), penalty);
+    let mut ordered: Vec<(i32, i32)> = totals.values().copied().collect();
+    ordered.sort_by_key(key);
+    totals
+        .into_iter()
+        .map(|(user_id, total)| {
+            let better = ordered.partition_point(|other| key(other) < key(&total));
+            (user_id, better + 1)
+        })
+        .collect()
+}
+
 /// Owner of the "first to solve" balloon per problem: the contestant with the
 /// earliest accepted solve among submissions made before `freeze_start_ms`
 /// (`i64::MAX` when the board is not frozen), ties broken by the smaller
@@ -168,6 +209,49 @@ fn is_penalty_attempt(row: &StandingsSubmission, count_compile_error: bool) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn accepted(
+        submission_id: i32,
+        user_id: i32,
+        problem_id: i32,
+        minute: i64,
+    ) -> StandingsSubmission {
+        StandingsSubmission {
+            submission_id,
+            user_id,
+            problem_id,
+            verdict: Some(Verdict::Accepted),
+            status: "Judged".into(),
+            elapsed_ms: minute * 60_000,
+        }
+    }
+
+    #[test]
+    fn shared_board_ranks_ties_share_a_rank_and_the_next_rank_skips() {
+        let subs = [
+            accepted(1, 1, 100, 10),
+            accepted(2, 2, 100, 10),
+            accepted(3, 3, 100, 30),
+        ];
+        let ranks = shared_board_ranks(&subs, &[1, 2, 3, 4], i64::MAX, false, 20);
+        assert_eq!(ranks[&1], 1);
+        assert_eq!(ranks[&2], 1);
+        assert_eq!(ranks[&3], 3);
+        assert_eq!(ranks[&4], 4, "a team with nothing solved still ranks last");
+    }
+
+    #[test]
+    fn shared_board_ranks_ignore_every_submission_inside_the_freeze() {
+        // Team 2 solves two problems inside the freeze; on the frozen board
+        // every viewer shares, team 1's earlier solve still leads.
+        let subs = [
+            accepted(1, 1, 100, 10),
+            accepted(2, 2, 100, 50),
+            accepted(3, 2, 101, 55),
+        ];
+        let ranks = shared_board_ranks(&subs, &[1, 2], 40 * 60_000, false, 20);
+        assert_eq!((ranks[&1], ranks[&2]), (1, 2));
+    }
 
     #[test]
     fn current_wrong_judgement_overrides_stale_solved_storage_shape() {

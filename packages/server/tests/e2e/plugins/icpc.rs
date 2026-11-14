@@ -302,6 +302,11 @@ async fn icpc_standings_private_by_default_restricts_each_contestant_to_their_ow
         "private standings should restrict a contestant to exactly their own row, got: {rows_b:?}"
     );
     assert_eq!(rows_b[0]["username"], "icpc_priv_b");
+    // A board of one row cannot place that row among the others: it carries
+    // no rank rather than an invented first place.
+    for row in rows_a.iter().chain(rows_b) {
+        assert!(row["rank"].is_null(), "{row}");
+    }
 
     // The organizer (`contest:manage`) always sees every row regardless of
     // `public_standings`.

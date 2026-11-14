@@ -781,6 +781,11 @@ async fn ioi_scoreboard_visibility_config_can_show_all_viewers_during_contest() 
         default_res.text
     );
     assert!(
+        default_rows[0]["rank"].is_null(),
+        "a scoreboard showing only the viewer's row carries no rank: {}",
+        default_res.text
+    );
+    assert!(
         default_rows
             .iter()
             .all(|row| row["username"].as_str() != Some("ioi_user6b")),

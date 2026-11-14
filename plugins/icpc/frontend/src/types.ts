@@ -17,7 +17,8 @@ export interface ProblemCell {
 }
 
 export interface StandingsEntry extends UserDisplayIdentity {
-  rank: number;
+  /** `null` when the board shows only the viewer's own row. */
+  rank: number | null;
   user_id: number;
   solved: number;
   penalty: number;

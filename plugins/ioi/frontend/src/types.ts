@@ -57,7 +57,8 @@ export interface ScoreboardProblemScore {
 }
 
 export interface ScoreboardEntry extends UserDisplayIdentity {
-  rank: number;
+  /** `null` when the board shows only the viewer's own row. */
+  rank: number | null;
   user_id: number;
   total_score: number;
   total_time_seconds: number;

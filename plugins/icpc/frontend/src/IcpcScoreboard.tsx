@@ -81,7 +81,11 @@ function PhaseBar({ phase, frozen }: { phase: string; frozen?: boolean }) {
   );
 }
 
-function MedalBadge({ rank }: { rank: number }) {
+function MedalBadge({ rank }: { rank: number | null }) {
+  // A board restricted to the viewer's own row carries no rank.
+  if (rank === null) {
+    return <span className="text-[13px] text-muted-foreground">—</span>;
+  }
   if (rank > 3) {
     return (
       <span className="font-mono tabular-nums text-[13px] text-muted-foreground">
