@@ -13,9 +13,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 
 import { fetchSupportedLanguages } from '@/features/problem/api/fetch-supported-languages';
+import {
+  fetchAllPages,
+  MAX_PER_PAGE,
+} from '@/features/submission/api/fetch-all-pages';
 import { fetchSubmissions } from '@/features/submission/api/fetch-submissions';
+import { useBulkRejudge } from '@/features/submission/hooks/use-bulk-rejudge';
 import { useCursorPages } from '@/features/submission/hooks/use-cursor-pages';
 
+import { BulkRejudgeBar, BulkRejudgeToggle } from './BulkRejudge';
 import { SubmissionListPager } from './SubmissionListPager';
 import { SubmissionsTable } from './SubmissionsTable';
 
@@ -100,6 +106,11 @@ export function AllSubmissions() {
     staleTime: 5 * 60 * 1000,
   });
 
+  const filters = {
+    q: appliedQ || null,
+    language: appliedLanguage,
+    status: toSubmissionStatus(appliedStatus),
+  };
   const { data: submissionsResult, isLoading } = useQuery({
     queryKey: [
       'admin-submissions-table',
@@ -110,14 +121,27 @@ export function AllSubmissions() {
     ],
     queryFn: () =>
       fetchSubmissions(apiClient, {
-        q: appliedQ || null,
-        language: appliedLanguage,
-        status: toSubmissionStatus(appliedStatus),
+        ...filters,
         cursor: pages.cursor,
         per_page: PER_PAGE,
         sort_by: 'created_at',
         sort_order: 'desc',
       }),
+  });
+
+  const bulk = useBulkRejudge({
+    listKey: ['admin-submissions-table'],
+    filterKey: ['all', filters],
+    fetchMatching: () =>
+      fetchAllPages((cursor) =>
+        fetchSubmissions(apiClient, {
+          ...filters,
+          cursor,
+          per_page: MAX_PER_PAGE,
+          sort_by: 'created_at',
+          sort_order: 'desc',
+        }),
+      ),
   });
 
   const submissions = submissionsResult?.data ?? [];
@@ -178,7 +202,10 @@ export function AllSubmissions() {
           }
           className="w-[200px]"
         />
+        <BulkRejudgeToggle bulk={bulk} />
       </div>
+
+      <BulkRejudgeBar bulk={bulk} />
 
       <div className="border rounded-lg overflow-hidden">
         {isLoading ? (
@@ -189,6 +216,7 @@ export function AllSubmissions() {
           <SubmissionsTable
             submissions={submissions}
             columns={SubmissionsTable.adminColumns}
+            {...bulk.tableSelection}
             linkBuilder={(sub) =>
               sub.contest_id
                 ? `/contests/${sub.contest_id}/submissions/${sub.id}`
