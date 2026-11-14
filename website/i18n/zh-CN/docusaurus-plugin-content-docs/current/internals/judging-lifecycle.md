@@ -28,6 +28,8 @@ sidebar_position: 2
 - 租约窃取会重新入队租约已失效 `lease_ttl_secs` 的工作，卡死任务检测器会重新入队 `stuck_job_timeout_secs` 内没有心跳或分发时间早于 `max_inflight_secs` 的工作（`reclaim_abandoned`）；
 - SystemError 重试回收器会重新入队以 `SystemError` 定稿的当前评测记录（`retry_system_errors`）。
 
+一次租约窃取或卡死任务扫描会接管它选中的全部工作：它以每个事务 `steal_batch_size` 行（检测器为 256 行）的批次处理，并不断重复，直到某一批不满为止，因此无论宕机服务器有多少进行中的工作，都会在一个扫描间隔内全部重新入队。
+
 所有租约时长都以数据库时钟比较：认领与刷新写入 `NOW()`，扫描也与 `NOW()` 比较。
 
 ## 认领

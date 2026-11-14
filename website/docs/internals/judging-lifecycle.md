@@ -41,6 +41,11 @@ recovery is a requeue:
 - the SystemError-retry reaper requeues a current judgement that finalized as
   a `SystemError` (`retry_system_errors`).
 
+One lease-steal or stuck-job scan takes over everything it selects: it works
+in transactions of `steal_batch_size` rows (256 for the detector) and repeats
+them until one comes back short, so a dead server's whole in-flight set is
+requeued within one scan interval however large it is.
+
 Every lease age is compared on the database clock: claims and refreshes stamp
 `NOW()`, and the scans compare against `NOW()`.
 

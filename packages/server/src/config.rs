@@ -137,6 +137,8 @@ pub struct ServerConfig {
     pub lease_refresh_interval_secs: u64,
     #[serde(default = "default_steal_scan_interval_secs")]
     pub steal_scan_interval_secs: u64,
+    /// Rows one lease-steal transaction takes; a scan repeats transactions
+    /// until it has taken every lapsed unit.
     #[serde(default = "default_steal_batch_size")]
     pub steal_batch_size: u32,
     /// Dispatch retries a judgement or code run gets after its owner was

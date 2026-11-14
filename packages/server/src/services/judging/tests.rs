@@ -319,6 +319,36 @@ async fn a_lapsed_lease_requeues_under_a_new_epoch_and_spends_a_retry() {
 }
 
 #[tokio::test]
+async fn one_reclaim_takes_over_every_lapsed_unit_whatever_the_batch_size() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    for _ in 0..7 {
+        new_submission(&db).await;
+    }
+    claim_judgements(&db, "dead", 10, NO_TYPES).await.unwrap();
+    exec(
+        &db,
+        "UPDATE submission_judgement SET lease_heartbeat_at = NOW() - INTERVAL '2 minutes'",
+    )
+    .await;
+
+    let reclaimed = reclaim_abandoned(
+        &db,
+        Unit::Judgement,
+        Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
+        RetryBudget::new(5),
+        3,
+        NO_TYPES,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reclaimed.requeued, 7,
+        "batches repeat until one comes back short"
+    );
+    assert_eq!(count_in_flight(&db, "dead").await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn a_live_lease_is_left_alone() {
     let (_pg, db) = crate::test_support::postgres().await;
     new_submission(&db).await;

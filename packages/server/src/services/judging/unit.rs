@@ -645,18 +645,48 @@ pub(crate) struct Reclaimed {
     pub exhausted: u64,
 }
 
-/// Takes over up to `limit` in-flight units of `unit` that `abandoned`
-/// selects and this replica can judge: each with dispatch retries left is
-/// requeued (spending one), each without is finalized as `SystemError` and
-/// dead-lettered.
+impl std::ops::AddAssign for Reclaimed {
+    fn add_assign(&mut self, other: Self) {
+        self.requeued += other.requeued;
+        self.exhausted += other.exhausted;
+    }
+}
+
+/// Takes over every in-flight unit of `unit` that `abandoned` selects and
+/// this replica can judge, `batch` rows per transaction: each with dispatch
+/// retries left is requeued (spending one), each without is finalized as
+/// `SystemError` and dead-lettered. Batches repeat until one comes back
+/// short, so a dead server's whole in-flight set is recovered in one scan
+/// however large it is. Every batch takes its rows out of flight, so the
+/// loop ends.
 pub(crate) async fn reclaim_abandoned(
+    db: &DatabaseConnection,
+    unit: Unit,
+    abandoned: Abandoned,
+    budget: RetryBudget,
+    batch: u32,
+    local: &[String],
+) -> Result<Reclaimed, DbErr> {
+    let batch = batch.max(1);
+    let mut total = Reclaimed::default();
+    loop {
+        let (taken, reclaimed) = reclaim_batch(db, unit, abandoned, budget, batch, local).await?;
+        total += reclaimed;
+        if taken < batch as usize {
+            return Ok(total);
+        }
+    }
+}
+
+/// One batch of [`reclaim_abandoned`]: returns how many rows it took.
+async fn reclaim_batch(
     db: &DatabaseConnection,
     unit: Unit,
     abandoned: Abandoned,
     budget: RetryBudget,
     limit: u32,
     local: &[String],
-) -> Result<Reclaimed, DbErr> {
+) -> Result<(usize, Reclaimed), DbErr> {
     let txn = db.begin().await?;
     let mut b = Binds::default();
     let predicate = abandoned.predicate(&mut b);
@@ -667,6 +697,7 @@ pub(crate) async fn reclaim_abandoned(
         handled = prefer_local_handler(unit.contest_type(), &local),
     );
     let picked = pick(&txn, unit, b, filter, Some(limit)).await?;
+    let taken = picked.len();
     let (retry, exhaust): (Vec<Picked>, Vec<Picked>) = picked
         .into_iter()
         .partition(|p| budget.allows(p.dispatch_retries));
@@ -679,10 +710,13 @@ pub(crate) async fn reclaim_abandoned(
         dead_letter(&txn, unit, p, dlq_code, &message).await?;
     }
     txn.commit().await?;
-    Ok(Reclaimed {
-        requeued,
-        exhausted,
-    })
+    Ok((
+        taken,
+        Reclaimed {
+            requeued,
+            exhausted,
+        },
+    ))
 }
 
 /// Finalizes the locked `rows` as `SystemError` with `error_code`.

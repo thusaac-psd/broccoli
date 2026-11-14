@@ -19,7 +19,8 @@ use crate::state::AppState;
 /// Queued work older than this is reported as a dispatcher-health signal. It
 /// is left alone: a deep durable queue is backlog, not a failure.
 const QUEUED_OBSERVABILITY_THRESHOLD_SECS: u64 = 5 * 60;
-/// Units each detection pass takes over per unit kind.
+/// Rows each detection transaction takes over; a pass repeats batches until
+/// every stuck unit is taken (see `judging::reclaim_abandoned`).
 const DETECT_BATCH_SIZE: u32 = 256;
 
 pub async fn run_stuck_job_detector(state: AppState, config: DlqConfig) {
