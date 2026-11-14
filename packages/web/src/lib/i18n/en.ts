@@ -375,7 +375,7 @@ export const en = {
   'ranking.score': 'Score',
   'ranking.penalty': 'Penalty',
   'ranking.searchPlaceholder': 'Search users...',
-  'ranking.empty': 'No participants found.',
+  'ranking.unavailable': 'This contest has no scoreboard to show.',
 
   // Theme
   'theme.switch': 'Switch theme',

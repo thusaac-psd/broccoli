@@ -361,7 +361,7 @@ export const zhCN: Catalog = {
   'ranking.score': '分数',
   'ranking.penalty': '罚时',
   'ranking.searchPlaceholder': '搜索用户…',
-  'ranking.empty': '暂无参赛者。',
+  'ranking.unavailable': '此比赛没有可显示的排行榜。',
 
   // Theme
   'theme.switch': '切换主题',
