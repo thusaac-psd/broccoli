@@ -252,6 +252,8 @@
 'codelink-bracket.setup.thirdPlace' = "Third-place match"
 'codelink-bracket.setup.thirdPlaceEnabled' = "Semifinal losers play for third place"
 'codelink-bracket.setup.thirdPlaceShared' = "Use the final stage problem groups"
+'codelink-bracket.setup.thirdPlaceMode' = 'Third-place match problems'
+'codelink-bracket.setup.slotN' = '{label}, slot {index}'
 'codelink-bracket.setup.thirdPlaceCustom' = "Assign separate problem groups"
 'codelink-bracket.setup.thirdPlaceHint' = "The championship and third-place matches share the final stage schedule, timings and BO/FT."
 'codelink-bracket.setup.issue.badSchedule' = "{round} needs a valid start time after the preceding stage start."

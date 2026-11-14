@@ -109,7 +109,7 @@ function ProblemCellView({ cell }: { cell: ProblemCell | undefined }) {
     // No attempts
     return (
       <td className="py-1.5 px-2 text-center border-b border-border">
-        <span className="text-[11px] text-muted-foreground/30">&mdash;</span>
+        <span className="text-[11px] text-muted-foreground">&mdash;</span>
       </td>
     );
   }
@@ -278,7 +278,11 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
           )}
           {phase === 'during' && (
             <Label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer font-normal">
-              <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} />
+              <Switch
+                checked={autoRefresh}
+                onCheckedChange={setAutoRefresh}
+                aria-label={t('icpc.scoreboard.autoRefresh')}
+              />
               {t('icpc.scoreboard.autoRefresh')}
             </Label>
           )}

@@ -40,7 +40,6 @@
         "@broccoli/web-sdk/submission",
         "@broccoli/web-sdk/ui",
         "@broccoli/web-sdk/utils",
-        "lucide-react",
         "@monaco-editor/react"
       ]
     }

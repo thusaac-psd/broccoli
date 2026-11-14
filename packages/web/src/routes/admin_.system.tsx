@@ -17,8 +17,11 @@ import { QueueDepthList } from '@/features/system/components/QueueDepthList';
 import { SystemHealthSummary } from '@/features/system/components/SystemHealthSummary';
 import { WorkersGrid } from '@/features/system/components/WorkersGrid';
 import { useSystemOverview } from '@/features/system/hooks/useSystemOverview';
+import { pageTitle, type RouteHandle } from '@/lib/route-title';
 
 const STAT_SKELETONS = ['workers', 'inflight', 'submissions', 'dlq'];
+
+export const handle: RouteHandle = pageTitle('system.title');
 
 export default function AdminSystemPage() {
   const { t } = useTranslation();

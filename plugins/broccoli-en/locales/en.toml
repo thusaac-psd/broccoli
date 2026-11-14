@@ -14,6 +14,8 @@
 # App
 'app.name' = "Broccoli OJ"
 'app.tagline' = "Online Judge"
+'app.pageTitle' = "{page} · {app}"
+'app.pageInContest' = "{page} · {contest}"
 
 # Sidebar
 'sidebar.platform' = "Platform"
@@ -35,6 +37,7 @@
 'session.expired.description' = "You were signed out. Sign in again to continue where you left off; your code drafts are kept."
 'session.expired.later' = "Not now"
 'nav.toggleMenu' = "Toggle navigation menu"
+'a11y.skipToContent' = "Skip to main content"
 
 # ErrorCatcher
 'error.title.400' = "400 Bad Request"
@@ -189,6 +192,7 @@
 'editor.stdin' = "stdin"
 'editor.stdout' = "stdout"
 'editor.stderr' = "stderr"
+'editor.addTestCase' = "Add test case"
 
 # Submission result
 'result.title' = "Result"
@@ -283,6 +287,7 @@
 'submissionDetail.applyError' = "Failed to apply version."
 'submissionDetail.judgementDiscarded' = "Version discarded."
 'submissionDetail.discardError' = "Failed to discard version."
+'submissionDetail.workerTarget' = "Worker to rejudge on"
 
 # Problems
 'problems.title' = "Problems"
@@ -407,6 +412,7 @@
 'users.subtitle' = "Manage roles, role permissions, and user role assignments."
 'users.registration.label' = "Self-registration"
 'users.registration.description' = "Let anyone create an account on the sign-up page. Applies to every server at once."
+'users.registration.saveFailed' = "Could not change self-registration."
 'users.tabs.users' = "Users"
 'users.tabs.roles' = "Roles & Permissions"
 'users.common.close' = "Close"
@@ -432,6 +438,7 @@
 'users.roles.revokePermissionConfirm' = "Revoke permission \"{permission}\" from this role?"
 'users.roles.revokePermissionSuccess' = "Permission revoked successfully."
 'users.roles.revokePermissionError' = "Failed to revoke permission."
+'users.roles.revokePermission' = "Revoke permission"
 
 # Users - User list
 'users.users.username' = "Username"
@@ -486,6 +493,7 @@
 'users.users.deleteUserConfirm' = "Delete user \"{username}\"? This action cannot be undone."
 'users.users.deleteUserSuccess' = "User deleted successfully."
 'users.users.deleteUserError' = "Failed to delete user."
+'users.users.revokeRole' = "Revoke role"
 
 # Admin
 'admin.createContest' = "Create Contest"
@@ -914,12 +922,12 @@
 'plugins.detail.noRoutes' = "No routes defined."
 'plugins.detail.noSlots' = "No slots defined."
 'plugins.detail.noComponents' = "No components defined."
-'plugins.detail.meta' = "Meta"
 'plugins.detail.loadError' = "Failed to load plugin details."
 'plugins.detail.servers' = "Servers"
 'plugins.detail.noServers' = "No server is reporting its plugin state."
 'plugins.detail.outdated' = "Applying the latest change"
 'plugins.detail.retryAt' = "Next retry at {time}"
+'plugins.detail.routeTitle' = "Title key"
 
 # Resource config
 'admin.configure' = "Configure"
@@ -1025,6 +1033,10 @@
 'common.temporarilyUnavailable' = "The server is busy right now. Retrying shortly."
 'common.version' = "v{version}"
 'common.close' = "Close"
+'common.remove' = "Remove"
+'common.download' = "Download"
+'common.increase' = "Increase"
+'common.decrease' = "Decrease"
 'confirm.confirm' = "Confirm"
 'config.validation.number' = "Must be a valid number"
 'config.validation.integer' = "Must be a whole number"
@@ -1166,6 +1178,10 @@
 'table.loading' = "loading..."
 'table.noResults' = "No results found."
 'table.search' = "Search..."
+'table.firstPage' = "First page"
+'table.previousPage' = "Previous page"
+'table.nextPage' = "Next page"
+'table.lastPage' = "Last page"
 'dateTime.time' = "Time:"
 'dateTime.hours' = "Hours"
 'dateTime.minutes' = "Minutes"

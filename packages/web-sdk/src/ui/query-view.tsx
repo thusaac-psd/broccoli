@@ -60,7 +60,7 @@ export function QueryErrorState({
       {action}
     </div>
   );
-  const iconClass = 'h-8 w-8 text-muted-foreground/60';
+  const iconClass = 'h-8 w-8 text-muted-foreground';
 
   switch (kind) {
     case 'unauthenticated':
@@ -115,7 +115,7 @@ export function SignInPrompt({
         className,
       )}
     >
-      <LogIn className="h-8 w-8 text-muted-foreground/60" aria-hidden />
+      <LogIn className="h-8 w-8 text-muted-foreground" aria-hidden />
       <p className="max-w-md text-sm text-muted-foreground">
         {message ?? t('query.signInRequired')}
       </p>

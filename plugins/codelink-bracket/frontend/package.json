@@ -41,8 +41,7 @@
         "@broccoli/web-sdk/slot",
         "@broccoli/web-sdk/submission",
         "@broccoli/web-sdk/ui",
-        "@broccoli/web-sdk/utils",
-        "lucide-react"
+        "@broccoli/web-sdk/utils"
       ]
     }
   },

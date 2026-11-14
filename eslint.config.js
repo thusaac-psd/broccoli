@@ -12,6 +12,8 @@ import reactRefresh from 'eslint-plugin-react-refresh';
 import reactX from 'eslint-plugin-react-x';
 import globals from 'globals';
 
+import a11y from './eslint-rules/a11y.js';
+
 export default defineConfig([
   // Base config for all files
   globalIgnores([
@@ -99,8 +101,25 @@ export default defineConfig([
       ...reactDom.configs.recommended.rules,
       'react-refresh/only-export-components': [
         'warn',
-        { allowConstantExport: true },
+        // `handle` is a React Router route module export.
+        { allowConstantExport: true, allowExportNames: ['handle'] },
       ],
+    },
+  },
+
+  // Every control has an accessible name.
+  {
+    files: [
+      'packages/web/src/**/*.tsx',
+      'packages/web-sdk/src/**/*.tsx',
+      'plugins/*/frontend/src/**/*.tsx',
+    ],
+    plugins: { a11y },
+    rules: {
+      'a11y/icon-button-label': 'error',
+      'a11y/img-alt': 'error',
+      'a11y/select-label': 'error',
+      'a11y/text-token-opacity': 'error',
     },
   },
 

@@ -28,6 +28,7 @@ import {
   useResolveClarification,
   useToggleReplyPublic,
 } from '@/features/clarification/hooks/use-clarifications';
+import { contestPageTitle, type RouteHandle } from '@/lib/route-title';
 
 type QaTab = 'all' | 'announcements' | 'questions' | 'dm';
 
@@ -36,6 +37,8 @@ function parseQaTab(value: string | null): QaTab {
     ? value
     : 'all';
 }
+
+export const handle: RouteHandle = contestPageTitle('sidebar.qa');
 
 export default function ContestQAPage() {
   const { t } = useTranslation();
@@ -190,7 +193,7 @@ export default function ContestQAPage() {
         icon={<MessageCircle className="h-6 w-6 text-primary" />}
       >
         <div className="flex flex-col items-center justify-center py-16 text-center">
-          <LogIn className="h-10 w-10 text-muted-foreground/40 mb-4" />
+          <LogIn className="h-10 w-10 text-muted-foreground mb-4" />
           <p className="text-muted-foreground mb-4">{t('auth.loginToAsk')}</p>
           <Button asChild>
             <Link to={signInPath(currentPath())}>{t('nav.signIn')}</Link>
@@ -206,7 +209,7 @@ export default function ContestQAPage() {
       title={t('sidebar.qa')}
       icon={<MessageCircle className="h-6 w-6 text-primary" />}
       actions={
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {isAdmin && (
             <>
               <PostAnnouncementDialog

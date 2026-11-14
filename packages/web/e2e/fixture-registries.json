@@ -1,0 +1,89 @@
+{
+  "problem_types": ["batch", "communication"],
+  "checker_formats": [
+    "exact",
+    "lines",
+    "none",
+    "testlib",
+    "tokens",
+    "tokens-case-insensitive",
+    "tokens-float"
+  ],
+  "contest_types": ["codelink-bracket", "codelink-qualifier", "icpc", "ioi"],
+  "languages": [
+    {
+      "id": "c",
+      "name": "C",
+      "default_filename": "solution.c",
+      "extensions": ["c"],
+      "template": "#include <stdio.h>\n\nint main() {\n    // Your code here\n    return 0;\n}\n"
+    },
+    {
+      "id": "cpp",
+      "name": "C++",
+      "default_filename": "solution.cpp",
+      "extensions": ["cpp", "cc", "cxx", "c++"],
+      "template": "#include <iostream>\nusing namespace std;\n\nint main() {\n    // Your code here\n    return 0;\n}\n"
+    }
+  ],
+  "evaluators": [
+    {
+      "problem_type": "batch",
+      "plugin_id": "batch-evaluator",
+      "function_name": "prepare_evaluate_case",
+      "interpret_function_name": "on_operation_results"
+    },
+    {
+      "problem_type": "communication",
+      "plugin_id": "communication-evaluator",
+      "function_name": "evaluate_communication",
+      "interpret_function_name": null
+    }
+  ],
+  "contest_type_handlers": [
+    {
+      "contest_type": "codelink-bracket",
+      "plugin_id": "codelink-bracket",
+      "submission_fn": "handle_codelink_bracket_submission",
+      "code_run_fn": "handle_codelink_bracket_code_run"
+    },
+    {
+      "contest_type": "codelink-qualifier",
+      "plugin_id": "codelink-qualifier",
+      "submission_fn": "handle_codelink_submission",
+      "code_run_fn": "handle_codelink_code_run"
+    },
+    {
+      "contest_type": "icpc",
+      "plugin_id": "icpc",
+      "submission_fn": "handle_icpc_submission",
+      "code_run_fn": "handle_icpc_code_run"
+    },
+    {
+      "contest_type": "ioi",
+      "plugin_id": "ioi",
+      "submission_fn": "handle_ioi_submission",
+      "code_run_fn": "handle_ioi_code_run"
+    }
+  ],
+  "hooks": [
+    {
+      "topic": "before_submission",
+      "plugin_id": "codelink-bracket",
+      "scope": "global",
+      "mode": "blocking"
+    },
+    {
+      "topic": "before_submission",
+      "plugin_id": "cooldown",
+      "scope": "resource",
+      "mode": "blocking"
+    },
+    {
+      "topic": "before_submission",
+      "plugin_id": "submission-limit",
+      "scope": "resource",
+      "mode": "blocking"
+    }
+  ]
+}

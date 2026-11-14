@@ -313,8 +313,8 @@ const SidebarTrigger = ({
   className,
   onClick,
   ...props
-}: React.ComponentProps<typeof Button> & {
-  ref?: React.RefObject<React.ElementRef<typeof Button> | null>;
+}: Omit<React.ComponentProps<'button'>, 'aria-label'> & {
+  ref?: React.RefObject<HTMLButtonElement | null>;
 }) => {
   const { t } = useTranslation();
   const { sidebarState, setSidebarState } = useSidebarState();
@@ -333,6 +333,7 @@ const SidebarTrigger = ({
       data-sidebar="trigger"
       variant="ghost"
       size="icon"
+      aria-label={t('sidebar.toggle')}
       className={cn('h-7 w-7', className)}
       onClick={(event) => {
         onClick?.(event);
@@ -341,7 +342,6 @@ const SidebarTrigger = ({
       {...props}
     >
       <PanelLeft />
-      <span className="sr-only">{t('sidebar.toggle')}</span>
     </Button>
   );
 };
@@ -540,7 +540,7 @@ const SidebarGroupLabel = ({
       ref={ref}
       data-sidebar="group-label"
       className={cn(
-        'flex h-8 shrink-0 items-center rounded-md px-2 text-xs font-medium text-sidebar-foreground/70 outline-hidden ring-sidebar-ring transition-[margin,opacity] duration-200 ease-linear focus-visible:ring-2 [&>svg]:size-4 [&>svg]:shrink-0',
+        'flex h-8 shrink-0 items-center rounded-md px-2 text-xs font-medium text-muted-foreground outline-hidden ring-sidebar-ring transition-[margin,opacity] duration-200 ease-linear focus-visible:ring-2 [&>svg]:size-4 [&>svg]:shrink-0',
         'group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0',
         className,
       )}

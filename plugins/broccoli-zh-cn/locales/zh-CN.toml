@@ -15,6 +15,8 @@
 # App
 'app.name' = "Broccoli OJ"
 'app.tagline' = "在线评测系统"
+'app.pageTitle' = "{page} · {app}"
+'app.pageInContest' = "{page} · {contest}"
 
 # Sidebar
 'sidebar.platform' = "平台"
@@ -36,6 +38,7 @@
 'session.expired.description' = "您已被登出。重新登录后可回到当前页面继续；代码草稿已保留。"
 'session.expired.later' = "稍后"
 'nav.toggleMenu' = "切换导航菜单"
+'a11y.skipToContent' = "跳到主要内容"
 
 # ErrorCatcher
 'error.title.400' = "400 错误请求"
@@ -190,6 +193,7 @@
 'editor.stdin' = "标准输入"
 'editor.stdout' = "标准输出"
 'editor.stderr' = "标准错误"
+'editor.addTestCase' = "添加测试用例"
 
 # Submission result
 'result.title' = "结果"
@@ -284,6 +288,7 @@
 'submissionDetail.applyError' = "应用版本失败。"
 'submissionDetail.judgementDiscarded' = "版本已丢弃。"
 'submissionDetail.discardError' = "丢弃版本失败。"
+'submissionDetail.workerTarget' = "重测使用的评测机"
 
 # Problems
 'problems.title' = "题目列表"
@@ -431,11 +436,13 @@
 'users.roles.revokePermissionConfirm' = "确定从此角色撤销权限“{permission}”？"
 'users.roles.revokePermissionSuccess' = "权限撤销成功。"
 'users.roles.revokePermissionError' = "撤销权限失败。"
+'users.roles.revokePermission' = "撤销权限"
 
 # Users - User list
 'users.users.username' = "用户名"
 'users.registration.label' = "开放注册"
 'users.registration.description' = "允许任何人在注册页面自行创建账号。立即对所有服务器生效。"
+'users.registration.saveFailed' = "无法更改开放注册设置。"
 'users.users.roles' = "角色"
 'users.users.searchPlaceholder' = "按用户名、ID 或角色搜索用户…"
 'users.create.title' = "创建用户"
@@ -487,6 +494,7 @@
 'users.users.deleteUserConfirm' = "确定删除用户“{username}”？此操作无法撤销。"
 'users.users.deleteUserSuccess' = "用户删除成功。"
 'users.users.deleteUserError' = "删除用户失败。"
+'users.users.revokeRole' = "撤销角色"
 
 # Admin
 'admin.createContest' = "创建比赛"
@@ -877,7 +885,6 @@
 'plugins.detail.noRoutes' = "未定义路由。"
 'plugins.detail.noSlots' = "未定义插槽。"
 'plugins.detail.noComponents' = "未定义组件。"
-'plugins.detail.meta' = "元信息"
 'plugins.detail.loadError' = "加载插件详情失败。"
 'plugins.detail.servers' = "服务器"
 'plugins.detail.noServers' = "没有服务器上报插件状态。"
@@ -921,6 +928,7 @@
 'plugins.disableConfirm.confirm' = "停用"
 'plugins.detail.uploadRemoved' = "已移除上传，插件已从所有服务器移除。"
 'plugins.detail.uploadReplacedByBundle' = "已移除上传，所有服务器重新运行内置版本。"
+'plugins.detail.routeTitle' = "标题键"
 
 # Resource config
 'admin.configure' = "配置"
@@ -1026,6 +1034,10 @@
 'common.temporarilyUnavailable' = "服务器正忙，稍后将自动重试。"
 'common.version' = "v{version}"
 'common.close' = "关闭"
+'common.remove' = "移除"
+'common.download' = "下载"
+'common.increase' = "增加"
+'common.decrease' = "减少"
 'confirm.confirm' = "确认"
 'config.validation.number' = "必须是有效的数字"
 'config.validation.integer' = "必须是整数"
@@ -1167,6 +1179,10 @@
 'table.loading' = "加载中…"
 'table.noResults' = "未找到结果。"
 'table.search' = "搜索…"
+'table.firstPage' = "第一页"
+'table.previousPage' = "上一页"
+'table.nextPage' = "下一页"
+'table.lastPage' = "最后一页"
 'dateTime.time' = "时间："
 'dateTime.hours' = "小时"
 'dateTime.minutes' = "分钟"

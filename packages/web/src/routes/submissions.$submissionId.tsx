@@ -4,6 +4,9 @@ import { Navigate, useParams } from 'react-router';
 
 import { PageLayout } from '@/components/PageLayout';
 import { SubmissionDetailView } from '@/features/submission/components/SubmissionDetailView';
+import { pageTitle, type RouteHandle } from '@/lib/route-title';
+
+export const handle: RouteHandle = pageTitle('result.title');
 
 export default function StandaloneSubmissionDetail() {
   const { t } = useTranslation();

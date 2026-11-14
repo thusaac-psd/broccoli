@@ -1,4 +1,4 @@
-import { useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -12,6 +12,7 @@ import {
 /** Opens or closes self-registration for every server. */
 export function RegistrationSwitch() {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const { data } = useRegistrationStatus();
@@ -21,7 +22,7 @@ export function RegistrationSwitch() {
       body: { open },
     });
     if (error) {
-      toast.error(error.message);
+      toast.error(errorMessage(error, t('users.registration.saveFailed')));
       return;
     }
     queryClient.setQueryData(REGISTRATION_STATUS_QUERY_KEY, { open });

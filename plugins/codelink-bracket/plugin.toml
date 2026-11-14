@@ -94,6 +94,7 @@ BracketManagementPage = "BracketManagementPage"
 [[web.routes]]
 path = "/contests/:contestId/bracket-management"
 component = "BracketManagementPage"
+title = "codelink-bracket.manage.title"
 
 [[web.slots]]
 name = "contest.admin.actions"

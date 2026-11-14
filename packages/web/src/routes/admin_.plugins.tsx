@@ -24,6 +24,9 @@ import { Unauthorized } from '@/components/Unauthorized';
 import { PluginCard } from '@/features/plugin/components/PluginCard';
 import { PluginDetailDialog } from '@/features/plugin/components/PluginDetailDialog';
 import { PluginUploadDialog } from '@/features/plugin/components/PluginUploadDialog';
+import { pageTitle, type RouteHandle } from '@/lib/route-title';
+
+export const handle: RouteHandle = pageTitle('plugins.title');
 
 export default function PluginsPage() {
   const { t } = useTranslation();

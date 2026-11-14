@@ -5,19 +5,22 @@ import { QueryLoading } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import { Trophy } from 'lucide-react';
 import { useEffect } from 'react';
-import { useNavigate } from 'react-router';
+import { Navigate } from 'react-router';
 
 import { ListSkeleton } from '@/components/ListSkeleton';
 import { GuestWelcome } from '@/features/auth/components/GuestWelcome';
 import { ContestSelector } from '@/features/contest/components/ContestSelector';
 import { useContest } from '@/features/contest/contexts/contest-context';
+import { type RouteHandle } from '@/lib/route-title';
+
+/** The home page is the app itself: the tab shows just its name. */
+export const handle: RouteHandle = {};
 
 export default function Index() {
   const { t } = useTranslation();
   const { user, isLoading: sessionLoading } = useAuth();
   const apiClient = useApiClient();
   const { contestId, setContest } = useContest();
-  const navigate = useNavigate();
 
   const { data: contests, isLoading: isContestsLoading } = useQuery({
     queryKey: ['dashboard-contests'],
@@ -38,31 +41,23 @@ export default function Index() {
     },
   });
 
-  // Auto-select contest if there's exactly one
-  useEffect(() => {
-    if (!user) {
-      return;
-    }
-    // FIX: check permissions instead of roles
-    if (user && user.roles.includes('admin')) {
-      navigate('/admin');
-      return;
-    }
-    // With a single contest there is nothing to select on this page, so
-    // always bounce back to the contest dashboard (even when a contest is
-    // already selected, e.g. after clicking the logo link to `/`).
-    if (contests && contests.length === 1) {
-      if (contestId !== contests[0].id) {
-        setContest(contests[0].id, contests[0].title);
-      }
-      navigate(`/contests/${contests[0].id}`);
-    }
-  }, [contests, contestId, setContest, navigate, user]);
-
-  // Admin user, redirect to admin dashboard
   // FIX: check permissions instead of roles
-  if (user && user.roles.includes('admin')) {
-    return <></>;
+  const isAdmin = !!user?.roles.includes('admin');
+  const onlyContest = !isAdmin && contests?.length === 1 ? contests[0] : null;
+
+  // Remember the only contest, so the sidebar keeps showing it.
+  useEffect(() => {
+    if (onlyContest && contestId !== onlyContest.id) {
+      setContest(onlyContest.id, onlyContest.title);
+    }
+  }, [onlyContest, contestId, setContest]);
+
+  // Redirects render as `<Navigate>`, never as an effect that calls
+  // `navigate`: this page stays mounted while the navigation is pending, and
+  // an effect that re-ran on each of those renders would navigate again and
+  // again.
+  if (isAdmin) {
+    return <Navigate to="/admin" replace />;
   }
 
   // Nobody is known until the session is restored.
@@ -85,9 +80,11 @@ export default function Index() {
     );
   }
 
-  // Single contest: the effect above is redirecting to its dashboard
-  if (contests && contests.length === 1) {
-    return null;
+  // With a single contest there is nothing to select on this page, so
+  // always go to its dashboard (even when it is already selected, e.g. after
+  // clicking the logo link to `/`).
+  if (onlyContest) {
+    return <Navigate to={`/contests/${onlyContest.id}`} replace />;
   }
 
   // No contests

@@ -3,11 +3,22 @@ import * as React from 'react';
 
 import { cn } from '@/utils';
 
+/**
+ * A switch shows no text of its own, so it takes its name from an
+ * `aria-label`, from the element `aria-labelledby` points at, or (given an
+ * `id`) from a `<Label htmlFor>`. A `<Label>` merely wrapping it does not
+ * name it for every screen reader.
+ */
+export type SwitchProps = React.ComponentPropsWithoutRef<
+  typeof SwitchPrimitives.Root
+> &
+  ({ 'aria-label': string } | { 'aria-labelledby': string } | { id: string });
+
 const Switch = ({
   ref,
   className,
   ...props
-}: React.ComponentPropsWithoutRef<typeof SwitchPrimitives.Root> & {
+}: SwitchProps & {
   ref?: React.RefObject<React.ElementRef<typeof SwitchPrimitives.Root> | null>;
 }) => (
   <SwitchPrimitives.Root

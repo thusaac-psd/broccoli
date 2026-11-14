@@ -4828,10 +4828,9 @@ export interface components {
     };
     WebRouteConfig: {
       component: string;
-      meta?: {
-        [key: string]: string;
-      } | null;
       path: string;
+      /** @description Translation key of the page's name, shown in the browser tab. */
+      title: string;
     };
     WebSlotConfig: {
       component: string;

@@ -143,10 +143,16 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
         <div className="flex items-center gap-3">
           {data.scoreboard_refresh_seconds > 0 ? (
             <Label className="flex items-center gap-2 text-sm">
-              <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} />
-              {t('codelink-qualifier.autoRefresh', {
-                seconds: data.scoreboard_refresh_seconds,
-              })}
+              <Switch
+                checked={autoRefresh}
+                onCheckedChange={setAutoRefresh}
+                aria-labelledby="codelink-qualifier-auto-refresh"
+              />
+              <span id="codelink-qualifier-auto-refresh">
+                {t('codelink-qualifier.autoRefresh', {
+                  seconds: data.scoreboard_refresh_seconds,
+                })}
+              </span>
             </Label>
           ) : (
             <span className="text-sm text-muted-foreground">

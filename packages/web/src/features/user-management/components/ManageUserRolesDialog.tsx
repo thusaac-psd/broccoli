@@ -184,6 +184,7 @@ export function ManageUserRolesDialog({
                   >
                     <Badge variant="secondary">{roleName}</Badge>
                     <Button
+                      aria-label={t('users.users.revokeRole')}
                       type="button"
                       variant="ghost"
                       size="sm"

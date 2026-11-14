@@ -309,8 +309,9 @@ function ContestForm({
   const [values, setValues] = useState(initial);
   const isEdit = contestId !== undefined;
   // The server fixes a contest's type at its first submission
-  // (CONTEST_TYPE_LOCKED), so the form shows it read-only from then on.
-  const { data: contestTypeLocked = false } = useQuery({
+  // (CONTEST_TYPE_LOCKED), so the form shows it read-only from then on, and
+  // until it knows the contest has none.
+  const typeLock = useQuery({
     queryKey: ['contest-has-submissions', contestId],
     queryFn: async () =>
       (
@@ -324,6 +325,8 @@ function ContestForm({
       ).data.length > 0,
     enabled: isEdit,
   });
+  const contestTypeLocked = typeLock.data === true;
+  const contestTypeReadOnly = isEdit && typeLock.data !== false;
 
   const set =
     <K extends keyof ContestFormValues>(field: K) =>
@@ -458,7 +461,7 @@ function ContestForm({
             id="contest-type"
             value={values.contestType}
             onChange={(e) => set('contestType')(e.target.value)}
-            disabled={contestTypeLocked}
+            disabled={contestTypeReadOnly}
             aria-describedby={
               contestTypeLocked ? 'contest-type-locked' : undefined
             }
@@ -709,6 +712,7 @@ export function ContestProblemsDialog({
                     <td className="px-3 py-2 text-right">
                       <div className="flex items-center justify-end gap-1">
                         <Button
+                          aria-label={t('markdown.preview')}
                           variant="ghost"
                           size="icon"
                           className="h-7 w-7"
@@ -717,6 +721,7 @@ export function ContestProblemsDialog({
                           <Eye className="h-3.5 w-3.5" />
                         </Button>
                         <Button
+                          aria-label={t('admin.configure')}
                           variant="ghost"
                           size="icon"
                           className="h-7 w-7"
@@ -728,6 +733,7 @@ export function ContestProblemsDialog({
                           <Settings className="h-3.5 w-3.5" />
                         </Button>
                         <Button
+                          aria-label={t('common.remove')}
                           variant="ghost"
                           size="icon"
                           className="h-7 w-7 text-destructive hover:text-destructive"
@@ -965,7 +971,12 @@ function useContestColumns({
       cell: ({ row }) => (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="h-7 w-7">
+            <Button
+              aria-label={t('admin.actions')}
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+            >
               <MoreHorizontal className="h-4 w-4" />
             </Button>
           </DropdownMenuTrigger>

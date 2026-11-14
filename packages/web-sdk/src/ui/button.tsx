@@ -34,11 +34,24 @@ const buttonVariants = cva(
   },
 );
 
-export interface ButtonProps
+type ButtonVariantProps = VariantProps<typeof buttonVariants>;
+
+interface ButtonBaseProps
   extends React.ButtonHTMLAttributes<HTMLButtonElement>,
-    VariantProps<typeof buttonVariants> {
+    Omit<ButtonVariantProps, 'size'> {
   asChild?: boolean;
 }
+
+/**
+ * An icon-only button (`size="icon"`) shows no text, so its name for
+ * assistive technology and its hover tooltip both come from the required
+ * `aria-label`.
+ */
+export type ButtonProps = ButtonBaseProps &
+  (
+    | { size?: Exclude<ButtonVariantProps['size'], 'icon'> }
+    | { size: 'icon'; 'aria-label': string }
+  );
 
 const Button = ({
   ref,
@@ -53,6 +66,9 @@ const Button = ({
     <Comp
       className={cn(buttonVariants({ variant, size, className }))}
       ref={ref}
+      title={
+        size === 'icon' ? (props.title ?? props['aria-label']) : props.title
+      }
       {...props}
     />
   );

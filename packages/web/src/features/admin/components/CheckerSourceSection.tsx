@@ -255,6 +255,7 @@ export function CheckerSourceSection({ problemId }: CheckerSourceSectionProps) {
                   {formatBytes(item.size)}
                 </span>
                 <Button
+                  aria-label={t('common.remove')}
                   type="button"
                   variant="ghost"
                   size="icon"
@@ -320,6 +321,7 @@ export function CheckerSourceSection({ problemId }: CheckerSourceSectionProps) {
                   {formatBytes(new Blob([file.content]).size)}
                 </span>
                 <Button
+                  aria-label={t('admin.delete')}
                   type="button"
                   variant="ghost"
                   size="icon"

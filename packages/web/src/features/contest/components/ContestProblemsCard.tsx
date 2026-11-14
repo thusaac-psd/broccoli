@@ -1,36 +1,23 @@
-import { useServerTimeReached } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
 import { useProblemPresentation } from '@broccoli/web-sdk/problem';
 import { QueryView, Skeleton } from '@broccoli/web-sdk/ui';
 import { ChevronRight } from 'lucide-react';
 import { Link } from 'react-router';
 
-import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
 import { useContestProblems } from '@/features/contest/hooks/use-contest-problems';
 
 export function ContestProblemsCard({ contestId }: { contestId: number }) {
   const { t } = useTranslation();
   const { user } = useAuth();
   const { hideLabels } = useProblemPresentation(contestId, user?.id);
-  const { contest } = useContestInfo(contestId);
-
-  const canManageContest = !!user?.permissions.includes(CONTEST_MANAGE);
-  const started = useServerTimeReached(
-    contest ? Date.parse(contest.start_time) : null,
-  );
-  const contestNotStarted = !!contest && !started;
-  const shouldBlockByStartTime = contestNotStarted && !canManageContest;
-
-  const problemsQuery = useContestProblems(contestId, {
-    enabled: !shouldBlockByStartTime,
-  });
+  const problemsQuery = useContestProblems(contestId);
+  const { awaitingStart } = problemsQuery;
 
   return (
     <div>
       <h3 className="text-lg font-semibold mb-3">{t('contests.problems')}</h3>
-      {shouldBlockByStartTime ? (
+      {awaitingStart ? (
         <div className="text-sm text-muted-foreground">
           {t('contests.problemsAvailableAfterStart')}
         </div>
@@ -90,7 +77,7 @@ export function ContestProblemsCard({ contestId }: { contestId: number }) {
                         </Link>
                       </td>
                       <td className="px-2 py-3">
-                        <ChevronRight className="h-4 w-4 text-muted-foreground/30 group-hover:text-primary transition-colors" />
+                        <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary transition-colors" />
                       </td>
                     </tr>
                   ))}

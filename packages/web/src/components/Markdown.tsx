@@ -1,11 +1,7 @@
-import 'katex/dist/katex.min.css';
-
-import { cn } from '@broccoli/web-sdk/utils';
-import type { ComponentPropsWithoutRef } from 'react';
-import ReactMarkdown from 'react-markdown';
-import rehypeKatex from 'rehype-katex';
+import { cn, retryImport } from '@broccoli/web-sdk/utils';
+import { type ComponentPropsWithoutRef, Suspense, use } from 'react';
+import ReactMarkdown, { type Options } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
 
 import { AuthImage } from '@/components/AuthImage';
 import { AuthLink } from '@/components/AuthLink';
@@ -30,14 +26,53 @@ function markdownCellAlignClass(
   }
 }
 
-export function Markdown({ children, className, resolveUrl }: MarkdownProps) {
+type MathPlugins = Pick<Options, 'remarkPlugins' | 'rehypePlugins'>;
+
+let mathPlugins: Promise<MathPlugins> | null = null;
+
+/** The TeX plugins, imported on first use and shared from then on. */
+function loadMath(): Promise<MathPlugins> {
+  mathPlugins ??= retryImport(() => import('./markdown-math'));
+  return mathPlugins;
+}
+
+/**
+ * Renders Markdown with GitHub extensions, and TeX when the text has a `$`
+ * (the only delimiter remark-math reads). Text without one never loads
+ * KaTeX; text with one renders, invisibly, without math until it has.
+ */
+export function Markdown(props: MarkdownProps) {
+  if (!props.children.includes('$')) return <MarkdownBody {...props} />;
+  return (
+    <Suspense
+      fallback={
+        <div className="invisible" aria-busy>
+          <MarkdownBody {...props} />
+        </div>
+      }
+    >
+      <MathMarkdown {...props} />
+    </Suspense>
+  );
+}
+
+function MathMarkdown(props: MarkdownProps) {
+  return <MarkdownBody {...props} math={use(loadMath())} />;
+}
+
+function MarkdownBody({
+  children,
+  className,
+  resolveUrl,
+  math,
+}: MarkdownProps & { math?: MathPlugins }) {
   const resolve = resolveUrl ?? ((url: string | undefined) => url);
   return (
     <div className={className}>
       <ReactMarkdown
         children={children}
-        remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex]}
+        remarkPlugins={[remarkGfm, ...(math?.remarkPlugins ?? [])]}
+        rehypePlugins={math?.rehypePlugins ?? []}
         components={{
           h1: ({ children }: ComponentPropsWithoutRef<'h1'>) => (
             <h1 className="text-2xl font-bold mt-6 mb-2">{children}</h1>
@@ -96,12 +131,15 @@ export function Markdown({ children, className, resolveUrl }: MarkdownProps) {
             </pre>
           ),
           code({ children, className: codeClassName }) {
-            const isBlock = !!codeClassName;
+            // A fenced block has a language class, or (without a language)
+            // ends in the newline before its closing fence; inline code has
+            // neither.
+            const isBlock = !!codeClassName || String(children).endsWith('\n');
             if (isBlock) {
               return <code className="font-mono text-[13px]">{children}</code>;
             }
             return (
-              <code className="bg-muted/80 text-destructive/80 rounded px-1.5 py-0.5 text-[13px] font-mono">
+              <code className="bg-muted text-foreground rounded px-1.5 py-0.5 text-[13px] font-mono">
                 {children}
               </code>
             );

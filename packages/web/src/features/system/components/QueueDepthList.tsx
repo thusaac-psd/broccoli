@@ -34,9 +34,14 @@ export function QueueDepthList({ queues }: Props) {
           q.depth === 0 ? TONE.idle : isResultQueue ? TONE.backlog : TONE.busy;
 
         return (
-          <li key={q.name} className="flex items-center justify-between p-3">
+          <li
+            key={q.name}
+            className="flex items-center justify-between gap-3 p-3"
+          >
             <div className="min-w-0">
-              <div className="font-mono text-xs truncate">{q.name}</div>
+              <div className="font-mono text-xs truncate" title={q.name}>
+                {q.name}
+              </div>
               {Object.keys(q.breakdown).length > 0 && (
                 <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
                   {Object.entries(q.breakdown).map(([state, count]) => (

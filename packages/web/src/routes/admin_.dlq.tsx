@@ -19,6 +19,7 @@ import { DlqStatsSummary } from '@/features/dlq/components/DlqStatsSummary';
 import { useDlqList } from '@/features/dlq/hooks/useDlqList';
 import { useDlqStats } from '@/features/dlq/hooks/useDlqStats';
 import type { DlqResolvedFilter } from '@/features/dlq/types';
+import { pageTitle, type RouteHandle } from '@/lib/route-title';
 
 const PER_PAGE = 25;
 
@@ -26,6 +27,8 @@ const FILTER_OPTIONS: DlqResolvedFilter[] = ['unresolved', 'all', 'resolved'];
 
 const STAT_SKELETONS = ['unresolved', 'resolved', 'op', 'stuck'];
 const ROW_SKELETONS = ['s1', 's2', 's3', 's4', 's5'];
+
+export const handle: RouteHandle = pageTitle('dlq.title');
 
 export default function AdminDlqPage() {
   const { t } = useTranslation();

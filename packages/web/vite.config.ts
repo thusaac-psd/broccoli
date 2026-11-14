@@ -3,6 +3,7 @@ import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
 import { defineConfig } from 'vite';
 
+import { precompressPlugin } from './plugins/precompress';
 import {
   resolveSdkEntry as resolveSdkDep,
   SDK_SHARED_DEPS,
@@ -32,12 +33,17 @@ export default defineConfig(() => {
       tailwindcss(),
       sharedDepsPlugin(),
       reactRouter(),
+      precompressPlugin(),
     ],
     server: {
       proxy: {
         '/api': 'http://localhost:3000',
         '/assets': 'http://localhost:3000',
       },
+    },
+    // A preview serves the build's own `/assets`, never a running server's.
+    preview: {
+      proxy: { '/api': 'http://localhost:3000' },
     },
     build: {
       outDir: 'build/client',

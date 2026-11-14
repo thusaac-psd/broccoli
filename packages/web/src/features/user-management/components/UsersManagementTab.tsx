@@ -114,7 +114,12 @@ function useUserColumns({
           <div className="flex justify-end">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon" className="h-7 w-7">
+                <Button
+                  aria-label={t('admin.actions')}
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7"
+                >
                   <MoreHorizontal className="h-4 w-4" />
                 </Button>
               </DropdownMenuTrigger>
