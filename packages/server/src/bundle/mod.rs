@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::SyncIoBridge;
 
+use crate::entity::user::username_key_sql;
 use crate::migration::{Migrator, known_migrations};
 
 /// [`Manifest::format`] of every bundle this build writes and reads.
@@ -155,8 +156,9 @@ enum Restore {
     NewRoles,
     /// The permissions of the roles [`Restore::NewRoles`] added.
     NewRolePermissions,
-    /// Accounts merge by username. An active account the target has stays as
-    /// it is, password included; a new one gets a new id. Every bundle row that
+    /// Accounts merge by username, compared through
+    /// [`crate::entity::user::username_key_sql`]. An active account the target
+    /// has stays as it is, password included; a new one gets a new id. Every bundle row that
     /// references an account follows it to its id on the target.
     Accounts,
     /// Rows that reference an account (`user_id`), moved to the account's id
@@ -772,15 +774,20 @@ fn restore_statements(table: &Table, columns: &[String]) -> Vec<String> {
         Restore::Accounts => {
             let new: Vec<String> = columns.iter().filter(|c| *c != "id").cloned().collect();
             let new = idents(&new);
+            let same = format!(
+                "{} = {}",
+                username_key_sql("u.username"),
+                username_key_sql("b.username")
+            );
             vec![
                 format!(
                     "INSERT INTO {t} ({new}) SELECT {new} FROM {s} b WHERE NOT EXISTS \
-                     (SELECT 1 FROM {t} u WHERE u.username = b.username AND u.deleted_at IS NULL)"
+                     (SELECT 1 FROM {t} u WHERE {same} AND u.deleted_at IS NULL)"
                 ),
                 format!(
                     "CREATE TEMP TABLE bundle_account_ids ON COMMIT DROP AS \
                      SELECT b.id AS bundle_id, u.id AS target_id FROM {s} b \
-                     JOIN {t} u ON u.username = b.username AND u.deleted_at IS NULL"
+                     JOIN {t} u ON {same} AND u.deleted_at IS NULL"
                 ),
             ]
         }

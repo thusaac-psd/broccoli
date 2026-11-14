@@ -41,6 +41,13 @@ pub struct Model {
 
 impl ActiveModelBehavior for ActiveModel {}
 
+/// The SQL form of a username's identity, for `expr` a username column or
+/// value: two usernames belong to the same account when these are equal.
+/// Raw SQL that matches accounts by username compares through this.
+pub fn username_key_sql(expr: &str) -> String {
+    format!("lower({expr})")
+}
+
 impl SoftDeletable for Entity {
     type DeletedAtColumn = Column;
     fn deleted_at() -> Self::DeletedAtColumn {

@@ -138,16 +138,17 @@ async fn a_contest_bundle_restores_every_row_and_blob_onto_another_server() {
     .expect("export");
 
     let target = TestApp::spawn().await;
-    // The target already has an active `carol`, with its own password and id.
+    // The target already has an active `CAROL`: the same account as the
+    // bundle's `carol`, with its own password and id.
     target
         .create_user_with_role("someone_first", "pass1234", "contestant")
         .await;
     target
-        .create_user_with_role("carol", "target-password", "contestant")
+        .create_user_with_role("CAROL", "target-password", "contestant")
         .await;
     let carol_before = text(
         &target,
-        "SELECT id::text || ' ' || password AS v FROM \"user\" WHERE username = 'carol'",
+        "SELECT id::text || ' ' || password AS v FROM \"user\" WHERE username = 'CAROL'",
     )
     .await;
 
@@ -174,12 +175,21 @@ async fn a_contest_bundle_restores_every_row_and_blob_onto_another_server() {
     // The roster follows the accounts by username.
     let roster = "SELECT string_agg(u.username, ',' ORDER BY u.username) AS v \
                   FROM contest_user cu JOIN \"user\" u ON u.id = cu.user_id";
-    assert_eq!(text(&target, roster).await, "carol,dave");
+    assert_eq!(text(&target, roster).await, "CAROL,dave");
+    assert_eq!(
+        text(
+            &target,
+            "SELECT count(*)::text AS v FROM \"user\" WHERE lower(username) = 'carol'"
+        )
+        .await,
+        "1",
+        "a username differing only in case is the same account"
+    );
     // An existing account keeps its id and credentials.
     assert_eq!(
         text(
             &target,
-            "SELECT id::text || ' ' || password AS v FROM \"user\" WHERE username = 'carol'"
+            "SELECT id::text || ' ' || password AS v FROM \"user\" WHERE username = 'CAROL'"
         )
         .await,
         carol_before
