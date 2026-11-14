@@ -522,12 +522,12 @@ env_stored() { local v; v="$(env_get "$ENV_FILE" "$1")"; printf '%s' "${v:-$2}";
 # workers at the new address (a rehearsal moving to the venue LAN).
 rehost_infra_urls() {
   local host="$BROCCOLI_INFRA_HOST" pg_pw redis_pw key value
-  pg_pw="$(env_get "$ENV_FILE" POSTGRES_PASSWORD)"
+  pg_pw="$(env_get "$ENV_FILE" BROCCOLI_DB_PASSWORD)"
   redis_pw="$(env_get "$ENV_FILE" REDIS_PASSWORD)"
   [ -n "$pg_pw" ] && [ -n "$redis_pw" ] || return 0
   for key in BROCCOLI__DATABASE__URL BROCCOLI__MQ__URL BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT; do
     case "$key" in
-      *DATABASE*) value="$(postgres_url "$(env_stored POSTGRES_USER postgres)" "$pg_pw" "$host" \
+      *DATABASE*) value="$(postgres_url "$(env_stored BROCCOLI_DB_USER broccoli)" "$pg_pw" "$host" \
         "$(bind_port "$(env_stored POSTGRES_BIND 0.0.0.0:5432)")" "$(env_stored POSTGRES_DB broccoli)")" ;;
       *MQ*) value="$(redis_url "$redis_pw" "$host" "$(bind_port "$(env_stored REDIS_BIND 0.0.0.0:6379)")")" ;;
       *)
@@ -553,13 +553,13 @@ rehost_infra_urls() {
 # fills them in for env files from before they existed.
 single_host_local_urls() {
   local pg_pw redis_pw user db key value
-  pg_pw="$(env_get "$ENV_FILE" POSTGRES_PASSWORD)"
+  pg_pw="$(env_get "$ENV_FILE" BROCCOLI_DB_PASSWORD)"
   redis_pw="$(env_get "$ENV_FILE" REDIS_PASSWORD)"
-  user="$(env_get "$ENV_FILE" POSTGRES_USER)"
+  user="$(env_get "$ENV_FILE" BROCCOLI_DB_USER)"
   db="$(env_get "$ENV_FILE" POSTGRES_DB)"
   for key in BROCCOLI_LOCAL_DATABASE_URL BROCCOLI_LOCAL_MQ_URL; do
     case "$key" in
-      *DATABASE*) value="$(postgres_url "${user:-postgres}" "$pg_pw" db 5432 "${db:-broccoli}")" ;;
+      *DATABASE*) value="$(postgres_url "${user:-broccoli}" "$pg_pw" db 5432 "${db:-broccoli}")" ;;
       *) value="$(redis_url "$redis_pw" redis 6379)" ;;
     esac
     [ "$(env_get "$ENV_FILE" "$key")" = "$value" ] || env_set "$ENV_FILE" "$key" "$value"
@@ -641,8 +641,9 @@ require_env() {
 validate_role_env() {
   case "$ROLE" in
     infra)
-      require_env POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB REDIS_PASSWORD \
-        BROCCOLI__AUTH__JWT_SECRET BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD
+      require_env POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB BROCCOLI_DB_USER \
+        BROCCOLI_DB_PASSWORD REDIS_PASSWORD BROCCOLI__AUTH__JWT_SECRET \
+        BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD
       if using_object_storage; then
         require_env BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET \
           BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY \
@@ -672,7 +673,7 @@ validate_role_env() {
       ;;
     single-host)
       require_env BROCCOLI_SERVER_IMAGE BROCCOLI_WORKER_IMAGE POSTGRES_USER POSTGRES_PASSWORD \
-        POSTGRES_DB REDIS_PASSWORD BROCCOLI__AUTH__JWT_SECRET \
+        POSTGRES_DB BROCCOLI_DB_USER BROCCOLI_DB_PASSWORD REDIS_PASSWORD BROCCOLI__AUTH__JWT_SECRET \
         BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD
       if using_object_storage; then
         require_env BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET \
@@ -699,8 +700,8 @@ populate_connection_defaults() {
   postgres_port="$(bind_port "${POSTGRES_BIND:-0.0.0.0:5432}")"
   redis_port="$(bind_port "${REDIS_BIND:-0.0.0.0:6379}")"
   s3_port="$(bind_port "${SEAWEEDFS_S3_BIND:-0.0.0.0:8333}")"
-  postgres_user="${POSTGRES_USER:?}"
-  postgres_password="${POSTGRES_PASSWORD:?}"
+  postgres_user="${BROCCOLI_DB_USER:?}"
+  postgres_password="${BROCCOLI_DB_PASSWORD:?}"
   postgres_db="${POSTGRES_DB:?}"
   redis_password="${REDIS_PASSWORD:?}"
 
@@ -778,7 +779,7 @@ write_env_file() {
   umask 077
   case "$ROLE" in
     infra|single-host)
-      local infra_host postgres_user postgres_password postgres_db redis_password s3_access s3_secret s3_bucket s3_endpoint jwt_secret admin_user admin_pass postgres_bind redis_bind s3_bind postgres_port redis_port s3_port
+      local infra_host postgres_user postgres_password app_user app_password postgres_db redis_password s3_access s3_secret s3_bucket s3_endpoint jwt_secret admin_user admin_pass postgres_bind redis_bind s3_bind postgres_port redis_port s3_port
       prompt_value BROCCOLI_INFRA_HOST "Infra address that server/worker machines will use" "$(primary_ip)"
       prompt_value POSTGRES_BIND "PostgreSQL bind address" "0.0.0.0:5432"
       prompt_value REDIS_BIND "Redis bind address" "0.0.0.0:6379"
@@ -796,6 +797,8 @@ write_env_file() {
       s3_port="$(bind_port "$s3_bind")"
       postgres_user="${POSTGRES_USER:-postgres}"
       postgres_password="${POSTGRES_PASSWORD:-$(random_secret)}"
+      app_user="${BROCCOLI_DB_USER:-broccoli}"
+      app_password="${BROCCOLI_DB_PASSWORD:-$(random_secret)}"
       postgres_db="${POSTGRES_DB:-broccoli}"
       redis_password="${REDIS_PASSWORD:-$(random_secret)}"
       s3_access="${BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY:-$(random_secret)}"
@@ -824,9 +827,11 @@ write_env_file() {
         env_line POSTGRES_USER "$postgres_user"
         env_line POSTGRES_PASSWORD "$postgres_password"
         env_line POSTGRES_DB "$postgres_db"
+        env_line BROCCOLI_DB_USER "$app_user"
+        env_line BROCCOLI_DB_PASSWORD "$app_password"
         env_line REDIS_PASSWORD "$redis_password"
         echo
-        env_line BROCCOLI__DATABASE__URL "$(postgres_url "$postgres_user" "$postgres_password" "$infra_host" "$postgres_port" "$postgres_db")"
+        env_line BROCCOLI__DATABASE__URL "$(postgres_url "$app_user" "$app_password" "$infra_host" "$postgres_port" "$postgres_db")"
         env_line BROCCOLI__MQ__URL "$(redis_url "$redis_password" "$infra_host" "$redis_port")"
         env_line BROCCOLI__STORAGE__BACKEND "$(storage_backend)"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET "$s3_bucket"

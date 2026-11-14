@@ -228,8 +228,10 @@ install_infra_server(){
   # postgres: role + db + LAN access (scram)
   echo ">> configuring postgres"
   sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1 \
-    || sudo -u postgres psql -c "CREATE ROLE $DB_USER LOGIN PASSWORD '$db_pw'"
-  sudo -u postgres psql -c "ALTER ROLE $DB_USER PASSWORD '$db_pw'"
+    || sudo -u postgres psql -c "CREATE ROLE $DB_USER LOGIN CREATEROLE PASSWORD '$db_pw'"
+  # CREATEROLE and nothing more: the server provisions each plugin's own
+  # role and schema with it.
+  sudo -u postgres psql -c "ALTER ROLE $DB_USER LOGIN CREATEROLE PASSWORD '$db_pw'"
   sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 \
     || sudo -u postgres createdb -O "$DB_USER" "$DB_NAME"
   local pgconf pghba subnet
@@ -245,6 +247,11 @@ install_infra_server(){
   # Replace the rule on every run, so a new LAN (rehearsal -> venue) is let in.
   sed -i '/# broccoli-lan$/d' "$pghba"
   echo "host $DB_NAME $DB_USER $subnet scram-sha-256 # broccoli-lan" >> "$pghba"
+  # The plugin roles the server provisions are members of the database's
+  # plugin group role, broccoli_<first 8 hex of sha256(database name)>_plugin.
+  local plugin_group
+  plugin_group="broccoli_$(printf '%s' "$DB_NAME" | sha256sum | cut -c1-8)_plugin"
+  echo "host $DB_NAME +$plugin_group $subnet scram-sha-256 # broccoli-lan" >> "$pghba"
   systemctl restart postgresql
 
   # redis: LAN bind + auth

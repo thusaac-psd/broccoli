@@ -11,9 +11,10 @@ envgen_write "$infra" "$server" \
   admin 'adminpw123'
 
 # postgres password identical in infra and the server DB URL
-pg="$(env_get "$infra" POSTGRES_PASSWORD)"
-[ -n "$pg" ] || { echo "FAIL: empty pg password"; exit 1; }
-[ "$(env_get "$server" BROCCOLI__DATABASE__URL)" = "postgres://postgres:${pg}@db:5432/broccoli" ] \
+pg="$(env_get "$infra" BROCCOLI_DB_PASSWORD)"
+[ -n "$pg" ] || { echo "FAIL: empty app role password"; exit 1; }
+[ -n "$(env_get "$infra" POSTGRES_PASSWORD)" ] || { echo "FAIL: empty superuser password"; exit 1; }
+[ "$(env_get "$server" BROCCOLI__DATABASE__URL)" = "postgres://broccoli:${pg}@db:5432/broccoli" ] \
   || { echo "FAIL: DB URL password/host mismatch"; exit 1; }
 # endpoints default to service names; phantom IP gone
 env_get "$server" BROCCOLI__MQ__URL | grep -qE '^redis://:.+@redis:6379$' || { echo "FAIL: MQ endpoint"; exit 1; }
@@ -82,15 +83,16 @@ printf 'PLAIN=Secret$$var99\n' > "$tmp/.env.plain"
 # A password holding URL delimiters is percent-encoded into the URLs.
 url_infra="$tmp/.env.infra.url"; url_server="$tmp/.env.server.url"
 cp "$rel/.env.infra.example" "$url_infra"
-env_set "$url_infra" POSTGRES_PASSWORD 'p@ss/w#rd?%'
+env_set "$url_infra" BROCCOLI_DB_PASSWORD 'p@ss/w#rd?%'
 envgen_write "$url_infra" "$url_server" "$rel/.env.infra.example" "$rel/.env.server.example" admin adminpw
-[ "$(env_get "$url_server" BROCCOLI__DATABASE__URL)" = 'postgres://postgres:p%40ss%2Fw%23rd%3F%25@db:5432/broccoli' ] \
+[ "$(env_get "$url_server" BROCCOLI__DATABASE__URL)" = 'postgres://broccoli:p%40ss%2Fw%23rd%3F%25@db:5432/broccoli' ] \
   || { echo "FAIL: DB URL password not percent-encoded"; exit 1; }
 
 # --- fixture: a cluster-secret sidecar ---
 cls="$tmp/cluster-secrets.env"
 cat > "$cls" <<EOF
 POSTGRES_PASSWORD=pgpw
+BROCCOLI_DB_PASSWORD=apppw
 REDIS_PASSWORD=rdpw
 BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY=s3acc
 BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY=s3sec
@@ -101,7 +103,7 @@ EOF
 wex="$rel/.env.worker.example"
 w="$tmp/.env.worker"
 workergen_write "$w" "$wex" "$cls" "10.0.0.10" "worker-7"
-grep -qx "BROCCOLI__DATABASE__URL='postgres://postgres:pgpw@10.0.0.10:5432/broccoli'" "$w" \
+grep -qx "BROCCOLI__DATABASE__URL='postgres://broccoli:apppw@10.0.0.10:5432/broccoli'" "$w" \
   || { echo "FAIL: worker DATABASE_URL wrong"; cat "$w"; exit 1; }
 grep -qx "BROCCOLI__MQ__URL='redis://:rdpw@10.0.0.10:6379'" "$w" \
   || { echo "FAIL: worker MQ_URL wrong"; exit 1; }
@@ -123,7 +125,7 @@ cluster_seed_infra "$infra2" "$cls"
 envgen_write "$infra2" "$server2" "$iex" "$sex" "admin" "adminpw"
 grep -qx "POSTGRES_PASSWORD='pgpw'" "$infra2" || { echo "FAIL: infra did not reuse sidecar PG pw"; exit 1; }
 grep -qx "REDIS_PASSWORD='rdpw'" "$infra2"    || { echo "FAIL: infra did not reuse sidecar redis pw"; exit 1; }
-grep -q  'postgres://postgres:pgpw@' "$server2" || { echo "FAIL: server DATABASE_URL did not use sidecar PG pw"; exit 1; }
+grep -q  'postgres://broccoli:apppw@' "$server2" || { echo "FAIL: server DATABASE_URL did not use sidecar app role pw"; exit 1; }
 
 # --- cluster_seed_infra must NOT clobber a real pre-existing infra credential.
 #     (A single-host deploy may already have minted POSTGRES_PASSWORD and had

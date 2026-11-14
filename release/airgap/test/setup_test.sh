@@ -30,7 +30,7 @@ echo "$out" | grep -q 'compose:  *docker compose'  || { echo "FAIL: compose not 
 echo "$out" | grep -q 'install.sh --role server'   || { echo "FAIL: exec plan missing"; exit 1; }
 # env files generated with consistent secrets + service-name endpoints
 sv="$tmp/bundle/compose/.env.server"
-grep -qE "^BROCCOLI__DATABASE__URL='postgres://postgres:.+@db:5432/broccoli'$" "$sv" || { echo "FAIL: db url"; exit 1; }
+grep -qE "^BROCCOLI__DATABASE__URL='postgres://broccoli:.+@db:5432/broccoli'$" "$sv" || { echo "FAIL: db url"; exit 1; }
 grep -q '10.0.0.10' "$sv" && { echo "FAIL: phantom IP remains"; exit 1; } || true
 grep -q 'change-me' "$sv" && { echo "FAIL: placeholder remains"; exit 1; } || true
 # dry-run started nothing (no compose project dir side effects beyond env files) — implicit
@@ -81,6 +81,7 @@ cp "$rel/.env.worker.example" "$tmp/bundle/compose/.env.worker.example"
 cls="$tmp/bundle.cluster-secret"; mkdir -p "$cls"
 cat > "$cls/cluster-secrets.env" <<EOF
 POSTGRES_PASSWORD=pgpw
+BROCCOLI_DB_PASSWORD=apppw
 REDIS_PASSWORD=rdpw
 BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY=s3acc
 BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY=s3sec
@@ -93,7 +94,7 @@ echo "$outw" | grep -q 'install.sh --role worker' || { echo "FAIL: worker exec p
 echo "$outw" | grep -q '.env.worker (generated)' || { echo "FAIL: worker dry-run plan omits env line"; echo "$outw"; exit 1; }
 wenv="$tmp/bundle/compose/.env.worker"
 grep -qx "BROCCOLI__WORKER__ID='worker-9'" "$wenv" || { echo "FAIL: worker id not rendered"; cat "$wenv"; exit 1; }
-grep -qx "BROCCOLI__DATABASE__URL='postgres://postgres:pgpw@10.0.0.10:5432/broccoli'" "$wenv" || { echo "FAIL: worker db url wrong"; cat "$wenv"; exit 1; }
+grep -qx "BROCCOLI__DATABASE__URL='postgres://broccoli:apppw@10.0.0.10:5432/broccoli'" "$wenv" || { echo "FAIL: worker db url wrong"; cat "$wenv"; exit 1; }
 grep -qx "BROCCOLI__MQ__URL='redis://:rdpw@10.0.0.10:6379'" "$wenv" || { echo "FAIL: worker mq url wrong"; cat "$wenv"; exit 1; }
 grep -q 'change-me' "$wenv" && { echo "FAIL: worker placeholder remains"; exit 1; } || true
 # A server name only this host resolves reaches the worker containers as an IP.
@@ -118,6 +119,7 @@ rm -f "$tmp/bundle/compose/.env.infra" "$tmp/bundle/compose/.env.server"
 mkdir -p "$tmp/bundle.cluster-secret"
 cat > "$tmp/bundle.cluster-secret/cluster-secrets.env" <<EOF
 POSTGRES_PASSWORD=pgpw
+BROCCOLI_DB_PASSWORD=apppw
 REDIS_PASSWORD=rdpw
 BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY=s3acc
 BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY=s3sec
@@ -130,7 +132,7 @@ grep -qx 'POSTGRES_DB=broccoli' "$sinfra" || { echo "FAIL: .env.infra missing PO
 grep -qx 'POSTGRES_USER=postgres' "$sinfra" || { echo "FAIL: .env.infra missing POSTGRES_USER after server+cluster-secret run"; cat "$sinfra"; exit 1; }
 grep -qx "POSTGRES_PASSWORD='pgpw'" "$sinfra" || { echo "FAIL: .env.infra did not adopt cluster-secret POSTGRES_PASSWORD"; cat "$sinfra"; exit 1; }
 sserver="$tmp/bundle/compose/.env.server"
-grep -q 'postgres://postgres:pgpw@' "$sserver" || { echo "FAIL: .env.server did not reuse cluster-secret POSTGRES_PASSWORD in db url"; cat "$sserver"; exit 1; }
+grep -q 'postgres://broccoli:apppw@' "$sserver" || { echo "FAIL: .env.server did not reuse cluster-secret BROCCOLI_DB_PASSWORD in db url"; cat "$sserver"; exit 1; }
 
 # --- pristine gate: a planted on-host env file (excluded from the manifest, so
 # integrity verify can't see it) must HARD-ABORT the server deploy as a tampering

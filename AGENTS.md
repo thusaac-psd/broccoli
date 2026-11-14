@@ -113,8 +113,11 @@ Current `docker-compose.yaml` services:
 
 It needs no setup. The credentials default to the ones
 `config/config.example.toml` uses, and `POSTGRES_USER`, `POSTGRES_PASSWORD`,
-`POSTGRES_DB` and `REDIS_PASSWORD` override them:
-`postgres://postgres:broccoli_pg_secret@localhost:5433/broccoli` and
+`POSTGRES_DB`, `BROCCOLI_DB_USER`, `BROCCOLI_DB_PASSWORD` and `REDIS_PASSWORD`
+override them. The server logs in as the app role `broccoli`, a non-superuser
+that owns the database and holds `CREATEROLE` (it provisions each plugin's own
+role); the superuser only initializes the database:
+`postgres://broccoli:broccoli_app_secret@localhost:5433/broccoli` and
 `redis://:broccoli_redis_secret@localhost:6379`.
 
 ### Configuration
