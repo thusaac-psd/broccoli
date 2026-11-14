@@ -935,6 +935,12 @@ impl Plugin {
             ));
         }
 
+        // Arm the epoch deadline before the timer thread can see the call: a
+        // cancel or timeout it handles bumps the engine epoch, and only a
+        // deadline armed before that bump traps the guest.
+        self.store.epoch_deadline_trap();
+        self.store.set_epoch_deadline(1);
+
         // Start timer
         self.timer_tx
             .send(TimerAction::Start {
@@ -947,8 +953,7 @@ impl Plugin {
                     .map(std::time::Duration::from_millis),
             })
             .expect("Timer should start");
-        self.store.epoch_deadline_trap();
-        self.store.set_epoch_deadline(1);
+        trace!(plugin = self.id.to_string(), "call registered with the timer");
         self.current_plugin_mut().start_time = std::time::Instant::now();
 
         // Call the function
