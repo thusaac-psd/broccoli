@@ -9,21 +9,26 @@ use console::style;
 use broccoli_cli_core::api::auth::DeviceCodeResponse;
 use broccoli_cli_core::backoff;
 use broccoli_cli_core::client::{Client, PollResponse, persist_session};
+use broccoli_cli_core::config;
+use broccoli_cli_core::server::ServerUrl;
 
 #[derive(Args)]
 pub struct LoginArgs {
-    #[arg(long, default_value = "http://localhost:3000", env = "BROCCOLI_URL")]
-    pub server: String,
+    /// Server to sign in to. Falls back to $BROCCOLI_URL, the server signed in
+    /// to last, `server` in config.toml, then http://localhost:3000.
+    #[arg(long, env = "BROCCOLI_URL")]
+    pub server: Option<ServerUrl>,
 }
 
 pub fn run(args: LoginArgs) -> anyhow::Result<()> {
+    let server = config::login_server(args.server.as_ref())?;
     println!(
         "{}  Requesting device code from {}...",
         style("→").blue().bold(),
-        style(&args.server).cyan()
+        style(&server).cyan()
     );
 
-    let client = Client::anonymous(&args.server);
+    let client = Client::anonymous(&server);
 
     let device_code_resp: DeviceCodeResponse = client
         .request_device_code()
@@ -67,7 +72,7 @@ pub fn run(args: LoginArgs) -> anyhow::Result<()> {
                 println!();
                 println!();
 
-                persist_session(&args.server, &token)?;
+                persist_session(&server, &token)?;
 
                 println!("{}  Logged in successfully!", style("✓").green().bold());
                 println!(

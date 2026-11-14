@@ -30,6 +30,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::credentials::{CredentialsFile, StoredTokens};
+use crate::server::ServerUrl;
 
 /// How long a session waits after an unreachable refresh before trying again.
 pub const REFRESH_RETRY: Duration = Duration::from_secs(5);
@@ -110,7 +111,7 @@ struct Slot {
 const RETIRED_TOKENS: usize = 16;
 
 struct Inner {
-    server: String,
+    server: ServerUrl,
     store: Option<CredentialsFile>,
     slot: Mutex<Slot>,
     settled: Condvar,
@@ -124,7 +125,7 @@ pub struct Session {
 
 impl Session {
     /// A session backed by the pair saved for `server` in `store`.
-    pub fn stored(server: String, tokens: StoredTokens, store: CredentialsFile) -> Self {
+    pub fn stored(server: ServerUrl, tokens: StoredTokens, store: CredentialsFile) -> Self {
         Self::build(
             server,
             tokens.token,
@@ -135,12 +136,12 @@ impl Session {
 
     /// A session for an access token given on the command line or in the
     /// environment: it is never refreshed or saved.
-    pub fn explicit(server: String, token: String) -> Self {
+    pub fn explicit(server: ServerUrl, token: String) -> Self {
         Self::build(server, token, None, None)
     }
 
     fn build(
-        server: String,
+        server: ServerUrl,
         token: String,
         refresh_token: Option<String>,
         store: Option<CredentialsFile>,
@@ -160,8 +161,14 @@ impl Session {
         }
     }
 
-    pub fn server(&self) -> &str {
+    pub fn server(&self) -> &ServerUrl {
         &self.inner.server
+    }
+
+    /// Whether a 401 can be answered by refreshing: a stored session can, an
+    /// explicit token cannot, so the server's refusal of it is final.
+    pub fn can_refresh(&self) -> bool {
+        self.inner.store.is_some() || self.lock().refresh_token.is_some()
     }
 
     pub fn state(&self) -> SessionState {
@@ -307,7 +314,7 @@ impl Session {
         let outcome = exchange(&refresh_token);
         let not_saved = match &outcome {
             Exchange::Rotated(tokens) => lock
-                .write(&self.inner.server, tokens)
+                .save_rotation(&self.inner.server, tokens)
                 .err()
                 .map(|e| format!("{e:#}")),
             _ => None,
@@ -371,7 +378,9 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
-    const SERVER: &str = "https://judge.example";
+    fn server() -> ServerUrl {
+        "https://judge.example".parse().unwrap()
+    }
 
     fn pair(token: &str, refresh: &str) -> StoredTokens {
         StoredTokens {
@@ -388,8 +397,8 @@ mod tests {
 
     /// One CLI process: a session over the pair currently saved in `file`.
     fn process(file: &CredentialsFile) -> Session {
-        let tokens = file.read(SERVER).unwrap();
-        Session::stored(SERVER.into(), tokens, file.clone())
+        let tokens = file.read(&server()).unwrap();
+        Session::stored(server(), tokens, file.clone())
     }
 
     fn never(_: &str) -> Exchange {
@@ -401,7 +410,7 @@ mod tests {
         let (_dir, file) = store();
         file.lock()
             .unwrap()
-            .write(SERVER, &pair("t0", "r0"))
+            .save_login(&server(), &pair("t0", "r0"))
             .unwrap();
         let session = process(&file);
 
@@ -413,7 +422,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(session.bearer().unwrap(), "t1");
-        assert_eq!(file.read(SERVER), Some(pair("t1", "r1")));
+        assert_eq!(file.read(&server()), Some(pair("t1", "r1")));
     }
 
     #[test]
@@ -421,7 +430,7 @@ mod tests {
         let (_dir, file) = store();
         file.lock()
             .unwrap()
-            .write(SERVER, &pair("t0", "r0"))
+            .save_login(&server(), &pair("t0", "r0"))
             .unwrap();
         let watch = process(&file);
         let submit = process(&file);
@@ -440,7 +449,7 @@ mod tests {
         let (_dir, file) = store();
         file.lock()
             .unwrap()
-            .write(SERVER, &pair("t0", "r0"))
+            .save_login(&server(), &pair("t0", "r0"))
             .unwrap();
         let session = process(&file);
         session
@@ -456,7 +465,7 @@ mod tests {
         let (_dir, file) = store();
         file.lock()
             .unwrap()
-            .write(SERVER, &pair("t0", "r0"))
+            .save_login(&server(), &pair("t0", "r0"))
             .unwrap();
         let session = process(&file);
 
@@ -474,14 +483,14 @@ mod tests {
         let (_dir, file) = store();
         file.lock()
             .unwrap()
-            .write(SERVER, &pair("t0", "r0"))
+            .save_login(&server(), &pair("t0", "r0"))
             .unwrap();
         let session = process(&file);
         let _ = session.refresh("t0", |_| Exchange::Refused);
 
         file.lock()
             .unwrap()
-            .write(SERVER, &pair("fresh", "rf"))
+            .save_login(&server(), &pair("fresh", "rf"))
             .unwrap();
 
         assert_eq!(session.bearer().unwrap(), "fresh");
@@ -490,7 +499,7 @@ mod tests {
 
     #[test]
     fn an_unreachable_server_is_retried_only_after_the_backoff() {
-        let session = Session::explicit(SERVER.into(), "t0".into());
+        let session = Session::explicit(server(), "t0".into());
         // Explicit sessions have no refresh token; give this one a store-less
         // refresh token to exercise the network path.
         session.lock().refresh_token = Some("r0".into());
@@ -524,7 +533,7 @@ mod tests {
 
     #[test]
     fn a_longer_retry_after_from_the_server_wins_over_the_backoff() {
-        let session = Session::explicit(SERVER.into(), "t0".into());
+        let session = Session::explicit(server(), "t0".into());
         session.lock().refresh_token = Some("r0".into());
         let t = Instant::now();
         let err = session
@@ -544,13 +553,13 @@ mod tests {
 
     #[test]
     fn an_explicit_token_is_never_refreshed() {
-        let session = Session::explicit(SERVER.into(), "t0".into());
+        let session = Session::explicit(server(), "t0".into());
         assert_eq!(session.refresh("t0", never), Err(SessionError::Rejected));
     }
 
     #[test]
     fn a_panicking_exchange_does_not_strand_the_session_in_refreshing() {
-        let session = Session::explicit(SERVER.into(), "t0".into());
+        let session = Session::explicit(server(), "t0".into());
         session.lock().refresh_token = Some("r0".into());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             session.refresh("t0", |_| panic!("exchange failed"))
@@ -565,7 +574,7 @@ mod tests {
         let (dir, file) = store();
         file.lock()
             .unwrap()
-            .write(SERVER, &pair("t0", "r0"))
+            .save_login(&server(), &pair("t0", "r0"))
             .unwrap();
         let session = process(&file);
         // A directory where the temp file goes makes every save fail.
@@ -576,7 +585,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, SessionError::NotSaved { .. }));
         assert_eq!(session.bearer().unwrap(), "t1");
-        assert_eq!(file.read(SERVER), Some(pair("t0", "r0")));
+        assert_eq!(file.read(&server()), Some(pair("t0", "r0")));
 
         // t1 expires: the file still holds the older t0/r0, which must not be
         // replayed; the session spends its own r1.

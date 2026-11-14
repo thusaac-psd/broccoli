@@ -16,6 +16,7 @@ use notify::{Event, EventKind, RecursiveMode, Watcher};
 use crate::dev_config::{self, FileKind, ResolvedDevConfig};
 use broccoli_cli_core::client::Client;
 use broccoli_cli_core::config;
+use broccoli_cli_core::server::ServerUrl;
 
 use super::read_manifest;
 use super::wasm::copy_wasm_artifact;
@@ -26,7 +27,7 @@ pub struct WatchPluginArgs {
     pub path: PathBuf,
 
     #[arg(long, env = "BROCCOLI_URL")]
-    pub server: Option<String>,
+    pub server: Option<ServerUrl>,
 
     #[arg(long, env = "BROCCOLI_TOKEN")]
     pub token: Option<String>,
@@ -133,7 +134,7 @@ pub fn run(args: WatchPluginArgs) -> anyhow::Result<()> {
         );
     }
 
-    let creds = config::resolve_credentials(args.server.as_deref(), args.token.as_deref())?;
+    let creds = config::resolve_credentials(args.server.as_ref(), args.token.as_deref())?;
     // One shared client so plugin uploads refresh the token on 401 (and persist
     // the rotation) instead of failing mid-session with a stale token.
     let client = Client::new(creds);

@@ -5,6 +5,7 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::credentials::CredentialsFile;
+use crate::server::ServerUrl;
 use crate::session::Session;
 
 /// Broccoli config directory (`~/.config/broccoli`); home-based, not cwd, to avoid writing tokens into a shared dir.
@@ -20,11 +21,73 @@ pub fn problem_cache_dir(contest_id: &str, problem_id: &str) -> PathBuf {
     config_dir().join("cache").join(contest_id).join(problem_id)
 }
 
+/// Where the server a command talks to came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerSource {
+    /// `--server` or `$BROCCOLI_URL`.
+    Explicit,
+    /// The server `broccoli login` signed in to last.
+    Active,
+    /// `server` in `config.toml` (the user's, else `/etc/broccoli`).
+    Config,
+}
+
+/// The server a command uses, in one order every command shares:
+/// `--server`/`$BROCCOLI_URL`, then the server the last `broccoli login`
+/// signed in to, then `server` in `config.toml`. So `broccoli login -s X`
+/// followed by any command uses X, and the configured server is the default
+/// for a machine nobody has logged in on yet.
+pub fn select_server(
+    explicit: Option<&ServerUrl>,
+    env_lookup: impl Fn(&str) -> Option<String>,
+    config_server: Option<String>,
+    store: &CredentialsFile,
+) -> anyhow::Result<Option<(ServerUrl, ServerSource)>> {
+    if let Some(server) = explicit {
+        return Ok(Some((server.clone(), ServerSource::Explicit)));
+    }
+    if let Some(env) = env_lookup("BROCCOLI_URL") {
+        let server = env
+            .parse()
+            .with_context(|| format!("$BROCCOLI_URL is not a server address: '{env}'"))?;
+        return Ok(Some((server, ServerSource::Explicit)));
+    }
+    if let Some((server, _)) = store.active() {
+        return Ok(Some((server, ServerSource::Active)));
+    }
+    match config_server {
+        Some(value) => {
+            let server = value.parse().with_context(|| {
+                format!("`server` in config.toml is not a server address: '{value}'")
+            })?;
+            Ok(Some((server, ServerSource::Config)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// The server `broccoli login` signs in to: [`select_server`]'s choice, else
+/// a server on this machine (`http://localhost:3000`).
+pub fn login_server(explicit: Option<&ServerUrl>) -> anyhow::Result<ServerUrl> {
+    let selected = select_server(
+        explicit,
+        |name| std::env::var(name).ok(),
+        load_user_config().server,
+        &CredentialsFile::default_location(),
+    )?;
+    Ok(match selected {
+        Some((server, _)) => server,
+        None => "http://localhost:3000".parse().expect("a valid address"),
+    })
+}
+
 /// Resolve the session to use: a token from `--token` or `BROCCOLI_TOKEN` is
-/// used as-is (never refreshed); otherwise the pair saved by `broccoli login`.
-/// The server comes from the flag, then `BROCCOLI_URL`, then `config.toml`,
-/// then the most recently saved server.
-pub fn resolve_credentials(server: Option<&str>, token: Option<&str>) -> anyhow::Result<Session> {
+/// used as-is (never refreshed); otherwise the pair saved by `broccoli login`
+/// for the server [`select_server`] picks.
+pub fn resolve_credentials(
+    server: Option<&ServerUrl>,
+    token: Option<&str>,
+) -> anyhow::Result<Session> {
     resolve_credentials_from_sources(
         server,
         token,
@@ -36,43 +99,39 @@ pub fn resolve_credentials(server: Option<&str>, token: Option<&str>) -> anyhow:
 
 /// [`resolve_credentials`] with injectable sources, for testing.
 fn resolve_credentials_from_sources(
-    server: Option<&str>,
+    server: Option<&ServerUrl>,
     token: Option<&str>,
     env_lookup: impl Fn(&str) -> Option<String>,
     config_server: Option<String>,
     store: &CredentialsFile,
 ) -> anyhow::Result<Session> {
-    let server = server
-        .map(String::from)
-        .or_else(|| env_lookup("BROCCOLI_URL"))
-        .or(config_server);
     let token = token
         .map(String::from)
         .or_else(|| env_lookup("BROCCOLI_TOKEN"));
-    // Explicit credentials never touch the credentials file, so a damaged
-    // file cannot lock out `--server`/`--token`.
-    if let (Some(server), Some(token)) = (&server, &token) {
-        return Ok(Session::explicit(server.clone(), token.clone()));
+    let Some((server, _)) = select_server(server, &env_lookup, config_server, store)? else {
+        bail!(
+            "No server to talk to.\n\
+             Run `broccoli login --server <URL>` to sign in, or pass --server and --token."
+        );
+    };
+    // An explicit token never reads the saved pairs, so a damaged file cannot
+    // lock out `--server`/`--token`.
+    if let Some(token) = token {
+        return Ok(Session::explicit(server, token));
     }
-
     if let Some(damage) = store.damage() {
         eprintln!(
             "Warning: ignoring saved credentials: {damage}. Run `broccoli login` to replace them."
         );
     }
-    let saved = match &server {
-        Some(server) => store.read(server).map(|tokens| (server.clone(), tokens)),
-        None => store.most_recent(),
-    };
-    match (token, saved) {
-        (Some(token), Some((server, _))) => Ok(Session::explicit(server, token)),
-        (None, Some((server, tokens))) => {
+    match store.read(&server) {
+        Some(tokens) => {
             store.check_locking();
             Ok(Session::stored(server, tokens, store.clone()))
         }
-        _ => bail!(
-            "No credentials found.\n\
-             Run `broccoli login` to authenticate, or pass --server and --token."
+        None => bail!(
+            "No credentials found for {server}.\n\
+             Run `broccoli login --server {server}` to sign in, or pass --server and --token."
         ),
     }
 }
@@ -218,8 +277,8 @@ mod tests {
         let (dir, file) = empty_store();
         file.lock()
             .unwrap()
-            .write(
-                server,
+            .save_login(
+                &server.parse().unwrap(),
                 &StoredTokens {
                     token: "saved".into(),
                     refresh_token: "saved-refresh".into(),
@@ -237,8 +296,9 @@ mod tests {
         store: &CredentialsFile,
     ) -> anyhow::Result<Session> {
         let env: HashMap<&str, &str> = env.iter().copied().collect();
+        let server = server.map(|s| s.parse::<ServerUrl>().unwrap());
         resolve_credentials_from_sources(
-            server,
+            server.as_ref(),
             token,
             |name| env.get(name).map(|v| v.to_string()),
             config_server.map(String::from),
@@ -254,7 +314,7 @@ mod tests {
             ("BROCCOLI_TOKEN", "env-token"),
         ];
         let session = resolve(None, None, &env, None, &store).unwrap();
-        assert_eq!(session.server(), "https://env.example.com");
+        assert_eq!(session.server().as_str(), "https://env.example.com");
         assert_eq!(session.bearer().unwrap(), "env-token");
     }
 
@@ -267,11 +327,31 @@ mod tests {
         ];
         let config = Some("https://config.example.com");
         let s = resolve(None, None, &env[1..], config, &store).unwrap();
-        assert_eq!(s.server(), "https://config.example.com");
+        assert_eq!(s.server().as_str(), "https://config.example.com");
         let s = resolve(None, None, &env, config, &store).unwrap();
-        assert_eq!(s.server(), "https://env.example.com");
+        assert_eq!(s.server().as_str(), "https://env.example.com");
         let s = resolve(Some("https://arg.example.com"), None, &env, config, &store).unwrap();
-        assert_eq!(s.server(), "https://arg.example.com");
+        assert_eq!(s.server().as_str(), "https://arg.example.com");
+    }
+
+    #[test]
+    fn the_server_logged_in_to_last_wins_over_the_configured_one() {
+        let (_dir, store) = saved_store("http://127.0.0.1:3100");
+        let session = resolve(None, None, &[], Some("https://preseeded.lab"), &store).unwrap();
+        assert_eq!(session.server().as_str(), "http://127.0.0.1:3100");
+        assert_eq!(session.bearer().unwrap(), "saved");
+    }
+
+    #[test]
+    fn a_missing_login_names_the_server_it_looked_for() {
+        let (_dir, store) = empty_store();
+        let Err(err) = resolve(None, None, &[], Some("https://preseeded.lab/"), &store) else {
+            panic!("nothing is saved for the configured server");
+        };
+        assert!(
+            err.to_string().contains("for https://preseeded.lab."),
+            "{err}"
+        );
     }
 
     #[test]
@@ -289,7 +369,7 @@ mod tests {
     fn the_saved_pair_is_used_without_an_explicit_token() {
         let (_dir, store) = saved_store("https://judge");
         let session = resolve(None, None, &[], None, &store).unwrap();
-        assert_eq!(session.server(), "https://judge");
+        assert_eq!(session.server().as_str(), "https://judge");
         assert_eq!(session.bearer().unwrap(), "saved");
     }
 

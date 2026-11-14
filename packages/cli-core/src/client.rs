@@ -20,6 +20,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::credentials::{CredentialsFile, StoredTokens};
+use crate::server::ServerUrl;
 use crate::session::{Exchange, Session, SessionError};
 
 /// Why a request failed, in a form callers can act on.
@@ -29,14 +30,68 @@ pub enum ClientError {
     #[error(transparent)]
     Session(#[from] SessionError),
     /// The server could not be reached.
-    #[error("Could not reach {server}: {cause}. Check your network connection.")]
-    Network { server: String, cause: String },
+    #[error("{}", cause.describe(server))]
+    Network {
+        server: ServerUrl,
+        cause: NetworkCause,
+    },
+    /// Something answered at the address, but not the Broccoli API: a route
+    /// the API has was missing (404/405 without the API's error body), or a
+    /// success carried a body that is not the API's.
+    #[error(
+        "{server} does not look like a Broccoli server ({detail}). \
+         Check the address: it is the URL you open the judge at in a browser."
+    )]
+    NotBroccoli { server: ServerUrl, detail: String },
     /// The server answered with an error.
     #[error(transparent)]
     Api(#[from] ApiError),
-    /// The server answered 2xx with a body this client cannot read.
-    #[error("Failed to parse server response: {0}")]
-    Decode(String),
+}
+
+/// Why a server could not be reached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkCause {
+    /// Nothing accepted the connection at the address.
+    Refused,
+    /// The host name does not resolve.
+    HostNotFound,
+    /// The server did not answer in time.
+    TimedOut,
+    /// Anything else the transport reported.
+    Other(String),
+}
+
+impl NetworkCause {
+    fn of(e: &ureq::Error) -> Self {
+        match e {
+            ureq::Error::Io(io) if io.kind() == std::io::ErrorKind::ConnectionRefused => {
+                Self::Refused
+            }
+            ureq::Error::ConnectionFailed => Self::Refused,
+            ureq::Error::HostNotFound => Self::HostNotFound,
+            ureq::Error::Timeout(_) => Self::TimedOut,
+            ureq::Error::Io(io) if io.kind() == std::io::ErrorKind::TimedOut => Self::TimedOut,
+            other => Self::Other(other.to_string()),
+        }
+    }
+
+    fn describe(&self, server: &ServerUrl) -> String {
+        match self {
+            Self::Refused => format!(
+                "Nothing is listening at {server}: the connection was refused. \
+                 Check the address and port, and that the server is running."
+            ),
+            Self::HostNotFound => {
+                format!("The host of {server} cannot be found. Check the address.")
+            }
+            Self::TimedOut => {
+                format!("{server} did not answer in time. Check your network connection.")
+            }
+            Self::Other(cause) => {
+                format!("Could not reach {server}: {cause}. Check your network connection.")
+            }
+        }
+    }
 }
 
 pub type ClientResult<T> = Result<T, ClientError>;
@@ -61,38 +116,39 @@ impl Client {
     }
 
     /// A client for the unauthenticated endpoints (login, device flow).
-    pub fn anonymous(server: &str) -> Self {
-        Self::new(Session::explicit(server.to_string(), String::new()))
+    pub fn anonymous(server: &ServerUrl) -> Self {
+        Self::new(Session::explicit(server.clone(), String::new()))
     }
 
     pub fn session(&self) -> &Session {
         &self.session
     }
 
-    pub fn server(&self) -> &str {
+    pub fn server(&self) -> &ServerUrl {
         self.session.server()
     }
 
     fn url(&self, path: &str) -> String {
-        format!("{}{}", self.server(), path)
+        self.server().join(path)
     }
 
     fn network(&self, e: ureq::Error) -> ClientError {
         ClientError::Network {
-            server: self.server().to_string(),
-            cause: e.to_string(),
+            server: self.server().clone(),
+            cause: NetworkCause::of(&e),
         }
     }
 
     /// Send an authenticated request built by `send` (given the bearer
-    /// header). On 401 the session is refreshed and the request resent once.
+    /// header). On 401 a stored session is refreshed and the request resent
+    /// once; an explicit token's 401 is the answer.
     fn authorized(
         &self,
         send: impl Fn(&str) -> Result<Response, ureq::Error>,
     ) -> ClientResult<Response> {
         let token = self.session.bearer()?;
         let resp = send(&format!("Bearer {token}")).map_err(|e| self.network(e))?;
-        if resp.status().as_u16() != 401 {
+        if resp.status().as_u16() != 401 || !self.session.can_refresh() {
             return Ok(resp);
         }
         self.session
@@ -161,23 +217,41 @@ impl Client {
             .map_err(|e| self.network(e))
     }
 
-    fn check_status(resp: Response) -> ClientResult<Response> {
+    /// Pass a success through; turn anything else into the error it means.
+    fn check_status(&self, resp: Response) -> ClientResult<Response> {
         if resp.status().is_success() {
             Ok(resp)
         } else {
-            Err(ApiError::from_response(resp).into())
+            Err(self.failure(resp))
         }
     }
 
+    /// The error a non-2xx answer means. A 404 or 405 without the API's
+    /// error body comes from something other than the API: a wrong port, a
+    /// path prefix the server is not mounted under, another web server.
+    fn failure(&self, resp: Response) -> ClientError {
+        let error = ApiError::from_response(resp);
+        if error.code == ApiError::UNSTRUCTURED && matches!(error.status, 404 | 405) {
+            return ClientError::NotBroccoli {
+                server: self.server().clone(),
+                detail: format!("it answered {} to an API request", error.status),
+            };
+        }
+        error.into()
+    }
+
     fn parse_response<T: DeserializeOwned>(&self, resp: Response) -> ClientResult<T> {
-        Self::check_status(resp)?
+        self.check_status(resp)?
             .into_body()
             .read_json::<T>()
-            .map_err(|e| ClientError::Decode(e.to_string()))
+            .map_err(|e| ClientError::NotBroccoli {
+                server: self.server().clone(),
+                detail: format!("its answer is not the API's: {e}"),
+            })
     }
 
     fn parse_empty(&self, resp: Response) -> ClientResult<()> {
-        Self::check_status(resp).map(drop)
+        self.check_status(resp).map(drop)
     }
 
     /// Publish a packaged plugin archive the way the admin UI does: inspect
@@ -284,13 +358,16 @@ impl Client {
             device_code: device_code.to_string(),
         };
         let resp = self.post_anonymous("/api/v1/auth/device-token", &body)?;
-        let resp = match resp.status().as_u16() {
-            200 | 400 => resp,
-            _ => return Err(ApiError::from_response(resp).into()),
-        };
-        resp.into_body()
-            .read_json()
-            .map_err(|e| ClientError::Decode(e.to_string()))
+        match resp.status().as_u16() {
+            200 | 400 => resp
+                .into_body()
+                .read_json()
+                .map_err(|e| ClientError::NotBroccoli {
+                    server: self.server().clone(),
+                    detail: format!("its answer is not the API's: {e}"),
+                }),
+            _ => Err(self.failure(resp)),
+        }
     }
 
     pub fn me(&self) -> ClientResult<MeResponse> {
@@ -530,17 +607,14 @@ impl Client {
 /// Exchange a freshly obtained access token (device flow, browser callback or
 /// password login) for a new access token plus a refresh token, and save the
 /// pair to `credentials.json`. Nothing is saved unless both tokens were issued.
-pub fn persist_session(server: &str, access_token: &str) -> anyhow::Result<()> {
-    let client = Client::new(Session::explicit(
-        server.to_string(),
-        access_token.to_string(),
-    ));
+pub fn persist_session(server: &ServerUrl, access_token: &str) -> anyhow::Result<()> {
+    let client = Client::new(Session::explicit(server.clone(), access_token.to_string()));
     let issued = client
         .issue_cli_token()
         .context("Failed to obtain a refresh token")?;
     CredentialsFile::default_location()
         .lock()?
-        .write(
+        .save_login(
             server,
             &StoredTokens {
                 token: issued.token,

@@ -835,9 +835,11 @@ async fn publish_with_cli(
     token: &str,
     archive: Vec<u8>,
 ) -> broccoli_api_types::plugin::PluginUploadResponse {
-    let client = broccoli_cli_core::client::Client::new(
-        broccoli_cli_core::session::Session::explicit(app.url(""), token.to_string()),
-    );
+    let client =
+        broccoli_cli_core::client::Client::new(broccoli_cli_core::session::Session::explicit(
+            app.url("").parse().unwrap(),
+            token.to_string(),
+        ));
     tokio::task::spawn_blocking(move || client.publish_plugin(&archive))
         .await
         .unwrap()
