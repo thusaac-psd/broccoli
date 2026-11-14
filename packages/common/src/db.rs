@@ -189,6 +189,49 @@ impl PgPoolSpec {
     }
 }
 
+/// Wait until Postgres at `url` accepts a connection (see [`crate::boot`]).
+/// One direct connection per attempt surfaces the real cause (refused,
+/// unknown host, bad password) instead of a pool's bare "timed out".
+pub async fn wait_until_reachable(url: &str, session: &PgSession) -> anyhow::Result<()> {
+    use crate::boot::{Unreachable, wait_for};
+    use sea_orm::sqlx::Connection;
+
+    let options = pg_connect_options(url, session)?;
+    let target = crate::redact::redact_url(url);
+    wait_for("the database", &target, || async {
+        match tokio::time::timeout(CONNECT_ATTEMPT, options.connect()).await {
+            Ok(Ok(conn)) => {
+                let _ = conn.close().await;
+                Ok(())
+            }
+            Ok(Err(e)) if connect_error_is_fatal(&e) => Err(Unreachable::Fatal(e.to_string())),
+            Ok(Err(e)) => Err(Unreachable::Transient(e.to_string())),
+            Err(_) => Err(Unreachable::Transient(format!(
+                "no answer within {CONNECT_ATTEMPT:?}"
+            ))),
+        }
+    })
+    .await
+}
+
+/// How long one connection attempt at boot may take.
+const CONNECT_ATTEMPT: Duration = Duration::from_secs(5);
+
+/// Whether a connection error is a refusal no retry fixes: a malformed URL,
+/// rejected credentials (SQLSTATE class 28) or a database that does not exist
+/// (3D000). Anything else (refused, reset, timed out, too many clients) is
+/// the server not being ready yet.
+fn connect_error_is_fatal(e: &sea_orm::sqlx::Error) -> bool {
+    use sea_orm::sqlx::Error;
+    match e {
+        Error::Configuration(_) => true,
+        Error::Database(db) => db
+            .code()
+            .is_some_and(|code| code.starts_with("28") || code == "3D000"),
+        _ => false,
+    }
+}
+
 /// Open a pool with `spec` and `session` behind a [`DatabaseConnection`].
 pub async fn connect(
     url: &str,

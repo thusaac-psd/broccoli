@@ -6,11 +6,13 @@
 //! aggregates per-worker progress against the live heartbeat registry so an admin
 //! can watch the warm complete before the contest opens.
 
+use crate::extractors::query::AppQuery;
+
 use common::db::DatabaseConnection;
 use std::collections::HashMap;
 
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use broccoli_server_sdk::permissions as perm;
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
@@ -126,7 +128,7 @@ pub async fn prewarm_status(
     auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
-    Query(query): Query<WarmStatusQuery>,
+    AppQuery(query): AppQuery<WarmStatusQuery>,
 ) -> Result<Json<WarmStatusResponse>, AppError> {
     auth_user.require_permission(perm::CONTEST_MANAGE)?;
     find_contest(&state.db, id).await?;

@@ -155,7 +155,7 @@ pub async fn ensure_bootstrap_admin(
     };
 
     let existing = user::Entity::find_active()
-        .filter(user::Column::Username.eq(username))
+        .filter(user::username_is_any([username]))
         .one(&txn)
         .await?;
     let user_id = match existing {

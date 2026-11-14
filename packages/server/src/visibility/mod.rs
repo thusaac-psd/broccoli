@@ -785,16 +785,14 @@ mod tests {
                 plugin: PluginConfig::default(),
                 submission: SubmissionConfig::default(),
                 storage: BlobStoreConfig::default(),
-                mq: MqAppConfig {
-                    enabled: false,
-                    ..Default::default()
-                },
+                mq: MqAppConfig::default(),
                 observability: common::config::ObservabilityConfig::default(),
                 batch_max_age_secs: 600,
                 bootstrap: BootstrapConfig::default(),
                 unknown_keys: Vec::new(),
             },
-            mq: None,
+            // Never reached: these tests make no queue calls.
+            mq: mq::Mq::lazy("redis://127.0.0.1:1", "unused").expect("valid url"),
             redis_client: None,
             blob_store,
             registries: RegistryState {

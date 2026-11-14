@@ -18,6 +18,9 @@ const CONTEST_TYPE_RETRY_AFTER_SECS: u64 = 5;
 /// couple of seconds usually sees.
 pub const PLUGIN_RETRY_AFTER_SECS: u64 = 2;
 
+/// The `Retry-After` of a `STORAGE_UNAVAILABLE` answer.
+pub const STORAGE_RETRY_AFTER_SECS: u64 = 5;
+
 #[derive(Debug)]
 pub enum AppError {
     Validation(String),
@@ -35,7 +38,11 @@ pub enum AppError {
     NotFound(String),
     MethodNotAllowed,
     Conflict(String),
-    UsernameTaken,
+    /// The usernames an active account already holds (case-insensitively).
+    /// Empty when the database refused a write without saying which.
+    UsernameTaken(Vec<String>),
+    /// `POST /auth/register` while self-registration is closed.
+    RegistrationClosed,
     PluginNotReady(String),
     /// A valid plugin archive whose plugin failed to load or initialize on
     /// the serving replica; nothing was published.
@@ -66,6 +73,9 @@ pub enum AppError {
     /// deadline: this server is too busy right now. Never a decision about
     /// the request; the client retries after [`PLUGIN_RETRY_AFTER_SECS`].
     PluginUnavailable,
+    /// Blob storage did not answer through its retries: an outage, retried
+    /// by the client after [`STORAGE_RETRY_AFTER_SECS`].
+    StorageUnavailable,
     PluginRejection {
         code: String,
         message: String,
@@ -139,10 +149,30 @@ impl AppError {
                 ),
             ),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, simple("CONFLICT", msg)),
-            AppError::UsernameTaken => (
-                StatusCode::CONFLICT,
-                simple("USERNAME_TAKEN", "Username is already taken".into()),
+            AppError::RegistrationClosed => (
+                StatusCode::FORBIDDEN,
+                simple(
+                    "REGISTRATION_CLOSED",
+                    "Self-registration is closed; ask the organisers for an account".into(),
+                ),
             ),
+            AppError::UsernameTaken(usernames) => {
+                let message = match usernames.as_slice() {
+                    [] => "Username is already taken".to_string(),
+                    [one] => format!("Username '{one}' is already taken"),
+                    many => format!("Usernames already taken: {}", many.join(", ")),
+                };
+                let details =
+                    (!usernames.is_empty()).then(|| serde_json::json!({ "usernames": usernames }));
+                (
+                    StatusCode::CONFLICT,
+                    ErrorBody {
+                        code: "USERNAME_TAKEN".into(),
+                        message,
+                        details,
+                    },
+                )
+            }
             AppError::PluginNotReady(msg) => {
                 (StatusCode::BAD_REQUEST, simple("PLUGIN_NOT_READY", msg))
             }
@@ -208,6 +238,15 @@ impl AppError {
                     format!(
                         "A plugin this request needs is busy; retry in \
                          {PLUGIN_RETRY_AFTER_SECS} seconds"
+                    ),
+                ),
+            ),
+            AppError::StorageUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                simple(
+                    "STORAGE_UNAVAILABLE",
+                    format!(
+                        "File storage is not answering; retry in {STORAGE_RETRY_AFTER_SECS} seconds"
                     ),
                 ),
             ),
@@ -291,6 +330,7 @@ impl IntoResponse for AppError {
             }
             AppError::ContestTypeUnavailable(_) => Some(CONTEST_TYPE_RETRY_AFTER_SECS),
             AppError::PluginUnavailable => Some(PLUGIN_RETRY_AFTER_SECS),
+            AppError::StorageUnavailable => Some(STORAGE_RETRY_AFTER_SECS),
             _ => None,
         };
 
@@ -318,6 +358,10 @@ impl From<StorageError> for AppError {
             StorageError::InvalidHash(_) => AppError::Validation(err.to_string()),
             StorageError::Io(_) => AppError::Internal(err.to_string()),
             StorageError::Backend(_) => AppError::Internal(err.to_string()),
+            StorageError::Unavailable(_) => {
+                tracing::warn!("{err}");
+                AppError::StorageUnavailable
+            }
         }
     }
 }
@@ -360,6 +404,20 @@ impl From<AssetError> for AppError {
     }
 }
 
+/// A multipart body that could not be read: over the route's body limit (413),
+/// or malformed (400).
+impl From<axum::extract::multipart::MultipartError> for AppError {
+    fn from(err: axum::extract::multipart::MultipartError) -> Self {
+        if err.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            AppError::PayloadTooLarge(
+                "The request body is larger than this endpoint accepts".into(),
+            )
+        } else {
+            AppError::Validation(format!("Malformed multipart body: {err}"))
+        }
+    }
+}
+
 impl From<TypedMultipartError> for AppError {
     fn from(err: TypedMultipartError) -> Self {
         match err {
@@ -370,10 +428,8 @@ impl From<TypedMultipartError> for AppError {
             | TypedMultipartError::InvalidEnumValue { .. }
             | TypedMultipartError::NamelessField => AppError::Validation(err.to_string()),
             TypedMultipartError::FieldTooLarge { .. } => AppError::PayloadTooLarge(err.to_string()),
-            TypedMultipartError::InvalidRequest { .. }
-            | TypedMultipartError::InvalidRequestBody { .. } => {
-                AppError::Validation(err.to_string())
-            }
+            TypedMultipartError::InvalidRequestBody { source } => source.into(),
+            TypedMultipartError::InvalidRequest { .. } => AppError::Validation(err.to_string()),
             _ => AppError::Internal(err.to_string()),
         }
     }
@@ -383,6 +439,20 @@ impl From<TypedMultipartError> for AppError {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn storage_that_does_not_answer_is_a_retryable_503() {
+        let err = AppError::from(StorageError::Unavailable("refused".into()));
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers()["Retry-After"],
+            STORAGE_RETRY_AFTER_SECS.to_string()
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["code"], "STORAGE_UNAVAILABLE");
+    }
 
     /// Durable-queue backpressure must surface as
     /// `503 Service Unavailable` with code `QUEUE_OVERLOADED` and the

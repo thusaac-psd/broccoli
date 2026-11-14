@@ -354,22 +354,25 @@ pub async fn bulk_add_participants(
     let existing_created_user_map = if hashed_entries.is_empty() {
         std::collections::HashMap::new()
     } else {
-        let requested_usernames: Vec<String> = hashed_entries
-            .iter()
-            .map(|entry| entry.username.clone())
-            .collect();
         user::Entity::find_active()
-            .filter(user::Column::Username.is_in(requested_usernames))
+            .filter(user::username_is_any(
+                hashed_entries.iter().map(|entry| &entry.username),
+            ))
             .all(&txn)
             .await?
             .into_iter()
-            .map(|user| (user.username.clone(), BulkParticipantAdded::from(user)))
+            .map(|user| {
+                (
+                    user::username_key(&user.username),
+                    BulkParticipantAdded::from(user),
+                )
+            })
             .collect::<std::collections::HashMap<_, _>>()
     };
 
     for entry in hashed_entries {
         let username = &entry.username;
-        if let Some(existing_user) = existing_created_user_map.get(username) {
+        if let Some(existing_user) = existing_created_user_map.get(&user::username_key(username)) {
             users_to_enroll.push(existing_user.clone());
             continue;
         }
@@ -384,7 +387,7 @@ pub async fn bulk_add_participants(
                 });
                 users_to_enroll.push(user.into());
             }
-            Err(AppError::UsernameTaken) => {
+            Err(AppError::UsernameTaken(_)) => {
                 return Err(AppError::Validation(format!(
                     "User '{username}' was created concurrently; retry the bulk participant request"
                 )));
@@ -401,17 +404,17 @@ pub async fn bulk_add_participants(
             .collect();
 
         let found_users: Vec<user::Model> = user::Entity::find_active()
-            .filter(user::Column::Username.is_in(trimmed_usernames.clone()))
+            .filter(user::username_is_any(&trimmed_usernames))
             .all(&txn)
             .await?;
 
         let found_map: std::collections::HashMap<String, BulkParticipantAdded> = found_users
             .into_iter()
-            .map(|u| (u.username.clone(), u.into()))
+            .map(|u| (user::username_key(&u.username), u.into()))
             .collect();
 
         for name in &trimmed_usernames {
-            if let Some(user) = found_map.get(name) {
+            if let Some(user) = found_map.get(&user::username_key(name)) {
                 users_to_enroll.push(user.clone());
             } else {
                 not_found.push(name.clone());

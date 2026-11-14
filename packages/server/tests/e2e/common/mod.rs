@@ -290,6 +290,11 @@ impl E2eTestApp {
         .own_stream(mq.topology().reply(&server_id), mq::REPLY_STREAM_TTL, || {})
         .spawn_heartbeat(|| serde_json::json!({}));
 
+        // Tests create their users by registering.
+        server::services::registration::set_open(&db, true)
+            .await
+            .expect("open self-registration");
+
         let blob_store = common::storage::config::create_blob_store(
             &BlobStoreConfig::default(),
             db.clone(),
@@ -349,7 +354,6 @@ impl E2eTestApp {
             submission: SubmissionConfig::default(),
             storage: BlobStoreConfig::default(),
             mq: MqAppConfig {
-                enabled: true,
                 url: redis_url.clone(),
                 operation_queue_name: operation_queue.clone(),
                 ..Default::default()
@@ -418,7 +422,7 @@ impl E2eTestApp {
             clock,
             plugin_config_cache,
             config: app_config,
-            mq: Some(mq.clone()),
+            mq: mq.clone(),
             redis_client: None,
             blob_store: blob_store.clone(),
             registries: server::state::RegistryState {

@@ -140,7 +140,7 @@ pub fn validate_create_users(users: &[CreateUserRequest]) -> Result<(), crate::e
     let mut seen = std::collections::HashSet::new();
     for entry in users {
         validate_account_credentials(&entry.username, entry.password.as_deref())?;
-        if !seen.insert(entry.username.trim().to_ascii_lowercase()) {
+        if !seen.insert(crate::entity::user::username_key(&entry.username)) {
             return Err(AppError::Validation(format!(
                 "Duplicate username: '{}'",
                 entry.username.trim()

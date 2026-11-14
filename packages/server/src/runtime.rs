@@ -52,6 +52,27 @@ impl ServerRuntime {
             common::observability::init_metrics(&app_config.observability.otlp.service_name);
 
         let db_session = crate::database::app_session(&app_config.database);
+        common::db::wait_until_reachable(&app_config.database.url, &db_session).await?;
+        // Redis before the boot lock, so a replica waiting for it does not hold
+        // up its peers' boot, and before pool sizing, which reads the fleet.
+        let mq_target = common::redact::redact_url(&app_config.mq.url);
+        let mq = common::boot::wait_for("Redis", &mq_target, || async {
+            mq::Mq::connect(&app_config.mq.url, &app_config.mq.operation_queue_name)
+                .await
+                .map_err(|e| {
+                    if e.is_unreachable() {
+                        common::boot::Unreachable::Transient(e)
+                    } else {
+                        common::boot::Unreachable::Fatal(e)
+                    }
+                })
+        })
+        .await?;
+        info!("MQ connected to {mq_target}");
+        let redis_client = Some(Arc::new(
+            redis::Client::open(app_config.mq.url.as_str()).context("Invalid mq.url")?,
+        ));
+
         // Boot-time schema work runs on one session holding a cluster-wide
         // advisory lock, so replicas booting together serialize instead of
         // racing each other's DDL and check-then-insert seeding.
@@ -93,43 +114,6 @@ impl ServerRuntime {
             app_config.storage.backend
         );
 
-        let mq = if app_config.mq.enabled {
-            match mq::Mq::connect(&app_config.mq.url, &app_config.mq.operation_queue_name).await {
-                Ok(queue) => {
-                    info!(
-                        "MQ connected to {}",
-                        common::redact::redact_url(&app_config.mq.url)
-                    );
-                    Some(queue)
-                }
-                Err(e @ (mq::MqError::RedisTooOld { .. } | mq::MqError::WrongKeyType { .. })) => {
-                    return Err(e.into());
-                }
-                Err(e) => {
-                    warn!("MQ connection failed, submissions won't be queued: {}", e);
-                    None
-                }
-            }
-        } else {
-            info!("MQ disabled by configuration");
-            None
-        };
-
-        let redis_client = if app_config.mq.enabled {
-            match redis::Client::open(app_config.mq.url.as_str()) {
-                Ok(c) => Some(Arc::new(c)),
-                Err(e) => {
-                    warn!(
-                        "Redis admin client init failed, /admin/system endpoints will degrade: {}",
-                        e
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
         let clock = crate::clock::PlatformClock::connect(&app_config.database.url)
             .await
             .context("Failed to read the database clock")?;
@@ -170,39 +154,32 @@ impl ServerRuntime {
                     payload(),
                 )
                 .await?;
-                let claim = match &mq {
-                    Some(mq) => {
-                        let waiters = operation_waiters.clone();
-                        claim.own_stream(
-                            mq.topology().reply(&server_id),
-                            mq::REPLY_STREAM_TTL,
-                            move || {
-                                crate::consumers::operation_result::fail_all_waiters(
-                                    &waiters,
-                                    "this server's reply stream was lost; the result cannot arrive",
-                                );
-                            },
-                        )
-                    }
-                    None => claim,
-                };
+                let waiters = operation_waiters.clone();
+                let claim = claim.own_stream(
+                    mq.topology().reply(&server_id),
+                    mq::REPLY_STREAM_TTL,
+                    move || {
+                        crate::consumers::operation_result::fail_all_waiters(
+                            &waiters,
+                            "this server's reply stream was lost; the result cannot arrive",
+                        );
+                    },
+                );
                 Some(claim.spawn_heartbeat(payload))
             }
             None => None,
         };
 
-        if let Some(mq) = &mq {
-            mq.check_key_types(&[(mq.topology().reply(&server_id), "stream")])
-                .await
-                .context("Checking this server's reply stream key")?;
-            let consumer = mq.dead_letter_consumer(&server_id);
-            consumer
-                .ensure_groups()
-                .await
-                .context("Creating the dead-letter consumer group")?;
-            tokio::spawn(consume_operation_dlq(db.clone(), consumer));
-            info!("Operation DLQ consumer started");
-        }
+        mq.check_key_types(&[(mq.topology().reply(&server_id), "stream")])
+            .await
+            .context("Checking this server's reply stream key")?;
+        let consumer = mq.dead_letter_consumer(&server_id);
+        consumer
+            .ensure_groups()
+            .await
+            .context("Creating the dead-letter consumer group")?;
+        tokio::spawn(consume_operation_dlq(db.clone(), consumer));
+        info!("Operation DLQ consumer started");
 
         // NOTE: the stuck job detector is spawned later (after AppState is
         // built) so it can re-dispatch stuck rows via the same dispatcher
@@ -223,11 +200,8 @@ impl ServerRuntime {
                 &operation_waiters_for_reaper,
                 correlation_ids,
             );
-            let Some(mq) = reaper_mq.as_ref() else {
-                return;
-            };
             for key in correlation_ids {
-                let mq = mq.clone();
+                let mq = reaper_mq.clone();
                 let key = key.clone();
                 tokio::spawn(async move {
                     let envelope = common::DlqEnvelope {
@@ -247,20 +221,18 @@ impl ServerRuntime {
         });
         evaluate_batches.spawn_reaper(batch_max_age, |_, _| {});
 
-        if let Some(mq) = &mq {
-            tokio::spawn(consume_operation_results(
-                mq.reply_inbox(&server_id),
-                crate::consumers::operation_result::OutstandingCheck {
-                    mq: mq.clone(),
-                    server_id: server_id.clone(),
-                    interval: crate::consumers::operation_result::OUTSTANDING_CHECK_INTERVAL,
-                },
-                operation_waiters.clone(),
-                evaluate_batches.clone(),
-                metrics.clone(),
-            ));
-            info!("Operation result consumer started");
-        }
+        tokio::spawn(consume_operation_results(
+            mq.reply_inbox(&server_id),
+            crate::consumers::operation_result::OutstandingCheck {
+                mq: mq.clone(),
+                server_id: server_id.clone(),
+                interval: crate::consumers::operation_result::OUTSTANDING_CHECK_INTERVAL,
+            },
+            operation_waiters.clone(),
+            evaluate_batches.clone(),
+            metrics.clone(),
+        ));
+        info!("Operation result consumer started");
 
         let hook_registry = crate::hooks::new_shared_registry();
         // Only a server whose claim fiber listens hears of config changes.
@@ -280,7 +252,7 @@ impl ServerRuntime {
             HostFunctionSystemDeps {
                 plugin_sql: plugin_sql.clone(),
                 host_db: host_fn_db,
-                mq: mq.clone(),
+                mq: Some(mq.clone()),
                 operation_batches: operation_batches.clone(),
                 operation_waiters: operation_waiters.clone(),
                 contest_type_registry: contest_type_registry.clone(),

@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_types)]
+
 use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequestParts, Path};
 use axum::http::request::Parts;

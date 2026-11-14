@@ -6,7 +6,9 @@ use common::storage::config::DEFAULT_MAX_BLOB_SIZE_BYTES;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DatabaseConfig {
-    #[serde(default = "default_database_url")]
+    /// Required: there is no default database to connect to. Empty until
+    /// set; loading the configuration refuses it empty.
+    #[serde(default)]
     pub url: String,
     /// Server-side `statement_timeout` for every worker connection, in seconds
     /// (`0` disables it). See `common::db`.
@@ -30,14 +32,10 @@ impl DatabaseConfig {
     }
 }
 
-fn default_database_url() -> String {
-    "postgres://localhost/broccoli".into()
-}
-
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            url: default_database_url(),
+            url: String::new(),
             statement_timeout_secs: common::db::default_statement_timeout_secs(),
             tcp_keepalives: common::db::default_tcp_keepalives(),
         }
@@ -125,8 +123,8 @@ fn default_metrics_addr() -> String {
 }
 
 /// Empty means "derive one for this host" (see
-/// [`common::node_identity::default_node_id`]); [`WorkerAppConfig::load`]
-/// resolves it, so a loaded config always carries a usable ID.
+/// [`common::node_identity::default_node_id`]);
+/// [`WorkerAppConfig::resolve_worker_id`] resolves it before the worker uses it.
 fn default_worker_id() -> String {
     String::new()
 }
@@ -270,8 +268,6 @@ impl WorkerAppConfig {
             .set_default("worker.cache_leader_heartbeat_interval_secs", 5_i64)?
             .set_default("worker.cache_follower_poll_interval_ms", 250_i64)?
             .set_default("worker.cache_follower_max_wait_secs", 30_i64)?
-            .set_default("mq.enabled", true)?
-            .set_default("mq.url", "redis://localhost:6379")?
             // Reference the shared `common` serde defaults so the worker's
             // builder defaults cannot drift from the server's.
             .set_default(
@@ -281,7 +277,6 @@ impl WorkerAppConfig {
             .set_default("observability.log_format", "auto")?
             .set_default("observability.log_filter", "info")?
             .set_default("observability.otlp.service_name", "broccoli-worker")?
-            .set_default("database.url", "postgres://localhost/broccoli")?
             .set_default("storage.backend", "database")?
             .set_default("storage.data_dir", "./data")?
             .set_default("storage.max_blob_size", DEFAULT_MAX_BLOB_SIZE_BYTES as i64)?
@@ -297,13 +292,22 @@ impl WorkerAppConfig {
         let (mut config, unknown_keys): (Self, _) =
             common::config::deserialize_noting_ignored(s, SERVER_SETTINGS)?;
         config.unknown_keys = unknown_keys;
-        config.worker.id = common::node_identity::resolve_node_id(
-            common::liveness::NodeRole::Worker,
-            &config.worker.id,
-            false,
-        )
-        .map_err(|e| ConfigError::Message(e.to_string()))?;
+        common::config::require_nonempty("database.url", &config.database.url)?;
+        common::config::require_nonempty("mq.url", &config.mq.url)?;
         Ok(config)
+    }
+
+    /// Replace `worker.id` with the ID this worker runs under (see
+    /// [`common::node_identity::resolve_node_id`]). Separate from
+    /// [`Self::load`] because it logs how the ID was chosen, so it runs once
+    /// logging is up.
+    pub fn resolve_worker_id(&mut self) -> anyhow::Result<()> {
+        self.worker.id = common::node_identity::resolve_node_id(
+            common::liveness::NodeRole::Worker,
+            &self.worker.id,
+            false,
+        )?;
+        Ok(())
     }
 }
 

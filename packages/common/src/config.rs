@@ -68,9 +68,9 @@ impl Default for DlqConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MqAppConfig {
-    #[serde(default = "default_mq_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_mq_url")]
+    /// Required: there is no default Redis to connect to. Empty until set;
+    /// loading the configuration refuses it empty (see [`require_nonempty`]).
+    #[serde(default)]
     pub url: String,
     /// Prefix of every message queue key: the shared operation stream itself,
     /// and `<name>:worker:<id>`, `<name>:reply:<id>`, `<name>:dlq` (see the
@@ -81,12 +81,6 @@ pub struct MqAppConfig {
     pub dlq: DlqConfig,
 }
 
-fn default_mq_enabled() -> bool {
-    true
-}
-fn default_mq_url() -> String {
-    "redis://localhost:6379".into()
-}
 // `pub` so the worker's config builder uses the same default.
 pub fn default_operation_queue_name() -> String {
     "operation_tasks".into()
@@ -95,8 +89,7 @@ pub fn default_operation_queue_name() -> String {
 impl Default for MqAppConfig {
     fn default() -> Self {
         Self {
-            enabled: default_mq_enabled(),
-            url: default_mq_url(),
+            url: String::new(),
             operation_queue_name: default_operation_queue_name(),
             dlq: DlqConfig::default(),
         }
@@ -236,12 +229,29 @@ pub fn warn_misnamed_env_settings() {
     }
 }
 
+/// Fails with a message naming `key` and its environment variable when the
+/// required setting `value` is empty.
+pub fn require_nonempty(key: &str, value: &str) -> Result<(), ::config::ConfigError> {
+    if value.trim().is_empty() {
+        return Err(::config::ConfigError::Message(format!(
+            "{key} is required: set it in the config file or as {}",
+            env_name(key)
+        )));
+    }
+    Ok(())
+}
+
+/// The environment variable of setting `key`: `a.b` is `BROCCOLI__A__B`.
+fn env_name(key: &str) -> String {
+    format!("{ENV_PREFIX}__{}", key.replace('.', "__").to_uppercase())
+}
+
 /// Logs one warning per setting the binary does not read (see
 /// [`deserialize_noting_ignored`]): a removed key, or a typo. Setting `a.b` comes from
 /// `a.b` in the config file or `BROCCOLI__A__B` in the environment.
 pub fn warn_unknown_keys(keys: &[String]) {
     for key in keys {
-        let env = format!("{ENV_PREFIX}__{}", key.replace('.', "__").to_uppercase());
+        let env = env_name(key);
         tracing::warn!(
             key,
             env,
@@ -345,5 +355,16 @@ mod unknown_key_tests {
         let (config, unknown) = read(&[("own.newly_added", "5")]);
         assert_eq!(config.own.newly_added, 5);
         assert!(unknown.is_empty(), "{unknown:?}");
+    }
+
+    #[test]
+    fn an_unset_required_setting_names_the_key_and_its_variable() {
+        let (config, _) = read(&[]);
+        assert!(require_nonempty("mq.url", &config.mq.url).is_err());
+        let err = require_nonempty("mq.url", " ").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "mq.url is required: set it in the config file or as BROCCOLI__MQ__URL"
+        );
     }
 }

@@ -804,3 +804,66 @@ async fn a_refused_reply_keeps_its_task_in_the_ledger() {
         .unwrap();
     assert!(found.missing.is_empty(), "{found:?}");
 }
+
+/// Reachability follows Redis: unreachable once a command fails because Redis
+/// is gone, reachable again once it is back, with no command needed in
+/// between while it stays up.
+#[tokio::test]
+async fn reachability_follows_redis_going_away_and_coming_back() {
+    let (container, url) = restartable_redis().await;
+    let mq = Mq::connect(&url, BASE).await.unwrap();
+    assert!(mq.check_reachable().await);
+
+    container.stop().await.unwrap();
+    let err = mq.ping().await.unwrap_err();
+    assert!(err.is_unreachable(), "{err}");
+    assert!(!mq.check_reachable().await);
+
+    start_again(&container).await;
+    assert!(mq.check_reachable().await);
+    mq.ping().await.unwrap();
+}
+
+/// Credentials Redis rejects are not an outage: waiting does not fix them.
+#[tokio::test]
+async fn rejected_credentials_are_not_unreachable() {
+    let (_container, url) = redis().await;
+    let mut conn = admin(&url).await;
+    let _: () = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("requirepass")
+        .arg("right")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let wrong = url.replace("redis://", "redis://:wrong@");
+    let err = match Mq::connect(&wrong, BASE).await {
+        Ok(_) => panic!("connected with a wrong password"),
+        Err(e) => e,
+    };
+    assert!(!err.is_unreachable(), "{err}");
+}
+
+/// A fixed window counts every event, admitted or not, and closes when its
+/// first event's TTL runs out: events past the limit never push it back.
+#[tokio::test]
+async fn a_fixed_window_counts_every_event_and_is_never_extended() {
+    let (_container, url) = redis().await;
+    let mq = Mq::connect(&url, BASE).await.unwrap();
+    let length = Duration::from_secs(60);
+    let (first, opened) = mq.count_in_window("login:10.0.0.1", length).await.unwrap();
+    assert_eq!(first, 1);
+    assert!(
+        opened <= length && opened > Duration::from_secs(55),
+        "{opened:?}"
+    );
+    let mut left = opened;
+    for n in 2..=15 {
+        let (count, now_left) = mq.count_in_window("login:10.0.0.1", length).await.unwrap();
+        assert_eq!(count, n);
+        assert!(now_left <= left, "{now_left:?} after {left:?}");
+        left = now_left;
+    }
+    let (other, _) = mq.count_in_window("login:10.0.0.2", length).await.unwrap();
+    assert_eq!(other, 1);
+}

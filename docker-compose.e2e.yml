@@ -37,7 +37,6 @@ x-worker-common: &worker-common
   environment: &worker-env
     BROCCOLI__DATABASE__URL: "postgres://broccoli:app_password@db:5432/broccoli"
     BROCCOLI__MQ__URL: "redis://redis:6379"
-    BROCCOLI__MQ__ENABLED: "true"
     BROCCOLI__WORKER__SANDBOX_BACKEND: "isolate"
     BROCCOLI__WORKER__ISOLATE_BIN: "isolate"
     BROCCOLI__WORKER__ENABLE_CGROUPS: "true"
@@ -142,8 +141,7 @@ services:
       BROCCOLI__SERVER__PORT: "3000"
       BROCCOLI__DATABASE__URL: "postgres://broccoli:app_password@db:5432/broccoli"
       BROCCOLI__MQ__URL: "redis://redis:6379"
-      BROCCOLI__MQ__ENABLED: "true"
-      BROCCOLI__AUTH__JWT_SECRET: "e2e-docker-jwt-secret"
+      BROCCOLI__AUTH__JWT_SECRET: "e2e-docker-jwt-secret-of-32-bytes-or-more"
       BROCCOLI__PLUGIN__PLUGINS_DIR: "/plugins"
       BROCCOLI__STORAGE__BACKEND: "object_storage"
       BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET: "broccoli-blobs"

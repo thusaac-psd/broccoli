@@ -11,7 +11,9 @@ pub use common::storage::config::BlobStoreConfig;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DatabaseConfig {
-    #[serde(default = "default_database_url")]
+    /// Required: there is no default database to connect to. Empty until
+    /// set; loading the configuration refuses it empty.
+    #[serde(default)]
     pub url: String,
     /// Server-side `statement_timeout` for every pooled connection, in seconds
     /// (`0` disables it). Boot-time migrations and seeding run on a separate
@@ -28,15 +30,11 @@ pub struct DatabaseConfig {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            url: default_database_url(),
+            url: String::new(),
             statement_timeout_secs: common::db::default_statement_timeout_secs(),
             tcp_keepalives: common::db::default_tcp_keepalives(),
         }
     }
-}
-
-fn default_database_url() -> String {
-    "postgres://postgres:password@localhost:5432/broccoli".into()
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -90,9 +88,11 @@ pub struct ServerConfig {
     /// `client_ip`). List every proxy in the chain, and only proxies.
     #[serde(default, deserialize_with = "deserialize_string_vec")]
     pub trusted_proxies: Vec<String>,
-    /// Per-IP throttling on `/api/v1/auth/login` (10 a minute per address,
-    /// behind `trusted_proxies` the client's own). Turn off only behind a NAT
-    /// that puts many contestants on one address the server can see.
+    /// Per-address quota on `/api/v1/auth/login`: 10 attempts a minute per
+    /// client address (behind `trusted_proxies` the client's own), counted in
+    /// Redis across every server (see `services::ip_quota`). Turn off only
+    /// behind a NAT that puts many contestants on one address the server can
+    /// see.
     #[serde(default = "default_true")]
     pub rate_limit_auth: bool,
     /// Logical identity of this replica. Used to derive the per-replica
@@ -358,6 +358,9 @@ where
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AuthConfig {
+    /// Required: empty until set; loading the configuration refuses it empty
+    /// or shorter than [`MIN_JWT_SECRET_BYTES`].
+    #[serde(default)]
     pub jwt_secret: String,
     /// Max FAILED login attempts per (username, client IP) within
     /// `login_failure_window_secs` before the pair is briefly throttled. Counts
@@ -371,6 +374,16 @@ pub struct AuthConfig {
     /// the maximum a throttled pair ever waits before it frees on its own.
     #[serde(default = "default_login_failure_window_secs")]
     pub login_failure_window_secs: u64,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            jwt_secret: String::new(),
+            login_failure_limit: default_login_failure_limit(),
+            login_failure_window_secs: default_login_failure_window_secs(),
+        }
+    }
 }
 
 fn default_login_failure_limit() -> u32 {
@@ -437,10 +450,11 @@ pub struct BootstrapConfig {
 pub struct AppConfig {
     #[serde(default)]
     pub server: ServerConfig,
+    /// Required: `database.url`.
     #[serde(default)]
     pub database: DatabaseConfig,
-    /// Required: `auth.jwt_secret` has no default, so configuration must
-    /// always provide it (via file or `BROCCOLI__AUTH__JWT_SECRET`).
+    /// Required: `auth.jwt_secret`, at least [`MIN_JWT_SECRET_BYTES`] long.
+    #[serde(default)]
     pub auth: AuthConfig,
     #[serde(default)]
     pub plugin: plugin_core::config::PluginConfig,
@@ -448,6 +462,7 @@ pub struct AppConfig {
     pub submission: SubmissionConfig,
     #[serde(default)]
     pub storage: BlobStoreConfig,
+    /// Required: `mq.url`.
     #[serde(default)]
     pub mq: MqAppConfig,
     #[serde(default)]
@@ -479,22 +494,18 @@ pub fn resolve_server_id(configured: &str) -> Result<String, common::node_identi
     common::node_identity::resolve_node_id(common::liveness::NodeRole::Server, configured, false)
 }
 
-/// Below this length the HS256 signing key is weak enough to brute-force, and a
-/// forged token is full account + permission takeover. Not enforced with a hard
-/// error -- that could block a restart mid-contest -- only warned at startup,
-/// consistent with the availability-first stance on auth.
-pub const MIN_RECOMMENDED_JWT_SECRET_BYTES: usize = 32;
+/// The shortest `auth.jwt_secret` the server accepts. Below it the HS256
+/// signing key is weak enough to brute-force, and a forged token is full
+/// account and permission takeover, so configuration with a shorter secret is
+/// refused when it is loaded. The secret is set once at install time, so this
+/// stops the first boot, never a restart of a running contest.
+pub const MIN_JWT_SECRET_BYTES: usize = 32;
 
 /// What the worker reads from a config file it shares with the server: not
 /// unknown here.
 const WORKER_SETTINGS: &[&str] = &["worker", "storage.cache_dir", "storage.max_cache_size"];
 
 impl AppConfig {
-    /// True when `auth.jwt_secret` is shorter than the recommended minimum.
-    pub fn jwt_secret_is_weak(&self) -> bool {
-        self.auth.jwt_secret.len() < MIN_RECOMMENDED_JWT_SECRET_BYTES
-    }
-
     pub fn load() -> Result<Self, ConfigError> {
         // Defaults live on the struct fields as `#[serde(default = ...)]`
         // attributes - the single source of truth. Builder-level
@@ -521,6 +532,17 @@ impl AppConfig {
         let (mut config, unknown_keys): (Self, _) =
             common::config::deserialize_noting_ignored(s, WORKER_SETTINGS)?;
         config.unknown_keys = unknown_keys;
+        common::config::require_nonempty("database.url", &config.database.url)?;
+        common::config::require_nonempty("mq.url", &config.mq.url)?;
+        common::config::require_nonempty("auth.jwt_secret", &config.auth.jwt_secret)?;
+        if config.auth.jwt_secret.len() < MIN_JWT_SECRET_BYTES {
+            return Err(ConfigError::Message(format!(
+                "auth.jwt_secret (BROCCOLI__AUTH__JWT_SECRET) is {} bytes; it must be at least \
+                 {MIN_JWT_SECRET_BYTES} random bytes, since a short HS256 key lets anyone \
+                 forge any user's token",
+                config.auth.jwt_secret.len()
+            )));
+        }
         Ok(config)
     }
 }
@@ -597,37 +619,57 @@ mod tests {
         assert_eq!(probe.trusted_proxies, vec!["10.0.0.0/8", "192.168.0.0/16"]);
     }
 
+    /// The settings with no default, valid.
+    fn required() -> config::ConfigBuilder<config::builder::DefaultState> {
+        Config::builder()
+            .set_override("auth.jwt_secret", "a-test-secret-of-at-least-32-bytes")
+            .unwrap()
+            .set_override("database.url", "postgres://db/broccoli")
+            .unwrap()
+            .set_override("mq.url", "redis://redis")
+            .unwrap()
+    }
+
+    fn load_error(builder: config::ConfigBuilder<config::builder::DefaultState>) -> String {
+        AppConfig::from_config(builder.build().unwrap())
+            .unwrap_err()
+            .to_string()
+    }
+
     #[test]
-    fn weak_jwt_secret_is_flagged_below_the_recommended_minimum() {
-        let cfg = |secret: &str| -> AppConfig {
-            Config::builder()
-                .set_override("auth.jwt_secret", secret)
-                .unwrap()
-                .build()
-                .unwrap()
-                .try_deserialize()
-                .unwrap()
-        };
-        assert!(cfg("short").jwt_secret_is_weak());
-        assert!(cfg("test-secret").jwt_secret_is_weak());
-        assert!(!cfg(&"a".repeat(MIN_RECOMMENDED_JWT_SECRET_BYTES)).jwt_secret_is_weak());
-        assert!(!cfg(&"x".repeat(64)).jwt_secret_is_weak());
+    fn a_jwt_secret_shorter_than_the_minimum_is_refused() {
+        let with_secret =
+            |secret: &str| required().set_override("auth.jwt_secret", secret).unwrap();
+        let err = load_error(with_secret("test-secret"));
+        assert!(err.contains("auth.jwt_secret"), "{err}");
+        assert!(err.contains("BROCCOLI__AUTH__JWT_SECRET"), "{err}");
+        let at_minimum = with_secret(&"a".repeat(MIN_JWT_SECRET_BYTES));
+        assert!(AppConfig::from_config(at_minimum.build().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn an_unset_required_setting_is_refused_by_name() {
+        for (key, env) in [
+            ("auth.jwt_secret", "BROCCOLI__AUTH__JWT_SECRET"),
+            ("database.url", "BROCCOLI__DATABASE__URL"),
+            ("mq.url", "BROCCOLI__MQ__URL"),
+        ] {
+            let err = load_error(required().set_override(key, "").unwrap());
+            assert_eq!(
+                err,
+                format!("{key} is required: set it in the config file or as {env}")
+            );
+        }
     }
 
     /// Guards the single-source-of-truth contract of `AppConfig::load`:
     /// with no config file and no environment, every default must resolve
     /// through the `#[serde(default = ...)]` field attributes. This mirrors
     /// the `load()` path (config-crate builder -> `try_deserialize`) minus
-    /// the file/env sources, supplying only the one key with no default
-    /// (`auth.jwt_secret`).
+    /// the file/env sources, supplying only the keys with no default.
     #[test]
     fn empty_config_resolves_defaults_via_serde_attributes() {
-        let built = Config::builder()
-            .set_override("auth.jwt_secret", "test-secret")
-            .unwrap()
-            .build()
-            .unwrap();
-        let cfg: AppConfig = built.try_deserialize().unwrap();
+        let cfg = AppConfig::from_config(required().build().unwrap()).unwrap();
 
         // The serde default applies; a builder-level default must not shadow it.
         assert_eq!(cfg.server.max_system_error_retries, 10);
@@ -638,16 +680,10 @@ mod tests {
         assert!(cfg.server.cors.allow_origins.is_empty());
         assert_eq!(cfg.server.cors.max_age, 3600);
         assert_eq!(cfg.server.max_queued_submissions, None);
-        assert_eq!(
-            cfg.database.url,
-            "postgres://postgres:password@localhost:5432/broccoli"
-        );
         assert_eq!(cfg.plugin.plugins_dir, PathBuf::from("./plugins"));
         assert!(cfg.plugin.enable_wasi);
         assert_eq!(cfg.submission.max_size, 2 * 1_048_576);
         assert_eq!(cfg.submission.rate_limit_per_minute, 600);
-        assert!(cfg.mq.enabled);
-        assert_eq!(cfg.mq.url, "redis://localhost:6379");
         assert_eq!(cfg.observability.log_format, "auto");
         assert_eq!(cfg.observability.log_filter, "info");
         assert!(cfg.bootstrap.admin_username.is_empty());
@@ -655,9 +691,7 @@ mod tests {
 
     #[test]
     fn a_key_the_server_does_not_read_is_reported() {
-        let built = Config::builder()
-            .set_override("auth.jwt_secret", "test-secret")
-            .unwrap()
+        let built = required()
             .set_override("server.claim_batch_size", 8)
             .unwrap()
             .set_override("server.port", 4000)
@@ -674,9 +708,7 @@ mod tests {
 
     #[test]
     fn a_setting_the_worker_reads_is_not_unknown_here() {
-        let built = Config::builder()
-            .set_override("auth.jwt_secret", "test-secret")
-            .unwrap()
+        let built = required()
             .set_override("worker.max_concurrency", 2)
             .unwrap()
             .set_override("storage.cache_dir", "/var/cache/broccoli")
@@ -693,9 +725,7 @@ mod tests {
 
     #[test]
     fn a_plugin_key_the_server_does_not_read_is_reported() {
-        let built = Config::builder()
-            .set_override("auth.jwt_secret", "test-secret")
-            .unwrap()
+        let built = required()
             .set_override("plugin.pool_max_instances", 64)
             .unwrap()
             .set_override("plugin.call_timeout_secs", 60)
@@ -714,16 +744,14 @@ mod tests {
     /// serde defaults.
     #[test]
     fn partial_tables_fill_remaining_keys_from_serde_defaults() {
-        let built = Config::builder()
-            .set_override("auth.jwt_secret", "test-secret")
-            .unwrap()
+        let built = required()
             .set_override("server.port", 8080)
             .unwrap()
             .set_override("submission.max_size", 42)
             .unwrap()
             .build()
             .unwrap();
-        let cfg: AppConfig = built.try_deserialize().unwrap();
+        let cfg = AppConfig::from_config(built).unwrap();
 
         assert_eq!(cfg.server.port, 8080);
         assert_eq!(cfg.server.host, "127.0.0.1");

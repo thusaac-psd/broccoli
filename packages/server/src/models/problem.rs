@@ -1,6 +1,5 @@
 use std::str::FromStr;
 
-use axum::body::Bytes;
 use axum_typed_multipart::{TryFromField, TryFromMultipart};
 use chrono::{DateTime, Utc};
 use sea_orm::DerivePartialModel;
@@ -127,9 +126,10 @@ pub enum UploadTestCasesMergeStrategy {
 
 #[derive(TryFromMultipart, utoipa::ToSchema)]
 pub struct UploadTestCasesRequest {
+    /// Streamed to a temporary file, never held in memory.
     #[form_data(limit = "unlimited")]
     #[schema(value_type = String, format = Binary)]
-    pub file: Bytes,
+    pub file: axum_typed_multipart::FieldData<tempfile::NamedTempFile>,
     #[schema(example = "input_*.txt")]
     pub input_format: String,
     #[schema(example = "output_*.txt")]

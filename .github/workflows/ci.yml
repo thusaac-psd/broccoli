@@ -81,9 +81,6 @@ jobs:
       # The web SDK's API types are generated from the server's OpenAPI
       # document; regenerating them must not change the committed file.
       - name: OpenAPI client is current
-        env:
-          # The document does not depend on the secret; the config needs one.
-          BROCCOLI__AUTH__JWT_SECRET: openapi
         run: |
           cargo run -p server --locked -- --openapi > "$RUNNER_TEMP/openapi.json"
           node packages/web-sdk/scripts/generate-api.mjs "$RUNNER_TEMP/openapi.json"

@@ -46,7 +46,9 @@ pub struct AppState {
     /// `plugin_config` point reads; see [`crate::services::plugin_config_cache`].
     pub plugin_config_cache: crate::services::plugin_config_cache::PluginConfigCache,
     pub config: AppConfig,
-    pub mq: Option<mq::Mq>,
+    /// The message queue. Required: a server never runs without it; boot
+    /// waits for Redis, and the claim fiber claims nothing while it is down.
+    pub mq: mq::Mq,
     pub redis_client: Option<Arc<redis::Client>>,
     pub blob_store: Arc<dyn BlobStore>,
     pub registries: RegistryState,

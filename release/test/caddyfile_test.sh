@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Both gateway Caddyfiles health-check upstreams on the shallow /livez and
-# retry unreachable upstreams, and both parse with a real Caddy. The Caddy
+# retry unreachable upstreams, every shipped Caddyfile keeps the internal
+# endpoints (/metrics, the API docs) off the public edge, and all parse with a
+# real Caddy. The Caddy
 # check skips unless a Caddy image is already local (offline-safe).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -15,6 +17,15 @@ for cf in "${files[@]}"; do
   for directive in health_interval health_timeout health_fails lb_try_duration; do
     grep -Eq "^[[:space:]]*$directive[[:space:]]" "$cf" || fail "$name has no $directive"
   done
+done
+
+for cf in "${files[@]}" "$rel/examples/Caddyfile"; do
+  name="$(basename "$cf")"
+  for path in /metrics /swagger-ui /scalar /api-docs; do
+    grep -Eq "^[[:space:]]*@internal path.*[[:space:]]$path([[:space:]]|\$)" "$cf" \
+      || fail "$name forwards $path"
+  done
+  grep -Eq '^[[:space:]]*respond @internal 404$' "$cf" || fail "$name does not refuse @internal"
 done
 
 image=""

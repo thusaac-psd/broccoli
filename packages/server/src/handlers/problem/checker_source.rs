@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use broccoli_server_sdk::permissions as perm;
 use tracing::instrument;
@@ -24,6 +24,7 @@ use crate::utils::problem::find_problem;
     responses(
         (status = 200, description = "Checker source updated", body = CheckerSourceResponse),
         (status = 400, description = "Validation error", body = ErrorBody),
+        (status = 413, description = "Request body over the endpoint's limit (PAYLOAD_TOO_LARGE)", body = ErrorBody),
         (status = 401, description = "Unauthorized", body = ErrorBody),
         (status = 403, description = "Forbidden", body = ErrorBody),
         (status = 404, description = "Problem not found", body = ErrorBody),
@@ -162,6 +163,6 @@ pub async fn delete_checker_source(
 /// real max payload plus generous JSON/escaping overhead.
 const CHECKER_SOURCE_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
-pub fn checker_source_body_limit() -> DefaultBodyLimit {
-    DefaultBodyLimit::max(CHECKER_SOURCE_BODY_LIMIT_BYTES)
+pub fn checker_source_body_limit() -> usize {
+    CHECKER_SOURCE_BODY_LIMIT_BYTES
 }

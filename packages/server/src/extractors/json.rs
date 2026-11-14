@@ -2,15 +2,17 @@ use axum::{
     Json,
     body::Bytes,
     extract::{FromRequest, Request, rejection::JsonRejection},
-    http::{HeaderMap, header::CONTENT_TYPE},
+    http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
 };
 use serde::de::DeserializeOwned;
 
+use super::body_limit::BodyLimit;
 use crate::error::AppError;
 
 /// A JSON request body. Its strings never hold NUL (U+0000): a body with a
 /// `\u0000` escape is rejected with a 400 `VALIDATION_ERROR`, since Postgres
-/// stores no NUL in text or JSONB.
+/// stores no NUL in text or JSONB. A body over the route's [`BodyLimit`] is a
+/// 413 `PAYLOAD_TOO_LARGE`.
 pub struct AppJson<T>(pub T);
 
 impl<S, T> FromRequest<S> for AppJson<T>
@@ -22,16 +24,24 @@ where
     type Rejection = AppError;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let limit = BodyLimit::of(req.extensions());
+        let rejected = |status: StatusCode, text: String| {
+            if status == StatusCode::PAYLOAD_TOO_LARGE {
+                limit.exceeded()
+            } else {
+                AppError::Validation(text)
+            }
+        };
         if !has_json_content_type(req.headers()) {
             // Json's own rejection names the missing content type.
             let Json(value) = Json::<T>::from_request(req, state)
                 .await
-                .map_err(|e| AppError::Validation(e.body_text()))?;
+                .map_err(|e| rejected(e.status(), e.body_text()))?;
             return Ok(AppJson(value));
         }
         let bytes = Bytes::from_request(req, state)
             .await
-            .map_err(|e| AppError::Validation(e.body_text()))?;
+            .map_err(|e| rejected(e.status(), e.body_text()))?;
         if has_escaped_nul(&bytes) {
             return Err(crate::utils::text::nul_rejected("The request body"));
         }

@@ -10,10 +10,10 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
 
-    /// Unique among active accounts, enforced by the baseline's partial
-    /// unique index `idx_user_username_active`. Declared `indexed` so the
-    /// entity describes that index (see `crate::migration`).
-    #[sea_orm(indexed)]
+    /// As the user typed it, for display. Unique among active accounts by its
+    /// [`username_key`], enforced by the partial unique index
+    /// `idx_user_username_active` on `lower(username)`, so `Admin` cannot
+    /// register next to `admin`.
     pub username: String,
     pub display_name: String,
     pub password: String,
@@ -41,9 +41,28 @@ pub struct Model {
 
 impl ActiveModelBehavior for ActiveModel {}
 
-/// The SQL form of a username's identity, for `expr` a username column or
-/// value: two usernames belong to the same account when these are equal.
-/// Raw SQL that matches accounts by username compares through this.
+/// The identity of a username: what two usernames must differ in to belong to
+/// different accounts. Usernames are ASCII, so this is SQL `lower(username)`,
+/// the expression the active-username index is unique on.
+pub fn username_key(username: &str) -> String {
+    username.trim().to_ascii_lowercase()
+}
+
+/// Rows whose username has the same [`username_key`] as one of `usernames`.
+/// Served by the active-username index.
+pub fn username_is_any<I, S>(usernames: I) -> sea_orm::sea_query::SimpleExpr
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    use sea_orm::sea_query::{Expr, ExprTrait, Func};
+    Expr::expr(Func::lower(Expr::col(Column::Username)))
+        .is_in(usernames.into_iter().map(|u| username_key(u.as_ref())))
+}
+
+/// The SQL form of [`username_key`], for `expr` a username column or value:
+/// two usernames belong to the same account when these are equal. Raw SQL
+/// that matches accounts by username compares through this.
 pub fn username_key_sql(expr: &str) -> String {
     format!("lower({expr})")
 }
