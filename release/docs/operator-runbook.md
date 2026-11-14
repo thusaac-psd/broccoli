@@ -54,6 +54,12 @@ still serving, raise `health_timeout` or `health_fails` there and restart the
 gateway. A Prometheus scrape of `/metrics` can likewise time out under load;
 give it a scrape timeout of a few seconds.
 
+`/metrics` and the API documentation (`/swagger-ui`, `/scalar`,
+`/api-docs/openapi.json`) answer without authentication, so they are for the
+internal network only: every shipped gateway Caddyfile answers them with 404,
+and Prometheus scrapes each server's port directly. Keep that port off the
+contestants' network.
+
 ## Restart
 
 Restart one role at a time:
@@ -221,10 +227,10 @@ times shown in the UI read right.
 
 Each worker judges one test at a time (`worker.max_concurrency` is 1).
 Concurrent runs on one machine share its L2/L3 cache, memory bandwidth and SMT
-siblings, and `time_used` (kernel CPU accounting) inflates under that
-contention even with CPU pinning, so borderline time limits flip. Scale judging
-by adding worker machines. Several worker processes on one machine share those
-caches too, so they are no way around it. Total fleet drain time for a contest:
+siblings, and `time_used` (kernel CPU accounting) inflates under that contention
+even with CPU pinning, so borderline time limits flip. Scale judging by adding
+worker machines. Several worker processes on one machine share those caches too,
+so they are no way around it. Total fleet drain time for a contest:
 
 ```
 drain_seconds = (n_submissions * n_testcases * avg_op_time_seconds)
@@ -243,26 +249,26 @@ handlers (4 per CPU), up to 24 for plugin host functions (one per plugin CPU
 token for plugin SQL, 4 to 16, and one per two tokens for plugin writes, 2 to
 8), and 2 of its own (the claim listener and the clock). A plugin call that
 finds its pool busy waits for a connection without holding a CPU token, for at
-most `plugin.call_timeout_secs`. A worker
-holds its slots plus 2, so 3 at the default `max_concurrency` of 1.
+most `plugin.call_timeout_secs`. A worker holds its slots plus 2, so 3 at the
+default `max_concurrency` of 1.
 
-At boot a server reads `max_connections`, keeps a tenth of it (at least 10)
-for operators and booting nodes, subtracts what the live workers hold, and
-splits the rest evenly with the other live servers. Its pools shrink to that
-share when they want more, never below 13 connections in all, and the server
-logs a warning naming the numbers. A server fits the fleet live when it
-boots: after adding nodes against a database with no room to spare, restart
-the servers so they fit again.
+At boot a server reads `max_connections`, keeps a tenth of it (at least 10) for
+operators and booting nodes, subtracts what the live workers hold, and splits
+the rest evenly with the other live servers. Its pools shrink to that share when
+they want more, never below 13 connections in all, and the server logs a warning
+naming the numbers. A server fits the fleet live when it boots: after adding
+nodes against a database with no room to spare, restart the servers so they fit
+again.
 
-The infra template's `max_connections=500` fits 5 servers and 30 workers at
-full size:
+The infra template's `max_connections=500` fits 5 servers and 30 workers at full
+size:
 
 ```
 500 - 3 superuser slots - 49 reserve = 448 ≥ 5 servers × 66 + 30 workers × 3 = 420
 ```
 
-Raise `POSTGRES_MAX_CONNECTIONS` in `.env.infra` for a larger fleet. The
-native installer sets 500 too, and the development `docker-compose.yaml` 200.
+Raise `POSTGRES_MAX_CONNECTIONS` in `.env.infra` for a larger fleet. The native
+installer sets 500 too, and the development `docker-compose.yaml` 200.
 
 **Sizing Redis memory**
 
@@ -327,9 +333,9 @@ There are three settings, and all of them size themselves:
 | `BROCCOLI__PLUGIN__CALL_TIMEOUT_SECS`    | 300                                                                             |
 
 Leave them unset unless a measurement says otherwise; an override goes in the
-role's env file. A machine shared with
-Postgres, Redis or a worker without a container memory limit should get an
-explicit `MEMORY_BUDGET` (for example `4GiB`).
+role's env file. A machine shared with Postgres, Redis or a worker without a
+container memory limit should get an explicit `MEMORY_BUDGET` (for example
+`4GiB`).
 
 **When it is busy.** A request whose plugin cannot answer before the request's
 deadline gets `503 PLUGIN_UNAVAILABLE` with `Retry-After`; the web client shows
@@ -376,8 +382,8 @@ each replica's env file before starting.
 
 ## Recovering In-Flight Submissions After a Server Restart or Crash
 
-Every server re-dispatches its own unfinished work automatically, and the
-others take over the work of one that stops:
+Every server re-dispatches its own unfinished work automatically, and the others
+take over the work of one that stops:
 
 - **Graceful stop** (`docker compose stop`, a rolling restart, a redeploy): the
   server releases the submissions, rejudges and code runs it was judging as it
@@ -388,9 +394,9 @@ others take over the work of one that stops:
   instance left behind as it boots. That work no longer counts against its
   in-flight limit.
 - **Crash without a restart**: the other servers steal the dead server's work
-  once its lease expires (`lease_ttl_secs`, default 60 s). On a single server the
-  work waits until it boots again, or until the stuck-job detector fails it after
-  `max_inflight_secs` (default 1 hour) so it can be rejudged.
+  once its lease expires (`lease_ttl_secs`, default 60 s). On a single server
+  the work waits until it boots again, or until the stuck-job detector fails it
+  after `max_inflight_secs` (default 1 hour) so it can be rejudged.
 
 When a crashed server will not come back:
 
