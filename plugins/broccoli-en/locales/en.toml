@@ -465,6 +465,7 @@
 'users.create.outcomeUnknown' = "An earlier attempt was interrupted and may have created some or all of these users. Check the user list before trying again."
 'users.users.empty' = "No users found."
 'users.users.noRoles' = "No roles assigned."
+'users.users.noPassword' = "No password set"
 'users.users.manageRoles' = "Manage Roles"
 'users.users.assignRole' = "Assign role"
 'users.users.assignRoleButton' = "Assign"

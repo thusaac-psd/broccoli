@@ -466,6 +466,7 @@
 'users.create.outcomeUnknown' = "之前的一次尝试被中断，可能已创建了部分或全部用户。请先查看用户列表，再决定是否重试。"
 'users.users.empty' = "未找到用户。"
 'users.users.noRoles' = "未分配任何角色。"
+'users.users.noPassword' = "未设置密码"
 'users.users.manageRoles' = "管理角色"
 'users.users.assignRole' = "分配角色"
 'users.users.assignRoleButton' = "分配"

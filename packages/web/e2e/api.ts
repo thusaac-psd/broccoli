@@ -265,6 +265,8 @@ const ROUTES: [string, RegExp, Handler][] = [
         username,
         display_name,
         roles,
+        // Alice came from a bundle without her password.
+        has_password: id !== USERS.contestant.id,
         created_at: at(-48 * 60),
       })),
   ],

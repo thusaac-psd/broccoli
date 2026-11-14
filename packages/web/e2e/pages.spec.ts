@@ -124,3 +124,12 @@ test('switching the UI locale switches the document language and title', async (
   await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
   await expect(page).toHaveTitle(/^插件管理 · /);
 });
+
+test('the user list marks an account without a password', async ({ page }) => {
+  await mockApi(page, 'admin');
+  await page.goto('/admin/users');
+  const alice = page.getByRole('row').filter({ hasText: 'alice' });
+  await expect(alice.getByText('No password set')).toBeVisible();
+  const admin = page.getByRole('row').filter({ hasText: 'Admin' });
+  await expect(admin.getByText('No password set')).toHaveCount(0);
+});

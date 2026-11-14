@@ -61,8 +61,13 @@ function useUserColumns({
         header: t('users.users.username'),
         sortKey: 'username',
         cell: ({ row }) => (
-          <span className="font-medium text-foreground">
-            {row.original.username}
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="font-medium text-foreground">
+              {row.original.username}
+            </span>
+            {!row.original.has_password && (
+              <Badge variant="secondary">{t('users.users.noPassword')}</Badge>
+            )}
           </span>
         ),
       },

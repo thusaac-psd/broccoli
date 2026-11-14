@@ -521,13 +521,7 @@ function BulkImportTab({
 
       const allUsersMap = new Map<string, UserPreviewItem>();
       for (const user of users) {
-        allUsersMap.set(user.username.toLowerCase(), {
-          id: user.id,
-          username: user.username,
-          display_name: user.display_name,
-          roles: user.roles,
-          created_at: user.created_at,
-        });
+        allUsersMap.set(user.username.toLowerCase(), user);
       }
 
       const enrolledMap = new Map<string, boolean>();
