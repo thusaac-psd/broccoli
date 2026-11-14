@@ -65,6 +65,7 @@ const contest = (
   title: string,
   startMinutes: number,
   endMinutes: number,
+  phase: 'upcoming' | 'running' | 'ended',
 ) => ({
   id,
   title,
@@ -80,14 +81,16 @@ const contest = (
   contest_type: 'icpc',
   created_at: at(-48 * 60),
   updated_at: at(-48 * 60),
+  phase,
 });
 
-const RUNNING = contest(1, 'Spring Training Contest 2026', -60, 240);
+const RUNNING = contest(1, 'Spring Training Contest 2026', -60, 240, 'running');
 const UPCOMING = contest(
   2,
   'Upcoming Qualifier',
   2 * 24 * 60,
   2 * 24 * 60 + 180,
+  'upcoming',
 );
 
 const PROBLEM_TITLES = [
@@ -190,6 +193,7 @@ const ROUTES: [string, RegExp, Handler][] = [
     (url) => (url.pathname.endsWith('/zh-CN') ? ZH_CN : {}),
   ],
   ['GET', /^\/plugins\/active$/, () => []],
+  ['GET', /^\/auth\/registration$/, () => ({ open: true })],
   ['GET', /^\/plugins\/registries$/, () => registries],
   [
     'GET',
