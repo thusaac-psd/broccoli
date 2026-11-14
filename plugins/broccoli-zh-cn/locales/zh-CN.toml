@@ -711,6 +711,9 @@
 
 # Test Cases (admin)
 'admin.manageTestCases' = "管理测试点"
+'admin.configIssues.title' = "部分设置与本题的测试点不再一致。请修正，否则提交会被错误计分。"
+'admin.configIssues.onProblem' = "本题的 {config}"
+'admin.configIssues.inContest' = "比赛 {contestId} 中的 {config}"
 'admin.testCases.title' = "测试点"
 'admin.testCases.empty' = "暂无测试点，请先创建。"
 'admin.testCases.loadFailed' = "无法加载测试点。"

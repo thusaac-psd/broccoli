@@ -710,6 +710,9 @@
 
 # Test Cases (admin)
 'admin.manageTestCases' = "Manage Test Cases"
+'admin.configIssues.title' = "Some settings no longer match this problem's test cases. Fix them, or submissions are scored wrong."
+'admin.configIssues.onProblem' = "{config} on this problem"
+'admin.configIssues.inContest' = "{config} in contest {contestId}"
 'admin.testCases.title' = "Test Cases"
 'admin.testCases.empty' = "No test cases yet. Create one to get started."
 'admin.testCases.loadFailed' = "Could not load the test cases."
