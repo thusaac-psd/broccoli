@@ -153,6 +153,7 @@ export const zhCN: Catalog = {
   'problem.notes': '注意',
   'problem.toggleFullscreen': '切换全屏',
   'problem.notFound': '未找到题目。',
+  'problem.standardIo': '标准输入 / 输出',
   'problem.loadFailed': '无法加载此题目。',
   'problem.sampleLoadFailed': '无法加载此样例。',
   'problem.notAvailableNow': '当前无法查看此题目。',

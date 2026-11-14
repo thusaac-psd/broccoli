@@ -162,6 +162,7 @@ export const en = {
   'problem.notes': 'Notes',
   'problem.toggleFullscreen': 'Toggle fullscreen',
   'problem.notFound': 'Problem not found.',
+  'problem.standardIo': 'Standard input / output',
   'problem.loadFailed': 'Could not load this problem.',
   'problem.sampleLoadFailed': 'Could not load this sample.',
   'problem.notAvailableNow': 'This problem is not available right now.',
