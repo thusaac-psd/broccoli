@@ -216,7 +216,7 @@ pub async fn run_code(
         files: Set(files_to_json(&payload.files)),
         language: Set(language),
         // Code-run rows ride the same durable-accept lifecycle
-        // as submissions - see `handlers/submission.rs::create_submission`
+        // as submissions - see `handlers/submission/mod.rs::create_submission`
         // for the crash window this closes and `dispatcher/claim.rs` for the
         // claim fiber that picks `Queued` rows off this table too.
         status: Set(SubmissionStatus::Queued),

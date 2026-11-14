@@ -1,18 +1,13 @@
 // Pure-logic test for `diffNullableField` / `testCaseDiffStatus` (see
-// `testCaseDiff.ts`). Follows the same convention as `verdict-key.test.ts`:
-// the repo has no frontend test runner configured (`pnpm test` at the root
-// is a no-op placeholder) and none is introduced by this change; this file
-// runs standalone via Node's built-in test runner + native TypeScript
-// support (`node --experimental-strip-types --test testCaseDiff.test.ts`,
-// Node >= 22), since the functions under test are pure and have no
-// React/JSX involved.
+// `testCaseDiff.ts`). `pnpm test` runs it with Node's built-in test runner
+// and native TypeScript support (`node --experimental-strip-types --test`),
+// since the functions under test are pure and have no React/JSX involved.
 //
-// This pins the fix for the finding: `TestCaseResultResponse.verdict`/
-// `.score` are `Option`-widened, and under visibility masking BOTH the
-// historical and current test case's fields read as `null` for the same
-// viewer. A naive `!==` comparison silently reports "unchanged" for a field
+// `TestCaseResultResponse.verdict`/`.score` are `Option`-widened, and under
+// visibility masking BOTH the earlier and the current judgement's test case
+// fields read as `null` for the same viewer. A naive `!==` comparison silently reports "unchanged" for a field
 // it cannot actually observe, so the "verdict/score changed on rejudge"
-// badge could never fire for a masked test case. The fix must distinguish
+// badge could never fire for a masked test case. The diff must distinguish
 // "unknown" (both sides masked) from "unchanged" (both sides observed and
 // equal) -- and must never collapse "unknown" into "unchanged".
 import assert from 'node:assert/strict';

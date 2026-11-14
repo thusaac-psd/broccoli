@@ -1,14 +1,13 @@
 //! Self-test for `TestApp::create_user_with_permissions`.
 //!
-//! The integration harness historically only had `create_user_with_role`,
-//! whose seeded roles (`admin`, `problem_setter`, `contestant`) each bundle
-//! several permissions together. That made it structurally impossible for an
-//! integration-level test to prove which single permission actually gates a
-//! given code path -- a test asserting `admin` can do X can never rule out
-//! that some OTHER permission `admin` also happens to carry is the real
-//! gate. `create_user_with_permissions` (mirrored from the equivalent e2e
-//! fixture in `tests/e2e/common/mod.rs`) closes that gap by minting a
-//! brand-new role carrying exactly the requested permissions.
+//! `create_user_with_role`'s seeded roles (`admin`, `problem_setter`,
+//! `contestant`) each bundle several permissions together, so a test using
+//! them cannot prove which single permission actually gates a given code
+//! path -- a test asserting `admin` can do X can never rule out that some
+//! OTHER permission `admin` also happens to carry is the real gate.
+//! `create_user_with_permissions` (mirrored from the equivalent e2e fixture
+//! in `tests/e2e/common/mod.rs`) mints a brand-new role carrying exactly the
+//! requested permissions.
 //!
 //! This test pins the fixture's core guarantee: a user created with exactly
 //! one named permission does not also hold unrelated permissions that a

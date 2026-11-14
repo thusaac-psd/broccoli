@@ -142,7 +142,7 @@ pub fn handle_force_decide(
 /// every problem-id-bearing field has already been masked for the
 /// requesting viewer (see [`mask_problem`]). Structural fields (who is
 /// playing whom, the round, scores, phase, winner) are never masked: the
-/// spec's visibility rules are about PROBLEMS, not about bracket shape.
+/// visibility rules are about PROBLEMS, not about bracket shape.
 #[derive(Debug, Serialize)]
 struct MatchView {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1068,8 +1068,7 @@ mod tests {
 
     #[test]
     fn get_match_hides_a_players_own_current_problem_from_that_same_player() {
-        // THE regression test for the gap this task closes: without
-        // per-viewer masking, a GET response would leak `group_a`
+        // Without per-viewer masking, a GET response would leak `group_a`
         // (including a problem the owner has not reached yet) to the owner
         // themself.
         let host = Host::mock();

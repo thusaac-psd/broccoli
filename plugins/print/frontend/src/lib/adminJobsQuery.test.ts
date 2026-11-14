@@ -3,15 +3,13 @@
 // packages/web/src/**/*.test.ts: no bundler/DOM needed since the function
 // under test is pure.
 //
-// Regression guard for the print queue's station/printer filters: staff
-// picking a station in `PrintQueuePage`'s toolbar used to see every
-// station's jobs anyway, because `usePrintApi.adminListJobs` built its
-// query string from a hand-maintained whitelist of exactly six keys that
-// never included `station`/`printer` -- the fields compiled fine at the
-// `PrintQueuePage` call site (an object literal spread into a wider type)
-// but were silently dropped before the request ever left the browser, even
-// though the server (`handle_admin_list_jobs` + `build_filter_where` in
-// plugins/print/src) already filters on both.
+// Guards the print queue's station/printer filters: staff picking a station
+// in `PrintQueuePage`'s toolbar must see only that station's jobs. A
+// hand-maintained key whitelist in `usePrintApi.adminListJobs` would drop
+// `station`/`printer` silently -- they compile fine at the `PrintQueuePage`
+// call site (an object literal spread into a wider type) -- even though the
+// server (`handle_admin_list_jobs` + `build_filter_where` in
+// plugins/print/src) filters on both.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
@@ -43,7 +41,7 @@ test('omits empty-string and undefined optional filters entirely', () => {
   assert.equal(params.get('per_page'), '25');
 });
 
-test('still carries every pre-existing filter unchanged', () => {
+test('carries every other filter unchanged', () => {
   const params = buildAdminJobsQueryParams({
     page: 3,
     per_page: 50,

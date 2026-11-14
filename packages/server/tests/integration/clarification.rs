@@ -380,12 +380,12 @@ mod clarification_actions {
 
     /// A stranger to a *private* contest (never registered, no `contest:manage`)
     /// must get an identical 404 for `reply`/`resolve` whether the target
-    /// clarification id exists or not. Before the fix, `reply_clarification`/
-    /// `resolve_clarification` fetched the row before checking contest
-    /// reachability: an existing id fell through to the admin/author/recipient
-    /// check and returned 403 PermissionDenied, while a non-existing id returned
-    /// 404 NotFound - letting the stranger confirm a clarification exists in a
-    /// contest they cannot otherwise reach at all.
+    /// clarification id exists or not. `reply_clarification`/
+    /// `resolve_clarification` check contest reachability before fetching the
+    /// row; fetching first would let an existing id fall through to the
+    /// admin/author/recipient check and return 403 PermissionDenied while a
+    /// missing id returns 404 NotFound - letting the stranger confirm a
+    /// clarification exists in a contest they cannot otherwise reach at all.
     #[tokio::test]
     async fn stranger_to_private_contest_cannot_distinguish_existing_from_missing_clarification() {
         let app = TestApp::spawn().await;
@@ -399,7 +399,7 @@ mod clarification_actions {
             .create_user_with_role("stranger1", "pass1234", "contestant")
             .await;
         // Private contest: `is_public: false`. `stranger` is never registered
-        // and has no `contest:manage` permission, so `check_contest_access`/
+        // and has no `contest:manage` permission, so `check_contest_access_decision`/
         // the kernel's `Resource::Contest` decision denies them outright.
         // `register_for_contest` is self-service and only works on public
         // contests, so `u1` is enrolled via the admin `add_participant`

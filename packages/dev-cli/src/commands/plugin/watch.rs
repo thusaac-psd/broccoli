@@ -667,8 +667,7 @@ fn upload_plugin(
     }
 
     // Routed through cli-core so a token that expires mid-session is refreshed
-    // and retried instead of failing the upload with a 401 (the old raw-reqwest
-    // path had no refresh). Transient 5xx retries live in the client too.
+    // and retried instead of failing the upload with a 401. Transient 5xx retries live in the client too.
     client.upload_plugin(archive)?;
     *last_uploaded_archive_fingerprint = Some(fingerprint);
     Ok(())

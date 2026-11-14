@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 /// (plugin-core) deserializes it and maps it onto its internal hook action.
 ///
 /// Wire-format note: `Reject` fields are declared in alphabetical order so
-/// the derived serializer emits the exact bytes the plugins historically
-/// produced with `serde_json::json!` (whose map sorts keys alphabetically).
+/// the derived serializer emits the same bytes as `serde_json::json!` (whose
+/// map sorts keys alphabetically).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "lowercase")]
 pub enum HookResponse {
@@ -142,8 +142,8 @@ mod tests {
             })),
         );
         let json = serde_json::to_string(&resp).unwrap();
-        // Byte-identical to the JSON the plugins previously built by hand
-        // with `serde_json::json!` (alphabetical key order).
+        // Byte-identical to the JSON `serde_json::json!` builds (alphabetical
+        // key order).
         assert_eq!(
             json,
             r#"{"action":"reject","code":"COOLDOWN_ACTIVE","details":{"cooldown_seconds":10,"remaining_seconds":3},"message":"Please wait 3 more seconds","status_code":429}"#

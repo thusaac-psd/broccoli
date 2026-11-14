@@ -459,7 +459,7 @@ fn decisions_from_output(
 /// multiple plugins are folded together, and the registry they come from is
 /// a `HashMap`) is unit-testable on its own, without needing a plugin host.
 ///
-/// M4: the `debug_assert_eq!` below compiles out in release, but that is
+/// The `debug_assert_eq!` below compiles out in release, but that is
 /// safe — it is not the mechanism keeping `acc`/`next` the same length. This
 /// function has one call site (`query_plugins`'s fold loop), where `acc`
 /// starts as `vec![Decision::Allow; resources.len()]` and `next` is always
@@ -515,15 +515,15 @@ pub(crate) async fn query_plugins(
     if resources.is_empty() {
         return Ok(Vec::new());
     }
-    // M4: compiled out in release, and that is safe for the same reason as
+    // Compiled out in release, and that is safe for the same reason as
     // `meet_positionally`'s — this has one call site
     // (`VisibilityKernel::decide_batch`, `mod.rs`), where `target_contest_ids`
     // is built as `plugin_targets.iter().map(...).collect()`: a `.map()` over
     // `plugin_targets` itself is length-preserving by construction,
     // unconditionally, in any build profile — not something a debug
-    // assertion is needed to enforce. This assertion exists only to fail
-    // loudly, in tests, if a future edit replaces that `.map()` with
-    // something that no longer preserves length.
+    // assertion is needed to enforce. This assertion fails loudly, in tests,
+    // if that `.map()` is ever replaced with something that does not
+    // preserve length.
     debug_assert_eq!(
         resources.len(),
         resource_contest_ids.len(),
@@ -746,7 +746,7 @@ mod tests {
 
     #[test]
     fn decisions_longer_than_resources_denies_whole_batch() {
-        // The brief only pins the SHORT case; a plugin that answers for more
+        // A plugin that answers for more
         // resources than were asked about is just as much a protocol
         // violation as answering for fewer, and must fail closed the same
         // way - never truncated and treated as a partial answer.
@@ -1403,7 +1403,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // query_plugins - MAX_MASK_FIELDS enforcement AFTER the fold (I10).
+    // query_plugins - MAX_MASK_FIELDS enforcement AFTER the fold.
     //
     // `oversized_redact_field_list_denies_whole_batch` above already pins
     // the pre-existing per-response check inside `decisions_from_output`.

@@ -38,8 +38,7 @@ grep -q 'change-me' "$sv" && { echo "FAIL: placeholder remains"; exit 1; } || tr
 echo "$out" | grep -q 'TLS gateway will serve' && { echo "FAIL: dry-run reached install.sh"; exit 1; } || true
 
 # default server-secret sidecar convention (no --server-secret passed) must be
-# honored by preflight too, not just by install.sh — regression guard for the
-# "preflight FAILs on the default sidecar" bug
+# honored by preflight too, not just by install.sh
 set +e
 out2="$(PATH="$tmp/bin:$PATH" BROCCOLI_SETUP_ADMIN_PASS=adminpw123 \
   bash "$here/../setup.sh" --role server --bundle "$tmp/bundle" \
@@ -107,11 +106,11 @@ PATH="$tmp/bin:$PATH" bash "$here/../setup.sh" --role worker --bundle "$tmp/bund
 grep -qx "BROCCOLI__WORKER__ID='worker-9'" "$wenv" || { echo "FAIL: a worker re-run changed its id"; cat "$wenv"; exit 1; }
 
 # --- server role + cluster-secret sidecar: .env.infra must NOT be corrupted ---
-# Regression guard: cluster_seed_infra used to run before envgen_write ever
-# seeded the full example, so envgen_write's own [ -f ] || cp seed became a
-# no-op and .env.infra ended up missing POSTGRES_DB/POSTGRES_USER (the infra
-# template has no ${POSTGRES_DB} default, so Postgres would create db
-# 'postgres', not 'broccoli').
+# envgen_write must seed the full example before cluster_seed_infra writes
+# .env.infra: otherwise envgen_write's own [ -f ] || cp seed is a no-op and
+# .env.infra misses POSTGRES_DB/POSTGRES_USER (the infra template has no
+# ${POSTGRES_DB} default, so Postgres would create db 'postgres', not
+# 'broccoli').
 rm -f "$tmp/bundle/compose/.env.infra" "$tmp/bundle/compose/.env.server"
 # create/overwrite explicitly so this scenario is order-independent from the
 # worker scenario above

@@ -15,9 +15,8 @@ use tracing::instrument;
 // `list_participants` gates contest reachability through
 // `kernel.decide(Action::Read, Resource::Contest(id)).is_denied()` - the
 // same `Resource::Contest` gate `get_contest`/`list_contest_problems` use
-// (`visibility::host_rules::decide_contest` is a verified byte-identical
-// port of the window/is_public/participant rule `check_contest_access` used
-// to apply directly here, so this is not a behavioural change). There is
+// (`visibility::host_rules::decide_contest` applies the
+// window/is_public/participant rule). There is
 // deliberately NO `Resource::Participant` in the kernel: nothing here ever
 // masks or denies an INDIVIDUAL participant row - the whole list is
 // admitted or rejected as one block, which is exactly what

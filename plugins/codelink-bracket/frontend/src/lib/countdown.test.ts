@@ -43,10 +43,9 @@ test('the exact deadline instant, undecided, is a waiting state (not counting, n
 });
 
 test('past the deadline, undecided, is a waiting state -- never a fabricated result', () => {
-  // THE central regression guard: this is the exact scenario the spec calls
-  // out -- "if the countdown reaches zero before the server has decided,
-  // show a waiting state rather than announcing a result the server has not
-  // made". An implementation that treated "time's up" as "some result now
+  // THE central guard: if the countdown reaches zero before the server has
+  // decided, the UI shows a waiting state rather than announcing a result
+  // the server has not made. An implementation that treated "time's up" as "some result now
   // exists" would fail this test.
   const status = deriveCountdownStatus(
     { deadlineMs: 10_000, decided: false },
@@ -96,8 +95,8 @@ test('xiaojuTimingFromMatch carries the real deadline through for an in-progress
 });
 
 test('xiaojuTimingFromMatch marks decided=true once the MATCH is decided, even with a deadline present', () => {
-  // THE regression case: the server does not clear `xiaoju` on decision (see
-  // `apply_force_decide`/the natural win path in judge.rs), so a decided
+  // The server does not clear `xiaoju` on decision (see `Event::Award` and
+  // the natural win path in `plugins/codelink-bracket/src/machine.rs`), so a decided
   // match can still carry a stale, present `current_xiaoju_deadline_ms`.
   // `decided` must come from `state`, not from field-presence, or a decided
   // match would be reported as still counting down / waiting for the

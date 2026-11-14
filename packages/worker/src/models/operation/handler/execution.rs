@@ -265,8 +265,8 @@ impl OperationHandler {
                 resolve_channel_roles(&operation.tasks, &operation.channels, &channel_names);
             for channel in &operation.channels {
                 // Only manage a keep-alive for channels with an identifiable
-                // producer step. An orphan channel (consumed, never produced) keeps
-                // its pre-existing behavior; there is no safe moment to close a
+                // producer step. An orphan channel (consumed, never produced) gets
+                // no keep-alive; there is no safe moment to close a
                 // writer we can't tie to a producer's completion.
                 if let Some(producer_id) = producer_of.get(&channel.name)
                     && let Some(file) = open_channel_keepalive(&dir.join(&channel.name))
@@ -1027,8 +1027,8 @@ async fn release_channel_keepalives(keepalives: Vec<KeepAlive>) {
 /// functional timeout -- the consumer-done flag is the real bound; this only caps
 /// a pathological consumer that neither opens nor finishes. Must exceed the
 /// consumer isolate's max lifetime (`worker_hard_timeout`, ~630s for a 600s-wall
-/// checker) so a live-but-slow consumer is never pre-empted (the original 120s
-/// ceiling did not, and wedged the FIFO until the isolate wall-time). See
+/// checker) so a live-but-slow consumer is never pre-empted (pre-empting it wedges
+/// the FIFO until the isolate wall-time). See
 /// `release_channel_keepalive`.
 const CHANNEL_RELEASE_MAX_WAIT: Duration = Duration::from_secs(900);
 /// How often buffered producer output is re-checked while the consumer drains
@@ -1056,7 +1056,7 @@ fn fifo_has_buffered_input(file: &std::fs::File) -> bool {
         revents: 0,
     };
     // 0ms timeout: never blocks. On any poll error report "no data" so release
-    // proceeds exactly as before -- we never hold the FIFO open for bytes we
+    // proceeds normally -- we never hold the FIFO open for bytes we
     // cannot confirm are actually queued.
     let rc = unsafe { libc::poll(&mut pfd, 1, 0) };
     rc > 0 && (pfd.revents & libc::POLLIN) != 0
@@ -1681,14 +1681,14 @@ mod channel_keepalive_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Regression guard for the burst-wedge root cause: the writer-restore ceiling
+    // Guards against the burst wedge: the writer-restore ceiling
     // is a runaway guard, NOT a functional timeout, so it MUST sit above the
     // consumer isolate's maximum lifetime. Otherwise a live-but-slow consumer
     // (its isolate reaches `open()` late under fork/exec pressure) is abandoned
     // mid-flight and the FIFO wedges until the 600s isolate wall-time. The worst
     // case consumer is the checker: --wall-time 600s + --extra-time + the worker
-    // hard-timeout margin. The original 120s ceiling failed this; assert a floor
-    // safely above the checker lifetime.
+    // hard-timeout margin. A 120s ceiling is too low; assert a floor safely
+    // above the checker lifetime.
     #[test]
     fn release_ceiling_exceeds_consumer_isolate_lifetime() {
         assert!(

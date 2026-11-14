@@ -77,8 +77,7 @@ impl Default for IsolateSandboxManager {
     /// Config-free defaults (`isolate` binary, cgroups off) for tests. Production
     /// injects real settings via `sandbox_manager_from_config`. This deliberately
     /// does NOT read `WorkerAppConfig::load()` - the sandbox layer must not reach
-    /// up to global app config, and the old code only did so to fall back to
-    /// exactly these values when config was absent.
+    /// up to global app config.
     fn default() -> Self {
         Self::new("isolate".to_string(), false)
     }
@@ -1131,7 +1130,7 @@ mod tests {
     fn reported_time_is_isolate_per_run_without_cgroups() {
         // A prior step recorded 2.0s; this run's isolate-reported per-`--run` CPU
         // is 0.4s. With cgroups off the offset is 0, so the reported time is
-        // isolate's raw value (0.4) - NOT 0.4 - 2.0 clamped to 0 (the old bug).
+        // isolate's raw value (0.4) - NOT 0.4 - 2.0 clamped to 0.
         let prior_cpu = 2.0;
         let isolate_reported = 0.4;
         let offset = cpu_time_offset(false, prior_cpu);

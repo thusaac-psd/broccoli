@@ -715,7 +715,7 @@ mod tests {
         assert_eq!(config.result_timeout_ms_for(1000, 1), 1_200_000);
     }
 
-    // ----- Checker fusion (Phase 6.1) -----
+    // ----- Checker fusion -----
 
     fn stream_stage() -> CheckerStage {
         CheckerStage {

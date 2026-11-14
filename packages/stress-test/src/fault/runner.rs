@@ -1,10 +1,10 @@
 //! Dispatcher for the `fault` subcommand.
 //!
-//! Mirrors the original fault-harness binary: build a `ScenarioContext` from
-//! flags, optionally spin up an ephemeral Redis testcontainer (cancel-storm and
-//! rolling-worker-restart, when no `--redis-url` is given - kill-server-recovery
-//! presumes operator-managed infra), run the chosen scenario, write the
-//! transcript JSON, and exit non-zero on failure.
+//! Builds a `ScenarioContext` from flags, optionally spins up an ephemeral
+//! Redis testcontainer (cancel-storm and rolling-worker-restart, when no
+//! `--redis-url` is given - kill-server-recovery presumes operator-managed
+//! infra), runs the chosen scenario, writes the transcript JSON, and exits
+//! non-zero on failure.
 
 use testcontainers::runners::AsyncRunner;
 

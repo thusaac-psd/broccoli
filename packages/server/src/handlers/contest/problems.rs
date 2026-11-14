@@ -16,8 +16,8 @@ use tracing::instrument;
 // The one viewer-facing read, `list_contest_problems`, already routes through
 // `VisibilityKernel` below (`Resource::Contest` then `Resource::Problem` per
 // row via `fetch_visible_batch`); these entity types are only used for the
-// pre-kernel row fetch that builds the (Resource, DTO) pairs the kernel then
-// decides on - the same pattern as `handlers/submission/mod.rs`.
+// row fetch that builds the (Resource, DTO) pairs the kernel then decides on -
+// the same pattern as `handlers/submission/mod.rs`.
 use crate::entity::{contest_problem, problem};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
@@ -160,9 +160,8 @@ pub async fn list_contest_problems(
     // window). One `fetch_visible_batch` call over `[Contest, Problem,
     // Problem, ...]` costs at most one `host_decide` batch and one plugin
     // crossing total for this whole page. The trade is that the
-    // `contest_problem` row query above no longer gets skipped on a denied
-    // contest (it used to short-circuit before any row fetch); that is a
-    // small, bounded extra query on the deny path in exchange for removing
+    // `contest_problem` row query above also runs on a denied contest; that
+    // is a small, bounded extra query on the deny path in exchange for removing
     // a full WASM crossing on the (far more common) allow path.
     //
     // The contest entry carries `None::<ContestProblemResponse>` as its T -
@@ -199,7 +198,7 @@ pub async fn list_contest_problems(
     }
 
     // The kernel's Contest decision already folds in the activation-window
-    // gate (`check_contest_access` + `require_contest_started`'s window
+    // gate (`check_contest_access_decision` + `require_contest_started`'s window
     // predicate - see `visibility::host_rules`). It deliberately does NOT
     // cover `require_contest_started`'s `now < start_time` business-rule
     // rejection (a 400, not a reachability outcome), so that check is

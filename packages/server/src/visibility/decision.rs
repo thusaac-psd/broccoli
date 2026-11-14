@@ -124,7 +124,7 @@ mod tests {
         assert_eq!(a.clone().meet(a.clone()), a);
     }
 
-    // M2: the six tests above look like a complete lattice-law suite, but a
+    // The six tests above look like a complete lattice-law suite, but a
     // mutant that replaces `meet`'s whole body with `self` (a first-argument
     // projection) survives FOUR of them. Not by sloppiness - a
     // first-argument projection genuinely IS associative

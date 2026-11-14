@@ -1122,7 +1122,7 @@ impl TestApp {
                     "default_contest_type": "standard",
                     "checker_format": "exact",
                     // Public so a contestant can read/submit to the standalone
-                    // problem; `require_problem_read_access` (correctly) hides
+                    // problem; `decide_standalone_problem_access` (correctly) hides
                     // non-public problems. Tests that specifically exercise the
                     // hiding behavior use `create_hidden_problem` instead.
                     "is_public": true,

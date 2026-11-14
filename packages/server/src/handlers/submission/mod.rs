@@ -13,13 +13,11 @@ use crate::dispatcher::queue_depth::enforce_queue_depth_admission;
 // via `Resource::Submission`, `list_submissions`/`list_contest_submissions`
 // via `fetch_visible_batch`, `create_submission`/`create_contest_submission`
 // via `Resource::Problem` before accepting a submit) - these entity types are
-// only used for the pre-kernel row fetch. `list_contest_submissions`'s top
-// gate now also routes through the kernel: it decides `Action::Read` on
+// only used for the row fetch that feeds the kernel. `list_contest_submissions`'s
+// top gate also routes through the kernel: it decides `Action::Read` on
 // `Resource::Contest(contest_id)` (the same gate `get_contest`/
-// `list_contest_problems` use - `decide_contest` is a verified
-// byte-identical port of the window/is_public/participant rule this used to
-// call directly via `check_contest_access`, so this is not a behavioural
-// change), reusing the single per-request kernel instance that also drives
+// `list_contest_problems` use, applying the window/is_public/participant
+// rule in `decide_contest`), reusing the single per-request kernel instance that also drives
 // the per-row `apply_filter_to_list` pass on `Resource::Submission` further
 // down - distinct resource kinds, so the two decisions cannot collide or
 // double-decide (see the comments at that call site), pinned by the frozen
@@ -905,17 +903,15 @@ pub async fn list_contest_submissions(
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
 
     // Gate contest visibility through `Resource::Contest` (the same gate
-    // `get_contest`/`list_contest_problems` use - `decide_contest` is a
-    // verified byte-identical port of the window/is_public/participant rule
-    // this replaces, so this is not a behavioural change) so the activation
+    // `get_contest`/`list_contest_problems` use, applying the
+    // window/is_public/participant rule in `decide_contest`) so the activation
     // window (activate_time/deactivate_time) is enforced here exactly as on
-    // every other contest read path. SUBMISSION_VIEW_ALL still short-circuits
-    // it, matching the prior behaviour where that permission bypassed the
-    // gate. The hand-rolled `is_public` check this originally replaced
-    // skipped the window entirely: a *public but out-of-window* contest (not
-    // yet activated, or deactivated/archived) leaked its full submission list
-    // - usernames, verdicts, scores - to any authenticated non-participant,
-    // and acted as an existence oracle (200-with-data vs 404). This top gate
+    // every other contest read path. SUBMISSION_VIEW_ALL short-circuits it.
+    // An `is_public` check alone is not enough: a *public but out-of-window*
+    // contest (not yet activated, or deactivated/archived) would leak its full
+    // submission list - usernames, verdicts, scores - to any authenticated
+    // non-participant, and act as an existence oracle (200-with-data vs
+    // 404). This top gate
     // decides `Resource::Contest`; the per-row pass below decides
     // `Resource::Submission` for each row - distinct resource kinds, so
     // there is no double-decision and this gate still runs, and still can

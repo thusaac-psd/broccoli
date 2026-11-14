@@ -41,9 +41,8 @@ pub struct QueryContext {
 /// read through contest `id`'s problem routes, `None` when it was read
 /// through the standalone problem routes. Samples and attachments are parts
 /// of their problem, so they carry exactly the scope their problem would.
-/// `#[serde(default)]` keeps this field
-/// optional on the wire so any code deserializing an older, pre-existing
-/// payload that never had it still round-trips.
+/// `#[serde(default)]` keeps this field optional on the wire, so a payload
+/// without it still deserializes.
 ///
 /// `id` is the resource's ONE authoritative identifier, always rendered as
 /// a decimal-string (i32-native kinds: contest/problem/sample/submission/
@@ -205,21 +204,19 @@ mod tests {
         assert_eq!(back.id, "0196c1d2-3a4b-7c8d-9e0f-1a2b3c4d5e6f");
     }
 
-    /// The whole point of `id: String`: two attachment UUIDs constructed so
-    /// their low 32 bits are IDENTICAL (which is exactly what
-    /// `id.as_u128() as i32` would have kept, in the truncating scheme this
-    /// replaces) must still produce two DIFFERENT `QueryResource.id`
-    /// values, because the full UUID - not just its low 32 bits - is now
-    /// on the wire.
+    /// Why `id` is a `String`: two attachment UUIDs whose low 32 bits are
+    /// IDENTICAL (all that `id.as_u128() as i32` would keep) must still
+    /// produce two DIFFERENT `QueryResource.id` values, because the full
+    /// UUID - not just its low 32 bits - is on the wire.
     #[test]
     fn distinct_attachment_uuids_with_colliding_low_32_bits_produce_distinct_wire_ids() {
         // Same low 32 bits (`3c4d5e6f`), different everything else -
         // `as_u128() as i32` would truncate both of these to the identical
-        // i32 value, which is precisely the collision this fix closes.
+        // i32 value, which is precisely the collision a `String` id avoids.
         let uuid_a = uuid::Uuid::parse_str("0196c1d2-3a4b-7c8d-9e0f-1a2b3c4d5e6f").unwrap();
         let uuid_b = uuid::Uuid::parse_str("ffffffff-ffff-7fff-bfff-ffff3c4d5e6f").unwrap();
         // Sanity check on the premise: both really do truncate to the same
-        // i32 under the old (now-deleted) scheme.
+        // i32.
         assert_eq!(uuid_a.as_u128() as i32, uuid_b.as_u128() as i32);
 
         let resource_a = QueryResource {

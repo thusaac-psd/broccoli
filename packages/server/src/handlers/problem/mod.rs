@@ -16,8 +16,8 @@ use tracing::instrument;
 // pinned by tests/integration/problem.rs's permission-denial tests for each
 // verb. The viewer-facing reads, `get_problem` and `get_contest_problem`,
 // route through `VisibilityKernel` below (`Resource::Problem`);
-// `contest`/`contest_problem` here are only used for the pre-kernel row fetch
-// and for the admin write paths' own bookkeeping.
+// `contest`/`contest_problem` here are only used for the row fetch that feeds
+// the kernel and for the admin write paths' own bookkeeping.
 use crate::entity::{contest, contest_problem, problem, test_case};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
@@ -294,10 +294,9 @@ async fn get_problem_in(
     let resource = scope.problem();
 
     // Fail fast, before doing any of the reads below, on a resource the
-    // kernel already knows is unreachable. Standalone, this folds in what
-    // the pre-kernel handler checked as `require_problem_read_access`
-    // (permission bypass, `is_public`, and - for a hidden draft -
-    // reachability via any contest it is attached to); under a contest it
+    // kernel already knows is unreachable. Standalone, this covers the
+    // permission bypass, `is_public`, and - for a hidden draft -
+    // reachability via any contest it is attached to; under a contest it
     // is that contest's access, window and membership checks - see
     // `visibility::host_rules::decide_problem_or_sample`.
     require_problem_part_reachable(
