@@ -16,6 +16,7 @@ import { useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 
 import type { EditorFile } from '@/components/CodeEditor';
+import { ContestRegisterGate } from '@/features/contest/components/ContestRegisterGate';
 import { useContestProblems } from '@/features/contest/hooks/use-contest-problems';
 import { useRestoreSubmissionScroll } from '@/features/submission/hooks/use-submission-navigation';
 import { useSubmissions } from '@/features/submission/hooks/use-submissions';
@@ -441,33 +442,37 @@ export default function ProblemView({
             </div>
           }
           codingContent={
-            <ProblemCodingTab
-              isCodeFullscreen={isCodeFullscreen}
-              onToggleFullscreen={() => setIsCodeFullscreen(!isCodeFullscreen)}
-              onSubmit={handleSubmit}
-              onRun={handleRun}
-              latestRun={submissions.latestRun}
-              storageKey={storageKey}
-              contestType={effectiveContestType}
-              onContestTypeChange={!contestId ? setContestType : undefined}
-              contestTypes={
-                !contestId ? (registries?.contest_types ?? []) : undefined
-              }
-              submissionFormat={problem?.submission_format}
-              latestSubmission={latestSubmission}
-              submissionHistory={submissionHistory}
-              submissionHistoryError={submissionHistoryError}
-              submissions={submissions.submissionEntries}
-              isSubmitting={isSubmitting}
-              overviewVisibleCount={RECENT_SUBMISSION_OVERVIEW_COUNT}
-              submissionDetailLinkBuilder={submissionDetailLinkBuilder}
-              contestId={contestId}
-              problemId={problemId}
-              targetWorkers={canPinWorker ? targetWorkers : null}
-              onTargetWorkersChange={
-                canPinWorker ? setTargetWorkers : undefined
-              }
-            />
+            <ContestRegisterGate contestId={contestId}>
+              <ProblemCodingTab
+                isCodeFullscreen={isCodeFullscreen}
+                onToggleFullscreen={() =>
+                  setIsCodeFullscreen(!isCodeFullscreen)
+                }
+                onSubmit={handleSubmit}
+                onRun={handleRun}
+                latestRun={submissions.latestRun}
+                storageKey={storageKey}
+                contestType={effectiveContestType}
+                onContestTypeChange={!contestId ? setContestType : undefined}
+                contestTypes={
+                  !contestId ? (registries?.contest_types ?? []) : undefined
+                }
+                submissionFormat={problem?.submission_format}
+                latestSubmission={latestSubmission}
+                submissionHistory={submissionHistory}
+                submissionHistoryError={submissionHistoryError}
+                submissions={submissions.submissionEntries}
+                isSubmitting={isSubmitting}
+                overviewVisibleCount={RECENT_SUBMISSION_OVERVIEW_COUNT}
+                submissionDetailLinkBuilder={submissionDetailLinkBuilder}
+                contestId={contestId}
+                problemId={problemId}
+                targetWorkers={canPinWorker ? targetWorkers : null}
+                onTargetWorkersChange={
+                  canPinWorker ? setTargetWorkers : undefined
+                }
+              />
+            </ContestRegisterGate>
           }
         />
       </div>

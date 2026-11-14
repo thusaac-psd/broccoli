@@ -313,6 +313,7 @@ export const zhCN: Catalog = {
   'contests.running': '进行中',
   'contests.ended': '已结束',
   'contests.problems': '题目',
+  'contests.registerToSubmit': '报名参加此比赛后才能提交。',
   'contests.enrollTitle': '参加比赛',
   'contests.enrollDescription': '你还没有参加这场比赛，点击立即报名参赛。',
   'contests.registeredDescription':
@@ -1238,6 +1239,7 @@ export const zhCN: Catalog = {
   'apiError.TOKEN_MISSING': '请登录后继续。',
   'apiError.TOKEN_INVALID': '登录已失效，请重新登录。',
   'apiError.PERMISSION_DENIED': '您没有执行此操作的权限。',
+  'apiError.CONTEST_NOT_REGISTERED': '请先报名参加此比赛。',
   'apiError.USERNAME_TAKEN': '该用户名已被占用。',
   'apiError.PAYLOAD_TOO_LARGE': '上传内容过大。',
   'apiError.METHOD_NOT_ALLOWED': '不支持此操作。',

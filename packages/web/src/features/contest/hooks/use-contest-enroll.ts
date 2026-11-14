@@ -1,4 +1,9 @@
-import { parseApiError, serverNow, useApiClient } from '@broccoli/web-sdk/api';
+import {
+  parseApiError,
+  serverNow,
+  useApiClient,
+  useErrorMessage,
+} from '@broccoli/web-sdk/api';
 import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -22,6 +27,7 @@ export function useContestEnroll({
   canManageContest: boolean;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const sendIdempotent = useIdempotentRequest();
@@ -63,7 +69,7 @@ export function useContestEnroll({
         invalidateEnrollment();
         return;
       }
-      toast.error(t('toast.contest.enrollError'));
+      toast.error(errorMessage(error, t('toast.contest.enrollError')));
     },
   });
 
@@ -79,8 +85,8 @@ export function useContestEnroll({
       invalidateEnrollment();
       queryClient.invalidateQueries({ queryKey: ['dashboard-contests'] });
     },
-    onError: () => {
-      toast.error(t('toast.contest.unregisterError'));
+    onError: (error: unknown) => {
+      toast.error(errorMessage(error, t('toast.contest.unregisterError')));
     },
   });
 

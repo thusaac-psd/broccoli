@@ -325,6 +325,7 @@ export const en = {
   'contests.running': 'Running',
   'contests.ended': 'Ended',
   'contests.problems': 'Problems',
+  'contests.registerToSubmit': 'Register for this contest to submit solutions.',
   'contests.enrollTitle': 'Enrollment',
   'contests.enrollDescription':
     'You have not enrolled in this contest yet. Enroll now to participate.',
@@ -1322,6 +1323,7 @@ export const en = {
   'apiError.TOKEN_MISSING': 'Sign in to continue.',
   'apiError.TOKEN_INVALID': 'Your session has ended. Sign in again.',
   'apiError.PERMISSION_DENIED': 'You do not have permission to do this.',
+  'apiError.CONTEST_NOT_REGISTERED': 'Register for this contest first.',
   'apiError.USERNAME_TAKEN': 'That username is already taken.',
   'apiError.PAYLOAD_TOO_LARGE': 'The upload is too large.',
   'apiError.METHOD_NOT_ALLOWED': 'This action is not supported.',
