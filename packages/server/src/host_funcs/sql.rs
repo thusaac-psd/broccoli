@@ -308,9 +308,8 @@ fn scrub_sql_for_guard(sql: &str) -> Result<String, ()> {
             // "set role" must collapse to `set_role` (NOT the SET ROLE keyword
             // pair). But it CAN be a function name: `"set_config"('role',..)` is
             // the built-in set_config called via a quoted identifier, a real role
-            // escape. Dropping the body (as a bare space) hid that token and let
-            // the call through; keeping it as one token means the downstream
-            // set_config match still fires.
+            // escape. Keeping it as one token means the downstream set_config
+            // match fires; dropping the body would hide it.
             '"' => {
                 // U&"..." / u&"..." is a Unicode-escape identifier: Postgres
                 // decodes \XXXX / \+XXXXXX into the REAL identifier at parse time,
@@ -983,7 +982,7 @@ mod tests {
             "SELECT /* abc",
             "SELECT \"abc",
             // the built-in set_config called via a QUOTED identifier is a real
-            // role escape -- dropping the quoted body used to hide it
+            // role escape, and the quoted body must stay visible to the guard
             "SELECT \"set_config\"('role','none',false)",
             "SELECT pg_catalog.\"set_config\"('role','none',false)",
             "SELECT \"pg_catalog\".\"set_config\"('role','none',false)",
@@ -991,7 +990,7 @@ mod tests {
             "SET \"role\" = 'admin'",
             "SET \"session_authorization\" = 'admin'",
             // a standard string abutting a token that ends in `e` (name'..') is
-            // NOT an E-string; the old heuristic read past its close and swallowed
+            // NOT an E-string, so the lexer ends it at its close and still sees
             // the ';'-smuggled SET ROLE
             "SELECT name'abc\\'; SET ROLE admin; --'",
             // U&"..." Unicode-escape identifiers decode to the real name at parse
@@ -1041,7 +1040,7 @@ mod tests {
             "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
             // role keywords or ';' that appear INSIDE a string literal are data,
             // not commands: the lexer neutralizes the literal so they must not
-            // trip the guard (previously false-positive-rejected)
+            // trip the guard
             "INSERT INTO t(v) VALUES ('hello; discard all')",
             "UPDATE t SET note = 'apply; set role reviewer' WHERE id = 1",
             "INSERT INTO audit_log(action) VALUES ('reset all')",
@@ -1058,7 +1057,7 @@ mod tests {
             // dollar-quoted DATA with no role keyword stays allowed
             "INSERT INTO t(doc) VALUES ($$ hello ; world $$)",
             // a standard string after an e-ending token, ending in a backslash,
-            // is valid and must not be mis-read as an E-string (was Err before)
+            // is valid and must not be mis-read as an E-string
             "SELECT name'C:\\'",
             "SELECT p FROM t WHERE p LIKE'abc\\'",
             // a genuine standalone E-string still honors its backslash escapes
