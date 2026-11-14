@@ -327,6 +327,9 @@ install_worker(){
   [ -f "$CONN_ENV" ] || die "connection.env not found in $BUNDLE (copy it from the infra box)"
   # shellcheck disable=SC1090
   set -a; . "$CONN_ENV"; set +a
+  # Native workers always read blobs from the infra box's SeaweedFS.
+  BROCCOLI__STORAGE__BACKEND=object_storage env_require_role worker \
+    || die "fix $CONN_ENV (copy the one install-native.sh infra-server wrote)"
   local wid="${BROCCOLI__WORKER__ID:-$(node_id worker)}"
   require_ubuntu; install_common_dirs
   ensure_toolchain

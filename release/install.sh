@@ -626,62 +626,18 @@ should_run_stress_smoke() {
   esac
 }
 
-require_env() {
-  local name
-  for name in "$@"; do
-    [ -n "${!name:-}" ] || die "set $name before installing role '$ROLE'"
-    # The .env.*.example files mark every value an operator must supply with
-    # change-me (a forgeable JWT secret, a phantom infra address, ...).
-    case "${!name}" in
-      *change-me*) die "$name still holds a change-me placeholder from an example file; set a real value" ;;
-    esac
-  done
-}
-
+# validate_role_env: the role's secrets and URLs (release/lib/env.sh, shared
+# with every installer) and the images this installer runs.
 validate_role_env() {
+  BROCCOLI__STORAGE__BACKEND="$(storage_backend)" env_require_role "$ROLE" \
+    || die "fix $ENV_FILE (or the variables passed to this run) and re-run"
   case "$ROLE" in
-    infra)
-      require_env POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB BROCCOLI_DB_USER \
-        BROCCOLI_DB_PASSWORD REDIS_PASSWORD BROCCOLI__AUTH__JWT_SECRET \
-        BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD
-      if using_object_storage; then
-        require_env BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET \
-          BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY \
-          BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY
-      fi
-      ;;
-    server)
-      require_env BROCCOLI_SERVER_IMAGE BROCCOLI__SERVER__ID BROCCOLI__DATABASE__URL \
-        BROCCOLI__MQ__URL BROCCOLI__AUTH__JWT_SECRET BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD
-      if using_object_storage; then
-        require_env BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT \
-          BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY \
-          BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY
-      fi
-      ;;
-    worker)
-      require_env BROCCOLI_WORKER_IMAGE BROCCOLI__WORKER__ID BROCCOLI__DATABASE__URL \
-        BROCCOLI__MQ__URL
-      if using_object_storage; then
-        require_env BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT \
-          BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY \
-          BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY
-      fi
-      ;;
-    gateway)
-      require_env CADDY_IMAGE BROCCOLI_UPSTREAMS
-      ;;
-    single-host)
-      require_env BROCCOLI_SERVER_IMAGE BROCCOLI_WORKER_IMAGE POSTGRES_USER POSTGRES_PASSWORD \
-        POSTGRES_DB BROCCOLI_DB_USER BROCCOLI_DB_PASSWORD REDIS_PASSWORD BROCCOLI__AUTH__JWT_SECRET \
-        BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD
-      if using_object_storage; then
-        require_env BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET \
-          BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY \
-          BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY
-      fi
-      ;;
-  esac
+    server) env_require BROCCOLI_SERVER_IMAGE BROCCOLI__SERVER__ID ;;
+    worker) env_require BROCCOLI_WORKER_IMAGE BROCCOLI__WORKER__ID ;;
+    gateway) env_require CADDY_IMAGE ;;
+    single-host) env_require BROCCOLI_SERVER_IMAGE BROCCOLI_WORKER_IMAGE ;;
+    *) true ;;
+  esac || die "fix $ENV_FILE (or the variables passed to this run) and re-run"
   if using_object_storage; then
     require_json_safe BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY \
       BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY
@@ -864,10 +820,7 @@ write_env_file() {
       fi
       prompt_secret BROCCOLI__AUTH__JWT_SECRET "JWT secret from server-secrets.env" copied
       prompt_secret BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD "Initial admin password from server-secrets.env" copied
-      require_env BROCCOLI__DATABASE__URL BROCCOLI__MQ__URL BROCCOLI__AUTH__JWT_SECRET BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD
-      if using_object_storage; then
-        require_env BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY
-      fi
+      BROCCOLI__STORAGE__BACKEND="$(storage_backend)" env_require_role server || die "set these and re-run"
       {
         env_line BROCCOLI_ROLE server
         env_line COMPOSE_PROJECT_NAME broccoli-server
@@ -900,10 +853,7 @@ write_env_file() {
         prompt_value BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "SeaweedFS/S3 access key from connection.env" ""
         prompt_secret BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "SeaweedFS/S3 secret key from connection.env" copied
       fi
-      require_env BROCCOLI__DATABASE__URL BROCCOLI__MQ__URL
-      if using_object_storage; then
-        require_env BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY
-      fi
+      BROCCOLI__STORAGE__BACKEND="$(storage_backend)" env_require_role worker || die "set these and re-run"
       {
         env_line BROCCOLI_ROLE worker
         env_line COMPOSE_PROJECT_NAME broccoli-worker
@@ -925,7 +875,7 @@ write_env_file() {
     gateway)
       prompt_value BROCCOLI_UPSTREAMS "Server upstreams, separated by spaces" ""
       prompt_value BROCCOLI_GATEWAY_HTTP_BIND "Gateway HTTP bind address" "0.0.0.0:80"
-      require_env BROCCOLI_UPSTREAMS
+      env_require BROCCOLI_UPSTREAMS || die "set BROCCOLI_UPSTREAMS and re-run"
       {
         env_line BROCCOLI_ROLE gateway
         env_line COMPOSE_PROJECT_NAME broccoli-gateway

@@ -255,28 +255,41 @@ cp compose/.env.infra.example compose/.env.infra
 cp compose/.env.server.example compose/.env.server
 ```
 
-Then edit both files and fill in real values, at minimum:
+Then edit both files and replace every `change-me` value:
 
 - Postgres and Redis passwords (`POSTGRES_PASSWORD`, the app role's
   `BROCCOLI_DB_PASSWORD` and `REDIS_PASSWORD` in `.env.infra`, the last two
   mirrored into `BROCCOLI__DATABASE__URL` / `BROCCOLI__MQ__URL` in
   `.env.server`).
-- `BROCCOLI__AUTH__JWT_SECRET` (at least 32 characters).
+- The hosts in `.env.server`. The server runs in the same Compose project as
+  the infra services, so it reaches them by their service names:
+  `postgres://broccoli:<BROCCOLI_DB_PASSWORD>@db:5432/broccoli`,
+  `redis://:<REDIS_PASSWORD>@redis:6379` and `http://seaweedfs:8333` for
+  `BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT` (in both files). Percent-encode
+  a password that holds `@`, `:`, `/`, `?`, `#` or `%`. Only a server that joins
+  another node's infra uses that node's LAN address (see "Multi-server
+  topology").
+- `BROCCOLI__AUTH__JWT_SECRET` (at least 32 characters, the same in both
+  files).
 - SeaweedFS/S3 credentials (`BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY` /
-  `..._SECRET_KEY`, and the endpoint if it differs from the compose default).
+  `..._SECRET_KEY`, the same in both files).
 - `BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD` for the initial admin account.
-- `BROCCOLI_SERVER_IMAGE`, pointed at the image tag that was baked and loaded
-  into this bundle.
+
+`BROCCOLI_SERVER_IMAGE` already names the image tag baked into this bundle.
+`setup.sh` (§4) writes all of this for you.
 
 The server also needs the server-only sidecar delivered to it: place
 `broccoli-airgap-<V>.server-secret/` (the CA + leaf private keys minted at
 assembly) next to the bundle directory as its sibling, or point at it explicitly
 with `--server-secret DIR`.
 
-`install.sh --role server` checks for `compose/.env.infra` and
+`install.sh --role server` checks `compose/.env.infra` and
 `compose/.env.server` **before** doing any other work (loading images, issuing
-the TLS leaf), and also fails fast if the server-secret directory is missing —
-it will not silently bring up containers with empty or placeholder config. Once
+the TLS leaf): it refuses a missing file, a required secret that is empty or
+still a `change-me` placeholder, and a database, Redis or S3 URL that is not
+well-formed, and lists every such setting. It also fails fast if the
+server-secret directory is missing. The worker role checks `.env.worker` the
+same way. Once
 the env files and the sidecar are in place, from the same bundle directory:
 
 ```bash
