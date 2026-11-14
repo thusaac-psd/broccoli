@@ -780,6 +780,11 @@ async fn ioi_scoreboard_visibility_config_can_show_all_viewers_during_contest() 
         "Viewer score should be visible in the default live scoreboard: {}",
         default_res.text
     );
+    assert_eq!(
+        default_res.body["full_board"], false,
+        "{}",
+        default_res.text
+    );
     assert!(
         default_rows[0]["rank"].is_null(),
         "a scoreboard showing only the viewer's row carries no rank: {}",

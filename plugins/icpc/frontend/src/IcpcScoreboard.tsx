@@ -1,5 +1,5 @@
 import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { formatRelativeSeconds, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Label, Switch, useConfirmDialog } from '@broccoli/web-sdk/ui';
 import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
@@ -171,7 +171,7 @@ function ProblemCellView({ cell }: { cell: ProblemCell | undefined }) {
 export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
   const { isIcpc, isLoading: guardLoading } = useIsIcpcContest(contestId);
   const api = useIcpcApi();
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const [autoRefresh, setAutoRefresh] = useState(true);
   // eslint-disable-next-line no-restricted-properties -- see the tick below
   const [now, setNow] = useState(Date.now());
@@ -247,11 +247,17 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
 
   const { phase, frozen, can_reveal, problem_labels, rows } = standings;
 
-  const secondsAgo =
-    dataUpdatedAt > 0 ? Math.floor((now - dataUpdatedAt) / 1000) : 0;
+  // `now` ticks behind `dataUpdatedAt` right after a refetch; never read
+  // that as a time in the future.
+  const updated = formatRelativeSeconds(
+    Math.min(0, (dataUpdatedAt - now) / 1000),
+    locale,
+  );
 
+  // The board never widens its container: a narrow screen scrolls the
+  // table inside its border instead of clipping its last columns.
   return (
-    <div>
+    <div className="min-w-0 max-w-full">
       {confirmDialog}
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <PhaseBar phase={phase} frozen={frozen} />
@@ -267,7 +273,7 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
           )}
           {dataUpdatedAt > 0 && (
             <span className="text-[11px] opacity-50">
-              {t('icpc.scoreboard.lastUpdated', { seconds: secondsAgo })}
+              {t('icpc.scoreboard.lastUpdated', { when: updated })}
             </span>
           )}
           {phase === 'during' && (
@@ -281,11 +287,13 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
 
       {rows.length === 0 ? (
         <div className="py-12 text-center text-muted-foreground">
-          {phase === 'before'
-            ? t('icpc.scoreboard.empty.before')
-            : phase === 'during'
-              ? t('icpc.scoreboard.empty.during')
-              : t('icpc.scoreboard.empty.after')}
+          {!standings.full_board
+            ? t('icpc.scoreboard.hidden')
+            : phase === 'before'
+              ? t('icpc.scoreboard.empty.before')
+              : phase === 'during'
+                ? t('icpc.scoreboard.empty.during')
+                : t('icpc.scoreboard.empty.after')}
         </div>
       ) : (
         <div className="overflow-x-auto rounded-lg border border-border">

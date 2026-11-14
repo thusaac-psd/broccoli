@@ -35,5 +35,7 @@ export interface StandingsResponse {
   can_reveal?: boolean;
   penalty_minutes: number;
   problem_labels: string[];
+  /** False when `rows` holds only the viewer's own row, or nothing. */
+  full_board: boolean;
   rows: StandingsEntry[];
 }

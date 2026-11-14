@@ -307,6 +307,7 @@ async fn icpc_standings_private_by_default_restricts_each_contestant_to_their_ow
     for row in rows_a.iter().chain(rows_b) {
         assert!(row["rank"].is_null(), "{row}");
     }
+    assert_eq!(res_a.body["full_board"], false, "{}", res_a.text);
 
     // The organizer (`contest:manage`) always sees every row regardless of
     // `public_standings`.
@@ -324,6 +325,7 @@ async fn icpc_standings_private_by_default_restricts_each_contestant_to_their_ow
         2,
         "an organizer should see every contestant's row, got: {rows_admin:?}"
     );
+    assert_eq!(res_admin.body["full_board"], true, "{}", res_admin.text);
 }
 
 // Companion to the test above: with `public_standings: true` explicitly set,

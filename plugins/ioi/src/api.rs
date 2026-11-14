@@ -619,6 +619,9 @@ pub(crate) fn handle_scoreboard(
             "scoreboard_visibility": contest_config.scoreboard_visibility,
             "scoreboard_tiebreaker": contest_config.scoreboard_tiebreaker,
             "max_scores": max_scores,
+            // Whether `rankings` holds every participant, rather than only
+            // the viewer's own row (or nothing, for a viewer with none).
+            "full_board": full_scoreboard_visible,
             "rankings": entries,
         })),
     })

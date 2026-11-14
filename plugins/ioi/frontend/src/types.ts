@@ -72,6 +72,8 @@ export interface ScoreboardResponse {
   scoreboard_visibility: ScoreboardVisibility;
   scoreboard_tiebreaker: ScoreboardTiebreaker;
   max_scores: Record<string, number>;
+  /** False when `rankings` holds only the viewer's own row, or nothing. */
+  full_board: boolean;
   rankings: ScoreboardEntry[];
 }
 

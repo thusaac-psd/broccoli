@@ -1423,6 +1423,7 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
                         "phase": phase,
                         "penalty_minutes": config.penalty_minutes,
                         "problem_labels": problem_labels,
+                        "full_board": false,
                         "rows": [],
                     })),
                 });
@@ -1664,6 +1665,9 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
             "can_reveal": fview.can_reveal,
             "penalty_minutes": config.penalty_minutes,
             "problem_labels": problem_labels,
+            // Whether `rows` holds every team, rather than only the viewer's
+            // own row (or nothing, for a viewer with none).
+            "full_board": restricted_user_id.is_none(),
             "rows": entries,
         })),
     })
