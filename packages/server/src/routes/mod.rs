@@ -14,14 +14,12 @@ use crate::state::AppState;
 #[derive(Debug, Clone, Copy)]
 pub struct RouteSettings {
     pub submission_max_size: usize,
-    pub rate_limit_auth: bool,
 }
 
 impl RouteSettings {
     pub fn of(config: &AppConfig) -> Self {
         Self {
             submission_max_size: config.submission.max_size,
-            rate_limit_auth: config.server.rate_limit_auth,
         }
     }
 
@@ -29,7 +27,6 @@ impl RouteSettings {
     pub fn documented() -> Self {
         Self {
             submission_max_size: SubmissionConfig::default().max_size,
-            rate_limit_auth: true,
         }
     }
 }

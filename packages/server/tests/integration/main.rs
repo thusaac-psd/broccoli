@@ -25,6 +25,7 @@ mod downloads_slim;
 mod health;
 mod hook_enablement;
 mod idempotency;
+mod login_quota;
 mod meta;
 mod nul_text;
 mod permission_fixture;

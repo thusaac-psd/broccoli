@@ -69,6 +69,11 @@ impl Topology {
         format!("{}:reply:{server_id}", self.base)
     }
 
+    /// The counter of fixed window `window` (see [`crate::Mq::count_in_window`]).
+    pub fn window_counter(&self, window: &str) -> String {
+        format!("{}:window:{window}", self.base)
+    }
+
     /// The dead-letter stream.
     pub fn dead_letter(&self) -> String {
         format!("{}:dlq", self.base)

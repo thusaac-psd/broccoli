@@ -702,3 +702,27 @@ async fn rejected_credentials_are_not_unreachable() {
     };
     assert!(!err.is_unreachable(), "{err}");
 }
+
+/// A fixed window counts every event, admitted or not, and closes when its
+/// first event's TTL runs out: events past the limit never push it back.
+#[tokio::test]
+async fn a_fixed_window_counts_every_event_and_is_never_extended() {
+    let (_container, url) = redis().await;
+    let mq = Mq::connect(&url, BASE).await.unwrap();
+    let length = Duration::from_secs(60);
+    let (first, opened) = mq.count_in_window("login:10.0.0.1", length).await.unwrap();
+    assert_eq!(first, 1);
+    assert!(
+        opened <= length && opened > Duration::from_secs(55),
+        "{opened:?}"
+    );
+    let mut left = opened;
+    for n in 2..=15 {
+        let (count, now_left) = mq.count_in_window("login:10.0.0.1", length).await.unwrap();
+        assert_eq!(count, n);
+        assert!(now_left <= left, "{now_left:?} after {left:?}");
+        left = now_left;
+    }
+    let (other, _) = mq.count_in_window("login:10.0.0.2", length).await.unwrap();
+    assert_eq!(other, 1);
+}

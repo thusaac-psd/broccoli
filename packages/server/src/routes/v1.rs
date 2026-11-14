@@ -1,38 +1,10 @@
-use std::net::IpAddr;
-use std::sync::Arc;
-use std::time::Duration;
-
-use axum::body::Body;
-use axum::http::{HeaderValue, Method, Request, Response, StatusCode, header};
-use serde_json::json;
-use tower_governor::GovernorError;
-use tower_governor::governor::GovernorConfigBuilder;
-use tower_governor::key_extractor::KeyExtractor;
+use axum::http::{HeaderValue, header};
 use tower_http::set_header::SetResponseHeaderLayer;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use crate::client_ip::ClientIp;
 use crate::extractors::body_limit::WithBodyLimit;
 use crate::handlers;
 use crate::state::AppState;
-
-const AUTH_RATE_LIMIT_PERIOD: Duration = Duration::from_secs(60);
-const AUTH_RATE_LIMIT_BURST: u32 = 10;
-
-// Registration is always throttled per client IP, but leniently: a generous
-// burst so realistic self-registration (even a shared venue NAT) is never
-// blocked, while automated account-spam from one source is capped. Unlike the
-// login limiter this is not gated behind rate_limit_auth, since an unthrottled
-// public register endpoint invites spam by default.
-const REGISTER_RATE_LIMIT_PERIOD: Duration = Duration::from_secs(60);
-const REGISTER_RATE_LIMIT_BURST: u32 = 30;
-
-// The device-authorization request endpoint mints a device+user code pair per
-// call; leave it unthrottled and a single source can flood the pending-code
-// store. Same lenient per-IP quota as registration: never blocks a real CLI
-// login, caps automated minting.
-const DEVICE_CODE_RATE_LIMIT_PERIOD: Duration = Duration::from_secs(60);
-const DEVICE_CODE_RATE_LIMIT_BURST: u32 = 30;
 
 pub fn routes(settings: super::RouteSettings) -> OpenApiRouter<AppState> {
     let submission_max_size = settings.submission_max_size;
@@ -40,7 +12,7 @@ pub fn routes(settings: super::RouteSettings) -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(handlers::meta::get_version))
         .routes(routes!(handlers::health::get_health))
-        .nest("/auth", auth_routes(settings.rate_limit_auth))
+        .nest("/auth", auth_routes())
         .nest("/users", user_routes())
         .nest("/roles", role_routes())
         .nest("/admin", admin_routes())
@@ -63,56 +35,14 @@ fn telemetry_routes() -> OpenApiRouter<AppState> {
         .body_limit(handlers::telemetry::telemetry_body_limit())
 }
 
-/// Apply a per-client-IP POST quota: `burst` requests, then one more per
-/// `period`. Keyed on the request's resolved [`ClientIp`].
-fn with_per_ip_post_limit<S>(
-    router: OpenApiRouter<S>,
-    period: Duration,
-    burst: u32,
-) -> OpenApiRouter<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    let mut builder = GovernorConfigBuilder::default();
-    builder
-        .period(period)
-        .burst_size(burst)
-        .methods(vec![Method::POST]);
-    let config = builder
-        .key_extractor(ConfiguredClientIpKeyExtractor)
-        .finish()
-        .expect("valid auth rate-limit quota");
-    router.layer(
-        tower_governor::GovernorLayer::new(Arc::new(config))
-            .error_handler(auth_rate_limit_error_response),
-    )
-}
-
-fn auth_routes(rate_limit_auth: bool) -> OpenApiRouter<AppState> {
-    let login = OpenApiRouter::new().routes(routes!(handlers::auth::login));
-    let login = if rate_limit_auth {
-        with_per_ip_post_limit(login, AUTH_RATE_LIMIT_PERIOD, AUTH_RATE_LIMIT_BURST)
-    } else {
-        login
-    };
-    let register = with_per_ip_post_limit(
-        OpenApiRouter::new().routes(routes!(handlers::auth::register)),
-        REGISTER_RATE_LIMIT_PERIOD,
-        REGISTER_RATE_LIMIT_BURST,
-    );
-    let device_code = with_per_ip_post_limit(
-        OpenApiRouter::new().routes(routes!(handlers::auth::request_device_code)),
-        DEVICE_CODE_RATE_LIMIT_PERIOD,
-        DEVICE_CODE_RATE_LIMIT_BURST,
-    );
-
+fn auth_routes() -> OpenApiRouter<AppState> {
     // Every auth response is session material (tokens, refresh cookies, the
     // caller's identity): mark the whole group `no-store` so neither browsers,
     // intermediaries nor the idempotency cache ever persist it.
     OpenApiRouter::new()
-        .merge(register)
-        .merge(login)
-        .merge(device_code)
+        .routes(routes!(handlers::auth::register))
+        .routes(routes!(handlers::auth::login))
+        .routes(routes!(handlers::auth::request_device_code))
         .routes(routes!(handlers::auth::refresh))
         .routes(routes!(handlers::auth::logout))
         .routes(routes!(handlers::auth::me))
@@ -124,70 +54,6 @@ fn auth_routes(rate_limit_auth: bool) -> OpenApiRouter<AppState> {
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
         ))
-}
-
-/// Keys the governor limiters on the client IP that `client_ip` resolved for
-/// this request, the same value the login throttle sees.
-#[derive(Clone, Copy, Debug)]
-struct ConfiguredClientIpKeyExtractor;
-
-impl KeyExtractor for ConfiguredClientIpKeyExtractor {
-    type Key = IpAddr;
-
-    fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
-        ClientIp::of(req).ok_or(GovernorError::UnableToExtractKey)
-    }
-}
-
-fn auth_rate_limit_error_response(error: GovernorError) -> Response<Body> {
-    match error {
-        GovernorError::TooManyRequests { wait_time, .. } => Response::builder()
-            .status(StatusCode::TOO_MANY_REQUESTS)
-            .header(header::RETRY_AFTER, wait_time.to_string())
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                json!({
-                    "code": "RATE_LIMITED",
-                    "message": format!("Rate limit exceeded. Try again in {wait_time} seconds"),
-                    "details": null,
-                })
-                .to_string(),
-            ))
-            .expect("valid rate-limit response"),
-        GovernorError::UnableToExtractKey => Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                json!({
-                    "code": "INTERNAL_ERROR",
-                    "message": "Unable to determine client IP for rate limiting",
-                    "details": null,
-                })
-                .to_string(),
-            ))
-            .expect("valid rate-limit response"),
-        GovernorError::Other { code, msg, headers } => {
-            let mut response = Response::builder().status(code);
-            if let Some(headers) = headers {
-                for (name, value) in headers {
-                    if let Some(name) = name {
-                        response = response.header(name, value);
-                    }
-                }
-            }
-            response
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({
-                        "code": "RATE_LIMIT_ERROR",
-                        "message": msg.unwrap_or_else(|| "Rate limit error".to_string()),
-                        "details": null,
-                    })
-                    .to_string(),
-                ))
-                .expect("valid rate-limit response")
-        }
-    }
 }
 
 fn user_routes() -> OpenApiRouter<AppState> {
@@ -543,90 +409,4 @@ fn dlq_routes() -> OpenApiRouter<AppState> {
             handlers::dlq::delete_dlq_message,
         ))
         .routes(routes!(handlers::dlq::retry_dlq_message))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::Router;
-    use axum::body::Body;
-    use axum::extract::ConnectInfo;
-    use axum::routing::post;
-    use std::net::SocketAddr;
-    use tower::ServiceExt;
-
-    fn limited_login(burst: u32) -> Router {
-        let router =
-            OpenApiRouter::<()>::new().route("/login", post(|| async { StatusCode::UNAUTHORIZED }));
-        let (router, _) =
-            with_per_ip_post_limit(router, AUTH_RATE_LIMIT_PERIOD, burst).split_for_parts();
-        router
-    }
-
-    #[tokio::test]
-    async fn auth_governor_returns_429_with_retry_after_after_ten_posts() {
-        let app = limited_login(AUTH_RATE_LIMIT_BURST);
-
-        for _ in 0..10 {
-            let mut request = Request::builder()
-                .method(Method::POST)
-                .uri("/login")
-                .body(Body::empty())
-                .unwrap();
-            request.extensions_mut().insert(ConnectInfo(
-                "203.0.113.10:12345".parse::<SocketAddr>().unwrap(),
-            ));
-
-            let response = app.clone().oneshot(request).await.unwrap();
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        }
-
-        let mut request = Request::builder()
-            .method(Method::POST)
-            .uri("/login")
-            .body(Body::empty())
-            .unwrap();
-        request.extensions_mut().insert(ConnectInfo(
-            "203.0.113.10:12345".parse::<SocketAddr>().unwrap(),
-        ));
-
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert!(response.headers().contains_key(header::RETRY_AFTER));
-    }
-
-    #[tokio::test]
-    async fn auth_governor_keys_on_the_resolved_client_behind_a_trusted_proxy() {
-        let app = limited_login(1).layer(axum::middleware::from_fn_with_state(
-            crate::client_ip::parse_trusted_proxy_networks(&["10.0.0.0/8".into()]),
-            crate::client_ip::client_ip_source_middleware,
-        ));
-        let send = |xff: &'static str| {
-            let mut request = Request::builder()
-                .method(Method::POST)
-                .uri("/login")
-                .header("x-forwarded-for", xff)
-                .body(Body::empty())
-                .unwrap();
-            request
-                .extensions_mut()
-                .insert(ConnectInfo("10.0.0.4:1".parse::<SocketAddr>().unwrap()));
-            app.clone().oneshot(request)
-        };
-
-        // Two clients behind the same gateway each get their own budget, and
-        // a port-suffixed hop keys on the same client as the bare address.
-        assert_eq!(
-            send("203.0.113.1").await.unwrap().status(),
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            send("203.0.113.2").await.unwrap().status(),
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            send("6.6.6.6, 203.0.113.1:443").await.unwrap().status(),
-            StatusCode::TOO_MANY_REQUESTS
-        );
-    }
 }

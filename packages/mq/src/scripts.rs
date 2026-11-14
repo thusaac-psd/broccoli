@@ -223,3 +223,22 @@ return out
 "#,
     )
 });
+
+/// Count one event in a fixed window: the first event starts the window
+/// (the key's TTL, kept by Redis), and later ones, admitted or not, only
+/// count, so a client retrying past the limit never extends its wait.
+///
+/// KEYS: counter. ARGV: window length in ms. Returns {count, ms left}.
+pub(crate) static COUNT_IN_WINDOW: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r#"
+local n = redis.call('INCR', KEYS[1])
+local left = redis.call('PTTL', KEYS[1])
+if left < 0 then
+  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+  left = tonumber(ARGV[1])
+end
+return {n, left}
+"#,
+    )
+});

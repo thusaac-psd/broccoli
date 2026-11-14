@@ -88,9 +88,11 @@ pub struct ServerConfig {
     /// `client_ip`). List every proxy in the chain, and only proxies.
     #[serde(default, deserialize_with = "deserialize_string_vec")]
     pub trusted_proxies: Vec<String>,
-    /// Per-IP throttling on `/api/v1/auth/login` (10 a minute per address,
-    /// behind `trusted_proxies` the client's own). Turn off only behind a NAT
-    /// that puts many contestants on one address the server can see.
+    /// Per-address quota on `/api/v1/auth/login`: 10 attempts a minute per
+    /// client address (behind `trusted_proxies` the client's own), counted in
+    /// Redis across every server (see `services::ip_quota`). Turn off only
+    /// behind a NAT that puts many contestants on one address the server can
+    /// see.
     #[serde(default = "default_true")]
     pub rate_limit_auth: bool,
     /// Logical identity of this replica. Used to derive the per-replica

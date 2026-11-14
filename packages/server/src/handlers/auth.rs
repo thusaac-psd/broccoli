@@ -10,6 +10,7 @@ use tracing::instrument;
 
 use crate::client_ip::{ClientIp, ForwardedHop};
 use crate::config::ServerConfig;
+use crate::services::ip_quota;
 // visibility-bypass-audited: this module has no permission gate to name
 // because it has no third-party resource parameter to gate - every query is
 // scoped to the identity resolved from the request's own credentials
@@ -53,13 +54,16 @@ use crate::utils::{hash, refresh};
         (status = 201, description = "User registered", body = RegisterResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 409, description = "Username taken (USERNAME_TAKEN)", body = ErrorBody),
+        (status = 429, description = "Too many registrations from this address, 30 a minute (RATE_LIMITED). Includes Retry-After.", body = ErrorBody),
     ),
 )]
 #[instrument(skip(state, payload), fields(username = %payload.username))]
 pub async fn register(
     State(state): State<AppState>,
+    ClientIp(client_ip): ClientIp,
     AppJson(payload): AppJson<RegisterRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    ip_quota::REGISTER.admit(&state.mq, client_ip).await?;
     validate_register_request(&payload)?;
 
     let prepared = crate::services::user_accounts::prepare_accounts(vec![
@@ -93,7 +97,7 @@ pub async fn register(
         (status = 200, description = "Login successful", body = LoginResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Invalid credentials (INVALID_CREDENTIALS)", body = ErrorBody),
-        (status = 429, description = "Rate limited (RATE_LIMITED). Includes Retry-After header when auth rate limiting is enabled.", body = ErrorBody),
+        (status = 429, description = "Rate limited (RATE_LIMITED): too many sign-ins from this address (10 a minute, with `server.rate_limit_auth`) or failed ones for this account. Includes Retry-After.", body = ErrorBody),
     ),
 )]
 #[instrument(skip(state, payload, jar), fields(username = %payload.username))]
@@ -104,6 +108,9 @@ pub async fn login(
     jar: CookieJar,
     AppJson(payload): AppJson<LoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    if state.config.server.rate_limit_auth {
+        ip_quota::LOGIN.admit(&state.mq, client_ip).await?;
+    }
     validate_login_request(&payload)?;
 
     let username = payload.username.trim();
@@ -378,16 +385,18 @@ fn host_header(headers: &HeaderMap) -> Option<String> {
     request_body = DeviceCodeRequest,
     responses(
         (status = 200, description = "Device code generated", body = DeviceCodeResponse),
-        (status = 429, description = "Too many pending device codes (RATE_LIMITED)", body = ErrorBody),
+        (status = 429, description = "Too many device codes requested from this address (30 a minute) or pending (RATE_LIMITED). Includes Retry-After.", body = ErrorBody),
     ),
 )]
 #[instrument(skip(state, headers, forwarded))]
 pub async fn request_device_code(
     State(state): State<AppState>,
+    ClientIp(client_ip): ClientIp,
     headers: HeaderMap,
     forwarded: Option<Extension<ForwardedHop>>,
     AppJson(_payload): AppJson<DeviceCodeRequest>,
 ) -> Result<Json<DeviceCodeResponse>, AppError> {
+    ip_quota::DEVICE_CODE.admit(&state.mq, client_ip).await?;
     let (device_code, user_code) = device_auth::create(
         &state.db,
         DEVICE_CODE_EXPIRY_SECS,
