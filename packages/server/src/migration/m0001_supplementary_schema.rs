@@ -1,7 +1,7 @@
 use sea_orm_migration::prelude::*;
 
 /// The schema the entity `sync()` cannot express: partial and named indexes,
-/// CHECK constraints and column defaults, the `plugin_user_public` view, the
+/// CHECK constraints and column defaults, the
 /// `submission_feedback` and `plugin_login_secret` tables, the optional
 /// `pg_stat_statements` extension and the database's plugin group role with
 /// its grants.
@@ -68,9 +68,6 @@ const SCHEMA: &[&str] = &[
     // judgement's in-flight count uses its entity's `status` index.
     r#"CREATE INDEX idx_code_run_in_flight ON code_run (owner_server_id)
         WHERE status IN ('Pending', 'Compiling', 'Running')"#,
-    // Curated, PII-free projection of `user` for plugin reads.
-    r#"CREATE VIEW plugin_user_public AS
-        SELECT id, username FROM "user" WHERE deleted_at IS NULL"#,
     // Withheld-feedback records owned by plugins; `metadata` is opaque to the
     // host. At most one pending record per plugin slot.
     r#"CREATE TABLE submission_feedback (
@@ -117,7 +114,6 @@ pub const PLUGIN_READABLE: &[&str] = &[
     "contest",
     "contest_problem",
     "contest_user",
-    "plugin_user_public",
     "problem",
     "problem_attachment",
     "submission",
