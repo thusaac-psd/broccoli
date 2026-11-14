@@ -1,4 +1,4 @@
-import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
+import { pollInterval, unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { formatRelativeSeconds, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Label, Switch, useConfirmDialog } from '@broccoli/web-sdk/ui';
 import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
@@ -188,13 +188,12 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
     enabled: !!contestId && isIcpc,
     queryFn: () => api.getStandings(contestId!),
     retry: 2,
-    refetchInterval: (query: { state: { data?: StandingsResponse } }) => {
-      const d = query.state.data;
+    refetchInterval: pollInterval<StandingsResponse>((d) => {
       // Poll during the contest, and also while a frozen board is awaiting reveal
       // (the 'after' phase) so the reveal reaches viewers who leave the tab open.
       const live = d?.phase === 'during' || (!!d?.frozen && !d?.revealed);
       return autoRefresh && live ? 30000 : false;
-    },
+    }),
   });
 
   // Reveal is final and cannot be undone from the UI, so it is confirmed

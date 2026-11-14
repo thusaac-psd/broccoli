@@ -1,3 +1,4 @@
+import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useSlotPermissions } from '@broccoli/web-sdk/slot';
 import {
@@ -815,7 +816,9 @@ export function IoiSubmissionResult({
       submission?.judge_epoch,
       submission?.status,
     ],
-    refetchInterval: submission?.status === 'Running' ? 1000 : false,
+    refetchInterval: pollInterval(() =>
+      submission?.status === 'Running' ? 1000 : false,
+    ),
     enabled: !!contestId && !!submission?.id && isIoi && feedbackNeedsSubtasks,
     queryFn: () => api.getSubmissionSubtaskScores(contestId!, submission!.id),
     retry: 2,

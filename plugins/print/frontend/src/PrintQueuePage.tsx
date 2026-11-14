@@ -4,7 +4,11 @@ import {
   useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { unsettledMessageKey, useAsyncSubmit } from '@broccoli/web-sdk/hooks';
+import {
+  pollInterval,
+  unsettledMessageKey,
+  useAsyncSubmit,
+} from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -76,7 +80,7 @@ export function PrintQueuePage() {
   const { data: stationsResp } = useQuery({
     queryKey: ['print', 'stations'],
     queryFn: () => api.listStations(),
-    refetchInterval: 15_000,
+    refetchInterval: pollInterval(15_000),
   });
   const stations = stationsResp?.data ?? [];
   const stationNames = stations.map((s) => s.name);

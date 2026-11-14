@@ -1,3 +1,4 @@
+import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { QueryLoading, QueryView } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
@@ -18,7 +19,7 @@ export function MyPrintsPanel({ contestId }: Props) {
   const query = useQuery({
     queryKey: ['print', 'my-jobs', contestId],
     queryFn: () => api.myJobs(contestId),
-    refetchInterval: 10_000,
+    refetchInterval: pollInterval(10_000),
     enabled: !!contestId,
   });
 

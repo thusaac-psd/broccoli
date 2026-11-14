@@ -75,7 +75,7 @@ export function BracketLiveXiaoju({
 
   const { data } = useBracket(contestId, {
     enabled: viewerId !== null,
-    refetchInterval: 1_000,
+    pollEveryMs: 1_000,
   });
 
   const match = data?.matches.find(

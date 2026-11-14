@@ -1,5 +1,6 @@
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
+import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import { PLUGIN_MANAGE } from '@broccoli/web-sdk/permissions';
 import type { PluginDetail, UploadRemoval } from '@broccoli/web-sdk/plugin';
@@ -73,8 +74,9 @@ export default function PluginsPage() {
     enabled: canManagePlugins,
     // Other servers apply a change within a few seconds: keep polling while
     // any plugin is still converging, so the page settles on its own.
-    refetchInterval: (query) =>
-      query.state.data?.some((p) => p.fleet.state === 'pending') ? 3000 : false,
+    refetchInterval: pollInterval<PluginDetail[]>((plugins) =>
+      plugins?.some((p) => p.fleet.state === 'pending') ? 3000 : false,
+    ),
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/admin/plugins');
       if (error) throw error;

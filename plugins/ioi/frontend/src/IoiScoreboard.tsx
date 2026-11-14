@@ -1,3 +1,4 @@
+import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { formatRelativeSeconds, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Label, Switch } from '@broccoli/web-sdk/ui';
 import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
@@ -188,8 +189,9 @@ export function IoiScoreboard({ contestId, children }: IoiScoreboardProps) {
     enabled: !!contestId && isIoi,
     queryFn: () => api.getScoreboard(contestId!),
     retry: 2,
-    refetchInterval: (query: { state: { data?: ScoreboardResponse } }) =>
-      autoRefresh && query.state.data?.phase === 'during' ? 30000 : false,
+    refetchInterval: pollInterval<ScoreboardResponse>((scoreboard) =>
+      autoRefresh && scoreboard?.phase === 'during' ? 30000 : false,
+    ),
   });
 
   useEffect(() => {

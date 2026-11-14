@@ -265,6 +265,15 @@ export default defineConfig([
             'Do not default a query result: render it through QueryView or queryState() so loading, failure and empty stay distinct.',
         },
         {
+          // A fixed `refetchInterval` asks a failing server as often as a
+          // healthy one, from every seat at once, and flickers a page that
+          // has nothing to show between loading and failed.
+          selector:
+            "ObjectExpression > Property[key.name='refetchInterval']:not([value.type='CallExpression'][value.callee.name='pollInterval'])",
+          message:
+            'Poll through pollInterval() from @broccoli/web-sdk/hooks, which backs off while polls fail.',
+        },
+        {
           // A server's `message` is English detail for logs; what the user
           // reads comes from useErrorMessage(), which translates by code.
           selector:

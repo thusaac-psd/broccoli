@@ -1,4 +1,5 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
+import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { useQuery } from '@tanstack/react-query';
 
 import type { DlqResolvedFilter } from '@/features/dlq/types';
@@ -28,7 +29,7 @@ export function useDlqList({
     // permission check must pass `enabled: false`, or this poll 403-loops for
     // unauthorized viewers (hooks run before an early Unauthorized return).
     enabled,
-    refetchInterval: REFETCH_INTERVAL_MS,
+    refetchInterval: pollInterval(REFETCH_INTERVAL_MS),
     refetchIntervalInBackground: false,
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/dlq', {
