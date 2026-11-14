@@ -102,7 +102,8 @@ pub async fn activate_plugin(state: &AppState, plugin_id: &str) -> Result<(), Pl
         let manifest = plugin_manifest(state.plugins.as_ref(), plugin_id)?;
         register_plugin_hooks(state, plugin_id, &manifest).await;
         call_plugin_init(state.plugins.as_ref(), plugin_id).await?;
-        state.plugins.update_translations()
+        state.plugins.update_translations();
+        Ok(())
     }
     .await;
     if let Err(error) = &result {
@@ -350,9 +351,7 @@ pub(crate) async fn roll_back(state: &AppState, plugin_id: &str, previous: Previ
     }
     previous.registrations.restore(&state.registries).await;
     register_plugin_hooks(state, plugin_id, &manifest).await;
-    if let Err(e) = state.plugins.update_translations() {
-        tracing::warn!(plugin_id, error = %e, "Failed to restore translations after a rollback");
-    }
+    state.plugins.update_translations();
     tracing::warn!(
         plugin_id,
         "Kept the previously loaded version of the plugin"

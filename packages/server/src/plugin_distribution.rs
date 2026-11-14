@@ -13,8 +13,10 @@
 //! bundle has a copy of the same plugin. Removing the upload clears the
 //! column and the bundled copy, if any, takes over again.
 //!
-//! Each server unpacks the archives it needs into its own
-//! `plugin.cache_dir/<archive hash>/<id>/`. A cache directory is only ever
+//! Each server unpacks the archives it needs into its own part of the cache,
+//! `plugin.cache_dir/<server id>@<database>/<archive hash>/<id>/` (see
+//! [`archive_cache_dir`]): servers sharing one cache directory, on one
+//! database or several, never prune each other's entries. A cache directory is only ever
 //! created whole (unpacked beside it, then renamed into place), so one that
 //! exists is complete; and an archive fetched from the blob store is checked
 //! against its hash and validated again before it is unpacked. Cache
@@ -100,11 +102,31 @@ pub async fn locate(
     }
 }
 
+/// This server's part of `plugin.cache_dir`, which it alone writes and
+/// prunes: named by its server id and its database, so neither two replicas
+/// of one database nor servers of different databases on one host share it.
+/// The compiled-module entry stays at the top, shared: it is addressed by
+/// module content.
+pub fn archive_cache_dir(state: &AppState) -> PathBuf {
+    state.config.plugin.cache_dir.join(format!(
+        "{}@{}",
+        state.config.server.id,
+        database_scope(&state.config.database.url)
+    ))
+}
+
+/// A short stable name for the database `url` points at: its host, port and
+/// database name, without credentials or options, hashed.
+fn database_scope(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let rest = rest.split(['?', '#']).next().unwrap_or_default();
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, location)| location);
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(rest.as_bytes());
+    hex::encode(&digest[..8])
+}
+
 fn cached_root(state: &AppState, hash: &ContentHash, plugin_id: &PluginId) -> PathBuf {
-    state
-        .config
-        .plugin
-        .cache_dir
+    archive_cache_dir(state)
         .join(hash.to_hex())
         .join(plugin_id.as_str())
 }
@@ -154,7 +176,7 @@ async fn materialize(
 /// Unpack `archive` into this server's cache, unless it is there already.
 /// Returns the plugin directory.
 pub async fn store(state: &AppState, archive: PluginArchive) -> Result<PathBuf, PluginError> {
-    let cache_dir = state.config.plugin.cache_dir.clone();
+    let cache_dir = archive_cache_dir(state);
     let root = cached_root(state, &archive.hash(), archive.id());
     tokio::task::spawn_blocking(move || {
         if root.exists() {
@@ -203,7 +225,7 @@ pub async fn evict(state: &AppState, source: &PluginSource) {
     let Some(entry) = source.archive_hash().and_then(cache_entry_for) else {
         return;
     };
-    let dir = state.config.plugin.cache_dir.join(entry);
+    let dir = archive_cache_dir(state).join(entry);
     if let Err(e) = tokio::fs::remove_dir_all(&dir).await
         && e.kind() != std::io::ErrorKind::NotFound
     {
@@ -211,13 +233,10 @@ pub async fn evict(state: &AppState, source: &PluginSource) {
     }
 }
 
-/// Delete every cache entry whose archive is not in `keep`: neither
-/// published for any plugin nor loaded on this server. The compiled-module
-/// entry ([`plugin_core::config::COMPILED_MODULES_ENTRY`]) always stays.
-/// Best-effort.
-pub async fn retain(state: &AppState, mut keep: HashSet<String>) {
-    keep.insert(plugin_core::config::COMPILED_MODULES_ENTRY.to_string());
-    let cache_dir = state.config.plugin.cache_dir.clone();
+/// Delete every entry of this server's cache whose archive is not in `keep`:
+/// neither published for any plugin nor loaded on this server. Best-effort.
+pub async fn retain(state: &AppState, keep: HashSet<String>) {
+    let cache_dir = archive_cache_dir(state);
     let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         let entries = match std::fs::read_dir(&cache_dir) {
             Ok(entries) => entries,
@@ -244,7 +263,7 @@ pub async fn retain(state: &AppState, mut keep: HashSet<String>) {
 
 /// The cache entry name (archive hash) of `root`, if it is a cached upload.
 pub fn cache_entry_of(state: &AppState, root: &Path) -> Option<String> {
-    let relative = root.strip_prefix(&state.config.plugin.cache_dir).ok()?;
+    let relative = root.strip_prefix(archive_cache_dir(state)).ok()?;
     Some(
         relative
             .components()
@@ -258,4 +277,29 @@ pub fn cache_entry_of(state: &AppState, root: &Path) -> Option<String> {
 /// The cache entry name a published `archive_hash` column value maps to.
 pub fn cache_entry_for(archive_hash: &str) -> Option<String> {
     ContentHash::from_hex(archive_hash).ok().map(|h| h.to_hex())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::database_scope;
+
+    #[test]
+    fn one_database_has_one_scope_whatever_the_credentials() {
+        assert_eq!(
+            database_scope("postgres://broccoli:secret@db:5432/broccoli"),
+            database_scope("postgres://other:pw@db:5432/broccoli?sslmode=disable"),
+        );
+    }
+
+    #[test]
+    fn different_databases_have_different_scopes() {
+        let a = database_scope("postgres://u:p@db:5432/broccoli");
+        for other in [
+            "postgres://u:p@db:5432/broccoli_qa",
+            "postgres://u:p@db:5433/broccoli",
+            "postgres://u:p@db2:5432/broccoli",
+        ] {
+            assert_ne!(a, database_scope(other), "{other}");
+        }
+    }
 }
