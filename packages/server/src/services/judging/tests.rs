@@ -402,8 +402,8 @@ async fn a_spent_dispatch_budget_finalizes_and_dead_letters_once_per_submission(
     let s = sub(&db, s.id).await;
     assert_eq!(
         s.status,
-        SubmissionStatus::SystemError,
-        "the submission follows"
+        SubmissionStatus::Pending,
+        "the submission shows the attempt until the system-error retry decides"
     );
     let dlq = dead_letter_message::Entity::find()
         .filter(dead_letter_message::Column::SubmissionId.eq(s.id))
@@ -479,6 +479,11 @@ async fn releasing_requeues_own_work_without_spending_a_retry() {
     assert_eq!(sub(&db, theirs.id).await.status, SubmissionStatus::Pending);
 }
 
+/// A system error the retry will re-judge never shows on the submission:
+/// it keeps showing the attempt in flight until the reaper requeues it, so
+/// the status a client sees never goes from terminal back to judging. Once
+/// the budget is spent the reaper confirms the error, once, and only then
+/// does the submission show it.
 #[tokio::test]
 async fn a_system_error_is_retried_within_the_submission_budget() {
     let (_pg, db) = crate::test_support::postgres().await;
@@ -497,15 +502,18 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
         .await
         .unwrap()
     );
-    assert_eq!(sub(&db, s.id).await.status, SubmissionStatus::SystemError);
+    assert_eq!(
+        sub(&db, s.id).await.status,
+        SubmissionStatus::Pending,
+        "the submission still shows the attempt"
+    );
 
     let budget = RetryBudget::new(1);
-    assert_eq!(
-        retry_system_errors(&db, budget, 10, NO_TYPES)
-            .await
-            .unwrap(),
-        1
-    );
+    let pass = retry_system_errors(&db, budget, 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(pass.requeued, 1);
+    assert!(pass.confirmed.is_empty());
     let j = judgement(&db, claimed.judgement.id).await;
     assert_eq!(j.status, SubmissionStatus::Queued);
     assert!(!j.is_finalized);
@@ -518,7 +526,7 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
     assert_eq!(s.status, SubmissionStatus::Queued);
     assert_eq!(s.system_error_retries, 1);
 
-    // The budget is spent: the next SystemError stands.
+    // The budget is spent: the next SystemError stands, shown once confirmed.
     let again = claim_one(&db, "srv").await;
     fail_dispatch(
         &db,
@@ -530,12 +538,25 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
     )
     .await
     .unwrap();
+    assert_eq!(sub(&db, s.id).await.status, SubmissionStatus::Pending);
+    let pass = retry_system_errors(&db, budget, 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(pass.requeued, 0);
     assert_eq!(
-        retry_system_errors(&db, budget, 10, NO_TYPES)
-            .await
-            .unwrap(),
-        0
+        pass.confirmed
+            .iter()
+            .map(|c| c.submission_id)
+            .collect::<Vec<_>>(),
+        [s.id]
     );
+    let shown = sub(&db, s.id).await;
+    assert_eq!(shown.status, SubmissionStatus::SystemError);
+    assert_eq!(shown.error_code.as_deref(), Some("PLUGIN_ERROR"));
+    let pass = retry_system_errors(&db, budget, 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert!(pass.confirmed.is_empty(), "confirmed once");
 }
 
 #[tokio::test]
@@ -557,10 +578,15 @@ async fn a_contestant_verdict_or_a_plugin_refusal_is_never_retried() {
     .await
     .unwrap();
 
-    let n = retry_system_errors(&db, RetryBudget::new(5), 10, NO_TYPES)
+    let pass = retry_system_errors(&db, RetryBudget::new(5), 10, NO_TYPES)
         .await
         .unwrap();
-    assert_eq!(n, 0);
+    assert_eq!(pass, SystemErrorPass::default());
+    assert_eq!(
+        sub(&db, refused.submission.id).await.status,
+        SubmissionStatus::SystemError,
+        "a refusal shows at once"
+    );
 }
 
 #[tokio::test]

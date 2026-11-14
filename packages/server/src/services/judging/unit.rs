@@ -105,11 +105,13 @@ impl Unit {
         match self {
             Unit::Judgement => format!(
                 ", mirrored AS (UPDATE submission s SET {MIRROR_SETS} FROM moved j \
-                 WHERE s.id = j.submission_id AND j.is_current RETURNING s.id, s.status), \
+                 WHERE s.id = j.submission_id AND j.is_current AND NOT {undecided} \
+                 RETURNING s.id, s.status), \
                  recovered AS (UPDATE dead_letter_message d \
                      SET resolved = TRUE, resolved_at = NOW(), resolved_by = NULL \
                      FROM moved j WHERE NOT d.resolved AND j.is_current AND {recovered} \
                        AND {settled})",
+                undecided = awaits_retry_decision("j"),
                 recovered = recovered("j"),
                 settled = settled_by_submission("d", "j"),
             ),
@@ -127,6 +129,19 @@ fn system_error(alias: &str) -> String {
         system_error = SubmissionStatus::SystemError,
         judged = SubmissionStatus::Judged,
         verdict = common::Verdict::SystemError,
+    )
+}
+
+/// SQL: the judgement `alias` finished as a system error that the
+/// system-error retry may still re-judge (anything but a plugin refusal).
+/// The submission keeps showing the attempt in flight instead of a terminal
+/// status that the retry would take back: [`retry_system_errors`], which owns
+/// the retry budget, either requeues the judgement or confirms the error.
+fn awaits_retry_decision(alias: &str) -> String {
+    format!(
+        "({alias}.is_finalized AND {system_error} AND {alias}.error_code IS DISTINCT FROM '{refused}')",
+        system_error = system_error(alias),
+        refused = SubmissionDlqErrorCode::PLUGIN_REFUSED,
     )
 }
 
@@ -818,26 +833,43 @@ async fn dead_letter(
         .await
 }
 
-/// Requeues up to `limit` current judgements that finalized as a
-/// `SystemError` in any shape (a plugin's `SystemError` verdict, or a
-/// `SystemError` status from a dispatch failure or exhaustion), while their
-/// submission has system-error retries left. A deterministic plugin refusal
-/// (`PLUGIN_REFUSED`) can only fail again and is left standing.
+/// A submission whose system error now stands, as the reaper confirmed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConfirmedSystemError {
+    pub submission_id: i32,
+    pub user_id: i32,
+    pub problem_id: i32,
+    pub contest_id: Option<i32>,
+}
+
+/// What one system-error retry pass did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SystemErrorPass {
+    /// Judgements requeued for another attempt.
+    pub requeued: u64,
+    /// Submissions whose system error stands: their budget is spent.
+    pub confirmed: Vec<ConfirmedSystemError>,
+}
+
+/// Decides up to `limit` current judgements that finalized as a system error
+/// in any shape (a plugin's `SystemError` verdict, or a `SystemError` status
+/// from a dispatch failure or exhaustion), which the submission row has not
+/// shown (see [`awaits_retry_decision`]). One with system-error retries left
+/// on its submission is requeued. One whose budget is spent is confirmed: the
+/// submission shows it from now on. A deterministic plugin refusal
+/// (`PLUGIN_REFUSED`) can only fail again; the submission shows it at once
+/// and it is never retried.
 pub(crate) async fn retry_system_errors(
     db: &DatabaseConnection,
     budget: RetryBudget,
     limit: u32,
     local: &[String],
-) -> Result<u64, DbErr> {
+) -> Result<SystemErrorPass, DbErr> {
     let txn = db.begin().await?;
     let mut b = Binds::default();
     let filter = format!(
-        "u.is_current AND u.is_finalized \
-         AND {system_error} \
-         AND u.error_code IS DISTINCT FROM {refused} \
-         AND s.system_error_retries < {max} AND {handled}",
-        system_error = system_error("u"),
-        refused = b.bind(SubmissionDlqErrorCode::PLUGIN_REFUSED),
+        "u.is_current AND {undecided} AND s.system_error_retries < {max} AND {handled}",
+        undecided = awaits_retry_decision("u"),
         max = b.bind(budget.max()),
         handled = {
             let local = b.bind(local.to_vec());
@@ -849,9 +881,51 @@ pub(crate) async fn retry_system_errors(
         .into_iter()
         .map(|p| p.id)
         .collect();
-    let n = requeue(&txn, Unit::Judgement, &ids, Requeue::SystemErrorRetry).await?;
+    let requeued = requeue(&txn, Unit::Judgement, &ids, Requeue::SystemErrorRetry).await?;
+
+    // Spent budgets: the submission shows the error, once. Any replica may
+    // confirm, whatever it can judge.
+    let mut b = Binds::default();
+    let filter = format!(
+        "u.is_current AND {undecided} AND s.system_error_retries >= {max} \
+         AND (s.judge_epoch IS DISTINCT FROM u.judge_epoch OR s.status IS DISTINCT FROM u.status)",
+        undecided = awaits_retry_decision("u"),
+        max = b.bind(budget.max()),
+    );
+    let ids: Vec<i32> = pick(&txn, Unit::Judgement, b, filter, Some(limit))
+        .await?
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    let confirmed = if ids.is_empty() {
+        Vec::new()
+    } else {
+        txn.query_all_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!(
+                "UPDATE submission s SET {MIRROR_SETS} FROM submission_judgement j \
+                 WHERE j.id = ANY($1) AND s.id = j.submission_id \
+                 RETURNING s.id, s.user_id, s.problem_id, s.contest_id"
+            ),
+            [ids.into()],
+        ))
+        .await?
+        .iter()
+        .map(|r| {
+            Ok(ConfirmedSystemError {
+                submission_id: r.try_get("", "id")?,
+                user_id: r.try_get("", "user_id")?,
+                problem_id: r.try_get("", "problem_id")?,
+                contest_id: r.try_get("", "contest_id")?,
+            })
+        })
+        .collect::<Result<_, DbErr>>()?
+    };
     txn.commit().await?;
-    Ok(n)
+    Ok(SystemErrorPass {
+        requeued,
+        confirmed,
+    })
 }
 
 /// Finalizes a unit whose dispatch failed as `SystemError`, fenced on its

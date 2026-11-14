@@ -323,7 +323,9 @@ impl E2eTestApp {
                 steal_scan_interval_secs: 15,
                 steal_batch_size: 8,
                 max_dispatch_retries: 5,
-                max_system_error_retries: 50,
+                // No system-error retries: a SystemError stands as soon as
+                // the reaper below confirms it.
+                max_system_error_retries: 0,
                 cancel_primitive_enabled: false,
                 claim_fiber_enabled: true,
                 plugin_timer_tick_interval_secs: 1,
@@ -476,8 +478,16 @@ impl E2eTestApp {
             claim_handle_opt = Some(tokio::spawn(server::dispatcher::claim::run(
                 state.clone(),
                 server_id.clone(),
-                claim_cancel_rx,
+                claim_cancel_rx.clone(),
             )));
+            // As in production: the reaper decides every SystemError, which
+            // the submission shows only once it stands.
+            tokio::spawn(server::dispatcher::system_error_retry::run(
+                state.clone(),
+                server_id.clone(),
+                0,
+                claim_cancel_rx,
+            ));
 
             let sandbox_manager = create_sandbox_manager();
             let worker_cache_dir =

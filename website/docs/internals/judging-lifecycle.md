@@ -104,6 +104,16 @@ current judgement rewrites them in the same statement or transaction. A
 plugin's result write is one statement that writes the judgement and the
 submission together.
 
+One projection waits: a current judgement that finalized as a system error
+the system-error retry may still re-judge (anything but `PLUGIN_REFUSED`).
+The submission keeps showing the attempt in flight until the reaper decides
+it within one scan (5 s): it requeues the judgement while the submission has
+retries left, so the submission goes on to `Queued` and the next attempt; or
+it confirms the error once the budget is spent, which projects it and fires
+the after-judging hooks. A client therefore never sees a terminal status
+that a retry takes back: within an attempt the statuses only move forward,
+and a terminal status is final.
+
 ## Judge epochs
 
 A judge epoch is the fencing token of one dispatch of one unit. Plugin

@@ -7,7 +7,10 @@
 //! finalized it: it requeues current judgements that finalized as a
 //! `SystemError` in any shape while their submission has system-error
 //! retries left (`max_system_error_retries`), and the claim fiber judges them
-//! again. Only when that budget is spent does the `SystemError` stand. See
+//! again. Only when that budget is spent does the `SystemError` stand: the
+//! fiber confirms it, the submission shows it, and its after-judging hooks
+//! fire. Until then the submission keeps showing the attempt in flight, so a
+//! client never sees a terminal status that a retry takes back. See
 //! `services::judging::retry_system_errors`.
 
 use std::time::Duration;
@@ -41,8 +44,24 @@ pub async fn run(
             _ = interval.tick() => {
                 let scan = scan_once(&state, budget);
                 match common::deadline::bounded("dispatcher.system_error_retry", common::deadline::BACKGROUND_STEP, scan).await {
-                    Some(Ok(0)) | None => {}
-                    Some(Ok(requeued)) => info!(server_id = %server_id, requeued, "Requeued SystemError verdicts for a bounded retry"),
+                    None => {}
+                    Some(Ok(pass)) => {
+                        if pass.requeued > 0 || !pass.confirmed.is_empty() {
+                            info!(server_id = %server_id, requeued = pass.requeued, confirmed = pass.confirmed.len(), "Decided SystemError verdicts");
+                        }
+                        for c in pass.confirmed {
+                            crate::services::submission_dispatch::fire_after_judging_hooks(
+                                &state.db,
+                                state.registries.hook_registry.clone(),
+                                &state.registries.contest_type_registry,
+                                c.submission_id,
+                                c.user_id,
+                                c.problem_id,
+                                c.contest_id,
+                            )
+                            .await;
+                        }
+                    }
                     Some(Err(e)) => error!(server_id = %server_id, error = %e, "SystemError-retry scan failed"),
                 }
             }
@@ -58,7 +77,10 @@ pub async fn run(
 /// One scan. Rejudging on a replica without a handler for the contest type
 /// would only fail again, so a judgement is left to a replica that has one
 /// (see `dispatcher::prefer_local_handler`).
-async fn scan_once(state: &AppState, budget: RetryBudget) -> anyhow::Result<u64> {
+async fn scan_once(
+    state: &AppState,
+    budget: RetryBudget,
+) -> anyhow::Result<judging::SystemErrorPass> {
     let local = super::local_contest_types(state).await;
     Ok(judging::retry_system_errors(&state.db, budget, SCAN_BATCH_SIZE, &local).await?)
 }
