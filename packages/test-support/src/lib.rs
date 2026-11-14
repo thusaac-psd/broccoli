@@ -155,29 +155,34 @@ fn admin_runtime() -> &'static tokio::runtime::Handle {
         .handle()
 }
 
+/// The process's admin connection to the shared cluster, opened on first use
+/// on the admin runtime. Call only from a task on that runtime.
+async fn admin(port: u16) -> &'static DatabaseConnection {
+    if SHARED_ADMIN_CONN.get().is_none() {
+        let admin_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut admin_opts = ConnectOptions::new(&admin_url);
+        admin_opts
+            .max_connections(1)
+            .min_connections(1)
+            .acquire_timeout(Duration::from_secs(60))
+            .idle_timeout(Duration::from_secs(600));
+        let conn = Database::connect(admin_opts)
+            .await
+            .expect("Failed to initialize shared admin database pool");
+        let _ = SHARED_ADMIN_CONN.set(conn.into());
+    }
+    SHARED_ADMIN_CONN
+        .get()
+        .expect("shared admin connection must be initialized")
+}
+
 async fn clone_template(port: u16, db_name: &str) {
     let handle = admin_runtime().clone();
     let db_name = db_name.to_string();
 
     handle
         .spawn(async move {
-            if SHARED_ADMIN_CONN.get().is_none() {
-                let admin_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-                let mut admin_opts = ConnectOptions::new(&admin_url);
-                admin_opts
-                    .max_connections(1)
-                    .min_connections(1)
-                    .acquire_timeout(Duration::from_secs(60))
-                    .idle_timeout(Duration::from_secs(600));
-                let conn = Database::connect(admin_opts)
-                    .await
-                    .expect("Failed to initialize shared admin database pool");
-                let _ = SHARED_ADMIN_CONN.set(conn.into());
-            }
-
-            let admin = SHARED_ADMIN_CONN
-                .get()
-                .expect("shared admin connection must be initialized");
+            let admin = admin(port).await;
             admin
                 .execute_raw(Statement::from_string(
                     DbBackend::Postgres,
@@ -186,7 +191,7 @@ async fn clone_template(port: u16, db_name: &str) {
                 .await
                 .expect("Failed to create test database from template");
             // A database-level setting, so every session on the clone (the
-            // server's pools and the plugin login's) resolves the clock.
+            // server's pools and the plugin logins') resolves the clock.
             admin
                 .execute_raw(Statement::from_string(
                     DbBackend::Postgres,
@@ -197,6 +202,45 @@ async fn clone_template(port: u16, db_name: &str) {
         })
         .await
         .expect("admin runtime task panicked");
+}
+
+/// The role an app-owned test database belongs to: `LOGIN CREATEROLE` and
+/// nothing more, the rights a production app role has.
+pub const APP_ROLE: &str = "broccoli_test_app";
+const APP_ROLE_PASSWORD: &str = "broccoli_test_app";
+
+/// An empty database owned by [`APP_ROLE`], whose URL connects as that role.
+/// Nothing is migrated: the test boots it as the app role, as a server would.
+pub async fn create_app_owned_database(db_name: &str) -> TestDatabase {
+    let port = shared_pg_port().await;
+    {
+        let _lock = CREATE_DB_LOCK.lock().await;
+        let name = db_name.to_string();
+        admin_runtime()
+            .clone()
+            .spawn(async move {
+                let admin = admin(port).await;
+                for sql in [
+                    format!(
+                        "DO $$ BEGIN \
+                           CREATE ROLE {APP_ROLE} LOGIN CREATEROLE PASSWORD '{APP_ROLE_PASSWORD}'; \
+                         EXCEPTION WHEN duplicate_object THEN NULL; END $$"
+                    ),
+                    format!("CREATE DATABASE \"{name}\" OWNER {APP_ROLE}"),
+                ] {
+                    admin
+                        .execute_unprepared(&sql)
+                        .await
+                        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+                }
+            })
+            .await
+            .expect("admin runtime task panicked");
+    }
+    TestDatabase(Arc::new(TestDatabaseInner {
+        name: db_name.to_string(),
+        url: format!("postgres://{APP_ROLE}:{APP_ROLE_PASSWORD}@127.0.0.1:{port}/{db_name}"),
+    }))
 }
 
 /// One test's database, cloned from `template_test` and dropped when the last

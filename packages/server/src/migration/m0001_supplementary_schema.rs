@@ -103,8 +103,8 @@ const SCHEMA: &[&str] = &[
 
 /// Host relations every plugin may read in full: contest data with no secret
 /// in it. Every other host relation is unreadable to plugins; the test
-/// `plugin_db::tests::grants` requires each one to be classified.
-pub(crate) const PLUGIN_READABLE: &[&str] = &[
+/// the integration test `plugin_db::every_host_relation_is_classified` requires each one to be classified.
+pub const PLUGIN_READABLE: &[&str] = &[
     "additional_file",
     "clarification",
     "clarification_reply",
@@ -124,7 +124,7 @@ pub(crate) const PLUGIN_READABLE: &[&str] = &[
 
 /// Host relations plugins may read only these columns of: an account's public
 /// profile, never its credentials.
-pub(crate) const PLUGIN_READABLE_COLUMNS: &[(&str, &[&str])] = &[(
+pub const PLUGIN_READABLE_COLUMNS: &[(&str, &[&str])] = &[(
     "user",
     &["id", "username", "display_name", "created_at", "deleted_at"],
 )];

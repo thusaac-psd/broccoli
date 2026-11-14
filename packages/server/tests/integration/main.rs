@@ -32,6 +32,7 @@ mod platform_clock;
 mod plugin;
 mod plugin_config;
 mod plugin_config_cache;
+mod plugin_db;
 mod plugin_fleet;
 mod plugin_flood;
 mod plugin_timer;

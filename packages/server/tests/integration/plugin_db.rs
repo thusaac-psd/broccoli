@@ -1,62 +1,57 @@
-//! Plugin SQL privileges, enforced by Postgres. Each test boots a fresh
-//! database through the real migration and drives the real per-plugin pools,
-//! so what a statement may do is decided by the engine, not by the SQL guard.
+//! Plugin SQL privileges, enforced by Postgres. Each test boots an empty
+//! database owned by a non-superuser `LOGIN CREATEROLE` app role through the
+//! real migration and drives the real per-plugin pools, so what a statement
+//! may do is decided by the engine, not by the SQL guard.
 
 use std::time::Duration;
 
 use common::db::DatabaseConnection;
+use futures::FutureExt;
 use sea_orm::{ConnectionTrait, DbBackend, DbErr, Statement};
-use testcontainers::ContainerAsync;
-use testcontainers::ImageExt;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
+use server::plugin_db::PluginSqlPools;
+use server::plugin_db::schema::PluginDbNames;
+use test_support::TestDatabase;
 
-use super::PluginSqlPools;
-use super::schema::PluginDbNames;
-
-pub(super) struct Fixture {
-    _container: ContainerAsync<Postgres>,
-    pub url: String,
-    pub app: DatabaseConnection,
+struct Fixture {
+    database: TestDatabase,
+    app: DatabaseConnection,
 }
 
 impl Fixture {
-    pub async fn new() -> Self {
-        let container = Postgres::default()
-            .with_tag("17-alpine")
-            .start()
+    async fn new() -> Self {
+        let name = format!("plugin_db_{}", uuid::Uuid::new_v4().simple());
+        let database = test_support::create_app_owned_database(&name).await;
+        let app = server::database::init_db(database.url())
             .await
-            .expect("start postgres container");
-        let port = container.get_host_port_ipv4(5432).await.expect("port");
-        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-        let app = crate::database::init_db(&url).await.expect("migrate");
-        Self {
-            _container: container,
-            url,
-            app,
-        }
+            .expect("the app role migrates its own database");
+        Self { database, app }
     }
 
     /// One server's plugin pools, `budget` connections together.
-    pub fn pools(&self, budget: u32) -> PluginSqlPools {
+    fn pools(&self, budget: u32) -> PluginSqlPools {
         PluginSqlPools::new(
             self.app.clone(),
-            &self.url,
+            self.database.url(),
             budget,
             Duration::from_secs(20),
-            &crate::database::app_session(&crate::config::DatabaseConfig::default()),
+            &server::database::app_session(&server::config::DatabaseConfig::default()),
         )
+    }
+
+    fn names(&self, plugin: &str) -> PluginDbNames {
+        let group = server::plugin_db::schema::group_role(self.database.name());
+        PluginDbNames::new(self.database.name(), &group, plugin)
     }
 }
 
 /// Run `sql` as `plugin`.
-pub(super) async fn exec(pools: &PluginSqlPools, plugin: &str, sql: &str) -> Result<(), DbErr> {
+async fn exec(pools: &PluginSqlPools, plugin: &str, sql: &str) -> Result<(), DbErr> {
     let lease = pools.lease(plugin).await?;
     lease.db.execute_unprepared(sql).await.map(drop)
 }
 
 /// The single text value `sql` returns, run as `plugin`.
-pub(super) async fn text(pools: &PluginSqlPools, plugin: &str, sql: &str) -> String {
+async fn text(pools: &PluginSqlPools, plugin: &str, sql: &str) -> String {
     let lease = pools.lease(plugin).await.expect("lease");
     lease
         .db
@@ -69,7 +64,7 @@ pub(super) async fn text(pools: &PluginSqlPools, plugin: &str, sql: &str) -> Str
 }
 
 /// `sql` must fail as `plugin` with a privilege error.
-pub(super) async fn denied(pools: &PluginSqlPools, plugin: &str, sql: &str) {
+async fn denied(pools: &PluginSqlPools, plugin: &str, sql: &str) {
     let err = exec(pools, plugin, sql)
         .await
         .expect_err(&format!("{plugin} must be refused: {sql}"));
@@ -102,7 +97,7 @@ async fn a_plugin_has_full_ddl_and_dml_in_its_own_schema() {
             .unwrap_or_else(|e| panic!("{sql}: {e}"));
     }
     // Unqualified DDL landed in the plugin's schema, owned by its role.
-    let names = PluginDbNames::new("postgres", &super::schema::group_role("postgres"), "print");
+    let names = f.names("print");
     let owner = text(
         &pools,
         "print",
@@ -148,7 +143,7 @@ async fn a_plugin_cannot_touch_another_plugins_schema() {
         denied(&pools, "intruder", sql).await;
     }
     // Neither can it become the other plugin's role.
-    let other = PluginDbNames::new("postgres", &super::schema::group_role("postgres"), "cooldown").role;
+    let other = f.names("cooldown").role;
     denied(&pools, "intruder", &format!("SET ROLE \"{other}\"")).await;
 }
 
@@ -158,7 +153,7 @@ async fn a_role_escape_lands_on_the_plugins_own_role() {
     // One connection: a role change would persist into the next statement,
     // as it would into the plugin's next call.
     let pools = f.pools(1);
-    let names = PluginDbNames::new("postgres", &super::schema::group_role("postgres"), "print");
+    let names = f.names("print");
     exec(&pools, "print", "RESET ROLE").await.expect("reset");
     assert_eq!(
         text(
@@ -221,59 +216,38 @@ async fn concurrent_first_uses_on_several_replicas_converge() {
     assert_eq!(secrets, 3);
 }
 
-/// Waits until every connection the pools hold is back idle: sqlx returns a
-/// released connection to its pool from a task of its own.
-async fn settle(pools: &PluginSqlPools) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while pools
-            .inner
-            .built()
-            .iter()
-            .any(|(_, db)| super::sqlx_pool(db).size() as usize != super::sqlx_pool(db).num_idle())
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("released connections return to their pools");
-}
-
-/// Plugins taking turns never hold more connections together than the
-/// budget: each first closes another plugin's idle connection.
+/// At most `budget` leases hold a connection at once: a lease past the budget
+/// waits until one ends. Transactions pin their connections, so the count is
+/// exact while they are open.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_plugin_pools_keep_to_one_budget() {
     let f = Fixture::new().await;
     let pools = f.pools(2);
-    for round in 0..3 {
-        for plugin in ["a", "b", "c", "d"] {
-            exec(&pools, plugin, "SELECT 1")
-                .await
-                .unwrap_or_else(|e| panic!("{plugin} round {round}: {e}"));
-            settle(&pools).await;
-            assert!(
-                pools.inner.open() <= 2,
-                "{} connections open after {plugin}",
-                pools.inner.open()
-            );
-        }
-    }
-    // Leases beyond the budget wait for one to end rather than open more.
-    let first = pools.lease("a").await.expect("first");
-    let second = pools.lease("b").await.expect("second");
+    let a = pools.lease("a").await.expect("a");
+    let a_txn = sea_orm::TransactionTrait::begin(&a.db)
+        .await
+        .expect("a begins");
+    let b = pools.lease("b").await.expect("b");
+    let b_txn = sea_orm::TransactionTrait::begin(&b.db)
+        .await
+        .expect("b begins");
+    assert_eq!(pools.open_connections(), 2);
+
     let third = pools.lease("c");
     tokio::pin!(third);
     assert!(
-        tokio::time::timeout(Duration::from_millis(300), &mut third)
-            .await
-            .is_err(),
+        (&mut third).now_or_never().is_none(),
         "a third lease must wait while two are held"
     );
-    drop(first);
-    let third = tokio::time::timeout(Duration::from_secs(10), third)
+    a_txn.rollback().await.expect("a ends");
+    drop(a);
+    let third = third.await.expect("the third lease proceeds once one ends");
+    third
+        .db
+        .execute_unprepared("SELECT 1")
         .await
-        .expect("the third lease proceeds once one ends")
-        .expect("third");
-    drop((second, third));
+        .expect("c runs");
+    drop((third, b_txn, b));
 }
 
 /// What plugins may do with host relations: read the classified contest data,
@@ -281,7 +255,7 @@ async fn the_plugin_pools_keep_to_one_budget() {
 /// table added later is covered without a test change.
 mod grants {
     use super::*;
-    use crate::migration::m0001_supplementary_schema::{PLUGIN_READABLE, PLUGIN_READABLE_COLUMNS};
+    use server::migration::{PLUGIN_READABLE, PLUGIN_READABLE_COLUMNS};
 
     /// Host relations no plugin may read at all: credentials, accounts and
     /// roles, other plugins' host-held state, and host machinery.

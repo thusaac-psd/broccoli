@@ -134,6 +134,13 @@ impl PluginSqlPools {
     }
 }
 
+impl PluginSqlPools {
+    /// Connections the plugin pools hold together, in use or idle.
+    pub fn open_connections(&self) -> u32 {
+        self.inner.open()
+    }
+}
+
 impl Inner {
     /// Every plugin pool's connections, open or opening.
     fn built(&self) -> Vec<(String, DatabaseConnection)> {
@@ -179,6 +186,3 @@ impl Inner {
 fn sqlx_pool(db: &DatabaseConnection) -> &sea_orm::sqlx::PgPool {
     db.as_sea_orm().get_postgres_connection_pool()
 }
-
-#[cfg(test)]
-mod tests;

@@ -178,9 +178,11 @@ fn provision_ddl(names: &PluginDbNames, password: &str, path: &str) -> Vec<Strin
              END $$",
             name = quote_literal(&names.role),
         ),
+        // CREATE ROLE leaves every other attribute off, and only a role that
+        // holds an attribute may name it, even to turn it off, so the app
+        // role names just what it holds.
         format!(
-            "ALTER ROLE {role} WITH LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE \
-             NOREPLICATION NOBYPASSRLS PASSWORD {}",
+            "ALTER ROLE {role} WITH LOGIN INHERIT NOCREATEROLE PASSWORD {}",
             quote_literal(password)
         ),
         format!("GRANT {} TO {role}", quote_ident(&names.group)),
