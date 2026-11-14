@@ -180,6 +180,9 @@ class Topology:
                 # Keep the per-submit rate-limit queries on the path, but never trip it.
                 "BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE": "100000000",
                 "BROCCOLI__SERVER__MAX_QUEUED_SUBMISSIONS": "0",
+                # Every point logs in from this host; the per-IP login limit
+                # would refuse the eleventh point within a minute.
+                "BROCCOLI__SERVER__RATE_LIMIT_AUTH": "false",
                 "BROCCOLI__PLUGIN__PLUGINS_DIR": str(self.a.plugins_dir),
             })
             env.update(kv(self.a.server_env))
