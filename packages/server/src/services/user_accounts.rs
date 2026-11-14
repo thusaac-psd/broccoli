@@ -87,7 +87,7 @@ pub async fn insert_account<C: ConnectionTrait>(
     let account = user::ActiveModel {
         username: Set(account.username.clone()),
         display_name: Set(account.display_name.clone()),
-        password: Set(account.password_hash.clone()),
+        password: Set(Some(account.password_hash.clone())),
         ..Default::default()
     }
     .insert(db)

@@ -10,6 +10,9 @@ pub struct UserResponse {
     pub display_name: String,
     #[schema(example = json!(["contestant"]))]
     pub roles: Vec<String>,
+    /// Whether the account has a password. One without (imported without its
+    /// secrets) cannot sign in until an admin sets one.
+    pub has_password: bool,
     #[schema(example = "2026-03-05T10:00:00Z")]
     pub created_at: DateTime<Utc>,
 }
@@ -21,6 +24,7 @@ impl From<crate::entity::user::ModelEx> for UserResponse {
             username: user.username,
             display_name: user.display_name,
             roles: user.roles.into_iter().map(|r| r.name).collect(),
+            has_password: user.password.is_some(),
             created_at: user.created_at,
         }
     }

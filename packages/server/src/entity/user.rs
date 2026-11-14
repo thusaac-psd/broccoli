@@ -16,7 +16,10 @@ pub struct Model {
     /// register next to `admin`.
     pub username: String,
     pub display_name: String,
-    pub password: String,
+    /// The argon2 hash of the account's password, or `None` when it has none
+    /// (an account a bundle brought without its secrets). An account without
+    /// a password cannot sign in until an admin sets one.
+    pub password: Option<String>,
 
     #[sea_orm(has_many, via = "user_role")]
     pub roles: HasMany<super::role::Entity>,

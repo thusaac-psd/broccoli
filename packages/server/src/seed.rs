@@ -161,7 +161,7 @@ pub async fn ensure_bootstrap_admin(
     let user_id = match existing {
         Some(existing) => {
             let mut active: user::ActiveModel = existing.clone().into();
-            active.password = Set(hash_configured_password().await?);
+            active.password = Set(Some(hash_configured_password().await?));
             active.update(&txn).await?;
             refresh_token::Entity::revoke_all_for_user(&txn, existing.id).await?;
             existing.id
@@ -170,7 +170,7 @@ pub async fn ensure_bootstrap_admin(
             user::ActiveModel {
                 username: Set(username.to_string()),
                 display_name: Set(username.to_string()),
-                password: Set(hash_configured_password().await?),
+                password: Set(Some(hash_configured_password().await?)),
                 ..Default::default()
             }
             .insert(&txn)

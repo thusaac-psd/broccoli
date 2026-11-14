@@ -4810,6 +4810,11 @@ export interface components {
       created_at: string;
       display_name: string;
       /**
+       * @description Whether the account has a password. One without (imported without its
+       *     secrets) cannot sign in until an admin sets one.
+       */
+      has_password: boolean;
+      /**
        * Format: int32
        * @example 1
        */

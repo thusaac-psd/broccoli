@@ -157,11 +157,11 @@ pub async fn login(
         .one(&state.db)
         .await?;
 
-    // An unknown username is checked against a dummy hash so both cases cost
-    // the same.
+    // An unknown username and an account without a password are checked
+    // against a dummy hash, so every refusal costs the same and reads the same.
     let is_valid = hash::verify_password_off_thread(
         payload.password.clone(),
-        maybe_user.as_ref().map(|u| u.password.clone()),
+        maybe_user.as_ref().and_then(|u| u.password.clone()),
     )
     .await
     .map_err(|e| AppError::Internal(format!("Password verify error: {e}")))?;

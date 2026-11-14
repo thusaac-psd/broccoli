@@ -465,7 +465,7 @@ mod user_creation {
             .await
             .unwrap()
             .unwrap();
-        assert_ne!(stored.password, " supplied_pass ");
+        assert_ne!(stored.password.as_deref(), Some(" supplied_pass "));
         let list = app.get_with_token(routes::USERS, &manager).await;
         assert!(
             list.body
