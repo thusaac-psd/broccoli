@@ -14,7 +14,7 @@ pub use decision::{Decision, FieldMask};
 pub(crate) use host_rules::{HostScopes, host_decide};
 pub use mask::apply_mask;
 pub use plugin_query::ResourceScope;
-pub(crate) use plugin_query::query_plugins;
+pub(crate) use plugin_query::{ResourceContest, query_plugins};
 pub use subject::{Action, ProblemScope, Resource, Subject};
 pub use visible::Visible;
 
@@ -344,15 +344,21 @@ impl<'a> VisibilityKernel<'a> {
                     // it stays positional with it - `contest_scope` below is
                     // only ever the batch-level hint, never a substitute for
                     // this.
-                    let target_contest_ids: Vec<Option<i32>> = plugin_targets
+                    let target_contests: Vec<ResourceContest> = plugin_targets
                         .iter()
-                        .map(|r| resource_contest_id(r, &scopes))
+                        .map(|r| {
+                            let id = resource_contest_id(r, &scopes);
+                            ResourceContest {
+                                id,
+                                phase: id.and_then(|c| scopes.contest_phases.get(&c).copied()),
+                            }
+                        })
                         .collect();
                     // Each resource's contest type routes it to the queriers
                     // that govern it.
-                    let target_scopes: Vec<ResourceScope> = target_contest_ids
+                    let target_scopes: Vec<ResourceScope> = target_contests
                         .iter()
-                        .map(|cid| match cid.and_then(|c| scopes.contest_types.get(&c)) {
+                        .map(|c| match c.id.and_then(|c| scopes.contest_types.get(&c)) {
                             Some(contest_type) => ResourceScope::ContestType(contest_type.clone()),
                             None => ResourceScope::Unknown,
                         })
@@ -364,7 +370,7 @@ impl<'a> VisibilityKernel<'a> {
                         action,
                         contest_id,
                         &plugin_targets,
-                        &target_contest_ids,
+                        &target_contests,
                         &target_scopes,
                     )
                     .await?;

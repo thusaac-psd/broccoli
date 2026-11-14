@@ -147,6 +147,9 @@ pub(crate) struct HostScopes {
     /// `contest_id -> contest_type` for every active contest the batch
     /// fetched.
     pub contest_types: HashMap<i32, Option<String>>,
+    /// `contest_id -> its phase at the batch's instant`, for every contest in
+    /// `contest_types`.
+    pub contest_phases: HashMap<i32, crate::utils::contest::ContestPhase>,
     /// `contest_id -> whether the subject is registered in it`, for every
     /// contest in `contest_types` when the subject is signed in.
     pub participation: HashMap<i32, bool>,
@@ -347,6 +350,11 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     scopes
         .contest_types
         .extend(contests.values().map(|c| (c.id, c.contest_type.clone())));
+    scopes.contest_phases.extend(
+        contests
+            .values()
+            .map(|c| (c.id, crate::utils::contest::contest_phase(c, now))),
+    );
 
     // Query 2: `contest_user` membership for this subject, across every
     // contest fetched above. Fetched unconditionally (whenever the subject

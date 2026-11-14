@@ -66,6 +66,16 @@ enum QuerierScope {
     ContestTypes(std::collections::BTreeSet<String>),
 }
 
+/// What the kernel resolved about the contest one resource sits in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ResourceContest {
+    /// The resource's authoritative contest (see `resource_contest_id` in
+    /// the kernel), `None` outside any contest.
+    pub id: Option<i32>,
+    /// That contest's phase, when the batch read the contest.
+    pub phase: Option<crate::utils::contest::ContestPhase>,
+}
+
 /// The contest type a resource, or a whole list query, falls under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceScope {
@@ -242,7 +252,7 @@ pub(super) fn scoped_querier_loaded(state: &AppState) -> bool {
 /// queriers. A resource is governed when it sits in a contest of one of
 /// `types`, judged from the core schema the host owns:
 ///
-/// - with a contest (`resource_contest_ids`): that contest's type;
+/// - with a contest (`resource_contests`): that contest's type;
 /// - a problem, sample or attachment reached outside a contest: any contest
 ///   the problem belongs to (`contest_problem`), since a contest plugin may
 ///   hide its problems wherever they are read from;
@@ -255,14 +265,14 @@ async fn blind_decisions(
     state: &AppState,
     types: &std::collections::BTreeSet<String>,
     resources: &[Resource],
-    resource_contest_ids: &[Option<i32>],
+    resource_contests: &[ResourceContest],
 ) -> Vec<Decision> {
     let types: Vec<String> = types.iter().cloned().collect();
     let mut contests = Vec::new();
     let mut problems = Vec::new();
     let mut submissions = Vec::new();
-    for (resource, contest_id) in resources.iter().zip(resource_contest_ids) {
-        match (contest_id, resource) {
+    for (resource, contest) in resources.iter().zip(resource_contests) {
+        match (&contest.id, resource) {
             (Some(c), _) => contests.push(*c),
             (None, Resource::Submission(id)) => submissions.push(*id),
             (None, r) => problems.extend(r.wire_problem_id()),
@@ -318,9 +328,9 @@ async fn blind_decisions(
     };
     resources
         .iter()
-        .zip(resource_contest_ids)
-        .map(|(resource, contest_id)| {
-            let denied = match (contest_id, resource) {
+        .zip(resource_contests)
+        .map(|(resource, contest)| {
+            let denied = match (&contest.id, resource) {
                 (Some(c), _) => contests.contains(c),
                 (None, Resource::Submission(id)) => submissions.contains(id),
                 (None, r) => match r.wire_problem_id() {
@@ -489,14 +499,14 @@ fn meet_positionally(acc: Vec<Decision>, next: Vec<Decision>) -> Vec<Decision> {
 /// otherwise. It is a hint (e.g. useful to a plugin that wants to reject a
 /// query outright for an unrecognized contest), never the authority on any
 /// individual resource's contest — a batch can span several contests at
-/// once, which this single value cannot represent. `resource_contest_ids`
+/// once, which this single value cannot represent. `resource_contests`
 /// (positional with `resources`, same length - see the `debug_assert_eq!`
 /// below) is the authority: each entry becomes that resource's own
 /// `QueryResource.contest_id` on the wire, resolved by the caller
 /// (`VisibilityKernel::decide_batch`) from the resource
 /// itself (`Contest`/`Problem`/`Sample`) or from `host_decide`'s submission
 /// -> contest_id map (`Submission`). Do not re-derive a batch-wide
-/// `contest_id` from `resource_contest_ids` here or anywhere downstream -
+/// `contest_id` from `resource_contests` here or anywhere downstream -
 /// that is exactly the lossy inference this parameter exists to avoid.
 ///
 /// `resource_scopes` (positional with `resources`) routes each resource to
@@ -509,7 +519,7 @@ pub(crate) async fn query_plugins(
     action: Action,
     contest_id: Option<i32>,
     resources: &[Resource],
-    resource_contest_ids: &[Option<i32>],
+    resource_contests: &[ResourceContest],
     resource_scopes: &[ResourceScope],
 ) -> Result<Vec<Decision>, AppError> {
     if resources.is_empty() {
@@ -517,7 +527,7 @@ pub(crate) async fn query_plugins(
     }
     // Compiled out in release, and that is safe for the same reason as
     // `meet_positionally`'s — this has one call site
-    // (`VisibilityKernel::decide_batch`, `mod.rs`), where `target_contest_ids`
+    // (`VisibilityKernel::decide_batch`, `mod.rs`), where `target_contests`
     // is built as `plugin_targets.iter().map(...).collect()`: a `.map()` over
     // `plugin_targets` itself is length-preserving by construction,
     // unconditionally, in any build profile — not something a debug
@@ -526,8 +536,8 @@ pub(crate) async fn query_plugins(
     // preserve length.
     debug_assert_eq!(
         resources.len(),
-        resource_contest_ids.len(),
-        "resource_contest_ids must be positional with resources"
+        resource_contests.len(),
+        "resource_contests must be positional with resources"
     );
     debug_assert_eq!(
         resources.len(),
@@ -543,7 +553,7 @@ pub(crate) async fn query_plugins(
         Blind::Everything => return Ok(vec![Decision::Deny; resources.len()]),
         Blind::Nothing => None,
         Blind::ContestTypes(types) => {
-            Some(blind_decisions(state, &types, resources, resource_contest_ids).await)
+            Some(blind_decisions(state, &types, resources, resource_contests).await)
         }
     };
 
@@ -553,12 +563,13 @@ pub(crate) async fn query_plugins(
 
     let query_resources: Vec<QueryResource> = resources
         .iter()
-        .zip(resource_contest_ids.iter())
-        .map(|(r, cid)| QueryResource {
+        .zip(resource_contests.iter())
+        .map(|(r, contest)| QueryResource {
             kind: r.wire_kind().to_string(),
             id: r.wire_id(),
-            contest_id: *cid,
+            contest_id: contest.id,
             problem_id: r.wire_problem_id(),
+            contest_phase: contest.phase,
         })
         .collect();
 
@@ -1204,14 +1215,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1), Resource::Submission(2)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1237,14 +1254,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1), Resource::Submission(2)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1303,14 +1326,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1), Resource::Submission(2)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1342,14 +1371,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1389,14 +1424,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1455,14 +1496,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1511,14 +1558,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1565,14 +1618,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1610,14 +1669,20 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1)];
 
-        let resource_contest_ids = vec![Some(1); resources.len()];
+        let resource_contests = vec![
+            ResourceContest {
+                id: Some(1),
+                phase: None
+            };
+            resources.len()
+        ];
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &resource_contest_ids,
+            &resource_contests,
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
@@ -1654,7 +1719,10 @@ mod tests {
             Action::Read,
             Some(1),
             &resources,
-            &[Some(1)],
+            &[ResourceContest {
+                id: Some(1),
+                phase: None,
+            }],
             &[ResourceScope::Unknown],
         )
         .await;
