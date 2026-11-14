@@ -394,7 +394,7 @@ export function Sidebar() {
 
       <SidebarFooter>
         <SidebarMenu>
-          <Slot name="sidebar.footer" as="div" />
+          <Slot name="sidebar.footer" as={null} />
           <LocaleSelector />
           <ThemeToggle />
           <SidebarMenuItem>
