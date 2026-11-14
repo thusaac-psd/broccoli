@@ -203,6 +203,42 @@ pub fn truncate_preview(s: &str) -> String {
 
 use crate::registry::{CheckerStageRegistry, ContestTypeRegistry, EvaluatorRegistry};
 
+/// The checker format a problem gets when it names none: the
+/// `default_checker_format` of the one loaded plugin whose manifest declares
+/// one and that registers that format here. `None` when no plugin, or more
+/// than one, declares a default.
+pub async fn default_checker_format(
+    plugins: &plugin_core::registry::PluginRegistry,
+    checker_stage_registry: &CheckerStageRegistry,
+) -> Option<String> {
+    let declared: Vec<(String, String)> = {
+        let registry = plugins.read().ok()?;
+        registry
+            .iter()
+            .filter_map(|(id, entry)| {
+                let format = entry
+                    .manifest
+                    .server
+                    .as_ref()?
+                    .default_checker_format
+                    .clone()?;
+                Some((id.clone(), format))
+            })
+            .collect()
+    };
+    let stages = checker_stage_registry.read().await;
+    let mut provided = declared
+        .into_iter()
+        .filter(|(plugin_id, format)| {
+            stages
+                .get(format)
+                .is_some_and(|handlers| &handlers.plugin_id == plugin_id)
+        })
+        .map(|(_, format)| format);
+    let first = provided.next()?;
+    provided.next().is_none().then_some(first)
+}
+
 pub async fn validate_checker_format(
     format: &str,
     registry: &CheckerStageRegistry,

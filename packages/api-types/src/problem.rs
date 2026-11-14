@@ -15,11 +15,13 @@ pub struct CreateProblemRequest {
     pub memory_limit: i32,
     #[schema(example = "batch")]
     pub problem_type: String,
-    /// How a solution's output is compared with the expected output.
-    /// Defaults to `lines`.
-    #[serde(default = "default_checker_format")]
+    /// How a solution's output is compared with the expected output. When
+    /// omitted, the default the checker plugins declare (see
+    /// `RegistriesResponse::default_checker_format`); required when there is
+    /// none.
+    #[serde(default)]
     #[schema(example = "lines")]
-    pub checker_format: String,
+    pub checker_format: Option<String>,
     /// Contest type that judges submissions made outside any contest.
     /// Required: the server never picks one, because any "first registered"
     /// choice depends on plugin names and can land on a tournament format that
@@ -158,15 +160,6 @@ pub struct TestCaseListItem {
     pub problem_id: i32,
     #[schema(example = "2025-09-01T09:00:00Z")]
     pub created_at: DateTime<Utc>,
-}
-
-/// The checker format of a problem that names none: line by line, ignoring
-/// trailing whitespace on each line and trailing blank lines, so an answer
-/// typed without a final newline matches `print(3)`. `exact` compares bytes.
-pub const DEFAULT_CHECKER_FORMAT: &str = "lines";
-
-fn default_checker_format() -> String {
-    DEFAULT_CHECKER_FORMAT.into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

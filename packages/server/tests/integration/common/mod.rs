@@ -810,6 +810,19 @@ impl TestApp {
                     );
                 }
             }
+            // The stand-in plugin's manifest, for what the host reads from a
+            // checker plugin's manifest (its default checker format).
+            {
+                let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures_config/__test__");
+                let entry = plugin_core::registry::PluginEntry::from_dir(&dir)
+                    .expect("the stand-in plugin's manifest loads");
+                plugins
+                    .get_registry()
+                    .write()
+                    .unwrap()
+                    .insert("__test__".into(), entry);
+            }
             contest_type_registry.write().await.insert(
                 "standard".into(),
                 server::registry::ContestTypeHandlers {

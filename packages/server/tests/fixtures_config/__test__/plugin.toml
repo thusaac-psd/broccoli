@@ -1,0 +1,7 @@
+name = "__test__"
+version = "0.1.0"
+description = "Manifest of the stand-in plugin a plugin-less test app registers its checker formats for: it declares their default"
+
+[server]
+entry = "none.wasm"
+default_checker_format = "lines"

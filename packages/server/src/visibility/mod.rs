@@ -656,6 +656,7 @@ mod tests {
                 }],
                 timers: vec![],
                 sql: Default::default(),
+                default_checker_format: None,
             }),
             web: None,
             translations: HashMap::new(),

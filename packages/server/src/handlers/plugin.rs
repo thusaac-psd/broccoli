@@ -115,7 +115,11 @@ pub async fn list_registries(
     Ok(Json(RegistriesResponse {
         problem_types,
         checker_formats,
-        default_checker_format: broccoli_api_types::problem::DEFAULT_CHECKER_FORMAT.into(),
+        default_checker_format: crate::models::problem::default_checker_format(
+            state.plugins.get_registry(),
+            &state.registries.checker_stage_registry,
+        )
+        .await,
         contest_types,
         languages,
         evaluators,

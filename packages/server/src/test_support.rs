@@ -48,11 +48,13 @@ pub(crate) async fn seed_user_and_problem(db: &DatabaseConnection) -> (i32, i32)
     .await
     .expect("insert user");
     let p = problem::ActiveModel {
+        problem_type: Set("standard".into()),
+        default_contest_type: Set("standard".into()),
         title: Set("test-problem".into()),
         content: Set("c".into()),
         time_limit: Set(1000),
         memory_limit: Set(262_144),
-        checker_format: Set(broccoli_api_types::problem::DEFAULT_CHECKER_FORMAT.into()),
+        checker_format: Set("lines".into()),
         created_at: Set(now),
         updated_at: Set(now),
         ..Default::default()

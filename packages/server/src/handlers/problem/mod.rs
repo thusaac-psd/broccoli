@@ -73,11 +73,20 @@ pub async fn create_problem(
     let default_contest_type = payload.default_contest_type;
 
     validate_problem_type(&problem_type, &state.registries.evaluator_registry).await?;
-    validate_checker_format(
-        &payload.checker_format,
-        &state.registries.checker_stage_registry,
-    )
-    .await?;
+    let checker_format = match payload.checker_format.clone() {
+        Some(format) => format,
+        None => default_checker_format(
+            state.plugins.get_registry(),
+            &state.registries.checker_stage_registry,
+        )
+        .await
+        .ok_or_else(|| {
+            AppError::Validation(
+                "checker_format is required: no loaded checker plugin declares a default".into(),
+            )
+        })?,
+    };
+    validate_checker_format(&checker_format, &state.registries.checker_stage_registry).await?;
     let known_languages = state.registries.known_language_ids().await;
     let submission_format = payload
         .submission_format
@@ -100,7 +109,7 @@ pub async fn create_problem(
         time_limit: Set(payload.time_limit),
         memory_limit: Set(payload.memory_limit),
         problem_type: Set(problem_type),
-        checker_format: Set(payload.checker_format),
+        checker_format: Set(checker_format),
         default_contest_type: Set(default_contest_type),
         show_test_details: Set(payload.show_test_details.unwrap_or(false)),
         is_public: Set(payload.is_public.unwrap_or(false)),

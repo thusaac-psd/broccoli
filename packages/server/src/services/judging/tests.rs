@@ -36,6 +36,7 @@ async fn new_submission(
     let created = create_submission(
         &txn,
         submission::ActiveModel {
+            contest_type: Set("standard".into()),
             files: Set(serde_json::json!([])),
             language: Set("cpp".into()),
             user_id: Set(user_id),
@@ -623,6 +624,7 @@ async fn applying_a_deferred_judgement_moves_its_results_to_a_fresh_epoch() {
 async fn new_code_run(db: &DatabaseConnection) -> code_run::Model {
     let (user_id, problem_id) = owner_ids(db).await;
     code_run::ActiveModel {
+        contest_type: Set("standard".into()),
         files: Set(serde_json::json!([])),
         language: Set("cpp".into()),
         user_id: Set(user_id),

@@ -449,6 +449,7 @@ mod tests {
         let now = Utc::now();
         let (user_id, problem_id) = crate::test_support::seed_user_and_problem(db).await;
         let sub = submission::ActiveModel {
+            contest_type: Set("standard".into()),
             files: Set(serde_json::json!({})),
             language: Set("cpp".into()),
             user_id: Set(user_id),
@@ -636,6 +637,7 @@ mod tests {
         let (_pg, db) = crate::test_support::postgres().await;
         let (user_id, problem_id) = crate::test_support::seed_user_and_problem(&db).await;
         let run = code_run::ActiveModel {
+            contest_type: Set("standard".into()),
             files: Set(serde_json::json!([])),
             language: Set("cpp".into()),
             user_id: Set(user_id),

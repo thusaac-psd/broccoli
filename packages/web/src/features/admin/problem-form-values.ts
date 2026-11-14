@@ -53,7 +53,7 @@ export function problemFormValues(problem: Problem): ProblemFormData {
 export function checkerFormatFor(
   current: string,
   registered: readonly string[],
-  serverDefault: string | undefined,
+  serverDefault: string | null | undefined,
 ): string {
   if (registered.includes(current)) return current;
   if (serverDefault && registered.includes(serverDefault)) return serverDefault;
