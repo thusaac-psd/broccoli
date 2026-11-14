@@ -81,7 +81,7 @@ struct Slot {
 const SESSION_RESET: &str = "SELECT pg_advisory_unlock_all(); UNLISTEN *; RESET ROLE; RESET ALL";
 
 /// Drop the session state a plugin's statements left on `conn`
-/// ([`SESSION_RESET`]). The pools run it on every connection returning to
+/// (`SESSION_RESET`). The pools run it on every connection returning to
 /// them.
 pub async fn reset_session(
     conn: &mut sea_orm::sqlx::PgConnection,
