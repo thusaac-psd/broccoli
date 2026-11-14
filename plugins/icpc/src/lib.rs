@@ -480,57 +480,6 @@ mod filter_tests {
     }
 
     #[test]
-    fn decide_visibility_admin_bypass_allows_everything_without_querying() {
-        let host = Host::mock();
-        let mut sub = subject(Some(99));
-        sub.permissions.push(perm::SUBMISSION_VIEW_ALL.to_string());
-        let req = VisibilityQueryInput {
-            subject: sub,
-            action: "view".to_string(),
-            context: QueryContext {
-                contest_id: Some(10),
-            },
-            resources: vec![submission_resource(7, 10), submission_resource(8, 10)],
-        };
-        let decisions = decide_visibility_decisions(&host, &req).unwrap();
-        assert_eq!(decisions.len(), 2);
-        assert!(
-            decisions
-                .iter()
-                .all(|d| matches!(d, WireDecision::Allow {}))
-        );
-        assert!(host.db.queries().is_empty());
-    }
-
-    #[test]
-    fn decide_visibility_contest_manage_bypass_allows_everything_without_querying() {
-        // A viewer holding `contest:manage` WITHOUT `submission:view_all`
-        // also bypasses to Allow for the whole batch, without querying, the
-        // same as the `SUBMISSION_VIEW_ALL` bypass above.
-        // `icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organizer`
-        // checks the same rule end to end.
-        let host = Host::mock();
-        let mut sub = subject(Some(99));
-        sub.permissions.push(perm::CONTEST_MANAGE.to_string());
-        let req = VisibilityQueryInput {
-            subject: sub,
-            action: "view".to_string(),
-            context: QueryContext {
-                contest_id: Some(10),
-            },
-            resources: vec![submission_resource(7, 10), submission_resource(8, 10)],
-        };
-        let decisions = decide_visibility_decisions(&host, &req).unwrap();
-        assert_eq!(decisions.len(), 2);
-        assert!(
-            decisions
-                .iter()
-                .all(|d| matches!(d, WireDecision::Allow {}))
-        );
-        assert!(host.db.queries().is_empty());
-    }
-
-    #[test]
     fn decide_visibility_issues_exactly_one_batched_query_for_the_whole_batch() {
         // The critical N+1 guard: a batch of MANY submissions must cost ONE
         // query, not one query per submission.
@@ -786,7 +735,7 @@ mod sql_tests {
 #[cfg(any(target_arch = "wasm32", test))]
 use std::collections::HashMap;
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(target_arch = "wasm32")]
 use broccoli_server_sdk::permissions as perm;
 #[cfg(any(target_arch = "wasm32", test))]
 use broccoli_server_sdk::prelude::*;
@@ -878,27 +827,9 @@ fn decide_visibility_decisions(
     host: &Host,
     req: &VisibilityQueryInput,
 ) -> Result<Vec<WireDecision>, SdkError> {
-    // Admin / view-all / organiser bypass, for the whole batch at once - it
-    // does not depend on any individual resource.
-    //
-    // Both `SUBMISSION_VIEW_ALL` and `CONTEST_MANAGE` bypass, matching
-    // `handle_standings` and the rule in `config.rs`: organizers
-    // (`contest:manage`) always see the real board, including a problem-setter
-    // or judge role that lacks `submission:view_all`. See
-    // `icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organizer`
-    // in `packages/server/tests/e2e/plugins/icpc.rs`.
-    if req
-        .subject
-        .permissions
-        .iter()
-        .any(|p| p == perm::SUBMISSION_VIEW_ALL || p == perm::CONTEST_MANAGE)
-    {
-        return Ok(req
-            .resources
-            .iter()
-            .map(|_| WireDecision::Allow {})
-            .collect());
-    }
+    // The host never asks this about staff (`contest:manage` or
+    // `submission:view_all`): organizers see the real data by the host's
+    // rule, so nothing here decides for them.
 
     // Resources this plugin has any opinion about at all: `kind ==
     // "submission"` with a resolvable id and a known contest_id. Everything
