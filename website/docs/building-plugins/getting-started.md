@@ -219,7 +219,8 @@ and `--token`.
 - The host surface lives behind `host`. Use `host.db` with the `Params` builder
   for parameterized SQL, `host.config.get_effective` for layered configuration,
   and `host.log` for logging.
-- Declare a `[config.<plugin>]` block in `plugin.toml` to get a settings form in
-  the admin UI, scoped to a problem, a contest, or a contest problem.
+- Declare a `[config.<namespace>]` block in `plugin.toml` to get a settings form
+  in the admin UI, scoped to a problem, a contest, or a contest problem. See
+  [Configuration](./configuration.md).
 - Mount frontend components into named slots with the web SDK. See the
   `[web]` and `[[web.slots]]` sections of a full plugin manifest.

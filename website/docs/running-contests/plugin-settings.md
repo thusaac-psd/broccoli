@@ -55,3 +55,10 @@ A level you have not set stays at its default and does not override a
 broader level. Only a value you save counts as set.
 
 :::
+
+## Values the server refuses
+
+Every setting has a type and often a range, and the server checks each value
+when you save it. A value of the wrong type, out of range, or not among a
+setting's choices is not saved, and the form marks the field the server
+refused. A saved value therefore always means what the form showed.

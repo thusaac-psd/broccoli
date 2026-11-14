@@ -35,7 +35,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Building plugins',
       collapsed: false,
-      items: ['building-plugins/getting-started'],
+      items: ['building-plugins/getting-started', 'building-plugins/configuration'],
     },
     {
       type: 'category',
