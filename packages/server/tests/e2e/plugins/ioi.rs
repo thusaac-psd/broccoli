@@ -1066,42 +1066,6 @@ async fn exec(app: &E2eTestApp, sql: &str) {
     app.db.execute_unprepared(sql).await.expect(sql);
 }
 
-/// Records every status a submission or judgement row takes, in order, so a
-/// test sees a transient status no poll would catch.
-async fn log_statuses(app: &E2eTestApp) {
-    exec(
-        app,
-        "CREATE TABLE status_log (seq BIGSERIAL PRIMARY KEY, tbl TEXT NOT NULL, status TEXT NOT NULL); \
-         CREATE FUNCTION log_status() RETURNS trigger LANGUAGE plpgsql AS $$ \
-         BEGIN INSERT INTO status_log (tbl, status) VALUES (TG_TABLE_NAME, NEW.status::text); \
-         RETURN NEW; END $$; \
-         CREATE TRIGGER log_submission_status AFTER INSERT OR UPDATE OF status ON submission \
-         FOR EACH ROW EXECUTE FUNCTION log_status(); \
-         CREATE TRIGGER log_judgement_status AFTER INSERT OR UPDATE OF status ON submission_judgement \
-         FOR EACH ROW EXECUTE FUNCTION log_status();",
-    )
-    .await;
-}
-
-async fn logged_statuses(app: &E2eTestApp) -> Vec<(String, String)> {
-    use sea_orm::{ConnectionTrait, DbBackend, Statement};
-    app.db
-        .query_all_raw(Statement::from_string(
-            DbBackend::Postgres,
-            "SELECT tbl, status FROM status_log ORDER BY seq",
-        ))
-        .await
-        .expect("read the status log")
-        .iter()
-        .map(|r| {
-            (
-                r.try_get("", "tbl").unwrap(),
-                r.try_get("", "status").unwrap(),
-            )
-        })
-        .collect()
-}
-
 async fn cut_by_a_disable(change: Change) {
     let app = E2eTestApp::spawn().await;
     let admin = app
@@ -1131,7 +1095,7 @@ async fn cut_by_a_disable(change: Change) {
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
 
-    log_statuses(&app).await;
+    app.log_statuses().await;
     // Hold every operation in the queue, so the judging session is started
     // and waiting for its first result when the plugin goes away.
     app.pause_worker();
@@ -1255,7 +1219,7 @@ async fn cut_by_a_disable(change: Change) {
         .await;
     assert_eq!(res.body["plugin_outage"], outage, "{}", res.text);
 
-    let cut_statuses = logged_statuses(&app).await;
+    let cut_statuses = app.logged_statuses().await;
     assert!(
         !cut_statuses
             .iter()

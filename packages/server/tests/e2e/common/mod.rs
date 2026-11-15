@@ -299,6 +299,47 @@ impl E2eTestApp {
             .await;
     }
 
+    /// Records every status a submission or judgement row takes from now on,
+    /// in order (see [`Self::logged_statuses`]), so a test sees a transient
+    /// status no poll would catch.
+    pub async fn log_statuses(&self) {
+        use sea_orm::ConnectionTrait;
+        self.db
+            .execute_unprepared(
+                "CREATE TABLE status_log (seq BIGSERIAL PRIMARY KEY, tbl TEXT NOT NULL, \
+                 status TEXT NOT NULL); \
+                 CREATE FUNCTION log_status() RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN INSERT INTO status_log (tbl, status) VALUES (TG_TABLE_NAME, NEW.status::text); \
+                 RETURN NEW; END $$; \
+                 CREATE TRIGGER log_submission_status AFTER INSERT OR UPDATE OF status ON submission \
+                 FOR EACH ROW EXECUTE FUNCTION log_status(); \
+                 CREATE TRIGGER log_judgement_status AFTER INSERT OR UPDATE OF status \
+                 ON submission_judgement FOR EACH ROW EXECUTE FUNCTION log_status();",
+            )
+            .await
+            .expect("install the status log");
+    }
+
+    /// Every `(table, status)` [`Self::log_statuses`] recorded, in order.
+    pub async fn logged_statuses(&self) -> Vec<(String, String)> {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+        self.db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT tbl, status FROM status_log ORDER BY seq",
+            ))
+            .await
+            .expect("read the status log")
+            .iter()
+            .map(|r| {
+                (
+                    r.try_get("", "tbl").unwrap(),
+                    r.try_get("", "status").unwrap(),
+                )
+            })
+            .collect()
+    }
+
     /// Converges this server onto the fleet's plugin table now, as its
     /// periodic reconcile does: what a change another replica published does
     /// here.

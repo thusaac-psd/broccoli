@@ -874,7 +874,8 @@ pub(crate) struct ConfirmedSystemError {
 /// What one system-error retry pass did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SystemErrorPass {
-    /// Judgements the platform lost, requeued with no retry spent.
+    /// Judgements the platform lost, or of a parked contest type, requeued
+    /// with no retry spent.
     pub handed_back: u64,
     /// Judgements requeued for another attempt, each spending one of its
     /// submission's system-error retries.
@@ -889,9 +890,11 @@ pub(crate) struct SystemErrorPass {
 /// submission row has not shown (see [`awaits_retry_decision`]), by the
 /// [`SystemErrorClass`] of the error code it carries:
 ///
-/// - `HandBack`: requeued, spending nothing;
+/// - `HandBack`: requeued, spending nothing (no dispatch finalizes one, but
+///   a plugin may write its code);
 /// - `Judging`: requeued while its submission has system-error retries left,
-///   spending one, and confirmed once they are spent;
+///   spending one, and confirmed once they are spent; while its contest type
+///   is parked, requeued spending nothing, so it waits parked;
 /// - `Refused`: never awaits a decision; the submission shows it at once.
 ///
 /// A confirmed error is what the submission shows from then on.
@@ -905,37 +908,37 @@ pub(crate) async fn retry_system_errors(
     let undecided = awaits_retry_decision("u");
     let class = |c: SystemErrorClass| c.sql_matches("u.error_code");
 
-    let ids = pick_current_system_errors(
-        &txn,
-        Binds::default(),
-        &class(SystemErrorClass::HandBack),
-        limit,
-        local,
-    )
-    .await?;
+    // A retry while the contest type is parked would only spend budget on
+    // an attempt nothing can judge, and confirming the error would make the
+    // disable's outage a verdict: the attempt goes back to the queue, parked
+    // with its submission, and is judged again once a provider is enabled.
+    let filter = format!(
+        "({} OR NOT {})",
+        class(SystemErrorClass::HandBack),
+        contest_type_open("s.contest_type"),
+    );
+    let ids = pick_current_system_errors(&txn, Binds::default(), &filter, limit, local).await?;
     let handed_back = requeue(&txn, Unit::Judgement, &ids, Requeue::HandedBack).await?;
 
-    // A retry while the contest type is parked would only spend budget on
-    // an attempt nothing can judge: the error waits for its provider.
     let mut b = Binds::default();
     let filter = format!(
-        "{} AND s.system_error_retries < {} AND {}",
+        "{} AND s.system_error_retries < {}",
         class(SystemErrorClass::Judging),
         b.bind(budget.max()),
-        contest_type_open("s.contest_type"),
     );
     let ids = pick_current_system_errors(&txn, b, &filter, limit, local).await?;
     let requeued = requeue(&txn, Unit::Judgement, &ids, Requeue::SystemErrorRetry).await?;
 
     // Errors that stand: the submission shows each, once. Any replica may
-    // confirm, whatever it can judge.
+    // confirm, whatever it can judge; none confirms one of a parked type.
     let mut b = Binds::default();
     let filter = format!(
         "u.is_current AND {undecided} \
-         AND {judging} AND s.system_error_retries >= {max} \
+         AND {judging} AND s.system_error_retries >= {max} AND {open} \
          AND (s.judge_epoch IS DISTINCT FROM u.judge_epoch OR s.status IS DISTINCT FROM u.status)",
         judging = class(SystemErrorClass::Judging),
         max = b.bind(budget.max()),
+        open = contest_type_open("s.contest_type"),
     );
     let ids: Vec<i32> = pick(&txn, Unit::Judgement, b, filter, Some(limit))
         .await?
@@ -1000,10 +1003,11 @@ async fn pick_current_system_errors(
 pub(crate) enum DispatchFailed {
     /// Finalized as `SystemError`; the system-error retry decides what next.
     SystemError,
-    /// Back to `Queued` without spending a retry: every provider of its
-    /// contest type is disabled fleet-wide, so the failure is the disable's
-    /// (a judging session its provider's unload cut), on whichever replica it
-    /// ran, and the work waits parked for a provider.
+    /// Back to `Queued` without spending a retry: the platform lost the
+    /// attempt, or every provider of its contest type is disabled fleet-wide,
+    /// so the failure is the disable's (a judging session its provider's
+    /// unload cut), on whichever replica it ran, and the work waits parked
+    /// for a provider.
     HandedBack,
     /// Nothing: the dispatch was since requeued, superseded or finished.
     Stale,
@@ -1011,14 +1015,15 @@ pub(crate) enum DispatchFailed {
 
 /// Ends a unit whose dispatch failed, fenced on its epoch: a failure reported
 /// by a dispatch that was since requeued or superseded changes nothing. A
-/// judgement of a parked contest type goes straight back to `Queued`, so it
-/// never shows a `SystemError` it does not have; anything else is finalized
-/// as `SystemError`.
+/// judgement goes straight back to `Queued`, so it never shows a
+/// `SystemError` it does not have, when the platform lost the attempt (an
+/// `error_code` of [`SystemErrorClass::HandBack`]) or its contest type is
+/// parked; anything else is finalized as `SystemError`.
 ///
 /// Every judging session ends here, most after their plugin finalized the
 /// judgement, so the common case is one statement: it finalizes a judgement
-/// whose type is open, or finds nothing to do. Only a judgement of a parked
-/// type takes a second, transactional pass to hand it back.
+/// whose type is open, or finds nothing to do. Only a judgement to hand back
+/// takes a second, transactional pass.
 pub(crate) async fn fail_dispatch(
     db: &DatabaseConnection,
     unit: Unit,
@@ -1027,6 +1032,11 @@ pub(crate) async fn fail_dispatch(
     error_code: &str,
     error_message: &str,
 ) -> Result<DispatchFailed, DbErr> {
+    if unit == Unit::Judgement
+        && SystemErrorClass::of_code(error_code) == SystemErrorClass::HandBack
+    {
+        return hand_back(db, id, judge_epoch, None).await;
+    }
     let in_flight = StatusPhase::InFlight.sql_list();
     let finalize = format!(
         "UPDATE {table} t SET status = '{system_error}', error_code = $3, error_message = $4, \
@@ -1079,18 +1089,19 @@ pub(crate) async fn fail_dispatch(
     if row.try_get::<i64>("", "parked")? == 0 {
         return Ok(DispatchFailed::Stale);
     }
-    hand_back_parked(db, id, judge_epoch, error_code, error_message).await
+    hand_back(db, id, judge_epoch, Some((error_code, error_message))).await
 }
 
-/// The rare second pass of [`fail_dispatch`]: under the submission's lock,
-/// hands back the judgement if its type is still parked, or finalizes it as
-/// `SystemError` if a provider was enabled since.
-async fn hand_back_parked(
+/// The second pass of [`fail_dispatch`]: under the submission's lock, hands
+/// back the in-flight judgement. With `unless_open`, the failure is the
+/// disable's only while the judgement's type is still parked: if a provider
+/// was enabled since, it is finalized as `SystemError` with that code and
+/// message instead.
+async fn hand_back(
     db: &DatabaseConnection,
     id: i32,
     judge_epoch: i32,
-    error_code: &str,
-    error_message: &str,
+    unless_open: Option<(&str, &str)>,
 ) -> Result<DispatchFailed, DbErr> {
     let txn = db.begin().await?;
     let row = txn
@@ -1108,9 +1119,9 @@ async fn hand_back_parked(
             [id.into(), judge_epoch.into()],
         ))
         .await?;
-    let outcome = match row {
-        None => DispatchFailed::Stale,
-        Some(row) if row.try_get::<bool>("", "open")? => {
+    let outcome = match (row, unless_open) {
+        (None, _) => DispatchFailed::Stale,
+        (Some(row), Some((error_code, error_message))) if row.try_get::<bool>("", "open")? => {
             txn.execute_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 format!(
@@ -1127,7 +1138,7 @@ async fn hand_back_parked(
             .await?;
             DispatchFailed::SystemError
         }
-        Some(_) => {
+        (Some(_), _) => {
             requeue(&txn, Unit::Judgement, &[id], Requeue::HandedBack).await?;
             DispatchFailed::HandedBack
         }

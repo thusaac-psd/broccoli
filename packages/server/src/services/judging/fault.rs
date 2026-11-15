@@ -49,6 +49,16 @@ impl DispatchFaults {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
+    /// The fault that lost this dispatch's attempt, if one did: a fault of
+    /// [`SystemErrorClass::HandBack`]. A lost attempt never becomes a
+    /// verdict: its judging session ends without asking the plugin, a
+    /// plugin write that would finalize it is fenced out, and the dispatch
+    /// hands the judgement back (`fail_dispatch`).
+    pub fn lost(&self) -> Option<Recorded> {
+        self.get()
+            .filter(|r| SystemErrorClass::of_fault(r.fault) == SystemErrorClass::HandBack)
+    }
+
     /// The faults of the plugin call tree running on this thread, if any.
     pub fn of_current_call() -> Option<Self> {
         plugin_core::executor::call_locals().map(|locals| Self::of(&locals))
@@ -76,10 +86,10 @@ pub(crate) enum SystemErrorClass {
     Judging,
     /// The platform lost the attempt (the queue was unreachable or lost an
     /// operation, the worker that took it lacks a platform tool, or no worker
-    /// could take it): requeued at once, spending no budget. A worker without
+    /// could take it): handed back to the queue at once, spending no budget,
+    /// and never finalized (see [`DispatchFaults::lost`]). A worker without
     /// its platform tools takes no work, so the next attempt goes to one that
-    /// has them. A judgement cut by its contest plugin's disable never gets
-    /// here: `fail_dispatch` hands it back without finalizing it.
+    /// has them.
     HandBack,
     /// The contest plugin refused the submission: it stands at once.
     Refused,
@@ -93,6 +103,14 @@ impl SystemErrorClass {
             | OperationFault::PlatformToolMissing
             | OperationFault::NoCapableWorker => Self::HandBack,
         }
+    }
+
+    /// The class of a system error carrying `code`.
+    pub(crate) fn of_code(code: &str) -> Self {
+        [Self::HandBack, Self::Refused]
+            .into_iter()
+            .find(|class| class.codes().contains(&code))
+            .unwrap_or(Self::Judging)
     }
 
     /// The error codes of this class; a `Judging` error carries any other
@@ -141,8 +159,28 @@ mod tests {
         for fault in OperationFault::ALL {
             let class = SystemErrorClass::of_fault(fault);
             assert!(class.codes().contains(&fault.code()), "{fault:?}");
+            assert_eq!(SystemErrorClass::of_code(fault.code()), class, "{fault:?}");
             assert!(!SystemErrorClass::Judging.sql_matches("c").contains("IN ()"));
         }
+        assert_eq!(
+            SystemErrorClass::of_code(SubmissionDlqErrorCode::PLUGIN_REFUSED),
+            SystemErrorClass::Refused
+        );
+        assert_eq!(
+            SystemErrorClass::of_code("PLUGIN_NO_VERDICT"),
+            SystemErrorClass::Judging
+        );
+    }
+
+    #[test]
+    fn a_hand_back_fault_loses_the_attempt() {
+        let faults = DispatchFaults::default();
+        assert!(faults.lost().is_none());
+        faults.record(OperationFault::NoCapableWorker, "none accepting");
+        assert_eq!(
+            faults.lost().map(|r| r.fault),
+            Some(OperationFault::NoCapableWorker)
+        );
     }
 
     #[test]

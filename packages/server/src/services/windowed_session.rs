@@ -149,6 +149,14 @@ pub trait WindowedSession: Send + Sync + Sized + 'static {
     /// Default no-op.
     fn note_retry_failed(&self, _slot_id: Self::SlotId, _error: &anyhow::Error) {}
 
+    /// Whether the platform lost the attempt this session judges (see
+    /// `judging::DispatchFaults::lost`): then no result reaches the plugin
+    /// any more, and the session ends as [`SessionEnd::Lost`]. Default: a
+    /// session that judges no unit has no attempt to lose.
+    fn attempt_lost(&self) -> bool {
+        false
+    }
+
     /// Called exactly once, when the session has ended and its active slots
     /// are cancelled. A driver whose session judges a unit must leave that
     /// unit terminal here, whatever `end` is.
@@ -175,6 +183,10 @@ pub enum SessionEnd {
     Decided(SessionAction),
     /// The plugin could not decide: its callback failed or the plugin is gone.
     Aborted(String),
+    /// The platform lost the attempt the session judges before the plugin
+    /// decided: the unit goes back to the queue, and the plugin is not asked
+    /// about it.
+    Lost,
     /// This server is shutting down. The session's work is released with the
     /// server's leases and judged again elsewhere, so nothing is recorded.
     Interrupted,
@@ -221,6 +233,8 @@ pub async fn run_windowed_session<S: WindowedSession>(
 }
 
 /// Ask the plugin's callback about `event`; a failed call ends the session.
+/// Every event reaches the plugin here, so a lost attempt ends the session
+/// here before any of its results does.
 async fn decide<S: WindowedSession>(
     driver: &S,
     event: SlotEvent<S::SlotId, S::Final>,
@@ -228,6 +242,9 @@ async fn decide<S: WindowedSession>(
     completed: usize,
     total: usize,
 ) -> Result<SessionDecision<S::SlotId>, SessionEnd> {
+    if driver.attempt_lost() {
+        return Err(SessionEnd::Lost);
+    }
     driver
         .call_callback(event, state, completed, total)
         .await
@@ -416,6 +433,9 @@ mod tests {
     struct Scripted {
         answers: Mutex<Vec<anyhow::Result<SessionAction>>>,
         ends: std::sync::Arc<Mutex<Vec<String>>>,
+        /// Whether the attempt is lost once this many callbacks were made.
+        lost_after: Option<usize>,
+        calls: std::sync::Arc<Mutex<usize>>,
     }
 
     impl Scripted {
@@ -426,6 +446,8 @@ mod tests {
             Self {
                 answers: Mutex::new(answers),
                 ends: Default::default(),
+                lost_after: None,
+                calls: Default::default(),
             }
         }
     }
@@ -482,6 +504,7 @@ mod tests {
             _completed: usize,
             _total: usize,
         ) -> anyhow::Result<SessionDecision<usize>> {
+            *self.calls.lock().unwrap() += 1;
             let action = self
                 .answers
                 .lock()
@@ -501,10 +524,16 @@ mod tests {
         async fn cancel_selected(&self, _active: &mut Vec<(usize, String)>, _ids: &HashSet<usize>) {
         }
 
+        fn attempt_lost(&self) -> bool {
+            self.lost_after
+                .is_some_and(|n| *self.calls.lock().unwrap() >= n)
+        }
+
         async fn on_end(&self, end: SessionEnd) {
             self.ends.lock().unwrap().push(match end {
                 SessionEnd::Decided(action) => format!("decided {action:?}"),
                 SessionEnd::Aborted(_) => "aborted".into(),
+                SessionEnd::Lost => "lost".into(),
                 SessionEnd::Interrupted => "interrupted".into(),
             });
         }
@@ -564,6 +593,29 @@ mod tests {
         )
         .await;
         assert_eq!(ends, ["decided Continue"]);
+    }
+
+    #[tokio::test]
+    async fn a_lost_attempt_ends_the_session_before_its_next_result_reaches_the_plugin() {
+        for lost_after in [0, 1] {
+            let mut driver = Scripted::new((0..3).map(|_| Ok(SessionAction::Continue)).collect());
+            driver.lost_after = Some(lost_after);
+            let (ends, calls) = (driver.ends.clone(), driver.calls.clone());
+            run_windowed_session(
+                driver,
+                vec![(); 3],
+                1,
+                Duration::from_secs(1),
+                serde_json::Value::Null,
+            )
+            .await;
+            assert_eq!(*ends.lock().unwrap(), ["lost"]);
+            assert_eq!(
+                *calls.lock().unwrap(),
+                lost_after,
+                "callbacks before the loss"
+            );
+        }
     }
 
     #[test]

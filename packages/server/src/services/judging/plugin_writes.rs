@@ -10,25 +10,17 @@ use common::StatusPhase;
 use super::fault::Recorded;
 use super::unit::{Unit, cascade};
 
-/// `update` as the dispatch's platform `fault` decides it: an update that
-/// ends the judgement as a system error carries the fault's code and
-/// description, whatever the plugin reported, so the system-error retry
-/// treats it by its cause (see [`super::fault`]). Any other update is
-/// unchanged.
-pub(crate) fn with_dispatch_fault(
-    mut update: SubmissionUpdate,
-    fault: Option<Recorded>,
-) -> SubmissionUpdate {
-    let Some(fault) = fault else {
-        return update;
-    };
-    let ends_in_system_error = update.status.is_some_and(|s| s.is_terminal())
-        && matches!(update.verdict, Some(Some(Verdict::SystemError)));
-    if ends_in_system_error {
-        update.error_code = Some(Some(fault.fault.code().to_string()));
-        update.error_message = Some(Some(fault.message));
-    }
-    update
+/// `update`, unless it would finalize an attempt the platform lost (see
+/// [`super::DispatchFaults::lost`]): then `None`, a write fenced out as a
+/// stale dispatch's is, whatever verdict the plugin computed from the lost
+/// operations. The dispatch hands the judgement back when it ends. Any other
+/// update is unchanged.
+pub(crate) fn unless_lost(
+    update: SubmissionUpdate,
+    lost: Option<Recorded>,
+) -> Option<SubmissionUpdate> {
+    let finalizes = update.status.is_some_and(|s| s.is_terminal());
+    (lost.is_none() || !finalizes).then_some(update)
 }
 
 /// The write fence every plugin write to a judgement goes through: the row
@@ -239,35 +231,27 @@ mod tests {
 
     fn lost() -> Option<Recorded> {
         Some(Recorded {
-            fault: OperationFault::OperationLost,
-            message: "lost".into(),
+            fault: OperationFault::NoCapableWorker,
+            message: "none accepting".into(),
         })
     }
 
     #[test]
-    fn a_system_error_under_a_platform_fault_carries_the_faults_code() {
-        let u = with_dispatch_fault(
-            update(SubmissionStatus::Judged, Some(Verdict::SystemError)),
-            lost(),
-        );
-        assert_eq!(u.error_code, Some(Some("OPERATION_LOST".into())));
-        assert_eq!(u.error_message, Some(Some("lost".into())));
+    fn no_verdict_finalizes_a_lost_attempt() {
+        for verdict in [Some(Verdict::SystemError), Some(Verdict::Accepted), None] {
+            let u = update(SubmissionStatus::Judged, verdict.clone());
+            assert!(unless_lost(u, lost()).is_none(), "{verdict:?}");
+        }
+        let u = update(SubmissionStatus::CompilationError, None);
+        assert!(unless_lost(u, lost()).is_none());
     }
 
     #[test]
-    fn other_updates_keep_what_the_plugin_wrote() {
-        for u in [
-            update(SubmissionStatus::Judged, Some(Verdict::Accepted)),
-            update(SubmissionStatus::Running, Some(Verdict::SystemError)),
-        ] {
-            let before = u.error_code.clone();
-            assert_eq!(with_dispatch_fault(u, lost()).error_code, before);
-        }
+    fn progress_of_a_lost_attempt_and_every_write_of_a_sound_one_stand() {
+        let u = update(SubmissionStatus::Running, None);
+        assert_eq!(unless_lost(u.clone(), lost()), Some(u));
         let u = update(SubmissionStatus::Judged, Some(Verdict::SystemError));
-        assert_eq!(
-            with_dispatch_fault(u, None).error_code,
-            Some(Some("PLUGIN_SAYS".into()))
-        );
+        assert_eq!(unless_lost(u.clone(), None), Some(u));
     }
 
     /// Records bound values and hands back sequential `$N` placeholders, so a
