@@ -4,7 +4,11 @@ import {
   useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import { useAuth, viewerCacheKey } from '@broccoli/web-sdk/auth';
-import { pollInterval, unsettledMessageKey } from '@broccoli/web-sdk/hooks';
+import {
+  pollInterval,
+  unsettledMessageKey,
+  useQueryState,
+} from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   CONTEST_MANAGE,
@@ -14,6 +18,8 @@ import { useProblemPresentation } from '@broccoli/web-sdk/problem';
 import {
   Badge,
   Button,
+  QueryErrorState,
+  RefreshFailedNotice,
   Sheet,
   SheetContent,
   SheetDescription,
@@ -116,7 +122,7 @@ function MatchDetail({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const { data: match } = useQuery({
+  const query = useQuery({
     queryKey: [
       'codelink-bracket-match',
       contestId,
@@ -128,12 +134,25 @@ function MatchDetail({
       match?.state === 'decided' ? false : 3_000,
     ),
   });
+  const state = useQueryState(query);
+  const match = query.data;
 
   const permissions = auth.user?.permissions ?? [];
   const isStaff = permissions.includes(CONTEST_MANAGE);
   const canViewAll = permissions.includes(SUBMISSION_VIEW_ALL);
   const orderingLeft = useStartsIn(match?.ordering_deadline_ms ?? null);
 
+  if (state.status === 'error') {
+    return (
+      <QueryErrorState
+        error={state.error}
+        retry={state.retry}
+        retrying={state.retrying}
+        failure={t('codelink-bracket.match.loadFailed')}
+        className="p-6"
+      />
+    );
+  }
   if (!match) {
     return (
       <div className="space-y-4 p-6">
@@ -196,6 +215,9 @@ function MatchDetail({
       </SheetHeader>
 
       <div className="space-y-6 px-6 py-5">
+        {state.status === 'data' && state.refreshError != null && (
+          <RefreshFailedNotice retry={state.retry} />
+        )}
         <AttentionBanner
           match={match}
           contestId={contestId}

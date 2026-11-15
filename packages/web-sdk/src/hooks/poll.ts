@@ -46,13 +46,13 @@ function failuresInARow(query: PolledQuery<unknown>): number {
  * contest).
  *
  * - While polls fail, the last good data stays on screen (show the
- *   `refreshError` of `queryState`) and each failure doubles the wait, up to
+ *   `refreshError` of `useQueryState`) and each failure doubles the wait, up to
  *   `POLL_BACKOFF_MAX_MS` and spread by jitter: a server in trouble is not
  *   asked once a second by every seat at once.
+ * - A poll that has never loaded backs off the same way: a page opened
+ *   while the server was down fills in once it is back. `useQueryState`
+ *   keeps the error on screen while each poll asks again.
  * - A failure asking again cannot change (no permission, gone) stops.
- * - A failure with nothing on screen stops: the error shows with its retry.
- *   Polling on would reset the query to loading on every poll, flickering
- *   between the two.
  */
 export function pollInterval<T>(
   every: number | ((data: T | undefined) => number | false),
@@ -67,13 +67,7 @@ export function pollInterval<T>(
     const failures = failuresInARow(query);
     if (pace === false || state.error == null) return pace;
     const kind = errorKind(state.error);
-    if (
-      state.data === undefined ||
-      kind === 'forbidden' ||
-      kind === 'notFound'
-    ) {
-      return false;
-    }
+    if (kind === 'forbidden' || kind === 'notFound') return false;
     const policy = { baseMs: pace, maxMs: Math.max(pace, POLL_BACKOFF_MAX_MS) };
     return Math.max(pace, backoffDelay(failures, policy, random));
   };

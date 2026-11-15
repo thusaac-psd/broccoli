@@ -117,10 +117,11 @@
 'submissions.bulkRejudge.enterMode' = "Rejudge"
 'submissions.bulkRejudge.exitMode' = "Cancel Rejudge"
 'submissions.bulkRejudge.noSelection' = "Select at least one submission first."
+'submissions.waitingForPlugin.disabled' = "Waiting: its contest plugin is disabled"
+'submissions.waitingForPlugin.unavailable' = "Waiting: its contest plugin is unavailable"
 'submissions.bulkRejudge.queued' = "Queued {count, plural, one {# submission} other {# submissions}} for rejudge."
 'submissions.bulkRejudge.error' = "Failed to bulk rejudge submissions."
 'submissions.bulkRejudge.applyImmediately' = "Apply immediately"
-'submissions.inContest' = "· contest #{id}"
 'submissions.pinnedTo' = "Pinned to {worker}"
 
 # Homepage
@@ -149,6 +150,8 @@
 'problem.notFound' = "Problem not found."
 'problem.standardIo' = "Standard input / output"
 'problem.loadFailed' = "Could not load this problem."
+'problem.pluginOutage.disabled' = "Submitting is unavailable while the plugin that judges this problem is disabled."
+'problem.pluginOutage.unavailable' = "Submitting is unavailable right now. Try again in a moment."
 'problem.sampleLoadFailed' = "Could not load this sample."
 'problem.notAvailableNow' = "This problem is not available right now."
 'problem.loadError' = "Failed to load problem."

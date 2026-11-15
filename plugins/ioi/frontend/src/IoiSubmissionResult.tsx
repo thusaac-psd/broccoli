@@ -24,10 +24,9 @@ import { type ReactNode, useEffect, useRef, useState } from 'react';
 
 import { resolveFeedbackVisibility } from './feedback-visibility';
 import { useIoiApi } from './hooks/useIoiApi';
-import { useIsIoiContest } from './hooks/useIsIoiContest';
+import { useIoiContestInfo } from './hooks/useIoiContestInfo';
 import { canViewPrivilegedSubmissionFeedback } from './permissions';
 import type {
-  ContestInfoResponse,
   SubtaskInfo,
   SubtaskScoreEntry,
   SubtaskScoresResponse,
@@ -730,9 +729,6 @@ export function IoiSubmissionResult({
 }: IoiSubmissionResultProps) {
   const contestId = submission?.contest_id;
   const problemId = submission?.problem_id;
-  const { isIoi, isLoading: guardLoading } = useIsIoiContest(
-    contestId ?? undefined,
-  );
   const api = useIoiApi();
   const queryClient = useQueryClient();
   const { t } = useTranslation();
@@ -762,27 +758,19 @@ export function IoiSubmissionResult({
 
   const taskConfigQuery = useQuery<TaskConfigResponse>({
     queryKey: ['ioi-task-config', contestId, problemId],
-    enabled: !!contestId && !!problemId && isIoi,
+    enabled: !!contestId && !!problemId,
     queryFn: () => api.getTaskConfig(contestId!, problemId!),
     staleTime: 5 * 60 * 1000,
     retry: 2,
   });
   const taskConfig = taskConfigQuery.data;
 
-  const contestInfoQuery = useQuery<ContestInfoResponse>({
-    queryKey: ['ioi-contest-info', contestId],
-    enabled: !!contestId && isIoi,
-    queryFn: () => api.getContestInfo(contestId!),
-    staleTime: 5 * 60 * 1000,
-    retry: 2,
-  });
-  const contestInfo = contestInfoQuery.data;
+  const contestInfo = useIoiContestInfo(contestId ?? undefined).data;
 
   const { data: tokenStatus } = useQuery({
     queryKey: ['ioi-token-status', contestId],
     enabled:
       !!contestId &&
-      isIoi &&
       !!taskConfig &&
       resolveFeedbackVisibility({
         taskConfig,
@@ -819,14 +807,14 @@ export function IoiSubmissionResult({
     refetchInterval: pollInterval(() =>
       submission?.status === 'Running' ? 1000 : false,
     ),
-    enabled: !!contestId && !!submission?.id && isIoi && feedbackNeedsSubtasks,
+    enabled: !!contestId && !!submission?.id && feedbackNeedsSubtasks,
     queryFn: () => api.getSubmissionSubtaskScores(contestId!, submission!.id),
     retry: 2,
   });
   const subtaskScoresData = subtaskScoresQuery.data;
 
-  // Not IOI or no submission - fall through to default slot children
-  if (guardLoading || !isIoi) return <>{children}</>;
+  // Mounted only on IOI contests (the slot's `contest_type`); with no
+  // submission yet, the host's own view shows.
   if (!submission) return <>{children}</>;
 
   // Host handles code viewer + compile output above the slot for these states

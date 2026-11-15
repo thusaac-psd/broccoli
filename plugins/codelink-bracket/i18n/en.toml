@@ -29,6 +29,7 @@
 'codelink-bracket.countdown.waitingForServer' = 'Deadline passed {time} ago. Waiting for the server to decide.'
 'codelink-bracket.countdown.decided' = 'This game has been decided.'
 
+'codelink-bracket.match.loadFailed' = 'Could not load this match.'
 'codelink-bracket.match.heading' = 'Round {round}: {a} vs {b}'
 'codelink-bracket.match.awaitingJudge' = 'The deadline passed while an earlier submission was still being judged. The result is not known yet.'
 'codelink-bracket.match.stuckJudge' = 'Submission #{id} was still being judged when the grace period ran out. Check its result (rejudge it if it is stuck), then decide the match.'

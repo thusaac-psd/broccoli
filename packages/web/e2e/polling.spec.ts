@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { mockApi, NOW } from './api';
+import { mockApi, NOW, runClockUntil } from './api';
 
 // A poll that fails keeps what the page already shows, says the view is not
 // up to date, and asks again ever more slowly: thousands of seats asking a
@@ -51,22 +51,28 @@ test('a submission whose polls fail stays on screen and is asked for ever more s
   expect(polls).toBeLessThan(20);
 });
 
-test('a submission that cannot be loaded shows the failure, with a retry, instead of polling it', async ({
+test('a submission opened while the server fails keeps being asked for, and shows once it answers', async ({
   page,
 }) => {
   await page.clock.install({ time: NOW });
   await mockApi(page, 'contestant');
-  let polls = 0;
-  await page.route('**/api/v1/submissions/1', (route) => {
-    polls += 1;
-    return route.fulfill({ status: 502, body: 'Bad Gateway' });
-  });
+  let down = true;
+  await page.route('**/api/v1/submissions/1', (route) =>
+    down
+      ? route.fulfill({ status: 502, body: 'Bad Gateway' })
+      : route.fallback(),
+  );
   await page.goto('/submissions/1');
-  await page.clock.runFor(5_000);
-  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
-  const shown = polls;
+  await runClockUntil(page, () =>
+    expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({
+      timeout: 500,
+    }),
+  );
 
-  await page.clock.runFor(60_000);
-  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
-  expect(polls).toBe(shown);
+  down = false;
+  await runClockUntil(page, () =>
+    expect(page.getByRole('heading', { name: '#1', exact: true })).toBeVisible({
+      timeout: 500,
+    }),
+  );
 });

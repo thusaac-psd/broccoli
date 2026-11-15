@@ -253,7 +253,7 @@ component = "SubtaskEditor"
 # Contestant-facing slots
 [[web.slots]]
 name = "ranking.content"
-position = "wrap"
+position = "replace"
 component = "IoiScoreboard"
 contest_type = "ioi"
 

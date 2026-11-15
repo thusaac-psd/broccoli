@@ -1,6 +1,7 @@
 import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
 import {
   getStatusLabel,
+  type PluginOutage,
   type ShownStatus,
   type Verdict,
   type Withheld,
@@ -56,21 +57,38 @@ function getVerdictVariant(verdict: Verdict): BadgeVariant {
   }
 }
 
+/** What decides the badge of a submission's outcome, as its responses carry it. */
+export interface VerdictOutcome {
+  verdict?: Verdict | null;
+  status?: ShownStatus;
+  withheld?: Withheld | null;
+  /** Set while the submission waits for its contest type's provider. */
+  plugin_outage?: PluginOutage | null;
+}
+
 /**
  * The badge of a submission's outcome. A withheld outcome (`status` `null`)
- * says why it is withheld (`withheld`), never that it is still running.
+ * says why it is withheld (`withheld`), never that it is still running; a
+ * submission waiting for its contest's plugin says so, never just "Queued".
  */
 export function getVerdictBadge(
-  verdict: Verdict | null | undefined,
-  status: ShownStatus,
+  { verdict, status, withheld, plugin_outage }: VerdictOutcome,
   t: I18nContextValue['t'],
-  withheld?: Withheld | null,
 ): {
   label: string;
   variant: BadgeVariant;
 } {
   if (status == null) {
     return { label: withheldLabel(withheld, t), variant: 'outline' };
+  }
+  if (plugin_outage) {
+    return {
+      label:
+        plugin_outage.state === 'disabled'
+          ? t('submissions.waitingForPlugin.disabled')
+          : t('submissions.waitingForPlugin.unavailable'),
+      variant: 'outline',
+    };
   }
   if (status === 'Pending' || status === 'Compiling' || status === 'Running') {
     return { label: getStatusLabel(status, t), variant: 'outline' };

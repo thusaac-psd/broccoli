@@ -1,5 +1,5 @@
 import { parseApiError, useApiClient } from '@broccoli/web-sdk/api';
-import { queryState } from '@broccoli/web-sdk/hooks';
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { PluginDetail } from '@broccoli/web-sdk/plugin';
 import {
@@ -398,7 +398,7 @@ export function ResourceConfigDialog({
   const scopeKind = scope.scope;
   // The query the schema list comes from, so a failed or unfinished load is
   // never shown as "no settings".
-  const source = queryState<unknown>(
+  const source = useQueryState<unknown>(
     scopeKind === 'plugin' ? pluginsQuery : configQuery,
   );
   const pluginsWithSchemas = useMemo(() => {

@@ -1,5 +1,5 @@
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
-import { queryState } from '@broccoli/web-sdk/hooks';
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
@@ -62,7 +62,7 @@ export function ManageRolePermissionsDialog({
     },
   });
   const { isFetching } = permissionsQuery;
-  const permissionsState = queryState(permissionsQuery);
+  const permissionsState = useQueryState(permissionsQuery);
   const permissions = permissionsQuery.data ?? NO_PERMISSIONS;
 
   async function handleGrantPermission() {

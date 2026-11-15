@@ -20,6 +20,7 @@
 'icpc.scoreboard.header.penalty' = '罚时'
 
 # IcpcContestInfo
+'icpc.contestInfo.loadFailed' = '无法加载本场比赛的 ICPC 规则。'
 'icpc.contestInfo.title' = 'ACM-ICPC 赛制'
 'icpc.contestInfo.description' = '按通过题数排名，题数相同时按总罚时排名。每次错误提交增加 {penalty_minutes} 分钟罚时。'
 'icpc.contestInfo.ceCount' = '编译错误计入尝试次数。'

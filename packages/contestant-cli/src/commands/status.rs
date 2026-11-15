@@ -1,10 +1,12 @@
 use std::io::IsTerminal;
 
 use anyhow::Context;
-use broccoli_cli_core::api::submission::{SubmissionListItem, SubmissionResponse};
+use broccoli_cli_core::api::submission::{
+    SubmissionListItem, SubmissionListResponse, SubmissionResponse,
+};
 use broccoli_cli_core::client::Client;
 use broccoli_cli_core::model::{StatusDisplay, SubmissionStatus, Verdict, VerdictDisplay};
-use broccoli_cli_core::{config, fmt};
+use broccoli_cli_core::{config, fmt, resolve};
 use clap::Args;
 use console::{Style, StyledObject, style};
 use dialoguer::Select;
@@ -42,25 +44,7 @@ pub fn run(args: StatusArgs) -> anyhow::Result<()> {
         );
     };
 
-    // scope to own submissions; never fall back to unscoped (would leak others' rows)
-    let mut self_uid = None;
-    for attempt in 0..2 {
-        match client.me() {
-            Ok(m) => {
-                self_uid = Some(m.id.to_string());
-                break;
-            }
-            Err(_) if attempt < 1 => std::thread::sleep(std::time::Duration::from_millis(250)),
-            Err(e) => {
-                return Err(e).context(
-                    "Could not determine your account (GET /auth/me failed). \
-                     Check your connection and try again.",
-                );
-            }
-        }
-    }
-    let self_uid = self_uid.expect("loop sets uid or returns early");
-    let subs = client.list_contest_submissions(&cid, None, Some(&self_uid), None, Some(50))?;
+    let subs = own_recent_submissions(&client, &cid)?;
     if subs.data.is_empty() {
         println!("  No submissions yet.");
         return Ok(());
@@ -85,6 +69,35 @@ pub fn run(args: StatusArgs) -> anyhow::Result<()> {
         print_recent_table(&subs.data);
     }
     Ok(())
+}
+
+/// The caller's own latest submissions in the contest `contest` refers to
+/// (its id or its title, as `.broccoli` or the config saved it).
+fn own_recent_submissions(
+    client: &Client,
+    contest: &str,
+) -> anyhow::Result<SubmissionListResponse> {
+    let contest = resolve::contest_id(client, contest)?;
+    // scope to own submissions; never fall back to unscoped (would leak others' rows)
+    let mut self_uid = None;
+    for attempt in 0..2 {
+        match client.me() {
+            Ok(m) => {
+                self_uid = Some(m.id);
+                break;
+            }
+            Err(_) if attempt < 1 => std::thread::sleep(std::time::Duration::from_millis(250)),
+            Err(e) => {
+                return Err(e).context(
+                    "Could not determine your account (GET /auth/me failed). \
+                     Check your connection and try again.",
+                );
+            }
+        }
+    }
+    let self_uid = self_uid.expect("loop sets uid or returns early");
+    let subs = client.list_contest_submissions(contest, None, Some(self_uid), None, Some(50))?;
+    Ok(subs)
 }
 
 // display-column widths shared by picker and table so rows line up under CJK
@@ -264,8 +277,81 @@ fn verdict_style(v: &Verdict) -> StyledObject<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::pad;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    use broccoli_cli_core::session::Session;
+
+    use super::*;
     use unicode_width::UnicodeWidthStr;
+
+    /// A server answering each request by its path, recording what it was
+    /// asked for.
+    fn serve(answer: fn(&str) -> String) -> (Client, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let log = asked.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                let path = request.split(' ').nth(1).unwrap_or_default().to_string();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim_end().is_empty() {
+                        break;
+                    }
+                }
+                let body = answer(&path);
+                log.lock().unwrap().push(path);
+                let mut stream = stream;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        (Client::new(Session::explicit(url, "token".into())), asked)
+    }
+
+    #[test]
+    fn status_finds_the_contest_a_name_refers_to() {
+        let (client, asked) = serve(|path| {
+            let at = "\"2030-01-01T00:00:00Z\"";
+            if path == "/api/v1/contests" {
+                format!(
+                    r#"{{"data":[{{"id":3,"title":"Spring Round","start_time":{at},
+                    "end_time":{at},"is_public":true,"submissions_visible":false,
+                    "show_compile_output":true,"show_participants_list":true,
+                    "created_at":{at},"updated_at":{at},"phase":"running"}}],
+                    "pagination":{{"page":1,"per_page":20,"total":1,"total_pages":1}}}}"#
+                )
+            } else if path == "/api/v1/auth/me" {
+                r#"{"id":7,"username":"alice","display_name":"Alice","roles":[],"permissions":[]}"#
+                    .into()
+            } else {
+                r#"{"data":[],"pagination":{"per_page":50,"total":null,"total_pages":null,
+                "has_more":false,"next_cursor":null}}"#
+                    .into()
+            }
+        });
+        let subs = own_recent_submissions(&client, "Spring Round").unwrap();
+        assert!(subs.data.is_empty());
+        assert_eq!(
+            asked.lock().unwrap().last().unwrap(),
+            "/api/v1/contests/3/submissions?user_id=7&per_page=50"
+        );
+    }
 
     #[test]
     fn pad_fills_to_display_width() {

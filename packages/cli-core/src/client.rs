@@ -1,3 +1,4 @@
+use crate::ids::{ContestId, ProblemId};
 use anyhow::Context;
 use broccoli_api_types::auth::{
     CliRefreshRequest, CliTokenResponse, DeviceCodeResponse, DeviceTokenRequest, LoginRequest,
@@ -41,6 +42,10 @@ pub enum ClientError {
         server: ServerUrl,
         cause: NetworkCause,
     },
+    /// The request could not be built, so nothing was sent: a bug in the
+    /// caller, never a network failure.
+    #[error("Could not build the request to {url}: {detail}.")]
+    InvalidRequest { url: String, detail: String },
     /// Something answered at the address, but not the Broccoli API: a route
     /// the API has was missing (404/405 without the API's error body), or a
     /// success carried a body that is not the API's.
@@ -165,10 +170,18 @@ impl Client {
         self.server().join(path)
     }
 
-    fn network(&self, e: ureq::Error) -> ClientError {
-        ClientError::Network {
-            server: self.server().clone(),
-            cause: NetworkCause::of(&e),
+    /// What a request to `url` that failed with `e` means: a request that
+    /// could not be built never left, so it is not the network's fault.
+    fn transport(&self, url: &str, e: ureq::Error) -> ClientError {
+        match e {
+            ureq::Error::Http(_) | ureq::Error::BadUri(_) => ClientError::InvalidRequest {
+                url: url.to_string(),
+                detail: e.to_string(),
+            },
+            e => ClientError::Network {
+                server: self.server().clone(),
+                cause: NetworkCause::of(&e),
+            },
         }
     }
 
@@ -177,12 +190,13 @@ impl Client {
     /// once; an explicit token's 401 is the answer.
     fn authorized(
         &self,
+        url: &str,
         send: impl Fn(&str) -> Result<Response, ureq::Error>,
     ) -> ClientResult<Response> {
         let token = self.session.bearer()?;
         let resp = self
             .timed(|| send(&format!("Bearer {token}")))
-            .map_err(|e| self.network(e))?;
+            .map_err(|e| self.transport(url, e))?;
         if resp.status().as_u16() != 401 || !self.session.can_refresh() {
             return Ok(resp);
         }
@@ -190,7 +204,7 @@ impl Client {
             .refresh(&token, |refresh| self.exchange(refresh))?;
         let token = self.session.bearer()?;
         self.timed(|| send(&format!("Bearer {token}")))
-            .map_err(|e| self.network(e))
+            .map_err(|e| self.transport(url, e))
     }
 
     /// Present a refresh token to `POST /auth/cli-refresh`.
@@ -223,12 +237,14 @@ impl Client {
 
     fn get(&self, path: &str) -> ClientResult<Response> {
         let url = self.url(path);
-        self.authorized(|bearer| self.agent.get(&url).header("Authorization", bearer).call())
+        self.authorized(&url, |bearer| {
+            self.agent.get(&url).header("Authorization", bearer).call()
+        })
     }
 
     fn post<B: Serialize>(&self, path: &str, body: &B) -> ClientResult<Response> {
         let url = self.url(path);
-        self.authorized(|bearer| {
+        self.authorized(&url, |bearer| {
             self.agent
                 .post(&url)
                 .header("Authorization", bearer)
@@ -238,7 +254,7 @@ impl Client {
 
     fn delete(&self, path: &str) -> ClientResult<Response> {
         let url = self.url(path);
-        self.authorized(|bearer| {
+        self.authorized(&url, |bearer| {
             self.agent
                 .delete(&url)
                 .header("Authorization", bearer)
@@ -248,8 +264,9 @@ impl Client {
 
     /// POST to an endpoint that needs no session.
     fn post_anonymous<B: Serialize>(&self, path: &str, body: &B) -> ClientResult<Response> {
-        self.timed(|| self.agent.post(&self.url(path)).send_json(body))
-            .map_err(|e| self.network(e))
+        let url = self.url(path);
+        self.timed(|| self.agent.post(&url).send_json(body))
+            .map_err(|e| self.transport(&url, e))
     }
 
     /// Pass a success through; turn anything else into the error it means.
@@ -335,7 +352,7 @@ impl Client {
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
         let content_type = format!("multipart/form-data; boundary={boundary}");
         let url = self.url(path);
-        self.authorized(|bearer| {
+        self.authorized(&url, |bearer| {
             self.agent
                 .post(&url)
                 .header("Authorization", bearer)
@@ -385,14 +402,15 @@ impl Client {
     /// refresh token it finds in the refresh cookie, where the web client
     /// keeps it.
     pub fn logout(&self, refresh_token: &str) -> ClientResult<()> {
+        let url = self.url("/api/v1/auth/logout");
         let resp = self
             .timed(|| {
                 self.agent
-                    .post(&self.url("/api/v1/auth/logout"))
+                    .post(&url)
                     .header("Cookie", format!("{REFRESH_COOKIE}={refresh_token}"))
                     .send_empty()
             })
-            .map_err(|e| self.network(e))?;
+            .map_err(|e| self.transport(&url, e))?;
         self.parse_empty(resp)
     }
 
@@ -445,17 +463,17 @@ impl Client {
         self.parse_response(resp)
     }
 
-    pub fn get_contest(&self, id: &str) -> ClientResult<ContestResponse> {
+    pub fn get_contest(&self, id: ContestId) -> ClientResult<ContestResponse> {
         let resp = self.get(&format!("/api/v1/contests/{}", id))?;
         self.parse_response(resp)
     }
 
-    pub fn get_contest_my_info(&self, id: &str) -> ClientResult<ContestUserContextResponse> {
+    pub fn get_contest_my_info(&self, id: ContestId) -> ClientResult<ContestUserContextResponse> {
         let resp = self.get(&format!("/api/v1/contests/{}/me", id))?;
         self.parse_response(resp)
     }
 
-    pub fn register_for_contest(&self, id: &str) -> ClientResult<()> {
+    pub fn register_for_contest(&self, id: ContestId) -> ClientResult<()> {
         let resp = self.post(
             &format!("/api/v1/contests/{}/register", id),
             &serde_json::json!({}),
@@ -464,27 +482,30 @@ impl Client {
     }
 
     /// DELETE on the register path.
-    pub fn unregister_from_contest(&self, id: &str) -> ClientResult<()> {
+    pub fn unregister_from_contest(&self, id: ContestId) -> ClientResult<()> {
         let resp = self.delete(&format!("/api/v1/contests/{}/register", id))?;
         self.parse_empty(resp)
     }
 
     pub fn list_contest_problems(
         &self,
-        contest_id: &str,
+        contest_id: ContestId,
     ) -> ClientResult<Vec<ContestProblemResponse>> {
         let resp = self.get(&format!("/api/v1/contests/{}/problems", contest_id))?;
         self.parse_response(resp)
     }
 
-    pub fn list_clarifications(&self, contest_id: &str) -> ClientResult<ClarificationListResponse> {
+    pub fn list_clarifications(
+        &self,
+        contest_id: ContestId,
+    ) -> ClientResult<ClarificationListResponse> {
         let resp = self.get(&format!("/api/v1/contests/{}/clarifications", contest_id))?;
         self.parse_response(resp)
     }
 
     pub fn create_clarification(
         &self,
-        contest_id: &str,
+        contest_id: ContestId,
         content: &str,
     ) -> ClientResult<ClarificationResponse> {
         let body = CreateClarificationRequest {
@@ -503,7 +524,7 @@ impl Client {
     /// A standalone problem, read outside every contest. A problem reached
     /// through a contest must use [`Client::get_contest_problem`] instead, or
     /// another contest holding the same problem can hide it.
-    pub fn get_problem(&self, problem_id: &str) -> ClientResult<ProblemResponse> {
+    pub fn get_problem(&self, problem_id: ProblemId) -> ClientResult<ProblemResponse> {
         let resp = self.get(&format!("/api/v1/problems/{}", problem_id))?;
         self.parse_response(resp)
     }
@@ -512,8 +533,8 @@ impl Client {
     /// server decides visibility for that contest only.
     pub fn get_contest_problem(
         &self,
-        contest_id: &str,
-        problem_id: &str,
+        contest_id: ContestId,
+        problem_id: ProblemId,
     ) -> ClientResult<ProblemResponse> {
         let resp = self.get(&format!(
             "/api/v1/contests/{}/problems/{}",
@@ -524,8 +545,8 @@ impl Client {
 
     pub fn get_contest_problem_samples(
         &self,
-        contest_id: &str,
-        problem_id: &str,
+        contest_id: ContestId,
+        problem_id: ProblemId,
     ) -> ClientResult<ProblemSamplesResponse> {
         let resp = self.get(&format!(
             "/api/v1/contests/{}/problems/{}/samples",
@@ -536,8 +557,8 @@ impl Client {
 
     pub fn create_contest_submission(
         &self,
-        contest_id: &str,
-        problem_id: &str,
+        contest_id: ContestId,
+        problem_id: ProblemId,
         files: Vec<SubmissionFileDto>,
         language: &str,
         contest_type: Option<&str>,
@@ -560,7 +581,7 @@ impl Client {
     /// Standalone submission, outside any contest.
     pub fn create_submission(
         &self,
-        problem_id: &str,
+        problem_id: ProblemId,
         files: Vec<SubmissionFileDto>,
         language: &str,
         contest_type: Option<&str>,
@@ -587,16 +608,16 @@ impl Client {
     /// `pagination.next_cursor` (URL-safe already); omit it for the first page.
     pub fn list_contest_submissions(
         &self,
-        contest_id: &str,
-        problem_id: Option<&str>,
-        user_id: Option<&str>,
+        contest_id: ContestId,
+        problem_id: Option<ProblemId>,
+        user_id: Option<i32>,
         cursor: Option<&str>,
         per_page: Option<u32>,
     ) -> ClientResult<SubmissionListResponse> {
         let mut path = format!("/api/v1/contests/{}/submissions", contest_id);
         let mut params: Vec<String> = Vec::new();
         if let Some(pid) = problem_id {
-            params.push(format!("problem_id={}", pid));
+            params.push(format!("problem_id={pid}"));
         }
         if let Some(uid) = user_id {
             params.push(format!("user_id={}", uid));
@@ -624,8 +645,8 @@ impl Client {
     /// Server requires 1-10 custom test cases.
     pub fn run_contest_code(
         &self,
-        contest_id: &str,
-        problem_id: &str,
+        contest_id: ContestId,
+        problem_id: ProblemId,
         files: Vec<SubmissionFileDto>,
         language: &str,
         custom_test_cases: Vec<CustomTestCaseInput>,
@@ -648,7 +669,7 @@ impl Client {
     /// Standalone problem, outside any contest.
     pub fn run_code(
         &self,
-        problem_id: &str,
+        problem_id: ProblemId,
         files: Vec<SubmissionFileDto>,
         language: &str,
         custom_test_cases: Vec<CustomTestCaseInput>,
@@ -756,11 +777,19 @@ impl ApiError {
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.code.as_str() {
-            _ if self.rejects_token() => write!(
-                f,
-                "{} Run `broccoli login` to re-authenticate.",
-                self.message
-            ),
+            _ if self.rejects_token() => {
+                // The server's message is a phrase that may lack its stop.
+                let message = self.message.trim_end();
+                let stop = if message.ends_with(['.', '!', '?']) {
+                    ""
+                } else {
+                    "."
+                };
+                write!(
+                    f,
+                    "{message}{stop} Run `broccoli login` to re-authenticate."
+                )
+            }
             Self::UNSTRUCTURED if self.message.is_empty() => {
                 write!(f, "Server returned {}", self.status)
             }
@@ -852,12 +881,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_request_that_cannot_be_built_is_not_reported_as_unreachable() {
+        let url: ServerUrl = "http://127.0.0.1:9".parse().unwrap();
+        let client = Client::new(Session::explicit(url, "token".into()));
+        let err = client.get("/api/v1/contests/Spring Round").unwrap_err();
+        assert!(matches!(err, ClientError::InvalidRequest { .. }), "{err}");
+    }
+
     fn error(status: u16, code: &str) -> ApiError {
         ApiError {
             status,
             code: code.into(),
             message: String::new(),
         }
+    }
+
+    #[test]
+    fn a_rejected_token_reads_as_whole_sentences() {
+        let rejected = ApiError {
+            status: 401,
+            code: "TOKEN_INVALID".into(),
+            message: "Invalid or expired token".into(),
+        };
+        assert_eq!(
+            rejected.to_string(),
+            "Invalid or expired token. Run `broccoli login` to re-authenticate."
+        );
+        let punctuated = ApiError {
+            message: "Invalid or expired token.".into(),
+            ..rejected
+        };
+        assert_eq!(
+            punctuated.to_string(),
+            "Invalid or expired token. Run `broccoli login` to re-authenticate."
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { queryState, useLanguageName } from '@broccoli/web-sdk/hooks';
+import { useLanguageName, useQueryState } from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import { isTerminalStatus } from '@broccoli/web-sdk/submission';
 import {
@@ -38,7 +38,7 @@ export function SubmissionDetailView({
   const { t } = useTranslation();
   const languageName = useLanguageName();
   const format = useFormat();
-  const detail = queryState(useSubmissionDetail(submissionId));
+  const detail = useQueryState(useSubmissionDetail(submissionId));
   const submission = detail.status === 'data' ? detail.data : null;
 
   const returnTarget = useSubmissionReturn(
@@ -81,10 +81,13 @@ export function SubmissionDetailView({
   const isTerminal = isTerminalStatus(status);
 
   const { label: verdictLabel, variant: verdictVariant } = getVerdictBadge(
-    result?.verdict ?? null,
-    status,
+    {
+      verdict: result?.verdict,
+      status,
+      withheld: submission.withheld,
+      plugin_outage: submission.plugin_outage,
+    },
     t,
-    submission.withheld,
   );
   const scoreDisplay = getSubmissionScoreDisplay(status, result?.score, t);
 

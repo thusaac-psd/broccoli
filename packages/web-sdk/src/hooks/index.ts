@@ -12,7 +12,11 @@ export {
   unsettledMessageKey,
 } from '@/hooks/idempotency';
 export * from '@/hooks/poll';
-export * from '@/hooks/query-state';
+export {
+  type QueryLike,
+  type QueryState,
+  useQueryState,
+} from '@/hooks/query-state';
 export * from '@/hooks/use-async-submit';
 export * from '@/hooks/use-idempotent-request';
 export * from '@/hooks/use-mobile';

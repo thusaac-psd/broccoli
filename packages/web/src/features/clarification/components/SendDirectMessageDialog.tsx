@@ -1,5 +1,5 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { queryState } from '@broccoli/web-sdk/hooks';
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button, Input, QueryErrorState } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
@@ -72,7 +72,7 @@ function RecipientPicker({
       return data;
     },
   });
-  const participantsState = queryState(participantsQuery);
+  const participantsState = useQueryState(participantsQuery);
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();

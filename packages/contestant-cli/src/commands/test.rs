@@ -11,6 +11,7 @@ use broccoli_cli_core::api::code_run::{CodeRunResponse, CustomTestCaseInput};
 use broccoli_cli_core::api::submission::SubmissionFileDto;
 use broccoli_cli_core::client::Client;
 use broccoli_cli_core::config::{self, load_user_config};
+use broccoli_cli_core::ids::{ContestId, ProblemId};
 use broccoli_cli_core::model::{StatusDisplay, SubmissionStatus, VerdictDisplay};
 use broccoli_cli_core::resolve;
 use broccoli_cli_core::tui::progress::Progress;
@@ -86,20 +87,17 @@ pub fn run(args: TestArgs) -> anyhow::Result<()> {
     // --local works offline from the cached samples: a contest id and a
     // `#ID` problem reference need no server to resolve.
     let resolved = resolve::contest_id(&client, contest_ref).and_then(|c| {
-        let p = resolve::problem(&client, &c, problem_ref)?;
+        let p = resolve::problem(&client, c, problem_ref)?;
         println!("{}  Problem {}", style("→").blue().bold(), style(&p).cyan());
-        Ok((c, p.id.to_string()))
+        Ok((c, p.id))
     });
     let (contest_id, problem_id) = match resolved {
         Ok(ids) => ids,
         Err(e) if args.local => {
-            let offline = contest_ref
-                .trim()
-                .parse::<i64>()
-                .ok()
+            let offline = resolve::offline_contest_id(contest_ref)
                 .zip(resolve::explicit_problem_id(problem_ref));
             match offline {
-                Some((c, p)) => (c.to_string(), p.to_string()),
+                Some(ids) => ids,
                 None => {
                     return Err(e.context(
                         "Offline, --local needs a numeric contest id and a #ID problem reference",
@@ -109,8 +107,6 @@ pub fn run(args: TestArgs) -> anyhow::Result<()> {
         }
         Err(e) => return Err(e),
     };
-    let contest_id = contest_id.as_str();
-    let problem_id = problem_id.as_str();
 
     println!(
         "{}  Fetching sample test cases...",
@@ -187,8 +183,8 @@ pub fn run(args: TestArgs) -> anyhow::Result<()> {
 
 /// Load sample test cases from the offline cache; `None` if absent.
 fn load_cached_samples(
-    contest_id: &str,
-    problem_id: &str,
+    contest_id: ContestId,
+    problem_id: ProblemId,
 ) -> Option<Vec<broccoli_cli_core::api::problem::SampleCase>> {
     let samples_dir = config::problem_cache_dir(contest_id, problem_id).join("samples");
     let mut cases = Vec::new();

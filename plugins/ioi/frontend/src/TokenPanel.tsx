@@ -6,13 +6,17 @@ import {
 } from '@broccoli/web-sdk/api';
 import { pollInterval, unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { Button } from '@broccoli/web-sdk/ui';
+import {
+  Button,
+  QueryErrorState,
+  RefreshFailedNotice,
+} from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
 
 import { useIoiApi } from './hooks/useIoiApi';
-import { useIsIoiContest } from './hooks/useIsIoiContest';
+import { useIoiContestInfo } from './hooks/useIoiContestInfo';
 import type { TokenStatusResponse } from './types';
 
 interface TokenPanelProps {
@@ -36,7 +40,8 @@ function formatCountdown(totalSeconds: number) {
 
 export function TokenPanel({ submission, contestId }: TokenPanelProps) {
   const cId = contestId ?? submission?.contest_id ?? undefined;
-  const { isIoi, contestInfo, isLoading: guardLoading } = useIsIoiContest(cId);
+  const infoQuery = useIoiContestInfo(cId);
+  const contestInfo = infoQuery.data;
   const api = useIoiApi();
   const queryClient = useQueryClient();
   const { t } = useTranslation();
@@ -48,11 +53,11 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
   >(null);
 
   const tokenMode = contestInfo?.token_mode;
-  const showTokens = isIoi && tokenMode && tokenMode !== 'none';
+  const showTokens = tokenMode !== undefined && tokenMode !== 'none';
 
-  const { data: tokenStatus } = useQuery({
+  const tokenQuery = useQuery({
     queryKey: ['ioi-token-status', cId],
-    enabled: !!cId && showTokens === true,
+    enabled: !!cId && showTokens,
     queryFn: async (): Promise<TokenStatusResponse | null> => {
       try {
         return await api.getTokenStatus(cId!);
@@ -68,8 +73,8 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
       }
     },
     refetchInterval: pollInterval(60000),
-    retry: false,
   });
+  const tokenStatus = tokenQuery.data;
 
   const countdownTargetMs = useMemo(() => {
     if (!tokenStatus) return null;
@@ -118,8 +123,23 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
     return () => clearTimeout(timer);
   }, [cId, countdownExpired, countdownTargetMs, regenChecks, queryClient]);
 
-  if (guardLoading || !isIoi || !showTokens) return null;
-  if (!tokenStatus) return null;
+  // Mounted only on IOI contests (the slot's `contest_type`): a failure to
+  // read the contest's rules or tokens is said, never read as "no tokens".
+  const failed = !contestInfo ? infoQuery : !tokenStatus ? tokenQuery : null;
+  if (failed?.isError) {
+    return (
+      <div className="rounded-lg border border-border bg-card">
+        <QueryErrorState
+          error={failed.error}
+          retry={() => void failed.refetch()}
+          retrying={failed.isFetching}
+          failure={t('ioi.tokenPanel.loadFailed')}
+          className="py-4"
+        />
+      </div>
+    );
+  }
+  if (!showTokens || !tokenStatus) return null;
 
   const canUseToken =
     submission &&
@@ -176,6 +196,12 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
       <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-3">
         {t('ioi.tokenPanel.title')}
       </div>
+      {tokenQuery.isError && (
+        <RefreshFailedNotice
+          retry={() => void tokenQuery.refetch()}
+          className="mb-3"
+        />
+      )}
 
       {/* Token display */}
       {tokenStatus.total > 0 && (

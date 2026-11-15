@@ -78,25 +78,32 @@ test('a slow poll is never made faster by failing', () => {
   );
 });
 
-test('a failure with nothing on screen stops polling: the error shows with its retry', () => {
-  assert.equal(
-    every(polled({ error: serverError, errorUpdateCount: 1 })),
-    false,
-  );
+test('a poll that has never loaded keeps asking, ever more slowly', () => {
+  const query = polled({});
+  const fail = () => {
+    query.state.error = serverError;
+    query.state.errorUpdateCount += 1;
+    return every(query);
+  };
+  assert.deepEqual([fail(), fail(), fail()], [2_000, 4_000, 8_000]);
+  for (let i = 0; i < 10; i += 1) fail();
+  assert.equal(fail(), POLL_BACKOFF_MAX_MS);
 });
 
-test('a failure asking again cannot change stops polling', () => {
+test('a failure asking again cannot change stops polling, loaded or not', () => {
   for (const status of [403, 404]) {
+    const error = RequestError.fromBody(status, {});
     assert.equal(
       every(
         polled({
           data: { done: false },
-          error: RequestError.fromBody(status, {}),
+          error,
           dataUpdateCount: 1,
           errorUpdateCount: 1,
         }),
       ),
       false,
     );
+    assert.equal(every(polled({ error, errorUpdateCount: 1 })), false);
   }
 });

@@ -10,7 +10,7 @@ import type { ReactNode } from 'react';
 import { errorKind } from '@/api/errors';
 import { useErrorMessage } from '@/api/use-error-message';
 import { useSignIn } from '@/auth/sign-in';
-import { type QueryLike, queryState } from '@/hooks/query-state';
+import { type QueryLike, useQueryState } from '@/hooks/query-state';
 import { useTranslation } from '@/i18n';
 import { Button } from '@/ui/button';
 import { Skeleton } from '@/ui/skeleton';
@@ -223,7 +223,7 @@ export function QueryView<T>({
   empty,
   children,
 }: QueryViewProps<T>) {
-  const state = queryState(query, isEmpty);
+  const state = useQueryState(query, isEmpty);
   switch (state.status) {
     case 'idle':
       return idle;

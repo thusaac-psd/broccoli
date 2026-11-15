@@ -66,3 +66,22 @@ test('retry refetches', () => {
   if (state.status === 'error') state.retry();
   assert.equal(refetched, 1);
 });
+
+test('a query asked again after failing keeps its failure on screen until it answers', () => {
+  const error = new RequestError(502, 'BAD_GATEWAY');
+  const asking = query<number[]>({
+    fetchStatus: 'fetching',
+    isFetching: true,
+    errorUpdateCount: 1,
+  });
+  const state = queryState(asking, isEmpty, error);
+  assert.equal(state.status, 'error');
+  assert.equal(state.status === 'error' && state.retrying, true);
+  assert.equal(state.status === 'error' && state.error, error);
+
+  // A query that never failed is loading, whatever another one failed with.
+  assert.equal(
+    queryState({ ...asking, errorUpdateCount: 0 }, isEmpty, error).status,
+    'loading',
+  );
+});

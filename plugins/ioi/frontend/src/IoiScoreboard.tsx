@@ -1,17 +1,15 @@
 import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { formatRelativeSeconds, useTranslation } from '@broccoli/web-sdk/i18n';
-import { Label, Switch } from '@broccoli/web-sdk/ui';
+import { Label, QueryView, Switch } from '@broccoli/web-sdk/ui';
 import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
-import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { useIoiApi } from './hooks/useIoiApi';
-import { useIsIoiContest } from './hooks/useIsIoiContest';
 import type { ScoreboardEntry, ScoreboardResponse } from './types';
 
 interface IoiScoreboardProps {
   contestId?: number;
-  children?: ReactNode;
 }
 
 const MEDAL_COLORS = ['#D4AF37', '#A8A8A8', '#CD7F32'] as const;
@@ -164,8 +162,8 @@ function ScoreCell({ score, max }: { score: number; max: number }) {
   );
 }
 
-export function IoiScoreboard({ contestId, children }: IoiScoreboardProps) {
-  const { isIoi, isLoading: guardLoading } = useIsIoiContest(contestId);
+// Mounted only on IOI contests: the slot declares `contest_type = "ioi"`.
+export function IoiScoreboard({ contestId }: IoiScoreboardProps) {
   const api = useIoiApi();
   const { t, locale } = useTranslation();
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -176,20 +174,16 @@ export function IoiScoreboard({ contestId, children }: IoiScoreboardProps) {
   // eslint-disable-next-line no-restricted-properties -- see the tick below
   const [now, setNow] = useState(Date.now());
 
-  const {
-    data: scoreboard,
-    isLoading,
-    isError,
-    dataUpdatedAt,
-  } = useQuery<ScoreboardResponse>({
+  const query = useQuery<ScoreboardResponse>({
     queryKey: ['ioi-scoreboard', contestId],
-    enabled: !!contestId && isIoi,
+    enabled: contestId !== undefined,
     queryFn: () => api.getScoreboard(contestId!),
     retry: 2,
     refetchInterval: pollInterval<ScoreboardResponse>((scoreboard) =>
       autoRefresh && scoreboard?.phase === 'during' ? 30000 : false,
     ),
   });
+  const { data: scoreboard, dataUpdatedAt } = query;
 
   useEffect(() => {
     const currentPhase = scoreboard?.phase ?? null;
@@ -219,24 +213,55 @@ export function IoiScoreboard({ contestId, children }: IoiScoreboardProps) {
     return () => clearInterval(id);
   }, [dataUpdatedAt]);
 
-  if (guardLoading || !isIoi) return <>{children}</>;
+  // `now` ticks behind `dataUpdatedAt` right after a refetch; never read
+  // that as a time in the future.
+  const updated = formatRelativeSeconds(
+    Math.min(0, (dataUpdatedAt - now) / 1000),
+    locale,
+  );
 
-  if (isError && !scoreboard) {
-    return (
-      <div className="p-6 text-center rounded-md bg-red-500/[0.06] text-red-600 dark:text-red-400 text-[13px]">
-        {t('ioi.scoreboard.loadError')}
-      </div>
-    );
-  }
+  return (
+    <QueryView
+      query={query}
+      loading={
+        <div className="p-6 text-center text-muted-foreground">
+          {t('ioi.scoreboard.loading')}
+        </div>
+      }
+      failure={t('ioi.scoreboard.loadError')}
+    >
+      {(scoreboard) => (
+        <>
+          {phaseBanner && (
+            <PhaseBanner
+              type={phaseBanner}
+              onDismiss={() => setPhaseBanner(null)}
+            />
+          )}
+          <Rankings
+            scoreboard={scoreboard}
+            updated={updated}
+            autoRefresh={autoRefresh}
+            setAutoRefresh={setAutoRefresh}
+          />
+        </>
+      )}
+    </QueryView>
+  );
+}
 
-  if (isLoading || !scoreboard) {
-    return (
-      <div className="p-6 text-center text-muted-foreground">
-        {t('ioi.scoreboard.loading')}
-      </div>
-    );
-  }
-
+function Rankings({
+  scoreboard,
+  updated,
+  autoRefresh,
+  setAutoRefresh,
+}: {
+  scoreboard: ScoreboardResponse;
+  updated: string;
+  autoRefresh: boolean;
+  setAutoRefresh: (on: boolean) => void;
+}) {
+  const { t } = useTranslation();
   const { phase, rankings } = scoreboard;
   const showTimeTiebreaker = scoreboard.scoreboard_tiebreaker !== 'equal_rank';
 
@@ -259,32 +284,16 @@ export function IoiScoreboard({ contestId, children }: IoiScoreboardProps) {
   const maxTotal =
     Object.values(maxPerProblem).reduce((sum, v) => sum + v, 0) || 1;
 
-  // `now` ticks behind `dataUpdatedAt` right after a refetch; never read
-  // that as a time in the future.
-  const updated = formatRelativeSeconds(
-    Math.min(0, (dataUpdatedAt - now) / 1000),
-    locale,
-  );
-
   // The board never widens its container: a narrow screen scrolls the
   // table inside its border instead of clipping its last columns.
   return (
     <div className="min-w-0 max-w-full">
-      {phaseBanner && (
-        <PhaseBanner
-          type={phaseBanner}
-          onDismiss={() => setPhaseBanner(null)}
-        />
-      )}
-
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <PhaseBar phase={phase} />
         <div className="flex items-center gap-3">
-          {dataUpdatedAt > 0 && (
-            <span className="text-[11px] text-muted-foreground">
-              {t('ioi.scoreboard.lastUpdated', { when: updated })}
-            </span>
-          )}
+          <span className="text-[11px] text-muted-foreground">
+            {t('ioi.scoreboard.lastUpdated', { when: updated })}
+          </span>
           {phase === 'during' && (
             <Label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer font-normal">
               <Switch
