@@ -121,7 +121,6 @@
 'submissions.bulkRejudge.queued' = "已将 {count} 条提交加入重测队列。"
 'submissions.bulkRejudge.error' = "批量重测失败。"
 'submissions.bulkRejudge.applyImmediately' = "立即应用"
-'submissions.inContest' = "· 比赛 #{id}"
 'submissions.pinnedTo' = "固定到 {worker}"
 
 # Homepage

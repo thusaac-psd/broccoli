@@ -120,7 +120,6 @@
 'submissions.bulkRejudge.queued' = "Queued {count, plural, one {# submission} other {# submissions}} for rejudge."
 'submissions.bulkRejudge.error' = "Failed to bulk rejudge submissions."
 'submissions.bulkRejudge.applyImmediately' = "Apply immediately"
-'submissions.inContest' = "· contest #{id}"
 'submissions.pinnedTo' = "Pinned to {worker}"
 
 # Homepage

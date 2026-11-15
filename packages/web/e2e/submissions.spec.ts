@@ -1,35 +1,33 @@
 import { expect, test } from '@playwright/test';
 
-import { cursorPage, mockApi, submission } from './api';
+import { mockApi } from './api';
 
-// A contestant's list of contest submissions names who submitted each row
-// once it holds other people's rows too; with only their own, it does not.
-test('the contest submissions list names the submitter of peer rows', async ({
+test('a contest submission names its author by name and username, with no ids', async ({
   page,
 }) => {
-  await mockApi(page, 'contestant');
-  await page.route('**/api/v1/contests/1/submissions?**', (route) =>
-    route.fulfill({
-      json: cursorPage([
-        {
-          ...submission(5, 3, 'Accepted'),
-          username: 'bob',
-          display_name: 'Bob',
-        },
-        submission(4, 2, 'WrongAnswer'),
-      ]),
-    }),
-  );
+  await mockApi(page, 'admin');
   await page.goto('/contests/1/submissions');
-  await expect(page.getByRole('columnheader', { name: 'User' })).toBeVisible();
-  await expect(page.getByRole('cell', { name: /Bob/ })).toBeVisible();
+  const author = page.getByRole('cell', { name: /Alice/ }).first();
+  await expect(author).toHaveText('Alicealice');
+  await expect(page.getByText(/contest #/)).toHaveCount(0);
 });
 
-test('the contest submissions list of only their own rows names nobody', async ({
+test('a long problem title stays on one line on a phone, in full in its title', async ({
   page,
 }) => {
-  await mockApi(page, 'contestant');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockApi(page, 'admin');
   await page.goto('/contests/1/submissions');
-  await expect(page.getByRole('row').nth(1)).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: 'User' })).toHaveCount(0);
+  const title = page
+    .getByText('Shortest Path on a Very Long Named Grid Problem')
+    .first();
+  await expect(title).toHaveAttribute(
+    'title',
+    'Shortest Path on a Very Long Named Grid Problem',
+  );
+  const { height, lineHeight } = await title.evaluate((element) => ({
+    height: element.getBoundingClientRect().height,
+    lineHeight: parseFloat(getComputedStyle(element).lineHeight),
+  }));
+  expect(height).toBeLessThanOrEqual(lineHeight + 1);
 });
