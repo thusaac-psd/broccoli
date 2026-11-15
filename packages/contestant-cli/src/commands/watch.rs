@@ -25,6 +25,7 @@ use broccoli_cli_core::clock::ServerClock;
 
 use super::contest::{Countdown, local_time};
 use broccoli_cli_core::fmt;
+use broccoli_cli_core::ids::{ContestId, ProblemId};
 use broccoli_cli_core::model::{
     ClarificationKind, StatusDisplay, SubmissionStatus, Verdict, VerdictDisplay,
 };
@@ -90,7 +91,7 @@ impl Tab {
 
 struct SubmissionRow {
     id: String,
-    problem_id: String,
+    problem_id: ProblemId,
     problem: String,
     status: Option<SubmissionStatus>,
     verdict: Option<Verdict>,
@@ -102,7 +103,7 @@ struct SubmissionRow {
 struct ProblemRow {
     label: String,
     title: String,
-    problem_id: String,
+    problem_id: ProblemId,
     solved: bool,
 }
 
@@ -165,7 +166,7 @@ impl Overlay {
 }
 
 struct AppData {
-    contest_id: String,
+    contest_id: ContestId,
     contest_title: String,
     /// The contest's timeline, for the header countdown.
     start_time: DateTime<Utc>,
@@ -357,10 +358,8 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
         &super::context::contest_ref(args.contest_id.as_deref())?,
     )?;
 
-    let contest = client.get_contest(&contest_id)?;
-    let problems = client
-        .list_contest_problems(&contest_id)
-        .unwrap_or_default();
+    let contest = client.get_contest(contest_id)?;
+    let problems = client.list_contest_problems(contest_id).unwrap_or_default();
     // Must scope the submissions poll to our own uid; an unscoped fallback would
     // leak every participant's submissions on a `submissions_visible` contest.
     let self_uid = {
@@ -384,7 +383,7 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
     };
 
     let mut app = AppData {
-        contest_id: contest_id.clone(),
+        contest_id,
         contest_title: contest.title,
         start_time: contest.start_time,
         end_time: contest.end_time,
@@ -415,7 +414,7 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
     let client = Arc::new(client);
 
     let (tx, rx) = mpsc::channel::<PollUpdate>();
-    let cid = contest_id.clone();
+    let cid = contest_id;
     let mut uid = self_uid;
 
     let running = Arc::new(AtomicBool::new(true));
@@ -444,7 +443,7 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
                 }
             }
             if !problems_listed
-                && let Ok(problems) = poll_client.list_contest_problems(&cid)
+                && let Ok(problems) = poll_client.list_contest_problems(cid)
                 && !problems.is_empty()
             {
                 problems_listed = true;
@@ -452,20 +451,14 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
                     break 'outer;
                 }
             }
-            let subs = poll_client.list_contest_submissions(
-                &cid,
-                None,
-                Some(&uid.to_string()),
-                None,
-                Some(100),
-            );
+            let subs = poll_client.list_contest_submissions(cid, None, Some(uid), None, Some(100));
             let mut outcome = PollOutcome::of(&subs);
             if let Ok(d) = subs
                 && tx.send(PollUpdate::Submissions(d)).is_err()
             {
                 break 'outer;
             }
-            let clars = poll_client.list_clarifications(&cid);
+            let clars = poll_client.list_clarifications(cid);
             outcome = outcome.worst(PollOutcome::of(&clars));
             if let Ok(d) = clars
                 && tx.send(PollUpdate::Clarifications(d)).is_err()
@@ -718,7 +711,7 @@ fn open_detail(app: &mut AppData, client: &Client) {
             let Some(row) = app.problems.get(app.sel_prob) else {
                 return;
             };
-            match client.get_contest_problem(&app.contest_id, &row.problem_id) {
+            match client.get_contest_problem(app.contest_id, row.problem_id) {
                 Ok(p) => {
                     app.overlay = Some(Overlay::Problem {
                         title: format!("{} (problem {})", p.title, p.id),
@@ -756,7 +749,7 @@ fn submit_clarification(app: &mut AppData, client: &Arc<Client>, refresh_now: &A
         app.flash = Some("Nothing to ask — clarification cancelled.".to_string());
         return;
     }
-    match client.create_clarification(&app.contest_id, &content) {
+    match client.create_clarification(app.contest_id, &content) {
         Ok(cl) => {
             app.flash = Some(format!("✓ Clarification #{} submitted", cl.id));
             refresh_now.store(true, Ordering::Relaxed);
@@ -1181,7 +1174,7 @@ fn update_submissions(app: &mut AppData, data: &SubmissionListResponse) {
         .iter()
         .map(|s| SubmissionRow {
             id: s.id.to_string(),
-            problem_id: s.problem_id.to_string(),
+            problem_id: ProblemId::from_server(s.problem_id),
             problem: s.problem_title.clone(),
             status: s.status,
             verdict: s.verdict.clone(),
@@ -1201,7 +1194,7 @@ fn set_problems(app: &mut AppData, problems: &[ContestProblemResponse]) {
         .map(|p| ProblemRow {
             label: p.label.clone(),
             title: broccoli_cli_core::model::problem_title(p).to_string(),
-            problem_id: p.problem_id.to_string(),
+            problem_id: ProblemId::from_server(p.problem_id),
             solved: false,
         })
         .collect();
@@ -1209,15 +1202,15 @@ fn set_problems(app: &mut AppData, problems: &[ContestProblemResponse]) {
 }
 
 fn mark_solved(app: &mut AppData) {
-    let solved_ids: HashSet<&str> = app
+    let solved_ids: HashSet<ProblemId> = app
         .my_submissions
         .iter()
         .filter(|s| s.verdict.as_ref().is_some_and(|v| v.is_accepted()))
-        .map(|s| s.problem_id.as_str())
+        .map(|s| s.problem_id)
         .collect();
     // Solved is monotonic: keep the ✓ even when an early AC scrolls past the 100-row window.
     for p in &mut app.problems {
-        p.solved = p.solved || solved_ids.contains(p.problem_id.as_str());
+        p.solved = p.solved || solved_ids.contains(&p.problem_id);
     }
 }
 
@@ -1772,7 +1765,7 @@ mod tests {
 
     fn sample_app() -> AppData {
         AppData {
-            contest_id: "1".into(),
+            contest_id: ContestId::from_server(1),
             contest_title: "Test Cup 2026".into(),
             start_time: ts("2026-01-01T00:00:00Z"),
             end_time: ts("2099-01-01T00:00:00Z"),
@@ -1781,7 +1774,7 @@ mod tests {
             my_submissions: vec![
                 SubmissionRow {
                     id: "1001".into(),
-                    problem_id: "1".into(),
+                    problem_id: ProblemId::from_server(1),
                     problem: "A Plus B".into(),
                     status: Some(SubmissionStatus::Judged),
                     verdict: Some(Verdict::Accepted),
@@ -1791,7 +1784,7 @@ mod tests {
                 },
                 SubmissionRow {
                     id: "1002".into(),
-                    problem_id: "2".into(),
+                    problem_id: ProblemId::from_server(2),
                     problem: "Subarrays".into(),
                     status: Some(SubmissionStatus::Judged),
                     verdict: Some(Verdict::WrongAnswer),
@@ -1804,13 +1797,13 @@ mod tests {
                 ProblemRow {
                     label: "A".into(),
                     title: "A Plus B".into(),
-                    problem_id: "1".into(),
+                    problem_id: ProblemId::from_server(1),
                     solved: true,
                 },
                 ProblemRow {
                     label: "B".into(),
                     title: "Subarrays".into(),
-                    problem_id: "2".into(),
+                    problem_id: ProblemId::from_server(2),
                     solved: false,
                 },
             ],
@@ -2114,14 +2107,14 @@ mod tests {
         assert_eq!(app.my_submissions.len(), 1);
         let s = &app.my_submissions[0];
         assert_eq!(s.id, "1001");
-        assert_eq!(s.problem_id, "1");
+        assert_eq!(s.problem_id, ProblemId::from_server(1));
         assert_eq!(s.verdict, Some(Verdict::Accepted));
         assert_eq!(s.time_used, Some(41));
         assert_eq!(s.memory_used, Some(2048));
         assert!(
             app.problems
                 .iter()
-                .find(|p| p.problem_id == "1")
+                .find(|p| p.problem_id == ProblemId::from_server(1))
                 .unwrap()
                 .solved,
             "accepted submission marks its problem solved"
@@ -2129,7 +2122,7 @@ mod tests {
         assert!(
             !app.problems
                 .iter()
-                .find(|p| p.problem_id == "2")
+                .find(|p| p.problem_id == ProblemId::from_server(2))
                 .unwrap()
                 .solved,
             "unrelated problem stays unsolved"
@@ -2217,7 +2210,7 @@ mod tests {
         assert!(
             app.problems
                 .iter()
-                .find(|p| p.problem_id == "1")
+                .find(|p| p.problem_id == ProblemId::from_server(1))
                 .unwrap()
                 .solved
         );
@@ -2227,7 +2220,7 @@ mod tests {
         assert!(
             app.problems
                 .iter()
-                .find(|p| p.problem_id == "1")
+                .find(|p| p.problem_id == ProblemId::from_server(1))
                 .unwrap()
                 .solved,
             "problem 1 stays solved even after its AC scrolls out of the window"

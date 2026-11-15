@@ -9,6 +9,7 @@ pub mod clock;
 pub mod config;
 pub mod credentials;
 pub mod fmt;
+pub mod ids;
 pub mod model;
 pub mod resolve;
 pub mod server;

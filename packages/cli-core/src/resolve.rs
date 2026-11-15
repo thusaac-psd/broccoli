@@ -2,16 +2,18 @@
 
 use crate::api::contest::ContestListItem;
 use crate::client::Client;
+use crate::ids::{ContestId, ProblemId};
 use anyhow::{Context, bail};
 
-/// Resolve a contest reference to its numeric id; numeric is taken as-is, else match title.
-pub fn contest_id(client: &Client, input: &str) -> anyhow::Result<String> {
+/// Resolve a contest reference (its id, its title or a unique part of it) to
+/// the contest's id.
+pub fn contest_id(client: &Client, input: &str) -> anyhow::Result<ContestId> {
     let q = input.trim();
     if q.is_empty() {
         bail!("Empty contest reference.");
     }
-    if q.parse::<i64>().is_ok() {
-        return Ok(q.to_string());
+    if let Some(id) = offline_contest_id(q) {
+        return Ok(id);
     }
 
     let contests = client
@@ -22,7 +24,7 @@ pub fn contest_id(client: &Client, input: &str) -> anyhow::Result<String> {
 
     let exact = contests_named(&contests, q);
     if exact.len() == 1 {
-        return Ok(exact[0].id.to_string());
+        return Ok(ContestId::from_server(exact[0].id));
     }
     if exact.len() > 1 {
         bail!(
@@ -41,7 +43,7 @@ pub fn contest_id(client: &Client, input: &str) -> anyhow::Result<String> {
         .filter(|c| c.title.to_lowercase().contains(&lower))
         .collect();
     match part.as_slice() {
-        [c] => Ok(c.id.to_string()),
+        [c] => Ok(ContestId::from_server(c.id)),
         [] => bail!(
             "No contest matching '{}'. Run `broccoli contest list` to see contests.",
             q
@@ -55,6 +57,11 @@ pub fn contest_id(client: &Client, input: &str) -> anyhow::Result<String> {
                 .join(", ")
         ),
     }
+}
+
+/// The contest `input` names with no server to ask: only its id can.
+pub fn offline_contest_id(input: &str) -> Option<ContestId> {
+    input.trim().parse().ok().map(ContestId::from_server)
 }
 
 /// The contests `input` names exactly: by id, or by title ignoring case, the
@@ -73,7 +80,7 @@ pub fn contests_named<'a>(
 /// A contest problem a reference resolved to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedProblem {
-    pub id: i32,
+    pub id: ProblemId,
     pub label: String,
     pub title: String,
 }
@@ -93,15 +100,33 @@ impl std::fmt::Display for ResolvedProblem {
 }
 
 /// The problem id an explicit `#<id>` reference names.
-pub fn explicit_problem_id(input: &str) -> Option<i32> {
-    input.trim().strip_prefix('#')?.trim().parse().ok()
+pub fn explicit_problem_id(input: &str) -> Option<ProblemId> {
+    input
+        .trim()
+        .strip_prefix('#')?
+        .trim()
+        .parse()
+        .ok()
+        .map(ProblemId::from_server)
+}
+
+/// Resolve a reference to a problem outside every contest: its id, as `12`
+/// or `#12`. With no contest there are no labels or positions to match.
+pub fn standalone_problem_id(input: &str) -> anyhow::Result<ProblemId> {
+    explicit_problem_id(input)
+        .or_else(|| input.trim().parse().ok().map(ProblemId::from_server))
+        .with_context(|| format!("'{}' is not a problem id", input.trim()))
 }
 
 /// Resolve a problem reference within a contest. A reference is, in order:
 /// `#<id>` (the problem id), the label (`A`), the 1-based position in the
 /// contest (`1`), or the title (`Two Sum`, or a unique part of it). A
 /// reference that two of these read as different problems is refused.
-pub fn problem(client: &Client, contest: &str, input: &str) -> anyhow::Result<ResolvedProblem> {
+pub fn problem(
+    client: &Client,
+    contest: ContestId,
+    input: &str,
+) -> anyhow::Result<ResolvedProblem> {
     if input.trim().is_empty() {
         bail!("Empty problem reference.");
     }
@@ -116,7 +141,7 @@ pub fn problem(client: &Client, contest: &str, input: &str) -> anyhow::Result<Re
         );
     }
     match_problem(&problems, input).map(|p| ResolvedProblem {
-        id: p.problem_id,
+        id: ProblemId::from_server(p.problem_id),
         label: p.label.clone(),
         title: crate::model::problem_title(p).to_string(),
     })
@@ -131,7 +156,7 @@ fn match_problem<'a>(
     if let Some(id) = explicit_problem_id(q) {
         return problems
             .iter()
-            .find(|p| p.problem_id == id)
+            .find(|p| p.problem_id == id.get())
             .with_context(|| {
                 format!(
                     "Problem #{id} is not in this contest. Available: {}.",

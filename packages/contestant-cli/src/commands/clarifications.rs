@@ -5,6 +5,7 @@ use clap::Args;
 use console::style;
 
 use broccoli_cli_core::client::Client;
+use broccoli_cli_core::ids::ContestId;
 use broccoli_cli_core::resolve;
 
 use super::context::contest_ref as context_contest;
@@ -49,11 +50,11 @@ pub fn run(args: ClarificationsArgs) -> anyhow::Result<()> {
     match args.command {
         Some(ClarificationsCommand::List(a)) => {
             let cid = resolve::contest_id(&client, &context_contest(a.contest.as_deref())?)?;
-            list(&client, &cid)
+            list(&client, cid)
         }
         Some(ClarificationsCommand::Ask(a)) => {
             let cid = resolve::contest_id(&client, &context_contest(a.contest.as_deref())?)?;
-            ask(&client, &cid, a.message)
+            ask(&client, cid, a.message)
         }
         None => {
             anyhow::bail!(
@@ -63,7 +64,7 @@ pub fn run(args: ClarificationsArgs) -> anyhow::Result<()> {
     }
 }
 
-fn list(client: &Client, contest: &str) -> anyhow::Result<()> {
+fn list(client: &Client, contest: ContestId) -> anyhow::Result<()> {
     println!(
         "{}  Clarifications for contest {}:\n",
         style("→").blue().bold(),
@@ -110,7 +111,7 @@ fn list(client: &Client, contest: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn ask(client: &Client, contest: &str, message: Option<String>) -> anyhow::Result<()> {
+fn ask(client: &Client, contest: ContestId, message: Option<String>) -> anyhow::Result<()> {
     let content = match message {
         Some(m) => m,
         None => {
