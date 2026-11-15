@@ -17,6 +17,7 @@ import {
   invalidateProblemTestCases,
   testCasesQueryKey,
 } from '@/features/admin/hooks/test-case-queries';
+import { useTestDataWrite } from '@/features/admin/hooks/use-test-data-write';
 
 /**
  * A problem's test cases with their create, edit, bulk upload and delete
@@ -27,6 +28,7 @@ export function TestCaseList({ problemId }: { problemId: number }) {
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const [confirm, confirmDialog] = useConfirmDialog();
+  const [sendTestDataWrite, configBreakDialog] = useTestDataWrite();
   const [formOpen, setFormOpen] = useState(false);
   const [bulkUploadOpen, setBulkUploadOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | undefined>();
@@ -54,11 +56,16 @@ export function TestCaseList({ problemId }: { problemId: number }) {
       destructive: true,
       failureMessage: t('toast.testCase.deleteError'),
       onConfirm: async () => {
-        const { error } = await apiClient.DELETE(
-          '/problems/{id}/test-cases/{tc_id}',
-          { params: { path: { id: problemId, tc_id: testCaseId } } },
+        const result = await sendTestDataWrite((force) =>
+          apiClient.DELETE('/problems/{id}/test-cases/{tc_id}', {
+            params: {
+              path: { id: problemId, tc_id: testCaseId },
+              query: { force },
+            },
+          }),
         );
-        if (error) throw error;
+        if (result === null) return;
+        if (result.error) throw result.error;
         toast.success(t('toast.testCase.deleted'));
         invalidateProblemTestCases(queryClient, problemId);
       },
@@ -200,6 +207,7 @@ export function TestCaseList({ problemId }: { problemId: number }) {
         onOpenChange={setBulkUploadOpen}
       />
       {confirmDialog}
+      {configBreakDialog}
     </div>
   );
 }

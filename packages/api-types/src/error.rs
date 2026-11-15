@@ -2,6 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
+/// What went wrong. `code` and `details` are the contract a client reads;
+/// `message` is an English diagnostic for logs and for people reading the
+/// API, the same whatever `Accept-Language` says. A client shows the user its
+/// own text for `code` (the web app's `apiError.<code>` keys) and, for a
+/// refused config, for each `details.fields[]` entry (its `kind` and
+/// parameters, or the plugin's translation `key`).
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ErrorBody {
     /// Machine-readable error code. Any POST sent with an `Idempotency-Key`
@@ -16,8 +22,12 @@ pub struct ErrorBody {
     /// request).
     #[schema(example = "VALIDATION_ERROR")]
     pub code: String,
+    /// An English description for logs and developers; never translated.
     #[schema(example = "Title must be 1-256 characters")]
     pub message: String,
+    /// What the code is about, in a shape each code documents: for example
+    /// `fields` for `VALIDATION_ERROR` on a config, `issues` for
+    /// `CONFIG_WOULD_BREAK`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
 }

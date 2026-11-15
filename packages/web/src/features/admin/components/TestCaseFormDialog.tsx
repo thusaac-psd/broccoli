@@ -27,6 +27,7 @@ import { toast } from 'sonner';
 import { RecordLoader } from '@/components/RecordLoader';
 import { SwitchField } from '@/features/admin/components/SwitchField';
 import { invalidateProblemTestCases } from '@/features/admin/hooks/test-case-queries';
+import { useTestDataWrite } from '@/features/admin/hooks/use-test-data-write';
 import { changedFields } from '@/lib/changed-fields';
 import { toastUnsettled } from '@/lib/idempotency-feedback';
 
@@ -166,6 +167,7 @@ function TestCaseForm({
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const sendIdempotent = useIdempotentRequest();
+  const [sendTestDataWrite, configBreakDialog] = useTestDataWrite();
   const [values, setValues] = useState(initial);
   const isEdit = testCaseId !== undefined;
 
@@ -180,21 +182,28 @@ function TestCaseForm({
       label: values.label.trim(),
     };
 
-    const result = isEdit
-      ? await apiClient.PATCH('/problems/{id}/test-cases/{tc_id}', {
-          params: { path: { id: problemId, tc_id: testCaseId } },
-          body: changedFields(
-            testCaseUpdateBody(initial),
-            testCaseUpdateBody(values),
+    const result = await sendTestDataWrite((force) =>
+      isEdit
+        ? apiClient.PATCH('/problems/{id}/test-cases/{tc_id}', {
+            params: {
+              path: { id: problemId, tc_id: testCaseId },
+              query: { force },
+            },
+            body: changedFields(
+              testCaseUpdateBody(initial),
+              testCaseUpdateBody(values),
+            ),
+          })
+        : sendIdempotent({ problemId, body: createBody, force }, (key) =>
+            apiClient.POST('/problems/{id}/test-cases', {
+              headers: { 'Idempotency-Key': key },
+              params: { path: { id: problemId }, query: { force } },
+              body: createBody,
+            }),
           ),
-        })
-      : await sendIdempotent({ problemId, body: createBody }, (key) =>
-          apiClient.POST('/problems/{id}/test-cases', {
-            headers: { 'Idempotency-Key': key },
-            params: { path: { id: problemId } },
-            body: createBody,
-          }),
-        );
+    );
+    // The user kept the test data as it is: the form stays open as it was.
+    if (result === null) throw new Error('test data change withdrawn');
 
     const refetch = () => invalidateProblemTestCases(queryClient, problemId);
     // Unsettled: the form stays open, so if the test case is not in the
@@ -222,6 +231,7 @@ function TestCaseForm({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
+      {configBreakDialog}
       <fieldset disabled={dialog.submitting} className="space-y-4">
         <TestDataField
           id="tc-input"

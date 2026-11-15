@@ -30,6 +30,9 @@ pub enum AppError {
     /// The plugin is not installed, declares no such config namespace, or
     /// does not allow it at the requested scope.
     ConfigNamespaceNotFound(String),
+    /// A change to a problem's test data that would leave these stored
+    /// configs refused by their plugins; nothing was changed.
+    ConfigWouldBreak(Vec<broccoli_api_types::plugin::IncompatibleConfig>),
     PayloadTooLarge(String),
     TokenMissing,
     TokenInvalid,
@@ -131,6 +134,18 @@ impl AppError {
             AppError::ConfigNamespaceNotFound(msg) => (
                 StatusCode::NOT_FOUND,
                 simple("CONFIG_NAMESPACE_NOT_FOUND", msg),
+            ),
+            AppError::ConfigWouldBreak(issues) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    code: "CONFIG_WOULD_BREAK".into(),
+                    message: format!(
+                        "The change would leave {} stored config(s) refused by their plugins; \
+                         send it again with force=true to make it anyway",
+                        issues.len()
+                    ),
+                    details: Some(serde_json::json!({ "issues": issues })),
+                },
             ),
             AppError::PayloadTooLarge(msg) => (
                 StatusCode::PAYLOAD_TOO_LARGE,

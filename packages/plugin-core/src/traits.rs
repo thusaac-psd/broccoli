@@ -520,27 +520,24 @@ pub trait PluginManager: PluginInvoker {
         plugin_entry.resolve_web_asset(asset_path)
     }
 
-    /// Rebuild the served translations from the loaded plugins' entries,
-    /// which hold their files' contents, so it reads no file and one plugin
-    /// can never fail it for the others.
+    /// Rebuild the served translations from the installed plugins' entries
+    /// (see [`crate::i18n::served_translations`]), which hold their files'
+    /// contents, so it reads no file and one plugin can never fail it for the
+    /// others.
     fn update_translations(&self) {
-        let mut merged = crate::i18n::I18nData::new();
-        match self.get_registry().read() {
-            Ok(registry) => {
-                for entry in registry
-                    .values()
-                    .filter(|e| e.status == PluginStatus::Loaded)
-                {
-                    for (lang, map) in &entry.translations {
-                        merged.entry(lang.clone()).or_default().extend(map.clone());
-                    }
+        let merged = match self.get_registry().read() {
+            Ok(registry) => crate::i18n::served_translations(registry.values().map(|entry| {
+                crate::i18n::InstalledPacks {
+                    plugin_id: &entry.id,
+                    loaded: entry.status == PluginStatus::Loaded,
+                    packs: &entry.translations,
                 }
-            }
+            })),
             Err(_) => {
                 error!("Plugin registry lock poisoned; keeping the served translations");
                 return;
             }
-        }
+        };
         self.get_i18n_registry().replace(merged);
     }
 

@@ -239,7 +239,7 @@ function messageParams(
 }
 
 /** What a server field error says, in the UI language when its kind is known. */
-function serverProblem(field: ServerFieldError): FieldProblem {
+export function serverProblem(field: ServerFieldError): FieldProblem {
   switch (field.kind) {
     case 'type':
       if (TYPE_KEYS[field.expected]) return { key: TYPE_KEYS[field.expected] };

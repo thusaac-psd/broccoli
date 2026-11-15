@@ -137,6 +137,23 @@ pub struct UploadTestCasesRequest {
     pub strategy: UploadTestCasesMergeStrategy,
 }
 
+/// The query of a change to a problem's test data.
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct TestDataWriteQuery {
+    /// Make the change even if it leaves stored configs of the problem
+    /// refused by their plugins, which it otherwise refuses with
+    /// `CONFIG_WOULD_BREAK`; the problem's config issues then list them.
+    #[serde(default)]
+    pub force: bool,
+}
+
+impl TestDataWriteQuery {
+    pub(crate) fn on_config_break(&self) -> crate::services::test_data::OnConfigBreak {
+        crate::services::test_data::OnConfigBreak::forced(self.force)
+    }
+}
+
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct ReorderTestCasesRequest {
     #[schema(example = json!([3, 1, 2]))]

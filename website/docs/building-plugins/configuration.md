@@ -128,11 +128,20 @@ Writes your plugin makes with `host.config.set*` are checked against the
 schema only. The plugin owns those values, so the host does not call its
 validator on them.
 
-A config can also become invalid after it is stored, when the test data it
-refers to changes. `GET /api/v1/problems/{id}/config/issues` runs every
-config stored for a problem, at the problem scope and in each contest that
-uses it, through the same checks and lists the ones refused, in the
-`incompatible_configs` shape. The problem's test case dialog shows them.
+The test data a config refers to can change after the config is stored. Every
+change to a problem's test cases (create, edit, delete, reorder, bulk delete
+and ZIP upload) therefore runs every config stored for the problem, at the
+problem scope and in each contest that uses it, through the same checks
+before it commits, with `host.submission.query_test_cases` answering with the
+test cases as the change leaves them. A change that gives a config an issue
+is refused with 409 `CONFIG_WOULD_BREAK`, its `details.issues` in the
+`incompatible_configs` shape, unless the request carries `force=true`. Your
+own SQL (`host.db.*`) reads committed data during that check, so read test
+cases through `host.submission.query_test_cases` in a validator.
+
+`GET /api/v1/problems/{id}/config/issues` lists the configs refused now. The
+problem's test case dialog shows them, and a judgement dispatched while there
+are any says so to staff (`config_issues` on the submission's judgements).
 
 ## Read it
 
