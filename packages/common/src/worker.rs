@@ -49,9 +49,17 @@ pub struct HeartbeatPayload {
     pub arch: Option<String>,
     pub cpu_count: Option<u32>,
     pub pid: Option<u32>,
-    /// The platform tools this worker found missing at boot: every job that
-    /// needs one fails on it.
+    /// The platform tools missing from this worker as of this heartbeat.
+    /// While any is, the worker takes no work ([`Self::accepts_work`]).
     pub missing_platform_tools: Vec<String>,
+}
+
+impl HeartbeatPayload {
+    /// Whether the worker takes work: it has every platform tool. A worker
+    /// that does not stays live and reads no task until it does.
+    pub fn accepts_work(&self) -> bool {
+        self.missing_platform_tools.is_empty()
+    }
 }
 
 /// Why an operation failed when the failure is the platform's, not the job's.

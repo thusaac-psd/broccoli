@@ -51,14 +51,39 @@ pub struct MissingPlatformTool {
 
 use broccoli_types::types::{COMPARE_TOOL, PLATFORM_TOOLS};
 
-/// The declared platform tools `tools_dir` does not hold, in declaration
-/// order: every one of them when there is no tools directory.
-pub fn missing_platform_tools(tools_dir: Option<&std::path::Path>) -> Vec<String> {
-    PLATFORM_TOOLS
-        .iter()
-        .filter(|name| !tools_dir.is_some_and(|dir| dir.join(name).is_file()))
-        .map(|name| name.to_string())
-        .collect()
+/// Where this worker's platform tools are. While a declared tool is missing
+/// the worker takes no work (see [`crate::runtime::run_consume_loop`]) and
+/// its heartbeat names the tool, so the directory is read each time: a tool
+/// put in place lets the worker take work again without a restart.
+#[derive(Clone, Debug, Default)]
+pub struct PlatformTools {
+    dir: Option<PathBuf>,
+}
+
+impl PlatformTools {
+    pub fn new(dir: Option<PathBuf>) -> Self {
+        Self { dir }
+    }
+
+    /// The platform tools directory of `config`; see [`tools_dir_from_config`].
+    pub fn from_config(config: &WorkerAppConfig) -> Self {
+        Self::new(tools_dir_from_config(config))
+    }
+
+    /// The declared platform tools the directory does not hold, in
+    /// declaration order: every one of them when there is no directory.
+    pub fn missing(&self) -> Vec<String> {
+        PLATFORM_TOOLS
+            .iter()
+            .filter(|name| {
+                !self
+                    .dir
+                    .as_ref()
+                    .is_some_and(|dir| dir.join(name).is_file())
+            })
+            .map(|name| name.to_string())
+            .collect()
+    }
 }
 
 /// Where platform tools are when `[worker.tools] dir` is unset, from where
@@ -213,11 +238,12 @@ impl OperationTaskExecutor {
     }
 
     /// The failed result of a job this worker cannot run for lack of a
-    /// platform tool. Failing it at once, without the execution retries, keeps
-    /// one misconfigured worker from holding every such job through its retry
-    /// budget. The result carries [`OperationFault::PlatformToolMissing`], so
-    /// the server ends the judgement once, with that cause, instead of
-    /// retrying it; the error is logged once per tool.
+    /// platform tool: one that reached it while the tool went missing, since
+    /// a worker without its tools takes no work. Failing it at once, without
+    /// the execution retries, hands it back quickly: the result carries
+    /// [`OperationFault::PlatformToolMissing`], which the server requeues for
+    /// a worker that has the tool, spending no retry. The error is logged
+    /// once per tool.
     fn missing_tool_result(&self, task_id: String, missing: &MissingPlatformTool) -> TaskResult {
         let first = self
             .reported_missing
@@ -225,7 +251,7 @@ impl OperationTaskExecutor {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(missing.tool.clone());
         if first {
-            error!(error = %missing, "Failing jobs that need a platform tool this worker does not have");
+            error!(error = %missing, "Handing back jobs that need a platform tool this worker does not have");
         }
         let message = missing.to_string();
         TaskResult {
@@ -468,12 +494,12 @@ fn report_tools_dir(tools_dir: Option<&std::path::Path>) {
     let Some(dir) = tools_dir else {
         error!(
             "No platform tools directory: [worker.tools] dir is unset and no {COMPARE_TOOL} \
-             was found beside the worker binary. Every job with a standard checker fails on \
-             this worker until BROCCOLI__WORKER__TOOLS__DIR names the directory holding it"
+             was found beside the worker binary. This worker takes no judging work until \
+             BROCCOLI__WORKER__TOOLS__DIR names the directory holding it"
         );
         return;
     };
-    let missing = missing_platform_tools(Some(dir));
+    let missing = PlatformTools::new(Some(dir.to_path_buf())).missing();
     let resolvable: Vec<&str> = PLATFORM_TOOLS
         .iter()
         .copied()
@@ -490,7 +516,7 @@ fn report_tools_dir(tools_dir: Option<&std::path::Path>) {
             tools_dir = %dir.display(),
             resolvable_platform_tools = ?resolvable,
             missing_platform_tools = ?missing,
-            "The platform tools directory lacks platform tools; jobs that need them fail on this worker"
+            "The platform tools directory lacks platform tools; this worker takes no judging work until they are in place"
         );
     }
 }
@@ -697,14 +723,21 @@ mod platform_tool_validation_tests {
                 .expect_err("a file in the tools dir is not a platform tool");
             assert!(err.to_string().contains("not a platform tool"), "{err}");
         }
-        assert!(missing_platform_tools(Some(tmp.path())).is_empty());
+        assert!(
+            PlatformTools::new(Some(tmp.path().into()))
+                .missing()
+                .is_empty()
+        );
     }
 
     #[test]
     fn missing_platform_tools_lists_the_declared_tools_a_dir_lacks() {
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(missing_platform_tools(Some(tmp.path())), vec![COMPARE_TOOL]);
-        assert_eq!(missing_platform_tools(None), vec![COMPARE_TOOL]);
+        let tools = PlatformTools::new(Some(tmp.path().into()));
+        assert_eq!(tools.missing(), vec![COMPARE_TOOL]);
+        assert_eq!(PlatformTools::new(None).missing(), vec![COMPARE_TOOL]);
+        std::fs::write(tmp.path().join(COMPARE_TOOL), "").unwrap();
+        assert!(tools.missing().is_empty(), "read again on every call");
     }
 
     #[test]
