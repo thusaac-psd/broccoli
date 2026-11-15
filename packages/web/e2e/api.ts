@@ -134,6 +134,11 @@ const contest = (
 });
 
 const RUNNING = contest(1, 'Spring Training Contest 2026', -60, 240, 'running');
+/** A running contest of the IOI format. */
+const IOI_RUNNING = {
+  ...contest(4, 'IOI Practice Round', -60, 240, 'running'),
+  contest_type: 'ioi',
+};
 /** A running contest whose contest-type plugin an administrator disabled. */
 const DISABLED = {
   ...contest(3, 'Disabled Format Contest', -60, 240, 'running'),
@@ -333,6 +338,41 @@ export const PLUGIN_ROUTES: [string, RegExp, Handler][] = [
       ],
     }),
   ],
+  [
+    'GET',
+    /^\/p\/ioi\/api\/plugins\/ioi\/contests\/4\/info$/,
+    () => ({
+      scoring_mode: 'sum_best_subtask',
+      feedback_level: 'full',
+      scoreboard_visibility: 'all_contest_viewers',
+      scoreboard_tiebreaker: 'equal_rank',
+      token_mode: 'none',
+    }),
+  ],
+  [
+    'GET',
+    /^\/p\/ioi\/api\/plugins\/ioi\/contests\/4\/scoreboard$/,
+    () => ({
+      phase: 'during',
+      scoring_mode: 'sum_best_subtask',
+      feedback_level: 'full',
+      scoreboard_visibility: 'all_contest_viewers',
+      scoreboard_tiebreaker: 'equal_rank',
+      max_scores: { '1': 100 },
+      full_board: true,
+      rankings: [
+        {
+          rank: 1,
+          user_id: 2,
+          username: 'alice',
+          display_name: 'Alice',
+          total_score: 40,
+          total_time_seconds: 600,
+          problems: [{ problem_id: 1, score: 40 }],
+        },
+      ],
+    }),
+  ],
 ];
 
 /** `METHOD path-pattern` to the body answered. */
@@ -370,6 +410,7 @@ const ROUTES: [string, RegExp, Handler][] = [
         : RUNNING,
   ],
   ['GET', /^\/contests\/2$/, () => UPCOMING],
+  ['GET', /^\/contests\/4$/, () => IOI_RUNNING],
   ['GET', /^\/contests\/3$/, () => DISABLED],
   [
     'GET',

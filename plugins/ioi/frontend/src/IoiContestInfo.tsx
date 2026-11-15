@@ -1,9 +1,9 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { Badge } from '@broccoli/web-sdk/ui';
+import { Badge, QueryView } from '@broccoli/web-sdk/ui';
 import { useParams } from 'react-router';
 
-import { useIsIoiContest } from './hooks/useIsIoiContest';
-import type { ScoringMode } from './types';
+import { useIoiContestInfo } from './hooks/useIoiContestInfo';
+import type { ContestInfoResponse, ScoringMode } from './types';
 
 const SCORING_MODE_KEYS: Record<
   ScoringMode,
@@ -36,18 +36,31 @@ const FORMAT_NAME = 'IOI';
 export function IoiContestInfo() {
   const { contestId } = useParams();
   const cId = contestId ? Number(contestId) : undefined;
-  const { isIoi, contestInfo, isLoading } = useIsIoiContest(cId);
+  const query = useIoiContestInfo(cId);
   const { t } = useTranslation();
 
-  if (isLoading || !isIoi || !contestInfo) return null;
+  return (
+    <div className="rounded-lg border border-border bg-card mb-4 p-4 text-left">
+      <QueryView
+        query={query}
+        loading={null}
+        failure={t('ioi.contestInfo.loadFailed')}
+      >
+        {(contestInfo) => <IoiContestCard contestInfo={contestInfo} />}
+      </QueryView>
+    </div>
+  );
+}
 
+function IoiContestCard({ contestInfo }: { contestInfo: ContestInfoResponse }) {
+  const { t } = useTranslation();
   const modeKeys = SCORING_MODE_KEYS[contestInfo.scoring_mode as ScoringMode];
   const mode = modeKeys
     ? { title: t(modeKeys.title), description: t(modeKeys.description) }
     : { title: contestInfo.scoring_mode, description: '' };
 
   return (
-    <div className="rounded-lg border border-border bg-card mb-4 p-4 text-left">
+    <>
       {/* Title row */}
       <div className="flex items-center gap-2 mb-2">
         <Badge
@@ -85,7 +98,7 @@ export function IoiContestInfo() {
           />
         )}
       </div>
-    </div>
+    </>
   );
 }
 

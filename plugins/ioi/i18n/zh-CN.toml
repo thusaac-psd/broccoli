@@ -1,4 +1,5 @@
 # IoiContestInfo
+'ioi.contestInfo.loadFailed' = '无法加载本场比赛的 IOI 规则。'
 'ioi.contestInfo.scoringMode.maxSubmission.title' = '最高分'
 'ioi.contestInfo.scoringMode.maxSubmission.description' = '该题的最终得分为所有提交中的最高得分。'
 'ioi.contestInfo.scoringMode.sumBestSubtask.title' = '各子任务最高分之和'
@@ -183,6 +184,7 @@
 'ioi.tokenConfig.requiredForScoringMode' = '“最佳令牌提交或最后提交”计分模式必须使用令牌，因此无法禁用令牌系统。'
 
 # TokenPanel
+'ioi.tokenPanel.loadFailed' = '无法加载你的令牌。'
 'ioi.tokenPanel.title' = '令牌'
 'ioi.tokenPanel.available' = '可用：{available} / {total}'
 'ioi.tokenPanel.useToken' = '在此提交上使用令牌'

@@ -1,0 +1,106 @@
+import { expect, type Page, test } from '@playwright/test';
+
+import { mockApi, NOW, runClockUntil } from './api';
+
+// A contest-format plugin's scoreboard and contest card say when they cannot
+// load or refresh: a failed call never reads as "this contest has no
+// scoreboard", and a board that stopped refreshing never passes for current.
+
+const UNAVAILABLE = {
+  status: 503,
+  json: { code: 'SERVICE_UNAVAILABLE', message: 'unavailable' },
+};
+const NO_SCOREBOARD = 'This contest has no scoreboard to show.';
+
+const ICPC = '**/api/v1/p/icpc/api/plugins/icpc/contests/1';
+const IOI = '**/api/v1/p/ioi/api/plugins/ioi/contests/4';
+
+async function open(page: Page, plugin: 'icpc' | 'ioi') {
+  await page.clock.install({ time: NOW });
+  await mockApi(page, 'contestant', { plugins: [plugin] });
+}
+
+test('an ICPC scoreboard whose contest info fails still shows the board', async ({
+  page,
+}) => {
+  await open(page, 'icpc');
+  await page.route(`${ICPC}/info`, (route) => route.fulfill(UNAVAILABLE));
+  await page.goto('/contests/1/rankings');
+  await expect(page.getByRole('cell', { name: 'Alice' })).toBeVisible();
+  await expect(page.getByText(NO_SCOREBOARD)).toHaveCount(0);
+});
+
+test('an ICPC scoreboard that cannot load says so, with a retry', async ({
+  page,
+}) => {
+  await open(page, 'icpc');
+  await page.route(`${ICPC}/standings`, (route) => route.fulfill(UNAVAILABLE));
+  await page.goto('/contests/1/rankings');
+  await runClockUntil(page, () =>
+    expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({
+      timeout: 500,
+    }),
+  );
+  await expect(page.getByText(NO_SCOREBOARD)).toHaveCount(0);
+});
+
+test('an IOI scoreboard that cannot load says so, with a retry', async ({
+  page,
+}) => {
+  await open(page, 'ioi');
+  await page.route(`${IOI}/**`, (route) => route.fulfill(UNAVAILABLE));
+  await page.goto('/contests/4/rankings');
+  await runClockUntil(page, () =>
+    expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({
+      timeout: 500,
+    }),
+  );
+  await expect(page.getByText(NO_SCOREBOARD)).toHaveCount(0);
+});
+
+test('the ICPC contest card whose info cannot load says so, with a retry', async ({
+  page,
+}) => {
+  await open(page, 'icpc');
+  await page.route(`${ICPC}/info`, (route) => route.fulfill(UNAVAILABLE));
+  await page.goto('/contests/1');
+  await runClockUntil(page, () =>
+    expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({
+      timeout: 500,
+    }),
+  );
+});
+
+test('the IOI contest card whose info cannot load says so, with a retry', async ({
+  page,
+}) => {
+  await open(page, 'ioi');
+  await page.route(`${IOI}/info`, (route) => route.fulfill(UNAVAILABLE));
+  await page.goto('/contests/4');
+  await runClockUntil(page, () =>
+    expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({
+      timeout: 500,
+    }),
+  );
+});
+
+for (const [plugin, path, url] of [
+  ['icpc', '/contests/1/rankings', `${ICPC}/standings`],
+  ['ioi', '/contests/4/rankings', `${IOI}/scoreboard`],
+] as const) {
+  test(`a live ${plugin.toUpperCase()} scoreboard whose refreshes fail says it is not current`, async ({
+    page,
+  }) => {
+    await open(page, plugin);
+    await page.goto(path);
+    await expect(page.getByRole('cell', { name: 'Alice' })).toBeVisible();
+
+    await page.route(url, (route) => route.fulfill(UNAVAILABLE));
+    await runClockUntil(page, () =>
+      expect(page.getByText('Could not refresh')).toBeVisible({
+        timeout: 500,
+      }),
+    );
+    await expect(page.getByRole('cell', { name: 'Alice' })).toBeVisible();
+  });
+}
