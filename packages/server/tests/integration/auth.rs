@@ -174,6 +174,33 @@ mod login {
         assert_eq!(res.body["code"], "INVALID_CREDENTIALS");
     }
 
+    /// A stored hash that does not parse is refused like a wrong password,
+    /// at the same cost, and an empty one cannot be stored at all.
+    #[tokio::test]
+    async fn an_unusable_stored_password_is_refused_like_a_wrong_one() {
+        use sea_orm::ConnectionTrait;
+        let app = TestApp::spawn().await;
+        let body = json!({"username": "alice", "password": "securepass"});
+        let reg = app.post_without_token(routes::REGISTER, &body).await;
+        assert_eq!(reg.status, 201, "Registration failed: {}", reg.text);
+
+        app.db
+            .execute_unprepared(
+                r#"UPDATE "user" SET password = 'not-an-argon2-hash' WHERE username = 'alice'"#,
+            )
+            .await
+            .unwrap();
+        let res = app.post_without_token(routes::LOGIN, &body).await;
+        assert_eq!(res.status, 401, "{}", res.text);
+        assert_eq!(res.body["code"], "INVALID_CREDENTIALS");
+
+        let blank = app
+            .db
+            .execute_unprepared(r#"UPDATE "user" SET password = '' WHERE username = 'alice'"#)
+            .await;
+        assert!(blank.is_err(), "an empty hash is not storable");
+    }
+
     #[tokio::test]
     async fn cannot_login_with_nonexistent_username() {
         let app = TestApp::spawn().await;
