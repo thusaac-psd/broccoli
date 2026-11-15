@@ -495,6 +495,14 @@ const ROUTES: [string, RegExp, Handler][] = [
   ['GET', /^\/submissions\/5\/judgements$/, () => []],
   [
     'GET',
+    /^\/submissions\/\d+\/judgements\/(\d+)$/,
+    (url) => ({
+      id: Number(url.pathname.split('/')[4]),
+      config_issues: false,
+    }),
+  ],
+  [
+    'GET',
     /^\/admin\/system\/overview$/,
     () => ({
       queue_state: 'reachable',
