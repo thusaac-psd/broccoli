@@ -130,7 +130,7 @@ test('an already translated error is shown as it is', () => {
   );
 });
 
-test("a judge error code a plugin raised reads from that plugin's pack first", () => {
+test("a judge error code a plugin raised reads only from that plugin's pack", () => {
   const catalog: Record<string, string> = {
     'icpc.apiError.NO_TEST_CASES': 'ICPC: no test cases',
     'apiError.NO_TEST_CASES': 'Host: no test cases',
@@ -142,13 +142,15 @@ test("a judge error code a plugin raised reads from that plugin's pack first", (
     judgeErrorText('icpc.NO_TEST_CASES', translator),
     'ICPC: no test cases',
   );
-  // Another plugin raising the same code without its own text falls back
-  // to the host catalog, never to the first plugin's text.
+  // Another plugin raising the same code without its own text reads neither
+  // the first plugin's text nor the host's: the caller's generic message.
   assert.equal(
     judgeErrorText('codelink-bracket.NO_TEST_CASES', translator),
-    'Host: no test cases',
+    undefined,
   );
-  assert.equal(judgeErrorText('ioi.SHARED', translator), 'Host: shared');
+  assert.equal(judgeErrorText('ioi.SHARED', translator), undefined);
+  // A plugin's code named like a host fault never reads as that fault.
+  assert.equal(judgeErrorText('ioi.OPERATION_LOST', translator), undefined);
   // A host code carries no plugin id.
   assert.equal(
     judgeErrorText('OPERATION_LOST', translator),

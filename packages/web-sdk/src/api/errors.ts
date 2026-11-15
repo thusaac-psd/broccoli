@@ -187,17 +187,16 @@ export function errorCodeKey(code: string): string {
 
 /**
  * The catalog keys that translate the error code a judgement or code run
- * records, most specific first. The host records a plugin's code as
- * `<plugin id>.<CODE>` (a plugin id holds no `.`): its translation is
- * `<plugin id>.apiError.<CODE>` in that plugin's pack, else the host's
- * `apiError.<CODE>`. A code without a plugin id is the host's own.
+ * records. The host records a plugin's code as `<plugin id>.<CODE>` (a plugin
+ * id holds no `.`): its translation is `<plugin id>.apiError.<CODE>` in that
+ * plugin's pack, and only there, so a plugin's code never reads as the host's
+ * fault of the same name. A code without a plugin id is the host's own,
+ * translated by `apiError.<CODE>`.
  */
 export function judgeErrorCodeKeys(code: string): string[] {
   const dot = code.indexOf('.');
   if (dot <= 0) return [errorCodeKey(code)];
-  const plugin = code.slice(0, dot);
-  const own = code.slice(dot + 1);
-  return [`${plugin}.${errorCodeKey(own)}`, errorCodeKey(own)];
+  return [`${code.slice(0, dot)}.${errorCodeKey(code.slice(dot + 1))}`];
 }
 
 /**
