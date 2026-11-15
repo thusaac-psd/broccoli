@@ -141,7 +141,15 @@ cases through `host.submission.query_test_cases` in a validator.
 
 `GET /api/v1/problems/{id}/config/issues` lists the configs refused now. The
 problem's test case dialog shows them, and a judgement dispatched while there
-are any says so to staff (`config_issues` on the submission's judgements).
+are any says so to staff (`config_issues` on the submission's judgements, and
+a warning on the submission page).
+
+Whether a problem has any is rechecked whenever the answer can change: on a
+test data change and on a config write for the problem, and, for every problem
+it reaches, when your plugin is enabled, disabled, reloaded or upgraded, when
+its plugin-scope config is written, and when a contest's own config is
+written. While your plugin is disabled its configs are not checked, so they
+count as having no issues until it is enabled again.
 
 ## Read it
 
