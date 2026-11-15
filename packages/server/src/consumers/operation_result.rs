@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use crate::registry::{EvaluateBatches, OperationWaiters};
 use common::metrics::Metrics;
-use common::worker::{TaskReply, TaskResult};
+use common::worker::{OperationFault, TaskReply, TaskResult};
 use mq::{Mq, ReplyInbox};
 use opentelemetry::KeyValue;
 use tracing::{debug, error, info, warn};
@@ -14,6 +14,10 @@ pub const OUTSTANDING_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 /// The error a lost operation fails with.
 pub const OPERATION_LOST: &str =
     "the operation was lost from the queue (Redis restarted without it); the result cannot arrive";
+
+/// The error an operation fails with while no live worker takes work.
+pub const NONE_ACCEPTING: &str =
+    "no live worker takes work (each lacks a platform tool); the operation cannot run";
 
 /// Proof that every operation this server waits for is still alive.
 ///
@@ -81,7 +85,9 @@ pub async fn consume_operation_results(
             let failed = found
                 .ids
                 .iter()
-                .filter(|id| fail_waiter(&waiters, id, OPERATION_LOST))
+                .filter(|id| {
+                    fail_waiter(&waiters, id, OperationFault::OperationLost, OPERATION_LOST)
+                })
                 .count();
             if failed > 0 {
                 error!(failed, "Failed operations the queue lost");
@@ -118,13 +124,18 @@ async fn find_missing(check: &OutstandingCheck, waiters: &OperationWaiters) -> O
     }
 }
 
-/// Fail one waiter with `reason`; whether it was still waiting.
-fn fail_waiter(waiters: &OperationWaiters, task_id: &str, reason: &str) -> bool {
+/// Fail one waiter with `fault` and `reason`; whether it was still waiting.
+fn fail_waiter(
+    waiters: &OperationWaiters,
+    task_id: &str,
+    fault: OperationFault,
+    reason: &str,
+) -> bool {
     let Some((task_id, waiter)) = waiters.remove(task_id) else {
         return false;
     };
     if let Some(faults) = &waiter.faults {
-        faults.record(common::worker::OperationFault::OperationLost, reason);
+        faults.record(fault, reason);
     }
     let _ = waiter.result_tx.send(TaskResult {
         task_id,
@@ -134,7 +145,7 @@ fn fail_waiter(waiters: &OperationWaiters, task_id: &str, reason: &str) -> bool 
         task_type: None,
         operation: None,
         worker_id: None,
-        fault: Some(common::worker::OperationFault::OperationLost),
+        fault: Some(fault),
     });
     true
 }
@@ -147,10 +158,64 @@ pub fn fail_all_waiters(waiters: &OperationWaiters, reason: &str) -> usize {
     let ids: Vec<String> = waiters.iter().map(|w| w.key().clone()).collect();
     let failed = ids
         .iter()
-        .filter(|id| fail_waiter(waiters, id, reason))
+        .filter(|id| fail_waiter(waiters, id, OperationFault::OperationLost, reason))
         .count();
     if failed > 0 {
         error!(failed, reason, "Failed every outstanding operation");
+    }
+    failed
+}
+
+/// For the life of the process: whenever the fleet comes to live workers
+/// none of which takes work ([`WorkerSlots::none_accepting`]), fail every
+/// operation this server waits for as [`OperationFault::PlatformToolMissing`],
+/// so its judgement is handed back to `Queued` without spending a retry
+/// instead of waiting at a queue no worker reads. Each failed task gets its
+/// cancel key, so a worker that takes work later skips it. Operations started
+/// while the fleet stays that way are refused when they publish
+/// (`services::operation_batch::start_operation_batch`).
+///
+/// [`WorkerSlots::none_accepting`]: crate::dispatcher::fanout::WorkerSlots::none_accepting
+pub async fn hand_back_while_none_accepting(
+    slots: crate::dispatcher::fanout::WorkerSlots,
+    waiters: OperationWaiters,
+    redis: Option<std::sync::Arc<redis::Client>>,
+) {
+    loop {
+        let changed = slots.changed();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        if slots.none_accepting() {
+            let ids = hand_back_all(&waiters);
+            if let (Some(client), false) = (&redis, ids.is_empty())
+                && let Err(e) = common::cancel::set_cancel_op_keys(client, &ids).await
+            {
+                warn!(error = %e, "Cancelling operations no worker can run failed");
+            }
+        }
+        changed.await;
+    }
+}
+
+/// Fail every waiter as [`NONE_ACCEPTING`]; the ids of those failed.
+fn hand_back_all(waiters: &OperationWaiters) -> Vec<String> {
+    let ids: Vec<String> = waiters.iter().map(|w| w.key().clone()).collect();
+    let failed: Vec<String> = ids
+        .into_iter()
+        .filter(|id| {
+            fail_waiter(
+                waiters,
+                id,
+                OperationFault::PlatformToolMissing,
+                NONE_ACCEPTING,
+            )
+        })
+        .collect();
+    if !failed.is_empty() {
+        warn!(
+            failed = failed.len(),
+            "No live worker takes work; handed back every outstanding operation"
+        );
     }
     failed
 }

@@ -39,6 +39,8 @@ struct EvaluateDriver {
     retry_pool: HashMap<i32, StartEvaluateCaseInput>,
     /// Per-test-case retry attempts consumed so far.
     op_retries: HashMap<i32, u32>,
+    /// The problem inputs every window of the session judges with.
+    problem_inputs: ProblemInputsCache,
 }
 
 #[async_trait]
@@ -67,13 +69,14 @@ impl WindowedSession for EvaluateDriver {
         timeout: Duration,
         tx: mpsc::Sender<SlotOutcome<i32, TestCaseVerdict>>,
     ) -> anyhow::Result<String> {
-        let batch_id = start_evaluate_batch(
+        let batch_id = start_evaluate_batch_with(
             self.caller_plugin_id.clone(),
             self.deps.clone(),
             StartEvaluateBatchInput {
                 problem_type: self.problem_type.clone(),
                 test_cases: vec![item],
             },
+            &self.problem_inputs,
         )
         .await?;
         let wait_batch_id = batch_id.clone();
@@ -260,6 +263,7 @@ async fn run_detached_windowed_evaluate(
         submission_completion,
         retry_pool,
         op_retries: HashMap::new(),
+        problem_inputs: ProblemInputsCache::default(),
     };
     run_windowed_session(
         driver,

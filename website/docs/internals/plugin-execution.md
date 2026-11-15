@@ -241,8 +241,11 @@ The test cases a server has outstanding at workers are bounded by
 `WorkerSlots` is the one record of live capacity: the sum of `max_concurrency`
 over the worker heartbeats and the number of live servers
 (`common::liveness::live_workers_and_server_count`, one `SCAN` over both roles
-and one pipelined read), refreshed by one task every 15 s, and nothing else
-reads liveness for sizing. Every figure derived from it has one owner:
+and one pipelined read). One task keeps it current: it reads again whenever
+a worker announces that it arrived, left, or started or stopped taking work
+(`common::liveness::changes_channel`), just after the soonest a live worker's
+key can expire, and at least every 15 s. Nothing else reads liveness for
+sizing. Every figure derived from it has one owner:
 
 | Figure | Owner | Value |
 |---|---|---|

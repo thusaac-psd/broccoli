@@ -85,6 +85,9 @@ pub struct OperationHostDeps {
     /// faults they meet (see `services::judging::DispatchFaults`); `None`
     /// outside a dispatch.
     pub faults: Option<crate::services::judging::DispatchFaults>,
+    /// The live workers: an operation is published only while one takes
+    /// work.
+    pub worker_slots: crate::dispatcher::fanout::WorkerSlots,
 }
 
 impl OperationHostDeps {
@@ -162,6 +165,7 @@ impl HostFunctionSystemDeps {
             evaluate_batches: self.evaluate_batches.clone(),
             judgement: None,
             faults: None,
+            worker_slots: self.worker_slots.clone(),
         }
     }
 }

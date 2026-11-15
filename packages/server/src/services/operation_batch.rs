@@ -195,6 +195,19 @@ pub async fn start_operation_batch(
                 OperationWaiter::new(op_tx, evaluate_case, deps.faults.clone()),
             );
             spawn_waiter_forwarder(correlation_id.clone(), op_rx, batch_tx);
+            // Checked once the waiter is in: a fleet that stops taking work
+            // after this either fails the waiter itself (see
+            // `consumers::operation_result::hand_back_while_none_accepting`)
+            // or is seen here.
+            if deps.worker_slots.none_accepting() {
+                if let Some(faults) = &deps.faults {
+                    faults.record(
+                        common::worker::OperationFault::PlatformToolMissing,
+                        crate::consumers::operation_result::NONE_ACCEPTING,
+                    );
+                }
+                anyhow::bail!(crate::consumers::operation_result::NONE_ACCEPTING);
+            }
 
             // A pin is a cache-locality hint: an invalid worker id is dropped,
             // and the queue routes a pin for a dead worker to the shared stream.
@@ -924,6 +937,7 @@ mod tests {
             evaluate_batches,
             judgement: None,
             faults: None,
+            worker_slots: Default::default(),
         }
     }
 
