@@ -4,9 +4,14 @@
 //! slots of the live workers that take work (the sum of `max_concurrency`
 //! over their heartbeats, see [`common::liveness`]), how many live workers
 //! take none ([`common::worker::HeartbeatPayload::accepts_work`]) and how
-//! many servers share them,
-//! refreshed by one task every [`SLOTS_REFRESH`] so no request or judging
-//! path ever reads Redis for it. Each server takes its share of the fleet
+//! many servers share them. One task keeps it current
+//! ([`WorkerSlots::follow`]) so no request or judging path ever reads Redis
+//! for it: it re-reads the liveness keys whenever a worker announces a change
+//! (it arrives, leaves, or starts or stops taking work, see
+//! [`common::liveness::changes_channel`]), just after the soonest a live
+//! worker's key can expire (a crashed worker announces nothing), and at least
+//! every [`SLOTS_REFRESH`]. The snapshot therefore drops a worker when its
+//! liveness key does. Each server takes its share of the fleet
 //! figures ([`WorkerSlots::share`]): the claim fiber's in-flight cap and
 //! [`Fanout`], how many test cases this server has outstanding at workers.
 //!
@@ -20,13 +25,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use common::worker::HeartbeatPayload;
+use futures::{FutureExt, StreamExt};
 use opentelemetry::KeyValue;
 use std::sync::Mutex;
 use tokio::sync::Notify;
 
-/// How often the live worker capacity is re-read: a Redis `SCAN`, too costly
-/// to repeat per claim pass or per test case.
+/// The longest the live worker capacity goes without a re-read: a Redis
+/// `SCAN`, too costly to repeat per claim pass or per test case.
 pub const SLOTS_REFRESH: Duration = Duration::from_secs(15);
+
+/// How long after a live worker's key can first expire the fleet is re-read:
+/// Redis has removed an expired key by the time a read reaches it.
+const EXPIRY_MARGIN: Duration = Duration::from_millis(100);
 
 /// Test cases outstanding at workers per live worker slot.
 pub const TEST_CASES_PER_WORKER_SLOT: u64 = 2;
@@ -34,6 +44,7 @@ pub const TEST_CASES_PER_WORKER_SLOT: u64 = 2;
 #[derive(Default)]
 struct SlotsInner {
     slots: AtomicU64,
+    /// Live workers that take no work.
     refusing: AtomicU64,
     servers: AtomicU64,
     changed: Notify,
@@ -77,23 +88,33 @@ impl WorkerSlots {
                 refusing += 1;
             }
         }
-        self.0.refusing.store(refusing, Ordering::Relaxed);
-        self.set(slots, servers);
-    }
-
-    fn set(&self, slots: u64, servers: u64) {
-        let slots_changed = self.0.slots.swap(slots, Ordering::Relaxed) != slots;
-        let servers_changed = self.0.servers.swap(servers, Ordering::Relaxed) != servers;
-        if slots_changed || servers_changed {
+        let changed = [
+            (&self.0.slots, slots),
+            (&self.0.refusing, refusing),
+            (&self.0.servers, servers),
+        ]
+        .into_iter()
+        .fold(false, |changed, (cell, now)| {
+            cell.swap(now, Ordering::Relaxed) != now || changed
+        });
+        if changed {
             self.0.changed.notify_waiters();
         }
     }
 
-    /// Read the live workers' heartbeats from `client` once.
-    pub async fn refresh(&self, client: &redis::Client, namespace: &str) {
+    /// Read the live workers' heartbeats from `client` once. Returns how soon
+    /// the next read is due, at the latest `every` from now (see
+    /// [`next_read_in`]).
+    pub async fn refresh(
+        &self,
+        client: &redis::Client,
+        namespace: &str,
+        every: Duration,
+    ) -> Duration {
         let (workers, servers) =
             crate::handlers::system::read_worker_payloads_and_server_count(client, namespace).await;
         self.observe(workers.iter().map(|(_, p)| p), servers as u64);
+        next_read_in(workers.iter().map(|(node, _)| node.age), every)
     }
 
     /// This server's share of a fleet-wide figure: an even split across the
@@ -107,18 +128,69 @@ impl WorkerSlots {
         self.0.changed.notified()
     }
 
-    /// Re-read the live workers' slots from `client` every [`SLOTS_REFRESH`]
-    /// for the life of the process.
+    /// Keep these slots current from `client` for the life of the process
+    /// (see [`Self::follow`]), re-reading at least every [`SLOTS_REFRESH`].
     pub fn spawn_refresh(&self, client: Arc<redis::Client>, namespace: String) {
-        let slots = self.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(SLOTS_REFRESH);
-            loop {
-                interval.tick().await;
-                slots.refresh(&client, &namespace).await;
-            }
-        });
+        tokio::spawn(self.clone().follow(client, namespace, SLOTS_REFRESH));
     }
+
+    /// Re-read the live workers whenever one announces a change, when a live
+    /// worker's key can next expire, and at least every `every`. The
+    /// subscription is taken before each read, so a change announced while it
+    /// runs is read again; announcements that queue up meanwhile take one
+    /// read. While the subscription is down the reads keep their schedule,
+    /// and the next one subscribes again.
+    pub async fn follow(self, client: Arc<redis::Client>, namespace: String, every: Duration) {
+        let channel = common::liveness::changes_channel(&namespace);
+        let mut changes = None;
+        loop {
+            if changes.is_none() {
+                changes = subscribe(&client, &channel).await;
+            }
+            let due = tokio::time::sleep(self.refresh(&client, &namespace, every).await);
+            let Some(stream) = changes.as_mut() else {
+                due.await;
+                continue;
+            };
+            tokio::select! {
+                _ = due => {}
+                announced = stream.next() => match announced {
+                    Some(_) => while let Some(Some(_)) = stream.next().now_or_never() {},
+                    None => changes = None,
+                },
+            }
+        }
+    }
+}
+
+/// A subscription to `channel`, or `None` while Redis does not answer.
+async fn subscribe(client: &redis::Client, channel: &str) -> Option<redis::aio::PubSubStream> {
+    let subscribed = async {
+        let mut pubsub = client.get_async_pubsub().await?;
+        pubsub.subscribe(channel).await?;
+        Ok::<_, redis::RedisError>(pubsub.into_on_message())
+    };
+    match tokio::time::timeout(common::redis_conn::COMMAND_TIMEOUT, subscribed).await {
+        Ok(Ok(stream)) => Some(stream),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "Subscribing to worker changes failed; retrying on the next read");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("Subscribing to worker changes timed out; retrying on the next read");
+            None
+        }
+    }
+}
+
+/// How soon the fleet is next read, given the age of every live worker's
+/// liveness key: just after the soonest one can expire unrenewed, so a
+/// crashed worker leaves the snapshot as its key leaves Redis, and no later
+/// than `every`.
+pub fn next_read_in(ages: impl IntoIterator<Item = Duration>, every: Duration) -> Duration {
+    ages.into_iter()
+        .map(|age| common::liveness::TTL.saturating_sub(age) + EXPIRY_MARGIN)
+        .fold(every, Duration::min)
 }
 
 /// Outstanding test cases a server may have: its share of
@@ -316,7 +388,7 @@ mod tests {
         let slots = WorkerSlots::default();
         let fanout = Fanout::with_floor(slots.clone(), 4, None);
         assert_eq!(fanout.limit(), 4 * TEST_CASES_PER_WORKER_SLOT);
-        slots.set(10, 1);
+        slots.observe(&[heartbeat(10, &[])], 1);
         assert_eq!(fanout.limit(), 10 * TEST_CASES_PER_WORKER_SLOT);
     }
 
@@ -324,7 +396,7 @@ mod tests {
     fn replicas_split_the_fleet_bound() {
         let slots = WorkerSlots::default();
         let fanout = Fanout::with_floor(slots.clone(), 4, None);
-        slots.set(10, 3);
+        slots.observe(&[heartbeat(10, &[])], 3);
         // 20 outstanding across the fleet, 7 per server rounded up.
         assert_eq!(fanout.limit(), 7);
         assert_eq!(slots.share(20), 7);
@@ -348,8 +420,43 @@ mod tests {
         let _held: Vec<_> = futures::future::join_all((0..2).map(|_| fanout.acquire())).await;
         let waiter = parked(&fanout).await;
         assert!(!waiter.is_finished());
-        slots.set(4, 1);
+        slots.observe(&[heartbeat(4, &[])], 1);
         let _permit = waiter.await.unwrap();
         assert_eq!(fanout.outstanding(), 3);
+    }
+
+    #[test]
+    fn the_next_read_follows_the_soonest_key_expiry() {
+        let every = Duration::from_secs(3600);
+        assert_eq!(next_read_in([], every), every, "no worker: the fallback");
+        let ttl = common::liveness::TTL;
+        assert_eq!(
+            next_read_in([Duration::from_secs(1), Duration::from_secs(4)], every),
+            ttl - Duration::from_secs(4) + EXPIRY_MARGIN,
+            "just after the oldest renewal runs out"
+        );
+        assert_eq!(
+            next_read_in([ttl + Duration::from_secs(1)], every),
+            EXPIRY_MARGIN,
+            "a key past its TTL is read again at once"
+        );
+        assert_eq!(
+            next_read_in([Duration::ZERO], Duration::from_secs(1)),
+            Duration::from_secs(1),
+            "never later than the fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fleet_that_stops_taking_work_is_a_change() {
+        let slots = WorkerSlots::default();
+        slots.observe(&[heartbeat(0, &[])], 1);
+        let changed = slots.changed();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        // The same slots (none) and servers, but the worker now refuses work.
+        slots.observe(&[heartbeat(0, &["broccoli-compare"])], 1);
+        assert!(slots.none_accepting());
+        changed.await;
     }
 }

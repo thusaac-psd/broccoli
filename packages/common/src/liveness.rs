@@ -12,6 +12,12 @@
 //! The message queue's Lua scripts take the same key (via [`NodeRole::key`]) to
 //! route pinned tasks and drain a dead worker's private stream
 //! (replies do not use it: a reply stream outlives its server's liveness key).
+//!
+//! A node that announces its changes ([`crate::node_identity::NodeClaim::announce_changes`])
+//! publishes its id on [`changes_channel`] when it arrives, when what it
+//! announces changes, and when it leaves, so a reader that follows the fleet
+//! re-reads it at once instead of on its next scan. A crashed node announces
+//! nothing: its key expires, at the latest [`TTL`] after it was last renewed.
 
 use std::time::Duration;
 
@@ -48,6 +54,12 @@ impl NodeRole {
     pub fn key(self, namespace: &str, id: &str) -> String {
         format!("{}{id}", self.key_prefix(namespace))
     }
+}
+
+/// The channel announcing node changes in `namespace` (see the module docs).
+/// Outside the liveness key prefix, so no scan takes it for a node.
+pub fn changes_channel(namespace: &str) -> String {
+    format!("{namespace}:heartbeat-changes")
 }
 
 /// How long ago a liveness key was last renewed, from its remaining TTL in
@@ -195,6 +207,7 @@ mod tests {
     fn keys_carry_the_role_and_id() {
         assert_eq!(NodeRole::Worker.key("ops", "w1"), "ops:heartbeat:worker:w1");
         assert_eq!(NodeRole::Server.key("ops", "s1"), "ops:heartbeat:server:s1");
+        assert!(!changes_channel("ops").starts_with("ops:heartbeat:"));
     }
 
     #[tokio::test]

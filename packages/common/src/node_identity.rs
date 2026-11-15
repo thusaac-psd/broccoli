@@ -203,10 +203,13 @@ pub enum RenewOutcome {
 /// Renew iff the key still carries our instance token; take it again if it is
 /// gone, unless this process already released it (`KEYS[2]`, the release
 /// marker, exists: a renewal still queued at Redis when the release ran).
-/// Each owned stream (`KEYS[3..]`, TTL in `ARGV[1 + i]`) is created empty
-/// when missing and gets its TTL again. Returns `{code, created}`: code 1
-/// (renewed), 2 (reacquired) or 0 (held by someone else, or released), and
-/// the 1-based indexes of the owned streams that had to be created.
+/// Each owned stream (`KEYS[3..]`, TTL in `ARGV[4 + i]`) is created empty
+/// when missing and gets its TTL again. A claim that announces its changes
+/// (`ARGV[4]` names the channel, empty otherwise) publishes its id
+/// (`ARGV[6]`) there when it takes the key again or `ARGV[5]` is `1`.
+/// Returns `{code, created}`: code 1 (renewed), 2 (reacquired) or 0 (held by
+/// someone else, or released), and the 1-based indexes of the owned streams
+/// that had to be created.
 const RENEW_LUA: &str = r#"
 if redis.call('EXISTS', KEYS[2]) == 1 then
   return {0, {}}
@@ -227,7 +230,10 @@ for i = 3, #KEYS do
     redis.call('XADD', KEYS[i], 'MAXLEN', 0, '*', '_', '')
     table.insert(created, i - 2)
   end
-  redis.call('PEXPIRE', KEYS[i], ARGV[i + 1])
+  redis.call('PEXPIRE', KEYS[i], ARGV[i + 4])
+end
+if ARGV[4] ~= '' and (code == 2 or ARGV[5] == '1') then
+  redis.call('PUBLISH', ARGV[4], ARGV[6])
 end
 return {code, created}
 "#;
@@ -235,7 +241,8 @@ return {code, created}
 /// Delete the key and the owned streams (`KEYS[3..]`) iff the key still
 /// carries our instance token, and leave the release marker (`KEYS[2]`, for
 /// one TTL) so a renewal of ours that is still in flight cannot take the ID
-/// back.
+/// back. A claim that announces its changes publishes its id (`ARGV[4]`) on
+/// the channel `ARGV[3]` names when it deletes the key.
 const RELEASE_LUA: &str = r#"
 redis.call('SET', KEYS[2], 1, 'PX', ARGV[2])
 local cur = redis.call('GET', KEYS[1])
@@ -246,7 +253,11 @@ if ok and type(doc) == 'table' and doc.instance == ARGV[1] then
   for i = 3, #KEYS do
     table.insert(keys, KEYS[i])
   end
-  return redis.call('DEL', unpack(keys))
+  local deleted = redis.call('DEL', unpack(keys))
+  if ARGV[3] ~= '' then
+    redis.call('PUBLISH', ARGV[3], ARGV[4])
+  end
+  return deleted
 end
 return 0
 "#;
@@ -258,6 +269,14 @@ struct OwnedStream {
     on_lost: Box<dyn Fn() + Send + Sync>,
     /// Whether a renewal has seen (or created) it before.
     existed: AtomicBool,
+}
+
+/// What a claim announces (see [`NodeClaim::announce_changes`]).
+struct Announce {
+    channel: String,
+    state: Box<dyn Fn(&serde_json::Value) -> serde_json::Value + Send + Sync>,
+    /// The state the last successful renewal wrote; `None` before the first.
+    last: std::sync::Mutex<Option<serde_json::Value>>,
 }
 
 /// This process's claim on its node ID. See the module docs.
@@ -272,6 +291,7 @@ pub struct NodeClaim {
     ttl: Duration,
     /// Streams this claim keeps alive.
     owned_streams: Vec<OwnedStream>,
+    announce: Option<Announce>,
 }
 
 impl NodeClaim {
@@ -313,6 +333,7 @@ impl NodeClaim {
             instance: uuid::Uuid::new_v4().to_string(),
             ttl,
             owned_streams: Vec::new(),
+            announce: None,
         };
         let value = claim.value(payload);
         let deadline = tokio::time::Instant::now() + ttl + interval;
@@ -383,11 +404,39 @@ impl NodeClaim {
         self
     }
 
+    /// Announce this node's changes on its namespace's
+    /// [`crate::liveness::changes_channel`]: its arrival (the first renewal,
+    /// or one that takes the key again), every renewal whose `state` of the
+    /// payload differs from the last renewal's, and its release. Takes effect
+    /// from the next renewal.
+    pub fn announce_changes(
+        mut self,
+        state: impl Fn(&serde_json::Value) -> serde_json::Value + Send + Sync + 'static,
+    ) -> Self {
+        self.announce = Some(Announce {
+            channel: crate::liveness::changes_channel(&self.namespace),
+            state: Box::new(state),
+            last: std::sync::Mutex::new(None),
+        });
+        self
+    }
+
+    fn announce_channel(&self) -> &str {
+        self.announce.as_ref().map_or("", |a| a.channel.as_str())
+    }
+
     /// Refresh the claim with a new payload. See [`RenewOutcome`].
     pub async fn renew(
         &self,
         payload: serde_json::Value,
     ) -> Result<RenewOutcome, redis::RedisError> {
+        let state = self.announce.as_ref().map(|a| (a.state)(&payload));
+        let changed = match (&self.announce, &state) {
+            (Some(a), Some(state)) => {
+                a.last.lock().unwrap_or_else(|p| p.into_inner()).as_ref() != Some(state)
+            }
+            _ => false,
+        };
         let value = self.value(payload);
         let (code, created): (i64, Vec<usize>) = self
             .with_conn(|mut conn| async move {
@@ -398,7 +447,10 @@ impl NodeClaim {
                     .key(self.release_marker())
                     .arg(&self.instance)
                     .arg(&value)
-                    .arg(self.ttl.as_millis() as u64);
+                    .arg(self.ttl.as_millis() as u64)
+                    .arg(self.announce_channel())
+                    .arg(if changed { "1" } else { "0" })
+                    .arg(&self.id);
                 for stream in &self.owned_streams {
                     invocation
                         .key(&stream.key)
@@ -417,6 +469,9 @@ impl NodeClaim {
                 );
                 (stream.on_lost)();
             }
+        }
+        if let (Some(a), Some(state), 1 | 2) = (&self.announce, state, code) {
+            *a.last.lock().unwrap_or_else(|p| p.into_inner()) = Some(state);
         }
         Ok(match code {
             1 => RenewOutcome::Renewed,
@@ -441,6 +496,8 @@ impl NodeClaim {
                     )
                     .arg(&self.instance)
                     .arg(self.ttl.as_millis() as u64)
+                    .arg(self.announce_channel())
+                    .arg(&self.id)
                     .invoke_async(&mut conn)
                     .await
             })
@@ -945,6 +1002,7 @@ mod tests {
             instance: "twin".into(),
             ttl,
             owned_streams: Vec::new(),
+            announce: None,
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut _hb = twin.spawn_heartbeat_with(

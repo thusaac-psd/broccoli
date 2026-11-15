@@ -93,14 +93,28 @@ impl HeartbeatConfig {
 }
 
 /// Keep the worker's heartbeat key (which is also its ID claim, taken at boot
-/// with [`NodeClaim::claim_at_boot`]) alive until shutdown.
+/// with [`NodeClaim::claim_at_boot`]) alive until shutdown, announcing every
+/// change of its capacity ([`HeartbeatPayload::capacity`]) so servers stop or
+/// resume handing out work at once.
 pub fn spawn(
     claim: NodeClaim,
     config: HeartbeatConfig,
     started_at: chrono::DateTime<Utc>,
     in_flight: InFlightCounter,
 ) -> HeartbeatHandle {
-    HeartbeatHandle(claim.spawn_heartbeat(move || config.payload(started_at, &in_flight)))
+    HeartbeatHandle(
+        announce_capacity(claim).spawn_heartbeat(move || config.payload(started_at, &in_flight)),
+    )
+}
+
+/// `claim`, announcing every change of the worker's capacity
+/// ([`HeartbeatPayload::capacity`]).
+pub fn announce_capacity(claim: NodeClaim) -> NodeClaim {
+    claim.announce_changes(|payload| {
+        serde_json::from_value::<HeartbeatPayload>(payload.clone())
+            .map(|p| serde_json::json!(p.capacity()))
+            .unwrap_or_default()
+    })
 }
 
 #[cfg(test)]

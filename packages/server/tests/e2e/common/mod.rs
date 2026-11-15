@@ -672,8 +672,21 @@ impl E2eTestApp {
             }
             // The fleet as the claim fiber sees it, read once before any test
             // submits and then kept current as in production.
-            worker_slots.refresh(&redis, &operation_queue).await;
-            worker_slots.spawn_refresh(Arc::new(redis), operation_queue.clone());
+            worker_slots
+                .refresh(
+                    &redis,
+                    &operation_queue,
+                    server::dispatcher::fanout::SLOTS_REFRESH,
+                )
+                .await;
+            worker_slots.spawn_refresh(Arc::new(redis.clone()), operation_queue.clone());
+            tokio::spawn(
+                server::consumers::operation_result::hand_back_while_none_accepting(
+                    worker_slots.clone(),
+                    operation_waiters.clone(),
+                    Some(Arc::new(redis)),
+                ),
+            );
         } else {
             state.registries.evaluator_registry.write().await.insert(
                 "batch".into(),

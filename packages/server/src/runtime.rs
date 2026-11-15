@@ -246,6 +246,13 @@ impl ServerRuntime {
         if let Some(client) = &redis_client {
             worker_slots.spawn_refresh(client.clone(), app_config.mq.operation_queue_name.clone());
         }
+        tokio::spawn(
+            crate::consumers::operation_result::hand_back_while_none_accepting(
+                worker_slots.clone(),
+                operation_waiters.clone(),
+                redis_client.clone(),
+            ),
+        );
 
         let manager = ServerManager::new(
             app_config.plugin.clone(),
