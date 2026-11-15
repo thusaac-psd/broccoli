@@ -9,6 +9,13 @@ pub struct CheckerVerdict {
     pub verdict: Verdict,
     pub score: f64,
     pub message: Option<String>,
+    /// Set, with a description for staff (the signal or exit status), when
+    /// the checker program itself failed: it crashed, was killed by a signal,
+    /// or exited with a code its format gives no meaning. The problem is at
+    /// fault, not the submission, so the system error stands instead of
+    /// being judged again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checker_failure: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +52,9 @@ pub struct CheckerRunOutcome {
     pub exit_code: Option<i32>,
     pub stderr: String,
     pub sandbox_status: Option<String>,
+    /// The signal that terminated the checker, if one did.
+    #[serde(default)]
+    pub signal: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +173,7 @@ mod tests {
             exit_code: Some(0),
             stderr: "ok".to_string(),
             sandbox_status: Some("OK".to_string()),
+            signal: None,
         };
 
         let json = serde_json::to_value(&result).unwrap();
@@ -180,6 +191,7 @@ mod tests {
                 exit_code: Some(1),
                 stderr: "wrong answer".to_string(),
                 sandbox_status: None,
+                signal: None,
             },
         };
 

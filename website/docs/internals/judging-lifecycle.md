@@ -143,7 +143,8 @@ plugin's result write is one statement that writes the judgement and the
 submission together.
 
 One projection waits: a current judgement that finalized as a system error
-the system-error retry may still re-judge (anything but `PLUGIN_REFUSED`).
+the system-error retry may still re-judge (anything but `PLUGIN_REFUSED` or
+`CHECKER_FAILED`, which stand).
 The submission keeps showing the attempt in flight until the reaper decides
 it within one scan (5 s): it requeues the judgement while the submission has
 retries left, so the submission goes on to `Queued` and the next attempt; or
@@ -203,8 +204,17 @@ reaches the plugin, a plugin write that would finalize the judgement is fenced
 out like a stale dispatch's, and the dispatch ends through `fail_dispatch`,
 which sends the judgement back to `Queued` under a fresh epoch spending
 nothing. The submission follows in the same transaction, so no client and no
-after-judging hook sees a `SystemError` that is then taken back. Any other
-system error is retried within the budget.
+after-judging hook sees a `SystemError` that is then taken back.
+
+A failure every attempt repeats stands at once (`SystemErrorClass::Stands`): a
+contest plugin's refusal (`PLUGIN_REFUSED`), or the problem's checker failing
+(`CHECKER_FAILED`). A checker plugin reports the latter on its verdict
+(`CheckerVerdict::checker_failure`, set by the standard testlib checker when
+the checker was killed by a signal, failed to start, or exited with a code
+testlib gives no meaning); the host records it as the dispatch's fault, so the
+system error carries the code and how the checker failed (staff only, like
+every system-error diagnostic). Any other system error is retried within the
+budget.
 
 A missing platform tool is the worker's fault, never the submission's. A worker
 that lacks one reads no task at all: it stays live, and its heartbeat lists the

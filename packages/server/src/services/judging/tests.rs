@@ -563,34 +563,51 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
     assert!(pass.confirmed.is_empty(), "confirmed once");
 }
 
+/// A contestant's verdict is never retried, and neither is a failure every
+/// attempt repeats: a plugin's refusal or the problem's checker failing
+/// shows at once.
 #[tokio::test]
-async fn a_contestant_verdict_or_a_plugin_refusal_is_never_retried() {
+async fn a_contestant_verdict_or_a_failure_that_stands_is_never_retried() {
     let (_pg, db) = crate::test_support::postgres().await;
     let (_, _) = new_submission(&db).await;
     let wrong = claim_one(&db, "srv").await;
     finish(&db, &wrong.judgement, Verdict::WrongAnswer).await;
-    let (_, _) = new_submission(&db).await;
-    let refused = claim_one(&db, "srv").await;
-    fail_dispatch(
-        &db,
-        Unit::Judgement,
-        refused.judgement.id,
-        refused.judgement.judge_epoch,
+    let mut standing = Vec::new();
+    for code in [
         common::SubmissionDlqErrorCode::PLUGIN_REFUSED,
-        "no",
-    )
-    .await
-    .unwrap();
+        DispatchFault::CheckerFailed.code(),
+    ] {
+        let (_, _) = new_submission(&db).await;
+        let claimed = claim_one(&db, "srv").await;
+        assert_eq!(
+            fail_dispatch(
+                &db,
+                Unit::Judgement,
+                claimed.judgement.id,
+                claimed.judgement.judge_epoch,
+                code,
+                "no",
+            )
+            .await
+            .unwrap(),
+            DispatchFailed::SystemError
+        );
+        standing.push((code, claimed.submission.id));
+    }
 
     let pass = retry_system_errors(&db, RetryBudget::new(5), 10, NO_TYPES)
         .await
         .unwrap();
     assert_eq!(pass, SystemErrorPass::default());
-    assert_eq!(
-        sub(&db, refused.submission.id).await.status,
-        SubmissionStatus::SystemError,
-        "a refusal shows at once"
-    );
+    for (code, id) in standing {
+        let shown = sub(&db, id).await;
+        assert_eq!(
+            shown.status,
+            SubmissionStatus::SystemError,
+            "{code} shows at once"
+        );
+        assert_eq!(shown.error_code.as_deref(), Some(code));
+    }
 }
 
 #[tokio::test]

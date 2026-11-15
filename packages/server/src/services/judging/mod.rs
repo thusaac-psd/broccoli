@@ -102,8 +102,8 @@ mod unit;
 mod tests;
 
 pub(crate) use budget::RetryBudget;
-pub use fault::DispatchFaults;
 pub(crate) use fault::SystemErrorClass;
+pub use fault::{DispatchFault, DispatchFaults};
 pub use notify::CLAIM_CHANNEL;
 pub(crate) use notify::ClaimWake;
 #[cfg(test)]
@@ -114,7 +114,8 @@ pub(crate) use open::{
     open_judgement,
 };
 pub(crate) use plugin_writes::{
-    SqlBindSink, code_run_write, code_run_write_fence, judgement_write, unless_lost, write_fence,
+    SqlBindSink, code_run_write, code_run_write_fence, judgement_write, under_dispatch_fault,
+    write_fence,
 };
 pub(crate) use unit::{
     Abandoned, ClaimedCodeRun, ClaimedJudgement, claim_code_runs, claim_judgements, fail_dispatch,

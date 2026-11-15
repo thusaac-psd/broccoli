@@ -149,15 +149,15 @@ fn system_error(alias: &str) -> String {
 }
 
 /// SQL: the judgement `alias` finished as a system error that the
-/// system-error retry may still re-judge (anything but a plugin refusal).
+/// system-error retry may still re-judge (anything but one that stands).
 /// The submission keeps showing the attempt in flight instead of a terminal
 /// status that the retry would take back: [`retry_system_errors`], which owns
 /// the retry budget, either requeues the judgement or confirms the error.
 fn awaits_retry_decision(alias: &str) -> String {
     format!(
-        "({alias}.is_finalized AND {system_error} AND NOT {refused})",
+        "({alias}.is_finalized AND {system_error} AND NOT {stands})",
         system_error = system_error(alias),
-        refused = SystemErrorClass::Refused.sql_matches(&format!("{alias}.error_code")),
+        stands = SystemErrorClass::Stands.sql_matches(&format!("{alias}.error_code")),
     )
 }
 
@@ -895,7 +895,7 @@ pub(crate) struct SystemErrorPass {
 /// - `Judging`: requeued while its submission has system-error retries left,
 ///   spending one, and confirmed once they are spent; while its contest type
 ///   is parked, requeued spending nothing, so it waits parked;
-/// - `Refused`: never awaits a decision; the submission shows it at once.
+/// - `Stands`: never awaits a decision; the submission shows it at once.
 ///
 /// A confirmed error is what the submission shows from then on.
 pub(crate) async fn retry_system_errors(
