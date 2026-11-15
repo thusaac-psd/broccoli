@@ -15,9 +15,9 @@
 //!   deadlines. Its parent is parked in that host function, holding no token;
 //!   the nested call runs on a second guest thread (host functions
 //!   `block_on`, which cannot nest on one thread) and takes a token back the
-//!   way a resuming call does. Nesting is capped at [`MAX_DEPTH`], which stops
-//!   A-calls-B-calls-A cycles and gives every admitted call at most one
-//!   nested call, the second thread the thread budget reserves for it.
+//!   way a resuming call does. Nesting is capped at [`MAX_DEPTH`], which cuts
+//!   every call cycle off and bounds the guest threads one admitted call can
+//!   hold, the threads the thread budget reserves for it.
 //!
 //! While guest code runs, the thread carries a call scope. A host function
 //! that blocks wraps the blocking part in [`parked`], which gives the token
@@ -36,8 +36,11 @@ use crate::admission::{Admission, CallClass, CallKind, Capacity, Token};
 use crate::error::PluginError;
 use crate::memory::MemoryBudget;
 
-/// Deepest nesting: a top-level call and one nested call.
-pub const MAX_DEPTH: u8 = 2;
+/// Deepest nesting: a top-level call and the calls nested under it. The
+/// deepest chain the host makes is three plugins long: an evaluator resolves
+/// a checker (`checker:resolve`), whose checker compiles its own source
+/// through a language plugin (`language:resolve`).
+pub const MAX_DEPTH: u8 = 3;
 
 /// How a call is admitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -111,8 +111,8 @@ a reload that fails leaves the old version serving.
 Guests never run on tokio's blocking pool. They run on
 `plugin_core::threads::GuestThreads`, which hands a job to an idle thread or
 starts one and never queues. It does not need to: the threads in use are at
-most one per admitted call plus one for that call's nested call
-(`Caps::threads`, twice the sum of the caps), so a call never holds a token
+most one per admitted call and nesting level (`Caps::threads`, `MAX_DEPTH`
+times the sum of the caps), so a call never holds a token
 while it waits for a thread, and the thread count is a sum of explicit caps.
 Idle threads leave after 30 s.
 
@@ -148,15 +148,16 @@ a pool of its own, within that shared budget; see
 (`host_funcs/checker.rs`, `host_funcs/language.rs`) call back into plugins
 with `CallOptions::nested()`.
 
-- They run on a second guest thread. Running them inline would nest
+- They run on a guest thread of their own. Running them inline would nest
   `block_on` inside `block_on` and panic.
 - They skip admission. The parent is parked in that host function, so the
   nested call takes a token the way a resuming call does, and inherits the
   parent's class and the earlier of the parent's deadline and its own call
   timeout.
-- Depth is capped at `MAX_DEPTH` (2). That stops A-calls-B-calls-A cycles and
-  gives every admitted call at most one nested call, the second thread
-  the thread budget reserves for it.
+- Depth is capped at `MAX_DEPTH` (3), the deepest chain the host makes: an
+  evaluator resolves a checker, and a testlib checker resolves its own
+  source's language. The cap cuts every cycle off and bounds the threads an
+  admitted call holds, one per level, which the thread budget reserves.
 - One instance is never re-entered: each call leases its own instance, so a
   nested call into the same plugin gets a second store.
 
