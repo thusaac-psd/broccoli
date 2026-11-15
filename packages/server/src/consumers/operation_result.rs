@@ -168,7 +168,7 @@ pub fn fail_all_waiters(waiters: &OperationWaiters, reason: &str) -> usize {
 
 /// For the life of the process: whenever the fleet comes to live workers
 /// none of which takes work ([`WorkerSlots::none_accepting`]), fail every
-/// operation this server waits for as [`OperationFault::PlatformToolMissing`],
+/// operation this server waits for as [`OperationFault::NoCapableWorker`],
 /// so its judgement is handed back to `Queued` without spending a retry
 /// instead of waiting at a queue no worker reads. Each failed task gets its
 /// cancel key, so a worker that takes work later skips it. Operations started
@@ -202,14 +202,7 @@ fn hand_back_all(waiters: &OperationWaiters) -> Vec<String> {
     let ids: Vec<String> = waiters.iter().map(|w| w.key().clone()).collect();
     let failed: Vec<String> = ids
         .into_iter()
-        .filter(|id| {
-            fail_waiter(
-                waiters,
-                id,
-                OperationFault::PlatformToolMissing,
-                NONE_ACCEPTING,
-            )
-        })
+        .filter(|id| fail_waiter(waiters, id, OperationFault::NoCapableWorker, NONE_ACCEPTING))
         .collect();
     if !failed.is_empty() {
         warn!(

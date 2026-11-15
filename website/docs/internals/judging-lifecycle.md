@@ -180,9 +180,10 @@ evaluate batches and detached sessions) shares one `DispatchFaults`, and
 whatever meets a platform fault records it there: a publish the queue
 refused (`QUEUE_UNREACHABLE`), an operation the queue lost
 (`OPERATION_LOST`), a worker without a platform tool
-(`PLATFORM_TOOL_MISSING`). A system error the dispatch then ends with
-carries that code, whatever the plugin reported, and the reaper treats it by
-its class (`SystemErrorClass`): a hand-back (the three fault codes, and
+(`PLATFORM_TOOL_MISSING`), a fleet with no live worker that takes work
+(`NO_CAPABLE_WORKER`). A system error the dispatch then ends with carries that
+code, whatever the plugin reported, and the reaper treats it by its class
+(`SystemErrorClass`): a hand-back (the four fault codes, and
 `PLUGIN_DISABLED`) is requeued spending nothing, and any other code is retried
 within the budget.
 
@@ -194,7 +195,7 @@ back for a worker that has the tool. While live workers exist and none of them
 takes work, the claim fiber claims nothing, so submissions wait `Queued`
 instead of failing. Work already dispatched when the fleet comes to that is
 handed back the same way: every operation the server waits for fails as
-`PLATFORM_TOOL_MISSING` and gets its cancel key, and an operation started
+`NO_CAPABLE_WORKER` and gets its cancel key, and an operation started
 meanwhile is refused when it publishes
 (`consumers::operation_result::hand_back_while_none_accepting`). Workers
 announce each change of whether they take work, so the claim fiber sees it at

@@ -237,7 +237,7 @@ fn operation() -> OperationTask {
 }
 
 /// Work already at the queue when the last worker that takes work stops
-/// taking it fails at once as a missing platform tool, the fault whose system
+/// taking it fails at once as `NO_CAPABLE_WORKER`, a fault whose system
 /// error is handed back to `Queued` spending no retry, instead of waiting at
 /// a queue no worker reads until its result wait runs out. An operation
 /// started while it stays so is refused the same way.
@@ -263,10 +263,10 @@ async fn work_at_the_queue_is_handed_back_when_no_worker_takes_work() {
         .unwrap()
         .expect("the operation is answered");
     assert!(!result.success);
-    assert_eq!(result.fault, Some(OperationFault::PlatformToolMissing));
+    assert_eq!(result.fault, Some(OperationFault::NoCapableWorker));
     assert_eq!(
         faults.get().map(|f| f.fault),
-        Some(OperationFault::PlatformToolMissing)
+        Some(OperationFault::NoCapableWorker)
     );
     assert!(deps.operation_waiters.is_empty());
 
@@ -277,7 +277,7 @@ async fn work_at_the_queue_is_handed_back_when_no_worker_takes_work() {
         .expect_err("nothing can run it");
     assert_eq!(
         refused.get().map(|f| f.fault),
-        Some(OperationFault::PlatformToolMissing)
+        Some(OperationFault::NoCapableWorker)
     );
     assert!(deps.operation_waiters.is_empty());
     hand_back.abort();
