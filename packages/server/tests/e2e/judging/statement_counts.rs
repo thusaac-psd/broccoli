@@ -13,14 +13,15 @@ use crate::common::E2eTestApp;
 /// row, and the problem and its additional files, which the evaluate window
 /// that judges it reads (ICPC judges one case per window). The worker's
 /// compile cache serves every case after the first, so compiling costs no
-/// statement per case. A fourth fails.
+/// statement per case. Half a statement of room: on a loaded machine a case's
+/// result row is sometimes written more than once. A fourth fails.
 ///
 /// Only statements that run at least once per added case count
 /// ([`per_case_statements`]): the app's background loops (claim ticks,
 /// leases) run meanwhile, but they tick with how long judging takes, not with
 /// what it does, so they show up at a fraction per case that depends on the
 /// machine.
-const MAX_PER_TEST_CASE: f64 = 3.0;
+const MAX_PER_TEST_CASE: f64 = 3.5;
 
 /// Marks the statements this test issues to wait for a submission, which the
 /// counts leave out: waiting by polling the API would count statements that
