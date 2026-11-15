@@ -70,10 +70,18 @@ impl Countdown {
     }
 }
 
-/// A timestamp in this machine's time zone.
+/// A timestamp in this machine's time zone, labelled with its UTC offset:
+/// a lab machine's zone may be wrong, and the label shows which one it is.
 pub fn local_time(ts: &DateTime<Utc>) -> String {
-    ts.with_timezone(&chrono::Local)
-        .format("%Y-%m-%d %H:%M")
+    in_zone(ts, &chrono::Local)
+}
+
+fn in_zone<Tz: chrono::TimeZone>(ts: &DateTime<Utc>, zone: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    ts.with_timezone(zone)
+        .format("%Y-%m-%d %H:%M UTC%:z")
         .to_string()
 }
 
@@ -99,6 +107,14 @@ mod tests {
 
     fn ts(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_time_says_which_zone_it_is_in() {
+        let at = ts("2030-01-01T10:00:00Z");
+        let beijing = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        assert_eq!(in_zone(&at, &beijing), "2030-01-01 18:00 UTC+08:00");
+        assert_eq!(in_zone(&at, &Utc), "2030-01-01 10:00 UTC+00:00");
     }
 
     #[test]

@@ -777,11 +777,19 @@ impl ApiError {
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.code.as_str() {
-            _ if self.rejects_token() => write!(
-                f,
-                "{} Run `broccoli login` to re-authenticate.",
-                self.message
-            ),
+            _ if self.rejects_token() => {
+                // The server's message is a phrase that may lack its stop.
+                let message = self.message.trim_end();
+                let stop = if message.ends_with(['.', '!', '?']) {
+                    ""
+                } else {
+                    "."
+                };
+                write!(
+                    f,
+                    "{message}{stop} Run `broccoli login` to re-authenticate."
+                )
+            }
             Self::UNSTRUCTURED if self.message.is_empty() => {
                 write!(f, "Server returned {}", self.status)
             }
@@ -887,6 +895,27 @@ mod tests {
             code: code.into(),
             message: String::new(),
         }
+    }
+
+    #[test]
+    fn a_rejected_token_reads_as_whole_sentences() {
+        let rejected = ApiError {
+            status: 401,
+            code: "TOKEN_INVALID".into(),
+            message: "Invalid or expired token".into(),
+        };
+        assert_eq!(
+            rejected.to_string(),
+            "Invalid or expired token. Run `broccoli login` to re-authenticate."
+        );
+        let punctuated = ApiError {
+            message: "Invalid or expired token.".into(),
+            ..rejected
+        };
+        assert_eq!(
+            punctuated.to_string(),
+            "Invalid or expired token. Run `broccoli login` to re-authenticate."
+        );
     }
 
     #[test]

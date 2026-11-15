@@ -349,7 +349,21 @@ impl Link {
     }
 }
 
+/// `watch` draws a live screen and reads keys, so it needs a terminal on
+/// both ends; without one it says so instead of failing to open the tty.
+fn require_terminal(stdin: bool, stdout: bool) -> anyhow::Result<()> {
+    if stdin && stdout {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "`broccoli watch` needs a terminal: run it in a terminal window, not through a pipe \
+         or a script. For the contest's details without one, run `broccoli contest info`."
+    )
+}
+
 pub fn run(args: WatchArgs) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+    require_terminal(io::stdin().is_terminal(), io::stdout().is_terminal())?;
     let creds = crate::commands::credentials()?;
     let client = Client::new(creds);
 
@@ -1673,6 +1687,16 @@ fn render_overlay(f: &mut Frame, app: &AppData, size: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watch_without_a_terminal_says_it_needs_one() {
+        for (stdin, stdout) in [(false, true), (true, false), (false, false)] {
+            let err = require_terminal(stdin, stdout).unwrap_err().to_string();
+            assert!(err.contains("needs a terminal"), "{err}");
+            assert!(err.contains("broccoli contest info"), "{err}");
+        }
+        assert!(require_terminal(true, true).is_ok());
+    }
     use broccoli_cli_core::api::clarification::ClarificationReplyResponse;
     use broccoli_cli_core::api::shared::ListPagination;
     use broccoli_cli_core::api::submission::SubmissionListItem;

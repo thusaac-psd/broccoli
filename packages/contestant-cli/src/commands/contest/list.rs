@@ -24,7 +24,9 @@ pub fn run() -> anyhow::Result<()> {
 
     let term_width = Term::stdout().size().1 as usize;
 
-    if term_width >= 80 {
+    // The table needs its full width (and its indent); a narrower terminal
+    // gets one card per contest.
+    if term_width >= TABLE_WIDTH + 2 {
         print_table(&resp.data);
     } else {
         print_cards(&resp.data);
@@ -44,21 +46,25 @@ fn status_label(phase: ContestPhase) -> console::StyledObject<&'static str> {
     }
 }
 
+/// The table's columns and the spaces between them; a time with its zone
+/// is 26 wide.
+const TABLE_WIDTH: usize = 6 + 40 + 15 + 26 + 26 + 4;
+
 fn print_table(contests: &[broccoli_cli_core::api::contest::ContestListItem]) {
     println!(
-        "  {:<6} {:<40} {:<15} {:<20} {:<20}",
+        "  {:<6} {:<40} {:<15} {:<26} {:<26}",
         style("ID").bold(),
         style("Name").bold(),
         style("Status").bold(),
         style("Start").bold(),
         style("End").bold(),
     );
-    println!("  {}", style("-".repeat(101)).dim());
+    println!("  {}", style("-".repeat(TABLE_WIDTH)).dim());
 
     for c in contests {
         let styled_status = status_label(c.phase);
         println!(
-            "  {:<6} {:<40} {:<15} {:<20} {:<20}",
+            "  {:<6} {:<40} {:<15} {:<26} {:<26}",
             style(&c.id).yellow(),
             truncate(&c.title, 38),
             styled_status,
