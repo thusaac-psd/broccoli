@@ -336,7 +336,7 @@ export interface paths {
     };
     /**
      * List active workers
-     * @description Returns the live workers: those whose liveness key in Redis has not expired (it lives 15 seconds without renewal). Requires `system:view` permission.
+     * @description Returns the live workers: those whose liveness key in Redis has not expired (it lives 15 seconds without renewal). While the message queue is unreachable, `queue_state` is `unreachable` and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.
      */
     get: operations['listSystemWorkers'];
     put?: never;
@@ -5168,7 +5168,15 @@ export interface components {
       worker_id: string;
     };
     WorkersResponse: {
+      /** @description Whether the worker list below was read just now. */
+      queue_state: components['schemas']['QueueState'];
+      /**
+       * @description The live workers. While the queue is unreachable: the list this server
+       *     last read, and `workers_stale` is true.
+       */
       workers: components['schemas']['WorkerInfo'][];
+      /** @description `workers` is the last list read before the queue became unreachable. */
+      workers_stale: boolean;
     };
   };
   responses: never;

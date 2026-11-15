@@ -1113,6 +1113,7 @@
 'system.worker.cpus' = "{count, plural, one {# CPU} other {# CPUs}}"
 'system.worker.pid' = "pid {pid}"
 'system.worker.notAccepting' = "not taking work"
+'system.worker.stale' = "state unknown"
 'system.worker.missingTools' = "Missing platform tools: {tools}. This worker takes no judging work until [worker.tools] dir holds them; submissions wait for a worker that has them."
 
 # Dead Letter Queue

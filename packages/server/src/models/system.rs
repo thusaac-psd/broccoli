@@ -54,7 +54,13 @@ pub struct WorkerInfo {
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct WorkersResponse {
+    /// Whether the worker list below was read just now.
+    pub queue_state: QueueState,
+    /// The live workers. While the queue is unreachable: the list this server
+    /// last read, and `workers_stale` is true.
     pub workers: Vec<WorkerInfo>,
+    /// `workers` is the last list read before the queue became unreachable.
+    pub workers_stale: bool,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]

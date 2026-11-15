@@ -1114,6 +1114,7 @@
 'system.worker.cpus' = "{count} 个 CPU"
 'system.worker.pid' = "进程号 {pid}"
 'system.worker.notAccepting' = "不接收任务"
+'system.worker.stale' = "状态未知"
 'system.worker.missingTools' = "缺少平台工具：{tools}。在 [worker.tools] dir 提供这些工具之前，此评测机不接收评测任务，提交会等待具备这些工具的评测机。"
 
 # Dead Letter Queue
