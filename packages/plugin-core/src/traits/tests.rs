@@ -509,13 +509,46 @@ async fn nesting_stops_at_the_depth_cap_on_a_separate_instance() {
     let (depth, first_error) = h
         .fixture
         .read(|c| (c.max_nest_depth, c.nest_errors.first().cloned()));
-    assert_eq!(depth, 2, "the top-level call and one nested call ran");
+    assert_eq!(depth, 3, "the top-level call and two nested calls ran");
     assert!(
-        first_error.is_some_and(|e| e.contains("nests deeper than 2")),
-        "the third level was refused"
+        first_error.is_some_and(|e| e.contains("nests deeper than 3")),
+        "the fourth level was refused"
     );
-    assert_eq!(h.pool_count(), 2, "the nested call leased its own instance");
+    assert_eq!(
+        h.pool_count(),
+        3,
+        "each nested call leased its own instance"
+    );
     assert_eq!(h.admission().running(CallClass::Background), 0);
+}
+
+/// A failure deep in a chain of nested calls reaches the top-level caller
+/// with the plugin, function and depth of every level and the innermost
+/// reason, not the wasm backtrace the host function's error was wrapped in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_nested_call_reports_every_level_and_the_reason() {
+    let h = Harness::new(2);
+    let err = h
+        .manager
+        .call_raw(PLUGIN, "nest", vec![], CallOptions::background(later()))
+        .await
+        .unwrap_err();
+    let PluginError::ExecutionFailed { depth, .. } = &err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*depth, 1);
+    let message = err.to_string();
+    for level in 1..=3 {
+        assert!(
+            message.contains(&format!("on plugin '{PLUGIN}' at call depth {level}")),
+            "level {level} is named: {message}"
+        );
+    }
+    assert!(
+        message.ends_with("nests deeper than 3 plugin calls"),
+        "the innermost reason comes last: {message}"
+    );
+    assert!(!message.contains("wasm backtrace"), "{message}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

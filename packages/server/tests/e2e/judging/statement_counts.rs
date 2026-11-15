@@ -10,17 +10,18 @@ use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use crate::common::E2eTestApp;
 
 /// Statements one more judged test case may cost a submission: its result
-/// row; the problem and its additional files, which the evaluate window that
-/// judges it reads (ICPC judges one case per window); and the worker's
-/// existence probe before it uploads the case's output, a statement here
-/// because the test's blob store is the database. A fifth fails.
+/// row, and the problem and its additional files, which the evaluate window
+/// that judges it reads (ICPC judges one case per window). The worker's
+/// compile cache serves every case after the first, so compiling costs no
+/// statement per case. Half a statement of room: on a loaded machine a case's
+/// result row is sometimes written more than once. A fourth fails.
 ///
 /// Only statements that run at least once per added case count
 /// ([`per_case_statements`]): the app's background loops (claim ticks,
 /// leases) run meanwhile, but they tick with how long judging takes, not with
 /// what it does, so they show up at a fraction per case that depends on the
 /// machine.
-const MAX_PER_TEST_CASE: f64 = 4.0;
+const MAX_PER_TEST_CASE: f64 = 3.5;
 
 /// Marks the statements this test issues to wait for a submission, which the
 /// counts leave out: waiting by polling the API would count statements that
@@ -85,9 +86,11 @@ fn print_top(label: &str, calls: &[(String, i64)], per: f64) {
     }
 }
 
-/// A testlib checker that accepts everything; with the mock sandbox only its
-/// config reads matter.
-const CHECKER: &str = "#include \"testlib.h\"\nint main(int c, char* v[]) { registerTestlibCmd(c, v); quitf(_ok, \"ok\"); }\n";
+/// A testlib checker that accepts everything, so both checkers accept
+/// [`super::CPP_SUM`] on every case.
+/// It reads the output to its end: testlib refuses an `_ok` that leaves
+/// output unread.
+const CHECKER: &str = "#include \"testlib.h\"\nint main(int c, char* v[]) { registerTestlibCmd(c, v); while (!ouf.seekEof()) ouf.readWord(); quitf(_ok, \"ok\"); }\n";
 
 /// Waits until submission `id` is judged, reading its status with a
 /// statement the counts leave out ([`WAIT_MARK`]).
@@ -116,9 +119,9 @@ async fn wait_judged_unmeasured(app: &E2eTestApp, id: i32) {
 }
 
 /// Judges two submissions over `cases` test cases and returns the statements
-/// the second cost, from submit to its last verdict. With the `exact`
-/// checker every case must be accepted, so the count is of cases judged, not
-/// of cases a first wrong answer skipped.
+/// the second cost, from submit to its last verdict. Every case must be
+/// accepted, so the count is of cases judged, not of cases a first wrong
+/// answer skipped.
 async fn judge(app: &E2eTestApp, admin: &str, checker: &str, cases: usize) -> Vec<(String, i64)> {
     let problem_id = app
         .create_problem_with_checker_format(admin, &format!("Count {checker} {cases}"), checker)
@@ -128,7 +131,10 @@ async fn judge(app: &E2eTestApp, admin: &str, checker: &str, cases: usize) -> Ve
             .put_with_token(
                 &format!("/api/v1/problems/{problem_id}/checker-source"),
                 &serde_json::json!({
-                    "files": [{ "filename": "checker.cpp", "content": CHECKER }]
+                    "files": [
+                        { "filename": "checker.cpp", "content": CHECKER },
+                        { "filename": "testlib.h", "content": super::testlib_checker::TESTLIB_H },
+                    ]
                 }),
                 admin,
             )
@@ -152,15 +158,13 @@ async fn judge(app: &E2eTestApp, admin: &str, checker: &str, cases: usize) -> Ve
             .get_with_token(&format!("/api/v1/submissions/{sub}"), admin)
             .await;
         assert_eq!(res.body["status"], "Judged", "{}", res.text);
-        if checker == "exact" {
-            // ICPC accepts a submission only when every case is accepted.
-            assert_eq!(res.body["result"]["verdict"], "Accepted", "{}", res.text);
-            assert_eq!(
-                res.body["result"]["test_case_pagination"]["total"], cases,
-                "{}",
-                res.text
-            );
-        }
+        // ICPC accepts a submission only when every case is accepted.
+        assert_eq!(res.body["result"]["verdict"], "Accepted", "{}", res.text);
+        assert_eq!(
+            res.body["result"]["test_case_pagination"]["total"], cases,
+            "{}",
+            res.text
+        );
     }
     measured
 }

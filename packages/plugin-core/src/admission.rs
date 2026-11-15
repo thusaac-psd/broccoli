@@ -219,12 +219,12 @@ impl Caps {
         self.0.iter().sum()
     }
 
-    /// Guest threads the caps can ever need: one per admitted call, and one
-    /// more for each one's nested call. Nesting stops at depth 2 and a
-    /// parent is parked while its nested call runs, so an admitted call has
-    /// at most one nested call at a time.
+    /// Guest threads the caps can ever need: one per level of nesting for
+    /// each admitted call. A parent is parked while its nested call runs, so
+    /// an admitted call holds one thread per level, at most
+    /// [`crate::executor::MAX_DEPTH`].
     pub fn threads(&self) -> usize {
-        2 * self.total()
+        usize::from(crate::executor::MAX_DEPTH) * self.total()
     }
 }
 
@@ -1209,13 +1209,13 @@ mod tests {
     }
 
     #[test]
-    fn the_thread_budget_covers_every_cap_and_a_nested_call_each() {
+    fn the_thread_budget_covers_every_cap_at_every_nesting_level() {
         let caps = Capacity::new(8).caps;
         assert_eq!(
             caps.total(),
             2 * 32 + DEFAULT_JUDGING_CAP + 16 + 8 + LIFECYCLE_CAP
         );
-        assert_eq!(caps.threads(), 2 * caps.total());
+        assert_eq!(caps.threads(), 3 * caps.total());
     }
 
     #[test]

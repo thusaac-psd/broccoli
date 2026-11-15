@@ -53,6 +53,8 @@ chrono = { version = "0.4.43", features = ["serde"] }
 common = { path = "packages/common" }
 config = "0.15.19"
 extism = "1.13.0"
+# The engine extism runs on, for reading the errors a call returns.
+wasmtime = { version = "49", default-features = false }
 futures = "0.3"
 hex = "0.4"
 hyper = { version = "1", features = ["server", "http1", "http2"] }
