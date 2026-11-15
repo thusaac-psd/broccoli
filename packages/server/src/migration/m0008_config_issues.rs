@@ -4,6 +4,10 @@ use sea_orm_migration::prelude::*;
 /// (`entity::problem::Model::config_issues`), and whether a judgement was
 /// claimed while they did (`entity::submission_judgement::Model::config_issues`).
 ///
+/// Plugins read both tables, so the plugin group role (named in
+/// `plugin_group_role`, see m0001) may read the new columns as it reads
+/// every other column that is not content.
+///
 /// Rolling-safe: defaulted columns older replicas never read or write.
 pub struct Migration;
 
@@ -16,6 +20,20 @@ impl MigrationName for Migration {
 const UP: &str = r#"
 ALTER TABLE public.problem ADD COLUMN config_issues boolean NOT NULL DEFAULT false;
 ALTER TABLE public.submission_judgement ADD COLUMN config_issues boolean NOT NULL DEFAULT false;
+DO $$
+DECLARE
+  plugin_group name;
+BEGIN
+  SELECT g.name INTO plugin_group FROM public.plugin_group_role g LIMIT 1;
+  IF plugin_group IS NULL THEN
+    RETURN;
+  END IF;
+  EXECUTE format('GRANT SELECT (config_issues) ON public.problem TO %I', plugin_group);
+  EXECUTE format('GRANT SELECT (config_issues) ON public.submission_judgement TO %I', plugin_group);
+EXCEPTION
+  WHEN insufficient_privilege THEN
+    RAISE WARNING 'plugin group grants skipped (insufficient privilege): %', SQLERRM;
+END $$;
 "#;
 
 const DOWN: &str = r#"
