@@ -353,7 +353,8 @@ install_worker(){
   # Native workers always read blobs from the infra box's SeaweedFS.
   BROCCOLI__STORAGE__BACKEND=object_storage env_require_role worker \
     || die "fix $CONN_ENV (copy the one install-native.sh infra-server wrote)"
-  local wid="${BROCCOLI__WORKER__ID:-$(node_id worker)}"
+  # Unset, the worker derives its id at boot (common::node_identity).
+  local wid="${BROCCOLI__WORKER__ID:-}"
   require_ubuntu; install_common_dirs
   ensure_toolchain
 
@@ -394,7 +395,7 @@ install_worker(){
   cp "$BUNDLE/systemd/10-isolate.conf" /etc/systemd/system/broccoli-worker.service.d/10-isolate.conf
 
   start_worker_units
-  echo ">> worker '$wid' up, judging for infra at $BROCCOLI_INFRA_HOST"
+  echo ">> worker ${wid:+'$wid' }up, judging for infra at $BROCCOLI_INFRA_HOST"
 }
 
 ROTATE_SECRETS=0

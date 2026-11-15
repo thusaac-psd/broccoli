@@ -807,7 +807,9 @@ write_env_file() {
       mv "$ENV_FILE.tmp" "$ENV_FILE"
       ;;
     server)
-      prompt_value BROCCOLI__SERVER__ID "Server ID (unique per server)" "$(node_id server)"
+      [ -n "${BROCCOLI__SERVER__ID:-}" ] || BROCCOLI__SERVER__ID="$(node_id_of docker "$server_image" server)" \
+        || die "could not ask $server_image for this machine's server id; set BROCCOLI__SERVER__ID"
+      prompt_value BROCCOLI__SERVER__ID "Server ID (unique per server)" "$BROCCOLI__SERVER__ID"
       prompt_value BROCCOLI_HTTP_BIND "Server HTTP bind address" "0.0.0.0:3000"
       prompt_value BROCCOLI_GATEWAY_HOSTS "Gateway addresses in front of this server, space-separated (blank if none)" ""
       gateway_trusted_proxies
@@ -828,7 +830,7 @@ write_env_file() {
         env_line BROCCOLI_VERSION "$version"
         env_line BROCCOLI_SERVER_IMAGE "$server_image"
         env_line BROCCOLI_HTTP_BIND "${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}"
-        env_line BROCCOLI__SERVER__ID "${BROCCOLI__SERVER__ID:-$(node_id server)}"
+        env_line BROCCOLI__SERVER__ID "$BROCCOLI__SERVER__ID"
         env_line BROCCOLI__SERVER__TRUSTED_PROXIES "${BROCCOLI__SERVER__TRUSTED_PROXIES:-[]}"
         env_line BROCCOLI__DATABASE__URL "$BROCCOLI__DATABASE__URL"
         env_line BROCCOLI__MQ__URL "$BROCCOLI__MQ__URL"
@@ -845,7 +847,9 @@ write_env_file() {
       mv "$ENV_FILE.tmp" "$ENV_FILE"
       ;;
     worker)
-      prompt_value BROCCOLI__WORKER__ID "Worker ID (unique per worker)" "$(node_id worker)"
+      [ -n "${BROCCOLI__WORKER__ID:-}" ] || BROCCOLI__WORKER__ID="$(node_id_of docker "$worker_image" worker)" \
+        || die "could not ask $worker_image for this machine's worker id; set BROCCOLI__WORKER__ID"
+      prompt_value BROCCOLI__WORKER__ID "Worker ID (unique per worker)" "$BROCCOLI__WORKER__ID"
       prompt_value BROCCOLI__DATABASE__URL "PostgreSQL URL from connection.env" ""
       prompt_value BROCCOLI__MQ__URL "Redis URL from connection.env" ""
       if using_object_storage; then
@@ -860,7 +864,7 @@ write_env_file() {
         env_line BROCCOLI_ENV_FILE "$ENV_FILE"
         env_line BROCCOLI_VERSION "$version"
         env_line BROCCOLI_WORKER_IMAGE "$worker_image"
-        env_line BROCCOLI__WORKER__ID "${BROCCOLI__WORKER__ID:-$(node_id worker)}"
+        env_line BROCCOLI__WORKER__ID "$BROCCOLI__WORKER__ID"
         env_line BROCCOLI__DATABASE__URL "$BROCCOLI__DATABASE__URL"
         env_line BROCCOLI__MQ__URL "$BROCCOLI__MQ__URL"
         env_line BROCCOLI__STORAGE__BACKEND "$(storage_backend)"

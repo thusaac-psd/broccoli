@@ -11,6 +11,16 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // The ID this machine's worker takes when none is configured, so an
+    // installer records the binary's own answer. Reads no configuration.
+    if std::env::args().any(|a| a == "--node-id") {
+        println!(
+            "{}",
+            common::node_identity::default_node_id(common::liveness::NodeRole::Worker)
+        );
+        return Ok(());
+    }
+
     if std::env::args().any(|a| a == "--healthcheck") {
         run_healthcheck().await?;
         println!("ok");

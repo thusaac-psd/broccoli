@@ -89,69 +89,136 @@ pub fn resolve_node_id(
 /// Where a default node ID came from, best first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IdSource {
-    MachineId,
+    Machine,
     Hostname,
     Random,
 }
 
-/// A default ID for this host that is unique across machines and stable across
-/// restarts: `{role}-` plus a hash of `/etc/machine-id`. Hostnames are only a
-/// fallback because cloned and live-boot machines share them (every Ubuntu live
-/// session is `ubuntu`). Inside a container the machine ID is ignored (images
-/// can bake one in) and the hostname, i.e. the container ID, is used. Duplicates that slip through are still caught by
+/// Where a container finds its host's identity when the deployment mounts it
+/// there: the host's `/etc/machine-id`. Read in or out of a container.
+pub const HOST_MACHINE_ID_MOUNT: &str = "/run/broccoli/host/machine-id";
+
+/// The one rule for a node's default ID, the same for a native install and
+/// for an installer that records it (`--node-id`): `{role}-{host}-{hash}`,
+/// where `hash` is the first 8 hex digits of SHA-256 over
+/// `broccoli-node-id:` and the machine's seed, its machine ID followed by
+/// `:` and the MAC address of its first physical network card. The machine
+/// ID tells apart machines that share a hostname (every Ubuntu live session
+/// is `ubuntu`); the card tells apart disk clones that share a machine ID. A
+/// card counts when it has a device link (bridges, veths and loopback do
+/// not) and a non-zero address, the first by interface name. The machine ID
+/// is read from [`HOST_MACHINE_ID_MOUNT`] when it is mounted, else, outside a
+/// container (an image can bake one in), from `/etc/machine-id` or
+/// `/var/lib/dbus/machine-id`. With neither a machine ID nor a card, the
+/// hostname stands in (inside a container, its own ID), and with none of
+/// them, a random ID. Duplicates that slip through are still caught by
 /// [`NodeClaim::claim_at_boot`].
 pub fn default_node_id(role: NodeRole) -> String {
-    // Inside a container the machine ID is absent or baked into the image (so
-    // shared by every container from it), while the hostname is the unique
-    // container ID: skip the machine ID there.
     let in_container = ["/.dockerenv", "/run/.containerenv"]
         .iter()
         .any(|p| std::path::Path::new(p).exists());
-    let machine_id = (!in_container)
-        .then(|| {
-            ["/etc/machine-id", "/var/lib/dbus/machine-id"]
-                .iter()
-                .find_map(|path| std::fs::read_to_string(path).ok())
-        })
-        .flatten();
+    let machine_id_files: &[&str] = if in_container {
+        &[HOST_MACHINE_ID_MOUNT]
+    } else {
+        &[
+            HOST_MACHINE_ID_MOUNT,
+            "/etc/machine-id",
+            "/var/lib/dbus/machine-id",
+        ]
+    };
+    let machine_id = machine_id_files
+        .iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .filter(|id| !id.trim().is_empty());
+    let mac = first_physical_mac(std::path::Path::new("/sys/class/net"));
     let hostname = hostname::get()
         .ok()
         .map(|h| h.to_string_lossy().into_owned());
-    let (id, source) = derive_default_node_id(role, machine_id.as_deref(), hostname.as_deref());
+    let (id, source) = derive_default_node_id(
+        role,
+        machine_id.as_deref(),
+        mac.as_deref(),
+        hostname.as_deref(),
+    );
     match source {
-        IdSource::MachineId => {
-            info!(role = role.as_str(), node_id = %id, "Node ID not configured; derived from the machine ID")
+        IdSource::Machine => {
+            info!(role = role.as_str(), node_id = %id, "Node ID not configured; derived from the machine")
         }
         IdSource::Hostname => warn!(
             role = role.as_str(),
             node_id = %id,
-            "Node ID not configured and no usable machine ID (none, or inside a container); derived from the hostname. \
+            "Node ID not configured and no machine ID or network card is visible (inside a container, \
+             mount the host's /etc/machine-id at {HOST_MACHINE_ID_MOUNT}); derived from the hostname. \
              Hosts with identical hostnames will refuse to start; set the ID explicitly."
         ),
         IdSource::Random => warn!(
             role = role.as_str(),
             node_id = %id,
-            "Node ID not configured and neither a machine ID nor a usable hostname was found; \
-             using a random ID that changes on every restart. Set the ID explicitly."
+            "Node ID not configured and neither a machine ID, a network card nor a usable hostname \
+             was found; using a random ID that changes on every restart. Set the ID explicitly."
         ),
     }
     id
 }
 
+/// The MAC address of the first physical network card under `net_dir` (a
+/// `/sys/class/net`), by interface name.
+fn first_physical_mac(net_dir: &std::path::Path) -> Option<String> {
+    let mut interfaces: Vec<std::path::PathBuf> = std::fs::read_dir(net_dir)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .collect();
+    interfaces.sort();
+    interfaces.into_iter().find_map(|dir| {
+        if !dir.join("device").exists() {
+            return None;
+        }
+        let mac = std::fs::read_to_string(dir.join("address")).ok()?;
+        let mac = mac.trim();
+        (!mac.is_empty() && mac != "00:00:00:00:00:00").then(|| mac.to_string())
+    })
+}
+
+/// The hostname as an ID part: its first label, lower-case, letters, digits
+/// and hyphens only, at most 40 characters.
+fn host_part(hostname: &str) -> String {
+    hostname
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
+        .take(40)
+        .collect()
+}
+
 fn derive_default_node_id(
     role: NodeRole,
     machine_id: Option<&str>,
+    mac: Option<&str>,
     hostname: Option<&str>,
 ) -> (String, IdSource) {
     let role = role.as_str();
-    if let Some(machine_id) = machine_id.map(str::trim).filter(|m| !m.is_empty()) {
-        // systemd asks that the machine ID not be exposed verbatim, so hash it
-        // with an application-specific prefix. 48 bits is plenty for a fleet.
-        let digest = Sha256::digest(format!("broccoli-node-id:{machine_id}"));
-        return (
-            format!("{role}-{}", &hex::encode(digest)[..12]),
-            IdSource::MachineId,
-        );
+    let machine_id = machine_id.map(str::trim).unwrap_or("");
+    let mac = mac.map(str::trim).unwrap_or("");
+    let seed = if mac.is_empty() {
+        machine_id.to_string()
+    } else {
+        format!("{machine_id}:{mac}")
+    };
+    if !seed.is_empty() {
+        // systemd asks that the machine ID not be exposed verbatim, so it is
+        // hashed with an application-specific prefix.
+        let digest = Sha256::digest(format!("broccoli-node-id:{seed}"));
+        let hash = &hex::encode(digest)[..8];
+        let host = hostname.map(host_part).unwrap_or_default();
+        let id = if host.is_empty() {
+            format!("{role}-{hash}")
+        } else {
+            format!("{role}-{host}-{hash}")
+        };
+        return (id, IdSource::Machine);
     }
     if let Some(hostname) = hostname {
         let sanitized: String = hostname
@@ -681,39 +748,76 @@ mod tests {
     use testcontainers_modules::redis::Redis;
 
     #[test]
-    fn default_id_prefers_a_hashed_machine_id_over_the_hostname() {
-        let (a, source) =
-            derive_default_node_id(NodeRole::Worker, Some("abc123\n"), Some("ubuntu"));
-        assert_eq!(source, IdSource::MachineId);
+    fn a_default_id_is_stable_per_machine_and_tells_machines_apart() {
+        let a =
+            |mac| derive_default_node_id(NodeRole::Worker, Some("aaaa\n"), mac, Some("Ubuntu.lab"));
+        let (id, source) = a(None);
+        assert_eq!(source, IdSource::Machine);
         assert!(
-            a.starts_with("worker-") && a.len() == "worker-".len() + 12,
-            "{a}"
+            id.starts_with("worker-ubuntu-") && id.len() == "worker-ubuntu-".len() + 8,
+            "{id}"
         );
         assert!(
-            !a.contains("abc123"),
+            !id.contains("aaaa"),
             "the machine ID must not be exposed verbatim"
         );
-        assert!(is_valid_node_id(&a));
-        // Stable for the same machine, distinct across machines and roles.
-        assert_eq!(
-            derive_default_node_id(NodeRole::Worker, Some("abc123"), None).0,
-            a
-        );
+        assert!(is_valid_node_id(&id));
+        assert_eq!(a(None).0, id, "stable on one machine");
+        let other = derive_default_node_id(NodeRole::Worker, Some("bbbb"), None, Some("ubuntu")).0;
+        assert_ne!(other, id, "two machines that share a hostname");
+        // Disk clones share a machine ID but not a network card.
         assert_ne!(
-            derive_default_node_id(NodeRole::Worker, Some("def456"), None).0,
-            a
+            a(Some("52:54:00:aa:aa:aa")).0,
+            a(Some("52:54:00:bb:bb:bb")).0
         );
-        let server = derive_default_node_id(NodeRole::Server, Some("abc123"), None).0;
-        assert_eq!(server.strip_prefix("server-"), a.strip_prefix("worker-"));
+        let server = derive_default_node_id(NodeRole::Server, Some("aaaa"), None, Some("ubuntu")).0;
+        assert_ne!(server, id, "server and worker ids differ");
+    }
+
+    /// The hash the operator runbook documents:
+    /// `sha256("broccoli-node-id:" + machine_id + ":" + mac)`, first 8 hex digits.
+    #[test]
+    fn a_default_id_hashes_the_machine_id_and_card_as_documented() {
+        let (id, _) = derive_default_node_id(
+            NodeRole::Worker,
+            Some("aaaa"),
+            Some("52:54:00:aa:aa:aa"),
+            Some("ubuntu"),
+        );
+        let digest = Sha256::digest("broccoli-node-id:aaaa:52:54:00:aa:aa:aa");
+        assert_eq!(id, format!("worker-ubuntu-{}", &hex::encode(digest)[..8]));
+    }
+
+    #[test]
+    fn only_a_physical_card_counts_and_the_first_by_name_wins() {
+        let net = tempfile::tempdir().unwrap();
+        let card = |name: &str, mac: &str, physical: bool| {
+            let dir = net.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("address"), format!("{mac}\n")).unwrap();
+            if physical {
+                std::os::unix::fs::symlink("/", dir.join("device")).unwrap();
+            }
+        };
+        card("docker0", "02:42:00:00:00:01", false);
+        card("veth9", "02:42:00:00:00:09", false);
+        card("lo", "00:00:00:00:00:00", false);
+        assert_eq!(first_physical_mac(net.path()), None);
+        card("eth1", "52:54:00:bb:bb:bb", true);
+        card("eth0", "52:54:00:aa:aa:aa", true);
+        assert_eq!(
+            first_physical_mac(net.path()).as_deref(),
+            Some("52:54:00:aa:aa:aa")
+        );
     }
 
     #[test]
     fn default_id_falls_back_to_hostname_then_random() {
         assert_eq!(
-            derive_default_node_id(NodeRole::Server, Some("  \n"), Some("lab pc:1")),
+            derive_default_node_id(NodeRole::Server, Some("  \n"), None, Some("lab pc:1")),
             ("server-lab-pc-1".to_string(), IdSource::Hostname)
         );
-        let (id, source) = derive_default_node_id(NodeRole::Worker, None, None);
+        let (id, source) = derive_default_node_id(NodeRole::Worker, None, None, None);
         assert_eq!(source, IdSource::Random);
         assert!(is_valid_node_id(&id), "{id}");
     }

@@ -372,18 +372,33 @@ value left in `.env.server` shows up in that warning: delete it.
 ## Multi-Replica Server Identity
 
 Every server replica and every worker needs an id of its own. Left unset,
-`BROCCOLI__SERVER__ID` and `BROCCOLI__WORKER__ID` are derived from the machine:
-a hash of `/etc/machine-id`, so cloned or live-boot machines that all call
-themselves `ubuntu` still get distinct ids. Inside a container the machine id is
-ignored (an image can bake one in) and the hostname, the container's own id, is
-used. Only when neither is available does the process fall back to a random id,
-and it warns at boot. `install.sh server` and `install.sh worker` write an id
-into `.env.server` or `.env.worker`, offering a default such as
-`worker-ubuntu-3f9c2a1b` (the hostname plus a hash of the machine id and the MAC
-address of the first physical network card), and re-runs keep it. Set the id
-yourself only when two replicas share one machine, or when you write env files
-by hand (`.env.server.example` ships `server-1`): then give each replica a
-unique stable value.
+`BROCCOLI__SERVER__ID` and `BROCCOLI__WORKER__ID` are derived by the binary
+itself, by one rule (`common::node_identity`), and `broccoli-server --node-id`
+or `broccoli-worker --node-id` prints the id it would take:
+
+- The id is `ROLE-HOST-HASH`, for example `worker-ubuntu-3f9c2a1b`: the first
+  label of the hostname, then the first 8 hex digits of
+  `sha256("broccoli-node-id:" + MACHINE_ID + ":" + MAC)`.
+- `MACHINE_ID` is `/etc/machine-id` (or `/var/lib/dbus/machine-id`). Inside a
+  container it is read only from `/run/broccoli/host/machine-id`, the host's
+  file mounted there, since an image can bake one in.
+- `MAC` is the address of the first physical network card, by interface name.
+  Virtual interfaces (bridges, veths) do not count, so disk-cloned or live-boot
+  machines that share a machine id and a hostname still get distinct ids, and
+  starting Docker leaves the id alone.
+- With no machine id, the hostname alone is used; with neither, a random id, and
+  the process warns at boot.
+
+The installers never derive an id. A container's hostname and network change
+whenever it is recreated, so `install.sh server` and `install.sh worker` (and
+the air-gapped `install.sh`, for an id `setup.sh` left blank) ask the image
+once: they run its binary with `--node-id` in the host's network with the host's
+machine id mounted, and record the answer in `.env.server` or `.env.worker`,
+where re-runs keep it. The native worker leaves the id unset and derives it at
+every boot, which gives the same answer on the same machine. Set the id yourself
+only when two replicas share one machine, or when you write env files by hand
+(`.env.server.example` ships `server-1`): then give each replica a unique stable
+value.
 
 **Why it matters:** each server reads its own reply stream
 (`operation_tasks:reply:<server_id>`) and owns in-flight work under its ID. A

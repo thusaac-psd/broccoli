@@ -1,36 +1,30 @@
 # shellcheck shell=bash
 # Facts about the machine an installer runs on, shared by every installer.
-# Run on the host itself, never inside a container: containers made from one
-# image share that image's machine-id.
+# Run on the host itself, never inside a container.
 
-# node_id PREFIX: an id for this machine's server or worker, PREFIX-HOST-HASH,
-# for example worker-ubuntu-3f9c2a1b. Hostnames repeat across cloned and
-# live-boot fleets (every box is "ubuntu"), and two workers or servers sharing
-# an id take each other's work, so HASH comes from this machine's machine-id
-# together with the MAC address of its first physical network card: a disk
-# cloned onto many boxes keeps one machine-id, but each box has its own card.
-# With neither, HASH is random. The installer writes the id into the role's
-# env file, which keeps it stable across re-runs.
-node_id() {
-  local prefix="$1" host seed="" mac="" file dir hash
-  host="$(hostname -s 2>/dev/null | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9-' | cut -c1-40)"
-  for file in "${BROCCOLI_MACHINE_ID_FILE:-/etc/machine-id}" /var/lib/dbus/machine-id; do
-    if [ -s "$file" ]; then
-      seed="$(cat "$file")"
-      break
-    fi
-  done
-  # A physical card has a device link; bridges, veths and loopback do not.
-  for dir in "${BROCCOLI_SYS_NET_DIR:-/sys/class/net}"/*; do
-    [ -e "$dir/device" ] && [ -s "$dir/address" ] || continue
-    mac="$(cat "$dir/address")"
-    [ "$mac" = 00:00:00:00:00:00 ] || break
-    mac=""
-  done
-  seed="$seed${mac:+:$mac}"
-  [ -n "$seed" ] || seed="$(openssl rand -hex 16)"
-  hash="$(printf 'broccoli-node-id:%s' "$seed" | openssl dgst -sha256 | sed 's/^.*= *//' | cut -c1-8)"
-  printf '%s-%s%s\n' "$prefix" "${host:+$host-}" "$hash"
+# node_id_of ENGINE IMAGE ROLE: the id ROLE's binary takes on this machine when
+# none is configured, asked of the image itself, so no installer derives an id:
+# the binary's rule (common::node_identity::default_node_id, documented in the
+# operator runbook) is the only one. The container runs in the host's network,
+# where it sees the host's network cards, with the host's machine-id mounted
+# where the binary reads it. A container gets a new hostname whenever it is
+# recreated, so a Compose deployment records this id in the role's env file,
+# which keeps it stable across re-runs. Prints the id, or fails.
+node_id_of() {
+  local engine="$1" image="$2" role="$3" bin id machine_id="${BROCCOLI_MACHINE_ID_FILE:-/etc/machine-id}"
+  local -a mount=()
+  case "$role" in
+    server) bin=/usr/local/bin/broccoli-server ;;
+    worker) bin=/usr/local/bin/broccoli-worker ;;
+    *) return 1 ;;
+  esac
+  [ -s "$machine_id" ] && mount=(--mount "type=bind,source=$machine_id,target=/run/broccoli/host/machine-id,readonly")
+  id="$("$engine" run --rm --network host "${mount[@]}" --entrypoint "$bin" "$image" --node-id 2>/dev/null | tail -n 1)" || return 1
+  case "$id" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  [ "${#id}" -le 128 ] || return 1
+  printf '%s\n' "$id"
 }
 
 # trusted_proxies_json "ADDR..." : the server.trusted_proxies value trusting

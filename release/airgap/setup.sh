@@ -130,8 +130,10 @@ if [ "$ROLE" = server ]; then
   fi
   # Every server needs its own id: two sharing one take each other's results.
   # A re-run keeps the id this node already has.
-  if [ -f "$server" ]; then default_id="$(env_get "$server" BROCCOLI__SERVER__ID)"; else default_id="$(node_id server)"; fi
-  SERVER_ID="$(answer SERVER_ID 'Server id (unique per server)' "${default_id:-$(node_id server)}" 0)"
+  # Left blank, install.sh asks the server image for this machine's id.
+  default_id=""
+  [ -f "$server" ] && default_id="$(env_get "$server" BROCCOLI__SERVER__ID)"
+  SERVER_ID="$(answer SERVER_ID 'Server id (unique per server; blank for this machine'"'"'s own)' "$default_id" 0)"
   if [ -n "$INFRA_HOST" ]; then
     # A further server: DB/MQ/S3, the JWT secret and the bootstrap admin all
     # come from the infra node's server-join.env. The containers dial the
@@ -179,7 +181,8 @@ fi
 if [ "$ROLE" = worker ]; then
   # A re-run keeps the id this worker already has.
   default_id="$(env_get "$BUNDLE/compose/.env.worker" BROCCOLI__WORKER__ID)"
-  WORKER_ID="$(answer WORKER_ID 'Worker id (unique per worker)' "${default_id:-$(node_id worker)}" 0)"
+  # Left blank, install.sh asks the worker image for this machine's id.
+  WORKER_ID="$(answer WORKER_ID 'Worker id (unique per worker; blank for this machine'"'"'s own)' "$default_id" 0)"
   # server LAN host: explicit --lan-host wins, else the sidecar's baked host
   SERVER_HOST="${FLAG_LAN_HOST:-$(env_get "$cluster_dir/cluster-secrets.env" BROCCOLI_SERVER_HOST)}"
   [ -n "$SERVER_HOST" ] || { echo "worker role needs the server LAN host: pass --lan-host, or build the bundle with --lan-host" >&2; exit 2; }

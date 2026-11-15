@@ -137,9 +137,9 @@ plan="$(bash "$install" --role server --bundle "$T/single" --lan-host contest.la
 [ "$(plan_get "$plan" BROCCOLI_GATEWAY_TRUSTED_PROXIES)" = '["172.31.250.2/32"]' ] || fail "single host trust list"
 [ "$(plan_get "$plan" BROCCOLI_HTTP_BIND)" = 127.0.0.1:3000 ] || fail "single host :3000 not on loopback"
 printf '%s\n' "$plan" | grep -q 'docker-compose.gateway-airgap.yaml.template' || fail "single host lost its gateway"
-case "$(env_get "$T/single/compose/.env.server" BROCCOLI__SERVER__ID)" in
-  server-1 | "") fail "a new server kept the example's shared id" ;;
-esac
+# A new server's id is blank until install.sh asks the loaded image for it.
+[ "$(env_get "$T/single/compose/.env.server" BROCCOLI__SERVER__ID)" != server-1 ] \
+  || fail "a new server kept the example's shared id"
 
 # --- planted gateway or join settings make a contestant bundle not pristine ---
 ( . "$here/../lib/manifest.sh"

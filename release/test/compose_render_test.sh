@@ -6,6 +6,8 @@
 # Every docker-compose.*.yaml.template must be rendered at least once.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+# The image answers the installer's node id question (bin/docker).
+export PATH="$here/bin:$PATH"
 rel="$(cd "$here/.." && pwd)"
 
 if ! docker compose version >/dev/null 2>&1; then

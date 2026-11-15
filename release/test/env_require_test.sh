@@ -5,6 +5,8 @@
 # the air-gapped install.sh (server and worker) and install-native.sh worker.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+# The image answers the installer's node id question (bin/docker).
+export PATH="$here/bin:$PATH"
 rel="$here/.."
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
