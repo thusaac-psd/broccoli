@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::judging_sessions::RunningSession;
 
 pub fn start_detached_windowed_evaluate(
     caller_plugin_id: String,
@@ -15,10 +16,9 @@ pub fn start_detached_windowed_evaluate(
     };
     // Counted from now: the session ends only after it has finalized its
     // judgement and run the after-judging hooks.
-    let running = deps.judging_sessions.enter();
+    let running = deps.judging_sessions.enter(&caller_plugin_id);
     tokio::spawn(async move {
-        let _running = running;
-        run_detached_windowed_evaluate(caller_plugin_id, deps, session_id, input).await;
+        run_detached_windowed_evaluate(caller_plugin_id, deps, session_id, input, running).await;
     });
     Ok(session)
 }
@@ -42,6 +42,8 @@ struct EvaluateDriver {
     op_retries: HashMap<i32, u32>,
     /// The problem inputs every window of the session judges with.
     problem_inputs: ProblemInputsCache,
+    /// This session as the server counts it; dropped after `on_end`.
+    running: RunningSession,
 }
 
 #[async_trait]
@@ -199,6 +201,10 @@ impl WindowedSession for EvaluateDriver {
         );
     }
 
+    async fn cut(&self) {
+        self.running.cut().await
+    }
+
     fn attempt_lost(&self) -> bool {
         self.submission_completion.is_some()
             && self
@@ -236,6 +242,7 @@ async fn run_detached_windowed_evaluate(
     deps: EvaluateHostDeps,
     session_id: String,
     input: StartDetachedWindowedEvaluateInput,
+    running: RunningSession,
 ) {
     let StartDetachedWindowedEvaluateInput {
         batch,
@@ -278,6 +285,7 @@ async fn run_detached_windowed_evaluate(
         retry_pool,
         op_retries: HashMap::new(),
         problem_inputs: ProblemInputsCache::default(),
+        running,
     };
     run_windowed_session(
         driver,

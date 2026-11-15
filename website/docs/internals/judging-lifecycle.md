@@ -109,6 +109,11 @@ is disabled fleet-wide; `contest_type_open` states that in SQL and
 
 - The claim statement takes no judgement or code run of a parked type, so
   nothing is dispatched to a plugin that is not there.
+- Unloading a plugin for good cuts every judging session it runs on that
+  replica at once (`JudgingSessions::cut`), so each ends `Aborted` now rather
+  than when its next result arrives. The replica that made the disable and
+  every replica that applies it through its reconcile unload through the same
+  `deactivate`.
 - A judgement that fails while its type is parked (its session aborted when
   the plugin went away, or nothing was registered to dispatch it to) goes
   straight back to `Queued` under a fresh epoch, whatever the failure said

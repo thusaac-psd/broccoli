@@ -669,6 +669,7 @@ impl E2eTestApp {
                 operation_waiters: operation_waiters.clone(),
                 evaluate_batches: evaluate_batches.clone(),
                 hook_registry,
+                judging_sessions: judging_sessions.clone(),
             },
             metrics: e2e_metrics.clone(),
             prometheus_registry: e2e_prom_registry,

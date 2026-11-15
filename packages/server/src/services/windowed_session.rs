@@ -157,6 +157,14 @@ pub trait WindowedSession: Send + Sync + Sized + 'static {
         false
     }
 
+    /// Completes once the session is cut from outside: its plugin was
+    /// unloaded for good. The session then ends at once as
+    /// [`SessionEnd::Aborted`], as when its callback finds the plugin gone,
+    /// instead of when its next result arrives. Default: never.
+    async fn cut(&self) {
+        std::future::pending::<()>().await
+    }
+
     /// Called exactly once, when the session has ended and its active slots
     /// are cancelled. A driver whose session judges a unit must leave that
     /// unit terminal here, whatever `end` is.
@@ -303,7 +311,17 @@ async fn drive<S: WindowedSession>(
         };
     }
 
-    while let Some(item) = rx.recv().await {
+    loop {
+        let item = tokio::select! {
+            biased;
+            () = driver.cut() => {
+                return SessionEnd::Aborted("the plugin was unloaded".to_string());
+            }
+            item = rx.recv() => item,
+        };
+        let Some(item) = item else {
+            break;
+        };
         if !remove_active_slot(active, &item.batch_id) {
             // A late result for a slot already removed (cancelled/superseded).
             continue;

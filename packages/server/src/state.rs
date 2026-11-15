@@ -22,6 +22,9 @@ pub struct RegistryState {
     pub operation_waiters: OperationWaiters,
     pub evaluate_batches: EvaluateBatches,
     pub hook_registry: SharedHookRegistry,
+    /// The detached judging sessions running here, the same the plugin
+    /// manager's host functions start.
+    pub judging_sessions: crate::services::judging_sessions::JudgingSessions,
 }
 
 impl RegistryState {

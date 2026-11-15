@@ -1001,10 +1001,10 @@ async fn ioi_scoreboard_uses_time_taken_as_score_tiebreaker() {
 }
 
 /// Disabling the contest-type plugin while one of its submissions is being
-/// judged hands that judgement back instead of failing it: it waits queued,
-/// spending neither retry budget and never showing a `SystemError`, while the
-/// contestant sees its outcome withheld for the disabled plugin, and the
-/// operator sees why it waits. A new submission or code run of the type, to
+/// judged ends its session at once and hands that judgement back instead of
+/// failing it: it waits queued, spending neither retry budget and never
+/// showing a `SystemError`, while the contestant sees its outcome withheld
+/// for the disabled plugin, and the operator sees why it waits. A new submission or code run of the type, to
 /// the contest or as practice, is refused with `CONTEST_TYPE_DISABLED`, which
 /// is not a retry-later answer, and the problem names the outage. Enabling the
 /// plugin again judges the parked submission to its verdict.
@@ -1117,6 +1117,15 @@ async fn cut_by_a_disable(change: Change) {
     };
 
     change.set_enabled(&app, &admin, false).await;
+    // The disable ends the session at once, on the replica that made it and
+    // on one that applied it alike, though no result arrives: the worker
+    // still holds every operation.
+    tokio::time::timeout(std::time::Duration::from_secs(60), app.judging_idle())
+        .await
+        .expect("the disable cut the judging session");
+    let handed_back = current_judgement(&app, sub_id).await;
+    assert_eq!(handed_back.status, SubmissionStatus::Queued);
+    assert!(handed_back.judge_epoch > cut.judge_epoch);
     app.resume_worker();
 
     // The cut judgement goes back to the queue under a fresh epoch and stays
