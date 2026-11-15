@@ -205,4 +205,10 @@ mod tests {
         ));
         assert!(parse(&["bundle", "import", "--wipe-dependents"]).is_err());
     }
+
+    #[test]
+    fn bundle_without_a_subcommand_is_a_usage_error() {
+        let error = parse(&["bundle"]).err().expect("a usage error");
+        assert_eq!(error.exit_code(), 2, "{:?}", error.kind());
+    }
 }

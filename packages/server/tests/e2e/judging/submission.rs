@@ -371,16 +371,33 @@ async fn concurrent_submissions_all_complete() {
 
 use super::CPP_SUM;
 
-/// A worker without a platform tool cannot judge any submission that needs
-/// one, on any attempt: the submission ends after one attempt with the cause
-/// as its error code, spends no system-error retry, and the operator finds
-/// it dead-lettered.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_worker_without_platform_tools_fails_a_submission_once_with_the_cause() {
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-    use server::entity::{dead_letter_message, submission};
+/// Status, verdict and judge epoch of the submission, as stored.
+async fn stored(app: &E2eTestApp, id: i32) -> server::entity::submission::Model {
+    use sea_orm::EntityTrait;
+    server::entity::submission::Entity::find_by_id(id)
+        .one(&app.db)
+        .await
+        .unwrap()
+        .unwrap()
+}
 
-    let app = E2eTestApp::spawn_without_platform_tools().await;
+/// The submission was judged: a verdict of its own, not a system error. (The
+/// mock sandbox runs the checker from the host's `/tools`, so its verdict is
+/// whatever that finds; isolate judges `CPP_SUM` Accepted.)
+fn assert_judged(res: &test_support::TestResponse) {
+    assert_eq!(res.body["status"], "Judged", "{}", res.text);
+    assert_ne!(res.body["verdict"], "SystemError", "{}", res.text);
+}
+
+/// A worker without its platform tools takes no work, so in a fleet with a
+/// healthy worker every submission is judged there on its first attempt.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worker_without_platform_tools_leaves_every_submission_to_one_that_has_them() {
+    let app = E2eTestApp::spawn_with_workers(vec![
+        E2eTestApp::platform_tools_dir(),
+        Some(E2eTestApp::empty_tools_dir()),
+    ])
+    .await;
     let admin = app
         .create_user_with_role("no_tools_admin", "pass1234", "admin")
         .await;
@@ -390,59 +407,63 @@ async fn a_worker_without_platform_tools_fails_a_submission_once_with_the_cause(
         .create_authenticated_user("no_tools_user", "pass1234")
         .await;
 
-    let sub_id = app
+    let mut ids = Vec::new();
+    for _ in 0..6 {
+        ids.push(
+            app.create_submission(problem_id, &contestant, "cpp", CPP_SUM)
+                .await,
+        );
+    }
+    for id in ids {
+        let res = app.wait_for_submission_terminal(id, &contestant, 60).await;
+        assert_judged(&res);
+        let row = stored(&app, id).await;
+        assert_eq!(row.system_error_retries, 0);
+        assert_eq!(row.judge_epoch, 0, "judged on its first attempt");
+    }
+}
+
+/// While the only live worker lacks a platform tool, submissions wait
+/// queued and the worker list says why; once the tool is in place the worker
+/// takes them and judges each on its first attempt.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lone_worker_without_platform_tools_leaves_submissions_queued_until_it_has_them() {
+    let tools = E2eTestApp::empty_tools_dir();
+    let app = E2eTestApp::spawn_with_workers(vec![Some(tools.clone())]).await;
+    let admin = app
+        .create_user_with_role("lone_no_tools_admin", "pass1234", "admin")
+        .await;
+    let problem_id = app.create_public_problem(&admin, "Lone no tools").await;
+    app.create_test_case(problem_id, &admin).await;
+    let contestant = app
+        .create_authenticated_user("lone_no_tools_user", "pass1234")
+        .await;
+
+    let id = app
         .create_submission(problem_id, &contestant, "cpp", CPP_SUM)
         .await;
     let res = app
-        .wait_for_submission_terminal(sub_id, &contestant, 60)
+        .get_with_token("/api/v1/admin/system/workers", &admin)
         .await;
-    assert_eq!(res.body["result"]["verdict"], "SystemError", "{}", res.text);
-    // The contestant sees the verdict and the judgement id to quote, never
-    // the platform's diagnostics.
-    let result = &res.body["result"];
-    assert!(result["judgement_id"].is_i64(), "{}", res.text);
-    assert!(result["error_message"].is_null(), "{}", res.text);
-    let case = &result["test_case_results"][0];
-    assert_eq!(case["verdict"], "SystemError", "{}", res.text);
-    assert!(case["checker_output"].is_null(), "{}", res.text);
-    assert!(!res.text.contains("BROCCOLI__WORKER"), "{}", res.text);
-    // The operator sees them.
-    let res = app
-        .get_with_token(&format!("/api/v1/submissions/{sub_id}"), &admin)
-        .await;
-    let operator = &res.body["result"];
-    assert!(
-        operator["error_message"]
-            .as_str()
-            .is_some_and(|m| m.contains("broccoli-compare")),
+    assert_eq!(res.status, 200, "{}", res.text);
+    let worker = &res.body["workers"][0];
+    assert_eq!(worker["accepting_work"], false, "{}", res.text);
+    assert_eq!(
+        worker["missing_platform_tools"],
+        json!(["broccoli-compare"]),
         "{}",
         res.text
     );
-    assert!(
-        operator["test_case_results"][0]["checker_output"].is_string(),
-        "{}",
-        res.text
-    );
+    let row = stored(&app, id).await;
+    assert_eq!(row.status, common::SubmissionStatus::Queued);
 
-    let row = submission::Entity::find_by_id(sub_id)
-        .one(&app.db)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(row.error_code.as_deref(), Some("PLATFORM_TOOL_MISSING"));
-    assert!(
-        row.error_message
-            .as_deref()
-            .is_some_and(|m| m.contains("broccoli-compare")),
-        "the operator message names the tool: {:?}",
-        row.error_message
-    );
-    assert_eq!(row.system_error_retries, 0, "no retry is spent");
-    let letters = dead_letter_message::Entity::find()
-        .filter(dead_letter_message::Column::SubmissionId.eq(sub_id))
-        .all(&app.db)
-        .await
-        .unwrap();
-    assert_eq!(letters.len(), 1, "{letters:?}");
-    assert_eq!(letters[0].error_code, "PLATFORM_MISCONFIGURED");
+    let healthy = E2eTestApp::platform_tools_dir().expect("the built platform tools");
+    for tool in broccoli_server_sdk::types::PLATFORM_TOOLS {
+        std::fs::copy(healthy.join(tool), tools.join(tool)).unwrap();
+    }
+    let res = app.wait_for_submission_terminal(id, &contestant, 120).await;
+    assert_judged(&res);
+    let row = stored(&app, id).await;
+    assert_eq!(row.system_error_retries, 0);
+    assert_eq!(row.judge_epoch, 0, "judged on its first attempt");
 }

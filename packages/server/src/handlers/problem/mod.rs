@@ -121,7 +121,10 @@ pub async fn create_problem(
 
     let model = new_problem.insert(&state.db).await?;
 
-    Ok((StatusCode::CREATED, Json(ProblemResponse::from(model))))
+    Ok((
+        StatusCode::CREATED,
+        Json(problem_response(&state, model).await),
+    ))
 }
 
 #[utoipa::path(
@@ -325,7 +328,8 @@ async fn get_problem_in(
     )
     .await?;
 
-    let mut response = ProblemResponse::from(find_problem(&state.db, scope.problem_id).await?);
+    let mut response =
+        problem_response(state, find_problem(&state.db, scope.problem_id).await?).await;
     response.samples = load_sample_test_cases(&state.db, scope.problem_id).await?;
 
     // The DTO reaches the response body only through `into_masked_json`, so
@@ -395,7 +399,7 @@ pub async fn update_problem(
     }
 
     if payload == UpdateProblemRequest::default() {
-        let mut existing = ProblemResponse::from(find_problem(&state.db, id).await?);
+        let mut existing = problem_response(&state, find_problem(&state.db, id).await?).await;
         existing.samples = load_sample_test_cases(&state.db, id).await?;
         return Ok(Json(existing));
     }
@@ -448,7 +452,7 @@ pub async fn update_problem(
     let model = active.update(&txn).await?;
     txn.commit().await?;
 
-    let mut response = ProblemResponse::from(model);
+    let mut response = problem_response(&state, model).await;
     response.samples = load_sample_test_cases(&state.db, id).await?;
     Ok(Json(response))
 }

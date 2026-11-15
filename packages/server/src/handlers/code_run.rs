@@ -150,7 +150,7 @@ async fn build_code_run_response(
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
         (status = 429, description = "Per-user rate limited (RATE_LIMITED)", body = ErrorBody),
-        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),
+        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, no Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -212,6 +212,7 @@ pub async fn run_code(
     validate_run_language(&payload.language, &known_languages)?;
 
     let contest_type = problem.default_contest_type.clone();
+    crate::plugin_lifecycle::accepting_handler(&state, &contest_type).await?;
     let custom_tcs_json =
         serde_json::to_value(&payload.custom_test_cases).unwrap_or(serde_json::Value::Null);
 
@@ -262,7 +263,7 @@ pub async fn run_code(
         (status = 403, description = "Forbidden (PERMISSION_DENIED); or the caller has not registered for this public contest (CONTEST_NOT_REGISTERED)", body = ErrorBody),
         (status = 404, description = "Contest or problem not found (NOT_FOUND)", body = ErrorBody),
         (status = 429, description = "Per-user rate limited (RATE_LIMITED)", body = ErrorBody),
-        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),
+        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, no Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -311,6 +312,7 @@ pub async fn run_contest_code(
 
     let language = payload.language.trim().to_string();
     let contest_type = required_contest_type(&contest_model)?;
+    crate::plugin_lifecycle::accepting_handler(&state, &contest_type).await?;
     let new_code_run = code_run::ActiveModel {
         files: Set(files_to_json(&payload.files)),
         language: Set(language),

@@ -672,6 +672,58 @@ mod submission_listing {
 mod submission_detail {
     use super::*;
 
+    /// The worker a submission is pinned to is the platform's decision: an
+    /// operator sees it on every submission shape, its owner on none.
+    #[tokio::test]
+    async fn the_pinned_worker_is_shown_to_operators_only() {
+        use sea_orm::ConnectionTrait;
+        let app = TestApp::spawn().await;
+        let admin_token = app
+            .create_user_with_role("admin1", "pass1234", "admin")
+            .await;
+        let problem_id = app.create_problem(&admin_token, "Test Problem").await;
+        let user_token = app.create_authenticated_user("user1", "pass1234").await;
+        let submission_id = app
+            .create_submission(problem_id, &user_token, "cpp", "int main() {}")
+            .await;
+        for table in ["submission", "submission_judgement"] {
+            let id = if table == "submission" {
+                "id"
+            } else {
+                "submission_id"
+            };
+            app.db
+                .execute_unprepared(&format!(
+                    "UPDATE {table} SET target_worker_id = 'lab-07' WHERE {id} = {submission_id}"
+                ))
+                .await
+                .unwrap();
+        }
+
+        for (token, shown) in [(&user_token, json!(null)), (&admin_token, json!("lab-07"))] {
+            let detail = app
+                .get_with_token(&routes::submission(submission_id), token)
+                .await;
+            assert_eq!(detail.body["target_worker_id"], shown, "{}", detail.text);
+            let list = app.get_with_token(routes::SUBMISSIONS, token).await;
+            let item = list.body["data"]
+                .as_array()
+                .and_then(|rows| rows.iter().find(|r| r["id"] == submission_id))
+                .unwrap_or_else(|| panic!("listed: {}", list.text));
+            assert_eq!(item["target_worker_id"], shown, "{}", list.text);
+            let judgements = app
+                .get_with_token(&routes::submission_judgements(submission_id), token)
+                .await;
+            let judgement = judgements
+                .body
+                .as_array()
+                .or_else(|| judgements.body["data"].as_array())
+                .and_then(|rows| rows.first())
+                .unwrap_or_else(|| panic!("a judgement: {}", judgements.text));
+            assert_eq!(judgement["target_worker_id"], shown, "{}", judgements.text);
+        }
+    }
+
     #[tokio::test]
     async fn owner_can_view_submission_detail() {
         let app = TestApp::spawn().await;

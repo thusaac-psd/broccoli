@@ -39,12 +39,12 @@ use crate::utils::contest::{
     compile_output_public, find_contest, require_contest_participant, require_contest_running,
     required_contest_type,
 };
+use crate::utils::diagnostics::Diagnostics;
 use crate::utils::judging::{files_to_json, validate_code_payload, validate_submission_contract};
 use crate::utils::problem::find_problem;
 use crate::utils::query::validate_sorting_params;
 use crate::utils::rate_limit::check_rate_limit;
 use crate::visibility::{Action, Resource, ResourceScope, Subject, VisibilityKernel};
-use broccoli_api_types::visibility::PluginOutage;
 
 mod dispatch;
 mod filter;
@@ -86,7 +86,7 @@ use response::{
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
         (status = 429, description = "Per-user rate limit or plugin rejection (RATE_LIMITED, PLUGIN_REJECTED)", body = ErrorBody),
-        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),
+        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, no Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -171,13 +171,16 @@ pub async fn create_submission(
     )?;
 
     let contest_type = match payload.contest_type {
-        Some(ref ct) => {
+        // A type no plugin provides is a bad request, not an outage.
+        Some(ref ct) if state.plugin_lifecycle.disabled_provider(ct).is_none() => {
             validate_contest_type("contest_type", ct, &state.registries.contest_type_registry)
                 .await?;
             ct.clone()
         }
+        Some(ref ct) => ct.clone(),
         None => problem.default_contest_type.clone(),
     };
+    crate::plugin_lifecycle::accepting_handler(&state, &contest_type).await?;
 
     let attempt_id = uuid::Uuid::new_v4();
     let hook_event = BeforeSubmissionEvent {
@@ -233,14 +236,7 @@ pub async fn create_submission(
     );
 
     let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
-    let response = build_submission_response(
-        &state.db,
-        &*state.blob_store,
-        state.clock.now(),
-        model,
-        visibility,
-    )
-    .await?;
+    let response = build_submission_response(&state, model, visibility).await?;
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -368,6 +364,7 @@ pub async fn list_submissions(
         query.cursor.as_deref(),
         per_page,
         total,
+        Diagnostics::for_viewer(&auth_user),
     )
     .await?;
     Ok(Json(serde_json::json!({
@@ -437,15 +434,7 @@ pub async fn get_submission(
     }
 
     let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
-    let response = build_submission_response_with_cases(
-        &state.db,
-        &*state.blob_store,
-        state.clock.now(),
-        sub,
-        visibility,
-        &query,
-    )
-    .await?;
+    let response = build_submission_response_with_cases(&state, sub, visibility, &query).await?;
 
     // The DTO reaches the response body only through `into_masked_json`
     // (inside `apply_filter_to_response`), so a `Redact` decision - host or
@@ -779,26 +768,9 @@ pub async fn create_contest_submission(
     )
     .await?;
     let contest_type = required_contest_type(&contest_model)?;
-    // Pin the owner used to authorize hook effects through admission commit.
-    let handler = state
-        .registries
-        .contest_type_registry
-        .read()
-        .await
-        .get(&contest_type)
-        .cloned();
-    // Contest types are plugin-provided, and the handler owns admission: a
-    // replica without one (its plugin still loading or failed here) must not
-    // accept the submission unchecked. Reject before any hook runs; a type
-    // whose plugin the fleet disabled is closed, not briefly unavailable.
-    let Some(handler) = handler else {
-        return Err(
-            match crate::plugin_lifecycle::contest_type_outage(&state, &contest_type).await {
-                Some(PluginOutage::Disabled { .. }) => AppError::ContestTypeDisabled(contest_type),
-                _ => AppError::ContestTypeUnavailable(contest_type),
-            },
-        );
-    };
+    // The handler owns admission, so it is pinned here, before any hook
+    // runs, to authorize hook effects through admission commit.
+    let handler = crate::plugin_lifecycle::accepting_handler(&state, &contest_type).await?;
     let admission_owner = handler
         .submission_admission
         .then_some(handler.plugin_id.as_str());
@@ -872,14 +844,7 @@ pub async fn create_contest_submission(
     );
 
     let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
-    let response = build_submission_response(
-        &state.db,
-        &*state.blob_store,
-        state.clock.now(),
-        model,
-        visibility,
-    )
-    .await?;
+    let response = build_submission_response(&state, model, visibility).await?;
 
     let response = apply_filter_to_response(&kernel, response).await?;
     Ok((StatusCode::CREATED, Json(response)))
@@ -1039,6 +1004,7 @@ pub async fn list_contest_submissions(
         query.cursor.as_deref(),
         per_page,
         total,
+        Diagnostics::for_viewer(&auth_user),
     )
     .await?;
     Ok(Json(serde_json::json!({

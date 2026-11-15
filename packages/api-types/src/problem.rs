@@ -65,6 +65,10 @@ pub struct ProblemResponse {
     pub created_at: DateTime<Utc>,
     #[schema(example = "2025-09-01T08:30:00Z")]
     pub updated_at: DateTime<Utc>,
+    /// What keeps `default_contest_type`, the type of a practice submission
+    /// or code run, from being served, if anything: such a submission is
+    /// refused until it is.
+    pub plugin_outage: Option<crate::visibility::PluginOutage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

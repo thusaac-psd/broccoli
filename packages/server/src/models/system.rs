@@ -41,15 +41,26 @@ pub struct WorkerInfo {
     /// Worker process ID on its host machine.
     #[schema(example = 4242)]
     pub pid: Option<u32>,
-    /// Platform tools the worker found missing at boot: every job that needs
-    /// one fails on it with `PLATFORM_TOOL_MISSING`. Empty on a healthy worker.
+    /// Platform tools the worker lacks as of its last heartbeat. Empty on a
+    /// healthy worker.
     #[schema(example = json!([]))]
     pub missing_platform_tools: Vec<String>,
+    /// Whether the worker takes judging work. A worker that lacks a platform
+    /// tool (`missing_platform_tools`) takes none until the tool is in place;
+    /// while no live worker takes work, submissions wait `Queued`.
+    #[schema(example = true)]
+    pub accepting_work: bool,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct WorkersResponse {
+    /// Whether the worker list below was read just now.
+    pub queue_state: QueueState,
+    /// The live workers. While the queue is unreachable: the list this server
+    /// last read, and `workers_stale` is true.
     pub workers: Vec<WorkerInfo>,
+    /// `workers` is the last list read before the queue became unreachable.
+    pub workers_stale: bool,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]

@@ -152,27 +152,34 @@ pub struct UploadTestCasesResponse {
     pub test_cases: Vec<TestCaseListItem>,
 }
 
-impl From<crate::entity::problem::Model> for ProblemResponse {
-    fn from(m: crate::entity::problem::Model) -> Self {
-        let submission_format: Option<std::collections::HashMap<String, Vec<String>>> = m
-            .submission_format
-            .and_then(|v| serde_json::from_value(v).ok());
-        Self {
-            id: m.id,
-            title: m.title,
-            content: m.content,
-            time_limit: m.time_limit,
-            memory_limit: m.memory_limit,
-            problem_type: m.problem_type,
-            checker_format: m.checker_format,
-            default_contest_type: m.default_contest_type,
-            show_test_details: m.show_test_details,
-            is_public: m.is_public,
-            submission_format,
-            samples: vec![],
-            created_at: m.created_at,
-            updated_at: m.updated_at,
-        }
+/// The problem's response, with what keeps its default contest type from
+/// being served (`crate::plugin_lifecycle::contest_type_outage`) and no
+/// samples (the caller loads them when it shows them).
+pub async fn problem_response(
+    state: &crate::state::AppState,
+    m: crate::entity::problem::Model,
+) -> ProblemResponse {
+    let plugin_outage =
+        crate::plugin_lifecycle::contest_type_outage(state, &m.default_contest_type).await;
+    let submission_format: Option<std::collections::HashMap<String, Vec<String>>> = m
+        .submission_format
+        .and_then(|v| serde_json::from_value(v).ok());
+    ProblemResponse {
+        id: m.id,
+        title: m.title,
+        content: m.content,
+        time_limit: m.time_limit,
+        memory_limit: m.memory_limit,
+        problem_type: m.problem_type,
+        checker_format: m.checker_format,
+        default_contest_type: m.default_contest_type,
+        show_test_details: m.show_test_details,
+        is_public: m.is_public,
+        submission_format,
+        samples: vec![],
+        created_at: m.created_at,
+        updated_at: m.updated_at,
+        plugin_outage,
     }
 }
 

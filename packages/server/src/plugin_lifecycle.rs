@@ -229,6 +229,22 @@ impl PluginLifecycle {
         self.governs.read().ok()?.get(plugin_id).cloned()
     }
 
+    /// What keeps a submission of `contest_type` in `status` parked, if
+    /// anything: one not yet finished, of a type whose every provider is
+    /// disabled fleet-wide, waits queued until a provider is enabled (see
+    /// `contest_type_open`).
+    pub fn parked_by(
+        &self,
+        contest_type: &str,
+        status: common::SubmissionStatus,
+    ) -> Option<PluginOutage> {
+        if status.is_terminal() {
+            return None;
+        }
+        self.disabled_provider(contest_type)
+            .map(|plugin_id| PluginOutage::Disabled { plugin_id })
+    }
+
     /// The plugin that keeps `contest_type` closed: every plugin that last
     /// registered the type is disabled fleet-wide, and this is the first of
     /// them by id. `None` when an enabled plugin provides the type, or no
@@ -310,6 +326,32 @@ pub async fn contest_type_outage(state: &AppState, contest_type: &str) -> Option
         .await
         .contains_key(contest_type);
     (!registered).then_some(PluginOutage::Unavailable)
+}
+
+/// The handler a new submission or code run of `contest_type` is accepted
+/// through, or why none can take it now: the one acceptance rule of every
+/// submit path, contest or practice. A type whose provider is disabled
+/// fleet-wide is closed (`CONTEST_TYPE_DISABLED`); one with no handler loaded
+/// here is briefly unavailable (`CONTEST_TYPE_UNAVAILABLE`, retry later).
+/// Accepting either would park the work unseen.
+pub async fn accepting_handler(
+    state: &AppState,
+    contest_type: &str,
+) -> Result<crate::registry::ContestTypeHandlers, AppError> {
+    let handler = match contest_type_outage(state, contest_type).await {
+        Some(PluginOutage::Disabled { .. }) => {
+            return Err(AppError::ContestTypeDisabled(contest_type.to_string()));
+        }
+        Some(PluginOutage::Unavailable) => None,
+        None => state
+            .registries
+            .contest_type_registry
+            .read()
+            .await
+            .get(contest_type)
+            .cloned(),
+    };
+    handler.ok_or_else(|| AppError::ContestTypeUnavailable(contest_type.to_string()))
 }
 
 /// Plugins that are enabled in the desired state but not `Loaded` here,

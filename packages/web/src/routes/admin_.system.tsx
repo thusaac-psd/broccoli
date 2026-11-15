@@ -111,7 +111,10 @@ export default function AdminSystemPage() {
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <WorkersGrid workers={data.workers} />
+                <WorkersGrid
+                  workers={data.workers}
+                  stale={data.workers_stale}
+                />
               </CardContent>
             </Card>
 

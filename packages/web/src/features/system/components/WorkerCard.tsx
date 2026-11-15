@@ -18,6 +18,8 @@ import type { WorkerInfo } from '@/features/system/types';
 
 interface Props {
   worker: WorkerInfo;
+  /** Read before the message queue became unreachable: its state now is unknown. */
+  stale: boolean;
 }
 
 function formatUptime(startedAt: string, t: I18nContextValue['t']) {
@@ -34,7 +36,7 @@ function formatUptime(startedAt: string, t: I18nContextValue['t']) {
   return t('system.worker.daysUptime', { count: days });
 }
 
-export function WorkerCard({ worker }: Props) {
+export function WorkerCard({ worker, stale }: Props) {
   const { t } = useTranslation();
   const format = useFormat();
 
@@ -61,10 +63,28 @@ export function WorkerCard({ worker }: Props) {
             <span className="font-mono text-sm font-medium truncate">
               {worker.id}
             </span>
-            <Badge variant="outline" className="gap-1 border-emerald-500/40">
-              <CircleDot className="h-3 w-3 text-emerald-500" />
-              {t('system.worker.online')}
-            </Badge>
+            {stale ? (
+              <Badge
+                variant="outline"
+                className="gap-1 border-amber-500/40 text-amber-600"
+              >
+                <CircleDot className="h-3 w-3" />
+                {t('system.worker.stale')}
+              </Badge>
+            ) : worker.accepting_work ? (
+              <Badge variant="outline" className="gap-1 border-emerald-500/40">
+                <CircleDot className="h-3 w-3 text-emerald-500" />
+                {t('system.worker.online')}
+              </Badge>
+            ) : (
+              <Badge
+                variant="outline"
+                className="gap-1 border-destructive/40 text-destructive"
+              >
+                <CircleDot className="h-3 w-3" />
+                {t('system.worker.notAccepting')}
+              </Badge>
+            )}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span className="inline-flex items-center gap-1">
