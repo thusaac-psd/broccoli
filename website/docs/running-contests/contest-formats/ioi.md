@@ -27,7 +27,11 @@ name, a scoring method, a max score, and the test labels it covers.
 | `test_cases`      | empty   | labels of the test cases the subtask covers  |
 
 A test case's label is the one set on the test case, or its numeric ID when
-it has none.
+it has none. Validation, scoring and the scoreboard all read a subtask's
+labels the same way, so they always agree on which test cases it covers. Saving
+the config fails when a label names no test case, or names more than one (one
+test case's label is another's ID). When a test data change forced through
+(`force=true`) leaves such a label behind, that entry scores as a failed test.
 
 - `group_min`, the subtask scores its full max score only when every test in
   it passes, otherwise it scores zero. This is stricter than CMS GroupMin,
