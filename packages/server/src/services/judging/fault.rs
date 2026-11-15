@@ -93,7 +93,7 @@ impl DispatchFaults {
     }
 
     /// The fault that lost this dispatch's attempt, if one did: a fault of
-    /// [`SystemErrorClass::HandBack`]. A lost attempt never becomes a
+    /// `SystemErrorClass::HandBack`. A lost attempt never becomes a
     /// verdict: its judging session ends without asking the plugin, a
     /// plugin write that would finalize it is fenced out, and the dispatch
     /// hands the judgement back (`fail_dispatch`).
