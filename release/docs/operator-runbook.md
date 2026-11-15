@@ -371,16 +371,19 @@ value left in `.env.server` shows up in that warning: delete it.
 
 ## Multi-Replica Server Identity
 
-`BROCCOLI__SERVER__ID` **must** be set explicitly on every server replica in a
-multi-server deployment, and the same holds for `BROCCOLI__WORKER__ID` on every
-worker. `install.sh server` and `install.sh worker` default each to an id unique
-to the machine, such as `worker-ubuntu-3f9c2a1b`: the hostname plus a hash of
-the host's `/etc/machine-id` and the MAC address of its first physical network
-card, so cloned or live-boot machines that all call themselves `ubuntu` still
-get distinct ids. The installer writes the id into `.env.server` or
-`.env.worker`, and re-runs keep it. If you write env files by hand
-(`.env.server.example` ships `server-1`), give each replica a unique stable
-value.
+Every server replica and every worker needs an id of its own. Left unset,
+`BROCCOLI__SERVER__ID` and `BROCCOLI__WORKER__ID` are derived from the machine:
+a hash of `/etc/machine-id`, so cloned or live-boot machines that all call
+themselves `ubuntu` still get distinct ids. Inside a container the machine id is
+ignored (an image can bake one in) and the hostname, the container's own id, is
+used. Only when neither is available does the process fall back to a random id,
+and it warns at boot. `install.sh server` and `install.sh worker` write an id
+into `.env.server` or `.env.worker`, offering a default such as
+`worker-ubuntu-3f9c2a1b` (the hostname plus a hash of the machine id and the MAC
+address of the first physical network card), and re-runs keep it. Set the id
+yourself only when two replicas share one machine, or when you write env files
+by hand (`.env.server.example` ships `server-1`): then give each replica a
+unique stable value.
 
 **Why it matters:** each server reads its own reply stream
 (`operation_tasks:reply:<server_id>`) and owns in-flight work under its ID. A
@@ -388,8 +391,8 @@ second process with the same ID refuses to start. A replica whose ID changes at
 every restart (the random fallback when no stable ID can be derived) leaves its
 old reply stream behind until it expires, 10 minutes later.
 
-The release `install.sh` prompts for the ID; if you bypass the installer, audit
-each replica's env file before starting.
+If you bypass the installer, check that no two replicas' env files name the same
+id before starting them.
 
 ## Recovering In-Flight Submissions After a Server Restart or Crash
 
