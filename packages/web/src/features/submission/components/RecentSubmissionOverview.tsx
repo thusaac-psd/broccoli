@@ -242,12 +242,7 @@ export function RecentSubmissionOverview({
           />
         ))}
         {mergedRows.map((row) => {
-          const { label, variant } = getVerdictBadge(
-            row.verdict,
-            row.status,
-            t,
-            row.withheld,
-          );
+          const { label, variant } = getVerdictBadge(row, t);
           const scoreToneClass = getScoreToneClass(variant);
           const scoreDisplay = getSubmissionScoreDisplay(
             row.status,

@@ -167,7 +167,7 @@ const PROBLEM_TITLES = [
   'Matrix',
 ];
 
-const problem = (id: number) => ({
+export const problem = (id: number) => ({
   id,
   title: PROBLEM_TITLES[id - 1],
   content: '# Statement\n\nCompute $a+b$.\n\n```\n1 2\n```',

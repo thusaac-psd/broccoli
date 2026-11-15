@@ -81,10 +81,13 @@ export function SubmissionDetailView({
   const isTerminal = isTerminalStatus(status);
 
   const { label: verdictLabel, variant: verdictVariant } = getVerdictBadge(
-    result?.verdict ?? null,
-    status,
+    {
+      verdict: result?.verdict,
+      status,
+      withheld: submission.withheld,
+      plugin_outage: submission.plugin_outage,
+    },
     t,
-    submission.withheld,
   );
   const scoreDisplay = getSubmissionScoreDisplay(status, result?.score, t);
 

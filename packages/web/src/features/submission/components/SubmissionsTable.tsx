@@ -292,10 +292,8 @@ function SubmissionRow({
   const format = useFormat();
   const { onSubmissionClick } = useSubmissionNavigation();
   const { label: verdictLabel, variant: verdictVariant } = getVerdictBadge(
-    submission.verdict ?? null,
-    submission.status,
+    submission,
     t,
-    submission.withheld,
   );
 
   const px = compact ? 'px-2' : 'px-4';

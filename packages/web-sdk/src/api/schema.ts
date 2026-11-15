@@ -4032,6 +4032,8 @@ export interface components {
        * @example 262144
        */
       memory_limit: number;
+      /** @description Set while the plugin providing the contest type a submission would use cannot serve it: submitting is refused. */
+      plugin_outage?: components['schemas']['PluginOutage'] | null;
       /** @example batch */
       problem_type: string;
       samples: components['schemas']['SampleTestCaseMeta'][];
@@ -4427,6 +4429,8 @@ export interface components {
        * @example 1024
        */
       memory_used?: number | null;
+      /** @description Set while the plugin providing its contest type cannot judge it: the submission waits until a provider is back. */
+      plugin_outage?: components['schemas']['PluginOutage'] | null;
       /**
        * Format: int32
        * @example 1
@@ -4488,6 +4492,8 @@ export interface components {
       judge_epoch: number;
       /** @example cpp */
       language: string;
+      /** @description Set while the plugin providing its contest type cannot judge it: the submission waits until a provider is back. */
+      plugin_outage?: components['schemas']['PluginOutage'] | null;
       /**
        * Format: int32
        * @example 1

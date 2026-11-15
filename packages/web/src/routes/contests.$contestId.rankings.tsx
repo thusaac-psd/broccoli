@@ -6,7 +6,7 @@ import { BarChart3 } from 'lucide-react';
 import { useParams } from 'react-router';
 
 import { PageLayout } from '@/components/PageLayout';
-import { ContestOutageNotice } from '@/features/contest/components/ContestOutageNotice';
+import { PluginOutageNotice } from '@/features/contest/components/PluginOutageNotice';
 import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
 import { contestPageTitle, type RouteHandle } from '@/lib/route-title';
 
@@ -39,7 +39,7 @@ export default function ContestRankingPage() {
       >
         {(contest) =>
           contest.plugin_outage ? (
-            <ContestOutageNotice contest={contest} />
+            <PluginOutageNotice outage={contest.plugin_outage} of="contest" />
           ) : (
             <>
               <Slot name="ranking.header" as="div" />
