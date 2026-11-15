@@ -1,6 +1,6 @@
 import { useServerNow } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { queryState } from '@broccoli/web-sdk/hooks';
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
 import {
@@ -52,7 +52,7 @@ export function BracketScoreboard({
   const presentRef = useRef<HTMLDivElement>(null);
   const presenting = useFullscreen(presentRef);
 
-  const bracket = queryState(useBracket(contestId));
+  const bracket = useQueryState(useBracket(contestId));
 
   if (!contestId) return <>{children}</>;
 

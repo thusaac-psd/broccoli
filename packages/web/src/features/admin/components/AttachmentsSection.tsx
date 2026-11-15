@@ -1,5 +1,5 @@
 import { useApiBasePath, useApiClient } from '@broccoli/web-sdk/api';
-import { queryState } from '@broccoli/web-sdk/hooks';
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -83,7 +83,7 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
     queryKey,
     queryFn: () => fetchAttachments(apiClient, problemId),
   });
-  const filesState = queryState(filesQuery);
+  const filesState = useQueryState(filesQuery);
   const files = filesQuery.data ?? NO_ATTACHMENTS;
 
   const handleFilesSelected = useCallback((fileList: File[]) => {

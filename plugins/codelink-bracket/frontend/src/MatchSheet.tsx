@@ -6,8 +6,8 @@ import {
 import { useAuth, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import {
   pollInterval,
-  queryState,
   unsettledMessageKey,
+  useQueryState,
 } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
@@ -134,7 +134,7 @@ function MatchDetail({
       match?.state === 'decided' ? false : 3_000,
     ),
   });
-  const state = queryState(query);
+  const state = useQueryState(query);
   const match = query.data;
 
   const permissions = auth.user?.permissions ?? [];

@@ -1,5 +1,5 @@
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
-import { queryState } from '@broccoli/web-sdk/hooks';
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -64,7 +64,7 @@ export function CheckerSourceSection({ problemId }: CheckerSourceSectionProps) {
   });
 
   const existing = existingQuery.data;
-  const existingState = queryState(existingQuery);
+  const existingState = useQueryState(existingQuery);
   // An upload replaces the whole set, merged with the files already there,
   // so it waits until those are known.
   const filesKnown = existingQuery.isSuccess;

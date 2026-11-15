@@ -259,11 +259,11 @@ export default defineConfig([
         {
           // `const { data = [] } = useQuery(...)` shows a failed or unfinished
           // fetch as an empty list. Render the query through QueryView or
-          // queryState() from @broccoli/web-sdk, which keep the states apart.
+          // useQueryState() from @broccoli/web-sdk, which keep the states apart.
           selector:
             'VariableDeclarator[init.type="CallExpression"][init.callee.name=/^use[A-Z]/] > ObjectPattern > Property[key.name="data"] > AssignmentPattern',
           message:
-            'Do not default a query result: render it through QueryView or queryState() so loading, failure and empty stay distinct.',
+            'Do not default a query result: render it through QueryView or useQueryState() so loading, failure and empty stay distinct.',
         },
         {
           // `const { data, isLoading } = useQuery(...)` has no failed state:
@@ -271,7 +271,7 @@ export default defineConfig([
           selector:
             'VariableDeclarator[init.type="CallExpression"][init.callee.name="useQuery"] > ObjectPattern:has(> Property[key.name="data"]):has(> Property[key.name=/^is(Loading|Pending)$/]):not(:has(> Property[key.name=/^(error|isError|status)$/]))',
           message:
-            'A query read without its failure shows a failed fetch as empty: render it through QueryView or queryState().',
+            'A query read without its failure shows a failed fetch as empty: render it through QueryView or useQueryState().',
         },
         {
           // A poll read field by field without its failure never says that
@@ -280,7 +280,7 @@ export default defineConfig([
           selector:
             'VariableDeclarator[init.callee.name="useQuery"]:has(ObjectExpression > Property[key.name="refetchInterval"]) > ObjectPattern:not(:has(> Property[key.name=/^(error|isError|status)$/]))',
           message:
-            'A polling query read without its failure hides that its refreshes fail: render it through QueryView, or queryState() and RefreshFailedNotice.',
+            'A polling query read without its failure hides that its refreshes fail: render it through QueryView, or useQueryState() and RefreshFailedNotice.',
         },
         {
           // A fixed `refetchInterval` asks a failing server as often as a

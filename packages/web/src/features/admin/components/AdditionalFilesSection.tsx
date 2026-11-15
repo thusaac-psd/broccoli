@@ -1,5 +1,5 @@
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
-import { queryState } from '@broccoli/web-sdk/hooks';
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -64,7 +64,7 @@ export function AdditionalFilesSection({
     queryKey,
     queryFn: () => fetchAdditionalFiles(apiClient, problemId),
   });
-  const filesState = queryState(filesQuery);
+  const filesState = useQueryState(filesQuery);
   const files = filesQuery.data ?? NO_FILES;
 
   const languagesQuery = useQuery({
