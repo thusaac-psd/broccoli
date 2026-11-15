@@ -83,7 +83,7 @@ fn prepare_case(
             contest_id: req.contest_id,
             overrides: None,
         })
-        .map_err(|e| extism_pdk::Error::msg(format!("{e}")))?;
+        .map_err(|e| extism_pdk::Error::msg(e.to_string()))?;
 
     // Checker fusion: resolve a checker stage to splice into the run op so the
     // solution output is checked worker-side. `none` schedules NO checker stage
@@ -108,7 +108,7 @@ fn prepare_case(
 
     let operations =
         batch::build_operation(req, &resolved, &sandbox_config, checker_stage.as_ref())
-            .map_err(|e| extism_pdk::Error::msg(format!("{e}")))?;
+            .map_err(|e| extism_pdk::Error::msg(e.to_string()))?;
     // Base budget covers compile + exec; add the checker stage's wall budget so a
     // sequential (File-mode) checker - e.g. a cold testlib compile - doesn't trip
     // the result-wait timeout.
@@ -161,7 +161,7 @@ fn interpret_case_result(
         checker_format,
         evaluator::DEFAULT_CHECK_STEP_ID,
     )
-    .map_err(|e| extism_pdk::Error::msg(format!("{e}")))?;
+    .map_err(|e| extism_pdk::Error::msg(e.to_string()))?;
     // A SystemError is a judge/system fault, never the contestant's code. Log each
     // step's raw sandbox result so the cause is diagnosable straight from the log
     // (exit/signal/status/oom/memory) instead of needing a repro.

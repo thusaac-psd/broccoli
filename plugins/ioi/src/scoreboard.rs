@@ -8,12 +8,12 @@ use broccoli_server_sdk::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use serde::Deserialize;
 
-// ContestConfig/ScoringMode/SubtaskDef/resolve_tc_label are only used by the
-// wasm32-gated cell loaders below; ScoreboardTiebreaker/ScoreboardVisibility
+// ContestConfig/ScoringMode/SubtaskDef are only used by the wasm32-gated cell
+// loaders below; ScoreboardTiebreaker/ScoreboardVisibility
 // are also used directly by the #[cfg(test)] unit tests, so gate the latter
 // two more broadly.
 #[cfg(target_arch = "wasm32")]
-use crate::config::{ContestConfig, ScoringMode, SubtaskDef, resolve_tc_label};
+use crate::config::{ContestConfig, ScoringMode, SubtaskDef};
 #[cfg(any(target_arch = "wasm32", test))]
 use crate::config::{ScoreboardTiebreaker, ScoreboardVisibility};
 #[cfg(target_arch = "wasm32")]
@@ -365,6 +365,11 @@ fn load_best_tokened_or_last_scoreboard_cells(
     Ok(cells)
 }
 
+/// One submission's earliest elapsed seconds and its raw score per test case
+/// id, the unit `load_sum_best_subtask_scoreboard_cells` picks the best of.
+#[cfg(target_arch = "wasm32")]
+type SubmissionScores = (i64, HashMap<i32, f64>);
+
 #[cfg(target_arch = "wasm32")]
 fn load_sum_best_subtask_scoreboard_cells(
     host: &Host,
@@ -415,7 +420,7 @@ fn load_sum_best_subtask_scoreboard_cells(
     );
     let rows: Vec<ScoreboardTcScoreRow> = host.db.query_with_args(&sql, &p.into_args())?;
 
-    let mut by_submission: HashMap<(i32, i32, i32), (i64, HashMap<i32, f64>)> = HashMap::new();
+    let mut by_submission: HashMap<(i32, i32, i32), SubmissionScores> = HashMap::new();
     for row in rows {
         let Some(max_score) = test_case_max.get(&(row.problem_id, row.test_case_id)) else {
             continue;
@@ -428,8 +433,7 @@ fn load_sum_best_subtask_scoreboard_cells(
         scores.insert(row.test_case_id, raw_score);
     }
 
-    let mut submissions_by_cell: HashMap<(i32, i32), Vec<(i64, HashMap<i32, f64>)>> =
-        HashMap::new();
+    let mut submissions_by_cell: HashMap<(i32, i32), Vec<SubmissionScores>> = HashMap::new();
     for ((user_id, problem_id, _submission_id), submission_scores) in by_submission {
         submissions_by_cell
             .entry((user_id, problem_id))
