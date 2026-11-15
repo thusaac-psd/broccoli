@@ -82,6 +82,23 @@ test('a parked submission says it is waiting and is asked for ever more slowly',
   expect(polls).toBeLessThan(15);
 });
 
+test('a parked submission shows one consistent status: waiting, with nothing in progress or spinning', async ({
+  page,
+}) => {
+  await mockApi(page, 'contestant');
+  await page.route(/\/api\/v1\/submissions\/6(\?|$)/, (route) =>
+    route.fulfill({ json: { ...parked(6), files: [], result: null } }),
+  );
+  await page.route('**/api/v1/submissions/6/judgements', (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await page.goto('/submissions/6');
+  await expect(page.getByText(WAITING)).toBeVisible();
+  await expect(page.getByText('In progress', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Judging...')).toHaveCount(0);
+  await expect(page.locator('.animate-spin')).toHaveCount(0);
+});
+
 test('a problem whose practice contest type has no provider offers no submit', async ({
   page,
 }) => {
