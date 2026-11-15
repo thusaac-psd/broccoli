@@ -99,3 +99,77 @@ test('a problem whose practice contest type has no provider offers no submit', a
   ).toBeVisible();
   await expect(page.getByRole('button', { name: 'Submit' })).toHaveCount(0);
 });
+
+const JUDGED_WITH_ISSUES =
+  "Judged while this problem's stored settings had issues";
+
+/** The current judgement of submission 1 (problem 2), with its issue flag. */
+async function judgementOne(
+  page: import('@playwright/test').Page,
+  configIssues: boolean | null,
+) {
+  await page.route('**/api/v1/submissions/1/judgements/1?**', (route) =>
+    route.fulfill({ json: { id: 1, config_issues: configIssues } }),
+  );
+}
+
+test('staff see that a judgement ran while its problem had config issues, with the issues as they stand', async ({
+  page,
+}) => {
+  await mockApi(page, 'admin');
+  await judgementOne(page, true);
+  await page.route('**/api/v1/problems/2/config/issues', (route) =>
+    route.fulfill({
+      json: [
+        {
+          plugin_id: 'ioi',
+          scope: 'problem',
+          ref_id: '2',
+          namespace: 'task',
+          errors: [
+            {
+              path: 'subtasks[0].test_cases[0]',
+              message: "this problem has no test case 't2'",
+              kind: 'plugin',
+              key: null,
+              params: {},
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  await page.goto('/submissions/1');
+  const notice = page
+    .getByRole('alert')
+    .filter({ hasText: JUDGED_WITH_ISSUES });
+  await expect(notice).toBeVisible();
+  await expect(notice).toContainText('ioi/task on this problem');
+});
+
+test('the notice says a rejudge scores the submission once its problem has no config issues', async ({
+  page,
+}) => {
+  await mockApi(page, 'admin');
+  await judgementOne(page, true);
+  await page.route('**/api/v1/problems/2/config/issues', (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await page.goto('/submissions/1');
+  const notice = page
+    .getByRole('alert')
+    .filter({ hasText: JUDGED_WITH_ISSUES });
+  await expect(notice).toContainText('Rejudge to score this submission');
+});
+
+test('a judgement whose problem had no config issues shows no notice', async ({
+  page,
+}) => {
+  await mockApi(page, 'admin');
+  await judgementOne(page, false);
+  await page.goto('/submissions/1');
+  await expect(
+    page.getByRole('heading', { name: '#1', exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText(JUDGED_WITH_ISSUES)).toHaveCount(0);
+});

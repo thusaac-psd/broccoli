@@ -18,6 +18,7 @@ import {
 } from '@broccoli/web-sdk/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  AlertTriangle,
   Check,
   ChevronDown,
   ChevronRight,
@@ -339,6 +340,16 @@ function JudgementRow({
         {!judgement.is_finalized && (
           <Badge variant="secondary">
             {t('submissionDetail.pendingVersion')}
+          </Badge>
+        )}
+        {judgement.config_issues && (
+          <Badge
+            variant="outline"
+            className="gap-1 border-amber-500/60 text-amber-700 dark:text-amber-300"
+            title={t('submissionDetail.configIssues.judged')}
+          >
+            <AlertTriangle className="h-3 w-3" />
+            {t('submissionDetail.configIssues.badge')}
           </Badge>
         )}
         {judgement.target_worker_id && (
