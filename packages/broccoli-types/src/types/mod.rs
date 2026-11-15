@@ -44,12 +44,9 @@ pub use hook_events::{
 pub use http::{PluginHttpAuth, PluginHttpRequest, PluginHttpResponse, error_code_for_status};
 pub use lifecycle::{ParseStatusError, StatusPhase, SubmissionLifecycle};
 pub use operation::{
-    COMPARE_TOOL, Channel, DEFAULT_OPERATION_RESULT_TIMEOUT_MS, DetachedOperationCallbackAction,
-    DetachedOperationCallbackEvent, DetachedOperationCallbackInput,
-    DetachedOperationCallbackOutput, DetachedOperationSession, DirectoryOptions, DirectoryRule,
-    EnvRule, Environment, ExecutionResult, IOConfig, IOTarget, MountSource, MountSpec,
-    OperationResult, OperationTask, PLATFORM_TOOLS, ResourceLimits, RunOptions, SandboxResult,
-    SandboxStatus, SessionFile, StartDetachedWindowedOperationInput, Step, StepCacheConfig,
+    COMPARE_TOOL, Channel, DirectoryOptions, DirectoryRule, EnvRule, Environment, ExecutionResult,
+    IOConfig, IOTarget, MountSource, MountSpec, OperationResult, OperationTask, PLATFORM_TOOLS,
+    ResourceLimits, RunOptions, SandboxResult, SandboxStatus, SessionFile, Step, StepCacheConfig,
     StepKind, TaskExecutionResult,
 };
 pub use persistence::{

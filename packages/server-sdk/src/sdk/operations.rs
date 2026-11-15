@@ -1,10 +1,5 @@
 use crate::error::SdkError;
-#[cfg(target_arch = "wasm32")]
-use crate::types::DetachedOperationSession;
-use crate::types::{
-    DEFAULT_OPERATION_RESULT_TIMEOUT_MS, OperationResult, OperationTask,
-    StartDetachedWindowedOperationInput,
-};
+use crate::types::{OperationResult, OperationTask};
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -17,7 +12,6 @@ pub struct WindowedOperationBuilder<'a> {
     operations: &'a Operations,
     tasks: &'a [OperationTask],
     concurrency: usize,
-    result_timeout_ms: u64,
 }
 
 impl Operations {
@@ -26,7 +20,6 @@ impl Operations {
             operations: self,
             tasks,
             concurrency: 1,
-            result_timeout_ms: DEFAULT_OPERATION_RESULT_TIMEOUT_MS,
         }
     }
 }
@@ -35,26 +28,6 @@ impl<'a> WindowedOperationBuilder<'a> {
     pub fn concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = concurrency.max(1);
         self
-    }
-
-    pub fn result_timeout_ms(mut self, result_timeout_ms: u64) -> Self {
-        self.result_timeout_ms = result_timeout_ms;
-        self
-    }
-
-    pub fn start_detached(
-        self,
-        callback_fn: impl Into<String>,
-        state: serde_json::Value,
-    ) -> Result<String, SdkError> {
-        let input = StartDetachedWindowedOperationInput {
-            operations: self.tasks.to_vec(),
-            concurrency: self.concurrency,
-            result_timeout_ms: self.result_timeout_ms,
-            callback_fn: callback_fn.into(),
-            state,
-        };
-        self.operations.start_detached_windowed(&input)
     }
 
     pub fn collect(self, timeout_ms: u64) -> Result<Vec<OperationResult>, SdkError> {
@@ -155,17 +128,6 @@ fn remaining_timeout_ms(started: Instant, timeout_ms: u64) -> Option<u64> {
 
 #[cfg(target_arch = "wasm32")]
 impl Operations {
-    fn start_detached_windowed(
-        &self,
-        input: &StartDetachedWindowedOperationInput,
-    ) -> Result<String, SdkError> {
-        let input_json = serde_json::to_string(input)?;
-        let response_json =
-            unsafe { crate::host::raw::start_detached_windowed_operation(input_json)? };
-        let response: DetachedOperationSession = serde_json::from_str(&response_json)?;
-        Ok(response.session_id)
-    }
-
     fn start_batch(&self, tasks: &[OperationTask]) -> Result<String, SdkError> {
         let ops_json = serde_json::to_string(tasks)?;
         let response_json = unsafe { crate::host::raw::start_operation_batch(ops_json)? };
@@ -217,7 +179,6 @@ use std::cell::RefCell;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) struct OperationsMock {
-    detached_windowed_requests: RefCell<Vec<StartDetachedWindowedOperationInput>>,
     batch_inputs: RefCell<Vec<Vec<OperationTask>>>,
     results: RefCell<Vec<OperationResult>>,
     result_timeouts: RefCell<Vec<u64>>,
@@ -228,7 +189,6 @@ pub(super) struct OperationsMock {
 impl OperationsMock {
     pub fn new() -> Self {
         Self {
-            detached_windowed_requests: RefCell::new(Vec::new()),
             batch_inputs: RefCell::new(Vec::new()),
             results: RefCell::new(Vec::new()),
             result_timeouts: RefCell::new(Vec::new()),
@@ -239,20 +199,6 @@ impl OperationsMock {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Operations {
-    fn start_detached_windowed(
-        &self,
-        input: &StartDetachedWindowedOperationInput,
-    ) -> Result<String, SdkError> {
-        self.inner
-            .detached_windowed_requests
-            .borrow_mut()
-            .push(input.clone());
-        Ok(format!(
-            "mock-detached-operation-{}",
-            self.inner.detached_windowed_requests.borrow().len()
-        ))
-    }
-
     fn start_batch(&self, tasks: &[OperationTask]) -> Result<String, SdkError> {
         self.inner.batch_inputs.borrow_mut().push(tasks.to_vec());
         Ok(format!(
@@ -274,10 +220,6 @@ impl Operations {
     fn cancel_batch(&self, batch_id: &str) -> Result<(), SdkError> {
         self.inner.cancels.borrow_mut().push(batch_id.to_string());
         Ok(())
-    }
-
-    pub fn detached_windowed_requests(&self) -> Vec<StartDetachedWindowedOperationInput> {
-        self.inner.detached_windowed_requests.borrow().clone()
     }
 
     pub fn queue_result(&self, result: OperationResult) {
@@ -318,46 +260,6 @@ mod tests {
             evaluate_batch_id: None,
             test_case_id: None,
         }
-    }
-
-    #[test]
-    fn windowed_operation_detached_builder_records_typed_request() {
-        let host = Host::mock();
-        let ops = vec![operation(), operation()];
-
-        let session_id = host
-            .operations
-            .windowed(&ops)
-            .concurrency(4)
-            .result_timeout_ms(9876)
-            .start_detached("on_operation_result", serde_json::json!({ "case": 42 }))
-            .unwrap();
-
-        assert_eq!(session_id, "mock-detached-operation-1");
-        let requests = host.operations.detached_windowed_requests();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].operations.len(), 2);
-        assert_eq!(requests[0].concurrency, 4);
-        assert_eq!(requests[0].result_timeout_ms, 9876);
-        assert_eq!(requests[0].callback_fn, "on_operation_result");
-        assert_eq!(requests[0].state["case"], 42);
-    }
-
-    #[test]
-    fn windowed_operation_detached_builder_uses_nonzero_timeout_by_default() {
-        let host = Host::mock();
-        let ops = vec![operation()];
-
-        host.operations
-            .windowed(&ops)
-            .start_detached("on_operation_result", serde_json::json!({}))
-            .unwrap();
-
-        let requests = host.operations.detached_windowed_requests();
-        assert_eq!(
-            requests[0].result_timeout_ms,
-            crate::types::DEFAULT_OPERATION_RESULT_TIMEOUT_MS
-        );
     }
 
     #[test]
