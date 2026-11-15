@@ -5059,6 +5059,13 @@ export interface components {
         };
     WorkerInfo: {
       /**
+       * @description Whether the worker takes judging work. A worker that lacks a platform
+       *     tool (`missing_platform_tools`) takes none until the tool is in place;
+       *     while no live worker takes work, submissions wait `Queued`.
+       * @example true
+       */
+      accepting_work: boolean;
+      /**
        * @description CPU architecture (e.g. `x86_64`, `aarch64`).
        * @example x86_64
        */
@@ -5095,8 +5102,8 @@ export interface components {
       /** Format: int32 */
       max_concurrency?: number | null;
       /**
-       * @description Platform tools the worker found missing at boot: every job that needs
-       *     one fails on it with `PLATFORM_TOOL_MISSING`. Empty on a healthy worker.
+       * @description Platform tools the worker lacks as of its last heartbeat. Empty on a
+       *     healthy worker.
        * @example []
        */
       missing_platform_tools: string[];

@@ -2,7 +2,7 @@ use common::db::DatabaseConnection;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use common::worker::{Executor, TaskReply, TaskResult};
@@ -15,8 +15,9 @@ use sea_orm::{
 use serde_json::Value;
 use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
+use worker::consumer::Settlement;
 use worker::models::operation::OperationTaskExecutor;
-use worker::models::operation::executor::derived_tools_dir;
+use worker::models::operation::executor::{PlatformTools, derived_tools_dir};
 use worker::models::operation::sandbox::isolate::IsolateSandboxManager;
 use worker::models::operation::sandbox::mock::MockSandboxManager;
 
@@ -129,8 +130,12 @@ pub struct E2eTestApp {
     server_handle: Option<JoinHandle<()>>,
     claim_cancel: Option<watch::Sender<bool>>,
     claim_handle: Option<JoinHandle<()>>,
-    worker_handle: Option<JoinHandle<()>>,
-    /// Holds the in-process worker before its next read while `true` (see
+    /// The in-process workers' consume loops, which stop once
+    /// `worker_shutdown` is set.
+    worker_handles: Vec<JoinHandle<()>>,
+    _worker_heartbeats: Vec<worker::heartbeat::HeartbeatHandle>,
+    worker_shutdown: Option<Arc<AtomicBool>>,
+    /// Holds the in-process workers before its next read while `true` (see
     /// [`E2eTestApp::pause_worker`]). `None` against an external server.
     worker_paused: Option<watch::Sender<bool>>,
     result_consumer_handle: Option<JoinHandle<()>>,
@@ -160,14 +165,116 @@ impl Drop for E2eTestApp {
         if let Some(h) = self.claim_handle.take() {
             h.abort();
         }
-        if let Some(h) = self.worker_handle.take() {
-            h.abort();
+        if let Some(shutdown) = self.worker_shutdown.take() {
+            shutdown.store(true, Ordering::Relaxed);
         }
         if let Some(h) = self.result_consumer_handle.take() {
             h.abort();
         }
         close_database_pool(self.db.clone());
     }
+}
+
+/// One in-process worker as production runs it, but without a sandbox
+/// preflight or metrics: the worker's own consume loop and heartbeat around
+/// an executor that runs each task and replies. While `paused` is `true` a
+/// task it reads waits unrun.
+#[allow(clippy::too_many_arguments)]
+async fn spawn_worker(
+    worker_id: &str,
+    mq: &mq::Mq,
+    redis: &redis::Client,
+    namespace: &str,
+    db_url: &str,
+    blob_store: Arc<dyn common::storage::BlobStore>,
+    metrics: common::metrics::Metrics,
+    tools_dir: Option<PathBuf>,
+    paused: watch::Receiver<bool>,
+    shutdown: Arc<AtomicBool>,
+) -> (JoinHandle<()>, worker::heartbeat::HeartbeatHandle) {
+    let tools = PlatformTools::new(tools_dir.clone());
+    let executor = Arc::new(
+        OperationTaskExecutor::new_with_sandbox_manager_and_blob_store(
+            create_sandbox_manager(),
+            blob_store,
+            std::env::temp_dir().join(format!("broccoli-e2e-worker-cache-{worker_id}")),
+            metrics,
+            tools_dir,
+        )
+        .await
+        .expect("Failed to initialize e2e operation executor"),
+    );
+    let clock = common::clock::PlatformClock::connect(db_url)
+        .await
+        .expect("read the database clock");
+    let in_flight = worker::heartbeat::InFlightCounter::new();
+    let started_at = clock.now();
+    let heartbeat = worker::heartbeat::HeartbeatConfig {
+        worker_id: worker_id.to_string(),
+        sandbox_backend: "e2e".into(),
+        max_concurrency: Some(1),
+        fairness_mode: "unknown".into(),
+        system_info: worker::system_info::SystemInfo::detect(),
+        tools: tools.clone(),
+        clock,
+    };
+    let claim = common::node_identity::NodeClaim::claim_at_boot(
+        redis.clone(),
+        namespace,
+        common::liveness::NodeRole::Worker,
+        worker_id,
+        heartbeat.payload(started_at, &in_flight),
+    )
+    .await
+    .expect("claim the e2e worker id");
+    let heartbeat = worker::heartbeat::spawn(claim, heartbeat, started_at, in_flight.clone());
+
+    let tasks = mq.task_consumer(worker_id);
+    tasks
+        .ensure_groups()
+        .await
+        .expect("create the worker groups");
+    let reply_mq = mq.clone();
+    let handle = tokio::spawn(worker::runtime::run_consume_loop(
+        mq.clone(),
+        tasks,
+        1,
+        tools,
+        in_flight,
+        shutdown,
+        Duration::from_secs(1),
+        move |delivery: mq::Delivery<common::worker::Task>| {
+            let (executor, reply_mq, mut paused) =
+                (executor.clone(), reply_mq.clone(), paused.clone());
+            async move {
+                if paused.wait_for(|paused| !*paused).await.is_err() {
+                    return Settlement::Abandon;
+                }
+                let Ok(task) = delivery.payload else {
+                    return Settlement::Ack;
+                };
+                let result = match executor.execute(task.clone()).await {
+                    Ok(r) => r,
+                    Err(e) => TaskResult {
+                        task_id: task.id.clone(),
+                        success: false,
+                        output: serde_json::Value::String(e.to_string()),
+                        error: Some(e.to_string()),
+                        task_type: Some(task.task_type.clone()),
+                        operation: Some(task.executor_name.clone()),
+                        worker_id: None,
+                        fault: None,
+                    },
+                };
+                let reply = TaskReply::Completed { result };
+                if let Err(e) = reply_mq.publish_reply(&task.reply_to, &reply).await {
+                    tracing::warn!(error = %e, "e2e worker: publishing a reply failed");
+                }
+                Settlement::Ack
+            }
+        },
+    ));
+    (handle, heartbeat)
 }
 
 #[allow(dead_code)]
@@ -180,7 +287,12 @@ impl E2eTestApp {
         if let Ok(server_url) = std::env::var("E2E_SERVER_URL") {
             Self::connect(&server_url).await
         } else {
-            Self::spawn_internal(true, Self::DEFAULT_DB_MAX_CONNECTIONS, worker_tools_dir()).await
+            Self::spawn_internal(
+                true,
+                Self::DEFAULT_DB_MAX_CONNECTIONS,
+                vec![worker_tools_dir()],
+            )
+            .await
         }
     }
 
@@ -188,7 +300,12 @@ impl E2eTestApp {
         if let Ok(server_url) = std::env::var("E2E_SERVER_URL") {
             Self::connect(&server_url).await
         } else {
-            Self::spawn_internal(false, Self::DEFAULT_DB_MAX_CONNECTIONS, worker_tools_dir()).await
+            Self::spawn_internal(
+                false,
+                Self::DEFAULT_DB_MAX_CONNECTIONS,
+                vec![worker_tools_dir()],
+            )
+            .await
         }
     }
 
@@ -205,19 +322,25 @@ impl E2eTestApp {
         if let Ok(server_url) = std::env::var("E2E_SERVER_URL") {
             Self::connect(&server_url).await
         } else {
-            Self::spawn_internal(true, db_max_connections, worker_tools_dir()).await
+            Self::spawn_internal(true, db_max_connections, vec![worker_tools_dir()]).await
         }
     }
 
-    /// Like [`spawn`], with a worker whose tools directory holds no
-    /// platform tool. In-process only.
-    pub async fn spawn_without_platform_tools() -> Self {
-        let empty = std::env::temp_dir().join(format!(
-            "broccoli-e2e-no-tools-{}",
-            TEST_COUNTER.load(Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&empty).expect("create an empty tools dir");
-        Self::spawn_internal(true, Self::DEFAULT_DB_MAX_CONNECTIONS, Some(empty)).await
+    /// Like [`spawn`], with one in-process worker per entry of `tools`, each
+    /// reading its platform tools from that directory. In-process only.
+    pub async fn spawn_with_workers(tools: Vec<Option<PathBuf>>) -> Self {
+        Self::spawn_internal(true, Self::DEFAULT_DB_MAX_CONNECTIONS, tools).await
+    }
+
+    /// The platform tools directory of a healthy worker.
+    pub fn platform_tools_dir() -> Option<PathBuf> {
+        worker_tools_dir()
+    }
+
+    /// A fresh, empty tools directory: a worker given it lacks every
+    /// platform tool.
+    pub fn empty_tools_dir() -> PathBuf {
+        tempfile::tempdir().expect("tools tempdir").keep()
     }
 
     async fn connect(server_url: &str) -> Self {
@@ -264,7 +387,9 @@ impl E2eTestApp {
             server_handle: None,
             claim_cancel: None,
             claim_handle: None,
-            worker_handle: None,
+            worker_handles: Vec::new(),
+            _worker_heartbeats: Vec::new(),
+            worker_shutdown: None,
             worker_paused: None,
             result_consumer_handle: None,
             _node_heartbeat: None,
@@ -278,7 +403,7 @@ impl E2eTestApp {
     async fn spawn_internal(
         load_plugins: bool,
         db_max_connections: u32,
-        tools_dir: Option<PathBuf>,
+        worker_tools: Vec<Option<PathBuf>>,
     ) -> Self {
         let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let plugin_cache = tempfile::tempdir().expect("plugin cache tempdir");
@@ -404,6 +529,7 @@ impl E2eTestApp {
 
         let plugin_config_cache =
             server::services::plugin_config_cache::PluginConfigCache::default();
+        let worker_slots = server::dispatcher::fanout::WorkerSlots::default();
         let plugin_sql = server::plugin_db::PluginSqlPools::new(
             db.clone(),
             &db_url,
@@ -431,7 +557,7 @@ impl E2eTestApp {
                 config: app_config.clone(),
                 metrics: None,
                 redis_client: None,
-                worker_slots: Default::default(),
+                worker_slots: worker_slots.clone(),
                 plugin_config_cache: plugin_config_cache.clone(),
             },
             None,
@@ -451,7 +577,9 @@ impl E2eTestApp {
             plugin_config_cache,
             config: app_config,
             mq: mq.clone(),
-            redis_client: None,
+            redis_client: Some(Arc::new(
+                redis::Client::open(redis_url.as_str()).expect("redis client"),
+            )),
             blob_store: blob_store.clone(),
             registries: server::state::RegistryState {
                 contest_type_registry,
@@ -466,7 +594,7 @@ impl E2eTestApp {
             metrics: e2e_metrics.clone(),
             prometheus_registry: e2e_prom_registry,
             dispatcher_permits: server::dispatcher::permits::DispatcherSemaphore::default(),
-            worker_slots: Default::default(),
+            worker_slots: worker_slots.clone(),
             plugin_lifecycle: Default::default(),
             plugin_sql,
             last_workers: Default::default(),
@@ -479,8 +607,10 @@ impl E2eTestApp {
         let mut result_consumer_handle_opt = None;
         let mut claim_cancel_opt = None;
         let mut claim_handle_opt = None;
-        let mut worker_handle_opt = None;
-        let (worker_paused, mut worker_paused_rx) = watch::channel(false);
+        let mut worker_handles = Vec::new();
+        let mut worker_heartbeats = Vec::new();
+        let worker_shutdown = Arc::new(AtomicBool::new(false));
+        let (worker_paused, worker_paused_rx) = watch::channel(false);
 
         if load_plugins {
             let failures = sync_plugins(&state).await.expect("Failed to sync plugins");
@@ -522,64 +652,28 @@ impl E2eTestApp {
                 claim_cancel_rx,
             ));
 
-            let sandbox_manager = create_sandbox_manager();
-            let worker_cache_dir =
-                std::env::temp_dir().join(format!("broccoli-e2e-worker-cache-{test_id}"));
-            let executor = Arc::new(
-                OperationTaskExecutor::new_with_sandbox_manager_and_blob_store(
-                    sandbox_manager,
+            let redis = redis::Client::open(redis_url.as_str()).expect("redis client");
+            for (i, tools_dir) in worker_tools.into_iter().enumerate() {
+                let (handle, heartbeat) = spawn_worker(
+                    &format!("e2e-worker-{test_id}-{i}"),
+                    &mq,
+                    &redis,
+                    &operation_queue,
+                    &db_url,
                     blob_store.clone(),
-                    worker_cache_dir,
                     e2e_metrics.clone(),
                     tools_dir,
+                    worker_paused_rx.clone(),
+                    worker_shutdown.clone(),
                 )
-                .await
-                .expect("Failed to initialize e2e operation executor"),
-            );
-            let tasks = mq.task_consumer(&format!("e2e-worker-{test_id}"));
-            tasks
-                .ensure_groups()
-                .await
-                .expect("create the worker groups");
-            let worker_mq = mq.clone();
-            // A minimal worker: run each task, reply, acknowledge.
-            worker_handle_opt = Some(tokio::spawn(async move {
-                let mut reader = tasks.reader();
-                loop {
-                    let Ok(batch) = reader.read(8).await else {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        continue;
-                    };
-                    // A batch read while paused runs only once resumed.
-                    if worker_paused_rx.wait_for(|paused| !*paused).await.is_err() {
-                        return;
-                    }
-                    for delivery in batch {
-                        let Ok(task) = delivery.payload else {
-                            let _ = tasks.ack(&delivery.entry).await;
-                            continue;
-                        };
-                        let result = match executor.execute(task.clone()).await {
-                            Ok(r) => r,
-                            Err(e) => TaskResult {
-                                task_id: task.id.clone(),
-                                success: false,
-                                output: serde_json::Value::String(e.to_string()),
-                                error: Some(e.to_string()),
-                                task_type: Some(task.task_type.clone()),
-                                operation: Some(task.executor_name.clone()),
-                                worker_id: None,
-                                fault: None,
-                            },
-                        };
-                        let reply = TaskReply::Completed { result };
-                        if let Err(e) = worker_mq.publish_reply(&task.reply_to, &reply).await {
-                            tracing::warn!(error = %e, "e2e worker: publishing a reply failed");
-                        }
-                        let _ = tasks.ack(&delivery.entry).await;
-                    }
-                }
-            }));
+                .await;
+                worker_handles.push(handle);
+                worker_heartbeats.push(heartbeat);
+            }
+            // The fleet as the claim fiber sees it, read once before any test
+            // submits and then kept current as in production.
+            worker_slots.refresh(&redis, &operation_queue).await;
+            worker_slots.spawn_refresh(Arc::new(redis), operation_queue.clone());
         } else {
             state.registries.evaluator_registry.write().await.insert(
                 "batch".into(),
@@ -643,7 +737,9 @@ impl E2eTestApp {
             server_handle: Some(server_handle),
             claim_cancel: claim_cancel_opt,
             claim_handle: claim_handle_opt,
-            worker_handle: worker_handle_opt,
+            worker_handles,
+            _worker_heartbeats: worker_heartbeats,
+            worker_shutdown: Some(worker_shutdown),
             worker_paused: Some(worker_paused),
             result_consumer_handle: result_consumer_handle_opt,
             _node_heartbeat: Some(node_heartbeat),

@@ -564,6 +564,7 @@ async fn try_read_workers(state: &AppState) -> Result<Vec<WorkerInfo>, String> {
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|(node, p)| WorkerInfo {
+                accepting_work: p.accepts_work(),
                 id: node.id,
                 started_at: p.started_at,
                 last_seen: p.last_seen,

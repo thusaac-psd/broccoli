@@ -1131,9 +1131,9 @@ async fn a_type_change_after_a_pending_submission_finds_it() {
 }
 
 /// A system error the platform caused (the queue was unreachable or lost
-/// an operation) goes back to the queue however often it happens, with
-/// neither retry budget spent: only failures judging the submission spend
-/// its system-error budget.
+/// an operation, or the worker that took it lacks a platform tool) goes back
+/// to the queue however often it happens, with neither retry budget spent:
+/// only failures judging the submission spend its system-error budget.
 #[tokio::test]
 async fn a_judgement_the_platform_lost_is_requeued_without_spending_a_retry() {
     let (_pg, db) = crate::test_support::postgres().await;
@@ -1142,6 +1142,7 @@ async fn a_judgement_the_platform_lost_is_requeued_without_spending_a_retry() {
     for code in [
         OperationFault::QueueUnreachable,
         OperationFault::OperationLost,
+        OperationFault::PlatformToolMissing,
         OperationFault::QueueUnreachable,
     ]
     .map(OperationFault::code)
@@ -1170,59 +1171,6 @@ async fn a_judgement_the_platform_lost_is_requeued_without_spending_a_retry() {
         assert_eq!(j.dispatch_retries, claimed.judgement.dispatch_retries);
         assert_eq!(sub(&db, s.id).await.system_error_retries, 0, "{code}");
     }
-}
-
-/// A platform misconfiguration fails every attempt alike: the submission
-/// shows the error and its cause after one attempt, and the operator finds
-/// it dead-lettered.
-#[tokio::test]
-async fn a_missing_platform_tool_stands_after_one_attempt_and_is_dead_lettered() {
-    let (_pg, db) = crate::test_support::postgres().await;
-    let (s, _) = new_submission(&db).await;
-    let claimed = claim_one(&db, "srv").await;
-    fail_dispatch(
-        &db,
-        Unit::Judgement,
-        claimed.judgement.id,
-        claimed.judgement.judge_epoch,
-        OperationFault::PlatformToolMissing.code(),
-        "worker w1 has no broccoli-compare",
-    )
-    .await
-    .unwrap();
-
-    let pass = retry_system_errors(&db, RetryBudget::new(10), 10, NO_TYPES)
-        .await
-        .unwrap();
-    assert_eq!((pass.handed_back, pass.requeued), (0, 0));
-    assert_eq!(
-        pass.confirmed
-            .iter()
-            .map(|c| c.submission_id)
-            .collect::<Vec<_>>(),
-        [s.id]
-    );
-    let shown = sub(&db, s.id).await;
-    assert_eq!(shown.status, SubmissionStatus::SystemError);
-    assert_eq!(shown.error_code.as_deref(), Some("PLATFORM_TOOL_MISSING"));
-    assert_eq!(
-        shown.error_message.as_deref(),
-        Some("worker w1 has no broccoli-compare")
-    );
-    assert_eq!(shown.system_error_retries, 0);
-    let letters = crate::entity::dead_letter_message::Entity::find()
-        .filter(crate::entity::dead_letter_message::Column::SubmissionId.eq(s.id))
-        .all(&db)
-        .await
-        .unwrap();
-    assert_eq!(letters.len(), 1);
-    assert_eq!(letters[0].error_code, "PLATFORM_MISCONFIGURED");
-    assert!(!letters[0].resolved);
-
-    let pass = retry_system_errors(&db, RetryBudget::new(10), 10, NO_TYPES)
-        .await
-        .unwrap();
-    assert_eq!(pass, SystemErrorPass::default(), "decided once");
 }
 
 /// Records `standard` (the type [`new_submission`] uses) as provided by one

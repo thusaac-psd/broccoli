@@ -163,6 +163,7 @@ mod worker_liveness {
                 .unwrap_or_else(|| panic!("worker {id} listed: {}", res.text))
         };
         assert!(by_id("fresh")["seconds_since_last_seen"].as_u64().unwrap() <= 2);
+        assert_eq!(by_id("fresh")["accepting_work"], true, "{}", res.text);
         assert!(by_id("old")["seconds_since_last_seen"].as_u64().unwrap() >= 11);
     }
 

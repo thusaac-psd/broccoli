@@ -26,9 +26,6 @@ pub enum DlqErrorCode {
     DeserializationError,
     StuckJob,
     DispatchRetryExhausted,
-    /// A platform misconfiguration (a worker without a platform tool) failed
-    /// the judgement; judging it again cannot help until an operator fixes it.
-    PlatformMisconfigured,
 }
 
 impl DlqErrorCode {
@@ -39,7 +36,6 @@ impl DlqErrorCode {
             Self::DeserializationError => "DESERIALIZATION_ERROR",
             Self::StuckJob => "STUCK_JOB",
             Self::DispatchRetryExhausted => "DISPATCH_RETRY_EXHAUSTED",
-            Self::PlatformMisconfigured => "PLATFORM_MISCONFIGURED",
         }
     }
 }

@@ -33,18 +33,10 @@ pub struct Recorded {
 struct CallFaults(DispatchFaults);
 
 impl DispatchFaults {
-    /// Record `fault`. A fault that would recur on every attempt replaces a
-    /// hand-back, since retrying cannot help; otherwise the first stays.
+    /// Record `fault`; the first one recorded stays.
     pub fn record(&self, fault: OperationFault, message: impl Into<String>) {
         let mut slot = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        let replaces = match slot.as_ref() {
-            None => true,
-            Some(current) => {
-                SystemErrorClass::of_fault(current.fault) == SystemErrorClass::HandBack
-                    && SystemErrorClass::of_fault(fault) == SystemErrorClass::Deterministic
-            }
-        };
-        if replaces {
+        if slot.is_none() {
             *slot = Some(Recorded {
                 fault,
                 message: message.into(),
@@ -83,12 +75,11 @@ pub(crate) enum SystemErrorClass {
     /// system-error budget lasts.
     Judging,
     /// The platform lost the attempt (the queue was unreachable or lost an
-    /// operation, or the contest plugin was disabled under it): requeued at
-    /// once, spending no budget.
+    /// operation, the worker that took it lacks a platform tool, or the
+    /// contest plugin was disabled under it): requeued at once, spending no
+    /// budget. A worker without its platform tools takes no work, so the next
+    /// attempt goes to one that has them.
     HandBack,
-    /// A platform misconfiguration that fails every attempt alike: the error
-    /// stands at once and is dead-lettered for the operator.
-    Deterministic,
     /// The contest plugin refused the submission: it stands at once.
     Refused,
 }
@@ -100,8 +91,9 @@ impl SystemErrorClass {
 
     pub(crate) fn of_fault(fault: OperationFault) -> Self {
         match fault {
-            OperationFault::QueueUnreachable | OperationFault::OperationLost => Self::HandBack,
-            OperationFault::PlatformToolMissing => Self::Deterministic,
+            OperationFault::QueueUnreachable
+            | OperationFault::OperationLost
+            | OperationFault::PlatformToolMissing => Self::HandBack,
         }
     }
 
@@ -111,12 +103,12 @@ impl SystemErrorClass {
         match self {
             Self::Judging => Vec::new(),
             Self::Refused => vec![SubmissionDlqErrorCode::PLUGIN_REFUSED],
-            Self::HandBack | Self::Deterministic => OperationFault::ALL
+            Self::HandBack => OperationFault::ALL
                 .iter()
                 .copied()
                 .filter(|f| Self::of_fault(*f) == self)
                 .map(OperationFault::code)
-                .chain((self == Self::HandBack).then_some(Self::PROVIDER_DISABLED))
+                .chain([Self::PROVIDER_DISABLED])
                 .collect(),
         }
     }
@@ -129,7 +121,7 @@ impl SystemErrorClass {
         };
         match self {
             Self::Judging => {
-                let special = [Self::HandBack, Self::Deterministic, Self::Refused]
+                let special = [Self::HandBack, Self::Refused]
                     .into_iter()
                     .flat_map(Self::codes)
                     .collect();
@@ -157,18 +149,13 @@ mod tests {
     }
 
     #[test]
-    fn a_deterministic_fault_outranks_a_hand_back() {
+    fn the_first_fault_recorded_decides() {
         let faults = DispatchFaults::default();
         faults.record(OperationFault::OperationLost, "lost");
         faults.record(OperationFault::PlatformToolMissing, "no tool");
         assert_eq!(
             faults.get().map(|r| r.fault),
-            Some(OperationFault::PlatformToolMissing)
-        );
-        faults.record(OperationFault::QueueUnreachable, "down");
-        assert_eq!(
-            faults.get().map(|r| r.fault),
-            Some(OperationFault::PlatformToolMissing)
+            Some(OperationFault::OperationLost)
         );
     }
 
