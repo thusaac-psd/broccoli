@@ -263,6 +263,19 @@ const SUBMISSION_DETAIL = {
   },
 };
 
+/** A submission that failed to judge, with the operator's diagnostics. */
+const SYSTEM_ERROR_DETAIL = {
+  ...submission(5, 2, 'SystemError'),
+  status: 'SystemError',
+  files: [{ filename: 'main.cpp', content: 'int main() { return 0; }\n' }],
+  result: {
+    ...SUBMISSION_DETAIL.result,
+    verdict: 'SystemError',
+    score: 0,
+    error_message: 'sandbox: cgroup memory controller unavailable',
+  },
+};
+
 /** An error answer, in the server's error shape. */
 class ErrorReply {
   readonly status: number;
@@ -478,6 +491,8 @@ const ROUTES: [string, RegExp, Handler][] = [
   ['GET', /^\/submissions$/, () => cursorPage(SUBMISSIONS)],
   ['GET', /^\/submissions\/1$/, () => SUBMISSION_DETAIL],
   ['GET', /^\/submissions\/1\/judgements$/, () => []],
+  ['GET', /^\/submissions\/5$/, () => SYSTEM_ERROR_DETAIL],
+  ['GET', /^\/submissions\/5\/judgements$/, () => []],
   [
     'GET',
     /^\/admin\/system\/overview$/,

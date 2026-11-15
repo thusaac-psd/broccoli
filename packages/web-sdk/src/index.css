@@ -55,7 +55,8 @@
   --muted-foreground: 240 3.8% 42%;
   --accent: 240 4.8% 95.9%;
   --accent-foreground: 240 5.9% 10%;
-  --destructive: 0 72.2% 50.6%;
+  /* Text at least 4.5:1 on every light surface, and light text on it. */
+  --destructive: 0 72.2% 42%;
   --destructive-foreground: 0 0% 98%;
   --border: 240 5.9% 90%;
   --input: 240 5.9% 90%;
@@ -92,8 +93,9 @@
   --muted-foreground: 220 10% 60%;
   --accent: 220 10% 18%;
   --accent-foreground: 210 20% 95%;
-  /* Light enough to read as text on the dark background; dark text on it. */
-  --destructive: 0 84% 65%;
+  /* Text at least 4.5:1 on every dark surface, muted included; dark text
+     on it. */
+  --destructive: 0 84% 70%;
   --destructive-foreground: 0 0% 9%;
   --border: 220 10% 20%;
   --input: 220 10% 20%;

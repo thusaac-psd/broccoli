@@ -25,6 +25,8 @@ const PAGES: Record<Viewer, string[]> = {
     '/contests/1/rankings',
     '/contests/1/qa',
     '/submissions/1',
+    // A system error shows the operator's diagnostics.
+    '/submissions/5',
   ],
   contestant: [
     '/contests/1',
