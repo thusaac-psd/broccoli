@@ -39,6 +39,7 @@ use crate::utils::contest::{
     compile_output_public, find_contest, require_contest_participant, require_contest_running,
     required_contest_type,
 };
+use crate::utils::diagnostics::Diagnostics;
 use crate::utils::judging::{files_to_json, validate_code_payload, validate_submission_contract};
 use crate::utils::problem::find_problem;
 use crate::utils::query::validate_sorting_params;
@@ -368,6 +369,7 @@ pub async fn list_submissions(
         query.cursor.as_deref(),
         per_page,
         total,
+        Diagnostics::for_viewer(&auth_user),
     )
     .await?;
     Ok(Json(serde_json::json!({
@@ -1039,6 +1041,7 @@ pub async fn list_contest_submissions(
         query.cursor.as_deref(),
         per_page,
         total,
+        Diagnostics::for_viewer(&auth_user),
     )
     .await?;
     Ok(Json(serde_json::json!({

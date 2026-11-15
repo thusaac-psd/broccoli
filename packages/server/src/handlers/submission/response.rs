@@ -31,6 +31,7 @@ use common::Verdict;
 pub(super) async fn build_submission_list_items(
     db: &DatabaseConnection,
     submissions: Vec<(submission::Model, Option<user::Model>)>,
+    diagnostics: Diagnostics,
 ) -> Result<Vec<SubmissionListItem>, AppError> {
     use std::collections::HashMap;
 
@@ -69,7 +70,7 @@ pub(super) async fn build_submission_list_items(
             contest_id: sub.contest_id,
             contest_type: sub.contest_type,
             judge_epoch: sub.judge_epoch,
-            target_worker_id: sub.target_worker_id,
+            target_worker_id: diagnostics.platform(sub.target_worker_id),
             created_at: sub.created_at,
             score,
             time_used: sub.time_used,
@@ -546,7 +547,7 @@ pub(super) async fn build_submission_response_with_cases(
         contest_id: sub.contest_id,
         contest_type: sub.contest_type.clone(),
         judge_epoch: sub.judge_epoch,
-        target_worker_id: sub.target_worker_id,
+        target_worker_id: diagnostics.platform(sub.target_worker_id),
         created_at: sub.created_at,
         result: result_response,
         withheld: None,
@@ -601,7 +602,7 @@ pub(super) async fn build_judgement_response(
             judgement.error_message.filter(|_| show_compile_output),
         ),
         judge_epoch: judgement.judge_epoch,
-        target_worker_id: judgement.target_worker_id,
+        target_worker_id: diagnostics.platform(judgement.target_worker_id),
         created_at: judgement.created_at,
         finalized_at: judgement.finalized_at,
         test_case_pagination: Some(pagination),

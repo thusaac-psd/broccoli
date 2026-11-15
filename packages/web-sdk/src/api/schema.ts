@@ -4377,7 +4377,11 @@ export interface components {
        * @example 1
        */
       submission_id: number;
-      /** @example worker-1 */
+      /**
+       * @description The worker this judgement is pinned to. Shown only to callers with
+       *     `system:view`.
+       * @example worker-1
+       */
       target_worker_id?: string | null;
       test_case_pagination?: components['schemas']['Pagination'] | null;
       test_case_results: components['schemas']['TestCaseResultResponse'][];
@@ -4571,7 +4575,8 @@ export interface components {
       status?: components['schemas']['SubmissionStatus'] | null;
       /**
        * @description When set, the submission has been pinned to this worker by an admin
-       *     and every operation it produces will run there.
+       *     and every operation it produces will run there. Shown only to callers
+       *     with `system:view`.
        * @example worker-1
        */
       target_worker_id?: string | null;

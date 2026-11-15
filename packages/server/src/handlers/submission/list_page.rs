@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use super::filter::apply_filter_to_list;
 use super::response::build_submission_list_items;
+use crate::utils::diagnostics::Diagnostics;
 // visibility-bypass-audited: `visible_page` decides every row it fetches with
 // `VisibilityKernel::decide_batch` and keeps only the ones not denied, and
 // decides the cursor row in the same batch, so no row reaches a page, or
@@ -228,7 +229,8 @@ fn invalid_cursor() -> AppError {
 /// One page of `select` in `order`, after `cursor`, holding up to `per_page`
 /// rows the caller is shown. `filtered_on` names the fields `select` filters
 /// on (see [`filtered_fields`]). `total` is the exact count for this caller,
-/// or `None` when it is withheld.
+/// or `None` when it is withheld. `diagnostics` is what the caller sees of
+/// the platform's details.
 // The page is one request's parameters; a struct would only rename them.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn visible_page(
@@ -240,6 +242,7 @@ pub(super) async fn visible_page(
     cursor: Option<&str>,
     per_page: u64,
     total: Option<u64>,
+    diagnostics: Diagnostics,
 ) -> Result<(Vec<serde_json::Value>, ListPagination), AppError> {
     let wanted = per_page as usize + 1;
     let mut shown: Vec<(Group, (submission::Model, Option<user::Model>))> =
@@ -342,7 +345,7 @@ pub(super) async fn visible_page(
     };
 
     let rows = shown.into_iter().map(|(_, row)| row).collect();
-    let items = build_submission_list_items(&state.db, rows).await?;
+    let items = build_submission_list_items(&state.db, rows, diagnostics).await?;
     let data = apply_filter_to_list(kernel, items).await?;
     Ok((
         data,
