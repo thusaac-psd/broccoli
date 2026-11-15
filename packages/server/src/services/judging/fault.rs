@@ -75,20 +75,17 @@ pub(crate) enum SystemErrorClass {
     /// system-error budget lasts.
     Judging,
     /// The platform lost the attempt (the queue was unreachable or lost an
-    /// operation, the worker that took it lacks a platform tool, or the
-    /// contest plugin was disabled under it): requeued at once, spending no
-    /// budget. A worker without its platform tools takes no work, so the next
-    /// attempt goes to one that has them.
+    /// operation, the worker that took it lacks a platform tool, or no worker
+    /// could take it): requeued at once, spending no budget. A worker without
+    /// its platform tools takes no work, so the next attempt goes to one that
+    /// has them. A judgement cut by its contest plugin's disable never gets
+    /// here: `fail_dispatch` hands it back without finalizing it.
     HandBack,
     /// The contest plugin refused the submission: it stands at once.
     Refused,
 }
 
 impl SystemErrorClass {
-    /// The error code of a judgement that failed while every provider of its
-    /// contest type was disabled fleet-wide: a hand-back.
-    pub(crate) const PROVIDER_DISABLED: &'static str = "PLUGIN_DISABLED";
-
     pub(crate) fn of_fault(fault: OperationFault) -> Self {
         match fault {
             OperationFault::QueueUnreachable
@@ -109,7 +106,6 @@ impl SystemErrorClass {
                 .copied()
                 .filter(|f| Self::of_fault(*f) == self)
                 .map(OperationFault::code)
-                .chain([Self::PROVIDER_DISABLED])
                 .collect(),
         }
     }

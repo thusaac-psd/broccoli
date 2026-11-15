@@ -306,8 +306,8 @@ async fn a_lapsed_lease_requeues_under_a_new_epoch_and_spends_a_retry() {
     assert_eq!(s.status, SubmissionStatus::Queued);
     assert_eq!(s.judge_epoch, j.judge_epoch);
     // The old dispatch can no longer finish.
-    assert!(
-        !fail_dispatch(
+    assert_eq!(
+        fail_dispatch(
             &db,
             Unit::Judgement,
             j.id,
@@ -316,7 +316,8 @@ async fn a_lapsed_lease_requeues_under_a_new_epoch_and_spends_a_retry() {
             "late"
         )
         .await
-        .unwrap()
+        .unwrap(),
+        DispatchFailed::Stale
     );
 }
 
@@ -492,7 +493,7 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
     let (s, _) = new_submission(&db).await;
     let claimed = claim_one(&db, "srv").await;
     exec(&db, "UPDATE submission_judgement SET dispatch_retries = 3").await;
-    assert!(
+    assert_eq!(
         fail_dispatch(
             &db,
             Unit::Judgement,
@@ -502,7 +503,8 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
             "boom"
         )
         .await
-        .unwrap()
+        .unwrap(),
+        DispatchFailed::SystemError
     );
     assert_eq!(
         sub(&db, s.id).await.status,
@@ -676,10 +678,11 @@ async fn a_code_run_follows_the_same_claim_and_requeue_rules() {
     assert_eq!(after.status, SubmissionStatus::Queued);
     assert_eq!(after.judge_epoch, run.judge_epoch + 1);
     assert_eq!(after.dispatch_retries, 1);
-    assert!(
-        !fail_dispatch(&db, Unit::CodeRun, run.id, run.judge_epoch, "X", "late")
+    assert_eq!(
+        fail_dispatch(&db, Unit::CodeRun, run.id, run.judge_epoch, "X", "late")
             .await
             .unwrap(),
+        DispatchFailed::Stale,
         "the lost dispatch is fenced"
     );
 }
@@ -1148,7 +1151,7 @@ async fn a_judgement_the_platform_lost_is_requeued_without_spending_a_retry() {
     .map(OperationFault::code)
     {
         let claimed = claim_one(&db, "srv").await;
-        assert!(
+        assert_eq!(
             fail_dispatch(
                 &db,
                 Unit::Judgement,
@@ -1158,7 +1161,8 @@ async fn a_judgement_the_platform_lost_is_requeued_without_spending_a_retry() {
                 "the queue",
             )
             .await
-            .unwrap()
+            .unwrap(),
+            DispatchFailed::SystemError
         );
         let pass = retry_system_errors(&db, budget, 10, NO_TYPES)
             .await
@@ -1195,8 +1199,9 @@ async fn claimable(db: &DatabaseConnection) -> usize {
         .len()
 }
 
-/// A judgement cut by its contest plugin's disable is handed back under
-/// `PLUGIN_DISABLED`, spending neither budget, and waits queued while every
+/// A judgement cut by its contest plugin's disable goes straight back to
+/// `Queued`, on whichever replica its session ran: it never shows a
+/// `SystemError`, spends neither budget, and waits queued while every
 /// provider of its type is disabled: nothing claims it and no retry is spent
 /// on it. It is claimed again once a provider is enabled.
 #[tokio::test]
@@ -1207,7 +1212,7 @@ async fn work_of_a_disabled_contest_plugin_is_parked_until_it_is_enabled() {
     let claimed = claim_one(&db, "srv").await;
 
     provider(&db, false).await;
-    assert!(
+    assert_eq!(
         fail_dispatch(
             &db,
             Unit::Judgement,
@@ -1217,25 +1222,24 @@ async fn work_of_a_disabled_contest_plugin_is_parked_until_it_is_enabled() {
             "the callback is gone",
         )
         .await
-        .unwrap()
+        .unwrap(),
+        DispatchFailed::HandedBack
     );
-    let j = judgement(&db, claimed.judgement.id).await;
-    assert_eq!(
-        j.error_code.as_deref(),
-        Some(SystemErrorClass::PROVIDER_DISABLED)
-    );
-
-    let pass = retry_system_errors(&db, RetryBudget::new(1), 10, NO_TYPES)
-        .await
-        .unwrap();
-    assert_eq!((pass.handed_back, pass.requeued), (1, 0));
-    assert!(pass.confirmed.is_empty());
     let j = judgement(&db, claimed.judgement.id).await;
     assert_eq!(j.status, SubmissionStatus::Queued);
+    assert_eq!((j.error_code, j.is_finalized), (None, false));
+    assert!(
+        j.judge_epoch > claimed.judgement.judge_epoch,
+        "the cut session is fenced"
+    );
     assert_eq!(j.dispatch_retries, claimed.judgement.dispatch_retries);
     let s = sub(&db, cut.id).await;
     assert_eq!(s.status, SubmissionStatus::Queued, "the submission follows");
     assert_eq!(s.system_error_retries, 0);
+    let pass = retry_system_errors(&db, RetryBudget::new(1), 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(pass, SystemErrorPass::default(), "no system error to retry");
 
     // A new submission waits with it.
     let (waiting, _) = new_submission(&db).await;

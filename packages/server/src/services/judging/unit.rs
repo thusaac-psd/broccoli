@@ -995,9 +995,25 @@ async fn pick_current_system_errors(
         .collect())
 }
 
-/// Finalizes a unit whose dispatch failed as `SystemError`, fenced on its
-/// epoch: a failure reported by a dispatch that was since requeued or
-/// superseded changes nothing. Returns whether the unit was finalized.
+/// What [`fail_dispatch`] did with the unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DispatchFailed {
+    /// Finalized as `SystemError`; the system-error retry decides what next.
+    SystemError,
+    /// Back to `Queued` without spending a retry: every provider of its
+    /// contest type is disabled fleet-wide, so the failure is the disable's
+    /// (a judging session its provider's unload cut), on whichever replica it
+    /// ran, and the work waits parked for a provider.
+    HandedBack,
+    /// Nothing: the dispatch was since requeued, superseded or finished.
+    Stale,
+}
+
+/// Ends a unit whose dispatch failed, fenced on its epoch: a failure reported
+/// by a dispatch that was since requeued or superseded changes nothing. A
+/// judgement of a parked contest type goes straight back to `Queued`, so it
+/// never shows a `SystemError` it does not have; anything else is finalized
+/// as `SystemError`.
 pub(crate) async fn fail_dispatch(
     db: &DatabaseConnection,
     unit: Unit,
@@ -1005,62 +1021,60 @@ pub(crate) async fn fail_dispatch(
     judge_epoch: i32,
     error_code: &str,
     error_message: &str,
-) -> Result<bool, DbErr> {
+) -> Result<DispatchFailed, DbErr> {
+    let txn = db.begin().await?;
     // A judgement locks its submission first, as every judgement transition
-    // does; the UPDATE joins the lock so it is taken before the row's.
-    let (lock, from, guard) = match unit {
-        Unit::Judgement => (
-            "WITH locked AS (SELECT s.id, s.contest_type FROM submission s \
-                             JOIN submission_judgement j ON j.submission_id = s.id \
-                             WHERE j.id = $1 FOR NO KEY UPDATE OF s), ",
-            "FROM locked",
-            "AND t.submission_id = locked.id AND NOT t.is_finalized",
-        ),
-        Unit::CodeRun => ("WITH ", "", ""),
-    };
-    // A judgement that fails while its contest type is parked failed because
-    // its provider was disabled under it (or would be judged by nothing
-    // now): it is handed back under that cause, whatever the failure said,
-    // and waits for the provider without spending its budget.
-    let (code, message) = match unit {
-        Unit::Judgement => (
-            format!(
-                "CASE WHEN {open} THEN $3 ELSE '{disabled}' END",
-                open = contest_type_open("locked.contest_type"),
-                disabled = SystemErrorClass::PROVIDER_DISABLED,
-            ),
-            format!(
-                "CASE WHEN {open} THEN $4 ELSE {why} END",
-                open = contest_type_open("locked.contest_type"),
-                why = "'The contest plugin was disabled while this was judged; it is judged again once the plugin is enabled'",
-            ),
-        ),
-        Unit::CodeRun => ("$3".to_string(), "$4".to_string()),
-    };
-    let n = db
-        .execute_raw(Statement::from_sql_and_values(
+    // does, so the from-state read here holds until the write below.
+    let row = txn
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             format!(
-                "{lock}moved AS (UPDATE {table} t SET status = '{system_error}', \
-                                     error_code = {code}, error_message = {message}, {finalize} {from} \
-                                 WHERE t.id = $1 AND t.judge_epoch = $2 \
-                                   AND t.status IN {in_flight} {guard} \
-                                 RETURNING t.*){mirror} \
+                "SELECT {open} AS open FROM {from} \
+                 WHERE u.id = $1 AND u.judge_epoch = $2 AND u.status IN {in_flight}{unfinalized} \
+                 {lock}",
+                open = match unit {
+                    Unit::Judgement => contest_type_open(unit.contest_type()),
+                    Unit::CodeRun => "TRUE".to_string(),
+                },
+                from = unit.scan_from(),
+                in_flight = StatusPhase::InFlight.sql_list(),
+                unfinalized = match unit {
+                    Unit::Judgement => " AND NOT u.is_finalized",
+                    Unit::CodeRun => "",
+                },
+                lock = match unit {
+                    Unit::Judgement => "FOR NO KEY UPDATE OF s",
+                    Unit::CodeRun => "FOR NO KEY UPDATE OF u",
+                },
+            ),
+            [id.into(), judge_epoch.into()],
+        ))
+        .await?;
+    let Some(row) = row else {
+        txn.commit().await?;
+        return Ok(DispatchFailed::Stale);
+    };
+    let outcome = if row.try_get::<bool>("", "open")? {
+        txn.execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!(
+                "WITH moved AS (UPDATE {table} t SET status = '{system_error}', \
+                                error_code = $2, error_message = $3, {finalize} \
+                                WHERE t.id = $1 RETURNING t.*){mirror} \
                  SELECT id FROM moved",
                 table = unit.table(),
                 system_error = SubmissionStatus::SystemError,
                 finalize = unit.finalize_sets(),
-                in_flight = StatusPhase::InFlight.sql_list(),
                 mirror = unit.cascade(),
             ),
-            [
-                id.into(),
-                judge_epoch.into(),
-                error_code.into(),
-                error_message.into(),
-            ],
+            [id.into(), error_code.into(), error_message.into()],
         ))
-        .await?
-        .rows_affected();
-    Ok(n > 0)
+        .await?;
+        DispatchFailed::SystemError
+    } else {
+        requeue(&txn, unit, &[id], Requeue::HandedBack).await?;
+        DispatchFailed::HandedBack
+    };
+    txn.commit().await?;
+    Ok(outcome)
 }
