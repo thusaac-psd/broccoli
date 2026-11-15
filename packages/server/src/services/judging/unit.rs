@@ -1014,6 +1014,11 @@ pub(crate) enum DispatchFailed {
 /// judgement of a parked contest type goes straight back to `Queued`, so it
 /// never shows a `SystemError` it does not have; anything else is finalized
 /// as `SystemError`.
+///
+/// Every judging session ends here, most after their plugin finalized the
+/// judgement, so the common case is one statement: it finalizes a judgement
+/// whose type is open, or finds nothing to do. Only a judgement of a parked
+/// type takes a second, transactional pass to hand it back.
 pub(crate) async fn fail_dispatch(
     db: &DatabaseConnection,
     unit: Unit,
@@ -1022,58 +1027,110 @@ pub(crate) async fn fail_dispatch(
     error_code: &str,
     error_message: &str,
 ) -> Result<DispatchFailed, DbErr> {
+    let in_flight = StatusPhase::InFlight.sql_list();
+    let finalize = format!(
+        "UPDATE {table} t SET status = '{system_error}', error_code = $3, error_message = $4, \
+         {finalize_sets}",
+        table = unit.table(),
+        system_error = SubmissionStatus::SystemError,
+        finalize_sets = unit.finalize_sets(),
+    );
+    let sql = match unit {
+        // A judgement locks its submission first, as every judgement
+        // transition does; the UPDATE joins the lock so it is taken before
+        // the row's.
+        Unit::Judgement => format!(
+            "WITH locked AS (SELECT s.id, {open} AS open FROM submission s \
+                             JOIN submission_judgement j ON j.submission_id = s.id \
+                             WHERE j.id = $1 FOR NO KEY UPDATE OF s), \
+                  moved AS ({finalize} FROM locked \
+                            WHERE t.id = $1 AND t.judge_epoch = $2 AND t.status IN {in_flight} \
+                              AND t.submission_id = locked.id AND NOT t.is_finalized AND locked.open \
+                            RETURNING t.*){mirror}, \
+                  parked AS (SELECT t.id FROM submission_judgement t, locked \
+                             WHERE t.id = $1 AND t.judge_epoch = $2 AND t.status IN {in_flight} \
+                               AND NOT t.is_finalized AND NOT locked.open) \
+             SELECT (SELECT COUNT(*) FROM moved) AS moved, (SELECT COUNT(*) FROM parked) AS parked",
+            open = contest_type_open("s.contest_type"),
+            mirror = unit.cascade(),
+        ),
+        Unit::CodeRun => format!(
+            "WITH moved AS ({finalize} WHERE t.id = $1 AND t.judge_epoch = $2 \
+                            AND t.status IN {in_flight} RETURNING t.id) \
+             SELECT (SELECT COUNT(*) FROM moved) AS moved, 0::bigint AS parked"
+        ),
+    };
+    let row = db
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            [
+                id.into(),
+                judge_epoch.into(),
+                error_code.into(),
+                error_message.into(),
+            ],
+        ))
+        .await?
+        .ok_or_else(|| DbErr::Custom("fail_dispatch returned no row".into()))?;
+    if row.try_get::<i64>("", "moved")? > 0 {
+        return Ok(DispatchFailed::SystemError);
+    }
+    if row.try_get::<i64>("", "parked")? == 0 {
+        return Ok(DispatchFailed::Stale);
+    }
+    hand_back_parked(db, id, judge_epoch, error_code, error_message).await
+}
+
+/// The rare second pass of [`fail_dispatch`]: under the submission's lock,
+/// hands back the judgement if its type is still parked, or finalizes it as
+/// `SystemError` if a provider was enabled since.
+async fn hand_back_parked(
+    db: &DatabaseConnection,
+    id: i32,
+    judge_epoch: i32,
+    error_code: &str,
+    error_message: &str,
+) -> Result<DispatchFailed, DbErr> {
     let txn = db.begin().await?;
-    // A judgement locks its submission first, as every judgement transition
-    // does, so the from-state read here holds until the write below.
     let row = txn
         .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             format!(
                 "SELECT {open} AS open FROM {from} \
-                 WHERE u.id = $1 AND u.judge_epoch = $2 AND u.status IN {in_flight}{unfinalized} \
-                 {lock}",
-                open = match unit {
-                    Unit::Judgement => contest_type_open(unit.contest_type()),
-                    Unit::CodeRun => "TRUE".to_string(),
-                },
-                from = unit.scan_from(),
+                 WHERE u.id = $1 AND u.judge_epoch = $2 AND u.status IN {in_flight} \
+                   AND NOT u.is_finalized \
+                 FOR NO KEY UPDATE OF s",
+                open = contest_type_open(Unit::Judgement.contest_type()),
+                from = Unit::Judgement.scan_from(),
                 in_flight = StatusPhase::InFlight.sql_list(),
-                unfinalized = match unit {
-                    Unit::Judgement => " AND NOT u.is_finalized",
-                    Unit::CodeRun => "",
-                },
-                lock = match unit {
-                    Unit::Judgement => "FOR NO KEY UPDATE OF s",
-                    Unit::CodeRun => "FOR NO KEY UPDATE OF u",
-                },
             ),
             [id.into(), judge_epoch.into()],
         ))
         .await?;
-    let Some(row) = row else {
-        txn.commit().await?;
-        return Ok(DispatchFailed::Stale);
-    };
-    let outcome = if row.try_get::<bool>("", "open")? {
-        txn.execute_raw(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            format!(
-                "WITH moved AS (UPDATE {table} t SET status = '{system_error}', \
-                                error_code = $2, error_message = $3, {finalize} \
-                                WHERE t.id = $1 RETURNING t.*){mirror} \
-                 SELECT id FROM moved",
-                table = unit.table(),
-                system_error = SubmissionStatus::SystemError,
-                finalize = unit.finalize_sets(),
-                mirror = unit.cascade(),
-            ),
-            [id.into(), error_code.into(), error_message.into()],
-        ))
-        .await?;
-        DispatchFailed::SystemError
-    } else {
-        requeue(&txn, unit, &[id], Requeue::HandedBack).await?;
-        DispatchFailed::HandedBack
+    let outcome = match row {
+        None => DispatchFailed::Stale,
+        Some(row) if row.try_get::<bool>("", "open")? => {
+            txn.execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                format!(
+                    "WITH moved AS (UPDATE submission_judgement t SET status = '{system_error}', \
+                                    error_code = $2, error_message = $3, {finalize} \
+                                    WHERE t.id = $1 RETURNING t.*){mirror} \
+                     SELECT id FROM moved",
+                    system_error = SubmissionStatus::SystemError,
+                    finalize = Unit::Judgement.finalize_sets(),
+                    mirror = Unit::Judgement.cascade(),
+                ),
+                [id.into(), error_code.into(), error_message.into()],
+            ))
+            .await?;
+            DispatchFailed::SystemError
+        }
+        Some(_) => {
+            requeue(&txn, Unit::Judgement, &[id], Requeue::HandedBack).await?;
+            DispatchFailed::HandedBack
+        }
     };
     txn.commit().await?;
     Ok(outcome)
