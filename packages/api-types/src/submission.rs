@@ -124,8 +124,10 @@ pub struct JudgeResultResponse {
     #[schema(example = 1024)]
     pub memory_used: Option<i32>,
     pub compile_output: Option<String>,
-    /// The platform's code for a system error (`apiError.<code>` in the
-    /// packs), shown with `error_message` to whoever sees diagnostics.
+    /// The code for a system error, shown with `error_message` to whoever
+    /// sees diagnostics: the host's own (`apiError.<code>` in the packs), or
+    /// a plugin's as `<plugin id>.<code>` (`<plugin id>.apiError.<code>` in
+    /// that plugin's pack).
     #[serde(default)]
     pub error_code: Option<String>,
     pub error_message: Option<String>,

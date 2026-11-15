@@ -228,6 +228,25 @@ mod tests {
         );
     }
 
+    /// Only the host's own codes class as a hand-back or as standing: every
+    /// one is bare, and a plugin's code is always recorded under its id
+    /// (`plugin_writes::plugin_error_code`), so no code a plugin writes,
+    /// whatever its text, can class as anything but a judging failure.
+    #[test]
+    fn no_code_a_plugin_writes_classes_as_a_host_code() {
+        for class in [SystemErrorClass::HandBack, SystemErrorClass::Stands] {
+            for code in class.codes() {
+                assert!(!code.contains('.'), "{code} must stay bare");
+                let as_plugin = super::super::plugin_writes::plugin_error_code("p", code);
+                assert_eq!(
+                    SystemErrorClass::of_code(&as_plugin),
+                    SystemErrorClass::Judging,
+                    "{as_plugin}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_hand_back_fault_loses_the_attempt() {
         let faults = DispatchFaults::default();

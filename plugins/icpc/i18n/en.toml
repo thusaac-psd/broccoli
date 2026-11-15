@@ -33,3 +33,6 @@
 'plugin.icpc.name' = 'ICPC'
 'plugin.icpc.description' = 'ICPC-style contests: pass/fail judging with time penalties.'
 'icpc.scoreboard.table' = 'Standings'
+
+# Judge error codes (a judgement records them as `icpc.<CODE>`)
+'icpc.apiError.NO_TEST_CASES' = 'This problem has no test cases, so it cannot be judged. Ask the contest staff to add them.'

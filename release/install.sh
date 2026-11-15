@@ -40,7 +40,9 @@ Server and worker nodes need BROCCOLI__DATABASE__URL, BROCCOLI__MQ__URL, and
 shared storage credentials from the infra node. Use LAN IPs or private cloud
 addresses for those URLs.
 
-Set BROCCOLI_DRY_RUN=1 to generate and validate files without starting Docker.
+Set BROCCOLI_DRY_RUN=1 to generate and validate files without Docker. A dry
+run leaves a server's or worker's id blank, for the binary to derive at boot;
+a later real install fills it in from the loaded image.
 
 Optional plugins ship in plugins-available/ and load only once enabled. Set
 BROCCOLI_PLUGINS to enable some at install time, for example
@@ -276,6 +278,39 @@ refresh_bundled_image_tags() {
       [ -z "${loaded_caddy_image:-}" ] || env_set_if_changed CADDY_IMAGE "$loaded_caddy_image"
       ;;
   esac
+}
+
+# ask_node_id KEY ROLE IMAGE: unless KEY (BROCCOLI__SERVER__ID or
+# BROCCOLI__WORKER__ID) is already set, set it to the id ROLE's image derives
+# for this machine (node_id_of). A dry run loads no image and runs no engine, so
+# it leaves KEY blank for the binary to derive at boot.
+ask_node_id() {
+  local key="$1" role="$2" image="$3" id
+  [ -z "${!key:-}" ] || return 0
+  ! is_dry_run || return 0
+  id="$(node_id_of docker "$image" "$role")" \
+    || die "could not ask $image for this machine's $role id; set $key"
+  printf -v "$key" '%s' "$id"
+}
+
+# node_id_comment KEY: the env file comment above KEY.
+node_id_comment() {
+  echo "# $1: this node's id. Blank means the binary derives it at boot;"
+  echo "# ./install.sh records the derived id here outside a dry run."
+}
+
+# record_blank_node_id: a preserved server or worker env file with a blank id
+# (written by a dry run) takes the id its image derives (ask_node_id).
+record_blank_node_id() {
+  local key image_key
+  case "$ROLE" in
+    server) key=BROCCOLI__SERVER__ID image_key=BROCCOLI_SERVER_IMAGE ;;
+    worker) key=BROCCOLI__WORKER__ID image_key=BROCCOLI_WORKER_IMAGE ;;
+    *) return 0 ;;
+  esac
+  [ -z "$(env_get "$ENV_FILE" "$key")" ] || return 0
+  ask_node_id "$key" "$ROLE" "$(env_get "$ENV_FILE" "$image_key")"
+  [ -z "${!key:-}" ] || env_set_if_changed "$key" "${!key}"
 }
 
 env_set_if_changed() {
@@ -627,13 +662,14 @@ should_run_stress_smoke() {
 }
 
 # validate_role_env: the role's secrets and URLs (release/lib/env.sh, shared
-# with every installer) and the images this installer runs.
+# with every installer), the images this installer runs and, outside a dry run,
+# the node id it records (ask_node_id).
 validate_role_env() {
   BROCCOLI__STORAGE__BACKEND="$(storage_backend)" env_require_role "$ROLE" \
     || die "fix $ENV_FILE (or the variables passed to this run) and re-run"
   case "$ROLE" in
-    server) env_require BROCCOLI_SERVER_IMAGE BROCCOLI__SERVER__ID ;;
-    worker) env_require BROCCOLI_WORKER_IMAGE BROCCOLI__WORKER__ID ;;
+    server) env_require BROCCOLI_SERVER_IMAGE && { is_dry_run || env_require BROCCOLI__SERVER__ID; } ;;
+    worker) env_require BROCCOLI_WORKER_IMAGE && { is_dry_run || env_require BROCCOLI__WORKER__ID; } ;;
     gateway) env_require CADDY_IMAGE ;;
     single-host) env_require BROCCOLI_SERVER_IMAGE BROCCOLI_WORKER_IMAGE ;;
     *) true ;;
@@ -807,9 +843,8 @@ write_env_file() {
       mv "$ENV_FILE.tmp" "$ENV_FILE"
       ;;
     server)
-      [ -n "${BROCCOLI__SERVER__ID:-}" ] || BROCCOLI__SERVER__ID="$(node_id_of docker "$server_image" server)" \
-        || die "could not ask $server_image for this machine's server id; set BROCCOLI__SERVER__ID"
-      prompt_value BROCCOLI__SERVER__ID "Server ID (unique per server)" "$BROCCOLI__SERVER__ID"
+      ask_node_id BROCCOLI__SERVER__ID server "$server_image"
+      prompt_value BROCCOLI__SERVER__ID "Server ID (unique per server)" "${BROCCOLI__SERVER__ID:-}"
       prompt_value BROCCOLI_HTTP_BIND "Server HTTP bind address" "0.0.0.0:3000"
       prompt_value BROCCOLI_GATEWAY_HOSTS "Gateway addresses in front of this server, space-separated (blank if none)" ""
       gateway_trusted_proxies
@@ -830,7 +865,8 @@ write_env_file() {
         env_line BROCCOLI_VERSION "$version"
         env_line BROCCOLI_SERVER_IMAGE "$server_image"
         env_line BROCCOLI_HTTP_BIND "${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}"
-        env_line BROCCOLI__SERVER__ID "$BROCCOLI__SERVER__ID"
+        node_id_comment BROCCOLI__SERVER__ID
+        env_line BROCCOLI__SERVER__ID "${BROCCOLI__SERVER__ID:-}"
         env_line BROCCOLI__SERVER__TRUSTED_PROXIES "${BROCCOLI__SERVER__TRUSTED_PROXIES:-[]}"
         env_line BROCCOLI__DATABASE__URL "$BROCCOLI__DATABASE__URL"
         env_line BROCCOLI__MQ__URL "$BROCCOLI__MQ__URL"
@@ -847,9 +883,8 @@ write_env_file() {
       mv "$ENV_FILE.tmp" "$ENV_FILE"
       ;;
     worker)
-      [ -n "${BROCCOLI__WORKER__ID:-}" ] || BROCCOLI__WORKER__ID="$(node_id_of docker "$worker_image" worker)" \
-        || die "could not ask $worker_image for this machine's worker id; set BROCCOLI__WORKER__ID"
-      prompt_value BROCCOLI__WORKER__ID "Worker ID (unique per worker)" "$BROCCOLI__WORKER__ID"
+      ask_node_id BROCCOLI__WORKER__ID worker "$worker_image"
+      prompt_value BROCCOLI__WORKER__ID "Worker ID (unique per worker)" "${BROCCOLI__WORKER__ID:-}"
       prompt_value BROCCOLI__DATABASE__URL "PostgreSQL URL from connection.env" ""
       prompt_value BROCCOLI__MQ__URL "Redis URL from connection.env" ""
       if using_object_storage; then
@@ -864,7 +899,8 @@ write_env_file() {
         env_line BROCCOLI_ENV_FILE "$ENV_FILE"
         env_line BROCCOLI_VERSION "$version"
         env_line BROCCOLI_WORKER_IMAGE "$worker_image"
-        env_line BROCCOLI__WORKER__ID "$BROCCOLI__WORKER__ID"
+        node_id_comment BROCCOLI__WORKER__ID
+        env_line BROCCOLI__WORKER__ID "${BROCCOLI__WORKER__ID:-}"
         env_line BROCCOLI__DATABASE__URL "$BROCCOLI__DATABASE__URL"
         env_line BROCCOLI__MQ__URL "$BROCCOLI__MQ__URL"
         env_line BROCCOLI__STORAGE__BACKEND "$(storage_backend)"
@@ -993,6 +1029,7 @@ if [ -f "$ENV_FILE" ]; then
   echo "$ENV_FILE already exists; preserving existing secrets"
   refresh_shared_settings
   refresh_bundled_image_tags
+  record_blank_node_id
   if { [ "$ROLE" = "infra" ] || [ "$ROLE" = "single-host" ]; } && [ -n "${BROCCOLI_INFRA_HOST:-}" ]; then
     rehost_infra_urls
   fi

@@ -31,7 +31,10 @@ it has none. Validation, scoring and the scoreboard all read a subtask's
 labels the same way, so they always agree on which test cases it covers. Saving
 the config fails when a label names no test case, or names more than one (one
 test case's label is another's ID). When a test data change forced through
-(`force=true`) leaves such a label behind, that entry scores as a failed test.
+(`force=true`) leaves such a label behind, that entry counts as a failed test
+worth 0 points: it fails a `group_min` or `group_mul` subtask, and adds nothing
+to a `sum` subtask, which the subtask's other tests score as if it were not
+there. The problem's config issues list the entry until the config is fixed.
 
 - `group_min`, the subtask scores its full max score only when every test in
   it passes, otherwise it scores zero. This is stricter than CMS GroupMin,

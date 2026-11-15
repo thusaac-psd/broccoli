@@ -7,9 +7,11 @@
 # the binary's rule (common::node_identity::default_node_id, documented in the
 # operator runbook) is the only one. The container runs in the host's network,
 # where it sees the host's network cards, with the host's machine-id mounted
-# where the binary reads it. A container gets a new hostname whenever it is
-# recreated, so a Compose deployment records this id in the role's env file,
-# which keeps it stable across re-runs. Prints the id, or fails.
+# where the binary reads it. The image must already be loaded: the engine never
+# pulls (`--pull never`), since a closed lab reaches no registry. A container
+# gets a new hostname whenever it is recreated, so a Compose deployment records
+# this id in the role's env file, which keeps it stable across re-runs. Prints
+# the id, or fails.
 node_id_of() {
   local engine="$1" image="$2" role="$3" bin id machine_id="${BROCCOLI_MACHINE_ID_FILE:-/etc/machine-id}"
   local -a mount=()
@@ -19,7 +21,7 @@ node_id_of() {
     *) return 1 ;;
   esac
   [ -s "$machine_id" ] && mount=(--mount "type=bind,source=$machine_id,target=/run/broccoli/host/machine-id,readonly")
-  id="$("$engine" run --rm --network host "${mount[@]}" --entrypoint "$bin" "$image" --node-id 2>/dev/null | tail -n 1)" || return 1
+  id="$("$engine" run --rm --pull never --network host "${mount[@]}" --entrypoint "$bin" "$image" --node-id 2>/dev/null | tail -n 1)" || return 1
   case "$id" in
     ''|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
