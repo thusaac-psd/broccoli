@@ -186,6 +186,7 @@ async fn spawn_worker(
     redis: &redis::Client,
     namespace: &str,
     db_url: &str,
+    db: &DatabaseConnection,
     blob_store: Arc<dyn common::storage::BlobStore>,
     metrics: common::metrics::Metrics,
     tools_dir: Option<PathBuf>,
@@ -197,6 +198,7 @@ async fn spawn_worker(
         OperationTaskExecutor::new_with_sandbox_manager_and_blob_store(
             create_sandbox_manager(),
             blob_store,
+            db.clone(),
             std::env::temp_dir().join(format!("broccoli-e2e-worker-cache-{worker_id}")),
             metrics,
             tools_dir,
@@ -660,6 +662,7 @@ impl E2eTestApp {
                     &redis,
                     &operation_queue,
                     &db_url,
+                    &db,
                     blob_store.clone(),
                     e2e_metrics.clone(),
                     tools_dir,
