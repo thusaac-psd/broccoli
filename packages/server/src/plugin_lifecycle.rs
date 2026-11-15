@@ -1279,12 +1279,24 @@ async fn published_source(state: &AppState, id: &PluginId) -> Result<PluginSourc
     }
 }
 
+/// A change to these plugins can change which of the stored configs that
+/// name them their plugins refuse, so it rechecks the problems that have them
+/// (see [`crate::services::config_issues`]).
+async fn recheck_config_issues(state: &AppState, plugin_ids: &[&str]) {
+    crate::services::config_issues::recheck_problems_of_plugins(
+        &state.db,
+        state.plugins.as_ref(),
+        plugin_ids,
+    )
+    .await;
+}
+
 /// Enable a plugin fleet-wide.
 ///
 /// Also the retry for a plugin that is enabled but failed on this replica.
 pub async fn enable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
     let plugin_id = id.as_str();
-    with_applied(state, async |applied| {
+    let result = with_applied(state, async |applied| {
         let source = published_source(state, id).await?;
         // This replica may not have applied a peer's disable yet, so the
         // desired state comes from the database, not the local cache.
@@ -1297,7 +1309,11 @@ pub async fn enable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
         }
         Ok(load_then_publish(state, applied, id, Change::Enable, &source).await?)
     })
-    .await
+    .await;
+    if result.is_ok() {
+        recheck_config_issues(state, &[plugin_id]).await;
+    }
+    result
 }
 
 /// Disable a plugin fleet-wide. Its pending timers are deleted: the plugin is
@@ -1307,7 +1323,7 @@ pub async fn enable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
 /// that failed to load here can still be turned off.
 pub async fn disable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
     let plugin_id = id.as_str();
-    with_applied(state, async |applied| {
+    let result = with_applied(state, async |applied| {
         let source = published_source(state, id).await?;
         let Some(generation) = publish(state, plugin_id, Change::Disable, None, &source).await?
         else {
@@ -1326,7 +1342,11 @@ pub async fn disable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
         delete_timers(state, plugin_id).await;
         Ok(())
     })
-    .await
+    .await;
+    if result.is_ok() {
+        recheck_config_issues(state, &[plugin_id]).await;
+    }
+    result
 }
 
 /// Delete a plugin's pending timers once it is off or gone everywhere: they
@@ -1350,7 +1370,7 @@ async fn delete_timers(state: &AppState, plugin_id: &str) {
 /// out its backoff.
 pub async fn reload(state: &AppState, id: &PluginId) -> Result<(), AppError> {
     let plugin_id = id.as_str();
-    with_applied(state, async |applied| {
+    let result = with_applied(state, async |applied| {
         let source = published_source(state, id).await?;
         // Checked against the database so a peer's recent enable or disable
         // counts; `publish` re-checks atomically for a change in between.
@@ -1359,7 +1379,11 @@ pub async fn reload(state: &AppState, id: &PluginId) -> Result<(), AppError> {
         }
         Ok(load_then_publish(state, applied, id, Change::Reload, &source).await?)
     })
-    .await
+    .await;
+    if result.is_ok() {
+        recheck_config_issues(state, &[plugin_id]).await;
+    }
+    result
 }
 
 /// Publish an uploaded plugin archive fleet-wide: store it in the blob
@@ -1384,7 +1408,7 @@ pub async fn install(
     }
     let id = archive.id().clone();
     let source = PluginSource::Upload(archive.hash().to_hex());
-    with_applied(state, async |applied| {
+    let result = with_applied(state, async |applied| {
         // Unpack from the bytes in hand rather than fetching them back.
         let stored = plugin_distribution::store(state, archive).await;
         let result = match stored {
@@ -1400,7 +1424,11 @@ pub async fn install(
             other => other.into(),
         })
     })
-    .await
+    .await;
+    if result.is_ok() {
+        recheck_config_issues(state, &[id.as_str()]).await;
+    }
+    result
 }
 
 /// [`retain_cache`] against the rows as they are now.
@@ -1437,7 +1465,7 @@ pub async fn remove_upload(
     expect: UploadRemoval,
 ) -> Result<UploadRemoval, AppError> {
     let plugin_id = id.as_str();
-    with_applied(state, async |applied| {
+    let result = with_applied(state, async |applied| {
         let row = plugin_entity::Entity::find_by_id(plugin_id)
             .one(&state.db)
             .await?
@@ -1515,13 +1543,17 @@ pub async fn remove_upload(
         refresh_cache(state).await;
         Ok(outcome)
     })
-    .await
+    .await;
+    if result.is_ok() {
+        recheck_config_issues(state, &[plugin_id]).await;
+    }
+    result
 }
 
 /// Reload every enabled plugin (including ones that failed to load here)
 /// and pick up new plugin directories in the bundle, fleet-wide.
 pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError> {
-    with_applied(state, async |applied| {
+    let result = with_applied(state, async |applied| {
         let rows = plugin_entity::Entity::find().all(&state.db).await?;
         let enabled: Vec<(PluginId, PluginSource)> = rows
             .iter()
@@ -1574,7 +1606,17 @@ pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError>
             failed,
         })
     })
-    .await
+    .await;
+    if let Ok(response) = &result {
+        let ids: Vec<&str> = response
+            .reloaded
+            .iter()
+            .chain(&response.new)
+            .map(String::as_str)
+            .collect();
+        recheck_config_issues(state, &ids).await;
+    }
+    result
 }
 
 #[cfg(test)]

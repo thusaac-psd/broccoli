@@ -15,11 +15,12 @@ use std::sync::Arc;
 
 use common::db::{DatabaseConnection, DatabaseTransaction};
 use plugin_core::traits::PluginManager;
-use sea_orm::sea_query::{Expr, LockType};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, TransactionTrait};
+use sea_orm::sea_query::LockType;
+use sea_orm::{QuerySelect, TransactionTrait};
 
 use crate::entity::problem;
 use crate::error::AppError;
+use crate::services::config_issues::set_config_issues;
 use crate::services::plugin_config::{Reads, problem_config_issues};
 use crate::utils::soft_delete::SoftDeletable;
 
@@ -111,60 +112,4 @@ impl TestDataEdit {
         txn.commit().await?;
         Ok(())
     }
-}
-
-/// Clears problem `problem_id`'s `config_issues` flag once a config write
-/// leaves none of its stored configs with issues. A config write is checked
-/// before it is stored, so it can resolve issues but never add one; when the
-/// flag is clear there is nothing to check. Runs after the write committed, so
-/// a failure here leaves the flag set and is only logged: judgements claimed
-/// meanwhile are marked, which errs on the side of a second look.
-pub(crate) async fn clear_resolved_config_issues(
-    db: &DatabaseConnection,
-    plugins: &dyn PluginManager,
-    problem_id: i32,
-) {
-    if let Err(error) = try_clear_resolved_config_issues(db, plugins, problem_id).await {
-        tracing::warn!(
-            problem_id,
-            ?error,
-            "could not recheck the problem's config issues"
-        );
-    }
-}
-
-async fn try_clear_resolved_config_issues(
-    db: &DatabaseConnection,
-    plugins: &dyn PluginManager,
-    problem_id: i32,
-) -> Result<(), AppError> {
-    let txn = db.begin().await?;
-    let flagged = problem::Entity::find_by_id(problem_id)
-        .filter(problem::Column::ConfigIssues.eq(true))
-        .lock(LockType::Update)
-        .one(&txn)
-        .await?
-        .is_some();
-    if !flagged {
-        return Ok(());
-    }
-    let issues = problem_config_issues(&txn, plugins, problem_id, true, Reads::Committed).await?;
-    if issues.is_empty() {
-        set_config_issues(&txn, problem_id, false).await?;
-        txn.commit().await?;
-    }
-    Ok(())
-}
-
-async fn set_config_issues(
-    txn: &DatabaseTransaction,
-    problem_id: i32,
-    has_issues: bool,
-) -> Result<(), AppError> {
-    problem::Entity::update_many()
-        .col_expr(problem::Column::ConfigIssues, Expr::value(has_issues))
-        .filter(problem::Column::Id.eq(problem_id))
-        .exec(txn)
-        .await?;
-    Ok(())
 }

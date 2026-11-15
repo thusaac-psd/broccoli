@@ -1484,3 +1484,119 @@ async fn a_judgement_made_while_a_config_has_issues_is_marked() {
         .await;
     assert_eq!(judgement_marks(fixed).await, json!(false));
 }
+
+/// The problem's `config_issues` flag, as stored: what judging copies onto
+/// the judgements it claims.
+async fn config_issues_flag(app: &E2eTestApp, problem_id: i32) -> bool {
+    server::entity::problem::Entity::find_by_id(problem_id)
+        .one(&app.db)
+        .await
+        .unwrap()
+        .expect("the problem")
+        .config_issues
+}
+
+/// Sets the flag directly, as a stale value a recheck must correct.
+async fn set_config_issues_flag(app: &E2eTestApp, problem_id: i32, value: bool) {
+    server::entity::problem::Entity::update_many()
+        .col_expr(
+            server::entity::problem::Column::ConfigIssues,
+            sea_orm::sea_query::Expr::value(value),
+        )
+        .filter(server::entity::problem::Column::Id.eq(problem_id))
+        .exec(&app.db)
+        .await
+        .unwrap();
+}
+
+/// A change to a plugin changes which stored configs are checked, and how,
+/// so it rechecks the flag of every problem with a config of that plugin:
+/// disabling `ioi` leaves its broken config unchecked, enabling it checks it
+/// again, and a reload corrects a flag that went stale.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_change_rechecks_the_config_issues_of_the_problems_it_configures() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_lifecycle_issues_admin", "password", "admin")
+        .await;
+    let (problem_id, _contest_id, t2) = ioi_problem_with_two_subtasks(&app, &admin).await;
+    let res = app
+        .patch_with_token(
+            &format!("/api/v1/problems/{problem_id}/test-cases/{t2}?force=true"),
+            &json!({ "label": "t9" }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(config_issues_flag(&app, problem_id).await);
+
+    let res = app
+        .post_with_token("/api/v1/admin/plugins/ioi/disable", &json!({}), &admin)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(
+        !config_issues_flag(&app, problem_id).await,
+        "a disabled plugin's configs are not checked"
+    );
+
+    let res = app
+        .post_with_token("/api/v1/admin/plugins/ioi/enable", &json!({}), &admin)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(config_issues_flag(&app, problem_id).await);
+
+    set_config_issues_flag(&app, problem_id, false).await;
+    let res = app
+        .post_with_token("/api/v1/admin/plugins/ioi/reload", &json!({}), &admin)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(config_issues_flag(&app, problem_id).await);
+}
+
+/// A write to a contest's own configs can change what its problems' configs
+/// are checked against, so it rechecks the flag of every problem in the
+/// contest, both ways.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_contest_config_write_rechecks_the_config_issues_of_its_problems() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_contest_issues_admin", "password", "admin")
+        .await;
+    let (problem_id, contest_id, t2) = ioi_problem_with_two_subtasks(&app, &admin).await;
+    let contest_config = format!("/api/v1/contests/{contest_id}/config/ioi/contest");
+    let write_contest_config = |mode: &'static str| {
+        let (app, admin, path) = (&app, admin.clone(), contest_config.clone());
+        async move {
+            let res = app
+                .put_with_token(
+                    &path,
+                    &json!({ "config": { "scoring_mode": mode }, "enabled": true }),
+                    &admin,
+                )
+                .await;
+            assert_eq!(res.status, 200, "{}", res.text);
+        }
+    };
+
+    set_config_issues_flag(&app, problem_id, true).await;
+    write_contest_config("sum_best_subtask").await;
+    assert!(
+        !config_issues_flag(&app, problem_id).await,
+        "no config has issues, so the stale flag is cleared"
+    );
+
+    let res = app
+        .patch_with_token(
+            &format!("/api/v1/problems/{problem_id}/test-cases/{t2}?force=true"),
+            &json!({ "label": "t9" }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    set_config_issues_flag(&app, problem_id, false).await;
+    write_contest_config("max_submission").await;
+    assert!(
+        config_issues_flag(&app, problem_id).await,
+        "the broken subtask config sets the stale flag again"
+    );
+}

@@ -525,6 +525,27 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
     Ok(incompatible)
 }
 
+/// The problems that have a stored config, at the problem scope or in a
+/// contest, of any plugin in `plugin_ids`: those whose config issues a change
+/// to one of these plugins can change.
+pub(crate) async fn problems_with_configs_of<C: ConnectionTrait>(
+    db: &C,
+    plugin_ids: &[&str],
+) -> Result<std::collections::BTreeSet<i32>, AppError> {
+    let rows = plugin_config::Entity::find()
+        .filter(plugin_config::Column::Scope.is_in([
+            ConfigScope::Problem.as_str(),
+            ConfigScope::ContestProblem.as_str(),
+        ]))
+        .all(db)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| plugin_ids.contains(&extract_plugin_id(&row.namespace)))
+        .filter_map(|row| ConfigTarget::of_row(&row.scope, &row.ref_id)?.problem_id)
+        .collect())
+}
+
 /// Every stored config of a problem, at the problem scope and, with
 /// `include_contests`, in each contest that uses it, that its namespace would
 /// refuse if an admin wrote it now, its plugin reading as `reads` says: test
