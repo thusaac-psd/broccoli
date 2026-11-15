@@ -85,12 +85,16 @@ exit, and the evaluate driver acts on it once:
   with `PLUGIN_NO_VERDICT`.
 - `Aborted`: a callback failed, or the plugin is gone (disabled, unloaded).
   The judgement is finalized as `SystemError` with `PLUGIN_SESSION_ABORTED`.
+- `Lost`: the platform lost the attempt (see [Retry budgets](#retry-budgets)).
+  The session ends before the next event reaches the plugin, so the plugin
+  never judges from the lost operations, and the judgement goes back to
+  `Queued`.
 - `Interrupted`: this server is shutting down. Nothing is recorded; the
   shutdown releases the judgement and a peer judges it again.
 
-Both finalizations go through `fail_dispatch`, fenced on the judgement's
-epoch and on it being open, so a verdict the plugin already wrote stands. The
-after-judging hooks fire after either. While the plugin providing a contest
+Every end goes through `fail_dispatch`, fenced on the judgement's epoch and on
+it being open, so a verdict the plugin already wrote stands. The after-judging
+hooks fire after it, for a judgement it left terminal. While the plugin providing a contest
 type is disabled, a submission to its contests is refused with
 `503 CONTEST_TYPE_DISABLED` and no `Retry-After`; `CONTEST_TYPE_UNAVAILABLE`
 (with `Retry-After`) means only that the serving replica has not loaded the
@@ -105,6 +109,11 @@ is disabled fleet-wide; `contest_type_open` states that in SQL and
 
 - The claim statement takes no judgement or code run of a parked type, so
   nothing is dispatched to a plugin that is not there.
+- Unloading a plugin for good cuts every judging session it runs on that
+  replica at once (`JudgingSessions::cut`), so each ends `Aborted` now rather
+  than when its next result arrives. The replica that made the disable and
+  every replica that applies it through its reconcile unload through the same
+  `deactivate`.
 - A judgement that fails while its type is parked (its session aborted when
   the plugin went away, or nothing was registered to dispatch it to) goes
   straight back to `Queued` under a fresh epoch, whatever the failure said
@@ -113,9 +122,12 @@ is disabled fleet-wide; `contest_type_open` states that in SQL and
   decision reads the fleet-wide `plugin` table, so the replica that made the
   disable and a replica that applied it through its reconcile hand the work
   back the same way.
-- The reaper retries no other system error of a parked type, so the budget
-  is not spent on attempts nothing can judge, and the stuck-job detector hands
-  back lapsed work of a parked type without spending a dispatch retry.
+- The reaper retries no system error of a parked type and confirms none:
+  one still awaiting its decision goes back to `Queued` spending nothing, so
+  the judgement history shows no finalized attempt the parked submission does
+  not, and the budget is not spent on attempts nothing can judge. The
+  stuck-job detector hands back lapsed work of a parked type without spending
+  a dispatch retry.
 
 A viewer whose submission the plugin governs sees its outcome withheld under
 the contest's `plugin_outage`; staff see it `Queued`. Once the plugin is
@@ -131,7 +143,8 @@ plugin's result write is one statement that writes the judgement and the
 submission together.
 
 One projection waits: a current judgement that finalized as a system error
-the system-error retry may still re-judge (anything but `PLUGIN_REFUSED`).
+the system-error retry may still re-judge (anything but `PLUGIN_REFUSED` or
+`CHECKER_FAILED`, which stand).
 The submission keeps showing the attempt in flight until the reaper decides
 it within one scan (5 s): it requeues the judgement while the submission has
 retries left, so the submission goes on to `Queued` and the next attempt; or
@@ -184,10 +197,24 @@ whatever meets a platform fault records it there: a publish the queue
 refused (`QUEUE_UNREACHABLE`), an operation the queue lost
 (`OPERATION_LOST`), a worker without a platform tool
 (`PLATFORM_TOOL_MISSING`), a fleet with no live worker that takes work
-(`NO_CAPABLE_WORKER`). A system error the dispatch then ends with carries that
-code, whatever the plugin reported, and the reaper treats it by its class
-(`SystemErrorClass`): a hand-back (the four fault codes) is requeued spending
-nothing, and any other code is retried within the budget.
+(`NO_CAPABLE_WORKER`). Each of these faults is a hand-back
+(`SystemErrorClass::HandBack`): the platform lost the attempt, and it never
+becomes a verdict. The judging session ends as `Lost` before another result
+reaches the plugin, a plugin write that would finalize the judgement is fenced
+out like a stale dispatch's, and the dispatch ends through `fail_dispatch`,
+which sends the judgement back to `Queued` under a fresh epoch spending
+nothing. The submission follows in the same transaction, so no client and no
+after-judging hook sees a `SystemError` that is then taken back.
+
+A failure every attempt repeats stands at once (`SystemErrorClass::Stands`): a
+contest plugin's refusal (`PLUGIN_REFUSED`), or the problem's checker failing
+(`CHECKER_FAILED`). A checker plugin reports the latter on its verdict
+(`CheckerVerdict::checker_failure`, set by the standard testlib checker when
+the checker was killed by a signal, failed to start, or exited with a code
+testlib gives no meaning); the host records it as the dispatch's fault, so the
+system error carries the code and how the checker failed (staff only, like
+every system-error diagnostic). Any other system error is retried within the
+budget.
 
 A missing platform tool is the worker's fault, never the submission's. A worker
 that lacks one reads no task at all: it stays live, and its heartbeat lists the

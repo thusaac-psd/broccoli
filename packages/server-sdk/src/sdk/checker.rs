@@ -82,6 +82,7 @@ mod tests {
             exit_code: Some(0),
             stderr: String::new(),
             sandbox_status: Some("OK".to_string()),
+            signal: None,
         };
         assert!(checker().interpret("tokens", &result).is_err());
     }

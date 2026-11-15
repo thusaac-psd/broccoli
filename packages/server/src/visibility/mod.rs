@@ -814,6 +814,7 @@ mod tests {
                 operation_waiters,
                 evaluate_batches,
                 hook_registry: crate::hooks::new_shared_registry(),
+                judging_sessions: Default::default(),
             },
             metrics,
             prometheus_registry,

@@ -465,3 +465,105 @@ async fn a_lone_worker_without_platform_tools_leaves_submissions_queued_until_it
     assert_eq!(row.system_error_retries, 0);
     assert_eq!(row.judge_epoch, 0, "judged on its first attempt");
 }
+
+/// When the last worker that takes work loses a platform tool while a
+/// submission is being judged, the platform lost that attempt: it goes back
+/// to the queue without the contest plugin ever seeing its failed
+/// operations, so neither the judgement nor the submission ever reads
+/// `SystemError` or `Judged` before the verdict of the attempt that stands,
+/// and no retry is spent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_judgement_whose_last_capable_worker_loses_a_tool_mid_run_shows_only_its_real_verdict() {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use server::entity::submission_judgement;
+
+    let healthy = E2eTestApp::platform_tools_dir().expect("the built platform tools");
+    let tools = E2eTestApp::empty_tools_dir();
+    let restore = || {
+        for tool in broccoli_server_sdk::types::PLATFORM_TOOLS {
+            std::fs::copy(healthy.join(tool), tools.join(tool)).unwrap();
+        }
+    };
+    restore();
+    let app = E2eTestApp::spawn_with_workers(vec![Some(tools.clone())]).await;
+    let admin = app
+        .create_user_with_role("lost_tool_admin", "pass1234", "admin")
+        .await;
+    let problem_id = app.create_public_problem(&admin, "Lost tool").await;
+    app.create_test_case(problem_id, &admin).await;
+    let contestant = app
+        .create_authenticated_user("lost_tool_user", "pass1234")
+        .await;
+
+    app.log_statuses().await;
+    // Every operation waits in the queue, so the judging session is started
+    // and waiting for its first result when the tool goes.
+    app.pause_worker();
+    let id = app
+        .create_submission(problem_id, &contestant, "cpp", CPP_SUM)
+        .await;
+    let current = || async {
+        submission_judgement::Entity::find()
+            .filter(submission_judgement::Column::SubmissionId.eq(id))
+            .filter(submission_judgement::Column::IsCurrent.eq(true))
+            .one(&app.db)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let first = loop {
+        let j = current().await;
+        if j.status == common::SubmissionStatus::Compiling {
+            break j;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "judging never started: {:?}",
+            j.status
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+
+    for tool in broccoli_server_sdk::types::PLATFORM_TOOLS {
+        std::fs::remove_file(tools.join(tool)).unwrap();
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let j = current().await;
+        if j.judge_epoch > first.judge_epoch {
+            assert_eq!(j.status, common::SubmissionStatus::Queued, "handed back");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never handed back: {:?}",
+            j.status
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    restore();
+    app.resume_worker();
+    let res = app.wait_for_submission_terminal(id, &contestant, 120).await;
+    assert_accepted(&res);
+    app.judging_idle().await;
+    let row = stored(&app, id).await;
+    assert_eq!(row.system_error_retries, 0, "no retry spent");
+
+    let statuses = app.logged_statuses().await;
+    for table in ["submission", "submission_judgement"] {
+        let seen: Vec<&str> = statuses
+            .iter()
+            .filter(|(t, _)| t == table)
+            .map(|(_, s)| s.as_str())
+            .collect();
+        assert!(!seen.contains(&"SystemError"), "{table}: {seen:?}");
+        assert_eq!(
+            seen.iter().position(|s| *s == "Judged"),
+            Some(seen.len() - 1),
+            "{table} reads Judged only for the verdict that stands: {seen:?}"
+        );
+        assert!(seen.contains(&"Queued"), "{table}: {seen:?}");
+    }
+}

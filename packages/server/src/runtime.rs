@@ -243,6 +243,7 @@ impl ServerRuntime {
         };
 
         let worker_slots = crate::dispatcher::fanout::WorkerSlots::default();
+        let judging_sessions = crate::services::judging_sessions::JudgingSessions::default();
         if let Some(client) = &redis_client {
             worker_slots.spawn_refresh(client.clone(), app_config.mq.operation_queue_name.clone());
         }
@@ -274,7 +275,7 @@ impl ServerRuntime {
                 redis_client: redis_client.clone(),
                 worker_slots: worker_slots.clone(),
                 plugin_config_cache: plugin_config_cache.clone(),
-                judging_sessions: Default::default(),
+                judging_sessions: judging_sessions.clone(),
             },
             Some(metrics.clone()),
         )
@@ -326,6 +327,7 @@ impl ServerRuntime {
                 operation_waiters: operation_waiters.clone(),
                 evaluate_batches: evaluate_batches.clone(),
                 hook_registry,
+                judging_sessions,
             },
             metrics,
             prometheus_registry,

@@ -745,6 +745,7 @@ impl TestApp {
         let operation_waiters: OperationWaiters = Arc::new(dashmap::DashMap::new());
         let evaluate_batches = EvaluateBatches::default();
         let hook_registry = server::hooks::new_shared_registry();
+        let judging_sessions = server::services::judging_sessions::JudgingSessions::default();
         let (test_metrics, test_prom_registry) =
             common::observability::init_metrics("broccoli-test");
 
@@ -779,7 +780,7 @@ impl TestApp {
                 redis_client: None,
                 worker_slots: Default::default(),
                 plugin_config_cache: plugin_config_cache.clone(),
-                judging_sessions: Default::default(),
+                judging_sessions: judging_sessions.clone(),
             },
             Some(test_metrics.clone()),
         )
@@ -885,6 +886,7 @@ impl TestApp {
                 operation_waiters,
                 evaluate_batches,
                 hook_registry,
+                judging_sessions,
             },
             metrics: test_metrics.clone(),
             prometheus_registry: test_prom_registry.clone(),

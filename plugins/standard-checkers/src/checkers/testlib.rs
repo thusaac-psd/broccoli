@@ -122,21 +122,25 @@ fn load_testlib_config(host: &Host) -> Result<TestlibConfig, String> {
 pub fn interpret_testlib_exit_code(exit_code: i32, stderr: &str) -> CheckerVerdict {
     match exit_code {
         0 => CheckerVerdict {
+            checker_failure: None,
             verdict: Verdict::Accepted,
             score: 1.0,
             message: extract_testlib_message(stderr),
         },
         1 => CheckerVerdict {
+            checker_failure: None,
             verdict: Verdict::WrongAnswer,
             score: 0.0,
             message: extract_testlib_message(stderr),
         },
         2 => CheckerVerdict {
+            checker_failure: None,
             verdict: Verdict::WrongAnswer,
             score: 0.0,
             message: extract_testlib_message(stderr).or_else(|| Some("Presentation error".into())),
         },
         3 => CheckerVerdict {
+            checker_failure: None,
             verdict: Verdict::SystemError,
             score: 0.0,
             message: extract_testlib_message(stderr)
@@ -153,6 +157,7 @@ pub fn interpret_testlib_exit_code(exit_code: i32, stderr: &str) -> CheckerVerdi
         // healing infra error that reproduces on every re-dispatch and never
         // resolves to the real WA.
         4 => CheckerVerdict {
+            checker_failure: None,
             verdict: Verdict::WrongAnswer,
             score: 0.0,
             message: extract_testlib_message(stderr)
@@ -164,6 +169,7 @@ pub fn interpret_testlib_exit_code(exit_code: i32, stderr: &str) -> CheckerVerdi
         // ended before the checker could read an expected token: a rejection, not
         // a judge failure.
         8 => CheckerVerdict {
+            checker_failure: None,
             verdict: Verdict::WrongAnswer,
             score: 0.0,
             message: extract_testlib_message(stderr)
@@ -177,6 +183,7 @@ pub fn interpret_testlib_exit_code(exit_code: i32, stderr: &str) -> CheckerVerdi
                 Verdict::WrongAnswer
             };
             CheckerVerdict {
+                checker_failure: None,
                 verdict,
                 score,
                 message: msg,
@@ -188,11 +195,17 @@ pub fn interpret_testlib_exit_code(exit_code: i32, stderr: &str) -> CheckerVerdi
         // score encoded in the 16+ band is not authoritatively pinned, so we do
         // not guess a partial score here. Treat it as a judge failure (SystemError
         // self-heals) rather than silently minting a wrong partial verdict.
-        other => CheckerVerdict {
-            verdict: Verdict::SystemError,
-            score: 0.0,
-            message: Some(format!("Checker exited with unexpected code {}", other)),
-        },
+        // The checker program itself failed, which every attempt repeats.
+        other => {
+            let failure =
+                format!("Checker exited with code {other}, which testlib gives no meaning");
+            CheckerVerdict {
+                checker_failure: Some(failure.clone()),
+                verdict: Verdict::SystemError,
+                score: 0.0,
+                message: Some(failure),
+            }
+        }
     }
 }
 

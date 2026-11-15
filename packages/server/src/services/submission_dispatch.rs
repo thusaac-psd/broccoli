@@ -174,10 +174,9 @@ async fn dispatch_after_judging_hooks(
     );
 }
 
-/// Ends a dispatch that produced no verdict as a system error, under the
-/// platform fault its operations met when there was one (so the system-error
-/// retry treats it by that cause, see `judging::SystemErrorClass`), else
-/// under `error_code`.
+/// Ends a dispatch that produced no verdict as a system error under
+/// `error_code`, or, when its operations met a platform fault, under that
+/// fault, which hands a lost attempt back (see `judging::fail_dispatch`).
 async fn record_dispatch_failure(
     db: &DatabaseConnection,
     metrics: &common::metrics::Metrics,
@@ -602,6 +601,18 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                                     &output
                                         .error_message
                                         .unwrap_or_else(|| "Unknown plugin error".to_string()),
+                                )
+                                .await;
+                            } else if faults.lost().is_some() {
+                                // The plugin's verdict, if it wrote one, was
+                                // fenced out: the attempt is handed back.
+                                record_dispatch_failure(
+                                    &db,
+                                    &metrics,
+                                    judgement_ref,
+                                    &faults,
+                                    "PLUGIN_ERROR",
+                                    "The platform lost the attempt",
                                 )
                                 .await;
                             } else {

@@ -7,28 +7,36 @@ use broccoli_server_sdk::types::{
 };
 use common::StatusPhase;
 
-use super::fault::Recorded;
+use super::fault::{Recorded, SystemErrorClass};
 use super::unit::{Unit, cascade};
 
-/// `update` as the dispatch's platform `fault` decides it: an update that
-/// ends the judgement as a system error carries the fault's code and
-/// description, whatever the plugin reported, so the system-error retry
-/// treats it by its cause (see [`super::fault`]). Any other update is
-/// unchanged.
-pub(crate) fn with_dispatch_fault(
+/// `update` as the dispatch's recorded `fault` decides it. An update that
+/// would finalize an attempt the platform lost (see
+/// [`super::DispatchFaults::lost`]) is `None`, a write fenced out as a stale
+/// dispatch's is, whatever verdict the plugin computed from the lost
+/// operations: the dispatch hands the judgement back when it ends. Under any
+/// other fault, an update that ends the judgement as a system error carries
+/// the fault's code and description, whatever the plugin reported, so the
+/// system-error retry treats it by its cause (see [`super::fault`]). Any
+/// other update is unchanged.
+pub(crate) fn under_dispatch_fault(
     mut update: SubmissionUpdate,
     fault: Option<Recorded>,
-) -> SubmissionUpdate {
+) -> Option<SubmissionUpdate> {
     let Some(fault) = fault else {
-        return update;
+        return Some(update);
     };
-    let ends_in_system_error = update.status.is_some_and(|s| s.is_terminal())
-        && matches!(update.verdict, Some(Some(Verdict::SystemError)));
+    let finalizes = update.status.is_some_and(|s| s.is_terminal());
+    if SystemErrorClass::of_fault(fault.fault) == SystemErrorClass::HandBack {
+        return (!finalizes).then_some(update);
+    }
+    let ends_in_system_error =
+        finalizes && matches!(update.verdict, Some(Some(Verdict::SystemError)));
     if ends_in_system_error {
         update.error_code = Some(Some(fault.fault.code().to_string()));
         update.error_message = Some(Some(fault.message));
     }
-    update
+    Some(update)
 }
 
 /// The write fence every plugin write to a judgement goes through: the row
@@ -223,6 +231,7 @@ fn push_double_opt_str<P: SqlBindSink>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::judging::fault::DispatchFault;
     use common::worker::OperationFault;
 
     fn update(status: SubmissionStatus, verdict: Option<Verdict>) -> SubmissionUpdate {
@@ -239,35 +248,52 @@ mod tests {
 
     fn lost() -> Option<Recorded> {
         Some(Recorded {
-            fault: OperationFault::OperationLost,
-            message: "lost".into(),
+            fault: OperationFault::NoCapableWorker.into(),
+            message: "none accepting".into(),
         })
     }
 
     #[test]
-    fn a_system_error_under_a_platform_fault_carries_the_faults_code() {
-        let u = with_dispatch_fault(
-            update(SubmissionStatus::Judged, Some(Verdict::SystemError)),
-            lost(),
-        );
-        assert_eq!(u.error_code, Some(Some("OPERATION_LOST".into())));
-        assert_eq!(u.error_message, Some(Some("lost".into())));
+    fn no_verdict_finalizes_a_lost_attempt() {
+        for verdict in [Some(Verdict::SystemError), Some(Verdict::Accepted), None] {
+            let u = update(SubmissionStatus::Judged, verdict.clone());
+            assert!(under_dispatch_fault(u, lost()).is_none(), "{verdict:?}");
+        }
+        let u = update(SubmissionStatus::CompilationError, None);
+        assert!(under_dispatch_fault(u, lost()).is_none());
     }
 
     #[test]
-    fn other_updates_keep_what_the_plugin_wrote() {
+    fn progress_of_a_lost_attempt_and_every_write_of_a_sound_one_stand() {
+        let u = update(SubmissionStatus::Running, None);
+        assert_eq!(under_dispatch_fault(u.clone(), lost()), Some(u));
+        let u = update(SubmissionStatus::Judged, Some(Verdict::SystemError));
+        assert_eq!(under_dispatch_fault(u.clone(), None), Some(u));
+    }
+
+    fn checker_failed() -> Option<Recorded> {
+        Some(Recorded {
+            fault: DispatchFault::CheckerFailed,
+            message: "signal 6".into(),
+        })
+    }
+
+    #[test]
+    fn a_system_error_under_a_fault_that_stands_carries_the_faults_code() {
+        let u = under_dispatch_fault(
+            update(SubmissionStatus::Judged, Some(Verdict::SystemError)),
+            checker_failed(),
+        )
+        .unwrap();
+        assert_eq!(u.error_code, Some(Some("CHECKER_FAILED".into())));
+        assert_eq!(u.error_message, Some(Some("signal 6".into())));
         for u in [
-            update(SubmissionStatus::Judged, Some(Verdict::Accepted)),
+            update(SubmissionStatus::Judged, Some(Verdict::WrongAnswer)),
             update(SubmissionStatus::Running, Some(Verdict::SystemError)),
         ] {
-            let before = u.error_code.clone();
-            assert_eq!(with_dispatch_fault(u, lost()).error_code, before);
+            let before = u.clone();
+            assert_eq!(under_dispatch_fault(u, checker_failed()), Some(before));
         }
-        let u = update(SubmissionStatus::Judged, Some(Verdict::SystemError));
-        assert_eq!(
-            with_dispatch_fault(u, None).error_code,
-            Some(Some("PLUGIN_SAYS".into()))
-        );
     }
 
     /// Records bound values and hands back sequential `$N` placeholders, so a
