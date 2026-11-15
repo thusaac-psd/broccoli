@@ -554,6 +554,7 @@ async fn build_visible_judgement(
         || compile_output_public(contest_model.as_ref(), state.clock.now());
     let show_test_details = visibility.has_view_all || problem_model.show_test_details;
 
+    let config_issues = visibility.has_view_all.then_some(judgement.config_issues);
     let mut response = build_judgement_response(
         &state.db,
         &*state.blob_store,
@@ -564,6 +565,7 @@ async fn build_visible_judgement(
         query,
     )
     .await?;
+    response.config_issues = config_issues;
     if visibility.has_view_all && !response.is_current {
         let row = state
             .db

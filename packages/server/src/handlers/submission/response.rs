@@ -606,6 +606,7 @@ pub(super) async fn build_judgement_response(
         finalized_at: judgement.finalized_at,
         test_case_pagination: Some(pagination),
         withheld: None,
+        config_issues: None,
         test_case_results,
     })
 }

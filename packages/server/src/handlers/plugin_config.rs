@@ -24,9 +24,10 @@ use crate::extractors::path::AppPath;
 use crate::host_funcs::config::{extract_plugin_id, strip_namespace_prefix};
 use crate::models::plugin_config::{PluginConfigResponse, UpsertPluginConfigRequest};
 use crate::services::plugin_config::{
-    ConfigScope, ConfigTarget, IncompatibleConfig, delete_config, get_config,
+    ConfigScope, ConfigTarget, IncompatibleConfig, Reads, delete_config, get_config,
     problem_config_issues, upsert_config,
 };
+use crate::services::test_data::clear_resolved_config_issues;
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, find_contest_problem};
 use crate::utils::problem::find_problem;
@@ -351,6 +352,7 @@ pub async fn list_problem_config_issues(
         state.plugins.as_ref(),
         problem_id,
         auth_user.has_permission(perm::CONTEST_MANAGE),
+        Reads::Committed,
     )
     .await?;
     Ok(Json(issues))
@@ -441,6 +443,7 @@ pub async fn upsert_problem_config(
     )
     .await?;
     txn.commit().await?;
+    clear_resolved_config_issues(&state.db, state.plugins.as_ref(), problem_id).await;
     Ok(result)
 }
 
@@ -477,6 +480,7 @@ pub async fn delete_problem_config(
     let target = ConfigTarget::problem(problem_id);
     let result = delete_config(&txn, &target, &plugin_id, &namespace).await?;
     txn.commit().await?;
+    clear_resolved_config_issues(&state.db, state.plugins.as_ref(), problem_id).await;
     Ok(result)
 }
 
@@ -601,6 +605,7 @@ pub async fn upsert_contest_problem_config(
     )
     .await?;
     txn.commit().await?;
+    clear_resolved_config_issues(&state.db, state.plugins.as_ref(), problem_id).await;
     Ok(result)
 }
 
@@ -641,6 +646,7 @@ pub async fn delete_contest_problem_config(
     let target = ConfigTarget::contest_problem(contest_id, problem_id);
     let result = delete_config(&txn, &target, &plugin_id, &namespace).await?;
     txn.commit().await?;
+    clear_resolved_config_issues(&state.db, state.plugins.as_ref(), problem_id).await;
     Ok(result)
 }
 

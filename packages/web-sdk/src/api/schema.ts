@@ -4341,6 +4341,13 @@ export interface components {
       case_changes?: number | null;
       compile_output?: string | null;
       /**
+       * @description For viewers who see every submission: whether the problem's stored
+       *     configs had issues (`GET /problems/{id}/config/issues`) when this
+       *     judgement was dispatched, so its score may come from a config its
+       *     plugin refuses. `null` for everyone else.
+       */
+      config_issues?: boolean | null;
+      /**
        * Format: date-time
        * @example 2025-10-01T14:30:00Z
        */
@@ -11827,7 +11834,14 @@ export interface operations {
   };
   createTestCase: {
     parameters: {
-      query?: never;
+      query?: {
+        /**
+         * @description Make the change even if it leaves stored configs of the problem
+         *     refused by their plugins, which it otherwise refuses with
+         *     `CONFIG_WOULD_BREAK`; the problem's config issues then list them.
+         */
+        force?: boolean;
+      };
       header?: never;
       path: {
         /** @description Problem ID */
@@ -11886,7 +11900,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Duplicate label in problem (CONFLICT) */
+      /** @description Duplicate label in problem (CONFLICT); or the change would leave stored configs of the problem refused by their plugins, listed in `details.issues`, which `force=true` makes anyway (CONFIG_WOULD_BREAK) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11908,7 +11922,14 @@ export interface operations {
   };
   bulkDeleteTestCases: {
     parameters: {
-      query?: never;
+      query?: {
+        /**
+         * @description Make the change even if it leaves stored configs of the problem
+         *     refused by their plugins, which it otherwise refuses with
+         *     `CONFIG_WOULD_BREAK`; the problem's config issues then list them.
+         */
+        force?: boolean;
+      };
       header?: never;
       path: {
         /** @description Problem ID */
@@ -11967,7 +11988,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Some test cases have judge results (CONFLICT) */
+      /** @description Some test cases have judge results (CONFLICT); or the change would leave stored configs of the problem refused by their plugins, listed in `details.issues`, which `force=true` makes anyway (CONFIG_WOULD_BREAK) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11980,7 +12001,14 @@ export interface operations {
   };
   reorderTestCases: {
     parameters: {
-      query?: never;
+      query?: {
+        /**
+         * @description Make the change even if it leaves stored configs of the problem
+         *     refused by their plugins, which it otherwise refuses with
+         *     `CONFIG_WOULD_BREAK`; the problem's config issues then list them.
+         */
+        force?: boolean;
+      };
       header?: never;
       path: {
         /** @description Problem ID */
@@ -12037,11 +12065,27 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
+      /** @description The change would leave stored configs of the problem refused by their plugins; `details.issues` lists them, and `force=true` makes it anyway (CONFIG_WOULD_BREAK) */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
     };
   };
   uploadTestCases: {
     parameters: {
-      query?: never;
+      query?: {
+        /**
+         * @description Make the change even if it leaves stored configs of the problem
+         *     refused by their plugins, which it otherwise refuses with
+         *     `CONFIG_WOULD_BREAK`; the problem's config issues then list them.
+         */
+        force?: boolean;
+      };
       header?: never;
       path: {
         /** @description Problem ID */
@@ -12100,7 +12144,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Duplicate label (abort), or replace would delete test cases that have judge results (CONFLICT) */
+      /** @description Duplicate label (abort), or replace would delete test cases that have judge results (CONFLICT); or the change would leave stored configs of the problem refused by their plugins, listed in `details.issues`, which `force=true` makes anyway (CONFIG_WOULD_BREAK) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -12174,7 +12218,14 @@ export interface operations {
   };
   deleteTestCase: {
     parameters: {
-      query?: never;
+      query?: {
+        /**
+         * @description Make the change even if it leaves stored configs of the problem
+         *     refused by their plugins, which it otherwise refuses with
+         *     `CONFIG_WOULD_BREAK`; the problem's config issues then list them.
+         */
+        force?: boolean;
+      };
       header?: never;
       path: {
         /** @description Problem ID */
@@ -12220,7 +12271,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Cannot delete: has judge results (CONFLICT) */
+      /** @description Cannot delete: has judge results (CONFLICT); or the change would leave stored configs of the problem refused by their plugins, listed in `details.issues`, which `force=true` makes anyway (CONFIG_WOULD_BREAK) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -12233,7 +12284,14 @@ export interface operations {
   };
   updateTestCase: {
     parameters: {
-      query?: never;
+      query?: {
+        /**
+         * @description Make the change even if it leaves stored configs of the problem
+         *     refused by their plugins, which it otherwise refuses with
+         *     `CONFIG_WOULD_BREAK`; the problem's config issues then list them.
+         */
+        force?: boolean;
+      };
       header?: never;
       path: {
         /** @description Problem ID */
@@ -12294,7 +12352,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Duplicate label in problem (CONFLICT) */
+      /** @description Duplicate label in problem (CONFLICT); or the change would leave stored configs of the problem refused by their plugins, listed in `details.issues`, which `force=true` makes anyway (CONFIG_WOULD_BREAK) */
       409: {
         headers: {
           [name: string]: unknown;

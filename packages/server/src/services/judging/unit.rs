@@ -61,6 +61,19 @@ impl Unit {
         }
     }
 
+    /// `SET` items, each led by `, `, that claiming a row of this unit adds to
+    /// its lease columns: a judgement records whether its problem's stored
+    /// configs had issues (`problem.config_issues`) when it was dispatched.
+    fn claim_sets(self) -> &'static str {
+        match self {
+            Unit::Judgement => {
+                ", config_issues = (SELECT p.config_issues FROM submission s \
+                 JOIN problem p ON p.id = s.problem_id WHERE s.id = t.submission_id)"
+            }
+            Unit::CodeRun => "",
+        }
+    }
+
     /// `SET` items that finalize a row of this unit.
     fn finalize_sets(self) -> &'static str {
         match self {
@@ -285,7 +298,7 @@ fn claim_statement(unit: Unit, server_id: &str, limit: u32, local: &[String]) ->
         "WITH picked AS (SELECT u.id FROM {from} WHERE u.{queued} AND {handled} AND {open} \
                          ORDER BY {order} LIMIT {limit} {lock}), \
               moved AS (UPDATE {table} t SET status = '{pending}', owner_server_id = {owner}, \
-                            lease_heartbeat_at = NOW(), leased_at = NOW() \
+                            lease_heartbeat_at = NOW(), leased_at = NOW(){claim_sets} \
                         FROM picked WHERE t.id = picked.id RETURNING t.*){mirror} \
          SELECT moved.*, (SELECT last_value FROM {epoch}) AS plugin_config_epoch FROM moved",
         from = unit.scan_from(),
@@ -295,6 +308,7 @@ fn claim_statement(unit: Unit, server_id: &str, limit: u32, local: &[String]) ->
         lock = unit.scan_lock(),
         table = unit.table(),
         pending = SubmissionStatus::Pending,
+        claim_sets = unit.claim_sets(),
         mirror = unit.cascade(),
         epoch = crate::services::plugin_config_cache::EPOCH_SEQUENCE,
     ))
