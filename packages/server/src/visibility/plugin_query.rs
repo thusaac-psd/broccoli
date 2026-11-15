@@ -1109,6 +1109,7 @@ mod tests {
                 Some(CannedResponse::Trap) => Err(PluginError::ExecutionFailed {
                     plugin_id: plugin_id.to_string(),
                     func_name: func_name.to_string(),
+                    depth: 1,
                     message: "deliberate test trap".to_string(),
                 }),
                 Some(CannedResponse::Unavailable) => Err(PluginError::Unavailable {
