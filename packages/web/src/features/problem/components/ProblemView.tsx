@@ -378,15 +378,17 @@ export default function ProblemView({
     );
   }
 
-  if (error && !problem && outage) {
+  // The contest says its plugin is out: what that plugin governs of the
+  // problem is withheld, so there is nothing to wait for.
+  if (outage && !problem) {
     return (
       <div className="flex flex-col flex-1 min-h-0">
         <ProblemViewHeader
           problem={undefined}
           headerId={headerId}
           contestId={contestId}
+          withheld={<ContestOutageNotice contest={contest} />}
         />
-        <ContestOutageNotice contest={contest} className="mx-4 md:mx-6" />
       </div>
     );
   }

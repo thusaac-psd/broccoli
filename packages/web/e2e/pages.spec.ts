@@ -168,6 +168,9 @@ test('a contest whose plugin is disabled says so on every page', async ({
   await page.goto('/contests/3/problems/1');
   await expect(page.getByText(notice).first()).toBeVisible();
   await expect(page.getByRole('button', { name: /submit/i })).toHaveCount(0);
+  // The withheld title and limits are not shown as placeholders.
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('A');
+  await expect(page.getByText('—', { exact: true })).toHaveCount(0);
 
   await page.goto('/contests/3/rankings');
   await expect(page.getByText(notice)).toBeVisible();
