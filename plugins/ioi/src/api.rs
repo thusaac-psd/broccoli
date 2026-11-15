@@ -9,7 +9,7 @@ use broccoli_server_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_arch = "wasm32")]
-use crate::config::{ContestConfig, resolve_tc_label, round_score};
+use crate::config::{ContestConfig, round_score};
 // Used by both the wasm32 handlers below and subtask_scores_access_decision,
 // which is deliberately reachable under `#[cfg(test)]` too (see its doc
 // comment) so `cargo test` can exercise the feedback-level access matrix.
@@ -31,7 +31,7 @@ use crate::scoreboard::{
     scoreboard_entries_tied,
 };
 #[cfg(target_arch = "wasm32")]
-use crate::subtasks::problem_max_score;
+use crate::subtasks::{member_ids_and_weights, problem_max_score};
 #[cfg(target_arch = "wasm32")]
 use crate::tokens::{TokenState, available_tokens, next_regen_elapsed_min};
 #[cfg(target_arch = "wasm32")]
@@ -256,26 +256,11 @@ pub(crate) fn handle_task_config(
         (FeedbackLevel::Full, false) => unreachable!(),
     };
 
-    let needs_label_map = expose_full_task_feedback;
-    let label_map: Option<HashMap<String, i32>> = if needs_label_map {
-        Some(
-            test_cases_list
-                .iter()
-                .map(|tc| (resolve_tc_label(tc), tc.id))
-                .collect(),
-        )
+    let (label_map, test_case_max_scores) = if expose_full_task_feedback {
+        let (ids, weights) = member_ids_and_weights(&effective_subtasks, &test_cases_list);
+        (Some(ids), Some(weights))
     } else {
-        None
-    };
-    let test_case_max_scores: Option<HashMap<String, f64>> = if needs_label_map {
-        Some(
-            test_cases_list
-                .iter()
-                .map(|tc| (resolve_tc_label(tc), tc.score))
-                .collect(),
-        )
-    } else {
-        None
+        (None, None)
     };
 
     let mut body = serde_json::json!({

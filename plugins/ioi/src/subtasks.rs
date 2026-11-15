@@ -71,11 +71,40 @@ impl<'a> MemberIndex<'a> {
             Member::Unknown | Member::Ambiguous(_) => None,
         }
     }
+
+    /// The weight member `key` carries in a `sum` subtask: the score of the
+    /// test case it names, or 0 when it names none. A broken member adds
+    /// nothing to a subtask's total weight, so the penalty for it does not
+    /// depend on the scale of the other members' weights.
+    pub fn weight(&self, key: &str) -> f64 {
+        self.test_case(key).map_or(0.0, |tc| tc.score)
+    }
+}
+
+/// Every subtask member key, with the test case id it names (when it names
+/// exactly one) and the weight it carries ([`MemberIndex::weight`]). The task
+/// config route serves these, so what a contestant sees per member agrees
+/// with what scoring counted.
+pub fn member_ids_and_weights(
+    subtask_defs: &[SubtaskDef],
+    test_cases: &[TestCaseRow],
+) -> (HashMap<String, i32>, HashMap<String, f64>) {
+    let members = MemberIndex::new(test_cases);
+    let mut ids = HashMap::new();
+    let mut weights = HashMap::new();
+    for key in subtask_defs.iter().flat_map(|def| def.test_cases.iter()) {
+        if let Some(tc) = members.test_case(key) {
+            ids.insert(key.clone(), tc.id);
+        }
+        weights.insert(key.clone(), members.weight(key));
+    }
+    (ids, weights)
 }
 
 /// Score a single subtask using the configured method. `tc_scores` holds
 /// each judged test case's score ratio by its id. A member that names no
-/// single test case ([`MemberIndex`]) scores 0 at weight 1.
+/// single test case ([`MemberIndex`]) scores 0 at weight 0: it fails a
+/// `group_min` or `group_mul` subtask and adds nothing to a `sum` one.
 pub fn score_subtask(
     def: &SubtaskDef,
     test_cases: &[TestCaseRow],
@@ -93,9 +122,12 @@ fn score_subtask_with_index(
     let resolved: Vec<(f64, f64)> = def
         .test_cases
         .iter()
-        .map(|key| match members.test_case(key) {
-            Some(tc) => (tc_scores.get(&tc.id).copied().unwrap_or(0.0), tc.score),
-            None => (0.0, 1.0),
+        .map(|key| {
+            let ratio = members
+                .test_case(key)
+                .and_then(|tc| tc_scores.get(&tc.id).copied())
+                .unwrap_or(0.0);
+            (ratio, members.weight(key))
         })
         .collect();
     let score = if resolved.is_empty() {
@@ -607,5 +639,43 @@ mod tests {
         let by_id = make_def(SubtaskScoringMethod::GroupMin, 60.0, vec!["t1", "3"]);
         assert_eq!(score_subtask(&by_id, &cases, &scores).score, 60.0);
         assert_eq!(compute_scoring_test_case_ids(&[by_id], &cases), vec![1, 3]);
+    }
+
+    /// A sum subtask's score for a member that names no test case, or names
+    /// two, does not depend on the scale of the other members' weights: the
+    /// broken member weighs 0, and the per-member weights the task config
+    /// serves say the same.
+    #[test]
+    fn a_broken_sum_member_weighs_nothing_at_any_weight_scale() {
+        for weight in [25.0, 1.0] {
+            let cases = vec![
+                test_case(1, weight, false, Some("a")),
+                test_case(2, weight, false, Some("b")),
+                test_case(3, weight, false, Some("dup")),
+                test_case(4, weight, false, Some("dup")),
+            ];
+            let def = make_def(
+                SubtaskScoringMethod::Sum,
+                100.0,
+                vec!["a", "b", "missing", "dup"],
+            );
+            let scores: HashMap<i32, f64> = [(1, 1.0), (2, 0.0), (3, 1.0), (4, 1.0)]
+                .into_iter()
+                .collect();
+
+            assert_eq!(
+                score_subtask(&def, &cases, &scores).score,
+                50.0,
+                "weight scale {weight}"
+            );
+
+            let (ids, weights) = member_ids_and_weights(&[def], &cases);
+            assert_eq!(ids.get("a"), Some(&1));
+            assert_eq!(ids.get("missing"), None);
+            assert_eq!(ids.get("dup"), None);
+            assert_eq!(weights.get("a"), Some(&weight));
+            assert_eq!(weights.get("missing"), Some(&0.0));
+            assert_eq!(weights.get("dup"), Some(&0.0));
+        }
     }
 }
