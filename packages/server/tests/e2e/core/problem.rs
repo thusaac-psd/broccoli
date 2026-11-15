@@ -366,7 +366,7 @@ mod test_case_crud {
         assert_eq!(res.status, 200);
         assert_eq!(res.body["id"], tc_id);
         assert_eq!(res.body["input"], "5\n1 2 3 4 5");
-        assert_eq!(res.body["expected_output"], "15");
+        assert_eq!(res.body["expected_output"], "15\n");
     }
 
     #[tokio::test(flavor = "multi_thread")]

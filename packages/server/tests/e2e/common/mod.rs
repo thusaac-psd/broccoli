@@ -1079,8 +1079,12 @@ impl E2eTestApp {
         res.id()
     }
 
+    /// A sample test case for a sum problem: input `5\n1 2 3 4 5`, answer
+    /// `15\n`. The answer is what a correct solution prints, final newline
+    /// included, because [`Self::create_problem`] judges with the byte-exact
+    /// `exact` checker.
     pub async fn create_test_case(&self, problem_id: i32, token: &str) -> i32 {
-        self.create_test_case_with(problem_id, "5\n1 2 3 4 5", "15", 10, true, token)
+        self.create_test_case_with(problem_id, "5\n1 2 3 4 5", "15\n", 10, true, token)
             .await
     }
 

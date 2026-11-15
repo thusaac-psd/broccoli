@@ -381,12 +381,10 @@ async fn stored(app: &E2eTestApp, id: i32) -> server::entity::submission::Model 
         .unwrap()
 }
 
-/// The submission was judged: a verdict of its own, not a system error. (The
-/// mock sandbox runs the checker from the host's `/tools`, so its verdict is
-/// whatever that finds; isolate judges `CPP_SUM` Accepted.)
-fn assert_judged(res: &test_support::TestResponse) {
+/// The submission was judged and `CPP_SUM` was accepted.
+fn assert_accepted(res: &test_support::TestResponse) {
     assert_eq!(res.body["status"], "Judged", "{}", res.text);
-    assert_ne!(res.body["verdict"], "SystemError", "{}", res.text);
+    assert_eq!(res.body["result"]["verdict"], "Accepted", "{}", res.text);
 }
 
 /// A worker without its platform tools takes no work, so in a fleet with a
@@ -416,7 +414,7 @@ async fn a_worker_without_platform_tools_leaves_every_submission_to_one_that_has
     }
     for id in ids {
         let res = app.wait_for_submission_terminal(id, &contestant, 60).await;
-        assert_judged(&res);
+        assert_accepted(&res);
         let row = stored(&app, id).await;
         assert_eq!(row.system_error_retries, 0);
         assert_eq!(row.judge_epoch, 0, "judged on its first attempt");
@@ -462,7 +460,7 @@ async fn a_lone_worker_without_platform_tools_leaves_submissions_queued_until_it
         std::fs::copy(healthy.join(tool), tools.join(tool)).unwrap();
     }
     let res = app.wait_for_submission_terminal(id, &contestant, 120).await;
-    assert_judged(&res);
+    assert_accepted(&res);
     let row = stored(&app, id).await;
     assert_eq!(row.system_error_retries, 0);
     assert_eq!(row.judge_epoch, 0, "judged on its first attempt");
