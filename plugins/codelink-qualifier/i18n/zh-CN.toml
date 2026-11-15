@@ -3,7 +3,6 @@
 'codelink-qualifier.rules.order' = '按最终 AC 提交的提交时间分配名额，时间完全相同时按提交 ID 排序。未获得计分名额的 AC 不计入晋级条件。'
 'codelink-qualifier.loading' = '正在加载 Codelink 榜单…'
 'codelink-qualifier.loadError' = '无法加载榜单。'
-'codelink-qualifier.stale' = '刷新失败，当前显示的榜单可能已过期。'
 'codelink-qualifier.refresh' = '刷新'
 'codelink-qualifier.points' = '{points} 分'
 'codelink-qualifier.autoRefresh' = '自动刷新（{seconds} 秒）'

@@ -1,5 +1,5 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { Badge, Button } from '@broccoli/web-sdk/ui';
+import { Badge, Button, RefreshFailedNotice } from '@broccoli/web-sdk/ui';
 
 import type { ContestInfoResponse } from './types';
 import { useCodelinkQuery } from './useCodelinkQuery';
@@ -47,9 +47,7 @@ export function CodelinkContestInfo({ contestId }: { contestId?: number }) {
         })}
       </p>
       {isError && (
-        <p role="alert" className="mt-2 text-sm text-destructive">
-          {t('codelink-qualifier.stale')}
-        </p>
+        <RefreshFailedNotice retry={() => void refetch()} className="mt-2" />
       )}
       <p className="mt-2 text-sm text-muted-foreground">
         {t('codelink-qualifier.rules.order')}

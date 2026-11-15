@@ -15,7 +15,7 @@ const NO_SCOREBOARD = 'This contest has no scoreboard to show.';
 const ICPC = '**/api/v1/p/icpc/api/plugins/icpc/contests/1';
 const IOI = '**/api/v1/p/ioi/api/plugins/ioi/contests/4';
 
-async function open(page: Page, plugin: 'icpc' | 'ioi') {
+async function open(page: Page, plugin: 'icpc' | 'ioi' | 'codelink-bracket') {
   await page.clock.install({ time: NOW });
   await mockApi(page, 'contestant', { plugins: [plugin] });
 }
@@ -104,3 +104,21 @@ for (const [plugin, path, url] of [
     await expect(page.getByRole('cell', { name: 'Alice' })).toBeVisible();
   });
 }
+
+test('a Codelink bracket whose refreshes fail keeps the bracket and says it is not current', async ({
+  page,
+}) => {
+  await open(page, 'codelink-bracket');
+  await page.goto('/contests/5/rankings');
+  const bracket = page.getByText('The bracket has not been set up yet.');
+  await expect(bracket).toBeVisible();
+
+  await page.route(
+    '**/api/v1/p/codelink-bracket/api/plugins/codelink-bracket/contests/5/bracket',
+    (route) => route.fulfill(UNAVAILABLE),
+  );
+  await runClockUntil(page, () =>
+    expect(page.getByText('Could not refresh')).toBeVisible({ timeout: 500 }),
+  );
+  await expect(bracket).toBeVisible();
+});

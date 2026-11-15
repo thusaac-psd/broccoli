@@ -134,6 +134,11 @@ const contest = (
 });
 
 const RUNNING = contest(1, 'Spring Training Contest 2026', -60, 240, 'running');
+/** A running contest of the Codelink bracket format. */
+const BRACKET_RUNNING = {
+  ...contest(5, 'Bracket Final', -60, 240, 'running'),
+  contest_type: 'codelink-bracket',
+};
 /** A running contest of the IOI format. */
 const IOI_RUNNING = {
   ...contest(4, 'IOI Practice Round', -60, 240, 'running'),
@@ -373,6 +378,11 @@ export const PLUGIN_ROUTES: [string, RegExp, Handler][] = [
       ],
     }),
   ],
+  [
+    'GET',
+    /^\/p\/codelink-bracket\/api\/plugins\/codelink-bracket\/contests\/5\/bracket$/,
+    () => ({ player_count: 0, matches: [] }),
+  ],
 ];
 
 /** `METHOD path-pattern` to the body answered. */
@@ -411,6 +421,7 @@ const ROUTES: [string, RegExp, Handler][] = [
   ],
   ['GET', /^\/contests\/2$/, () => UPCOMING],
   ['GET', /^\/contests\/4$/, () => IOI_RUNNING],
+  ['GET', /^\/contests\/5$/, () => BRACKET_RUNNING],
   ['GET', /^\/contests\/3$/, () => DISABLED],
   [
     'GET',

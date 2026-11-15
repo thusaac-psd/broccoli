@@ -274,6 +274,15 @@ export default defineConfig([
             'A query read without its failure shows a failed fetch as empty: render it through QueryView or queryState().',
         },
         {
+          // A poll read field by field without its failure never says that
+          // its refreshes fail: the last good copy ages on screen and reads
+          // as current.
+          selector:
+            'VariableDeclarator[init.callee.name="useQuery"]:has(ObjectExpression > Property[key.name="refetchInterval"]) > ObjectPattern:not(:has(> Property[key.name=/^(error|isError|status)$/]))',
+          message:
+            'A polling query read without its failure hides that its refreshes fail: render it through QueryView, or queryState() and RefreshFailedNotice.',
+        },
+        {
           // A fixed `refetchInterval` asks a failing server as often as a
           // healthy one, from every seat at once, and flickers a page that
           // has nothing to show between loading and failed.
