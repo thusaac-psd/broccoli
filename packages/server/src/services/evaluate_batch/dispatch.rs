@@ -25,10 +25,28 @@ impl EvaluatorStage {
     }
 }
 
+/// Start an evaluate batch that reads its problem's inputs itself.
 pub async fn start_evaluate_batch(
     caller_plugin_id: String,
     deps: EvaluateHostDeps,
     input: StartEvaluateBatchInput,
+) -> anyhow::Result<String> {
+    start_evaluate_batch_with(
+        caller_plugin_id,
+        deps,
+        input,
+        &ProblemInputsCache::default(),
+    )
+    .await
+}
+
+/// Start an evaluate batch whose problem inputs come from `problem` (see
+/// [`ProblemInputsCache`]).
+pub async fn start_evaluate_batch_with(
+    caller_plugin_id: String,
+    deps: EvaluateHostDeps,
+    input: StartEvaluateBatchInput,
+    problem: &ProblemInputsCache,
 ) -> anyhow::Result<String> {
     let problem_type = input.problem_type.clone();
     let evaluator = {
@@ -38,7 +56,7 @@ pub async fn start_evaluate_batch(
     .ok_or_else(|| anyhow!("No evaluator registered for problem type: {}", problem_type))?;
 
     let batch_id = Uuid::new_v4().to_string();
-    let resolved_inputs = resolve_inputs(&deps, input, &batch_id).await?;
+    let resolved_inputs = resolve_inputs(&deps, input, &batch_id, problem).await?;
     let test_case_count = resolved_inputs.len();
 
     let batch_tx = deps.evaluate_batches.open(
@@ -431,41 +449,105 @@ async fn call_interpret(
         .with_context(|| "Failed to deserialize evaluator interpret verdicts")
 }
 
+/// What every test case of one problem in one language is judged with,
+/// besides the case itself: the problem's checker format and its additional
+/// files for the language.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct ProblemInputs {
+    problem_id: i32,
+    solution_language: String,
+    pub(super) checker_format: String,
+    pub(super) additional_file_refs: Vec<FileRef>,
+}
+
+impl ProblemInputs {
+    async fn load(
+        db: &common::db::DatabaseConnection,
+        problem_id: i32,
+        solution_language: &str,
+    ) -> anyhow::Result<Self> {
+        let problem_model = problem::Entity::find_by_id(problem_id)
+            .one(db)
+            .await
+            .with_context(|| "Failed to query problem")?
+            .ok_or_else(|| anyhow!("Problem {} not found", problem_id))?;
+
+        let additional_file_refs = additional_file::Entity::find()
+            .filter(additional_file::Column::ProblemId.eq(problem_id))
+            .filter(additional_file::Column::Language.eq(solution_language))
+            .all(db)
+            .await
+            .with_context(|| "Failed to query additional_files")?
+            .into_iter()
+            .map(|r| FileRef {
+                filename: r.path,
+                content_type: r.content_type,
+                blob_hash: r.content_hash,
+                read_token: None,
+            })
+            .collect();
+
+        // The host does not inline the checker source: a checker plugin reads
+        // it from the problem-scoped namespace its manifest declares
+        // `checker_source`.
+        Ok(Self {
+            problem_id,
+            solution_language: solution_language.to_string(),
+            checker_format: problem_model.checker_format,
+            additional_file_refs,
+        })
+    }
+}
+
+/// The problem inputs of the evaluate batches of one judging session, read
+/// once, by its first batch: a session that judges one test case per window
+/// reads its problem once, not once per case, and judges every case with the
+/// inputs it started with even when the problem changes meanwhile. A batch of
+/// another problem or language reads its own and leaves these alone.
+#[derive(Default)]
+pub struct ProblemInputsCache(tokio::sync::Mutex<Option<Arc<ProblemInputs>>>);
+
+impl ProblemInputsCache {
+    pub(super) async fn get(
+        &self,
+        db: &common::db::DatabaseConnection,
+        problem_id: i32,
+        solution_language: &str,
+    ) -> anyhow::Result<Arc<ProblemInputs>> {
+        let mut cached = self.0.lock().await;
+        match cached.as_ref() {
+            Some(inputs)
+                if inputs.problem_id == problem_id
+                    && inputs.solution_language == solution_language =>
+            {
+                Ok(inputs.clone())
+            }
+            Some(_) => Ok(Arc::new(
+                ProblemInputs::load(db, problem_id, solution_language).await?,
+            )),
+            None => {
+                let inputs =
+                    Arc::new(ProblemInputs::load(db, problem_id, solution_language).await?);
+                *cached = Some(inputs.clone());
+                Ok(inputs)
+            }
+        }
+    }
+}
+
 async fn resolve_inputs(
     deps: &EvaluateHostDeps,
     input: StartEvaluateBatchInput,
     evaluate_batch_id: &str,
+    problem: &ProblemInputsCache,
 ) -> anyhow::Result<Vec<BuildEvalOpsInput>> {
     let Some((problem_id, solution_language)) = validate_batch_shape(&input.test_cases)? else {
         return Ok(Vec::new());
     };
-
-    let problem_model = problem::Entity::find_by_id(problem_id)
-        .one(&deps.db)
-        .await
-        .with_context(|| "Failed to query problem")?
-        .ok_or_else(|| anyhow!("Problem {} not found", problem_id))?;
-
-    let af_models = additional_file::Entity::find()
-        .filter(additional_file::Column::ProblemId.eq(problem_id))
-        .filter(additional_file::Column::Language.eq(solution_language.as_str()))
-        .all(&deps.db)
-        .await
-        .with_context(|| "Failed to query additional_files")?;
-
-    let additional_file_refs: Vec<FileRef> = af_models
-        .into_iter()
-        .map(|r| FileRef {
-            filename: r.path,
-            content_type: r.content_type,
-            blob_hash: r.content_hash,
-            read_token: None,
-        })
-        .collect();
-
-    let checker_format = problem_model.checker_format.clone();
-    // The host does not inline the checker source: a checker plugin reads it
-    // from the problem-scoped namespace its manifest declares `checker_source`.
+    let problem = problem
+        .get(&deps.db, problem_id, &solution_language)
+        .await?;
+    let checker_format = &problem.checker_format;
 
     let test_cases = input.test_cases;
     let db_needed_ids: Vec<i32> = test_cases
@@ -545,7 +627,7 @@ async fn resolve_inputs(
             test_input: test_input.file,
             expected_output: expected_output.file,
             checker_format: tc_checker_format,
-            additional_file_refs: additional_file_refs.clone(),
+            additional_file_refs: problem.additional_file_refs.clone(),
             target_worker_id: tc.target_worker_id,
         });
     }
