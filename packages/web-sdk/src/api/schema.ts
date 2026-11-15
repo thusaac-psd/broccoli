@@ -3291,6 +3291,14 @@ export interface components {
       };
       unresolved_by_message_type: components['schemas']['MessageTypeCounts'];
     };
+    /**
+     * @description What went wrong. `code` and `details` are the contract a client reads;
+     *     `message` is an English diagnostic for logs and for people reading the
+     *     API, the same whatever `Accept-Language` says. A client shows the user its
+     *     own text for `code` (the web app's `apiError.<code>` keys) and, for a
+     *     refused config, for each `details.fields[]` entry (its `kind` and
+     *     parameters, or the plugin's translation `key`).
+     */
     ErrorBody: {
       /**
        * @description Machine-readable error code. Any POST sent with an `Idempotency-Key`
@@ -3306,8 +3314,16 @@ export interface components {
        * @example VALIDATION_ERROR
        */
       code: string;
+      /**
+       * @description What the code is about, in a shape each code documents: for example
+       *     `fields` for `VALIDATION_ERROR` on a config, `issues` for
+       *     `CONFIG_WOULD_BREAK`.
+       */
       details?: unknown;
-      /** @example Title must be 1-256 characters */
+      /**
+       * @description An English description for logs and developers; never translated.
+       * @example Title must be 1-256 characters
+       */
       message: string;
     };
     /** @description A single evaluator registration entry. */

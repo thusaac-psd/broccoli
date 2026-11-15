@@ -76,7 +76,7 @@ pub(crate) fn metrics_test_lock() -> std::sync::MutexGuard<'static, ()> {
     info(
         title = "Broccoli Online Judge API",
         version = "1.0.0",
-        description = "API for the Broccoli online judge system"
+        description = "API for the Broccoli online judge system. A failed request answers with an `ErrorBody`: clients act on and translate its `code` (and `details`), while its `message` is an English diagnostic whatever the request's `Accept-Language`."
     ),
     servers(
         (url = "/api/v1", description = "Version 1 API server")
