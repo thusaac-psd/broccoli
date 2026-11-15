@@ -232,7 +232,7 @@ impl PluginLifecycle {
     /// What keeps a submission of `contest_type` in `status` parked, if
     /// anything: one not yet finished, of a type whose every provider is
     /// disabled fleet-wide, waits queued until a provider is enabled (see
-    /// [`contest_type_open`]).
+    /// `contest_type_open`).
     pub fn parked_by(
         &self,
         contest_type: &str,
