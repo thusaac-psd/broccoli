@@ -264,7 +264,7 @@ const SUBMISSION_DETAIL = {
 };
 
 /** A submission that failed to judge, with the operator's diagnostics. */
-const SYSTEM_ERROR_DETAIL = {
+export const SYSTEM_ERROR_DETAIL = {
   ...submission(5, 2, 'SystemError'),
   status: 'SystemError',
   files: [{ filename: 'main.cpp', content: 'int main() { return 0; }\n' }],

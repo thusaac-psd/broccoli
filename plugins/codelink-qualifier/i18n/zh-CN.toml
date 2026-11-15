@@ -50,3 +50,6 @@
 'plugin.codelink-qualifier.name' = 'Codelink 资格赛'
 'plugin.codelink-qualifier.description' = 'Codelink 资格赛：可配置计分档位与晋级线。'
 'identifier.contestType.codelink-qualifier' = 'Codelink 资格赛'
+
+# Judge error codes (a judgement records them as `codelink-qualifier.<CODE>`)
+'codelink-qualifier.apiError.CODELINK_NO_TEST_CASES' = 'Codelink 题目需要测试点，而该题目没有。请联系比赛工作人员添加测试点。'

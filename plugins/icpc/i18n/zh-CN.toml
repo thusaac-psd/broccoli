@@ -33,3 +33,6 @@
 'plugin.icpc.name' = 'ICPC 赛制'
 'plugin.icpc.description' = 'ICPC 赛制：按通过与否评判，并计罚时。'
 'icpc.scoreboard.table' = '排行榜'
+
+# Judge error codes (a judgement records them as `icpc.<CODE>`)
+'icpc.apiError.NO_TEST_CASES' = '该题目没有测试点，无法评测。请联系比赛工作人员添加测试点。'

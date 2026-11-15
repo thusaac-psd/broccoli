@@ -1,6 +1,6 @@
 import {
-  errorCodeKey,
   errorKind,
+  judgeErrorText,
   useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -110,7 +110,8 @@ export function SubmissionResult({
             {t('result.systemMessage')}
           </div>
           <p className="text-destructive">
-            {(result.error_code && lookup(errorCodeKey(result.error_code))) ||
+            {(result.error_code &&
+              judgeErrorText(result.error_code, { lookup })) ||
               t('result.systemErrorGeneric', {
                 reference: result.judgement_id ?? submission.id,
               })}

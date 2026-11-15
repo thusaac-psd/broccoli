@@ -83,6 +83,23 @@ HookResponse::reject(
 
 没有翻译的代码会退回到其 HTTP 状态类别的通用提示。插件自有 HTTP 路由返回的错误使用同样的查找方式。
 
+## 翻译评测错误
+
+插件以系统错误结束的评测记录或代码运行可以带上 `error_code`。主机会把它记在插件的 ID 下，因此 `icpc` 给出的 `NO_TEST_CASES` 会存为 `icpc.NO_TEST_CASES`，既不会与其他插件的代码冲突，也不会被当作主机自己的代码。界面依次显示词条目录中 `<插件 ID>.apiError.<CODE>` 的翻译、主机的 `apiError.<CODE>`，都没有时显示通用的系统错误提示：
+
+```rust
+host.submission.update(&SubmissionUpdate {
+    verdict: Some(Some(Verdict::SystemError)),
+    error_code: Some(Some("NO_TEST_CASES".to_string())),
+    error_message: Some(Some("Problem has no test cases; cannot be judged".to_string())),
+    // ...
+})?;
+```
+
+```toml
+'icpc.apiError.NO_TEST_CASES' = '该题目没有测试点，无法评测。请联系比赛工作人员添加测试点。'
+```
+
 ## 翻译清单和配置模式
 
 插件列表和配置表单显示清单中的 `name` 和 `description`，以及配置模式中的 `title` 和 `description` 字段。它们在词条目录中各有一个键；缺少该键时显示 `plugin.toml` 中的原文。

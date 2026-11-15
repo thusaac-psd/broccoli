@@ -1,5 +1,5 @@
 import {
-  errorCodeKey,
+  judgeErrorText,
   useApiClient,
   useErrorMessage,
 } from '@broccoli/web-sdk/api';
@@ -289,7 +289,7 @@ function JudgementRow({
 
   // The code's translation, when the packs have one.
   const errorCodeText = judgement.error_code
-    ? lookup(errorCodeKey(judgement.error_code))
+    ? judgeErrorText(judgement.error_code, { lookup })
     : undefined;
 
   const detailsVisible =

@@ -10,15 +10,32 @@ use common::StatusPhase;
 use super::fault::Recorded;
 use super::unit::{Unit, cascade};
 
-/// `update` as the dispatch's platform `fault` decides it: an update that
-/// ends the judgement as a system error carries the fault's code and
-/// description, whatever the plugin reported, so the system-error retry
-/// treats it by its cause (see [`super::fault`]). Any other update is
-/// unchanged.
-pub(crate) fn with_dispatch_fault(
+/// A plugin's error code as the host records it on a judgement or code run:
+/// `<plugin_id>.<code>`. A plugin id holds no `.`, so the UI reads the raising
+/// plugin off the code and looks its translation up in that plugin's pack
+/// (`<plugin_id>.apiError.<code>`), and two plugins' codes never collide. A
+/// recorded code without a plugin id is the host's own: a plugin never writes
+/// one, so it cannot pass for a platform fault or a refusal (see
+/// [`super::fault`]).
+pub(crate) fn plugin_error_code(plugin_id: &str, code: &str) -> String {
+    format!("{plugin_id}.{code}")
+}
+
+fn attributed(plugin_id: &str, code: Option<Option<String>>) -> Option<Option<String>> {
+    code.map(|code| code.map(|code| plugin_error_code(plugin_id, &code)))
+}
+
+/// `update` from `plugin_id` as the host records it: its error code is the
+/// plugin's ([`plugin_error_code`]), unless the dispatch's platform `fault`
+/// decides it. An update that ends the judgement as a system error under a
+/// fault carries the fault's code and description, whatever the plugin
+/// reported, so the system-error retry treats it by its cause.
+fn as_recorded(
+    plugin_id: &str,
     mut update: SubmissionUpdate,
     fault: Option<Recorded>,
 ) -> SubmissionUpdate {
+    update.error_code = attributed(plugin_id, update.error_code);
     let Some(fault) = fault else {
         return update;
     };
@@ -49,16 +66,20 @@ pub(crate) fn write_fence(alias: &str, judgement: &str, submission: &str, epoch:
     )
 }
 
-/// One statement for a plugin's progress or result update: writes the
-/// judged columns onto the caller's judgement behind [`write_fence`],
+/// One statement for `plugin_id`'s progress or result update, as the host
+/// records it under the dispatch's platform `fault` ([`as_recorded`]): writes
+/// the judged columns onto the caller's judgement behind [`write_fence`],
 /// finalizes it on a terminal status, and rewrites the submission cache when
 /// the judgement is current. Its row count is the number of judgements
 /// written (0 when the fence rejected the write). `None` when the update
 /// sets nothing.
 pub(crate) fn judgement_write<P: SqlBindSink>(
     p: &mut P,
-    update: &SubmissionUpdate,
+    plugin_id: &str,
+    update: SubmissionUpdate,
+    fault: Option<Recorded>,
 ) -> Option<String> {
+    let update = as_recorded(plugin_id, update, fault);
     let mut sets = Vec::new();
     push_judge_sets(
         p,
@@ -110,10 +131,16 @@ pub(crate) fn code_run_write_fence(alias: &str, code_run: &str, epoch: &str) -> 
     )
 }
 
-/// The statement for a plugin's code-run progress or result update, behind
-/// [`code_run_write_fence`]; a terminal status stamps `judged_at`. Its row
+/// The statement for `plugin_id`'s code-run progress or result update, behind
+/// [`code_run_write_fence`], its error code the plugin's
+/// ([`plugin_error_code`]); a terminal status stamps `judged_at`. Its row
 /// count is the number of runs written. `None` when the update sets nothing.
-pub(crate) fn code_run_write<P: SqlBindSink>(p: &mut P, update: &CodeRunUpdate) -> Option<String> {
+pub(crate) fn code_run_write<P: SqlBindSink>(
+    p: &mut P,
+    plugin_id: &str,
+    mut update: CodeRunUpdate,
+) -> Option<String> {
+    update.error_code = attributed(plugin_id, update.error_code);
     let mut sets = Vec::new();
     push_judge_sets(
         p,
@@ -223,6 +250,7 @@ fn push_double_opt_str<P: SqlBindSink>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::SubmissionDlqErrorCode;
     use common::worker::OperationFault;
 
     fn update(status: SubmissionStatus, verdict: Option<Verdict>) -> SubmissionUpdate {
@@ -246,7 +274,8 @@ mod tests {
 
     #[test]
     fn a_system_error_under_a_platform_fault_carries_the_faults_code() {
-        let u = with_dispatch_fault(
+        let u = as_recorded(
+            "judge",
             update(SubmissionStatus::Judged, Some(Verdict::SystemError)),
             lost(),
         );
@@ -255,19 +284,48 @@ mod tests {
     }
 
     #[test]
-    fn other_updates_keep_what_the_plugin_wrote() {
+    fn other_updates_record_the_plugins_code_under_its_id() {
         for u in [
             update(SubmissionStatus::Judged, Some(Verdict::Accepted)),
             update(SubmissionStatus::Running, Some(Verdict::SystemError)),
         ] {
-            let before = u.error_code.clone();
-            assert_eq!(with_dispatch_fault(u, lost()).error_code, before);
+            assert_eq!(
+                as_recorded("judge", u, lost()).error_code,
+                Some(Some("judge.PLUGIN_SAYS".into()))
+            );
         }
         let u = update(SubmissionStatus::Judged, Some(Verdict::SystemError));
         assert_eq!(
-            with_dispatch_fault(u, None).error_code,
-            Some(Some("PLUGIN_SAYS".into()))
+            as_recorded("judge", u, None).error_code,
+            Some(Some("judge.PLUGIN_SAYS".into()))
         );
+    }
+
+    /// A plugin cannot record a host code: one that names a platform fault
+    /// or a refusal is recorded under the plugin's id, so it never reads as
+    /// one of the host's classes.
+    #[test]
+    fn a_plugin_writing_a_host_code_records_it_as_its_own() {
+        for code in [SubmissionDlqErrorCode::PLUGIN_REFUSED, "OPERATION_LOST"] {
+            let mut u = update(SubmissionStatus::Judged, Some(Verdict::SystemError));
+            u.error_code = Some(Some(code.into()));
+            assert_eq!(
+                as_recorded("judge", u, None).error_code,
+                Some(Some(format!("judge.{code}")))
+            );
+        }
+        let cleared = SubmissionUpdate {
+            error_code: Some(None),
+            ..update(SubmissionStatus::Judged, Some(Verdict::Accepted))
+        };
+        assert_eq!(as_recorded("judge", cleared, None).error_code, Some(None));
+        let run = CodeRunUpdate {
+            error_code: Some(Some("NO_TEST_CASES".into())),
+            ..Default::default()
+        };
+        let mut p = RecordingSink { args: Vec::new() };
+        code_run_write(&mut p, "judge", run).expect("sets");
+        assert_eq!(p.args[0], serde_json::json!("judge.NO_TEST_CASES"));
     }
 
     /// Records bound values and hands back sequential `$N` placeholders, so a
