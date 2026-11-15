@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use crate::config::round_score;
 use crate::config::{SubtaskDef, SubtaskScoringMethod};
 use crate::persist::persist_results;
+use crate::subtasks::MemberIndex;
 use crate::subtasks::score_all_subtasks;
-use crate::subtasks::test_case_reference_keys;
 
 /// Per-test-case outcome from evaluation, with raw (0..1) scores.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,21 +74,11 @@ impl ContestJudge for IoiJudge {
     }
 
     fn finalize(&self, host: &Host, progress: &JudgeProgress<'_>) -> Result<(), SdkError> {
-        let id_to_keys: HashMap<i32, Vec<String>> = self
-            .all_test_cases
-            .iter()
-            .map(|tc| (tc.id, test_case_reference_keys(tc)))
-            .collect();
-        let tc_scores: HashMap<String, f64> = progress
+        let tc_scores: HashMap<i32, f64> = progress
             .outcomes
             .iter()
             .filter(|outcome| !outcome.verdict.is_skipped_or_cancelled())
-            .flat_map(|outcome| {
-                id_to_keys
-                    .get(&outcome.test_case_id)
-                    .into_iter()
-                    .flat_map(|keys| keys.iter().cloned().map(|key| (key, outcome.score)))
-            })
+            .map(|outcome| (outcome.test_case_id, outcome.score))
             .collect();
         let subtask_results =
             score_all_subtasks(&self.subtask_defs, &self.all_test_cases, &tc_scores);
@@ -190,25 +180,17 @@ struct SubtaskShortCircuit {
 
 impl SubtaskShortCircuit {
     fn new(subtask_defs: &[SubtaskDef], test_cases: &[TestCaseRow]) -> Self {
-        let mut key_to_ids: HashMap<String, Vec<i32>> = HashMap::new();
-        for tc in test_cases {
-            for key in test_case_reference_keys(tc) {
-                key_to_ids.entry(key).or_default().push(tc.id);
-            }
-        }
-
+        let members = MemberIndex::new(test_cases);
         let mut subtask_cases = vec![HashSet::new(); subtask_defs.len()];
         let mut case_subtasks: HashMap<i32, Vec<usize>> = HashMap::new();
 
         for (subtask_idx, def) in subtask_defs.iter().enumerate() {
             for key in &def.test_cases {
-                let Some(ids) = key_to_ids.get(key) else {
+                let Some(tc) = members.test_case(key) else {
                     continue;
                 };
-                for id in ids {
-                    if subtask_cases[subtask_idx].insert(*id) {
-                        case_subtasks.entry(*id).or_default().push(subtask_idx);
-                    }
+                if subtask_cases[subtask_idx].insert(tc.id) {
+                    case_subtasks.entry(tc.id).or_default().push(subtask_idx);
                 }
             }
         }

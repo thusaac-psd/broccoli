@@ -2,12 +2,12 @@
 //! scoring in [`crate::subtasks`] would silently score wrong for the
 //! problem's current test data.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use broccoli_server_sdk::types::{ConfigViolation, TestCaseRow};
 
 use crate::config::{SubtaskDef, SubtaskScoringMethod};
-use crate::subtasks::test_case_reference_keys;
+use crate::subtasks::{Member, MemberIndex};
 
 /// Every reason `subtasks` cannot score `test_cases` as written:
 ///
@@ -23,12 +23,7 @@ pub fn task_violations(
     subtasks: &[SubtaskDef],
     test_cases: &[TestCaseRow],
 ) -> Vec<ConfigViolation> {
-    let mut cases_by_key: HashMap<String, Vec<&TestCaseRow>> = HashMap::new();
-    for tc in test_cases {
-        for key in test_case_reference_keys(tc) {
-            cases_by_key.entry(key).or_default().push(tc);
-        }
-    }
+    let index = MemberIndex::new(test_cases);
 
     let mut violations = Vec::new();
     let mut names = HashSet::new();
@@ -59,8 +54,8 @@ pub fn task_violations(
         let mut all_resolved = true;
         for (j, key) in subtask.test_cases.iter().enumerate() {
             let path = format!("subtasks[{i}].test_cases[{j}]");
-            match cases_by_key.get(key).map(Vec::as_slice) {
-                None | Some([]) => {
+            match index.resolve(key) {
+                Member::Unknown => {
                     all_resolved = false;
                     violations.push(
                         ConfigViolation::new(
@@ -71,7 +66,7 @@ pub fn task_violations(
                         .param("testCase", key.as_str()),
                     );
                 }
-                Some([tc]) => {
+                Member::One(tc) => {
                     if members.insert(tc.id) {
                         total_weight += tc.score.max(0.0);
                     } else {
@@ -85,19 +80,16 @@ pub fn task_violations(
                         );
                     }
                 }
-                Some(several) => {
+                Member::Ambiguous(count) => {
                     all_resolved = false;
                     violations.push(
                         ConfigViolation::new(
                             path,
-                            format!(
-                                "'{key}' names {} test cases; refer to one by its id",
-                                several.len()
-                            ),
+                            format!("'{key}' names {count} test cases; refer to one by its id"),
                         )
                         .key("ioi.config.task.ambiguousTestCase")
                         .param("testCase", key.as_str())
-                        .param("count", several.len()),
+                        .param("count", count),
                     );
                 }
             }

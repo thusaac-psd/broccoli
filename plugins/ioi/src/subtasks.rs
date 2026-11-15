@@ -23,74 +23,101 @@ pub fn test_case_reference_keys(tc: &TestCaseRow) -> Vec<String> {
     }
 }
 
-fn test_case_weights(test_cases: &[TestCaseRow]) -> HashMap<String, f64> {
-    let mut weights = HashMap::new();
-    for tc in test_cases {
-        for key in test_case_reference_keys(tc) {
-            weights.insert(key, tc.score);
-        }
-    }
-    weights
+/// What a subtask member key (a test case's label, or its numeric id) names.
+#[derive(Debug, Clone, Copy)]
+pub enum Member<'a> {
+    /// Exactly one test case has the key.
+    One(&'a TestCaseRow),
+    /// No test case has it.
+    Unknown,
+    /// This many test cases share it as their label.
+    Ambiguous(usize),
 }
 
-/// Make every scored test case reachable by BOTH its label and its numeric id.
-/// The incoming `tc_scores` map is keyed by label only, but a `SubtaskDef` may
-/// reference a member by numeric id (e.g. `"42"`); without this the id-keyed
-/// lookup misses and the member silently scores 0 (dragging `Sum`, zeroing
-/// `GroupMin`/`GroupMul`). Mirrors [`test_case_weights`], which already keys by
-/// both via [`test_case_reference_keys`].
-fn scores_by_all_keys(
-    test_cases: &[TestCaseRow],
-    tc_scores: &HashMap<String, f64>,
-) -> HashMap<String, f64> {
-    let mut out = tc_scores.clone();
-    for tc in test_cases {
-        if let Some(&score) = tc_scores.get(&resolve_tc_label(tc)) {
+/// Resolves subtask members to test cases, by the one rule every reader of a
+/// subtask uses (the validator, scoring, weights, the short-circuit and the
+/// scoring set): a key names a test case only when exactly one test case has
+/// it. A label two test cases share names none of them. The validator
+/// refuses such a member ("refer to one by its id"); when a test-data change
+/// is forced past that check, the member counts as missing everywhere, never
+/// as one of the cases that happen to share the label.
+pub struct MemberIndex<'a> {
+    by_key: HashMap<String, Vec<&'a TestCaseRow>>,
+}
+
+impl<'a> MemberIndex<'a> {
+    pub fn new(test_cases: &'a [TestCaseRow]) -> Self {
+        let mut by_key: HashMap<String, Vec<&'a TestCaseRow>> = HashMap::new();
+        for tc in test_cases {
             for key in test_case_reference_keys(tc) {
-                out.entry(key).or_insert(score);
+                by_key.entry(key).or_default().push(tc);
             }
         }
+        Self { by_key }
     }
-    out
+
+    pub fn resolve(&self, key: &str) -> Member<'a> {
+        match self.by_key.get(key).map(Vec::as_slice) {
+            None | Some([]) => Member::Unknown,
+            Some([tc]) => Member::One(tc),
+            Some(several) => Member::Ambiguous(several.len()),
+        }
+    }
+
+    /// The test case `key` names, if it names exactly one.
+    pub fn test_case(&self, key: &str) -> Option<&'a TestCaseRow> {
+        match self.resolve(key) {
+            Member::One(tc) => Some(tc),
+            Member::Unknown | Member::Ambiguous(_) => None,
+        }
+    }
 }
 
-/// Score a single subtask using the configured method.
+/// Score a single subtask using the configured method. `tc_scores` holds
+/// each judged test case's score ratio by its id. A member that names no
+/// single test case ([`MemberIndex`]) scores 0 at weight 1.
 pub fn score_subtask(
     def: &SubtaskDef,
     test_cases: &[TestCaseRow],
-    tc_scores: &HashMap<String, f64>,
+    tc_scores: &HashMap<i32, f64>,
 ) -> SubtaskResult {
-    let weights = test_case_weights(test_cases);
-    let tc_scores = scores_by_all_keys(test_cases, tc_scores);
-    score_subtask_with_weights(def, &weights, &tc_scores)
+    score_subtask_with_index(def, &MemberIndex::new(test_cases), tc_scores)
 }
 
-fn score_subtask_with_weights(
+fn score_subtask_with_index(
     def: &SubtaskDef,
-    test_case_weights: &HashMap<String, f64>,
-    tc_scores: &HashMap<String, f64>,
+    members: &MemberIndex<'_>,
+    tc_scores: &HashMap<i32, f64>,
 ) -> SubtaskResult {
-    let score = if def.test_cases.is_empty() {
+    // Each member's score ratio and weight.
+    let resolved: Vec<(f64, f64)> = def
+        .test_cases
+        .iter()
+        .map(|key| match members.test_case(key) {
+            Some(tc) => (tc_scores.get(&tc.id).copied().unwrap_or(0.0), tc.score),
+            None => (0.0, 1.0),
+        })
+        .collect();
+    let score = if resolved.is_empty() {
         0.0
     } else {
         match def.scoring_method {
             SubtaskScoringMethod::GroupMin => {
-                let all_pass = def
-                    .test_cases
-                    .iter()
-                    .all(|label| tc_scores.get(label).copied().unwrap_or(0.0) >= 1.0);
-                if all_pass { def.max_score } else { 0.0 }
+                if resolved.iter().all(|(score, _)| *score >= 1.0) {
+                    def.max_score
+                } else {
+                    0.0
+                }
             }
             SubtaskScoringMethod::Sum => {
                 let mut total_weight = 0.0;
                 let mut weighted_sum = 0.0;
-                for label in &def.test_cases {
-                    let weight = test_case_weights.get(label).copied().unwrap_or(1.0);
-                    if weight <= 0.0 {
+                for (score, weight) in &resolved {
+                    if *weight <= 0.0 {
                         continue;
                     }
                     total_weight += weight;
-                    weighted_sum += tc_scores.get(label).copied().unwrap_or(0.0) * weight;
+                    weighted_sum += score * weight;
                 }
                 if total_weight > 0.0 {
                     def.max_score * (weighted_sum / total_weight)
@@ -99,11 +126,7 @@ fn score_subtask_with_weights(
                 }
             }
             SubtaskScoringMethod::GroupMul => {
-                let product: f64 = def
-                    .test_cases
-                    .iter()
-                    .map(|label| tc_scores.get(label).copied().unwrap_or(0.0))
-                    .product();
+                let product: f64 = resolved.iter().map(|(score, _)| score).product();
                 def.max_score * product
             }
         }
@@ -116,16 +139,16 @@ fn score_subtask_with_weights(
     }
 }
 
-/// Score all subtasks and return results in definition order.
+/// Score all subtasks and return results in definition order. `tc_scores`
+/// holds each judged test case's score ratio by its id.
 pub fn score_all_subtasks(
     defs: &[SubtaskDef],
     test_cases: &[TestCaseRow],
-    tc_scores: &HashMap<String, f64>,
+    tc_scores: &HashMap<i32, f64>,
 ) -> Vec<SubtaskResult> {
-    let weights = test_case_weights(test_cases);
-    let tc_scores = scores_by_all_keys(test_cases, tc_scores);
+    let members = MemberIndex::new(test_cases);
     defs.iter()
-        .map(|def| score_subtask_with_weights(def, &weights, &tc_scores))
+        .map(|def| score_subtask_with_index(def, &members, tc_scores))
         .collect()
 }
 
@@ -133,25 +156,22 @@ pub fn score_all_subtasks(
 ///
 /// Samples are retained for feedback. Positive-score cases are retained for
 /// normal scoring. Zero-score non-samples are retained only when an explicit
-/// subtask references their resolved label or numeric ID.
+/// subtask member names them ([`MemberIndex`]).
 pub fn compute_scoring_test_case_ids(
     subtask_defs: &[SubtaskDef],
     test_cases: &[TestCaseRow],
 ) -> Vec<i32> {
-    let subtask_labels: HashSet<&str> = subtask_defs
+    let members = MemberIndex::new(test_cases);
+    let in_a_subtask: HashSet<i32> = subtask_defs
         .iter()
-        .flat_map(|def| def.test_cases.iter().map(String::as_str))
+        .flat_map(|def| def.test_cases.iter())
+        .filter_map(|key| members.test_case(key))
+        .map(|tc| tc.id)
         .collect();
 
     test_cases
         .iter()
-        .filter(|tc| {
-            tc.is_sample
-                || tc.score > 0.0
-                || test_case_reference_keys(tc)
-                    .iter()
-                    .any(|key| subtask_labels.contains(key.as_str()))
-        })
+        .filter(|tc| tc.is_sample || tc.score > 0.0 || in_a_subtask.contains(&tc.id))
         .map(|tc| tc.id)
         .collect()
 }
@@ -210,8 +230,19 @@ mod tests {
         }
     }
 
-    fn scores(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
-        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    /// A weight-1 test case for every member of `def` (each member key is
+    /// the case's numeric id), and `pairs` as the score ratios by id.
+    fn scored(def: &SubtaskDef, pairs: &[(&str, f64)]) -> (Vec<TestCaseRow>, HashMap<i32, f64>) {
+        let cases = def
+            .test_cases
+            .iter()
+            .map(|key| test_case(key.parse().unwrap(), 1.0, false, None))
+            .collect();
+        let scores = pairs
+            .iter()
+            .map(|(k, v)| (k.parse().unwrap(), *v))
+            .collect();
+        (cases, scores)
     }
 
     fn test_case(id: i32, score: f64, is_sample: bool, label: Option<&str>) -> TestCaseRow {
@@ -231,16 +262,16 @@ mod tests {
     #[test]
     fn group_min_all_pass() {
         let def = make_def(SubtaskScoringMethod::GroupMin, 30.0, vec!["1", "2", "3"]);
-        let s = scores(&[("1", 1.0), ("2", 1.0), ("3", 1.0)]);
-        let result = score_subtask(&def, &[], &s);
+        let (cases, s) = scored(&def, &[("1", 1.0), ("2", 1.0), ("3", 1.0)]);
+        let result = score_subtask(&def, &cases, &s);
         assert_eq!(result.score, 30.0);
     }
 
     #[test]
     fn group_min_one_fail() {
         let def = make_def(SubtaskScoringMethod::GroupMin, 30.0, vec!["1", "2", "3"]);
-        let s = scores(&[("1", 1.0), ("2", 0.5), ("3", 1.0)]);
-        let result = score_subtask(&def, &[], &s);
+        let (cases, s) = scored(&def, &[("1", 1.0), ("2", 0.5), ("3", 1.0)]);
+        let result = score_subtask(&def, &cases, &s);
         assert_eq!(result.score, 0.0);
     }
 
@@ -255,26 +286,25 @@ mod tests {
     #[test]
     fn sum_proportional() {
         let def = make_def(SubtaskScoringMethod::Sum, 100.0, vec!["1", "2"]);
-        let s = scores(&[("1", 1.0), ("2", 1.0)]);
-        let result = score_subtask(&def, &[], &s);
+        let (cases, s) = scored(&def, &[("1", 1.0), ("2", 1.0)]);
+        let result = score_subtask(&def, &cases, &s);
         assert_eq!(result.score, 100.0);
     }
 
     #[test]
     fn sum_partial_scores() {
         let def = make_def(SubtaskScoringMethod::Sum, 100.0, vec!["1", "2"]);
-        let s = scores(&[("1", 0.5), ("2", 0.5)]);
-        let result = score_subtask(&def, &[], &s);
+        let (cases, s) = scored(&def, &[("1", 0.5), ("2", 0.5)]);
+        let result = score_subtask(&def, &cases, &s);
         assert_eq!(result.score, 50.0);
     }
 
     #[test]
-    fn subtask_member_referenced_by_numeric_id_scores_via_label_keyed_map() {
+    fn a_member_scores_the_same_named_by_its_label_or_its_id() {
         // tc id=42 has an explicit label "big_01"; the score map is keyed by
-        // label. A subtask that references the member by its numeric id must
-        // still resolve it through the label.
+        // id, and a member resolves to the case whichever key names it.
         let tc = test_case(42, 30.0, false, Some("big_01"));
-        let s = scores(&[("big_01", 1.0)]);
+        let s: HashMap<i32, f64> = [(42, 1.0)].into_iter().collect();
 
         let group_min = make_def(SubtaskScoringMethod::GroupMin, 30.0, vec!["42"]);
         assert_eq!(
@@ -289,8 +319,8 @@ mod tests {
     #[test]
     fn sum_all_zero() {
         let def = make_def(SubtaskScoringMethod::Sum, 100.0, vec!["1", "2"]);
-        let s = scores(&[("1", 0.0), ("2", 0.0)]);
-        let result = score_subtask(&def, &[], &s);
+        let (cases, s) = scored(&def, &[("1", 0.0), ("2", 0.0)]);
+        let result = score_subtask(&def, &cases, &s);
         assert_eq!(result.score, 0.0);
     }
 
@@ -305,32 +335,32 @@ mod tests {
     #[test]
     fn group_mul_all_perfect() {
         let def = make_def(SubtaskScoringMethod::GroupMul, 50.0, vec!["1", "2"]);
-        let s = scores(&[("1", 1.0), ("2", 1.0)]);
-        let result = score_subtask(&def, &[], &s);
+        let (cases, s) = scored(&def, &[("1", 1.0), ("2", 1.0)]);
+        let result = score_subtask(&def, &cases, &s);
         assert_eq!(result.score, 50.0);
     }
 
     #[test]
     fn group_mul_one_half() {
         let def = make_def(SubtaskScoringMethod::GroupMul, 50.0, vec!["1", "2"]);
-        let s = scores(&[("1", 1.0), ("2", 0.5)]);
-        let result = score_subtask(&def, &[], &s);
+        let (cases, s) = scored(&def, &[("1", 1.0), ("2", 0.5)]);
+        let result = score_subtask(&def, &cases, &s);
         assert_eq!(result.score, 25.0);
     }
 
     #[test]
     fn group_mul_one_zero() {
         let def = make_def(SubtaskScoringMethod::GroupMul, 50.0, vec!["1", "2"]);
-        let s = scores(&[("1", 1.0), ("2", 0.0)]);
-        let result = score_subtask(&def, &[], &s);
+        let (cases, s) = scored(&def, &[("1", 1.0), ("2", 0.0)]);
+        let result = score_subtask(&def, &cases, &s);
         assert_eq!(result.score, 0.0);
     }
 
     #[test]
     fn missing_tc_treated_as_zero() {
         let def = make_def(SubtaskScoringMethod::Sum, 100.0, vec!["1", "2", "3"]);
-        let s = scores(&[("1", 1.0)]); // 2 and 3 missing
-        let result = score_subtask(&def, &[], &s);
+        let (cases, s) = scored(&def, &[("1", 1.0)]); // 2 and 3 unjudged
+        let result = score_subtask(&def, &cases, &s);
         // 100 * (1.0 + 0.0 + 0.0) / 3 = 33.33
         assert_eq!(result.score, 33.33);
     }
@@ -537,5 +567,45 @@ mod tests {
         let ids = compute_scoring_test_case_ids(&defs, &test_cases);
 
         assert_eq!(ids, vec![2]);
+    }
+
+    /// A label two test cases share (a test-data change forced past the
+    /// validator) names neither: scoring, the scoring set and the validator
+    /// agree it is unresolved, and naming one of the cases by id resolves it
+    /// everywhere.
+    #[test]
+    fn every_reader_resolves_an_ambiguous_label_the_same_way() {
+        let cases = vec![
+            test_case(1, 40.0, false, Some("t1")),
+            test_case(2, 0.0, false, Some("dup")),
+            test_case(3, 0.0, false, Some("dup")),
+        ];
+        let members = MemberIndex::new(&cases);
+        assert!(matches!(members.resolve("dup"), Member::Ambiguous(2)));
+        assert!(members.test_case("dup").is_none());
+        assert_eq!(members.test_case("3").map(|tc| tc.id), Some(3));
+
+        let scores: HashMap<i32, f64> = [(1, 1.0), (2, 1.0), (3, 1.0)].into_iter().collect();
+        let by_label = make_def(SubtaskScoringMethod::GroupMin, 60.0, vec!["t1", "dup"]);
+        assert_eq!(
+            score_subtask(&by_label, &cases, &scores).score,
+            0.0,
+            "an ambiguous member counts as missing, never as one of the cases"
+        );
+        // Zero-weight cases stay out of the scoring set unless a member names
+        // exactly one of them.
+        assert_eq!(compute_scoring_test_case_ids(&[by_label], &cases), vec![1]);
+        assert!(
+            crate::validate::task_violations(
+                &[make_def(SubtaskScoringMethod::GroupMin, 60.0, vec!["dup"])],
+                &cases
+            )
+            .iter()
+            .any(|v| v.key.as_deref() == Some("ioi.config.task.ambiguousTestCase"))
+        );
+
+        let by_id = make_def(SubtaskScoringMethod::GroupMin, 60.0, vec!["t1", "3"]);
+        assert_eq!(score_subtask(&by_id, &cases, &scores).score, 60.0);
+        assert_eq!(compute_scoring_test_case_ids(&[by_id], &cases), vec![1, 3]);
     }
 }
