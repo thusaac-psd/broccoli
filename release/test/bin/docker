@@ -3,7 +3,9 @@
 # --node-id`, the question installers ask an image for this machine's node id
 # (lib/host.sh node_id_of). It answers ROLE-fake-HASH, HASH taken from the
 # machine-id file mounted at /run/broccoli/host/machine-id, so a test sees which
-# machine's id reached the image. FAKE_ENGINE_FAIL=1 makes the image fail.
+# machine's id reached the image. A question without `--pull never` fails, as
+# an engine reaching for a registry from a closed lab would.
+# FAKE_ENGINE_FAIL=1 makes the image fail.
 # Every other command goes to the real engine further down PATH. Release tests
 # put this directory first on PATH.
 set -euo pipefail
@@ -16,7 +18,7 @@ case " $* " in
     exec "$real" "$@" ;;
 esac
 shift
-role="" seed="no-machine-id" asked=0
+role="" seed="no-machine-id" asked=0 pull=
 while [ $# -gt 0 ]; do
   case "$1" in
     --entrypoint) role="${2##*/broccoli-}"; shift 2 ;;
@@ -26,10 +28,12 @@ while [ $# -gt 0 ]; do
           src="${2#*source=}"; seed="$(cat "${src%%,*}")" ;;
       esac
       shift 2 ;;
+    --pull) pull="$2"; shift 2 ;;
     --node-id) asked=1; shift ;;
     *) shift ;;
   esac
 done
 [ "$asked" = 1 ] && [ -n "$role" ] || { echo "fake engine: not a node id question" >&2; exit 1; }
+[ "$pull" = never ] || { echo "fake engine: would pull the image (pass --pull never)" >&2; exit 1; }
 [ -z "${FAKE_ENGINE_FAIL:-}" ] || exit 1
 printf '%s-fake-%s\n' "$role" "$(printf '%s' "$seed" | sha256sum | cut -c1-8)"
