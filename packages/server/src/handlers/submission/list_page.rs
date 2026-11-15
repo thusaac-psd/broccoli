@@ -345,7 +345,7 @@ pub(super) async fn visible_page(
     };
 
     let rows = shown.into_iter().map(|(_, row)| row).collect();
-    let items = build_submission_list_items(&state.db, rows, diagnostics).await?;
+    let items = build_submission_list_items(state, rows, diagnostics).await?;
     let data = apply_filter_to_list(kernel, items).await?;
     Ok((
         data,

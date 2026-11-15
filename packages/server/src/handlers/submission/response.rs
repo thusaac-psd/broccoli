@@ -2,7 +2,6 @@ use common::db::DatabaseConnection;
 use std::collections::HashMap;
 
 use broccoli_server_sdk::permissions as perm;
-use chrono::{DateTime, Utc};
 use common::SubmissionStatus;
 use common::storage::BlobStore;
 use sea_orm::prelude::Expr;
@@ -20,6 +19,7 @@ use crate::error::AppError;
 use crate::extractors::auth::AuthUser;
 use crate::models::shared::{PageWindow, Pagination};
 use crate::models::submission::*;
+use crate::state::AppState;
 use crate::utils::contest::compile_output_public;
 use crate::utils::diagnostics::{Diagnostics, is_system_error};
 use crate::utils::judging::files_from_json;
@@ -29,10 +29,11 @@ use crate::utils::test_case_body::{
 use common::Verdict;
 
 pub(super) async fn build_submission_list_items(
-    db: &DatabaseConnection,
+    state: &AppState,
     submissions: Vec<(submission::Model, Option<user::Model>)>,
     diagnostics: Diagnostics,
 ) -> Result<Vec<SubmissionListItem>, AppError> {
+    let db = &state.db;
     use std::collections::HashMap;
 
     if submissions.is_empty() {
@@ -68,7 +69,7 @@ pub(super) async fn build_submission_list_items(
             problem_id: sub.problem_id,
             problem_title: problem_model.title.clone(),
             contest_id: sub.contest_id,
-            contest_type: sub.contest_type,
+            contest_type: sub.contest_type.clone(),
             judge_epoch: sub.judge_epoch,
             target_worker_id: diagnostics.platform(sub.target_worker_id),
             created_at: sub.created_at,
@@ -76,6 +77,9 @@ pub(super) async fn build_submission_list_items(
             time_used: sub.time_used,
             memory_used: sub.memory_used,
             withheld: None,
+            plugin_outage: state
+                .plugin_lifecycle
+                .parked_by(&sub.contest_type, sub.status),
         });
     }
 
@@ -434,31 +438,21 @@ impl SubmissionContext {
 }
 
 pub(super) async fn build_submission_response(
-    db: &DatabaseConnection,
-    blob_store: &dyn BlobStore,
-    now: DateTime<Utc>,
+    state: &AppState,
     sub: submission::Model,
     visibility: Option<VisibilityContext>,
 ) -> Result<SubmissionResponse, AppError> {
-    build_submission_response_with_cases(
-        db,
-        blob_store,
-        now,
-        sub,
-        visibility,
-        &SubmissionResultQuery::default(),
-    )
-    .await
+    build_submission_response_with_cases(state, sub, visibility, &SubmissionResultQuery::default())
+        .await
 }
 
 pub(super) async fn build_submission_response_with_cases(
-    db: &DatabaseConnection,
-    blob_store: &dyn BlobStore,
-    now: DateTime<Utc>,
+    state: &AppState,
     sub: submission::Model,
     visibility: Option<VisibilityContext>,
     query: &SubmissionResultQuery,
 ) -> Result<SubmissionResponse, AppError> {
+    let (db, blob_store, now) = (&state.db, &*state.blob_store, state.clock.now());
     let context = SubmissionContext::load(db, &sub).await?;
     let contest_model = context.contest;
 
@@ -551,6 +545,9 @@ pub(super) async fn build_submission_response_with_cases(
         created_at: sub.created_at,
         result: result_response,
         withheld: None,
+        plugin_outage: state
+            .plugin_lifecycle
+            .parked_by(&sub.contest_type, sub.status),
     })
 }
 
