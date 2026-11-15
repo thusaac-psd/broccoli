@@ -163,9 +163,18 @@ class Topology:
             "BROCCOLI__MQ__URL": self.a.redis_url,
             "BROCCOLI__OBSERVABILITY__LOG_FORMAT": "json",
             "BROCCOLI__OBSERVABILITY__LOG_FILTER": "warn",
-            "BROCCOLI_CONFIG": "/nonexistent/perf",
+            # An empty file of its own, so the run reads only these settings
+            # and never the repository's config/config.toml.
+            "BROCCOLI_CONFIG": str(self.config_file()),
         })
         return env
+
+    def config_file(self) -> Path:
+        path = self.logdir / "config.toml"
+        if not path.exists():
+            self.logdir.mkdir(parents=True, exist_ok=True)
+            path.write_text("")
+        return path.resolve()
 
     def start(self) -> None:
         self.logdir.mkdir(parents=True, exist_ok=True)
