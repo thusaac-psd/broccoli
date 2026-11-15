@@ -7,6 +7,7 @@ pub mod device_auth;
 pub mod evaluate_batch;
 pub mod ip_quota;
 pub mod judging;
+pub mod judging_sessions;
 pub mod operation_batch;
 pub mod plugin_config;
 pub mod plugin_config_cache;

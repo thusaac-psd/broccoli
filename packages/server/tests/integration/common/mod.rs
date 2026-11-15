@@ -779,6 +779,7 @@ impl TestApp {
                 redis_client: None,
                 worker_slots: Default::default(),
                 plugin_config_cache: plugin_config_cache.clone(),
+                judging_sessions: Default::default(),
             },
             Some(test_metrics.clone()),
         )

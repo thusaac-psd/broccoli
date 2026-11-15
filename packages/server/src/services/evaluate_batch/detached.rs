@@ -13,12 +13,13 @@ pub fn start_detached_windowed_evaluate(
     let session = DetachedEvaluateSession {
         session_id: session_id.clone(),
     };
-    tokio::spawn(run_detached_windowed_evaluate(
-        caller_plugin_id,
-        deps,
-        session_id,
-        input,
-    ));
+    // Counted from now: the session ends only after it has finalized its
+    // judgement and run the after-judging hooks.
+    let running = deps.judging_sessions.enter();
+    tokio::spawn(async move {
+        let _running = running;
+        run_detached_windowed_evaluate(caller_plugin_id, deps, session_id, input).await;
+    });
     Ok(session)
 }
 
