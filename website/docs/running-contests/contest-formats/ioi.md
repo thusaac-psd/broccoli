@@ -36,12 +36,6 @@ worth 0 points: it fails a `group_min` or `group_mul` subtask, and adds nothing
 to a `sum` subtask, which the subtask's other tests score as if it were not
 there. The problem's config issues list the entry until the config is fixed.
 
-A problem in an IOI contest that cannot be judged yet, because it has no test
-cases or none is judged (none is a sample, scores, or belongs to a subtask), is
-listed on its config issues and the contest's as soon as it joins the contest,
-whether or not a task config is saved. The task config still saves meanwhile,
-and the issue clears once the test data is ready.
-
 - `group_min`, the subtask scores its full max score only when every test in
   it passes, otherwise it scores zero. This is stricter than CMS GroupMin,
   which scales the subtask by its lowest test outcome, so a subtask with a
@@ -57,10 +51,14 @@ case that is not a sample and is worth more than zero points, with a max
 score equal to the sum of those points.
 
 A problem none of whose subtasks can score is not judged: every submission
-to it ends as a system error that stands (`NOTHING_TO_SCORE`), and the
-problem's config issues say so. A subtask can score when its max score is
-above zero and one of its labels names a test case of the problem, one worth
-more than zero points for a `sum` subtask.
+to it ends as a system error that stands (`NOTHING_TO_SCORE`), as does every
+submission to a problem with no test cases (`NO_TEST_CASES`). A subtask can
+score when its max score is above zero and one of its labels names a test
+case of the problem, one worth more than zero points for a `sum` subtask.
+Either kind of problem is listed on its config issues and the contest's as
+soon as it joins an IOI contest, whether or not a task config is saved. The
+task config still saves meanwhile, and the issue clears once the test data
+and the subtasks let the problem score.
 
 Partial credit inside a subtask only appears when the checker scores a test
 as a fraction, for example a testlib points checker. The built in

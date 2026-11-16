@@ -26,28 +26,22 @@ use crate::subtasks::{Member, MemberIndex, Unjudgeable, unjudgeable};
 ///
 /// Its issue, which leaves the config stored and lists the problem on its
 /// config issues, is a problem judging would refuse outright
-/// ([`unjudgeable`]): one with no test cases yet, or none that is judged.
-/// Neither is wrong with the subtasks, and the host checks the defaults
-/// (no subtasks) of every problem in an IOI contest, so it shows before
-/// anyone submits.
+/// ([`unjudgeable`]), in the words the refused submission records: one with
+/// no test cases yet, or none of whose subtasks can score. The config still
+/// saves, so staff can fix the test data and the subtasks in either order,
+/// and the host checks the defaults (no subtasks) of every problem in an IOI
+/// contest, so it shows before anyone submits.
 pub fn check_task(subtasks: &[SubtaskDef], test_cases: &[TestCaseRow]) -> ConfigValidateOutput {
-    let issues = match unjudgeable(subtasks, test_cases) {
-        Some(Unjudgeable::NoTestCases) => vec![
-            ConfigViolation::new(
-                "subtasks",
-                "the problem has no test cases, so it cannot be judged",
-            )
-            .key("ioi.config.task.problemHasNoTestCases"),
-        ],
-        Some(Unjudgeable::NothingToScore) => vec![
-            ConfigViolation::new(
-                "subtasks",
-                "no test case is judged: none is a sample, scores or belongs to a subtask",
-            )
-            .key("ioi.config.task.nothingToScore"),
-        ],
-        None => Vec::new(),
-    };
+    let issues = unjudgeable(subtasks, test_cases)
+        .map(|reason| {
+            let key = match reason {
+                Unjudgeable::NoTestCases => "ioi.config.task.problemHasNoTestCases",
+                Unjudgeable::NothingToScore => "ioi.config.task.nothingToScore",
+            };
+            ConfigViolation::new("subtasks", reason.message()).key(key)
+        })
+        .into_iter()
+        .collect();
     ConfigValidateOutput {
         errors: subtask_violations(subtasks, test_cases),
         issues,
