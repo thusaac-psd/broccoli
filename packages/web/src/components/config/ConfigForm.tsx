@@ -123,6 +123,9 @@ function ConfigFormFields({
   const [message, setMessage] = useState<{
     type: 'success' | 'error';
     text: string;
+    /** The fields a refusal names, by path. A field a plugin's slot
+     * component renders shows no inline error, so they are listed here too. */
+    fields?: [string, FieldProblem][];
   } | null>(null);
 
   const isUsingDefaultsOnly = useMemo(
@@ -190,8 +193,13 @@ function ConfigFormFields({
 
     setLoading(false);
     if (error) {
-      setErrors(serverFieldErrors(error));
-      setMessage({ type: 'error', text: t('plugins.config.saveError') });
+      const fieldErrors = serverFieldErrors(error);
+      setErrors(fieldErrors);
+      setMessage({
+        type: 'error',
+        text: t('plugins.config.saveError'),
+        fields: Object.entries(fieldErrors),
+      });
     } else {
       setStoredValues(payload);
       setFromDefaults(false);
@@ -303,6 +311,19 @@ function ConfigFormFields({
           }`}
         >
           {message.text}
+          {message.fields && message.fields.length > 0 && (
+            <ul className="mt-1 list-disc pl-5">
+              {message.fields.map(([path, problem]) => (
+                <li key={path}>
+                  {path ? (
+                    <code className="font-mono text-xs">{path}</code>
+                  ) : null}
+                  {path ? ': ' : null}
+                  {t(problem.key, problem.params)}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 

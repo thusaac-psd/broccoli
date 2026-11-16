@@ -107,6 +107,7 @@ handler = "api_station_status"
 [config.print]
 description = "Code printing settings"
 scopes = ["contest", "plugin"]
+validate = "validate_print_config"
 
 [config.print.properties.enabled]
 type = "boolean"

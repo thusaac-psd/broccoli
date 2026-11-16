@@ -43,6 +43,11 @@ pub fn validate(ns: &ConfigNamespace, config: &Value) -> Result<(), Vec<FieldErr
 /// fails this would reject its own defaults, so the plugin does not load.
 pub fn check_manifest(manifest: &PluginManifest) -> Result<(), String> {
     for (name, ns) in &manifest.config {
+        if ns.validate.is_some() && !manifest.has_server() {
+            return Err(format!(
+                "config namespace '{name}' names a validate function but the plugin has no [server] module"
+            ));
+        }
         for (field, prop) in &ns.properties {
             check_property(prop, field)
                 .map_err(|e| format!("config namespace '{name}', field {e}"))?;
@@ -458,5 +463,21 @@ mod tests {
         .unwrap();
         let err = check_manifest(&manifest).expect_err("unknown type");
         assert!(err.contains("unknown type 'int'"), "{err}");
+    }
+
+    #[test]
+    fn a_validate_function_without_a_server_module_is_refused() {
+        let manifest: PluginManifest = toml::from_str(
+            r#"
+            name = "p"
+            version = "1.0.0"
+            [config.task]
+            scopes = ["contest_problem"]
+            validate = "validate_task"
+        "#,
+        )
+        .unwrap();
+        let err = check_manifest(&manifest).expect_err("no server module");
+        assert!(err.contains("validate function"), "{err}");
     }
 }

@@ -44,15 +44,71 @@ min = 0
 ## 宿主拒绝的写入
 
 通过管理 API 或 `host.config.set*` 写入时，只有插件为该级别声明了这个命名空间、且值符合其
-schema，写入才会被接受：
+schema，写入才会被接受。管理员的写入若命名空间声明了 `validate` 函数，还必须通过它（见下文）：
 
 | 响应 | 错误码 | 情形 |
 | --- | --- | --- |
 | 404 | `CONFIG_NAMESPACE_NOT_FOUND` | 插件未安装、没有这个命名空间，或者没有为该级别声明它 |
-| 400 | `VALIDATION_ERROR` | 值不符合 schema；`details.fields` 列出每个 `{path, message}` |
+| 400 | `VALIDATION_ERROR` | 值不符合 schema，或命名空间的 `validate` 函数拒绝了它；`details.fields` 列出每个 `{path, message}` |
+| 503 | `PLUGIN_UNAVAILABLE` | 命名空间声明了 `validate` 函数，而插件此刻无法应答 |
 
 存储的值可以省略字段，读取时这些字段取默认值。升级插件改变了 schema 时，检查或上传压缩包的
 结果会在 `incompatible_configs` 中列出新 schema 拒绝的每一条已存储配置。
+
+## 拒绝 schema 表达不了的值
+
+schema 只检查类型和范围，不检查含义。一份子任务列表可以类型完全正确，却引用了题目中不存在的
+测试点，于是每份提交都得 0 分。在 `validate` 下写一个函数名，宿主就会在管理员每次写入该命名空间时，
+在 schema 检查之后、存储之前调用它：
+
+```toml
+[config.task]
+scopes = ["contest_problem"]
+validate = "validate_task_config"
+```
+
+函数收到一个 `ConfigValidateInput`：命名空间、级别、配置所属的 `contest_id` 和 `problem_id`，
+以及填好默认值的待写入值。其他需要的数据用常规的宿主函数读取，然后返回一个
+`ConfigValidateOutput`，每个问题一条 `ConfigViolation`。列表为空即接受该值：
+
+```rust
+#[plugin_fn]
+pub fn validate_task_config(input: String) -> FnResult<String> {
+    let host = Host::new();
+    let req: ConfigValidateInput = serde_json::from_str(&input)?;
+    let task: TaskConfig = req.parse()?;
+    let problem_id = req
+        .problem_id
+        .ok_or_else(|| SdkError::Other("a task config belongs to a problem".into()))?;
+    let labels = host.submission.query_test_cases(problem_id)?;
+    let errors = task
+        .subtasks
+        .iter()
+        .enumerate()
+        .flat_map(|(i, s)| s.test_cases.iter().enumerate().map(move |(j, l)| (i, j, l)))
+        .filter(|(_, _, label)| !labels.iter().any(|tc| tc.label.as_deref() == Some(label)))
+        .map(|(i, j, label)| {
+            ConfigViolation::new(
+                format!("subtasks[{i}].test_cases[{j}]"),
+                format!("this problem has no test case '{label}'"),
+            )
+        })
+        .collect();
+    Ok(serde_json::to_string(&ConfigValidateOutput { errors })?)
+}
+```
+
+宿主把每条违规作为 `VALIDATION_ERROR` 的一个字段返回，设置表单会把它显示在 `path` 指向的字段旁，
+并在保存失败的提示中一并列出。函数出错或返回无法解析的内容时，写入同样被拒绝：宿主绝不存储
+未经校验函数接受的值。
+
+插件自己用 `host.config.set*` 写入的值只按 schema 检查。这些值归插件所有，宿主不会再交给它的
+校验函数。
+
+配置存储之后，它引用的测试数据也可能变化，使配置失效。
+`GET /api/v1/problems/{id}/config/issues` 对一道题目存储的每条配置（题目级别的，以及使用该题的
+每场比赛中的）重新做同样的检查，并以 `incompatible_configs` 的格式列出被拒绝的配置。题目的测试点
+对话框会显示它们。
 
 ## 读取配置
 

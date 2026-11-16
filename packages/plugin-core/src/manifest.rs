@@ -145,6 +145,7 @@ mod tests {
                     schema: Some("config/settings.schema.toml".into()),
                     properties: HashMap::new(),
                     checker_source: false,
+                    validate: None,
                 },
             )]),
         };
@@ -188,6 +189,7 @@ mod tests {
                     schema: Some("../secret.toml".into()),
                     properties: HashMap::new(),
                     checker_source: false,
+                    validate: None,
                 },
             )]),
         };

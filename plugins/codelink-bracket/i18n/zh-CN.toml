@@ -274,3 +274,5 @@
 'codelink-bracket.notifications.reconnecting' = '正在连接小局提醒…'
 'codelink-bracket.notifications.error' = '无法显示桌面通知，请检查浏览器和系统的通知设置。'
 'codelink-bracket.notifications.view' = '查看我的对局'
+
+'apiError.NOT_IN_MATCH' = '你不是这场对局的选手。'

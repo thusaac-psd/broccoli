@@ -9,6 +9,7 @@ pub mod scoreboard;
 pub mod scoring;
 pub mod subtasks;
 pub mod tokens;
+pub mod validate;
 
 // Host/SdkError/TestCaseRow (via the prelude) and everything below are only
 // used by the wasm32-gated plugin entry points and loader helpers in this
@@ -189,4 +190,20 @@ pub fn api_scoreboard(input: String) -> FnResult<String> {
 #[plugin_fn]
 pub fn api_submission_subtask_scores(input: String) -> FnResult<String> {
     run_api_handler(&input, api::handle_submission_subtask_scores)
+}
+
+/// The `task` namespace's validate function: refuses subtasks the problem's
+/// current test cases cannot score as written.
+#[cfg(target_arch = "wasm32")]
+#[plugin_fn]
+pub fn validate_task_config(input: String) -> FnResult<String> {
+    let host = Host::new();
+    let req: ConfigValidateInput = serde_json::from_str(&input)?;
+    let task: TaskConfig = req.parse()?;
+    let problem_id = req
+        .problem_id
+        .ok_or_else(|| SdkError::Other("a task config belongs to a problem".into()))?;
+    let test_cases = host.submission.query_test_cases(problem_id)?;
+    let errors = validate::task_violations(&task.subtasks, &test_cases);
+    Ok(serde_json::to_string(&ConfigValidateOutput { errors })?)
 }

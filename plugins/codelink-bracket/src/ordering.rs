@@ -20,7 +20,7 @@ use crate::bracket;
 use crate::model::{MatchState, Phase};
 use crate::storage;
 
-/// The rejection message [`record_order`] returns once a match has left
+/// The rejection message for a ranking sent after a match has left
 /// `Phase::Ordering`. A shared constant (rather than an inline literal at
 /// each call site) so `handle_order` can pattern-match on it below to
 /// distinguish "you lost a race with `/start`" from a genuine internal
@@ -28,6 +28,48 @@ use crate::storage;
 pub(crate) const LEFT_ORDERING_PHASE_MSG: &str =
     "the match has left the ordering phase; rankings can no longer be changed";
 const ORDERING_CLOSED_MSG: &str = "The stage ordering window has closed";
+
+/// Why [`record_order`] refuses a ranking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderRejection {
+    /// The submitter is neither player of the match: they may not rank it at
+    /// all, whatever they send.
+    NotParticipant(i32),
+    /// The match has left `Phase::Ordering`.
+    LeftOrdering,
+    /// The ranking is not a permutation of the opponent's problem group.
+    NotPermutation,
+}
+
+impl OrderRejection {
+    /// The client error this rejection is: 403 `NOT_IN_MATCH` for someone
+    /// outside the match (the code the submission gate uses for the same
+    /// condition), 400 for a bad ranking from a player.
+    pub fn response(self) -> PluginHttpResponse {
+        match self {
+            OrderRejection::NotParticipant(_) => {
+                PluginHttpResponse::error_with_code(403, "NOT_IN_MATCH", self.to_string())
+            }
+            OrderRejection::LeftOrdering | OrderRejection::NotPermutation => {
+                PluginHttpResponse::error(400, self.to_string())
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for OrderRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OrderRejection::NotParticipant(player) => {
+                write!(f, "player {player} is not a participant in this match")
+            }
+            OrderRejection::LeftOrdering => f.write_str(LEFT_ORDERING_PHASE_MSG),
+            OrderRejection::NotPermutation => {
+                f.write_str("order must be a permutation of the opponent's problem group")
+            }
+        }
+    }
+}
 
 /// Whether `order` contains exactly the same problem ids as `group`,
 /// each exactly once (order of `group` itself is irrelevant).
@@ -42,7 +84,7 @@ fn is_permutation_of(order: &[i32], group: &[i32]) -> bool {
 /// Record `submitter`'s ranking of their OPPONENT's problems.
 ///
 /// `submitter` must be one of `match_state.player_a` / `match_state.player_b`
-/// -- anyone else is rejected. If `submitter` is player B, `order` must be a
+/// -- anyone else is rejected, in any phase. If `submitter` is player B, `order` must be a
 /// permutation of `match_state.group_a` (A's own problems -- B's opponent's
 /// problems, from B's point of view), and the result is written into
 /// `order_a`, the order imposed ON player A. Symmetrically for player A.
@@ -60,27 +102,22 @@ pub fn record_order(
     match_state: &mut MatchState,
     submitter: i32,
     order: Vec<i32>,
-) -> Result<(), String> {
-    if match_state.phase != Phase::Ordering {
-        return Err(LEFT_ORDERING_PHASE_MSG.to_string());
-    }
-    if submitter == match_state.player_b {
-        if !is_permutation_of(&order, &match_state.group_a) {
-            return Err("order must be a permutation of the opponent's problem group".to_string());
-        }
-        match_state.order_a = Some(order);
-        Ok(())
+) -> Result<(), OrderRejection> {
+    let (opponent_group, slot) = if submitter == match_state.player_b {
+        (&match_state.group_a, &mut match_state.order_a)
     } else if submitter == match_state.player_a {
-        if !is_permutation_of(&order, &match_state.group_b) {
-            return Err("order must be a permutation of the opponent's problem group".to_string());
-        }
-        match_state.order_b = Some(order);
-        Ok(())
+        (&match_state.group_b, &mut match_state.order_b)
     } else {
-        Err(format!(
-            "player {submitter} is not a participant in this match"
-        ))
+        return Err(OrderRejection::NotParticipant(submitter));
+    };
+    if match_state.phase != Phase::Ordering {
+        return Err(OrderRejection::LeftOrdering);
     }
+    if !is_permutation_of(&order, opponent_group) {
+        return Err(OrderRejection::NotPermutation);
+    }
+    *slot = Some(order);
+    Ok(())
 }
 
 /// Wire body for `POST /contests/{contest_id}/matches/{match_id}/order`.
@@ -141,8 +178,7 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     // see the `map_err` below the CAS closure for how a same-race rejection
     // discovered INSIDE the closure is still kept off the generic 500 path.
     let mut probe = current.clone();
-    record_order(&mut probe, submitter, body.order.clone())
-        .map_err(|msg| PluginHttpResponse::error(400, msg))?;
+    record_order(&mut probe, submitter, body.order.clone()).map_err(OrderRejection::response)?;
 
     let result = storage::update_match(host, contest_id, match_id, |m| {
         if let Some((start, end)) = ordering_window {
@@ -151,7 +187,7 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
                 return Err(SdkError::Other(ORDERING_CLOSED_MSG.into()));
             }
         }
-        record_order(m, submitter, body.order.clone()).map_err(SdkError::Other)
+        record_order(m, submitter, body.order.clone()).map_err(|r| SdkError::Other(r.to_string()))
     });
     let updated: MatchState = result.map_err(|e| match e {
         // The probe above passed (the match was still `Ordering` at that
@@ -235,13 +271,26 @@ mod tests {
         let mut m = match_in_ordering(10, 20, group_a(), group_b());
         // 999 is not in A's group at all.
         let err = record_order(&mut m, 20, vec![101, 102, 999]).unwrap_err();
-        assert!(err.contains("permutation"), "got: {err}");
+        assert_eq!(err, OrderRejection::NotPermutation);
     }
 
     #[test]
     fn rejects_a_ranking_from_someone_who_is_not_in_the_match() {
         let mut m = match_in_ordering(10, 20, group_a(), group_b());
-        assert!(record_order(&mut m, 77, vec![101, 102, 103]).is_err());
+        assert_eq!(
+            record_order(&mut m, 77, vec![101, 102, 103]),
+            Err(OrderRejection::NotParticipant(77))
+        );
+    }
+
+    #[test]
+    fn someone_outside_the_match_is_refused_even_after_it_started() {
+        let mut m = match_in_ordering(10, 20, group_a(), group_b());
+        m.phase = Phase::Playing;
+        assert_eq!(
+            record_order(&mut m, 77, vec![101, 102, 103]),
+            Err(OrderRejection::NotParticipant(77))
+        );
     }
 
     #[test]
@@ -260,7 +309,7 @@ mod tests {
         m.phase = Phase::Playing;
         m.order_a = Some(vec![101, 102, 103]);
         let err = record_order(&mut m, 20, vec![103, 102, 101]).unwrap_err();
-        assert!(err.contains("ordering phase"), "got: {err}");
+        assert_eq!(err, OrderRejection::LeftOrdering);
         assert_eq!(
             m.order_a,
             Some(vec![101, 102, 103]),
@@ -393,6 +442,19 @@ mod tests {
         assert_eq!(resp.status, 200);
         let reloaded = storage::load_match(&host, 7, 0).unwrap().unwrap();
         assert_eq!(reloaded.order_a, Some(vec![103, 102, 101]));
+    }
+
+    #[test]
+    fn a_contestant_outside_the_match_is_forbidden_to_rank_it() {
+        let host = Host::mock();
+        let m = match_in_ordering(10, 20, group_a(), group_b());
+        seed_match(&host, 7, 0, &m);
+
+        let err = handle_order(&host, &order_request(7, 0, 14, vec![103, 102, 101])).unwrap_err();
+        let resp = err.into_response();
+        assert_eq!(resp.status, 403);
+        assert_eq!(resp.body.unwrap()["code"], "NOT_IN_MATCH");
+        assert_eq!(storage::load_match(&host, 7, 0).unwrap().unwrap(), m);
     }
 
     #[test]

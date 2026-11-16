@@ -274,3 +274,5 @@
 'codelink-bracket.notifications.reconnecting' = 'Connecting to game reminders…'
 'codelink-bracket.notifications.error' = 'The desktop notification could not be shown. Check your browser and system notification settings.'
 'codelink-bracket.notifications.view' = 'View my match'
+
+'apiError.NOT_IN_MATCH' = 'You are not a player in this match.'

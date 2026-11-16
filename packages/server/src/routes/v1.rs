@@ -356,6 +356,7 @@ fn submission_routes() -> OpenApiRouter<AppState> {
 fn problem_config_routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(handlers::plugin_config::list_problem_config))
+        .routes(routes!(handlers::plugin_config::list_problem_config_issues))
         .routes(routes!(
             handlers::plugin_config::get_problem_config,
             handlers::plugin_config::upsert_problem_config,
