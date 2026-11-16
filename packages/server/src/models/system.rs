@@ -41,6 +41,10 @@ pub struct WorkerInfo {
     /// Worker process ID on its host machine.
     #[schema(example = 4242)]
     pub pid: Option<u32>,
+    /// Platform tools the worker found missing at boot: every job that needs
+    /// one fails on it with `PLATFORM_TOOL_MISSING`. Empty on a healthy worker.
+    #[schema(example = json!([]))]
+    pub missing_platform_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -65,9 +69,24 @@ pub struct QueuesResponse {
     pub queues: Vec<QueueInfo>,
 }
 
+/// Whether this server reached the message queue (Redis) for a response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueState {
+    Reachable,
+    Unreachable,
+}
+
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct SystemOverviewResponse {
+    /// Whether the worker list and queue depths below were read just now.
+    pub queue_state: QueueState,
+    /// The live workers. While the queue is unreachable: the list this server
+    /// last read, and `workers_stale` is true.
     pub workers: Vec<WorkerInfo>,
+    /// `workers` is the last list read before the queue became unreachable.
+    pub workers_stale: bool,
+    /// Queue depths; empty while the queue is unreachable.
     pub queues: Vec<QueueInfo>,
     /// Submissions currently in a non-terminal state (Pending, Compiling, Running).
     #[schema(example = 0)]

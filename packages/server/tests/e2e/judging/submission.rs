@@ -370,3 +370,79 @@ async fn concurrent_submissions_all_complete() {
 }
 
 use super::CPP_SUM;
+
+/// A worker without a platform tool cannot judge any submission that needs
+/// one, on any attempt: the submission ends after one attempt with the cause
+/// as its error code, spends no system-error retry, and the operator finds
+/// it dead-lettered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worker_without_platform_tools_fails_a_submission_once_with_the_cause() {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use server::entity::{dead_letter_message, submission};
+
+    let app = E2eTestApp::spawn_without_platform_tools().await;
+    let admin = app
+        .create_user_with_role("no_tools_admin", "pass1234", "admin")
+        .await;
+    let problem_id = app.create_public_problem(&admin, "No tools").await;
+    app.create_test_case(problem_id, &admin).await;
+    let contestant = app
+        .create_authenticated_user("no_tools_user", "pass1234")
+        .await;
+
+    let sub_id = app
+        .create_submission(problem_id, &contestant, "cpp", CPP_SUM)
+        .await;
+    let res = app
+        .wait_for_submission_terminal(sub_id, &contestant, 60)
+        .await;
+    assert_eq!(res.body["result"]["verdict"], "SystemError", "{}", res.text);
+    // The contestant sees the verdict and the judgement id to quote, never
+    // the platform's diagnostics.
+    let result = &res.body["result"];
+    assert!(result["judgement_id"].is_i64(), "{}", res.text);
+    assert!(result["error_message"].is_null(), "{}", res.text);
+    let case = &result["test_case_results"][0];
+    assert_eq!(case["verdict"], "SystemError", "{}", res.text);
+    assert!(case["checker_output"].is_null(), "{}", res.text);
+    assert!(!res.text.contains("BROCCOLI__WORKER"), "{}", res.text);
+    // The operator sees them.
+    let res = app
+        .get_with_token(&format!("/api/v1/submissions/{sub_id}"), &admin)
+        .await;
+    let operator = &res.body["result"];
+    assert!(
+        operator["error_message"]
+            .as_str()
+            .is_some_and(|m| m.contains("broccoli-compare")),
+        "{}",
+        res.text
+    );
+    assert!(
+        operator["test_case_results"][0]["checker_output"].is_string(),
+        "{}",
+        res.text
+    );
+
+    let row = submission::Entity::find_by_id(sub_id)
+        .one(&app.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.error_code.as_deref(), Some("PLATFORM_TOOL_MISSING"));
+    assert!(
+        row.error_message
+            .as_deref()
+            .is_some_and(|m| m.contains("broccoli-compare")),
+        "the operator message names the tool: {:?}",
+        row.error_message
+    );
+    assert_eq!(row.system_error_retries, 0, "no retry is spent");
+    let letters = dead_letter_message::Entity::find()
+        .filter(dead_letter_message::Column::SubmissionId.eq(sub_id))
+        .all(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(letters.len(), 1, "{letters:?}");
+    assert_eq!(letters[0].error_code, "PLATFORM_MISCONFIGURED");
+}

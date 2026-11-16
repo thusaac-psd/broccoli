@@ -93,7 +93,7 @@ fn start_detached_windowed_operation_fn(
     let session = operation_batch::start_detached_windowed_operation(
         call.plugin_id.clone(),
         manager,
-        call.deps.clone(),
+        call.deps.for_current_call(),
         input,
     )
     .map_err(|e| extism::Error::msg(e.to_string()))?;
@@ -113,7 +113,7 @@ fn start_operation_batch_fn(
     let batch_id = tokio::runtime::Handle::current()
         .block_on(operation_batch::start_operation_batch(
             call.plugin_id.clone(),
-            call.deps.clone(),
+            call.deps.for_current_call(),
             operations,
         ))
         .map_err(|e| extism::Error::msg(e.to_string()))?;

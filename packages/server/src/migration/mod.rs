@@ -11,9 +11,11 @@
 //!   fails when the migrated database differs from them, so an entity change
 //!   without its migration cannot pass CI.
 //!
-//! A database is refused when it records a migration this build does not
-//! define: it was migrated by a newer build, and this one cannot know what
-//! that schema means.
+//! A database is refused when its history is not a prefix of this build's
+//! list: one that runs past this build's latest migration was migrated by a
+//! newer build, and one that does not start from this build's baseline (or
+//! records versions the list has no place for) predates the baseline or
+//! comes from an unrelated build. Neither has a migration path from here.
 
 use common::db::DatabaseConnection;
 use sea_orm::{ConnectionTrait, Statement};
@@ -36,14 +38,13 @@ pub(crate) fn known_migrations<M: MigratorTrait>() -> Vec<String> {
 }
 
 /// Fail before any schema change unless the database is empty or was migrated
-/// by this build or an older one. Every version it records must be one `M`
-/// defines; anything else means a newer build migrated it (or it is not a
-/// Broccoli database), and applying this build's migrations could corrupt it.
+/// by this build or an older one of the same baseline (see
+/// [`check_history`]): applying this build's migrations to any other schema
+/// could corrupt it.
 pub(crate) async fn check_applied_versions<M: MigratorTrait>(
     db: &DatabaseConnection,
 ) -> Result<(), DbErr> {
     let known = known_migrations::<M>();
-    let latest_known = known.last().cloned().unwrap_or_default();
     let backend = db.get_database_backend();
     let row = db
         .query_one_raw(Statement::from_string(
@@ -77,20 +78,77 @@ pub(crate) async fn check_applied_versions<M: MigratorTrait>(
         .into_iter()
         .map(|row| row.try_get::<String>("", "version"))
         .collect::<Result<_, _>>()?;
-    let unknown: Vec<&str> = applied
+    check_history(&known, &applied).map_err(|mismatch| DbErr::Custom(mismatch.to_string()))
+}
+
+/// How a database's migration history disagrees with this build's.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HistoryMismatch {
+    /// The history starts from this build's baseline and adds versions after
+    /// its latest: a newer build migrated the database.
+    Newer {
+        unknown: Vec<String>,
+        latest: String,
+    },
+    /// The history does not start from this build's baseline, or holds
+    /// versions this build's list has no place for: the database predates
+    /// the baseline or is not one any build of this line created.
+    Foreign {
+        unknown: Vec<String>,
+        baseline: String,
+    },
+}
+
+impl std::fmt::Display for HistoryMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HistoryMismatch::Newer { unknown, latest } => write!(
+                f,
+                "the database schema is at {}, which this build does not know (it was migrated \
+                 by a newer build); this build's schema is {latest}. Run a build at least as new \
+                 as the one that migrated the database, or restore the backup taken before that \
+                 upgrade",
+                unknown.join(", ")
+            ),
+            HistoryMismatch::Foreign { unknown, baseline } => {
+                let records = if unknown.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (it records {})", unknown.join(", "))
+                };
+                write!(
+                    f,
+                    "the database's migration history does not start from this build's baseline \
+                     {baseline}{records}: it predates the baseline or was created by an \
+                     unrelated build, and no migration path leads from it. Recreate the database \
+                     or restore a backup taken with a compatible build"
+                )
+            }
+        }
+    }
+}
+
+/// Checks an applied migration history against `known`, this build's list,
+/// oldest first. A history is accepted when it is empty, or starts from the
+/// baseline and records only versions `known` defines; one that adds versions
+/// after the latest was written by a newer build; anything else is foreign. Versions are compared as recorded:
+/// `mNNNN_` names sort in the order they were appended.
+pub(crate) fn check_history(known: &[String], applied: &[String]) -> Result<(), HistoryMismatch> {
+    let unknown: Vec<String> = applied
         .iter()
         .filter(|version| !known.contains(version))
-        .map(String::as_str)
+        .cloned()
         .collect();
-    if unknown.is_empty() {
+    let baseline = known.first().cloned().unwrap_or_default();
+    let latest = known.last().cloned().unwrap_or_default();
+    let has_baseline = applied.is_empty() || applied.contains(&baseline);
+    if unknown.is_empty() && has_baseline {
         return Ok(());
     }
-    Err(DbErr::Custom(format!(
-        "the database schema is at {}, which this build does not know (it was migrated by a \
-         newer build); this build's schema is {latest_known}. Run a build at least as new as the \
-         one that migrated the database, or restore the backup taken before that upgrade",
-        unknown.join(", ")
-    )))
+    if has_baseline && unknown.iter().all(|version| *version > latest) {
+        return Err(HistoryMismatch::Newer { unknown, latest });
+    }
+    Err(HistoryMismatch::Foreign { unknown, baseline })
 }
 
 pub struct Migrator;
@@ -110,3 +168,56 @@ impl MigratorTrait for Migrator {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod history_tests {
+    use super::{HistoryMismatch, check_history};
+
+    fn list(versions: &[&str]) -> Vec<String> {
+        versions.iter().map(|v| v.to_string()).collect()
+    }
+
+    fn known() -> Vec<String> {
+        list(&["m0001_baseline", "m0002_b", "m0003_c"])
+    }
+
+    #[test]
+    fn an_empty_or_older_history_is_accepted() {
+        assert_eq!(check_history(&known(), &[]), Ok(()));
+        assert_eq!(check_history(&known(), &list(&["m0001_baseline"])), Ok(()));
+        assert_eq!(check_history(&known(), &known()), Ok(()));
+    }
+
+    #[test]
+    fn versions_after_the_latest_mean_a_newer_build() {
+        let applied = list(&["m0001_baseline", "m0002_b", "m0003_c", "m0004_d"]);
+        assert_eq!(
+            check_history(&known(), &applied),
+            Err(HistoryMismatch::Newer {
+                unknown: list(&["m0004_d"]),
+                latest: "m0003_c".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_history_without_this_builds_baseline_is_foreign_not_newer() {
+        // A database from before the baseline was squashed: its versions
+        // sort after this build's latest only by name.
+        let applied = list(&["m20250101_000001_create_users", "m20250301_000002_add_x"]);
+        let err = check_history(&known(), &applied).unwrap_err();
+        assert!(matches!(err, HistoryMismatch::Foreign { .. }), "{err:?}");
+        let message = err.to_string();
+        assert!(message.contains("baseline m0001_baseline"), "{message}");
+        assert!(!message.contains("newer build"), "{message}");
+    }
+
+    #[test]
+    fn unknown_versions_inside_the_known_range_are_foreign() {
+        let applied = list(&["m0001_baseline", "m0002_other", "m0003_c"]);
+        assert!(matches!(
+            check_history(&known(), &applied),
+            Err(HistoryMismatch::Foreign { .. })
+        ));
+    }
+}

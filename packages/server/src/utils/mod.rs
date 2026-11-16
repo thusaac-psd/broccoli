@@ -1,6 +1,7 @@
 pub mod advisory_lock;
 pub mod blob;
 pub mod contest;
+pub mod diagnostics;
 pub mod filename;
 pub mod hash;
 pub mod judging;

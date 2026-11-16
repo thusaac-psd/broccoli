@@ -48,9 +48,21 @@ enum Admit {
 
 /// How one call is admitted and when it must end. There is no default: every
 /// call site states its kind and deadline, or that it is nested.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone)]
 pub struct CallOptions {
     admit: Admit,
+    /// The [`CallLocals`] a top-level call's tree starts with (see
+    /// [`CallOptions::with_locals`]).
+    locals: Option<Arc<CallLocals>>,
+}
+
+impl std::fmt::Debug for CallOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallOptions")
+            .field("admit", &self.admit)
+            .field("seeded", &self.locals.is_some())
+            .finish()
+    }
 }
 
 impl CallOptions {
@@ -58,6 +70,17 @@ impl CallOptions {
     pub fn new(kind: CallKind, deadline: Instant) -> Self {
         Self {
             admit: Admit::Kind(kind, deadline),
+            locals: None,
+        }
+    }
+
+    /// Start the call tree with `locals` instead of empty ones, so the caller
+    /// shares state with the host functions the call runs (a nested call
+    /// always shares its parent's).
+    pub fn with_locals(self, locals: Arc<CallLocals>) -> Self {
+        Self {
+            locals: Some(locals),
+            ..self
         }
     }
 
@@ -93,6 +116,7 @@ impl CallOptions {
     pub fn nested() -> Self {
         Self {
             admit: Admit::Nested,
+            locals: None,
         }
     }
 }
@@ -344,7 +368,7 @@ pub(crate) fn resolve(
             class: kind.class(),
             deadline,
             depth: 1,
-            locals: Arc::default(),
+            locals: options.locals.unwrap_or_default(),
         }),
         Admit::Nested => {
             let parent = current_parent().ok_or_else(|| {
@@ -413,9 +437,20 @@ mod tests {
     #[test]
     fn top_level_calls_get_their_own_call_locals() {
         let options = CallOptions::background(Instant::now() + Duration::from_secs(60));
-        let a = resolve(options, Duration::from_secs(60), "p", "f").unwrap();
+        let a = resolve(options.clone(), Duration::from_secs(60), "p", "f").unwrap();
         let b = resolve(options, Duration::from_secs(60), "p", "f").unwrap();
         a.locals.with(|n: &mut u32| *n = 7);
         assert_eq!(b.locals.with(|n: &mut u32| *n), 0);
+    }
+
+    #[test]
+    fn a_top_level_call_can_start_with_the_callers_locals() {
+        let seeded: Arc<CallLocals> = Arc::default();
+        seeded.with(|n: &mut u32| *n = 3);
+        let options = CallOptions::background(Instant::now() + Duration::from_secs(60))
+            .with_locals(seeded.clone());
+        let call = resolve(options, Duration::from_secs(60), "p", "f").unwrap();
+        call.locals.with(|n: &mut u32| *n += 1);
+        assert_eq!(seeded.with(|n: &mut u32| *n), 4);
     }
 }

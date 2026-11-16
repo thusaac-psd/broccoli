@@ -2,6 +2,7 @@
 
 use chrono::Utc;
 use common::db::DatabaseConnection;
+use common::worker::OperationFault;
 use common::{DlqMessageType, SubmissionStatus, Verdict};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait,
@@ -1129,36 +1130,97 @@ async fn a_type_change_after_a_pending_submission_finds_it() {
     assert!(change.await.unwrap(), "the change sees the submission");
 }
 
-/// A dispatch handed back (it failed while the queue was unreachable) is
-/// `Queued` again at a fresh epoch with neither retry budget spent; a
-/// hand-back for an epoch since requeued changes nothing.
+/// A system error the platform caused (the queue was unreachable or lost
+/// an operation) goes back to the queue however often it happens, with
+/// neither retry budget spent: only failures judging the submission spend
+/// its system-error budget.
 #[tokio::test]
-async fn a_dispatch_handed_back_spends_no_retry_and_is_fenced_on_its_epoch() {
+async fn a_judgement_the_platform_lost_is_requeued_without_spending_a_retry() {
     let (_pg, db) = crate::test_support::postgres().await;
     let (s, _) = new_submission(&db).await;
-    let claimed = claim_one(&db, "srv-a").await;
-    let epoch = claimed.judgement.judge_epoch;
-
-    assert!(
-        release_dispatch(&db, Unit::Judgement, claimed.judgement.id, epoch)
+    let budget = RetryBudget::new(1);
+    for code in [
+        OperationFault::QueueUnreachable,
+        OperationFault::OperationLost,
+        OperationFault::QueueUnreachable,
+    ]
+    .map(OperationFault::code)
+    {
+        let claimed = claim_one(&db, "srv").await;
+        assert!(
+            fail_dispatch(
+                &db,
+                Unit::Judgement,
+                claimed.judgement.id,
+                claimed.judgement.judge_epoch,
+                code,
+                "the queue",
+            )
             .await
             .unwrap()
-    );
-    let j = judgement(&db, claimed.judgement.id).await;
-    assert_eq!(j.status, SubmissionStatus::Queued);
-    assert_eq!(j.owner_server_id, None);
-    assert_eq!(j.dispatch_retries, claimed.judgement.dispatch_retries);
-    assert!(
-        j.judge_epoch > epoch,
-        "a fresh epoch fences the old dispatch"
-    );
-    assert_eq!(sub(&db, s.id).await.system_error_retries, 0);
-
-    assert!(
-        !release_dispatch(&db, Unit::Judgement, j.id, epoch)
+        );
+        let pass = retry_system_errors(&db, budget, 10, NO_TYPES)
             .await
-            .unwrap(),
-        "a stale epoch hands nothing back"
+            .unwrap();
+        assert_eq!((pass.handed_back, pass.requeued), (1, 0), "{code}");
+        assert!(pass.confirmed.is_empty());
+        let j = judgement(&db, claimed.judgement.id).await;
+        assert_eq!(j.status, SubmissionStatus::Queued);
+        assert!(j.judge_epoch > claimed.judgement.judge_epoch);
+        assert_eq!(j.dispatch_retries, claimed.judgement.dispatch_retries);
+        assert_eq!(sub(&db, s.id).await.system_error_retries, 0, "{code}");
+    }
+}
+
+/// A platform misconfiguration fails every attempt alike: the submission
+/// shows the error and its cause after one attempt, and the operator finds
+/// it dead-lettered.
+#[tokio::test]
+async fn a_missing_platform_tool_stands_after_one_attempt_and_is_dead_lettered() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (s, _) = new_submission(&db).await;
+    let claimed = claim_one(&db, "srv").await;
+    fail_dispatch(
+        &db,
+        Unit::Judgement,
+        claimed.judgement.id,
+        claimed.judgement.judge_epoch,
+        OperationFault::PlatformToolMissing.code(),
+        "worker w1 has no broccoli-compare",
+    )
+    .await
+    .unwrap();
+
+    let pass = retry_system_errors(&db, RetryBudget::new(10), 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!((pass.handed_back, pass.requeued), (0, 0));
+    assert_eq!(
+        pass.confirmed
+            .iter()
+            .map(|c| c.submission_id)
+            .collect::<Vec<_>>(),
+        [s.id]
     );
-    assert_eq!(claim_one(&db, "srv-b").await.judgement.id, j.id);
+    let shown = sub(&db, s.id).await;
+    assert_eq!(shown.status, SubmissionStatus::SystemError);
+    assert_eq!(shown.error_code.as_deref(), Some("PLATFORM_TOOL_MISSING"));
+    assert_eq!(
+        shown.error_message.as_deref(),
+        Some("worker w1 has no broccoli-compare")
+    );
+    assert_eq!(shown.system_error_retries, 0);
+    let letters = crate::entity::dead_letter_message::Entity::find()
+        .filter(crate::entity::dead_letter_message::Column::SubmissionId.eq(s.id))
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(letters.len(), 1);
+    assert_eq!(letters[0].error_code, "PLATFORM_MISCONFIGURED");
+    assert!(!letters[0].resolved);
+
+    let pass = retry_system_errors(&db, RetryBudget::new(10), 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(pass, SystemErrorPass::default(), "decided once");
 }

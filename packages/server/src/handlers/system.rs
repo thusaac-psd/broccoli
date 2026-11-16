@@ -22,7 +22,7 @@ use crate::entity::{dead_letter_message, submission};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;
 use crate::models::system::{
-    QueueInfo, QueuesResponse, SystemOverviewResponse, WorkerInfo, WorkersResponse,
+    QueueInfo, QueueState, QueuesResponse, SystemOverviewResponse, WorkerInfo, WorkersResponse,
 };
 use crate::state::AppState;
 
@@ -82,7 +82,7 @@ pub async fn list_queues(
     tag = "System",
     operation_id = "getSystemOverview",
     summary = "Aggregated system health",
-    description = "Returns workers, queue depths, in-progress submissions, and unresolved DLQ count in a single response. Requires `system:view` permission.",
+    description = "Returns workers, queue depths, in-progress submissions, and unresolved DLQ count in a single response. While the message queue is unreachable, `queue_state` is `unreachable`, `queues` is empty and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.",
     responses(
         (status = 200, description = "System overview", body = SystemOverviewResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
@@ -97,8 +97,25 @@ pub async fn system_overview(
 ) -> Result<Json<SystemOverviewResponse>, AppError> {
     auth_user.require_permission(perm::SYSTEM_VIEW)?;
 
-    let workers = read_workers(&state).await;
-    let queues = read_queues(&state).await;
+    let (queue_state, workers, workers_stale, queues) = match (
+        try_read_workers(&state).await,
+        try_read_queues(&state).await,
+    ) {
+        (Ok(workers), Ok(queues)) => {
+            state.last_workers.remember(&workers);
+            (QueueState::Reachable, workers, false, queues)
+        }
+        (workers, queues) => {
+            let error = workers.err().or(queues.err()).unwrap_or_default();
+            warn!(%error, "The message queue is unreachable; showing the last worker list");
+            (
+                QueueState::Unreachable,
+                state.last_workers.get(),
+                true,
+                Vec::new(),
+            )
+        }
+    };
 
     let submissions_in_progress = submission::Entity::find()
         .filter(submission::Column::Status.is_in(vec![
@@ -115,7 +132,9 @@ pub async fn system_overview(
         .await?;
 
     Ok(Json(SystemOverviewResponse {
+        queue_state,
         workers,
+        workers_stale,
         queues,
         submissions_in_progress,
         dlq_unresolved_count,
@@ -510,31 +529,60 @@ impl SubmissionInFlightDelta {
 
 /// The live workers (see [`common::liveness`]) with the payload each last
 /// wrote, sorted by id. Empty when Redis is unavailable.
+/// The worker list the overview last read, shown marked stale while the
+/// queue is unreachable.
+#[derive(Clone, Default)]
+pub struct LastWorkers(std::sync::Arc<std::sync::Mutex<Vec<WorkerInfo>>>);
+
+impl LastWorkers {
+    fn remember(&self, workers: &[WorkerInfo]) {
+        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = workers.to_vec();
+    }
+
+    fn get(&self) -> Vec<WorkerInfo> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+}
+
+/// The live workers; empty when Redis cannot be read (logged).
 pub(crate) async fn read_workers(state: &AppState) -> Vec<WorkerInfo> {
+    try_read_workers(state).await.unwrap_or_else(|e| {
+        warn!(error = %e, "Reading worker liveness keys failed");
+        Vec::new()
+    })
+}
+
+/// The live workers, or why Redis could not be read. Without a Redis client
+/// (development without a queue) there are none.
+async fn try_read_workers(state: &AppState) -> Result<Vec<WorkerInfo>, String> {
     let Some(client) = state.redis_client.as_ref() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    read_worker_payloads(client, &state.config.mq.operation_queue_name)
-        .await
-        .into_iter()
-        .map(|(node, p)| WorkerInfo {
-            id: node.id,
-            started_at: p.started_at,
-            last_seen: p.last_seen,
-            seconds_since_last_seen: node.age.as_secs(),
-            in_flight: p.in_flight,
-            max_concurrency: p.max_concurrency,
-            fairness_mode: p.fairness_mode,
-            sandbox_backend: p.sandbox_backend,
-            version: p.version,
-            hostname: p.hostname,
-            ip_addresses: p.ip_addresses,
-            os: p.os,
-            arch: p.arch,
-            cpu_count: p.cpu_count,
-            pid: p.pid,
-        })
-        .collect()
+    Ok(
+        read_worker_payloads(client, &state.config.mq.operation_queue_name)
+            .await
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|(node, p)| WorkerInfo {
+                id: node.id,
+                started_at: p.started_at,
+                last_seen: p.last_seen,
+                seconds_since_last_seen: node.age.as_secs(),
+                in_flight: p.in_flight,
+                max_concurrency: p.max_concurrency,
+                fairness_mode: p.fairness_mode,
+                sandbox_backend: p.sandbox_backend,
+                version: p.version,
+                hostname: p.hostname,
+                ip_addresses: p.ip_addresses,
+                os: p.os,
+                arch: p.arch,
+                cpu_count: p.cpu_count,
+                pid: p.pid,
+                missing_platform_tools: p.missing_platform_tools,
+            })
+            .collect(),
+    )
 }
 
 /// The live workers in `namespace` with their parsed heartbeat payloads, and
@@ -575,40 +623,28 @@ fn parse_worker_payloads(
 }
 
 /// The live workers in `namespace` with their parsed heartbeat payloads,
-/// sorted by id. Empty when Redis is unavailable.
-pub(crate) async fn read_worker_payloads(
+/// sorted by id.
+async fn read_worker_payloads(
     client: &redis::Client,
     namespace: &str,
-) -> Vec<(liveness::LiveNode, HeartbeatPayload)> {
-    let nodes = match client.get_multiplexed_async_connection().await {
-        Ok(mut conn) => liveness::live_nodes(&mut conn, namespace, NodeRole::Worker).await,
-        Err(e) => Err(e),
-    };
-    let nodes = match nodes {
-        Ok(nodes) => nodes,
-        Err(e) => {
-            warn!(error = %e, "Reading worker liveness keys failed");
-            return Vec::new();
-        }
-    };
-    nodes
-        .into_iter()
-        .filter_map(
-            |node| match serde_json::from_str::<HeartbeatPayload>(&node.payload) {
-                Ok(p) => Some((node, p)),
-                Err(e) => {
-                    warn!(worker_id = %node.id, error = %e, "Unparseable worker heartbeat");
-                    None
-                }
-            },
-        )
-        .collect()
+) -> redis::RedisResult<Vec<(liveness::LiveNode, HeartbeatPayload)>> {
+    let mut conn = client.get_multiplexed_async_connection().await?;
+    let nodes = liveness::live_nodes(&mut conn, namespace, NodeRole::Worker).await?;
+    Ok(parse_worker_payloads(nodes))
 }
 
 /// Depth of every stream of the queue: the shared and dead-letter streams,
 /// each worker's private stream (live, or dead and not yet drained) and this
 /// server's reply stream.
 pub(crate) async fn read_queues(state: &AppState) -> Vec<QueueInfo> {
+    try_read_queues(state).await.unwrap_or_else(|e| {
+        warn!(error = %e, "MQ depth lookup failed");
+        Vec::new()
+    })
+}
+
+/// [`read_queues`], or why the queue could not be read.
+async fn try_read_queues(state: &AppState) -> Result<Vec<QueueInfo>, String> {
     let mq = &state.mq;
     let topology = mq.topology();
     let mut keys = vec![
@@ -629,14 +665,8 @@ pub(crate) async fn read_queues(state: &AppState) -> Vec<QueueInfo> {
     }
     keys.sort();
     keys.dedup();
-    let depths = match mq.depths(&keys).await {
-        Ok(depths) => depths,
-        Err(e) => {
-            warn!(error = %e, "MQ depth lookup failed");
-            return Vec::new();
-        }
-    };
-    depths
+    let depths = mq.depths(&keys).await.map_err(|e| e.to_string())?;
+    Ok(depths
         .into_iter()
         .map(|d| QueueInfo {
             name: d.key,
@@ -646,7 +676,7 @@ pub(crate) async fn read_queues(state: &AppState) -> Vec<QueueInfo> {
                 ("pending".to_string(), d.pending),
             ]),
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]

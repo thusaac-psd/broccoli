@@ -102,9 +102,9 @@ impl PluginConfig {
     }
 }
 
-/// The one entry of `cache_dir` that is not an unpacked archive: compiled
-/// plugin modules and their wasmtime cache config. Whatever cleans the
-/// archive cache keeps this entry.
+/// The entry of `cache_dir` that holds compiled plugin modules and their
+/// wasmtime cache config, shared by every server using the directory. The
+/// host keeps unpacked archives in other entries.
 pub const COMPILED_MODULES_ENTRY: &str = ".compiled";
 
 /// The wasmtime cache config that keeps compiled plugin modules in

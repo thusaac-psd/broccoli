@@ -95,7 +95,7 @@ fn start_detached_windowed_evaluate_fn(
 
     let session = evaluate_batch::start_detached_windowed_evaluate(
         call.plugin_id.clone(),
-        call.deps.clone(),
+        call.deps.for_current_call(),
         input,
     )
     .map_err(|e| extism::Error::msg(e.to_string()))?;
@@ -114,7 +114,7 @@ fn start_evaluate_batch_fn(
     let batch_id = tokio::runtime::Handle::current()
         .block_on(evaluate_batch::start_evaluate_batch(
             call.plugin_id.clone(),
-            call.deps.clone(),
+            call.deps.for_current_call(),
             input,
         ))
         .map_err(|e| extism::Error::msg(e.to_string()))?;

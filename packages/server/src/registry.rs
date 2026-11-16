@@ -105,18 +105,23 @@ pub struct OperationWaiter {
     /// (see `consumers::operation_result`). Before, the task may not be in
     /// the queue yet.
     pub published: bool,
+    /// The dispatch the operation works for, if any: a platform fault the
+    /// operation meets is recorded there.
+    pub faults: Option<crate::services::judging::DispatchFaults>,
 }
 
 impl OperationWaiter {
     pub fn new(
         result_tx: oneshot::Sender<TaskResult>,
         evaluate_case: Option<EvaluateCaseRef>,
+        faults: Option<crate::services::judging::DispatchFaults>,
     ) -> Self {
         Self {
             result_tx,
             evaluate_case,
             published_at: Instant::now(),
             published: false,
+            faults,
         }
     }
 }

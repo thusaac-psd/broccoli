@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use config::{Config, ConfigError, File};
+use config::{Config, ConfigError};
 use serde::{
     Deserialize, Deserializer, Serialize,
     de::{self, SeqAccess, Visitor},
@@ -520,7 +520,7 @@ impl AppConfig {
         // struct-level default.
         let s = Config::builder()
             .set_default("observability.otlp.service_name", "broccoli-server")?
-            .add_source(File::with_name("config/config").required(false))
+            .add_source(common::config::config_file())
             .add_source(common::config::environment())
             .build()?;
         Self::from_config(s)

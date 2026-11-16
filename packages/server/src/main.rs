@@ -12,28 +12,48 @@ use server::runtime::ServerRuntime;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+/// `broccoli-server`: the API server, and the one-shot commands that share
+/// its configuration. With no command it serves.
+#[derive(clap::Parser)]
+#[command(
+    name = "broccoli-server",
+    bin_name = "broccoli-server",
+    version,
+    about = "The Broccoli API server",
+    args_conflicts_with_subcommands = true
+)]
+struct Cli {
+    /// Print the OpenAPI document and exit. Reads no configuration.
+    #[arg(long, exclusive = true)]
+    openapi: bool,
+    /// Print the plugin group role the server derives for DATABASE and exit,
+    /// so an installer can admit the plugin roles in pg_hba.conf. Reads no
+    /// configuration.
+    #[arg(long, value_name = "DATABASE", exclusive = true)]
+    plugin_group_role: Option<String>,
+    /// Probe this server's `/healthz` and exit 0 when it answers 2xx.
+    #[arg(long, exclusive = true)]
+    healthcheck: bool,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Run the server (the default).
+    Serve,
+    /// Export or import a problem or contest bundle.
+    Bundle(server::bundle::cli::BundleArgs),
+}
+
 fn main() -> anyhow::Result<()> {
-    if std::env::args().any(|a| a == "--version" || a == "-V") {
-        println!("broccoli-server {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
-    }
-
-    // Prints the plugin group role of a database name and exits, so an
-    // installer can admit the plugin roles in pg_hba.conf with the name the
-    // server derives (see `plugin_db::schema::group_role`).
-    let args: Vec<String> = std::env::args().collect();
-    if let Some(i) = args.iter().position(|a| a == "--plugin-group-role") {
-        let database = args
-            .get(i + 1)
-            .context("--plugin-group-role takes a database name")?;
-        println!("{}", server::plugin_db::schema::group_role(database));
-        return Ok(());
-    }
-
-    // Prints the OpenAPI document and exits. The document does not depend on
-    // configuration, so none is read.
-    if std::env::args().any(|a| a == "--openapi") {
+    let cli = <Cli as clap::Parser>::parse();
+    if cli.openapi {
         println!("{}", server::openapi_json());
+        return Ok(());
+    }
+    if let Some(database) = &cli.plugin_group_role {
+        println!("{}", server::plugin_db::schema::group_role(database));
         return Ok(());
     }
 
@@ -49,15 +69,16 @@ fn main() -> anyhow::Result<()> {
         .build()
         .context("Failed to build tokio runtime")?;
 
-    // `bundle export|import`: see `server::bundle::cli`.
-    if args.get(1).map(String::as_str) == Some("bundle") {
-        let code = tokio_runtime.block_on(server::bundle::cli::run(&app_config, &args[2..]));
-        std::process::exit(code);
-    }
-
-    if std::env::args().any(|a| a == "--healthcheck") {
+    if cli.healthcheck {
         let exit_code = tokio_runtime.block_on(run_healthcheck(&app_config));
         std::process::exit(exit_code);
+    }
+    match cli.command.unwrap_or(Command::Serve) {
+        Command::Bundle(args) => {
+            let code = tokio_runtime.block_on(server::bundle::cli::run(&app_config, args));
+            std::process::exit(code);
+        }
+        Command::Serve => {}
     }
 
     let result = tokio_runtime.block_on(async move {
@@ -109,5 +130,79 @@ async fn run_healthcheck(app_config: &AppConfig) -> i32 {
             eprintln!("healthcheck failed: {e}");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, Parser, error::ErrorKind};
+
+    use super::{Cli, Command};
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("broccoli-server").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn the_command_definition_is_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn no_arguments_serve() {
+        let cli = parse(&[]).unwrap();
+        assert!(cli.command.is_none() && !cli.openapi && !cli.healthcheck);
+        assert!(matches!(
+            parse(&["serve"]).unwrap().command,
+            Some(Command::Serve)
+        ));
+    }
+
+    #[test]
+    fn help_and_version_print_instead_of_serving() {
+        assert_eq!(
+            parse(&["--help"]).err().map(|e| e.kind()),
+            Some(ErrorKind::DisplayHelp)
+        );
+        assert_eq!(
+            parse(&["--version"]).err().map(|e| e.kind()),
+            Some(ErrorKind::DisplayVersion)
+        );
+        assert_eq!(
+            parse(&["bundle", "--help"]).err().map(|e| e.kind()),
+            Some(ErrorKind::DisplayHelp)
+        );
+    }
+
+    #[test]
+    fn unknown_arguments_are_refused() {
+        for args in [&["--frobnicate"][..], &["frobnicate"], &["serve", "extra"]] {
+            assert!(parse(args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn the_one_shot_flags_take_no_command() {
+        assert!(parse(&["--openapi"]).unwrap().openapi);
+        assert_eq!(
+            parse(&["--plugin-group-role", "broccoli"])
+                .unwrap()
+                .plugin_group_role
+                .as_deref(),
+            Some("broccoli")
+        );
+        assert!(parse(&["--healthcheck", "serve"]).is_err());
+        assert!(parse(&["--plugin-group-role"]).is_err());
+    }
+
+    #[test]
+    fn bundle_parses_its_subcommands() {
+        assert!(matches!(
+            parse(&["bundle", "import", "--replace-problems"])
+                .unwrap()
+                .command,
+            Some(Command::Bundle(_))
+        ));
+        assert!(parse(&["bundle", "import", "--wipe-dependents"]).is_err());
     }
 }

@@ -11,7 +11,7 @@ use tracing::{Instrument, error, info, instrument, warn};
 
 use crate::entity::{problem, submission, submission_judgement, test_case};
 use crate::hooks;
-use crate::services::judging::{self, ClaimedJudgement, Unit};
+use crate::services::judging::{self, ClaimedJudgement, DispatchFaults, Unit};
 use crate::state::AppState;
 use crate::utils::judging::files_log_summary;
 use crate::utils::test_case_body::{
@@ -174,44 +174,29 @@ async fn dispatch_after_judging_hooks(
     );
 }
 
+/// Ends a dispatch that produced no verdict as a system error, under the
+/// platform fault its operations met when there was one (so the system-error
+/// retry treats it by that cause, see `judging::SystemErrorClass`), else
+/// under `error_code`.
 async fn record_dispatch_failure(
     db: &DatabaseConnection,
-    mq: &mq::Mq,
     metrics: &common::metrics::Metrics,
     judgement: JudgementRef,
+    faults: &DispatchFaults,
     error_code: &'static str,
     error_message: &str,
 ) {
-    // A dispatch that failed while the queue is unreachable most likely
-    // failed for that (its operations could not be published), and nothing
-    // reached a worker: it goes back to the queue with no retry spent instead
-    // of ending as a SystemError.
-    if !mq.check_reachable().await {
-        match judging::release_dispatch(db, Unit::Judgement, judgement.id, judgement.judge_epoch)
-            .await
-        {
-            Ok(_) => warn!(
-                submission_id = judgement.submission_id,
-                judgement_id = judgement.id,
-                error_code,
-                "Dispatch failed while the message queue is unreachable; handed the judgement back"
-            ),
-            Err(e) => error!(
-                submission_id = judgement.submission_id,
-                judgement_id = judgement.id,
-                marking_error = %e,
-                "Failed to hand back a judgement whose dispatch failed while the message queue is unreachable; a detector requeues it"
-            ),
-        }
-        return;
-    }
+    let (error_code, error_message) = match faults.get() {
+        Some(fault) => (fault.fault.code(), fault.message),
+        None => (error_code, error_message.to_string()),
+    };
     let recovered = match judging::fail_dispatch(
         db,
         Unit::Judgement,
         judgement.id,
         judgement.judge_epoch,
         error_code,
-        error_message,
+        &error_message,
     )
     .await
     {
@@ -270,6 +255,9 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
         judge_epoch: judgement.judge_epoch,
     };
     let judgement_id = judgement.id;
+    // What the dispatch's operations meet, wherever they run: its plugin
+    // calls start with these faults in their call locals.
+    let faults = DispatchFaults::default();
     tracing::Span::current().record(
         "contest_id",
         tracing::field::display(
@@ -297,9 +285,9 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             );
             record_dispatch_failure(
                 &state.db,
-                &state.mq,
                 &state.metrics,
                 judgement_ref,
+                &faults,
                 "NO_HANDLER_REGISTERED",
                 &format!("No plugin registered for contest type {:?}", contest_type),
             )
@@ -317,9 +305,9 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             error!(problem_id = submission.problem_id, "Problem not found");
             record_dispatch_failure(
                 &state.db,
-                &state.mq,
                 &state.metrics,
                 judgement_ref,
+                &faults,
                 "PROBLEM_NOT_FOUND",
                 &format!("Problem {} not found", submission.problem_id),
             )
@@ -330,9 +318,9 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             error!(error = %e, "DB error fetching problem");
             record_dispatch_failure(
                 &state.db,
-                &state.mq,
                 &state.metrics,
                 judgement_ref,
+                &faults,
                 "DATABASE_ERROR",
                 &format!("Failed to fetch problem: {}", e),
             )
@@ -347,9 +335,9 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             error!(error = %e, "Failed to parse submission files");
             record_dispatch_failure(
                 &state.db,
-                &state.mq,
                 &state.metrics,
                 judgement_ref,
+                &faults,
                 "INVALID_FILES",
                 &format!("Failed to parse submission files: {}", e),
             )
@@ -390,9 +378,9 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 error!(error = %e, "Failed to query test cases");
                 record_dispatch_failure(
                     &state.db,
-                    &state.mq,
                     &state.metrics,
                     judgement_ref,
+                    &faults,
                     "DATABASE_ERROR",
                     &format!("Failed to query test cases: {}", e),
                 )
@@ -454,9 +442,9 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                     error!(error = %e, "Failed to spill over-budget inline test case input to blob store");
                     record_dispatch_failure(
                         &state.db,
-                        &state.mq,
                         &state.metrics,
                         judgement_ref,
+                        &faults,
                         "BLOB_STORE_ERROR",
                         &format!("Failed to store oversized inline test case input: {e}"),
                     )
@@ -477,9 +465,9 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                     error!(error = %e, "Failed to spill over-budget inline test case expected_output to blob store");
                     record_dispatch_failure(
                         &state.db,
-                        &state.mq,
                         &state.metrics,
                         judgement_ref,
+                        &faults,
                         "BLOB_STORE_ERROR",
                         &format!("Failed to store oversized inline test case expected_output: {e}"),
                     )
@@ -526,9 +514,9 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             error!(error = %e, "Failed to serialize plugin input");
             record_dispatch_failure(
                 &state.db,
-                &state.mq,
                 &state.metrics,
                 judgement_ref,
+                &faults,
                 "SERIALIZATION_ERROR",
                 &format!("Failed to serialize input: {}", e),
             )
@@ -543,7 +531,6 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
     let hook_registry = state.registries.hook_registry.clone();
     let contest_types = state.registries.contest_type_registry.clone();
     let db = state.db.clone();
-    let mq = state.mq.clone();
     let metrics = state.metrics.clone();
     let submission_id = submission.id;
     let user_id = submission.user_id;
@@ -578,7 +565,10 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                     &plugin_id,
                     &function_name,
                     input_bytes,
-                    plugins.get_config().judging_call(),
+                    plugins
+                        .get_config()
+                        .judging_call()
+                        .with_locals(faults.call_locals()),
                 )
                 .await;
 
@@ -605,9 +595,9 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                                 };
                                 record_dispatch_failure(
                                     &db,
-                                    &mq,
                                     &metrics,
                                     judgement_ref,
+                                    &faults,
                                     error_code,
                                     &output
                                         .error_message
@@ -638,9 +628,9 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                             error!(submission_id, judgement_id, problem_id, contest_id = ?contest_id, error = %e, "Failed to parse plugin output");
                             record_dispatch_failure(
                                 &db,
-                                &mq,
                                 &metrics,
                                 judgement_ref,
+                                &faults,
                                 "PLUGIN_INVALID_OUTPUT",
                                 &format!("Plugin returned invalid output: {}", e),
                             )
@@ -660,9 +650,9 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                     error!(submission_id, judgement_id, problem_id, contest_id = ?contest_id, error = %e, "Plugin execution failed");
                     record_dispatch_failure(
                         &db,
-                        &mq,
                         &metrics,
                         judgement_ref,
+                        &faults,
                         "PLUGIN_EXECUTION_ERROR",
                         &e.to_string(),
                     )

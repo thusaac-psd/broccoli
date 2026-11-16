@@ -6,13 +6,18 @@ use super::*;
 struct EvaluatorStage {
     pm: Arc<dyn plugin_core::traits::PluginManager>,
     plugin_id: String,
+    /// The deps of the batch's operations: an evaluator call shares their
+    /// dispatch's fault record.
+    operation_deps: crate::host_funcs::context::OperationHostDeps,
 }
 
 impl EvaluatorStage {
     /// Call `function` on the evaluator with JSON `input` as background work.
     /// How many evaluator guests run at once is admission's business.
     async fn call(&self, function: &str, input_bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-        let options = self.pm.get_config().background_call();
+        let options = self
+            .operation_deps
+            .call_options(self.pm.get_config().background_call());
         Ok(self
             .pm
             .call_raw(&self.plugin_id, function, input_bytes, options)
@@ -71,6 +76,7 @@ pub async fn start_evaluate_batch(
     let stage = EvaluatorStage {
         pm: deps.plugin_manager.get()?,
         plugin_id: evaluator.plugin_id.clone(),
+        operation_deps: deps.operation_deps.clone(),
     };
 
     let function = match evaluator.functions {

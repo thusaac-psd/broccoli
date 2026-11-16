@@ -891,6 +891,7 @@ impl TestApp {
             worker_slots: Default::default(),
             plugin_lifecycle: Default::default(),
             plugin_sql,
+            last_workers: Default::default(),
             login_throttle: std::sync::Arc::new(server::utils::login_throttle::LoginThrottle::new(
                 0,
                 std::time::Duration::from_secs(60),

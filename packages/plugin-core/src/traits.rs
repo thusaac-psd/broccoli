@@ -8,7 +8,7 @@ use crate::config::PluginConfig;
 use crate::error::{AssetError, PluginError};
 use crate::executor::{CallOptions, Executor, NewScope, ScopeGuard};
 use crate::host::HostFunctionRegistry;
-use crate::i18n::{I18nRegistry, TranslationMap};
+use crate::i18n::I18nRegistry;
 use crate::manifest::PluginManifest;
 use crate::registry::{PluginEntry, PluginInfo, PluginRegistry, PluginStatus};
 
@@ -377,13 +377,15 @@ pub trait PluginManager: PluginInvoker {
         let Some((entry_point, permissions)) = self.resolve(&entry.manifest) else {
             return Ok(None);
         };
+        // Read once, here: instances are built on demand for the life of the
+        // pool, and none of them may depend on the file staying on disk.
         let wasm_path = entry.root_dir.join(&entry_point);
-        if !wasm_path.exists() {
-            return Err(PluginError::LoadFailed(format!(
-                "Wasm file not found at path: {}",
+        let wasm = std::fs::read(&wasm_path).map_err(|e| {
+            PluginError::LoadFailed(format!(
+                "Wasm file not readable at path {}: {e}",
                 wasm_path.display()
-            )));
-        }
+            ))
+        })?;
 
         let budget = self.executor().budget().clone();
         // A runaway trap on one instance's linear memory, so an unbounded
@@ -392,7 +394,7 @@ pub trait PluginManager: PluginInvoker {
         // deadline is enforced by the deadline thread; the manifest
         // timeout, a margin past the longest deadline any call gets, is
         // the backstop for a guest the deadline thread never cancelled.
-        let manifest = Manifest::new([Wasm::file(&wasm_path)])
+        let manifest = Manifest::new([Wasm::data(wasm)])
             .with_memory_max(budget.instance_memory_pages())
             .with_timeout(
                 self.get_config().call_timeout() + crate::config::TIMEOUT_BACKSTOP_MARGIN,
@@ -516,40 +518,28 @@ pub trait PluginManager: PluginInvoker {
         plugin_entry.resolve_web_asset(asset_path)
     }
 
-    fn update_translations(&self) -> Result<(), PluginError> {
-        let registry = self
-            .get_registry()
-            .read()
-            .map_err(|_| PluginError::Internal("Failed to acquire registry read lock".into()))?;
-
-        let i18n = self.get_i18n_registry();
-        i18n.clear();
-
-        let loaded_plugins = registry
-            .values()
-            .filter(|e| e.status == PluginStatus::Loaded);
-        for plugin_entry in loaded_plugins {
-            for (lang, path) in &plugin_entry.manifest.translations {
-                let translation_path = plugin_entry.root_dir.join(path);
-                let content = std::fs::read_to_string(&translation_path).map_err(|e| {
-                    PluginError::LoadFailed(format!(
-                        "Failed to read translation file '{}': {}",
-                        translation_path.display(),
-                        e
-                    ))
-                })?;
-                let translation: TranslationMap = toml::from_str(&content).map_err(|e| {
-                    PluginError::LoadFailed(format!(
-                        "Invalid translation file syntax in '{}': {}",
-                        translation_path.display(),
-                        e
-                    ))
-                })?;
-                i18n.merge(lang.clone(), translation);
+    /// Rebuild the served translations from the loaded plugins' entries,
+    /// which hold their files' contents, so it reads no file and one plugin
+    /// can never fail it for the others.
+    fn update_translations(&self) {
+        let mut merged = crate::i18n::I18nData::new();
+        match self.get_registry().read() {
+            Ok(registry) => {
+                for entry in registry
+                    .values()
+                    .filter(|e| e.status == PluginStatus::Loaded)
+                {
+                    for (lang, map) in &entry.translations {
+                        merged.entry(lang.clone()).or_default().extend(map.clone());
+                    }
+                }
+            }
+            Err(_) => {
+                error!("Plugin registry lock poisoned; keeping the served translations");
+                return;
             }
         }
-
-        Ok(())
+        self.get_i18n_registry().replace(merged);
     }
 
     fn reload_plugin(&self, plugin_id: &str) -> Result<(), PluginError> {
