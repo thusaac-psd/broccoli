@@ -43,6 +43,12 @@ pub trait OperationTaskPublisher: Send + Sync {
         task: &Task,
         pin: Option<&str>,
     ) -> anyhow::Result<mq::Route>;
+
+    /// Whether the queue behind this publisher answers now (see
+    /// [`mq::Mq::check_reachable`]).
+    async fn queue_reachable(&self) -> bool {
+        true
+    }
 }
 
 #[async_trait]
@@ -53,6 +59,10 @@ impl OperationTaskPublisher for mq::Mq {
         pin: Option<&str>,
     ) -> anyhow::Result<mq::Route> {
         Ok(self.publish_task(task, pin).await?)
+    }
+
+    async fn queue_reachable(&self) -> bool {
+        self.check_reachable().await
     }
 }
 

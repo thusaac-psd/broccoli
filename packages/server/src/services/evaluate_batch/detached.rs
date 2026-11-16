@@ -280,13 +280,46 @@ pub const SESSION_ENDED_WITHOUT_VERDICT: &str = "PLUGIN_NO_VERDICT";
 /// Leave the judgement a session judged terminal: finalize it as
 /// `SystemError` if the plugin did not (a no-op when it did, or when the
 /// judgement was since requeued or superseded), then fire its after-judging
-/// hooks.
+/// hooks. A session that ended without a verdict while the queue is
+/// unreachable hands its judgement back instead, with no retry spent, as a
+/// failed dispatch does (`submission_dispatch::record_dispatch_failure`).
 async fn finish_judgement(
     deps: &EvaluateHostDeps,
     completion: &DetachedSubmissionCompletion,
     error_code: &str,
     error_message: &str,
 ) {
+    let queue_reachable = match &deps.operation_deps.operation_publisher {
+        Some(publisher) => publisher.queue_reachable().await,
+        None => true,
+    };
+    if !queue_reachable {
+        match crate::services::judging::release_dispatch(
+            &deps.db,
+            crate::services::judging::Unit::Judgement,
+            completion.judgement_id,
+            completion.judge_epoch,
+        )
+        .await
+        {
+            Ok(true) => {
+                tracing::warn!(
+                    submission_id = completion.submission_id,
+                    judgement_id = completion.judgement_id,
+                    error_code,
+                    "Judging session ended without a verdict while the message queue is unreachable; handed the judgement back"
+                );
+                return;
+            }
+            Ok(false) => {}
+            Err(e) => tracing::error!(
+                submission_id = completion.submission_id,
+                judgement_id = completion.judgement_id,
+                error = %e,
+                "Failed to hand back a judgement while the message queue is unreachable"
+            ),
+        }
+    }
     match crate::services::judging::fail_dispatch(
         &deps.db,
         crate::services::judging::Unit::Judgement,
