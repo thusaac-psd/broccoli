@@ -395,6 +395,11 @@ impl WindowedEvalSession<'_> {
 }
 
 #[cfg(target_arch = "wasm32")]
+use crate::types::host_io::{
+    BatchId, CancelTestCasesInput, CancelTestCasesOutput, NextResultInput, NextResultOutput,
+};
+
+#[cfg(target_arch = "wasm32")]
 impl Eval {
     fn start_detached_windowed(
         &self,
@@ -410,13 +415,8 @@ impl Eval {
     fn start_batch(&self, input: &StartEvaluateBatchInput) -> Result<String, SdkError> {
         let input_json = serde_json::to_string(input)?;
         let response_json = unsafe { crate::host::raw::start_evaluate_batch(input_json)? };
-        let response: serde_json::Value = serde_json::from_str(&response_json)?;
-        response["batch_id"]
-            .as_str()
-            .map(String::from)
-            .ok_or_else(|| {
-                SdkError::HostCall("Missing batch_id in start_evaluate_batch response".into())
-            })
+        let started: BatchId = serde_json::from_str(&response_json)?;
+        Ok(started.batch_id)
     }
 
     fn next_result(
@@ -424,41 +424,34 @@ impl Eval {
         batch_id: &str,
         timeout_ms: u64,
     ) -> Result<Option<TestCaseVerdict>, SdkError> {
-        let input = serde_json::json!({
-            "batch_id": batch_id,
-            "timeout_ms": timeout_ms,
-        });
+        let input = NextResultInput {
+            batch_id: batch_id.to_string(),
+            timeout_ms,
+        };
         let result_json =
             unsafe { crate::host::raw::get_next_evaluate_result(serde_json::to_string(&input)?)? };
-        let envelope: serde_json::Value = serde_json::from_str(&result_json)?;
-
-        match envelope.get("result").filter(|v| !v.is_null()) {
-            Some(v) => Ok(Some(serde_json::from_value(v.clone())?)),
-            None => Ok(None),
-        }
+        let next: NextResultOutput<TestCaseVerdict> = serde_json::from_str(&result_json)?;
+        Ok(next.result)
     }
 
     fn cancel_batch(&self, batch_id: &str) -> Result<(), SdkError> {
-        let input = serde_json::json!({ "batch_id": batch_id });
+        let input = BatchId {
+            batch_id: batch_id.to_string(),
+        };
         unsafe { crate::host::raw::cancel_evaluate_batch(serde_json::to_string(&input)?)? };
         Ok(())
     }
 
     fn cancel_test_cases(&self, batch_id: &str, test_case_ids: &[i32]) -> Result<usize, SdkError> {
-        let input = serde_json::json!({
-            "evaluate_batch_id": batch_id,
-            "test_case_ids": test_case_ids,
-        });
+        let input = CancelTestCasesInput {
+            evaluate_batch_id: batch_id.to_string(),
+            test_case_ids: test_case_ids.to_vec(),
+        };
         let response_json = unsafe {
             crate::host::raw::cancel_evaluate_test_cases(serde_json::to_string(&input)?)?
         };
-        let response: serde_json::Value = serde_json::from_str(&response_json)?;
-        response["count"]
-            .as_u64()
-            .map(|count| count as usize)
-            .ok_or_else(|| {
-                SdkError::HostCall("Missing count in cancel_evaluate_test_cases response".into())
-            })
+        let cancelled: CancelTestCasesOutput = serde_json::from_str(&response_json)?;
+        Ok(cancelled.count)
     }
 }
 

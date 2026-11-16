@@ -3,91 +3,35 @@ use crate::registry::{
     EvaluatorFunctions, EvaluatorHandler, EvaluatorRegistry, LanguageResolverEntry,
     LanguageResolverRegistry,
 };
+use broccoli_server_sdk::types::host_io::{
+    EvaluatorHandlers, RegisterCheckerResolverInput, RegisterContestTypeInput,
+    RegisterEvaluatorInput, RegisterLanguageResolverInput,
+};
 use extism::{Function, UserData, Val, ValType};
-use serde::Deserialize;
 use std::sync::Arc;
 
-#[derive(Deserialize)]
-struct RegisterContestTypeInput {
-    #[serde(rename = "type")]
-    contest_type: String,
-    submission_handler: String,
-    code_run_handler: String,
-    #[serde(default)]
-    submission_admission: bool,
-}
-
-#[derive(Deserialize)]
-struct RegisterEvaluatorInput {
-    #[serde(rename = "type")]
-    problem_type: String,
-    #[serde(flatten)]
-    functions: RegisterEvaluatorFunctions,
-}
-
-/// Either one direct `handler`, or a staged `prepare_handler` +
-/// `interpret_handler` pair (see [`EvaluatorFunctions`]).
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RegisterEvaluatorFunctions {
-    Staged {
-        prepare_handler: String,
-        interpret_handler: String,
-    },
-    Direct {
-        handler: String,
-    },
-}
-
-impl RegisterEvaluatorFunctions {
-    fn into_functions(self) -> Result<EvaluatorFunctions, extism::Error> {
-        let functions = match self {
-            Self::Staged {
-                prepare_handler,
-                interpret_handler,
-            } => EvaluatorFunctions::Staged {
-                prepare: prepare_handler,
-                interpret: interpret_handler,
-            },
-            Self::Direct { handler } => EvaluatorFunctions::Direct { function: handler },
-        };
-        let names: &[&String] = match &functions {
-            EvaluatorFunctions::Direct { function } => &[function],
-            EvaluatorFunctions::Staged { prepare, interpret } => &[prepare, interpret],
-        };
-        if names.iter().any(|name| name.is_empty()) {
-            return Err(extism::Error::msg(
-                "evaluator handler names must not be empty",
-            ));
-        }
-        Ok(functions)
+/// The functions `handlers` names, refused when a name is empty.
+fn evaluator_functions(handlers: EvaluatorHandlers) -> Result<EvaluatorFunctions, extism::Error> {
+    let functions = match handlers {
+        EvaluatorHandlers::Staged {
+            prepare_handler,
+            interpret_handler,
+        } => EvaluatorFunctions::Staged {
+            prepare: prepare_handler,
+            interpret: interpret_handler,
+        },
+        EvaluatorHandlers::Direct { handler } => EvaluatorFunctions::Direct { function: handler },
+    };
+    let names: &[&String] = match &functions {
+        EvaluatorFunctions::Direct { function } => &[function],
+        EvaluatorFunctions::Staged { prepare, interpret } => &[prepare, interpret],
+    };
+    if names.iter().any(|name| name.is_empty()) {
+        return Err(extism::Error::msg(
+            "evaluator handler names must not be empty",
+        ));
     }
-}
-
-#[derive(Deserialize)]
-struct RegisterCheckerResolverInput {
-    #[serde(rename = "format")]
-    checker_format: String,
-    resolve_handler: String,
-    interpret_handler: String,
-}
-
-#[derive(Deserialize)]
-struct RegisterLanguageResolverInput {
-    language_id: String,
-    function_name: String,
-    #[serde(default)]
-    display_name: String,
-    #[serde(default = "default_source_filename")]
-    default_filename: String,
-    #[serde(default)]
-    extensions: Vec<String>,
-    #[serde(default)]
-    template: String,
-}
-
-fn default_source_filename() -> String {
-    "solution.txt".to_string()
+    Ok(functions)
 }
 
 struct RegistryContext {
@@ -209,7 +153,7 @@ fn register_evaluator_fn(
     let (plugin_id, registry) = (&call.plugin_id, &call.evaluator_registry);
     let input: RegisterEvaluatorInput = super::read_json(plugin, inputs, "input")?;
     validate_registry_id(&input.problem_type, "problem_type")?;
-    let functions = input.functions.into_functions()?;
+    let functions = evaluator_functions(input.handlers)?;
 
     tokio::runtime::Handle::current().block_on(async {
         tracing::info!(
@@ -344,10 +288,11 @@ mod tests {
     use super::*;
 
     fn parse(json: serde_json::Value) -> Result<EvaluatorFunctions, extism::Error> {
-        serde_json::from_value::<RegisterEvaluatorInput>(json)
-            .unwrap()
-            .functions
-            .into_functions()
+        evaluator_functions(
+            serde_json::from_value::<RegisterEvaluatorInput>(json)
+                .unwrap()
+                .handlers,
+        )
     }
 
     #[test]
