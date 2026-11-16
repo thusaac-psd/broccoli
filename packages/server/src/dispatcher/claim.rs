@@ -283,7 +283,7 @@ impl ClaimPass {
 ///
 /// Each kind is claimed by one statement that returns everything its
 /// dispatch needs, and the dispatch starts right after it with nothing
-/// fallible in between (see [`start_claimed`]).
+/// fallible in between (see `start_claimed`).
 ///
 /// **Crash-recovery contract:** dispatch runs detached after the claim
 /// committed. If this server crashes in between, the claimed rows stay in
