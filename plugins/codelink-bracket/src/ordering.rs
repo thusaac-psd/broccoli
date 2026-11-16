@@ -17,15 +17,14 @@ use broccoli_server_sdk::prelude::*;
 use serde::Deserialize;
 
 use crate::bracket;
-use crate::model::{MatchPhase, MatchState};
+use crate::model::{MatchState, Phase};
 use crate::storage;
 
 /// The rejection message [`record_order`] returns once a match has left
-/// `MatchPhase::Ordering`. A shared constant (rather than an inline literal
-/// at each call site) so `handle_order` can pattern-match on it below to
+/// `Phase::Ordering`. A shared constant (rather than an inline literal at
+/// each call site) so `handle_order` can pattern-match on it below to
 /// distinguish "you lost a race with `/start`" from a genuine internal
-/// error, the same technique `judge::ALREADY_DECIDED_MSG` uses for
-/// `routes::handle_force_decide`.
+/// error.
 pub(crate) const LEFT_ORDERING_PHASE_MSG: &str =
     "the match has left the ordering phase; rankings can no longer be changed";
 const ORDERING_CLOSED_MSG: &str = "The stage ordering window has closed";
@@ -48,14 +47,12 @@ fn is_permutation_of(order: &[i32], group: &[i32]) -> bool {
 /// problems, from B's point of view), and the result is written into
 /// `order_a`, the order imposed ON player A. Symmetrically for player A.
 ///
-/// Resubmitting BEFORE the match starts (`match_state.state ==
-/// MatchPhase::Ordering`) replaces the previous ranking -- there is no
+/// Resubmitting BEFORE the match starts (`Phase::Ordering`) replaces the previous ranking -- there is no
 /// once-only guard for that case, staff/players may fix a fat-fingered
 /// ranking freely up until `/start`. Once the match has left `Ordering`
-/// (`InProgress`, `Tiebreak`, `AwaitingJudge`, `Decided`,
-/// `NeedsAdjudication`), a resubmission is rejected outright: `order_a`/
-/// `order_b` are read LIVE (not snapshotted) by `judge.rs::current_problem`
-/// and `gate.rs::check` to decide who is currently playing which problem, so
+/// a resubmission is rejected outright: `order_a`/`order_b` are read LIVE
+/// (not snapshotted) by [`MatchState::current_problem`] to decide who is
+/// currently playing which problem, so
 /// letting either player rewrite them mid-match would let a player reorder
 /// remaining problems after seeing an earlier 小局's outcome (covered by the
 /// integration test `a_ranking_cannot_be_resubmitted_after_the_match_has_started`).
@@ -64,7 +61,7 @@ pub fn record_order(
     submitter: i32,
     order: Vec<i32>,
 ) -> Result<(), String> {
-    if match_state.state != MatchPhase::Ordering {
+    if match_state.phase != Phase::Ordering {
         return Err(LEFT_ORDERING_PHASE_MSG.to_string());
     }
     if submitter == match_state.player_b {
@@ -124,13 +121,13 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     // only after the complete preceding round and its intermission.
     if let Some(setup) = storage::load_setup(host, contest_id)? {
         let matches = storage::load_all_matches(host, contest_id)?;
-        let contest_start = crate::judge::contest_times(host, contest_id)?.start_ms;
+        let contest_start = crate::clock::contest_times(host, contest_id)?.start_ms;
         let Some(stage_at) =
             bracket::stage_open_at_ms(&setup, &matches, current.round, contest_start)
         else {
             return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
         };
-        if crate::judge::now_ms(host)? < stage_at {
+        if crate::clock::now_ms(host)? < stage_at {
             return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
         }
     }
@@ -151,7 +148,7 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
 
     let result = storage::update_match(host, contest_id, match_id, |m| {
         if let Some((start, end)) = ordering_window {
-            let now = crate::judge::now_ms(host)?;
+            let now = crate::clock::now_ms(host)?;
             if now < start || now >= end {
                 return Err(SdkError::Other(ORDERING_CLOSED_MSG.into()));
             }
@@ -174,11 +171,11 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         other => ApiError::from(other),
     })?;
 
-    // Scheduled matches keep their full shared ordering window. Only legacy
-    // matches may start early when the second ranking arrives.
+    // Scheduled matches keep their full shared ordering window. Only
+    // unscheduled matches may start early when the second ranking arrives.
     // The ranking is already saved, so a failure here is logged, not
-    // returned; the start timer and the staff override still cover it.
-    if let Err(e) = crate::judge::try_autostart(host, contest_id, match_id) {
+    // returned; the start wakeup and the staff override still cover it.
+    if let Err(e) = crate::executor::tick(host, contest_id, match_id) {
         let _ = host.log.info(&format!(
             "codelink-bracket: autostart after ranking failed: {e:?}"
         ));
@@ -196,10 +193,10 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::queue_bracket_contest_info;
     use std::collections::HashMap;
 
     use super::*;
-    use crate::model::MatchPhase;
 
     fn group_a() -> Vec<i32> {
         vec![101, 102, 103]
@@ -217,7 +214,7 @@ mod tests {
             player_b: b,
             group_a,
             group_b,
-            state: MatchPhase::Ordering,
+            phase: Phase::Ordering,
             ..Default::default()
         }
     }
@@ -257,12 +254,12 @@ mod tests {
         assert_eq!(m.order_a, Some(vec![103, 102, 101]));
     }
 
-    // -- state guard on record_order (DEFECT 2 fix) --
+    // -- record_order only while ordering --
 
     #[test]
     fn rejects_a_resubmission_once_the_match_has_left_ordering() {
         let mut m = match_in_ordering(10, 20, group_a(), group_b());
-        m.state = MatchPhase::InProgress;
+        m.phase = Phase::Playing;
         m.order_a = Some(vec![101, 102, 103]);
         let err = record_order(&mut m, 20, vec![103, 102, 101]).unwrap_err();
         assert!(err.contains("ordering phase"), "got: {err}");
@@ -277,20 +274,14 @@ mod tests {
     fn rejects_a_ranking_submitted_to_an_already_decided_match() {
         // Every non-Ordering phase refuses a ranking, not just InProgress.
         let mut m = match_in_ordering(10, 20, group_a(), group_b());
-        m.state = MatchPhase::Decided;
+        m.phase = Phase::Decided {
+            winner: 10,
+            decided_at_ms: 0,
+        };
         assert!(record_order(&mut m, 20, group_a()).is_err());
     }
 
     // -- handle_order (host wiring) --
-
-    fn queue_bracket_contest_info(host: &Host) {
-        host.db.queue_query_result(serde_json::json!([{
-            "contest_type": "codelink-bracket",
-            "is_public": true,
-            "is_active": true,
-            "phase": "during",
-        }]));
-    }
 
     fn order_request(
         contest_id: i32,
@@ -414,7 +405,7 @@ mod tests {
         let host = Host::mock();
         queue_bracket_contest_info(&host);
         let mut m = match_in_ordering(10, 20, group_a(), group_b());
-        m.state = MatchPhase::InProgress;
+        m.phase = Phase::Playing;
         m.order_a = Some(vec![101, 102, 103]);
         m.order_b = Some(vec![201, 202, 203]);
         seed_match(&host, 7, 0, &m);

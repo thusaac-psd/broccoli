@@ -7,7 +7,6 @@ import type { MatchView } from '../types.ts';
 export type Side = 'a' | 'b';
 
 export type PlayerStage =
-  | { kind: 'waiting_opponent' }
   | { kind: 'rank' }
   /** Ranked; `startsAtMs` null means the opponent has not ranked yet. */
   | { kind: 'waiting_start'; startsAtMs: number | null }
@@ -37,8 +36,6 @@ export function playerStage(match: MatchView, side: Side): PlayerStage {
   const ownOrder = side === 'a' ? match.order_a : match.order_b;
   const submittedRanking = side === 'a' ? match.order_b : match.order_a;
   switch (match.state) {
-    case 'pending':
-      return { kind: 'waiting_opponent' };
     case 'ordering':
       if (match.ordering_deadline_ms != null) return { kind: 'rank' };
       return submittedRanking === null
@@ -103,7 +100,6 @@ export function matchSteps(match: MatchView, side: Side): Step[] {
   const hasTiebreak =
     match.state === 'tiebreak' || match.games.some((g) => g.tiebreak);
   const beforePlay =
-    stage.kind === 'waiting_opponent' ||
     stage.kind === 'rank' ||
     stage.kind === 'waiting_start' ||
     stage.kind === 'preparing';
@@ -111,10 +107,7 @@ export function matchSteps(match: MatchView, side: Side): Step[] {
   const steps: Step[] = [
     {
       key: 'rank',
-      status:
-        stage.kind === 'rank' || stage.kind === 'waiting_opponent'
-          ? 'current'
-          : 'done',
+      status: stage.kind === 'rank' ? 'current' : 'done',
     },
     {
       key: 'start',

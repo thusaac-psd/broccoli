@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use broccoli_server_sdk::prelude::*;
 
-use crate::model::{MatchPhase, MatchState, Setup};
+use crate::model::{MatchState, Phase, Setup};
 
 /// Match ids fit in a byte; supported brackets contain at most 128 players.
 /// Number of matches in a one-based elimination stage.
@@ -178,22 +178,37 @@ pub fn find_players_match(
         .map(|(_, m)| m)
 }
 
-/// Apply `f` to a match's state via a compare-and-set retry loop, so a
-/// judging callback and a timer firing on the same match cannot clobber
-/// each other's write.
+/// Apply `f` to an existing match's state via a compare-and-set retry loop,
+/// so concurrent writers cannot clobber each other. A match that was never
+/// created is an error rather than a new default document. Phase changes go
+/// through [`crate::executor::drive`] instead.
 pub fn update_match<F>(host: &Host, contest: i32, id: u8, f: F) -> Result<MatchState, SdkError>
 where
     F: Fn(&mut MatchState) -> Result<(), SdkError>,
 {
     let key = match_key(contest, id);
-    host.storage.modify(&key, f)
+    for _ in 0..100 {
+        let snapshot = host
+            .storage
+            .snapshot(&key)?
+            .ok_or_else(|| SdkError::Other("match not found".into()))?;
+        let mut m: MatchState = serde_json::from_str(&snapshot.value)?;
+        f(&mut m)?;
+        if host.storage.compare_and_set_snapshot(
+            &key,
+            Some(&snapshot),
+            &serde_json::to_string(&m)?,
+        )? {
+            return Ok(m);
+        }
+    }
+    Err(SdkError::Other("CAS retry limit exceeded".into()))
 }
 
 /// First-stage participants come from the canonical setup seeds. Later
 /// matches at `(round, pos)` wait until both feeder slots
 /// (`slot_key(contest, round, pos*2)` and `..pos*2+1`) have been filled. A no-op, not an error, while either slot is still empty -- the
-/// caller (round 1: `setup::handle_setup`; later rounds: the synchronized
-/// stage opener in `judge`) calls this for every position only after the
+/// caller (the stage opener in `stages`) calls this for every position only after the
 /// stage's opening barrier has passed.
 ///
 /// Uses `compare_and_set(key, None, ..)` (create-only) rather than
@@ -245,7 +260,7 @@ pub fn create_match_if_both_slots_filled(
         player_b,
         group_a: round_def.group_a.clone(),
         group_b: round_def.group_b.clone(),
-        state: MatchPhase::Ordering,
+        phase: Phase::Ordering,
         ..Default::default()
     };
     let id = match_id_for(setup.player_count(), round, pos);
@@ -427,7 +442,7 @@ mod tests {
         assert_eq!(m.player_b, 20);
         assert_eq!(m.round, 1);
         assert_eq!(m.pos, 0);
-        assert_eq!(m.state, MatchPhase::Ordering);
+        assert_eq!(m.phase, Phase::Ordering);
         assert_eq!(m.group_a, vec![1, 2, 3]);
         assert_eq!(m.group_b, vec![4, 5, 6]);
     }
@@ -446,7 +461,7 @@ mod tests {
             .unwrap();
         create_match_if_both_slots_filled(&host, 7, &setup, 1, 0).unwrap();
         update_match(&host, 7, match_id_for(16, 1, 0), |m| {
-            m.state = MatchPhase::InProgress;
+            m.phase = Phase::Playing;
             Ok(())
         })
         .unwrap();
@@ -458,7 +473,7 @@ mod tests {
         let m = load_match(&host, 7, match_id_for(16, 1, 0))
             .unwrap()
             .unwrap();
-        assert_eq!(m.state, MatchPhase::InProgress);
+        assert_eq!(m.phase, Phase::Playing);
     }
 
     #[test]

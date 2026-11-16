@@ -17,7 +17,6 @@ import type { MatchPhase } from '../types.ts';
 import { describeMatchPhase, isActivelyPlaying } from './phase.ts';
 
 const ALL_PHASES: MatchPhase[] = [
-  'pending',
   'ordering',
   'preparing',
   'intermission',

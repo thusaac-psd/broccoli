@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 /// Default grace period (seconds) between a match entering
-/// `MatchPhase::AwaitingJudge` and its escalation timer firing. See
+/// `Phase::AwaitingJudge` and its escalation to staff. See
 /// [`Setup::escalation_grace_seconds`].
 pub fn default_escalation_grace_seconds() -> i64 {
     120
@@ -24,29 +24,19 @@ pub struct Setup {
     pub seeds: Vec<i32>,
     /// Optional bronze match, played alongside the final using the final
     /// stage's timing and BO/FT settings, with its own problem groups.
-    #[serde(default)]
     pub third_place: Option<ThirdPlaceConfig>,
     /// Prefix of stages whose rules are frozen, including interrupted openings.
     pub opened_rounds: usize,
-    #[serde(default)]
     pub stage_clocks: BTreeMap<u8, StageClock>,
     /// Shared by both players across this match's regular games only.
-    #[serde(default)]
     pub match_extra_time_seconds: i64,
     /// Score penalty added to subsequent submissions for each WA/TLE/MLE/RE
     /// in a regular game, without shortening the submission window or spending
-    /// extra time. Tiebreaks never apply penalties. Zero disables penalties;
-    /// older setups retain the 20s default.
-    #[serde(default = "default_penalty_seconds")]
+    /// extra time. Tiebreaks never apply penalties. Zero disables penalties.
     pub penalty_seconds: i64,
-    /// How long a match may sit in `MatchPhase::AwaitingJudge` (blocked on
-    /// an in-flight submission past its 小局 deadline) before escalating to
-    /// `MatchPhase::NeedsAdjudication` for staff. `#[serde(default)]` so
-    /// both a persisted `Setup` document written before this field existed,
-    /// and a `/setup` request body that omits it, fall back to
-    /// [`default_escalation_grace_seconds`] rather than failing to
-    /// deserialize or silently becoming `0`.
-    #[serde(default = "default_escalation_grace_seconds")]
+    /// How long a match may sit in `Phase::AwaitingJudge` (blocked on an
+    /// in-flight submission past its 小局 deadline) before escalating to
+    /// `Phase::NeedsAdjudication` for staff.
     pub escalation_grace_seconds: i64,
 }
 
@@ -105,7 +95,8 @@ pub struct RoundDef {
     #[serde(default)]
     pub wins_to_advance: Option<usize>,
     /// UTC time at which the whole stage starts its 180-second ordering phase.
-    /// Missing only on legacy stages, which retain their original pacing.
+    /// Without one, the stage opens once the previous stage and its break are
+    /// complete, and each match starts once both rankings arrive.
     #[serde(default)]
     pub start_at_ms: Option<i64>,
     #[serde(default)]
@@ -178,6 +169,15 @@ impl Setup {
         }
     }
 
+    /// Whether `round` follows a shared stage schedule (see
+    /// `RoundDef::start_at_ms`).
+    pub fn is_scheduled(&self, round: u8) -> bool {
+        round
+            .checked_sub(1)
+            .and_then(|index| self.rounds.get(usize::from(index)))
+            .is_some_and(|r| r.start_at_ms.is_some())
+    }
+
     pub fn problem_round(&self, problem: i32) -> Option<u8> {
         self.rounds
             .iter()
@@ -193,12 +193,6 @@ impl Setup {
                 }
                 _ => None,
             })
-    }
-}
-
-impl MatchState {
-    pub fn is_regular_game(&self, index: u8) -> bool {
-        (index as usize) < self.group_a.len()
     }
 }
 
@@ -261,92 +255,75 @@ pub struct MatchState {
     /// The order player B must solve THEIR OWN group's problems in, as
     /// ranked by player A (B's opponent). `None` until A submits a ranking.
     pub order_b: Option<Vec<i32>>,
+    /// Every game opened so far, regular games first, then tiebreak
+    /// attempts. A game's index alone says which kind it is (see
+    /// [`MatchState::game_kind`]).
     pub xiaoju: Vec<XiaojuState>,
     pub score_a: u8,
     pub score_b: u8,
-    pub state: MatchPhase,
-    #[serde(default)]
-    pub next_game_at_ms: Option<i64>,
-    pub winner: Option<i32>,
-    /// Index into this round's `RoundDef::tiebreak` list of the 附加赛
-    /// problem currently (or most recently) in play.
-    pub tiebreak_index: usize,
-    /// When this match reached `MatchPhase::Decided` (Unix epoch
-    /// milliseconds), `0` until then. Needed to compute a ROUND-WIDE
-    /// intermission boundary ("Intermission | Fixed, between rounds only"):
-    /// the next round may not open before the fixed intermission has
-    /// elapsed after the LAST match of the previous round finished, which
-    /// requires knowing when each match finished, not just that it did.
-    /// Read by `bracket::player_free_at_ms` to time the winner's break.
-    pub decided_at_ms: i64,
-    /// While `state == MatchPhase::AwaitingJudge`: the id of the in-flight
-    /// submission this match is blocked on, so staff reading
-    /// `GET /matches/{id}` know which submission to rejudge. `None`
-    /// otherwise. See `MatchPhase::AwaitingJudge`'s doc comment for the
-    /// policy this exists to support.
-    pub awaiting_submission_id: Option<i32>,
-    /// Why the match is in `NeedsAdjudication`, so staff (and the UI) are
-    /// told the actual cause instead of guessing it from other fields.
-    /// `None` in any other phase, and for documents written before this
-    /// field existed (`#[serde(default)]`).
-    #[serde(default)]
-    pub adjudication_reason: Option<AdjudicationReason>,
+    /// Changed only by [`crate::machine::transition`].
+    pub phase: Phase,
     /// None until the first game opens. Both durations then remain fixed for
     /// this match, even if staff correct the stage setup during play.
     pub game_durations: Option<GameDurations>,
-    /// Pinned at the first game along with the base duration. Legacy matches
-    /// that already opened a game keep a zero allowance.
-    #[serde(default)]
+    /// Pinned at the first game along with the base duration.
     pub match_extra_time_seconds: i64,
     /// Balance after settled games. While a game is open, its deadlines
     /// describe the running clock; only settlement changes this balance.
-    #[serde(default)]
     pub extra_time_remaining_ms: i64,
 }
 
-/// State of one 小局 (the best-of-one sub-match on a single problem).
-///
-/// `winner: Option<i32>` here is deliberately a different shape from
-/// `MatchOutcome::Decided { winner: i32 }`: a 小局 can legitimately end with
-/// NEITHER player scoring ("如果在规定时间内双方均未能通过当前题目，则该
-/// 小局双方均不得分"), which this type expresses as `Decided { winner: None
-/// }` conceptually via `decided = true, winner = None`. A match, by
-/// contrast, must always produce a winner or reach `NeedsAdjudication` --
-/// never a scoreless terminal state. Do not "harmonise" these two shapes.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct XiaojuState {
-    pub index: u8,
-    pub opened_at_ms: i64,
-    /// Missing in old documents, whose final deadline is also their base deadline.
-    #[serde(default)]
-    pub base_deadline_ms: Option<i64>,
-    pub deadline_ms: i64,
-    #[serde(default)]
-    pub extra_time_used_ms: i64,
-    pub winner: Option<i32>,
-    pub decided: bool,
+/// Where a match is in its lifecycle. Each phase carries exactly the data
+/// that exists while the match is in it, so a winner without a decision, or
+/// a blocking submission outside `AwaitingJudge`, cannot be represented.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Phase {
+    /// Both players may read each other's group and submit a ranking.
+    #[default]
+    Ordering,
+    /// Ordering has closed; the whole stage waits for its common game start.
+    Preparing,
+    /// The last game in `xiaoju` is open for submissions. Whether it is a
+    /// regular game or a tiebreak follows from its index.
+    Playing,
+    /// A settled game is followed by a break before the next game opens.
+    Intermission { next_game_at_ms: i64 },
+    /// The open game's deadline passed while an older submission was still
+    /// in flight (see `decide::submission_in_flight`) and could still beat
+    /// the best accepted one. Awarding the game now could hand it to the
+    /// wrong player, and a platform fault must never decide it silently, so
+    /// the match waits for that verdict until `escalate_at_ms`, then goes to
+    /// staff. If the verdict lands first, the game is decided normally, and
+    /// an accepted blocker wins because it was submitted earlier.
+    AwaitingJudge {
+        blocking_submission_id: i32,
+        escalate_at_ms: i64,
+    },
+    /// The match has a winner.
+    Decided { winner: i32, decided_at_ms: i64 },
+    /// The match cannot continue on its own; staff must award it.
+    NeedsAdjudication { adjudication: Adjudication },
 }
 
-impl XiaojuState {
-    pub fn base_deadline_ms(&self) -> i64 {
-        self.base_deadline_ms.unwrap_or(self.deadline_ms)
-    }
-
-    /// The same half-open window is enforced at submission and settlement.
-    /// Use i128 for the comparison so even an unbounded test deadline is safe.
-    pub fn contains_submission_at_us(&self, submitted_at_us: i64) -> bool {
-        let at = i128::from(submitted_at_us);
-        i128::from(self.opened_at_ms) * 1_000 <= at && at < i128::from(self.deadline_ms) * 1_000
+impl Phase {
+    /// Whether no further game can be played automatically. Admissions are
+    /// retired and the match's timers are released once it is closed.
+    pub fn is_closed(&self) -> bool {
+        matches!(
+            self,
+            Phase::Decided { .. } | Phase::NeedsAdjudication { .. }
+        )
     }
 }
 
-/// Why a match needs a staff decision.
+/// Why a match needs a staff decision, with the data each cause brings.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AdjudicationReason {
-    /// A submission was still being judged when the escalation grace ran
-    /// out (`awaiting_submission_id` names it).
-    StuckJudge,
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum Adjudication {
+    /// `submission_id` was still being judged when the escalation grace ran
+    /// out, so staff know which submission to rejudge.
+    StuckJudge { submission_id: i32 },
     /// Every tiebreak problem ended scoreless.
     TiebreakExhausted,
     /// The round has no problem definition to continue with.
@@ -356,42 +333,288 @@ pub enum AdjudicationReason {
     ContestEnded,
 }
 
-/// A match's lifecycle phase.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+impl Adjudication {
+    pub fn reason(&self) -> AdjudicationReason {
+        match self {
+            Adjudication::StuckJudge { .. } => AdjudicationReason::StuckJudge,
+            Adjudication::TiebreakExhausted => AdjudicationReason::TiebreakExhausted,
+            Adjudication::SetupMissing => AdjudicationReason::SetupMissing,
+            Adjudication::ContestEnded => AdjudicationReason::ContestEnded,
+        }
+    }
+}
+
+/// The wire name of an [`Adjudication`], as the HTTP views report it.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum MatchPhase {
-    /// Slots filled (or not yet); ordering has not started.
-    #[default]
-    Pending,
-    /// Both players may read each other's group and submit a ranking.
+pub enum AdjudicationReason {
+    StuckJudge,
+    TiebreakExhausted,
+    SetupMissing,
+    ContestEnded,
+}
+
+/// The wire name of a match's phase, as the HTTP views report it. A playing
+/// match is reported as `in_progress` or `tiebreak` by its open game.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PhaseName {
     Ordering,
-    /// Ordering has closed; the whole stage waits for its common game start.
     Preparing,
-    /// A settled game is followed by a buffer before the next game opens.
     Intermission,
-    /// The regular 小局 are running.
     InProgress,
-    /// Scores were level after the regular 小局; an 附加赛 is running.
     Tiebreak,
-    /// A 小局's deadline passed while an older submission was still IN
-    /// FLIGHT (queued, pending, compiling, running, or a `SystemError`
-    /// being retried -- see `decide::is_in_flight`) and could still beat
-    /// the current best AC once judged. Awarding the AC now could hand the
-    /// 小局 to the wrong player; staying in `InProgress`/`Tiebreak` forever
-    /// would let a platform fault cost a player the 小局 outright with no
-    /// automatic recovery. The contest owner's chosen policy: never let a
-    /// platform fault decide it silently -- surface it as a distinct,
-    /// staff-visible state (`awaiting_submission_id` names the blocking
-    /// submission) with an escalation timer
-    /// (`Setup::escalation_grace_seconds`) to `NeedsAdjudication` if the
-    /// block outlives its grace period. If the blocking submission's
-    /// verdict lands first, the match resumes normally -- and if it turns
-    /// out accepted, the EARLIER submitter wins, per the earliest-submitted
-    /// rule this whole plugin is built around.
     AwaitingJudge,
-    /// The match has a winner.
     Decided,
-    /// The tiebreak problem list was exhausted without a decision; staff
-    /// must resolve this match manually.
     NeedsAdjudication,
+}
+
+/// Which kind of game an index in [`MatchState::xiaoju`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameKind {
+    /// Each player solves their own problem at this index of the order
+    /// imposed on them.
+    Regular,
+    /// Both players solve `RoundDef::tiebreak[attempt]`. A scoreless
+    /// attempt moves on to the next problem rather than replaying this one.
+    Tiebreak { attempt: usize },
+}
+
+impl MatchState {
+    pub fn game_kind(&self, index: u8) -> GameKind {
+        match usize::from(index).checked_sub(self.group_a.len()) {
+            None => GameKind::Regular,
+            Some(attempt) => GameKind::Tiebreak { attempt },
+        }
+    }
+
+    pub fn is_regular_game(&self, index: u8) -> bool {
+        self.game_kind(index) == GameKind::Regular
+    }
+
+    /// The game that is open or blocked on judging, if any.
+    pub fn open_game(&self) -> Option<&XiaojuState> {
+        match self.phase {
+            Phase::Playing | Phase::AwaitingJudge { .. } => self.xiaoju.last(),
+            _ => None,
+        }
+    }
+
+    pub fn phase_name(&self) -> PhaseName {
+        match self.phase {
+            Phase::Ordering => PhaseName::Ordering,
+            Phase::Preparing => PhaseName::Preparing,
+            Phase::Intermission { .. } => PhaseName::Intermission,
+            Phase::Playing => match self.xiaoju.last().map(|g| self.game_kind(g.index)) {
+                Some(GameKind::Tiebreak { .. }) => PhaseName::Tiebreak,
+                _ => PhaseName::InProgress,
+            },
+            Phase::AwaitingJudge { .. } => PhaseName::AwaitingJudge,
+            Phase::Decided { .. } => PhaseName::Decided,
+            Phase::NeedsAdjudication { .. } => PhaseName::NeedsAdjudication,
+        }
+    }
+
+    pub fn winner(&self) -> Option<i32> {
+        match self.phase {
+            Phase::Decided { winner, .. } => Some(winner),
+            _ => None,
+        }
+    }
+
+    pub fn decided_at_ms(&self) -> Option<i64> {
+        match self.phase {
+            Phase::Decided { decided_at_ms, .. } => Some(decided_at_ms),
+            _ => None,
+        }
+    }
+
+    /// The submission staff should rejudge: the one the match is waiting
+    /// for, or the one whose wait sent it to staff.
+    pub fn blocking_submission_id(&self) -> Option<i32> {
+        match self.phase {
+            Phase::AwaitingJudge {
+                blocking_submission_id,
+                ..
+            } => Some(blocking_submission_id),
+            Phase::NeedsAdjudication {
+                adjudication: Adjudication::StuckJudge { submission_id },
+            } => Some(submission_id),
+            _ => None,
+        }
+    }
+
+    /// Index into `RoundDef::tiebreak` of the attempt that is in play, about
+    /// to open after a break, or played last; `0` before any tiebreak.
+    pub fn tiebreak_attempt(&self) -> usize {
+        let index = match self.phase {
+            Phase::Intermission { .. } => self.xiaoju.len(),
+            _ => self.xiaoju.last().map_or(0, |g| usize::from(g.index)),
+        };
+        index.saturating_sub(self.group_a.len())
+    }
+
+    /// The problem `player` must currently submit to: their position in the
+    /// order imposed on them in a regular game, or the shared problem of a
+    /// tiebreak attempt. `None` outside an open game or for anyone else.
+    /// Submission gating, judging and feedback all resolve the current
+    /// problem here.
+    pub fn current_problem(&self, round_def: &RoundDef, player: i32) -> Option<i32> {
+        let game = self.open_game()?;
+        match self.game_kind(game.index) {
+            GameKind::Regular => {
+                let order = if player == self.player_a {
+                    self.order_a.as_ref()
+                } else if player == self.player_b {
+                    self.order_b.as_ref()
+                } else {
+                    return None;
+                };
+                order?.get(usize::from(game.index)).copied()
+            }
+            GameKind::Tiebreak { attempt } => (player == self.player_a || player == self.player_b)
+                .then(|| round_def.tiebreak.get(attempt).copied())
+                .flatten(),
+        }
+    }
+}
+
+/// State of one 小局 (the best-of-one sub-match on a single problem).
+///
+/// `winner: Option<i32>` here is deliberately a different shape from
+/// `Phase::Decided { winner: i32 }`: a 小局 can legitimately end with
+/// NEITHER player scoring ("如果在规定时间内双方均未能通过当前题目，则该
+/// 小局双方均不得分"), which this type expresses as `decided = true, winner =
+/// None`. A match, by contrast, must always produce a winner or reach
+/// `NeedsAdjudication` -- never a scoreless terminal state. Do not
+/// "harmonise" these two shapes.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct XiaojuState {
+    pub index: u8,
+    pub opened_at_ms: i64,
+    /// The deadline without shared extra time.
+    pub base_deadline_ms: i64,
+    /// The deadline including the shared extra time still available when the
+    /// game opened.
+    pub deadline_ms: i64,
+    pub extra_time_used_ms: i64,
+    pub winner: Option<i32>,
+    pub decided: bool,
+}
+
+impl XiaojuState {
+    /// The same half-open window is enforced at submission and settlement.
+    /// Use i128 for the comparison so even an unbounded test deadline is safe.
+    pub fn contains_submission_at_us(&self, submitted_at_us: i64) -> bool {
+        let at = i128::from(submitted_at_us);
+        i128::from(self.opened_at_ms) * 1_000 <= at && at < i128::from(self.deadline_ms) * 1_000
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round_def() -> RoundDef {
+        RoundDef {
+            tiebreak: vec![301, 302],
+            ..Default::default()
+        }
+    }
+
+    fn with_games(phase: Phase, games: u8) -> MatchState {
+        MatchState {
+            player_a: 10,
+            player_b: 20,
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
+            order_a: Some(vec![103, 101, 102]),
+            order_b: Some(vec![203, 201, 202]),
+            xiaoju: (0..games)
+                .map(|index| XiaojuState {
+                    index,
+                    ..Default::default()
+                })
+                .collect(),
+            phase,
+            ..Default::default()
+        }
+    }
+
+    fn blocked() -> Phase {
+        Phase::AwaitingJudge {
+            blocking_submission_id: 5,
+            escalate_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn the_current_problem_follows_the_imposed_order_in_regular_games() {
+        for phase in [Phase::Playing, blocked()] {
+            let m = with_games(phase, 2);
+            assert_eq!(m.current_problem(&round_def(), 10), Some(101));
+            assert_eq!(m.current_problem(&round_def(), 20), Some(201));
+            assert_eq!(m.current_problem(&round_def(), 99), None);
+        }
+    }
+
+    #[test]
+    fn both_players_share_the_current_tiebreak_problem_even_while_blocked() {
+        for phase in [Phase::Playing, blocked()] {
+            let m = with_games(phase, 5);
+            assert_eq!(m.game_kind(4), GameKind::Tiebreak { attempt: 1 });
+            assert_eq!(m.current_problem(&round_def(), 10), Some(302));
+            assert_eq!(m.current_problem(&round_def(), 20), Some(302));
+            assert_eq!(m.current_problem(&round_def(), 99), None);
+        }
+    }
+
+    #[test]
+    fn there_is_no_current_problem_without_an_open_game() {
+        let pause = Phase::Intermission { next_game_at_ms: 0 };
+        for phase in [Phase::Ordering, pause] {
+            assert_eq!(with_games(phase, 1).current_problem(&round_def(), 10), None);
+        }
+    }
+
+    #[test]
+    fn a_playing_match_is_named_by_its_open_game() {
+        assert_eq!(
+            with_games(Phase::Playing, 1).phase_name(),
+            PhaseName::InProgress
+        );
+        assert_eq!(
+            with_games(Phase::Playing, 4).phase_name(),
+            PhaseName::Tiebreak
+        );
+        assert_eq!(
+            with_games(blocked(), 4).phase_name(),
+            PhaseName::AwaitingJudge
+        );
+    }
+
+    #[test]
+    fn the_tiebreak_attempt_is_the_one_in_play_or_about_to_open() {
+        assert_eq!(with_games(Phase::Ordering, 0).tiebreak_attempt(), 0);
+        assert_eq!(with_games(Phase::Playing, 2).tiebreak_attempt(), 0);
+        assert_eq!(with_games(Phase::Playing, 5).tiebreak_attempt(), 1);
+        let pause = Phase::Intermission { next_game_at_ms: 0 };
+        assert_eq!(with_games(pause, 5).tiebreak_attempt(), 2);
+    }
+
+    #[test]
+    fn only_a_decision_or_adjudication_closes_a_match() {
+        let closed = [
+            Phase::Decided {
+                winner: 10,
+                decided_at_ms: 0,
+            },
+            Phase::NeedsAdjudication {
+                adjudication: Adjudication::ContestEnded,
+            },
+        ];
+        assert!(closed.iter().all(Phase::is_closed));
+        let open = [Phase::Ordering, Phase::Preparing, Phase::Playing, blocked()];
+        assert!(!open.iter().any(Phase::is_closed));
+    }
 }

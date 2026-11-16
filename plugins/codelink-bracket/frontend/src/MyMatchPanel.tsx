@@ -190,11 +190,6 @@ function CurrentTask({
   );
 
   switch (stage.kind) {
-    case 'waiting_opponent':
-      return note(
-        <Hourglass className="h-4 w-4 text-muted-foreground" />,
-        t('codelink-bracket.my.waitingOpponent'),
-      );
     case 'rank':
       return (
         <div className="space-y-2">

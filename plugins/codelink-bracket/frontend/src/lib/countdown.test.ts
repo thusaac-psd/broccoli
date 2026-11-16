@@ -81,7 +81,7 @@ test('xiaojuTimingFromMatch returns null (no clock) when the deadline field is a
   assert.equal(
     xiaojuTimingFromMatch({
       current_xiaoju_deadline_ms: null,
-      state: 'pending',
+      state: 'ordering',
     }),
     null,
   );
@@ -133,7 +133,6 @@ test('xiaojuTimingFromMatch feeding into deriveCountdownStatus reproduces Awaiti
 
 test('xiaojuTimingFromMatch: every MatchPhase is handled without throwing', () => {
   const allPhases: MatchPhase[] = [
-    'pending',
     'ordering',
     'in_progress',
     'tiebreak',
