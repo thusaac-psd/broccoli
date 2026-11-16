@@ -29,12 +29,7 @@ impl MqError {
     /// credentials, a bad URL, a Redis that is too old, a foreign key.
     pub fn is_unreachable(&self) -> bool {
         match self {
-            Self::Redis(e) => {
-                e.is_io_error()
-                    || e.is_timeout()
-                    || e.is_connection_refusal()
-                    || e.is_connection_dropped()
-            }
+            Self::Redis(e) => common::redis_conn::is_outage(e),
             Self::Encode(_) | Self::RedisTooOld { .. } | Self::WrongKeyType { .. } => false,
         }
     }

@@ -56,6 +56,10 @@ impl AdmissionRefused {
 /// acquire timeout, after which a database that came back serves again.
 pub const DATABASE_RETRY_AFTER_SECS: u64 = 5;
 
+/// The `Retry-After` of a `QUEUE_UNAVAILABLE` answer: about one Redis
+/// command timeout, after which a queue that came back serves again.
+pub const QUEUE_RETRY_AFTER_SECS: u64 = common::redis_conn::COMMAND_TIMEOUT.as_secs();
+
 #[derive(Debug)]
 pub enum AppError {
     Validation(String),
@@ -136,6 +140,10 @@ pub enum AppError {
     /// ([`common::db::is_outage`]): an outage, retried by the client after
     /// [`DATABASE_RETRY_AFTER_SECS`].
     DatabaseUnavailable,
+    /// The message queue (Redis) cannot be reached
+    /// ([`common::redis_conn::is_outage`]): an outage, retried by the client
+    /// after [`QUEUE_RETRY_AFTER_SECS`].
+    QueueUnavailable,
     IdempotencyKeyInProgress,
     IdempotencyKeyMismatch(String),
     /// Idempotent response was too large to cache and cannot be replayed.
@@ -370,6 +378,16 @@ impl AppError {
                     ),
                 ),
             ),
+            AppError::QueueUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                simple(
+                    HostCode::QueueUnavailable,
+                    format!(
+                        "The server's message queue is not answering; retry in \
+                         {QUEUE_RETRY_AFTER_SECS} seconds"
+                    ),
+                ),
+            ),
             AppError::PluginRefusal(refusal) => refusal.into_parts(),
             AppError::AdmissionRefused(refused) => {
                 let (code, message) = refused.code_and_message();
@@ -441,6 +459,7 @@ impl IntoResponse for AppError {
             AppError::PluginUnavailable => Some(PLUGIN_RETRY_AFTER_SECS),
             AppError::StorageUnavailable => Some(STORAGE_RETRY_AFTER_SECS),
             AppError::DatabaseUnavailable => Some(DATABASE_RETRY_AFTER_SECS),
+            AppError::QueueUnavailable => Some(QUEUE_RETRY_AFTER_SECS),
             _ => None,
         };
 
@@ -461,6 +480,17 @@ impl From<DbErr> for AppError {
             AppError::DatabaseUnavailable
         } else {
             AppError::Internal(err.to_string())
+        }
+    }
+}
+
+impl From<redis::RedisError> for AppError {
+    fn from(err: redis::RedisError) -> Self {
+        if common::redis_conn::is_outage(&err) {
+            tracing::warn!("Message queue unavailable: {err}");
+            AppError::QueueUnavailable
+        } else {
+            AppError::Internal(format!("Redis error: {err}"))
         }
     }
 }
@@ -577,6 +607,23 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
         assert_eq!(body["code"], "STORAGE_UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn a_queue_that_does_not_answer_is_a_retryable_503() {
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        let response = AppError::from(redis::RedisError::from(refused)).into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers()["Retry-After"],
+            QUEUE_RETRY_AFTER_SECS.to_string()
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["code"], "QUEUE_UNAVAILABLE");
+
+        let reply = redis::RedisError::from((redis::ErrorKind::UnexpectedReturnType, "WRONGTYPE"));
+        assert!(matches!(AppError::from(reply), AppError::Internal(_)));
     }
 
     /// Durable-queue backpressure must surface as

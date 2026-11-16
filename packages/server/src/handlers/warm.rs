@@ -62,6 +62,7 @@ const ENUMERATE_BLOBS_SQL: &str = r#"
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)"),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)"),
         (status = 404, description = "Contest not found (NOT_FOUND)"),
+        (status = 503, description = "Message queue unavailable (QUEUE_UNAVAILABLE)"),
     ),
     security(("jwt" = [])),
 )]
@@ -120,6 +121,7 @@ pub struct WarmStatusQuery {
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)"),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)"),
         (status = 404, description = "Contest not found (NOT_FOUND)"),
+        (status = 503, description = "Message queue unavailable (QUEUE_UNAVAILABLE)"),
     ),
     security(("jwt" = [])),
 )]
@@ -141,7 +143,7 @@ pub async fn prewarm_status(
     let mut conn = client
         .get_multiplexed_async_connection()
         .await
-        .map_err(redis_err)?;
+        .map_err(AppError::from)?;
 
     // Resolve the job: explicit query param, else the contest's latest warm.
     let job_id = match query.job {
@@ -149,7 +151,7 @@ pub async fn prewarm_status(
         None => conn
             .get::<_, Option<String>>(warm_contest_key(id))
             .await
-            .map_err(redis_err)?,
+            .map_err(AppError::from)?,
     };
 
     let Some(job_id) = job_id else {
@@ -168,7 +170,7 @@ pub async fn prewarm_status(
     let total_blobs = match conn
         .get::<_, Option<String>>(warm_job_key(&job_id))
         .await
-        .map_err(redis_err)?
+        .map_err(AppError::from)?
     {
         Some(raw) => serde_json::from_str::<WarmJob>(&raw)
             .map(|j| j.total())
@@ -302,7 +304,7 @@ async fn publish_warm_job(
     let mut conn = client
         .get_multiplexed_async_connection()
         .await
-        .map_err(redis_err)?;
+        .map_err(AppError::from)?;
 
     // Store the full payload (so late/reconnecting workers can read it) + map the
     // contest to this job, then notify workers.
@@ -313,7 +315,7 @@ async fn publish_warm_job(
         .arg(WARM_KEY_TTL_SECS)
         .query_async(&mut conn)
         .await
-        .map_err(redis_err)?;
+        .map_err(AppError::from)?;
     let _: () = redis::cmd("SET")
         .arg(warm_contest_key(contest_id))
         .arg(&job.job_id)
@@ -321,13 +323,13 @@ async fn publish_warm_job(
         .arg(WARM_KEY_TTL_SECS)
         .query_async(&mut conn)
         .await
-        .map_err(redis_err)?;
+        .map_err(AppError::from)?;
     let _: i64 = redis::cmd("PUBLISH")
         .arg(WARM_CHANNEL)
         .arg(&job.job_id)
         .query_async(&mut conn)
         .await
-        .map_err(redis_err)?;
+        .map_err(AppError::from)?;
 
     Ok(job)
 }
@@ -344,10 +346,10 @@ async fn read_progress(
         let mut iter = conn
             .scan_match::<&str, String>(&pattern)
             .await
-            .map_err(redis_err)?;
+            .map_err(AppError::from)?;
         let mut acc = Vec::new();
         while let Some(item) = iter.next_item().await {
-            acc.push(item.map_err(redis_err)?);
+            acc.push(item.map_err(AppError::from)?);
         }
         acc
     };
@@ -356,13 +358,9 @@ async fn read_progress(
         return Ok(Vec::new());
     }
 
-    let values: Vec<Option<String>> = conn.mget(&keys).await.map_err(redis_err)?;
+    let values: Vec<Option<String>> = conn.mget(&keys).await.map_err(AppError::from)?;
     Ok(values
         .into_iter()
         .filter_map(|v| v.and_then(|s| serde_json::from_str::<WarmProgress>(&s).ok()))
         .collect())
-}
-
-fn redis_err(e: redis::RedisError) -> AppError {
-    AppError::Internal(format!("Redis error: {e}"))
 }

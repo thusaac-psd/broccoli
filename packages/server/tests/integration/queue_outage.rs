@@ -43,6 +43,35 @@ async fn healthz_is_unavailable_while_redis_is_unreachable() {
     assert_eq!(res.body["db"], "ok", "{}", res.text);
 }
 
+/// An API call that needs Redis while it cannot be reached answers a
+/// retryable `503 QUEUE_UNAVAILABLE` with `Retry-After`, the way a database
+/// outage answers `DATABASE_UNAVAILABLE`.
+#[tokio::test]
+async fn api_calls_answer_a_queue_outage_as_retryable() {
+    let app = TestApp::spawn_with_options(SpawnOptions {
+        redis_url: Some("redis://127.0.0.1:1".into()),
+        ..without_queue()
+    })
+    .await;
+    let token = app
+        .create_user_with_role("queue_outage_warm", "password123", "admin")
+        .await;
+    let contest_id = app.create_contest(&token, "Queue outage", true, true).await;
+
+    let res = app
+        .get_with_token(
+            &format!("{}/{contest_id}/prewarm/status", routes::CONTESTS),
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 503, "{}", res.text);
+    assert_eq!(res.body["code"], "QUEUE_UNAVAILABLE", "{}", res.text);
+    assert_eq!(
+        res.headers.get("retry-after").and_then(|v| v.to_str().ok()),
+        Some(server::error::QUEUE_RETRY_AFTER_SECS.to_string().as_str())
+    );
+}
+
 async fn queued_submission(app: &TestApp, admin: &str) -> submission::Model {
     let token = app
         .create_user_with_role(admin, "password123", "admin")

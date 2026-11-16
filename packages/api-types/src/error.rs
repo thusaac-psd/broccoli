@@ -115,6 +115,8 @@ host_codes! {
     StorageUnavailable = "STORAGE_UNAVAILABLE";
     /// The server's database cannot be reached or cannot serve connections.
     DatabaseUnavailable = "DATABASE_UNAVAILABLE";
+    /// The server's message queue (Redis) cannot be reached.
+    QueueUnavailable = "QUEUE_UNAVAILABLE";
     /// A plugin hook refused the request without a code of its own.
     PluginRejected = "PLUGIN_REJECTED";
     IdempotencyKeyInProgress = "IDEMPOTENCY_KEY_IN_PROGRESS";

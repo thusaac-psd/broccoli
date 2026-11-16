@@ -116,6 +116,14 @@ fn breaks_connection(e: &RedisError) -> bool {
     e.is_timeout() || e.is_io_error() || e.is_connection_dropped() || e.is_unrecoverable_error()
 }
 
+/// Whether `e` is Redis not answering (refused, reset, timed out), which
+/// waiting can fix, as opposed to an answer no retry changes (rejected
+/// credentials, a reply error). The one outage rule for Redis, as
+/// [`crate::db::is_outage`] is for the database.
+pub fn is_outage(e: &RedisError) -> bool {
+    e.is_io_error() || e.is_timeout() || e.is_connection_refusal() || e.is_connection_dropped()
+}
+
 /// The error code of a server reply error (`NOGROUP`, `BUSYGROUP`, ...).
 /// Errors raised by `redis.call` inside a script keep their code.
 pub fn has_code(e: &RedisError, code: &str) -> bool {
