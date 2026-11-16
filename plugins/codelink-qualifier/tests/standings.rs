@@ -1,3 +1,4 @@
+use broccoli_server_sdk::types::{SubmissionLifecycle, Verdict};
 use codelink_qualifier::config::ContestConfig;
 use codelink_qualifier::standings::*;
 
@@ -827,4 +828,38 @@ fn invalid_capacity_never_silently_excludes_a_direct_qualifier() {
     let mut result = weighted_board(vec![ac(1, 1, 17), ac(2, 1, 1), ac(3, 2, 18), ac(4, 2, 2)]);
     result.config.advancement_slots = 1;
     assert!(result.advancement(true).is_err());
+}
+
+fn projected(status: SubmissionLifecycle, verdict: Option<Verdict>) -> Submission {
+    Submission::from(SubmissionRow {
+        submission_id: 1,
+        user_id: 1,
+        problem_id: 1,
+        submitted_at_us: 0,
+        status,
+        verdict,
+    })
+}
+
+/// A submission is pending exactly while the host's projection of it is not
+/// terminal. A system error the host may still retry keeps showing the
+/// attempt in flight, so it is pending even though its judgement finished.
+#[test]
+fn a_submission_is_pending_until_the_host_shows_a_terminal_status() {
+    use SubmissionLifecycle::*;
+    for status in [Queued, Pending, Compiling, Running] {
+        let s = projected(status, None);
+        assert!(s.pending && !s.accepted, "{status:?}");
+    }
+    let accepted = projected(Judged, Some(Verdict::Accepted));
+    assert!(accepted.accepted && !accepted.pending);
+    for (status, verdict) in [
+        (Judged, Some(Verdict::WrongAnswer)),
+        (Judged, Some(Verdict::SystemError)),
+        (CompilationError, None),
+        (SystemError, Some(Verdict::SystemError)),
+    ] {
+        let s = projected(status, verdict.clone());
+        assert!(!s.pending && !s.accepted, "{status:?} {verdict:?}");
+    }
 }

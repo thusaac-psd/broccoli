@@ -2,7 +2,7 @@ use broccoli_server_sdk::prelude::*;
 use serde::Deserialize;
 
 use crate::config::{ContestConfig, ProblemConfig};
-use crate::standings::{Participant, Problem, Submission, calculate};
+use crate::standings::{Participant, Problem, Submission, SubmissionRow, calculate};
 
 pub fn handle_contest_info(
     host: &Host,
@@ -80,9 +80,10 @@ pub fn handle_standings(
     );
     let participants: Vec<Participant> = host.db.query_with_args(&sql, &p.into_args())?;
 
-    let submissions: Vec<Submission> = host
+    let rows: Vec<SubmissionRow> = host
         .db
         .query_with_args(include_str!("submissions.sql"), &[contest_id])?;
+    let submissions: Vec<Submission> = rows.into_iter().map(Submission::from).collect();
     let standings = calculate(participants, problems, submissions, &config)?;
     let advancement = standings.advancement(info.phase.has_ended())?;
     let mut body = serde_json::to_value(standings)?;

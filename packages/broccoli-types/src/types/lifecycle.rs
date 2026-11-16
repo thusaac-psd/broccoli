@@ -99,6 +99,18 @@ impl SubmissionLifecycle {
         self.phase() == StatusPhase::InFlight
     }
 
+    /// Whether a submission showing this status may still get a different
+    /// result. The submission row is the host's projection of its current
+    /// judgement, and it shows a system error the host may still retry at
+    /// the status it had in flight until the retry decides, so every terminal
+    /// status a submission shows is final. A plugin decides "still pending"
+    /// from the submission's own status through this (in SQL:
+    /// `status NOT IN` [`StatusPhase::Terminal`]'s list), never from a
+    /// judgement's `is_finalized`.
+    pub fn result_may_change(&self) -> bool {
+        !self.is_terminal()
+    }
+
     pub fn is_judged(&self) -> bool {
         matches!(self, Self::Judged)
     }

@@ -13,29 +13,6 @@ use crate::model::{GameKind, MatchState, RoundDef};
 
 pub use broccoli_server_sdk::types::SubmissionLifecycle;
 
-/// Whether a submission in this status is still IN FLIGHT (could yet
-/// receive a different verdict) as far as the bracket's scoring policy is
-/// concerned.
-///
-/// This is deliberately NOT the same as `packages/common::SubmissionStatus
-/// ::is_terminal()`: that method's idea of "terminal" is a host-wide,
-/// storage-lifecycle concept, where `SystemError` counts as terminal
-/// (judging finished, the submission's row is in a resting state). The
-/// bracket's scoring policy needs the OPPOSITE answer for `SystemError`: the
-/// platform aggressively re-judges these (`max_system_error_retries`,
-/// "never abandon a system fault" --
-/// `packages/server/src/dispatcher/system_error_retry.rs`), so a
-/// `SystemError` submission can still turn into a real verdict later and
-/// must keep blocking a later AC, exactly like `Queued`/`Pending`/
-/// `Compiling`/`Running`. Only `Judged` and `CompilationError` are actually
-/// done as far as this decision is concerned.
-fn is_in_flight(status: &SubmissionLifecycle) -> bool {
-    !matches!(
-        status,
-        SubmissionLifecycle::Judged | SubmissionLifecycle::CompilationError
-    )
-}
-
 /// Effective submission time (arrival + the player's accumulated penalty)
 /// in microseconds, then the smaller submission id on an exact tie.
 /// Without the id, a same-instant tie would be broken by iteration order.
@@ -44,19 +21,16 @@ fn arrival_order(s: &SubmissionRecord) -> (i64, i32) {
 }
 
 /// Whether `s` could still turn into a different outcome, so the 小局 must
-/// wait for it: either its lifecycle `status` is still in flight (see
-/// [`is_in_flight`]), or judging finished with a `SystemError` VERDICT.
-///
-/// The second arm is the shape the platform actually produces for a sandbox
-/// fault: plugin-finalized as `status == Judged` with `verdict ==
-/// SystemError`, which the SystemError-retry reaper selects and re-judges
-/// exactly like `status == SystemError`. Classifying by `status` alone called
-/// it terminal. Measured on a real 4-worker stack under a concurrent burst:
-/// correct solutions came back `Judged/SystemError` and lost their 小局 - to
-/// the opponent's later AC, or 0-0 at the deadline - purely to a platform
-/// fault. A SystemError verdict is never the contestant's outcome.
+/// wait for it: its result may still change by the host's rule
+/// ([`SubmissionLifecycle::result_may_change`]), or it finished as a system
+/// error in either shape (a `SystemError` status, or `Judged` with a
+/// `SystemError` verdict). A system error is never the contestant's outcome:
+/// one the host may still retry shows as in flight, and one the host stopped
+/// retrying waits for staff to rejudge it.
 pub(crate) fn submission_in_flight(s: &SubmissionRecord) -> bool {
-    is_in_flight(&s.status) || matches!(s.verdict, Some(Verdict::SystemError))
+    s.status.result_may_change()
+        || s.status == SubmissionLifecycle::SystemError
+        || s.verdict == Some(Verdict::SystemError)
 }
 
 /// The oldest submission still being judged, if any.
@@ -71,7 +45,7 @@ pub fn oldest_in_flight(subs: &[SubmissionRecord]) -> Option<i32> {
 /// to which problem, when it was SUBMITTED (not judged -- see
 /// [`decide_xiaoju`]'s doc comment for why that distinction matters), its
 /// verdict if judging has completed (`None` while still pending or while a
-/// system fault is being retried -- see `is_in_flight`), and its host
+/// system fault is being retried -- see [`submission_in_flight`]), and its host
 /// submission id (surfaced to staff via [`XiaojuOutcome::AwaitingJudge`] so
 /// they know which submission to rejudge).
 #[derive(Debug, Clone)]
@@ -136,7 +110,7 @@ pub enum XiaojuOutcome {
         winner: Option<i32>,
     },
     /// The deadline has passed, but an older submission is STILL in flight
-    /// (see `is_in_flight`) and could still beat the current best AC --
+    /// (see [`submission_in_flight`]) and could still beat the current best AC --
     /// awarding the AC now could hand the 小局 to the wrong player once that
     /// verdict lands, but staying `NotYet` forever would let a platform
     /// fault cost a player the 小局 outright (it would never resolve without

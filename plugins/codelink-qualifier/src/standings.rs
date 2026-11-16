@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use broccoli_server_sdk::error::SdkError;
 pub use broccoli_server_sdk::types::UserIdentity as Participant;
+use broccoli_server_sdk::types::{SubmissionLifecycle, Verdict};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ContestConfig, ProblemConfig};
@@ -13,7 +14,7 @@ pub struct Problem {
     pub points: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Submission {
     pub submission_id: i32,
     pub user_id: i32,
@@ -21,7 +22,34 @@ pub struct Submission {
     /// Microseconds from contest start to submission, independent of judge time.
     pub submitted_at_us: i64,
     pub accepted: bool,
+    /// Whether its result may still change, so the standings may too.
     pub pending: bool,
+}
+
+/// A contest submission as `submissions.sql` reads it: the submission row,
+/// the host's projection of its current judgement.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SubmissionRow {
+    pub submission_id: i32,
+    pub user_id: i32,
+    pub problem_id: i32,
+    pub submitted_at_us: i64,
+    pub status: SubmissionLifecycle,
+    pub verdict: Option<Verdict>,
+}
+
+impl From<SubmissionRow> for Submission {
+    fn from(row: SubmissionRow) -> Self {
+        Self {
+            submission_id: row.submission_id,
+            user_id: row.user_id,
+            problem_id: row.problem_id,
+            submitted_at_us: row.submitted_at_us,
+            accepted: row.status == SubmissionLifecycle::Judged
+                && row.verdict == Some(Verdict::Accepted),
+            pending: row.status.result_may_change(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

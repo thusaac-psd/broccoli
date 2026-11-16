@@ -82,19 +82,23 @@ fn hidden_result_mask_fields() -> Vec<String> {
     vec![broccoli_server_sdk::visibility::SUBMISSION_STATUS_PATH.to_string()]
 }
 
+/// Every contest submission whose result is final, read off the submission
+/// row: the host's projection of its current judgement, which keeps a
+/// result that may still change at a status that is not terminal (see
+/// `SubmissionLifecycle::result_may_change`).
 #[cfg(any(target_arch = "wasm32", test))]
 fn current_submissions_sql(contest_id_placeholder: &str, user_filter: &str) -> String {
     format!(
         "SELECT s.id AS submission_id, s.user_id, s.problem_id, \
-                sj.status::text AS status, sj.verdict::text AS verdict, \
+                s.status::text AS status, s.verdict::text AS verdict, \
                 EXTRACT(EPOCH FROM (s.created_at - c.start_time)) * 1000 AS elapsed_ms \
          FROM submission s \
-         JOIN submission_judgement sj ON sj.submission_id = s.id \
-          AND sj.is_current = TRUE AND sj.is_finalized = TRUE \
          JOIN contest c ON c.id = s.contest_id \
          JOIN contest_problem cp ON cp.contest_id = s.contest_id \
           AND cp.problem_id = s.problem_id \
-         WHERE s.contest_id = {contest_id_placeholder}{user_filter}"
+         WHERE s.contest_id = {contest_id_placeholder} \
+           AND s.status IN {final_statuses}{user_filter}",
+        final_statuses = broccoli_server_sdk::types::StatusPhase::Terminal.sql_list(),
     )
 }
 
