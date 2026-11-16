@@ -1,4 +1,4 @@
-use super::wait::{self, Patience};
+use super::wait;
 use super::{Rejected, context};
 use anyhow::Context;
 use broccoli_cli_core::api::submission::SubmissionFileDto;
@@ -188,14 +188,12 @@ fn single_required_filename<'a>(
 }
 
 /// How long `submit -w` waits for the verdict before it gives up.
-pub const VERDICT_PATIENCE: Patience = Patience {
-    limit: Duration::from_secs(300),
-};
+const VERDICT_WAIT: Duration = Duration::from_secs(300);
 
 fn watch_verdict(client: &Client, submission_id: i32) -> anyhow::Result<()> {
     let id = submission_id.to_string();
     let check_later = format!("check it later with `broccoli status {submission_id}`.");
-    let (sub, elapsed) = wait::until_final(VERDICT_PATIENCE, &check_later, || {
+    let (sub, elapsed) = wait::until_final(VERDICT_WAIT, &check_later, || {
         let sub = client
             .get_submission(&id)
             .context("Failed to poll submission status")?;

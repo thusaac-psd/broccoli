@@ -15,7 +15,7 @@ use broccoli_cli_core::ids::{ContestId, ProblemId};
 use broccoli_cli_core::model::{Standing, StatusDisplay, SubmissionStatus, VerdictDisplay};
 use broccoli_cli_core::resolve;
 
-use super::wait::{self, Patience};
+use super::wait;
 use super::{Rejected, context};
 
 #[derive(Args)]
@@ -207,13 +207,11 @@ fn load_cached_samples(
 }
 
 /// How long a remote `test` waits for its code run before it gives up.
-const RUN_PATIENCE: Patience = Patience {
-    limit: std::time::Duration::from_secs(120),
-};
+const RUN_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 
 fn poll_code_run(client: &Client, run_id: i32) -> anyhow::Result<CodeRunResponse> {
     let check_later = "run the test again later, or test with --local.";
-    let (run, _) = wait::until_final(RUN_PATIENCE, check_later, || {
+    let (run, _) = wait::until_final(RUN_WAIT, check_later, || {
         let run = client.get_code_run(run_id)?;
         Ok((Standing::Status(run.status), run))
     })?;

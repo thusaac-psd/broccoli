@@ -7,12 +7,6 @@ use std::time::{Duration, Instant};
 use broccoli_cli_core::model::{Standing, SubmissionStatus};
 use broccoli_cli_core::tui::progress::Progress;
 
-/// How long a wait polls before it gives up with [`StillWaiting`].
-#[derive(Debug, Clone, Copy)]
-pub struct Patience {
-    pub limit: Duration,
-}
-
 /// The wait gave up while the work was still queued or judging. Nothing was
 /// cancelled: the server still judges it, and `check_later` says where to
 /// look. `broccoli` exits with [`StillWaiting::EXIT_CODE`].
@@ -52,11 +46,12 @@ fn interval(standing: &Standing) -> Duration {
     }
 }
 
-/// Poll until the work is final and return the last answer with how long it
-/// took. On a terminal the wait line is redrawn in place; anywhere else each
-/// new thing waited for is printed once, so a pipe or a log shows it too.
+/// Poll until the work is final, for at most `limit` before giving up with
+/// [`StillWaiting`], and return the last answer with how long it took. On a
+/// terminal the wait line is redrawn in place; anywhere else each new thing
+/// waited for is printed once, so a pipe or a log shows it too.
 pub fn until_final<T>(
-    patience: Patience,
+    limit: Duration,
     check_later: &str,
     poll: impl FnMut() -> anyhow::Result<(Standing, T)>,
 ) -> anyhow::Result<(T, Duration)> {
@@ -64,7 +59,7 @@ pub fn until_final<T>(
     let start = Instant::now();
     let mut said = None;
     run(
-        patience,
+        limit,
         check_later,
         poll,
         || start.elapsed(),
@@ -85,7 +80,7 @@ pub fn until_final<T>(
 
 /// [`until_final`] with the clock, the sleep and the wait line passed in.
 fn run<T>(
-    patience: Patience,
+    limit: Duration,
     check_later: &str,
     mut poll: impl FnMut() -> anyhow::Result<(Standing, T)>,
     elapsed: impl Fn() -> Duration,
@@ -98,7 +93,7 @@ fn run<T>(
         let Some(waiting_for) = standing.waiting_for() else {
             return Ok((answer, waited));
         };
-        if waited >= patience.limit {
+        if waited >= limit {
             return Err(StillWaiting {
                 waited,
                 waiting_for,
@@ -119,9 +114,7 @@ mod tests {
 
     use super::*;
 
-    const MINUTE: Patience = Patience {
-        limit: Duration::from_secs(60),
-    };
+    const MINUTE: Duration = Duration::from_secs(60);
 
     /// Drive [`run`] over `answers` (the last one repeats), on a clock that
     /// only the sleeps move. Each poll answers with its index.
@@ -172,7 +165,7 @@ mod tests {
         let (result, shown) = drive(vec![Standing::Status(SubmissionStatus::Queued)]);
         let err = result.unwrap_err();
         let still = err.downcast_ref::<StillWaiting>().unwrap();
-        assert_eq!(still.waited, MINUTE.limit);
+        assert_eq!(still.waited, MINUTE);
         assert_eq!(still.waiting_for, "Queued: waiting for a judge to take it");
         assert!(err.to_string().contains("It is not cancelled: check later"));
         assert_eq!(shown.len(), 60);
