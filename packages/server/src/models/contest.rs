@@ -115,8 +115,21 @@ pub struct ContestListRow {
     pub updated_at: DateTime<Utc>,
 }
 
-impl From<ContestListRow> for ContestListItem {
-    fn from(row: ContestListRow) -> Self {
+impl ContestListRow {
+    /// The contest's phase at `now`.
+    pub fn phase(&self, now: DateTime<Utc>) -> crate::utils::contest::ContestPhase {
+        crate::utils::contest::phase_at(
+            self.activate_time,
+            self.start_time,
+            self.end_time,
+            self.deactivate_time,
+            now,
+        )
+    }
+
+    /// The list item, with the contest's phase at `now`.
+    pub fn into_item(self, now: DateTime<Utc>) -> ContestListItem {
+        let phase = self.phase(now);
         let ContestListRow {
             id,
             title,
@@ -131,8 +144,8 @@ impl From<ContestListRow> for ContestListItem {
             contest_type,
             created_at,
             updated_at,
-        } = row;
-        Self {
+        } = self;
+        ContestListItem {
             id,
             title,
             activate_time,
@@ -146,28 +159,30 @@ impl From<ContestListRow> for ContestListItem {
             contest_type,
             created_at,
             updated_at,
+            phase,
         }
     }
 }
 
-impl From<crate::entity::contest::Model> for ContestResponse {
-    fn from(m: crate::entity::contest::Model) -> Self {
-        Self {
-            id: m.id,
-            title: m.title,
-            description: m.description,
-            activate_time: m.activate_time,
-            start_time: m.start_time,
-            end_time: m.end_time,
-            deactivate_time: m.deactivate_time,
-            is_public: m.is_public,
-            submissions_visible: m.submissions_visible,
-            show_compile_output: m.show_compile_output,
-            show_participants_list: m.show_participants_list,
-            contest_type: m.contest_type,
-            created_at: m.created_at,
-            updated_at: m.updated_at,
-        }
+/// The contest's response, with its phase at `now`.
+pub fn contest_response(m: crate::entity::contest::Model, now: DateTime<Utc>) -> ContestResponse {
+    let phase = crate::utils::contest::contest_phase(&m, now);
+    ContestResponse {
+        id: m.id,
+        title: m.title,
+        description: m.description,
+        activate_time: m.activate_time,
+        start_time: m.start_time,
+        end_time: m.end_time,
+        deactivate_time: m.deactivate_time,
+        is_public: m.is_public,
+        submissions_visible: m.submissions_visible,
+        show_compile_output: m.show_compile_output,
+        show_participants_list: m.show_participants_list,
+        contest_type: m.contest_type,
+        created_at: m.created_at,
+        updated_at: m.updated_at,
+        phase,
     }
 }
 

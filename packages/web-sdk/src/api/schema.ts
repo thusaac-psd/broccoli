@@ -2748,6 +2748,8 @@ export interface components {
       id: number;
       /** @example true */
       is_public: boolean;
+      /** @description Where the contest is now, on the server's clock. */
+      phase: components['schemas']['ContestPhase'];
       /** @example true */
       show_compile_output: boolean;
       /** @example true */
@@ -2792,6 +2794,23 @@ export interface components {
       /** @example alice_wonder */
       username: string;
     };
+    /**
+     * @description Where a contest is at one instant. The host derives it from the contest's
+     *     timeline with one function, on the platform clock, and hands it to plugins
+     *     wherever they act on a contest; a plugin never derives it itself.
+     *
+     *     The activation window is `[activate_time, deactivate_time)` and the
+     *     contest runs during `[start_time, end_time)`. Timelines satisfy
+     *     `activate_time <= start_time < end_time <= deactivate_time`, so the phases
+     *     follow each other in declaration order.
+     * @enum {string}
+     */
+    ContestPhase:
+      | 'unactivated'
+      | 'upcoming'
+      | 'running'
+      | 'ended'
+      | 'deactivated';
     ContestProblemResponse: {
       /**
        * Format: int32
@@ -2845,6 +2864,11 @@ export interface components {
       id: number;
       /** @example true */
       is_public: boolean;
+      /**
+       * @description Where the contest is now, on the server's clock. Clients render this
+       *     rather than comparing the timeline with their own clock.
+       */
+      phase: components['schemas']['ContestPhase'];
       /** @example true */
       show_compile_output: boolean;
       /** @example true */
@@ -3283,7 +3307,7 @@ export interface components {
        */
       problem_type: string;
     };
-    /** @description One way a config value breaks its schema. */
+    /** @description One way a config value breaks its namespace's schema. */
     FieldError: {
       message: string;
       /**
@@ -5224,47 +5248,6 @@ export interface operations {
       };
     };
   };
-  getPluginDependents: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        /** @description Plugin ID */
-        id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description What depends on the plugin */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['PluginDependentsResponse'];
-        };
-      };
-      /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorBody'];
-        };
-      };
-      /** @description Forbidden (PERMISSION_DENIED) */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorBody'];
-        };
-      };
-    };
-  };
   getPluginDetails: {
     parameters: {
       query?: never;
@@ -5541,6 +5524,47 @@ export interface operations {
       };
       /** @description Config not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  getPluginDependents: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Plugin ID */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description What depends on the plugin */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['PluginDependentsResponse'];
+        };
+      };
+      /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Forbidden (PERMISSION_DENIED) */
+      403: {
         headers: {
           [name: string]: unknown;
         };
