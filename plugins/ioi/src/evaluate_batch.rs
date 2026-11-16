@@ -8,8 +8,8 @@ use broccoli_server_sdk::evaluator::{
 use broccoli_server_sdk::types::*;
 use serde::{Deserialize, Serialize};
 
-use crate::config::round_score;
 use crate::config::{SubtaskDef, SubtaskScoringMethod};
+use crate::config::{round_score, total_score};
 use crate::persist::persist_results;
 use crate::subtasks::MemberIndex;
 use crate::subtasks::score_all_subtasks;
@@ -82,7 +82,9 @@ impl ContestJudge for IoiJudge {
             .collect();
         let subtask_results =
             score_all_subtasks(&self.subtask_defs, &self.all_test_cases, &tc_scores);
-        let submission_score = round_score(subtask_results.iter().map(|result| result.score).sum());
+        let submission_score = round_score(total_score(
+            subtask_results.iter().map(|result| result.score),
+        ));
         let persist_outcomes: Vec<EvalOutcome> = progress
             .outcomes
             .iter()

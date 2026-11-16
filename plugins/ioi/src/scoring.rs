@@ -1,4 +1,4 @@
-use crate::config::round_score;
+use crate::config::{round_score, total_score};
 
 /// MaxSubmission mode: task score = max(current submission score, historical best).
 pub fn score_max_submission(current: f64, historical_best: f64) -> f64 {
@@ -28,7 +28,7 @@ pub fn score_sum_best_subtask(all_submissions_subtask_scores: &[Vec<f64>]) -> f6
         }
     }
 
-    round_score(best_per_subtask.iter().sum())
+    round_score(total_score(best_per_subtask))
 }
 
 /// BestTokenedOrLast mode: task score = max(best tokened submission score, last submission score).
