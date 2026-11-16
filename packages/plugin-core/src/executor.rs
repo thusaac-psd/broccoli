@@ -128,6 +128,11 @@ impl CallOptions {
             locals: None,
         }
     }
+
+    /// Whether this is a call from inside a host function of a running call.
+    pub(crate) fn is_nested(&self) -> bool {
+        matches!(self.admit, Admit::Nested)
+    }
 }
 
 /// The admission and memory state every call of one server shares.
