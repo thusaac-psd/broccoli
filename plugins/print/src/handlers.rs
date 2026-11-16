@@ -104,12 +104,14 @@ fn move_job(
                 "A {} job cannot be {}",
                 status.as_str(),
                 match change {
-                    Change::Approve => "approved",
-                    Change::Cancel => "canceled",
-                    Change::Reprint => "reprinted",
-                    Change::Pin { .. } => "pinned",
-                    Change::Claim { .. } => "claimed",
-                    Change::Report { .. } => "reported on by a station that does not hold it",
+                    Change::Approve => "approved".to_string(),
+                    Change::Cancel => "canceled".to_string(),
+                    Change::Reprint => "reprinted".to_string(),
+                    Change::Pin { .. } => "pinned".to_string(),
+                    Change::Claim { printer, .. } => format!("claimed onto printer '{printer}'"),
+                    Change::Report { .. } => {
+                        "reported on by a station that does not hold it".to_string()
+                    }
                 }
             ),
         )
@@ -702,8 +704,15 @@ mod tests {
             .insert("authorization".into(), "PrintStation G".into());
         req.params.insert("id".into(), "5".into());
         req.body = Some(json!({ "printer": "main" }));
-        let err = handle_station_claim(&host, &req).unwrap_err();
-        assert_eq!(err.into_response().status, 409);
+        let err = handle_station_claim(&host, &req)
+            .unwrap_err()
+            .into_response();
+        assert_eq!(err.status, 409);
+        let message = err.body.unwrap()["message"].as_str().unwrap().to_string();
+        assert_eq!(
+            message,
+            "A claimed job cannot be claimed onto printer 'main'"
+        );
     }
 
     fn station_request(id: i64, body: serde_json::Value) -> (Host, PluginHttpRequest) {
