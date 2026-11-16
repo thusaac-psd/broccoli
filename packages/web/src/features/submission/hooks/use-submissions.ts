@@ -12,11 +12,13 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
+import { contestQueryKey } from '@/features/contest/hooks/use-contest-info';
 import { pairFanOutSubmissions } from '@/features/submission/hooks/fan-out-response';
 import {
   entriesReducer,
   entryInProgress,
   type EntryResult,
+  isOutageRefusal,
   pollEntry,
   type PollResponse,
   pollTarget,
@@ -144,6 +146,21 @@ export function useSubmissions({
       pollers.clear();
     };
   }, []);
+
+  // A submit or run refused because the contest type's plugin is out means
+  // the page's view of that outage is stale (opened before a disable, say):
+  // read it again, so the page closes submissions or shows them open.
+  const rereadOutage = useCallback(
+    (err: unknown) => {
+      if (!isOutageRefusal(err)) return;
+      void queryClient.invalidateQueries({
+        queryKey: contestId
+          ? contestQueryKey(contestId)
+          : ['problem', problemId],
+      });
+    },
+    [contestId, problemId, queryClient],
+  );
 
   const submit = useCallback(
     async (
@@ -278,6 +295,7 @@ export function useSubmissions({
           placeholderEntries.forEach((placeholder) =>
             dispatch({ type: 'rejected', id: placeholder.id, error: err }),
           );
+          rereadOutage(err);
           toast.error(errorMessage(err, t('toast.submission.error')));
         }
         return;
@@ -368,6 +386,7 @@ export function useSubmissions({
           return;
         }
         dispatch({ type: 'rejected', id: entryId, error: err });
+        rereadOutage(err);
         toast.error(errorMessage(err, t('toast.submission.error')));
       }
     },
@@ -377,6 +396,7 @@ export function useSubmissions({
       errorMessage,
       problemId,
       queryClient,
+      rereadOutage,
       sendIdempotent,
       t,
     ],
@@ -439,10 +459,11 @@ export function useSubmissions({
         toast.success(t('toast.submission.running'));
       } catch (err) {
         dispatch({ type: 'rejected', id: entryId, error: err });
+        rereadOutage(err);
         toast.error(errorMessage(err, t('toast.submission.runError')));
       }
     },
-    [apiClient, contestId, errorMessage, problemId, t],
+    [apiClient, contestId, errorMessage, problemId, rereadOutage, t],
   );
 
   const submissionEntries = entries.filter((e) => !e.isRun);

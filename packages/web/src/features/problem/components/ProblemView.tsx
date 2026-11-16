@@ -1,6 +1,10 @@
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
-import { useRegistries } from '@broccoli/web-sdk/hooks';
+import {
+  PLUGIN_OUTAGE_POLL_MS,
+  pollInterval,
+  useRegistries,
+} from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { PROBLEM_EDIT, SYSTEM_ADMIN } from '@broccoli/web-sdk/permissions';
 import {
@@ -107,6 +111,13 @@ export default function ProblemView({
     enabled: authReady && allowed && Number.isFinite(problemId),
     queryFn: ({ signal }) =>
       fetchProblem(apiClient, problemId, contestId, signal),
+    // While its contest type's plugin is out, asked whether it is back, so
+    // the page opens submissions again once it is (a contest problem's
+    // outage is the contest's, which `useContestInfo` polls).
+    refetchInterval: pollInterval<Awaited<ReturnType<typeof fetchProblem>>>(
+      (problem) =>
+        !contestId && problem?.plugin_outage ? PLUGIN_OUTAGE_POLL_MS : false,
+    ),
   });
   const { data: problem, isLoading, error } = problemQuery;
   // A contest problem is out with its contest's plugin; a problem on its own

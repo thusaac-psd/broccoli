@@ -1,3 +1,4 @@
+import { parseApiError } from '@broccoli/web-sdk/api';
 import { nextPollDelay } from '@broccoli/web-sdk/hooks';
 import {
   type CodeRun,
@@ -180,6 +181,23 @@ export function pollTarget(entry: SubmissionEntry): PollTarget | null {
   }
   const id = entry.submission?.id ?? entry.submissionId;
   return id === undefined ? null : { kind: 'submission', id, pace };
+}
+
+/**
+ * The codes of a refusal that says the plugin judging the contest type is
+ * out: whatever the page shows of the contest's (or problem's) outage is
+ * stale, so it is read again.
+ */
+const OUTAGE_REFUSALS: ReadonlySet<string> = new Set([
+  'CONTEST_TYPE_DISABLED',
+  'CONTEST_TYPE_UNAVAILABLE',
+  'PLUGIN_DISABLED',
+  'PLUGIN_UNAVAILABLE',
+]);
+
+export function isOutageRefusal(error: unknown): boolean {
+  const code = parseApiError(error)?.code;
+  return code !== undefined && OUTAGE_REFUSALS.has(code);
 }
 
 /** One poll: the result, or the HTTP status and body of a failed request. */

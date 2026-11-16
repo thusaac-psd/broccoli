@@ -8,6 +8,7 @@ import {
   type EntryAction,
   entryInProgress,
   type EntryResult,
+  isOutageRefusal,
   pollEntry,
   type PollResponse,
   pollTarget,
@@ -358,4 +359,20 @@ test('an entry is in progress only while sent or judged, not while its plugin pa
     false,
   );
   assert.equal(entryInProgress(entry(1, 'done')), false);
+});
+
+test('a refusal for a plugin outage asks for the outage to be read again', () => {
+  for (const code of [
+    'CONTEST_TYPE_DISABLED',
+    'CONTEST_TYPE_UNAVAILABLE',
+    'PLUGIN_DISABLED',
+    'PLUGIN_UNAVAILABLE',
+  ]) {
+    assert.equal(isOutageRefusal({ code, message: '' }), true);
+  }
+  assert.equal(
+    isOutageRefusal({ code: 'QUEUE_OVERLOADED', message: '' }),
+    false,
+  );
+  assert.equal(isOutageRefusal(new TypeError('offline')), false);
 });
