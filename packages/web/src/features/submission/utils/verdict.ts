@@ -1,6 +1,7 @@
 import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
 import {
   getStatusLabel,
+  type ShownStatus,
   type SubmissionOutcome,
   type Verdict,
   withheldLabel,
@@ -109,6 +110,25 @@ export function getVerdictBadge(
     label: getVerdictLabel(verdict, t),
     variant: getVerdictVariant(verdict),
   };
+}
+
+/**
+ * What a submission being judged shows beside its spinner. A queued one
+ * waits for a judge (no worker may be taking work at all), so it never
+ * reads as being judged.
+ */
+export function progressLabel(
+  status: ShownStatus,
+  t: I18nContextValue['t'],
+): string {
+  switch (status) {
+    case 'Queued':
+      return t('result.waitingForJudge');
+    case 'Compiling':
+      return t('result.compiling');
+    default:
+      return t('result.judging');
+  }
 }
 
 export function verdictToString(verdict: Verdict): string;

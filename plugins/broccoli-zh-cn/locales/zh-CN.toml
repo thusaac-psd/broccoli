@@ -202,6 +202,7 @@
 'result.title' = "结果"
 'result.submitPrompt' = "提交代码以查看结果"
 'result.judging' = "评测中…"
+'result.waitingForJudge' = "等待评测机…"
 'result.time' = "时间：{value}ms"
 'result.memory' = "内存：{value}"
 'result.testCase' = "测试点 #{id}"

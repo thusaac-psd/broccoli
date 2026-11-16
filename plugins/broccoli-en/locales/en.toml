@@ -201,6 +201,7 @@
 'result.title' = "Result"
 'result.submitPrompt' = "Submit your code to see results"
 'result.judging' = "Judging..."
+'result.waitingForJudge' = "Waiting for a judge..."
 'result.time' = "Time: {value}ms"
 'result.memory' = "Memory: {value}"
 'result.testCase' = "Test Case #{id}"
