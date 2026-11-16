@@ -12,10 +12,10 @@ use broccoli_cli_core::api::submission::SubmissionFileDto;
 use broccoli_cli_core::client::Client;
 use broccoli_cli_core::config::{self, load_user_config};
 use broccoli_cli_core::ids::{ContestId, ProblemId};
-use broccoli_cli_core::model::{StatusDisplay, SubmissionStatus, VerdictDisplay};
+use broccoli_cli_core::model::{Standing, StatusDisplay, SubmissionStatus, VerdictDisplay};
 use broccoli_cli_core::resolve;
-use broccoli_cli_core::tui::progress::Progress;
 
+use super::wait::{self, Patience};
 use super::{Rejected, context};
 
 #[derive(Args)]
@@ -206,28 +206,18 @@ fn load_cached_samples(
     if cases.is_empty() { None } else { Some(cases) }
 }
 
-fn poll_code_run(client: &Client, run_id: i32) -> anyhow::Result<CodeRunResponse> {
-    use std::time::{Duration, Instant};
-    let mut progress = Progress::stderr();
-    let start = Instant::now();
+/// How long a remote `test` waits for its code run before it gives up.
+const RUN_PATIENCE: Patience = Patience {
+    limit: std::time::Duration::from_secs(120),
+};
 
-    loop {
-        let cr = client.get_code_run(run_id)?;
-        let status = cr.status;
-        if !status.is_in_progress() {
-            return Ok(cr);
-        }
-        if start.elapsed() > Duration::from_secs(120) {
-            progress.clear();
-            bail!("Timed out waiting for the code run to finish.");
-        }
-        progress.tick(format_args!(
-            "Running... {} ({:.0}s)",
-            status.human(),
-            start.elapsed().as_secs_f64()
-        ));
-        std::thread::sleep(Duration::from_millis(300));
-    }
+fn poll_code_run(client: &Client, run_id: i32) -> anyhow::Result<CodeRunResponse> {
+    let check_later = "run the test again later, or test with --local.";
+    let (run, _) = wait::until_final(RUN_PATIENCE, check_later, || {
+        let run = client.get_code_run(run_id)?;
+        Ok((Standing::Status(run.status), run))
+    })?;
+    Ok(run)
 }
 
 fn run_samples_locally(

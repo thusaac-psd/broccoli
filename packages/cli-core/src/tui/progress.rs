@@ -43,6 +43,11 @@ impl<W: Write> Progress<W> {
         }
     }
 
+    /// Whether the line is drawn: the output is a terminal.
+    pub fn is_live(&self) -> bool {
+        self.live
+    }
+
     /// Replace the line with the next spinner frame and `message`.
     pub fn tick(&mut self, message: impl Display) {
         if !self.live {

@@ -5,7 +5,7 @@ use broccoli_cli_core::api::submission::{
     SubmissionListItem, SubmissionListResponse, SubmissionResponse,
 };
 use broccoli_cli_core::client::Client;
-use broccoli_cli_core::model::{StatusDisplay, SubmissionStatus, Verdict, VerdictDisplay};
+use broccoli_cli_core::model::{Standing, StatusDisplay, Verdict, VerdictDisplay};
 use broccoli_cli_core::{config, fmt, resolve};
 use clap::Args;
 use console::{Style, StyledObject, style};
@@ -112,7 +112,7 @@ const W_MEM: usize = 9;
 fn picker_row(s: &SubmissionListItem) -> String {
     let verdict = match s.verdict.as_ref() {
         Some(v) => v.human().to_string(),
-        None => s.status.human().to_string(),
+        None => Standing::of_item(s).human().to_string(),
     };
     let score = s.score.map(fmt::score).unwrap_or_else(|| "—".into());
     let time = s
@@ -152,12 +152,13 @@ fn print_recent_table(subs: &[SubmissionListItem]) {
             .map(|m| fmt::memory_kb(m as i64))
             .unwrap_or_else(|| "—".into());
         // judged verdict if present, else lifecycle status; pad before colouring
+        let standing = Standing::of_item(s);
         let verdict_plain = match s.verdict.as_ref() {
             Some(v) => v.human().to_string(),
-            None => s.status.human().to_string(),
+            None => standing.human().to_string(),
         };
         let verdict_cell =
-            cell_style(s.verdict.as_ref(), &s.status).apply_to(pad(&verdict_plain, W_VERDICT));
+            cell_style(s.verdict.as_ref(), &standing).apply_to(pad(&verdict_plain, W_VERDICT));
         println!(
             "  {} {} {} {} {} {}",
             style(pad(&s.id.to_string(), W_ID)).cyan(),
@@ -179,7 +180,11 @@ fn print_submission(sub: &SubmissionResponse) {
         style(format!("#{}", sub.id)).bold(),
         sub.problem_title
     );
-    println!("  Status: {}", status_style(&sub.status));
+    let standing = Standing::of_submission(sub);
+    println!("  Status: {}", status_style(&standing));
+    if let Some(waiting_for) = standing.waiting_for() {
+        println!("  {}", style(waiting_for).dim());
+    }
     if let Some(ref result) = sub.result {
         if let Some(ref v) = result.verdict {
             println!("  Verdict: {}", verdict_style(v));
@@ -245,25 +250,24 @@ fn pad(s: &str, width: usize) -> String {
 }
 
 /// Console style for a submission's verdict/status cell.
-fn cell_style(verdict: Option<&Verdict>, status: &Option<SubmissionStatus>) -> Style {
+fn cell_style(verdict: Option<&Verdict>, standing: &Standing) -> Style {
     match verdict {
         Some(v) if v.is_accepted() => Style::new().green().bold(),
         Some(_) => Style::new().red().bold(),
-        None if status.is_some_and(|s| s.is_error()) => Style::new().red(),
-        None if status.is_in_progress() => Style::new().yellow(),
-        None => Style::new(),
+        None => standing_style(standing),
     }
 }
 
-fn status_style(s: &Option<SubmissionStatus>) -> StyledObject<String> {
-    let label = s.human().to_string();
-    if s.is_some_and(|s| s.is_error()) {
-        style(label).red()
-    } else if s.is_in_progress() {
-        style(label).yellow()
-    } else {
-        style(label)
+fn standing_style(standing: &Standing) -> Style {
+    match standing {
+        Standing::Status(s) if s.is_error() => Style::new().red(),
+        _ if standing.is_in_progress() => Style::new().yellow(),
+        _ => Style::new(),
     }
+}
+
+fn status_style(standing: &Standing) -> StyledObject<String> {
+    standing_style(standing).apply_to(standing.human().to_string())
 }
 
 fn verdict_style(v: &Verdict) -> StyledObject<String> {
