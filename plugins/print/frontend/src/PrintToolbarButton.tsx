@@ -1,5 +1,5 @@
 import { useErrorMessage } from '@broccoli/web-sdk/api';
-import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
+import { useAsyncDialog } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -18,12 +18,12 @@ import {
   SelectValue,
   Textarea,
 } from '@broccoli/web-sdk/ui';
-import { AlertCircle, Check, Loader2, Printer, Upload } from 'lucide-react';
+import { AlertCircle, Loader2, Printer, Upload } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { useParams } from 'react-router';
 
 import { usePrintApi } from './hooks/usePrintApi';
-import { estimatePages } from './lib/format';
+import { announcePrinted, printFailure } from './lib/send';
 
 /** Languages a print job can be highlighted as, by their proper names. */
 const LANGUAGES: { value: string; name?: string }[] = [
@@ -38,8 +38,6 @@ const LANGUAGES: { value: string; name?: string }[] = [
   { value: 'text' },
 ];
 
-type Phase = 'idle' | 'sending' | 'done' | 'error';
-
 export function PrintToolbarButton() {
   const { t } = useTranslation();
   const errorMessage = useErrorMessage();
@@ -48,20 +46,11 @@ export function PrintToolbarButton() {
   const contestId = params.contestId ? Number(params.contestId) : undefined;
   const problemId = params.problemId ? Number(params.problemId) : undefined;
 
-  const [open, setOpen] = useState(false);
+  const dialog = useAsyncDialog();
   const [filename, setFilename] = useState('print.txt');
   const [language, setLanguage] = useState('cpp');
   const [source, setSource] = useState('');
-  const [phase, setPhase] = useState<Phase>('idle');
-  const [message, setMessage] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
-
-  const pages = source.trim() ? estimatePages(source) : 0;
-
-  const reset = () => {
-    setPhase('idle');
-    setMessage(null);
-  };
 
   const onFile = async (file: File | undefined) => {
     if (!file) return;
@@ -70,45 +59,19 @@ export function PrintToolbarButton() {
     setFilename(file.name);
   };
 
-  const submit = async () => {
-    if (contestId === undefined) return;
-    if (!source.trim()) {
-      setPhase('error');
-      setMessage(t('print.dialog.empty'));
-      return;
-    }
-    setPhase('sending');
-    setMessage(null);
-    try {
-      const r = await api.printArbitrary({
+  const submit = () => {
+    if (contestId === undefined || !source.trim()) return;
+    void dialog.submit(async () => {
+      const result = await api.printArbitrary({
         contest_id: contestId,
         problem_id: problemId,
         filename: filename.trim() || 'print.txt',
         language,
         source,
       });
-      if (!r.settled) {
-        // The job may already be queued: say so instead of inviting a
-        // second print.
-        setPhase('error');
-        setMessage(t(unsettledMessageKey(r.outcome)));
-        return;
-      }
-      setPhase('done');
-      setMessage(
-        r.data?.status === 'pending_approval'
-          ? t('print.action.needsApproval')
-          : t('print.action.submitted'),
-      );
-      window.setTimeout(() => {
-        setOpen(false);
-        setSource('');
-        reset();
-      }, 2200);
-    } catch (e) {
-      setPhase('error');
-      setMessage(errorMessage(e, t('print.action.failed')));
-    }
+      announcePrinted(result, t);
+      setSource('');
+    });
   };
 
   // Pasted code prints only within a contest.
@@ -121,22 +84,13 @@ export function PrintToolbarButton() {
         size="sm"
         className="gap-1.5"
         title={t('print.action.printCode')}
-        onClick={() => {
-          reset();
-          setOpen(true);
-        }}
+        onClick={() => dialog.onOpenChange(true)}
       >
         <Printer className="h-4 w-4" />
         <span className="hidden sm:inline">{t('print.action.print')}</span>
       </Button>
 
-      <Dialog
-        open={open}
-        onOpenChange={(o) => {
-          setOpen(o);
-          if (!o) reset();
-        }}
-      >
+      <Dialog open={dialog.open} onOpenChange={dialog.onOpenChange}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
@@ -210,49 +164,33 @@ export function PrintToolbarButton() {
             />
           </div>
 
-          {phase === 'error' && message && (
+          {dialog.state.status === 'failed' && (
             <p className="flex items-center gap-2 text-sm text-red-600 dark:text-red-400">
               <AlertCircle className="h-4 w-4 shrink-0" />
-              {message}
-            </p>
-          )}
-          {phase === 'done' && message && (
-            <p className="flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400">
-              <Check className="h-4 w-4 shrink-0" />
-              {message}
+              {printFailure(dialog.state.error, t, errorMessage)}
             </p>
           )}
 
-          <DialogFooter className="items-center sm:justify-between">
-            <span className="text-xs text-muted-foreground tabular-nums">
-              {pages > 0
-                ? t('print.submission.estimatedPages', { count: pages })
-                : ''}
-            </span>
+          <DialogFooter>
             <div className="flex gap-2">
               <Button
                 variant="ghost"
-                onClick={() => setOpen(false)}
-                disabled={phase === 'sending'}
+                onClick={() => dialog.onOpenChange(false)}
+                disabled={dialog.submitting}
               >
                 {t('print.dialog.cancel')}
               </Button>
               <Button
                 onClick={submit}
-                disabled={
-                  phase === 'sending' || phase === 'done' || !source.trim()
-                }
+                disabled={dialog.submitting || !source.trim()}
                 className="gap-1.5 min-w-24"
               >
-                {phase === 'sending' && (
+                {dialog.submitting && (
                   <Loader2 className="h-4 w-4 animate-spin" />
                 )}
-                {phase === 'done' && <Check className="h-4 w-4" />}
-                {phase === 'sending'
+                {dialog.submitting
                   ? t('print.action.printing')
-                  : phase === 'done'
-                    ? t('print.action.submitted')
-                    : t('print.dialog.submit')}
+                  : t('print.dialog.submit')}
               </Button>
             </div>
           </DialogFooter>

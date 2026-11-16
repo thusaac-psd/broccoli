@@ -1,5 +1,5 @@
 import { useErrorMessage } from '@broccoli/web-sdk/api';
-import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
+import { useAsyncDialog } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { Submission } from '@broccoli/web-sdk/submission';
 import {
@@ -11,31 +11,22 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@broccoli/web-sdk/ui';
-import { AlertCircle, Check, FileText, Loader2, Printer } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { AlertCircle, FileText, Loader2, Printer } from 'lucide-react';
 
 import { usePrintApi } from './hooks/usePrintApi';
-import { estimatePages } from './lib/format';
+import { announcePrinted, printFailure } from './lib/send';
 
 interface Props {
   submission?: Submission | null;
 }
 
-type Phase = 'idle' | 'sending' | 'done' | 'error';
-
 export function PrintSubmissionButton({ submission }: Props) {
   const { t } = useTranslation();
   const errorMessage = useErrorMessage();
   const api = usePrintApi();
-  const [open, setOpen] = useState(false);
-  const [phase, setPhase] = useState<Phase>('idle');
-  const [message, setMessage] = useState<string | null>(null);
+  const dialog = useAsyncDialog();
 
   const files = submission?.files ?? [];
-  const totalPages = useMemo(
-    () => files.reduce((acc, f) => acc + estimatePages(f.content), 0),
-    [files],
-  );
 
   // Only a contest submission with source can be printed.
   if (!submission || submission.contest_id == null || files.length === 0) {
@@ -43,42 +34,10 @@ export function PrintSubmissionButton({ submission }: Props) {
   }
   const contestId = submission.contest_id;
 
-  const reset = () => {
-    setPhase('idle');
-    setMessage(null);
-  };
-
-  const submit = async () => {
-    setPhase('sending');
-    setMessage(null);
-    try {
-      let resultStatus: string | undefined;
-      const results = [await api.printSubmission(contestId, submission.id)];
-      for (const r of results) {
-        if (!r.settled) {
-          // A job may already be queued: say so instead of inviting a
-          // second print.
-          setPhase('error');
-          setMessage(t(unsettledMessageKey(r.outcome)));
-          return;
-        }
-        resultStatus = r.data?.status ?? resultStatus;
-      }
-      setPhase('done');
-      setMessage(
-        resultStatus === 'pending_approval'
-          ? t('print.action.needsApproval')
-          : t('print.action.submitted'),
-      );
-      window.setTimeout(() => {
-        setOpen(false);
-        reset();
-      }, 2000);
-    } catch (e) {
-      setPhase('error');
-      setMessage(errorMessage(e, t('print.action.failed')));
-    }
-  };
+  const submit = () =>
+    void dialog.submit(async () => {
+      announcePrinted(await api.printSubmission(contestId, submission.id), t);
+    });
 
   return (
     <>
@@ -87,23 +46,14 @@ export function PrintSubmissionButton({ submission }: Props) {
           variant="outline"
           size="sm"
           className="gap-1.5"
-          onClick={() => {
-            reset();
-            setOpen(true);
-          }}
+          onClick={() => dialog.onOpenChange(true)}
         >
           <Printer className="h-4 w-4" />
           {t('print.action.print')}
         </Button>
       </div>
 
-      <Dialog
-        open={open}
-        onOpenChange={(o) => {
-          setOpen(o);
-          if (!o) reset();
-        }}
-      >
+      <Dialog open={dialog.open} onOpenChange={dialog.onOpenChange}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
@@ -127,57 +77,36 @@ export function PrintSubmissionButton({ submission }: Props) {
                     {f.filename}
                   </code>
                 </span>
-                <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-                  {t('print.submission.estimatedPages', {
-                    count: estimatePages(f.content),
-                  })}
-                </span>
               </div>
             ))}
           </div>
 
-          <p className="text-xs text-muted-foreground">
-            {t('print.submission.files', {
-              count: files.length,
-              pages: totalPages,
-            })}
-          </p>
-
-          {phase === 'error' && message && (
+          {dialog.state.status === 'failed' && (
             <p className="flex items-center gap-2 text-sm text-red-600 dark:text-red-400">
               <AlertCircle className="h-4 w-4 shrink-0" />
-              {message}
-            </p>
-          )}
-          {phase === 'done' && message && (
-            <p className="flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400">
-              <Check className="h-4 w-4 shrink-0" />
-              {message}
+              {printFailure(dialog.state.error, t, errorMessage)}
             </p>
           )}
 
           <DialogFooter>
             <Button
               variant="ghost"
-              onClick={() => setOpen(false)}
-              disabled={phase === 'sending'}
+              onClick={() => dialog.onOpenChange(false)}
+              disabled={dialog.submitting}
             >
               {t('print.dialog.cancel')}
             </Button>
             <Button
               onClick={submit}
-              disabled={phase === 'sending' || phase === 'done'}
+              disabled={dialog.submitting}
               className="gap-1.5 min-w-28"
             >
-              {phase === 'sending' && (
+              {dialog.submitting && (
                 <Loader2 className="h-4 w-4 animate-spin" />
               )}
-              {phase === 'done' && <Check className="h-4 w-4" />}
-              {phase === 'sending'
+              {dialog.submitting
                 ? t('print.action.printing')
-                : phase === 'done'
-                  ? t('print.action.submitted')
-                  : t('print.dialog.submit')}
+                : t('print.dialog.submit')}
             </Button>
           </DialogFooter>
         </DialogContent>

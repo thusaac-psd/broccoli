@@ -116,27 +116,6 @@ export function useGameClock(match: MatchView): {
   return null;
 }
 
-export function VerdictBadge({ verdict }: { verdict: string }) {
-  const tone =
-    verdict === 'Accepted'
-      ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
-      : /Pending|Queued|Compiling|Running|Judging/.test(verdict)
-        ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300'
-        : verdict === 'SystemError'
-          ? 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
-          : 'bg-red-500/10 text-red-700 dark:text-red-300';
-  return (
-    <span
-      className={cn(
-        'inline-flex rounded px-1.5 py-0.5 font-mono text-[11px] font-medium',
-        tone,
-      )}
-    >
-      {verdict}
-    </span>
-  );
-}
-
 /**
  * A button that asks before doing something staff cannot take back. The
  * dialog stays open while `onConfirm` runs, and shows its failure.

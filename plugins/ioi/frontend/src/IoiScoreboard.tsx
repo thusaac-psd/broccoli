@@ -182,8 +182,12 @@ export function IoiScoreboard({ contestId }: IoiScoreboardProps) {
     enabled: contestId !== undefined,
     queryFn: () => api.getScoreboard(contestId!),
     retry: 2,
+    // Poll until the contest is over: a board opened before the start
+    // learns from the server that it has started.
     refetchInterval: pollInterval<ScoreboardResponse>((scoreboard) =>
-      autoRefresh && scoreboard?.phase === 'during' ? 30000 : false,
+      autoRefresh && scoreboard !== undefined && scoreboard.phase !== 'after'
+        ? 30000
+        : false,
     ),
   });
   const { data: scoreboard, dataUpdatedAt } = query;

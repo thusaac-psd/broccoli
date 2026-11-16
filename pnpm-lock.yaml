@@ -466,9 +466,15 @@ importers:
       '@tailwindcss/postcss':
         specifier: 'catalog:'
         version: 4.3.5
+      '@tanstack/react-query':
+        specifier: 'catalog:'
+        version: 5.107.1(@types/react@19.3.0)(react@19.3.1)
       '@tsdown/css':
         specifier: 'catalog:'
         version: 0.21.10(jiti@2.7.0)(postcss-import@16.2.0(postcss@8.5.32))(postcss@8.5.32)(tsdown@0.21.10)(yaml@2.9.1)
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.19.2
       '@types/react':
         specifier: 'catalog:'
         version: 19.3.0
@@ -660,6 +666,9 @@ importers:
       '@tailwindcss/postcss':
         specifier: 'catalog:'
         version: 4.3.5
+      '@tanstack/react-query':
+        specifier: 'catalog:'
+        version: 5.107.1(@types/react@19.3.0)(react@19.3.1)
       '@tsdown/css':
         specifier: 'catalog:'
         version: 0.21.10(jiti@2.7.0)(postcss-import@16.2.0(postcss@8.5.32))(postcss@8.5.32)(tsdown@0.21.10)(yaml@2.9.1)

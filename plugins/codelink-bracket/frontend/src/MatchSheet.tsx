@@ -9,13 +9,14 @@ import {
   unsettledMessageKey,
   useQueryState,
 } from '@broccoli/web-sdk/hooks';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   CONTEST_MANAGE,
   isStaff,
   SUBMISSION_REJUDGE,
 } from '@broccoli/web-sdk/permissions';
 import { useProblemPresentation } from '@broccoli/web-sdk/problem';
+import { getVerdictBadge } from '@broccoli/web-sdk/submission';
 import {
   Badge,
   Button,
@@ -55,13 +56,7 @@ import { matchNameKey } from './lib/rounds';
 import { gameLabel, sideOf } from './lib/stage';
 import { adjudicationMessage } from './lib/summary';
 import { OrderingPanel } from './OrderingPanel';
-import {
-  ConfirmButton,
-  StatusPill,
-  useGameClock,
-  useStartsIn,
-  VerdictBadge,
-} from './parts';
+import { ConfirmButton, StatusPill, useGameClock, useStartsIn } from './parts';
 import type { GameView, MatchView } from './types';
 
 interface MatchSheetProps {
@@ -683,6 +678,21 @@ function GamesTable({
   );
 }
 
+/** A submission's outcome, named in the UI language as the host names it. */
+function OutcomeBadge({
+  submission,
+}: {
+  submission: Parameters<typeof getVerdictBadge>[0];
+}) {
+  const { t } = useTranslation();
+  const { label, variant } = getVerdictBadge(submission, t);
+  return (
+    <Badge variant={variant} className="text-[11px]">
+      {label}
+    </Badge>
+  );
+}
+
 function SubmissionFeed({
   contestId,
   userId,
@@ -695,6 +705,7 @@ function SubmissionFeed({
   problems: ReadonlyMap<number, ProblemInfo>;
 }) {
   const { t } = useTranslation();
+  const format = useFormat();
   const { data, isLoading, isError } = usePlayerSubmissions(
     contestId,
     userId,
@@ -732,13 +743,9 @@ function SubmissionFeed({
                   <span className="w-12 shrink-0 font-mono font-medium">
                     {problems.get(s.problem_id)?.label ?? `#${s.problem_id}`}
                   </span>
-                  <VerdictBadge
-                    verdict={
-                      s.verdict ?? s.status ?? t('submission.resultHidden')
-                    }
-                  />
+                  <OutcomeBadge submission={s} />
                   <span className="ml-auto font-mono text-xs tabular-nums text-muted-foreground">
-                    {new Date(s.created_at).toLocaleTimeString()}
+                    {format.time(s.created_at)}
                   </span>
                   <span className="font-mono text-xs text-muted-foreground">
                     #{s.id}

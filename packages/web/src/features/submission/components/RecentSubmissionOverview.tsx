@@ -6,6 +6,7 @@ import type {
   Verdict,
   Withheld,
 } from '@broccoli/web-sdk/submission';
+import { getVerdictBadge } from '@broccoli/web-sdk/submission';
 import { Badge, QueryErrorState } from '@broccoli/web-sdk/ui';
 import { formatKibibytes } from '@broccoli/web-sdk/utils';
 
@@ -13,7 +14,6 @@ import { useSubmissionNavigation } from '@/features/submission/hooks/use-submiss
 import type { SubmissionEntry } from '@/features/submission/hooks/use-submissions';
 
 import { getSubmissionScoreDisplay } from '../utils/score-display';
-import { getVerdictBadge } from '../utils/verdict';
 import { PinnedSubmissionGroup } from './PinnedSubmissionGroup';
 import { SubmissionRejection } from './SubmissionResult';
 

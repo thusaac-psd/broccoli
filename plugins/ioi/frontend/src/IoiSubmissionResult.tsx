@@ -856,18 +856,11 @@ export function IoiSubmissionResult({
     subtaskScores,
   });
 
+  // A system error's message is the host's to show, above this slot.
   if (effectiveFeedback === 'none') {
     return (
-      <div className="flex flex-col gap-2">
-        {submission.status === 'SystemError' &&
-          submission.result?.error_message && (
-            <div className="rounded-md bg-red-500/[0.06] px-3 py-2 text-xs text-red-600">
-              {submission.result.error_message}
-            </div>
-          )}
-        <div className="p-5 text-center text-[13px] italic text-muted-foreground">
-          {t('ioi.submission.noFeedback')}
-        </div>
+      <div className="p-5 text-center text-[13px] italic text-muted-foreground">
+        {t('ioi.submission.noFeedback')}
       </div>
     );
   }

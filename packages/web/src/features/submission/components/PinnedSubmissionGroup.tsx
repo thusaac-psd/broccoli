@@ -6,13 +6,13 @@ import {
   type Verdict,
   type Withheld,
 } from '@broccoli/web-sdk/submission';
+import { getVerdictBadge } from '@broccoli/web-sdk/submission';
 import { Badge } from '@broccoli/web-sdk/ui';
 import { formatKibibytes } from '@broccoli/web-sdk/utils';
 import { AlertTriangle, Loader2, Pin } from 'lucide-react';
 
 import { useSubmissionNavigation } from '@/features/submission/hooks/use-submission-navigation';
 import type { SubmissionEntry } from '@/features/submission/hooks/use-submissions';
-import { getVerdictBadge } from '@/features/submission/utils/verdict';
 
 interface Props {
   /** All entries belonging to one fan-out group, in any order. */

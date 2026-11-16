@@ -16,14 +16,12 @@
 'print.dialog.dropFile' = '选择文件'
 'print.dialog.cancel' = '取消'
 'print.dialog.submit' = '打印'
-'print.dialog.empty' = '没有要打印的内容'
 'print.dialog.tooManyPages' = '过长，无法打印（预计 {pages} 页，限制 {max} 页）。'
 'print.dialog.plainText' = '纯文本'
 
 # 提交打印确认
 'print.submission.title' = '打印这份提交？'
 'print.submission.files' = '{count} 个文件，约 {pages} 页'
-'print.submission.estimatedPages' = '约 {count} 页'
 
 # 打印队列页面（工作人员）
 'print.queue.title' = '打印队列'

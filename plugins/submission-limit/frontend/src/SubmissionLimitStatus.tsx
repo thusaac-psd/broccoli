@@ -3,11 +3,12 @@
  * Hidden when no limit is configured (unlimited) or plugin is not enabled.
  */
 import { usePluginApi } from '@broccoli/web-sdk/api';
-import { useAuth } from '@broccoli/web-sdk/auth';
+import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useSubmitGate } from '@broccoli/web-sdk/submission';
 import { cn } from '@broccoli/web-sdk/utils';
-import { useEffect, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef } from 'react';
 
 interface Props {
   submission?: { id: number; status: string } | null;
@@ -32,34 +33,43 @@ export function SubmissionLimitStatus({
   problemId,
 }: Props) {
   const api = usePluginApi('submission-limit');
-  const { accessToken } = useAuth();
+  const { user } = useAuth();
+  const authReady = useAuthReady();
   const { t } = useTranslation();
-  const [status, setStatus] = useState<LimitStatus | null>(null);
+  const queryClient = useQueryClient();
 
+  const viewerKey = viewerCacheKey(user);
+  const { data: status } = useQuery({
+    queryKey: [
+      'submission-limit-status',
+      contestId ?? null,
+      problemId,
+      viewerKey,
+    ],
+    enabled: authReady && !!user && problemId !== undefined,
+    queryFn: () =>
+      api.get<LimitStatus>(
+        contestId
+          ? `${ROUTES}/contests/${contestId}/problems/${problemId}/status`
+          : `${ROUTES}/problems/${problemId}/status`,
+      ),
+  });
+
+  // A new submission of this problem uses up one more.
   const submissionId = submission?.id;
-
+  const seenSubmission = useRef(submissionId);
   useEffect(() => {
-    if (!problemId || !accessToken) return;
-
-    let cancelled = false;
-
-    async function load() {
-      const path = contestId
-        ? `${ROUTES}/contests/${contestId}/problems/${problemId}/status`
-        : `${ROUTES}/problems/${problemId}/status`;
-      try {
-        const data = await api.get<LimitStatus>(path);
-        if (!cancelled) setStatus(data);
-      } catch {
-        // silent - status indicator is best-effort
-      }
-    }
-
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, [api, accessToken, contestId, problemId, submissionId]);
+    if (seenSubmission.current === submissionId) return;
+    seenSubmission.current = submissionId;
+    void queryClient.invalidateQueries({
+      queryKey: [
+        'submission-limit-status',
+        contestId ?? null,
+        problemId,
+        viewerKey,
+      ],
+    });
+  }, [queryClient, submissionId, contestId, problemId, viewerKey]);
 
   useSubmitGate(
     'submission-limit',
