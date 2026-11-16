@@ -35,13 +35,19 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub submission_format: Option<serde_json::Value>,
 
-    /// Whether some stored config of the problem, at the problem scope or in
-    /// a contest, was refused by its plugin when last checked: set by every
-    /// test-data change (`services::test_data`), cleared by the config write
-    /// that resolves the last issue. Judging copies it onto the judgement it
+    /// Whether a plugin found something wrong with a config of the problem,
+    /// at the problem scope or in a contest, when last checked
+    /// (`services::config_issues`). Judging copies it onto the judgement it
     /// claims.
     #[sea_orm(default_value = false)]
     pub config_issues: bool,
+
+    /// Whether the problem waits for a config issues recheck: set by a bundle
+    /// import, which restores it without the plugins that check it, and
+    /// cleared by the recheck every running server makes of the marked
+    /// problems (`services::config_issues::recheck_marked`).
+    #[sea_orm(default_value = false)]
+    pub config_recheck: bool,
 
     #[sea_orm(has_many)]
     pub submissions: HasMany<super::submission::Entity>,

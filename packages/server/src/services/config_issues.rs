@@ -26,10 +26,13 @@
 //! - a change to a plugin (enabled, disabled, reloaded, upgraded, its upload
 //!   removed) changes which checks run and how, so it rechecks the problems
 //!   its checks reach and every flagged one ([`recheck_problems_of_plugins`]);
+//! - a bundle import restores configs and test data without the plugins
+//!   that check them, so it marks each problem it restores
+//!   (`problem::Model::config_recheck`), and every running server rechecks
+//!   the marked problems on its next reconcile pass ([`recheck_marked`]);
 //! - a server start loads plugins that may check configs differently than
-//!   the ones that last checked them, and finds configs no running server
-//!   checked (a restored bundle's), so it rechecks every problem a check
-//!   reaches or is flagged ([`recheck_every_problem`]).
+//!   the ones that last checked them, so it rechecks every problem a check
+//!   reaches, is flagged or is marked ([`recheck_every_problem`]).
 //!
 //! The rechecks run after the change committed, on the action that made it,
 //! never on the judging path. A recheck that fails is logged and leaves the
@@ -525,6 +528,17 @@ async fn flagged(db: &DatabaseConnection) -> Result<Vec<i32>, AppError> {
         .await?)
 }
 
+/// The problems marked for a recheck.
+async fn marked(db: &DatabaseConnection) -> Result<Vec<i32>, AppError> {
+    Ok(problem::Entity::find()
+        .select_only()
+        .column(problem::Column::Id)
+        .filter(problem::Column::ConfigRecheck.eq(true))
+        .into_tuple()
+        .all(db)
+        .await?)
+}
+
 /// Rechecks the flag of every problem the checks of `plugin_ids` reach, and
 /// of every flagged problem, after a change to those plugins: a disabled
 /// plugin no longer provides the types its checks reached.
@@ -551,12 +565,13 @@ pub(crate) async fn recheck_problems_of_plugins(
     }
 }
 
-/// Rechecks the flag of every problem a check reaches or is flagged, at a
-/// server start.
+/// Rechecks the flag of every problem a check reaches, is flagged or is
+/// marked, at a server start.
 pub(crate) async fn recheck_every_problem(db: &DatabaseConnection, checker: &ConfigChecker<'_>) {
     let problems = async {
         let mut problems = problems_checked_by(db, checker, None).await?;
         problems.extend(flagged(db).await?);
+        problems.extend(marked(db).await?);
         Ok::<_, AppError>(problems)
     };
     match problems.await {
@@ -566,6 +581,29 @@ pub(crate) async fn recheck_every_problem(db: &DatabaseConnection, checker: &Con
         Err(error) => tracing::warn!(
             ?error,
             "could not find the problems whose config issues a server start rechecks"
+        ),
+    }
+}
+
+/// Rechecks the flag of every problem marked for a recheck, clearing each
+/// mark. Every running server runs it on each reconcile pass; two servers
+/// rechecking one problem agree, under the problem's row lock.
+pub async fn recheck_marked(state: &AppState) {
+    match marked(&state.db).await {
+        Ok(problems) if problems.is_empty() => {}
+        Ok(problems) => {
+            recheck_problems(
+                &state.db,
+                &ConfigChecker::of(state),
+                problems.into_iter().collect(),
+                Recheck::Both,
+                Reads::Committed,
+            )
+            .await
+        }
+        Err(error) => tracing::warn!(
+            ?error,
+            "could not find the problems marked for a config issues recheck"
         ),
     }
 }
@@ -592,7 +630,7 @@ pub(crate) async fn recheck_problems(
 
 /// Rechecks one problem under its row lock, the lock a test-data change and
 /// a write of one of its configs hold, so a recheck never races the data it
-/// checks against.
+/// checks against. A full recheck clears the problem's recheck mark.
 async fn try_recheck(
     db: &DatabaseConnection,
     checker: &ConfigChecker<'_>,
@@ -616,10 +654,18 @@ async fn try_recheck(
         .is_empty();
     let moves = match recheck {
         Recheck::ClearOnly => !has_issues,
-        Recheck::Both => has_issues != row.config_issues,
+        Recheck::Both => has_issues != row.config_issues || row.config_recheck,
     };
     if moves {
-        set_config_issues(&txn, problem_id, has_issues).await?;
+        problem::Entity::update_many()
+            .col_expr(problem::Column::ConfigIssues, Expr::value(has_issues))
+            .col_expr(
+                problem::Column::ConfigRecheck,
+                Expr::value(row.config_recheck && recheck == Recheck::ClearOnly),
+            )
+            .filter(problem::Column::Id.eq(problem_id))
+            .exec(&txn)
+            .await?;
         txn.commit().await?;
     }
     Ok(())

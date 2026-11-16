@@ -611,6 +611,8 @@ pub async fn run(state: AppState) {
         if let Err(e) = reconcile(&state).await {
             tracing::warn!(error = %e, "Plugin reconcile failed; retrying next tick");
         }
+        // A bundle import restores problems no running server checked.
+        crate::services::config_issues::recheck_marked(&state).await;
     }
 }
 

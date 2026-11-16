@@ -315,11 +315,16 @@ const TABLES: &[Table] = &[
     },
 ];
 
-/// Columns a bundle never carries: what the target works out for itself.
-/// Whether a problem's configs have issues depends on the plugins that
-/// check them, so an imported problem starts clear and the target's next
-/// start checks its configs (`services::config_issues`).
-const DERIVED: &[(&str, &str)] = &[("problem", "config_issues")];
+/// Columns a bundle never carries and an import never restores: what the
+/// target works out for itself. Whether a problem's configs have issues
+/// depends on the plugins that check them, which an import does not run, so
+/// an imported problem starts clear and marked for a recheck (see
+/// [`mark_for_recheck`]).
+const DERIVED: &[(&str, &str)] = &[("problem", "config_issues"), ("problem", "config_recheck")];
+
+fn derived(table: &str, column: &str) -> bool {
+    DERIVED.contains(&(table, column))
+}
 
 /// The tables import empties before restoring problems.
 fn problem_tables() -> impl Iterator<Item = &'static str> {
@@ -409,7 +414,7 @@ pub async fn export(
         let columns: Vec<String> = columns(&mut tx, table.name)
             .await?
             .into_iter()
-            .filter(|c| !DERIVED.contains(&(table.name, c.as_str())))
+            .filter(|c| !derived(table.name, c))
             .collect();
         let select: Vec<String> = columns
             .iter()
@@ -654,7 +659,12 @@ pub async fn import(
     // Restore in table order, whatever order the archive held them in.
     loaded.sort_by_key(|(table, _)| TABLES.iter().position(|t| t.name == table.name));
     for (table, columns) in &loaded {
-        for statement in restore_statements(table, columns) {
+        let columns: Vec<String> = columns
+            .iter()
+            .filter(|c| !derived(table.name, c))
+            .cloned()
+            .collect();
+        for statement in restore_statements(table, &columns) {
             sqlx::query(AssertSqlSafe(statement.as_str()))
                 .execute(&mut *tx)
                 .await
@@ -678,8 +688,37 @@ pub async fn import(
             }
         }
     }
+    let restored: Vec<&str> = loaded.iter().map(|(table, _)| table.name).collect();
+    mark_for_recheck(&mut tx, &restored).await?;
     tx.commit().await?;
     Ok(summary)
+}
+
+/// Marks every problem the import restored, or restored a contest's use of,
+/// for a config issues recheck: the import runs no plugin, so it checks
+/// none of the configs and test data it restores. Every running server
+/// rechecks the marked problems on its next reconcile pass
+/// (`services::config_issues::recheck_marked`).
+async fn mark_for_recheck(
+    tx: &mut Transaction<'_, Postgres>,
+    restored: &[&str],
+) -> anyhow::Result<()> {
+    let of: Vec<String> = [("problem", "id"), ("contest_problem", "problem_id")]
+        .into_iter()
+        .filter(|(table, _)| restored.contains(table))
+        .map(|(table, column)| format!("SELECT {} FROM {}", ident(column), staging(table)))
+        .collect();
+    if of.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(AssertSqlSafe(format!(
+        "UPDATE problem SET config_recheck = true WHERE id IN ({})",
+        of.join(" UNION ")
+    )))
+    .execute(&mut **tx)
+    .await
+    .context("mark the restored problems for a config issues recheck")?;
+    Ok(())
 }
 
 /// Empty the problem tables for the bundle's problems. Refuse to import onto

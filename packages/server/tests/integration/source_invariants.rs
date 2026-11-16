@@ -685,8 +685,8 @@ fn handlers_do_not_import_entities_directly() {
 /// Every write or delete of a stored plugin config goes through
 /// `services::plugin_config`, which checks a config before it stores it and
 /// returns the change that rechecks the `config_issues` flags it reaches once
-/// it commits. A bundle restores the table in bulk, and the server's next
-/// start checks what it restored. No other module writes the `plugin_config`
+/// it commits. A bundle restores the table in bulk, and marks the problems
+/// it restores for the recheck every running server makes. No other module writes the `plugin_config`
 /// table, through its entity or in SQL.
 #[test]
 fn only_the_config_service_writes_stored_configs() {
