@@ -35,8 +35,11 @@ reports the current state.
 
 ## Sign-in limits
 
-Each client address may try to sign in 10 times a minute, counted across all
-servers, and register or request a CLI device code 30 times a minute. A client
+Each client address may fail to sign in 100 times a minute, counted across all
+servers. A successful sign-in counts nothing, so a venue whose contestants all
+reach the server through one NAT address signs every one of them in with no
+setting changed. One account may fail 10 times a minute from one address
+(`auth.login_failure_limit`). Each address may register or request a CLI device
+code 30 times a minute, and holds at most 450 pending device codes. A client
 over a limit gets `429 RATE_LIMITED` with a `Retry-After` header; retrying
-sooner does not extend the wait. Behind a NAT that shows every contestant as
-one address, turn the sign-in limit off with `server.rate_limit_auth = false`.
+sooner does not extend the wait.

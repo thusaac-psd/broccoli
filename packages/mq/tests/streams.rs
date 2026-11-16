@@ -869,3 +869,24 @@ async fn a_fixed_window_counts_every_event_and_is_never_extended() {
     let (other, _) = mq.count_in_window("login:10.0.0.2", length).await.unwrap();
     assert_eq!(other, 1);
 }
+
+/// Reading a window's count counts nothing, and a window never opened holds
+/// none.
+#[tokio::test]
+async fn reading_a_window_counts_no_event() {
+    let (_container, url) = redis().await;
+    let mq = Mq::connect(&url, BASE).await.unwrap();
+    let length = Duration::from_secs(60);
+    assert_eq!(
+        mq.window_count("failed-login:10.0.0.1").await.unwrap(),
+        (0, Duration::ZERO)
+    );
+    mq.count_in_window("failed-login:10.0.0.1", length)
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        let (count, left) = mq.window_count("failed-login:10.0.0.1").await.unwrap();
+        assert_eq!(count, 1);
+        assert!(left <= length && left > Duration::from_secs(55), "{left:?}");
+    }
+}

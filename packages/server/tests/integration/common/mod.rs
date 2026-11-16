@@ -540,8 +540,6 @@ pub struct SpawnOptions {
     /// Point the server's message queue at an address nothing listens on, as
     /// if Redis were down.
     pub mq_unreachable: bool,
-    /// Sets `server.rate_limit_auth` (off by default here).
-    pub rate_limit_auth: bool,
     /// Leave self-registration as a fresh install has it, closed. Otherwise
     /// it is opened, since most tests create their users by registering.
     pub registration_closed: bool,
@@ -664,7 +662,6 @@ impl TestApp {
                 public_base_url: None,
                 frontend_dist: PathBuf::from("/srv/dist"),
                 trusted_proxies: vec![],
-                rate_limit_auth: options.rate_limit_auth,
                 // Unique per spawned app: replicas sharing a database
                 // (`spawn_replica`) must report under distinct server ids.
                 id: format!(

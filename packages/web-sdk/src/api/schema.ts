@@ -6499,7 +6499,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Rate limited (RATE_LIMITED): too many sign-ins from this address (10 a minute, with `server.rate_limit_auth`) or failed ones for this account. Includes Retry-After. */
+      /** @description Rate limited (RATE_LIMITED): too many failed sign-ins from this address (100 a minute, counted across every server) or for this account from this address. A successful sign-in counts toward neither. Includes Retry-After. */
       429: {
         headers: {
           [name: string]: unknown;

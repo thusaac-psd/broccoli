@@ -122,7 +122,7 @@ pub async fn register(
         (status = 200, description = "Login successful", body = LoginResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Invalid credentials (INVALID_CREDENTIALS)", body = ErrorBody),
-        (status = 429, description = "Rate limited (RATE_LIMITED): too many sign-ins from this address (10 a minute, with `server.rate_limit_auth`) or failed ones for this account. Includes Retry-After.", body = ErrorBody),
+        (status = 429, description = "Rate limited (RATE_LIMITED): too many failed sign-ins from this address (100 a minute, counted across every server) or for this account from this address. A successful sign-in counts toward neither. Includes Retry-After.", body = ErrorBody),
     ),
 )]
 #[instrument(skip(state, payload, jar), fields(username = %payload.username))]
@@ -133,9 +133,7 @@ pub async fn login(
     jar: CookieJar,
     AppJson(payload): AppJson<LoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    if state.config.server.rate_limit_auth {
-        ip_quota::LOGIN.admit(&state.mq, client_ip).await?;
-    }
+    ip_quota::FAILED_LOGIN.check(&state.mq, client_ip).await?;
     validate_login_request(&payload)?;
 
     let username = payload.username.trim();
@@ -174,6 +172,7 @@ pub async fn login(
         if let Some(ip) = client_ip {
             state.login_throttle.record_failure(&throttle_key, ip);
         }
+        ip_quota::FAILED_LOGIN.record(&state.mq, client_ip).await;
         return Err(AppError::InvalidCredentials);
     };
 
