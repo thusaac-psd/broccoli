@@ -4,6 +4,7 @@ import { pollInterval, unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { formatRelativeSeconds, useTranslation } from '@broccoli/web-sdk/i18n';
 import { useContestSlotContext } from '@broccoli/web-sdk/slot';
 import {
+  Button,
   Label,
   QueryView,
   Switch,
@@ -291,13 +292,14 @@ function Standings({
         <PhaseBar phase={phase} frozen={frozen} />
         <div className="flex items-center gap-3">
           {can_reveal && (
-            <button
+            <Button
               type="button"
+              variant="destructive"
+              size="sm"
               onClick={onReveal}
-              className="rounded-md bg-amber-500 px-3 py-1 text-[12px] font-semibold text-white hover:bg-amber-600 disabled:opacity-50"
             >
               {t('icpc.scoreboard.reveal')}
-            </button>
+            </Button>
           )}
           <span className="text-[11px] text-muted-foreground">
             {t('icpc.scoreboard.lastUpdated', { when: updated })}
