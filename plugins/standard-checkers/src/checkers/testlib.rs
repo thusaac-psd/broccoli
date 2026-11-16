@@ -139,6 +139,8 @@ pub fn interpret_testlib_exit_code(exit_code: i32, stderr: &str) -> CheckerVerdi
             score: 0.0,
             message: extract_testlib_message(stderr).or_else(|| Some("Presentation error".into())),
         },
+        // testlib _fail also covers a file the checker could not open, which
+        // the platform can cause, so it is judged again rather than standing.
         3 => CheckerVerdict {
             checker_failure: None,
             verdict: Verdict::SystemError,
@@ -175,20 +177,23 @@ pub fn interpret_testlib_exit_code(exit_code: i32, stderr: &str) -> CheckerVerdi
             message: extract_testlib_message(stderr)
                 .or_else(|| Some("Unexpected end of the participant output".into())),
         },
-        7 => {
-            let (score, msg) = parse_testlib_partial(stderr);
-            let verdict = if score >= 1.0 {
-                Verdict::Accepted
-            } else {
-                Verdict::WrongAnswer
-            };
-            CheckerVerdict {
+        // A partial score; a checker that names no finite score fails itself.
+        7 => match parse_testlib_partial(stderr) {
+            Some((score, msg)) => CheckerVerdict {
                 checker_failure: None,
-                verdict,
+                verdict: if score >= 1.0 {
+                    Verdict::Accepted
+                } else {
+                    Verdict::WrongAnswer
+                },
                 score,
                 message: msg,
-            }
-        }
+            },
+            None => checker_failure(format!(
+                "Checker exited with code 7 without a finite score: {}",
+                truncate(stderr.trim(), 1024)
+            )),
+        },
         // Any other code is not a recognized testlib verdict. This deliberately
         // INCLUDES the _partially band (PARTIALLY_EXIT_CODE = 16 plus a pctype
         // offset): broccoli's partial-credit path is exit 7 (`points X`), and the
@@ -196,16 +201,9 @@ pub fn interpret_testlib_exit_code(exit_code: i32, stderr: &str) -> CheckerVerdi
         // not guess a partial score here. Treat it as a judge failure (SystemError
         // self-heals) rather than silently minting a wrong partial verdict.
         // The checker program itself failed, which every attempt repeats.
-        other => {
-            let failure =
-                format!("Checker exited with code {other}, which testlib gives no meaning");
-            CheckerVerdict {
-                checker_failure: Some(failure.clone()),
-                verdict: Verdict::SystemError,
-                score: 0.0,
-                message: Some(failure),
-            }
-        }
+        other => checker_failure(format!(
+            "Checker exited with code {other}, which testlib gives no meaning"
+        )),
     }
 }
 
@@ -335,6 +333,17 @@ pub(crate) fn resolve_testlib_compile(
     Ok((resolved, config))
 }
 
+/// A system error that is the checker's own failure, which every attempt
+/// repeats, so it stands.
+fn checker_failure(failure: String) -> CheckerVerdict {
+    CheckerVerdict {
+        checker_failure: Some(failure.clone()),
+        verdict: Verdict::SystemError,
+        score: 0.0,
+        message: Some(failure),
+    }
+}
+
 fn extract_testlib_message(stderr: &str) -> Option<String> {
     let msg = stderr.trim();
     if msg.is_empty() {
@@ -344,43 +353,18 @@ fn extract_testlib_message(stderr: &str) -> Option<String> {
     }
 }
 
-pub fn parse_testlib_partial(stderr: &str) -> (f64, Option<String>) {
+pub fn parse_testlib_partial(stderr: &str) -> Option<(f64, Option<String>)> {
     let line = stderr.lines().next().unwrap_or("").trim();
-
-    if let Some(rest) = line
+    let rest = line
         .strip_prefix("points ")
         .or_else(|| line.strip_prefix("points\t"))
-    {
-        let parts: Vec<&str> = rest.splitn(2, |c: char| c.is_whitespace()).collect();
-        if let Some(score) = parts.first().and_then(|s| s.parse::<f64>().ok()) {
-            let score = if score.is_finite() {
-                score.clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            let message = parts.get(1).map(|m| truncate(m.trim(), 1024));
-            return (score, message);
-        }
-    }
-
-    if let Some(first_token) = line.split_whitespace().next()
-        && let Ok(score) = first_token.parse::<f64>()
-    {
-        let score = if score.is_finite() {
-            score.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let rest = line.get(first_token.len()..).unwrap_or("").trim();
-        let message = if rest.is_empty() {
-            None
-        } else {
-            Some(truncate(rest, 1024))
-        };
-        return (score, message);
-    }
-
-    (0.0, extract_testlib_message(stderr))
+        .unwrap_or(line)
+        .trim_start();
+    let token = rest.split_whitespace().next()?;
+    let score = token.parse::<f64>().ok().filter(|s| s.is_finite())?;
+    let message = rest[token.len()..].trim();
+    let message = (!message.is_empty()).then(|| truncate(message, 1024));
+    Some((score.clamp(0.0, 1.0), message))
 }
 
 #[cfg(test)]
@@ -407,6 +391,20 @@ mod tests {
         let v = interpret_testlib_exit_code(2, "");
         assert_eq!(v.verdict, Verdict::WrongAnswer);
         assert!(v.message.unwrap().contains("Presentation error"));
+    }
+
+    /// A checker that exits 7 without a finite score misbehaves on its own:
+    /// every attempt repeats it, so the checker failure stands.
+    #[test]
+    fn a_partial_score_exit_without_a_finite_score_is_a_checker_failure() {
+        for stderr in ["points abc\n", "points nan\n", ""] {
+            let v = interpret_testlib_exit_code(7, stderr);
+            assert_eq!(v.verdict, Verdict::SystemError, "{stderr:?}");
+            assert!(v.checker_failure.is_some(), "{stderr:?}: {v:?}");
+        }
+        let v = interpret_testlib_exit_code(7, "points 0.25 close\n");
+        assert_eq!(v.verdict, Verdict::WrongAnswer);
+        assert_eq!(v.checker_failure, None);
     }
 
     #[test]

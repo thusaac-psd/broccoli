@@ -260,20 +260,13 @@ pub fn interpret_result(
     let score_str = mgr_sandbox.stdout.lines().next().unwrap_or("").trim();
     let score: f64 = match score_str.parse::<f64>() {
         Ok(s) if s.is_finite() => s,
+        // The manager finished on its own but printed no score: every
+        // attempt fails alike, so the failure stands.
         _ => {
+            let failure = format!("Manager stdout is not a valid score: '{score_str}'");
             return TestCaseVerdict {
-                test_case_id,
-                verdict: Verdict::SystemError,
-                score: 0.0,
-                time_used_ms: time_to_ms(total_time_s),
-                memory_used_kb: max_memory_kb.map(|m| m as i64),
-                message: Some(format!(
-                    "Manager stdout is not a valid score: '{}'",
-                    score_str
-                )),
                 stdout: opt_nonempty(&mgr_sandbox.stdout),
-                stderr: opt_nonempty(&mgr_sandbox.stderr),
-                problem_failure: None,
+                ..manager_failed(Verdict::SystemError, failure.clone(), Some(failure))
             };
         }
     };
@@ -517,6 +510,16 @@ mod tests {
         assert_eq!(
             exited.problem_failure.as_deref(),
             Some("Manager exited with code 3")
+        );
+
+        let garbled = interpret_result(42, &manager_run(true, mgr_result("abc\n", "")), 1);
+        assert_eq!(garbled.verdict, Verdict::SystemError);
+        assert!(
+            garbled
+                .problem_failure
+                .as_deref()
+                .is_some_and(|f| f.contains("'abc'")),
+            "a manager that exits 0 without a score fails every attempt alike: {garbled:?}"
         );
 
         let crashed = interpret_result(42, &manager_run(false, signal_sandbox(11)), 1);
