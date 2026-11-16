@@ -69,7 +69,7 @@ export function DlqMessageRow({ message, onClick }: Props) {
       <td className="p-3 align-top">
         {message.resolved ? (
           <Badge variant="secondary">
-            {message.resolved_by === null
+            {message.resolved_by == null
               ? t('dlq.row.recovered')
               : t('dlq.row.resolved')}
           </Badge>

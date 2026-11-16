@@ -21,7 +21,7 @@ async fn insert(
         problem_id: Set(problem_id),
         contest_id: Set(None),
         contest_type: Set("standard".into()),
-        status: Set(status.clone()),
+        status: Set(status),
         judge_epoch: Set(0),
         created_at: Set(chrono::Utc::now()),
         ..Default::default()

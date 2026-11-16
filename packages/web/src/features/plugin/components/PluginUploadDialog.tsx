@@ -182,8 +182,11 @@ export function PluginUploadDialog({
               <div>
                 <p className="font-medium">{summary.name}</p>
                 <p className="font-mono text-xs text-muted-foreground">
-                  {summary.id} · v{summary.version} ·{' '}
-                  {formatBytes(summary.size_bytes)}
+                  {t('plugins.upload.summary', {
+                    id: summary.id,
+                    version: summary.version,
+                    size: formatBytes(summary.size_bytes),
+                  })}
                 </p>
                 {summary.description && (
                   <p className="text-muted-foreground mt-1">
@@ -221,7 +224,7 @@ export function PluginUploadDialog({
                 )}
               </div>
               <p className="font-mono text-[11px] text-muted-foreground break-all">
-                sha256 {summary.archive_hash}
+                {t('plugins.archiveHash', { hash: summary.archive_hash })}
               </p>
               <p className="text-xs text-muted-foreground">
                 {t('plugins.upload.rollout')}

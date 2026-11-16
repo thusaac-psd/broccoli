@@ -882,7 +882,9 @@ export const en: Record<string, string> = {
   'plugins.reloadError': 'Failed to reload plugin',
   'plugins.source.bundle': 'Bundled',
   'plugins.source.upload': 'Uploaded',
+  'plugins.archiveHash': 'sha256 {hash}',
   'plugins.upload.button': 'Upload plugin',
+  'plugins.upload.summary': '{id} · v{version} · {size}',
   'plugins.upload.disabled': 'Plugin uploads are disabled on this server',
   'plugins.upload.title': 'Upload a plugin',
   'plugins.upload.description':

@@ -860,7 +860,9 @@ async fn queuing_a_unit_or_freeing_its_room_notifies_the_claim_fibers() {
     let (_pg, db, url) = crate::test_support::postgres_with_url().await;
     // Boot installed it already; a reboot installs it again.
     install_claim_notify(&db).await.unwrap();
-    let mut listener = sea_orm::sqlx::postgres::PgListener::connect(&url).await.unwrap();
+    let mut listener = sea_orm::sqlx::postgres::PgListener::connect(&url)
+        .await
+        .unwrap();
     listener.listen(CLAIM_CHANNEL).await.unwrap();
 
     let (s, _) = new_submission(&db).await;

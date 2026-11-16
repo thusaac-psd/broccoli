@@ -99,8 +99,7 @@ impl PluginArchive {
         })?;
         let manifest_source =
             manifest_source.ok_or_else(|| reject(format!("Archive has no {id}/plugin.toml")))?;
-        let manifest =
-            parse_manifest(&manifest_source).map_err(|e| reject(e.to_string()))?;
+        let manifest = parse_manifest(&manifest_source).map_err(|e| reject(e.to_string()))?;
         // Route and timer declarations are checked without touching disk.
         PluginEntry::new(id.to_string(), PathBuf::new(), manifest.clone())
             .map_err(|e| reject(e.to_string()))?;

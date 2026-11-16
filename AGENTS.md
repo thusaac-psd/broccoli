@@ -132,7 +132,7 @@ The checked-in Docker Postgres credentials are:
 ### Frontend
 
 - `packages/web` uses React 19, React Router 7 (SPA mode, `ssr: false`), Vite 8,
-  Tailwind, TanStack Query, Monaco, Radix UI, and Recharts.
+  Tailwind, TanStack Query, Monaco, and Radix UI.
 - Routing is file-system based through `@react-router/fs-routes`, with
   `packages/web/src/routes.ts` adding an explicit catch-all extension route.
 - `packages/web-sdk` (`@broccoli/web-sdk`) is a published TypeScript package

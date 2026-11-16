@@ -131,7 +131,7 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
                   {new Date(data.created_at).toLocaleString()}
                 </span>
               </Field>
-              {data.submission_id !== null && (
+              {data.submission_id != null && (
                 <Field label={t('dlq.detail.submissionId')}>
                   <Link
                     to={`/submissions/${data.submission_id}`}
@@ -144,7 +144,7 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
               <Field label={t('dlq.detail.status')}>
                 {data.resolved ? (
                   <Badge variant="secondary">
-                    {data.resolved_by === null
+                    {data.resolved_by == null
                       ? t('dlq.detail.resolvedAutomatically')
                       : t('dlq.detail.resolvedByUser', {
                           id: data.resolved_by,

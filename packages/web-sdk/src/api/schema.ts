@@ -3479,7 +3479,7 @@ export interface components {
     PluginArchiveSummary: {
       /** @description Content hash of the archive: its key in the blob store. */
       archive_hash: string;
-      current?: null | components['schemas']['PublishedPluginResponse'];
+      current?: components['schemas']['PublishedPluginResponse'] | null;
       description?: string | null;
       has_server: boolean;
       has_web: boolean;
@@ -3589,7 +3589,7 @@ export interface components {
       id: string;
       /** @example An Awesome Plugin */
       name: string;
-      server?: null | components['schemas']['ServerDetailResponse'];
+      server?: components['schemas']['ServerDetailResponse'] | null;
       /** @description Where the fleet takes the plugin's files from. */
       source: components['schemas']['PluginSourceResponse'];
       /**
@@ -3600,7 +3600,7 @@ export interface components {
       translations: string[];
       /** @example 1.0.0 */
       version: string;
-      web?: null | components['schemas']['WebDetailResponse'];
+      web?: components['schemas']['WebDetailResponse'] | null;
     };
     /** @description One live replica's view of a plugin. */
     PluginReplicaResponse: {
