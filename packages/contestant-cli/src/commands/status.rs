@@ -6,7 +6,7 @@ use broccoli_cli_core::api::submission::{
 };
 use broccoli_cli_core::client::Client;
 use broccoli_cli_core::model::{Standing, StatusDisplay, Verdict, VerdictDisplay};
-use broccoli_cli_core::{config, fmt, resolve};
+use broccoli_cli_core::{fmt, resolve};
 use clap::Args;
 use console::{Style, StyledObject, style};
 use dialoguer::Select;
@@ -17,6 +17,16 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 pub struct StatusArgs {
     /// Submission ID to query. Omit to pick from your recent submissions.
     pub id: Option<String>,
+
+    /// Contest ID or name (e.g. 3 or "Spring Round") to list your recent
+    /// submissions in; defaults to the .broccoli file's or your saved one
+    #[arg(short = 'c', long, conflicts_with = "id")]
+    pub contest: Option<String>,
+
+    /// Only list submissions to this problem: label, position, title or #ID
+    /// (e.g. A, 1, "Two Sum" or #42)
+    #[arg(short = 'p', long, conflicts_with = "id")]
+    pub problem: Option<String>,
 
     /// Print the recent-submissions table (no interactive picker)
     #[arg(long)]
@@ -33,18 +43,11 @@ pub fn run(args: StatusArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let cid = super::context::discover_context()
-        .and_then(|c| c.contest)
-        .or_else(|| config::load_user_config().contest);
-    let Some(cid) = cid else {
-        anyhow::bail!(
-            "No submission id and no contest context. Pass an id (`broccoli status <id>`), \
-             run from a directory with a .broccoli file, or set one with \
-             `broccoli config set contest <id>`."
-        );
-    };
-
-    let subs = own_recent_submissions(&client, &cid)?;
+    let contest = super::context::contest_ref(args.contest.as_deref()).context(
+        "No submission id and no contest. Pass an id (`broccoli status <id>`) or a contest \
+         (`-c <id|name>`).",
+    )?;
+    let subs = own_recent_submissions(&client, &contest, args.problem.as_deref())?;
     if subs.data.is_empty() {
         println!("  No submissions yet.");
         return Ok(());
@@ -72,12 +75,16 @@ pub fn run(args: StatusArgs) -> anyhow::Result<()> {
 }
 
 /// The caller's own latest submissions in the contest `contest` refers to
-/// (its id or its title, as `.broccoli` or the config saved it).
+/// (its id or its title), to the problem `problem` refers to when given.
 fn own_recent_submissions(
     client: &Client,
     contest: &str,
+    problem: Option<&str>,
 ) -> anyhow::Result<SubmissionListResponse> {
     let contest = resolve::contest_id(client, contest)?;
+    let problem = problem
+        .map(|p| resolve::problem(client, contest, p).map(|p| p.id))
+        .transpose()?;
     // scope to own submissions; never fall back to unscoped (would leak others' rows)
     let mut self_uid = None;
     for attempt in 0..2 {
@@ -96,7 +103,7 @@ fn own_recent_submissions(
         }
     }
     let self_uid = self_uid.expect("loop sets uid or returns early");
-    let subs = client.list_contest_submissions(contest, None, Some(self_uid), None, Some(50))?;
+    let subs = client.list_contest_submissions(contest, problem, Some(self_uid), None, Some(50))?;
     Ok(subs)
 }
 
@@ -328,32 +335,50 @@ mod tests {
         (Client::new(Session::explicit(url, "token".into())), asked)
     }
 
+    /// The answers of a server holding contest 3 "Spring Round", whose
+    /// problem A is problem 42, signed in as user 7 with no submissions.
+    fn spring_round(path: &str) -> String {
+        let at = "\"2030-01-01T00:00:00Z\"";
+        if path == "/api/v1/auth/me" {
+            r#"{"id":7,"username":"alice","display_name":"Alice","roles":[],"permissions":[]}"#
+                .into()
+        } else if path == "/api/v1/contests/3/problems" {
+            r#"[{"contest_id":3,"problem_id":42,"label":"A","position":1,
+            "problem_title":"Two Sum","withheld":null}]"#
+                .into()
+        } else if path.starts_with("/api/v1/contests/3/") {
+            r#"{"data":[],"pagination":{"per_page":50,"total":null,"total_pages":null,
+            "has_more":false,"next_cursor":null}}"#
+                .into()
+        } else {
+            format!(
+                r#"{{"data":[{{"id":3,"title":"Spring Round","start_time":{at},
+                "end_time":{at},"is_public":true,"submissions_visible":false,
+                "show_compile_output":true,"show_participants_list":true,
+                "created_at":{at},"updated_at":{at},"phase":"running"}}],
+                "pagination":{{"page":1,"per_page":100,"total":1,"total_pages":1}}}}"#
+            )
+        }
+    }
+
     #[test]
     fn status_finds_the_contest_a_name_refers_to() {
-        let (client, asked) = serve(|path| {
-            let at = "\"2030-01-01T00:00:00Z\"";
-            if path == "/api/v1/contests" {
-                format!(
-                    r#"{{"data":[{{"id":3,"title":"Spring Round","start_time":{at},
-                    "end_time":{at},"is_public":true,"submissions_visible":false,
-                    "show_compile_output":true,"show_participants_list":true,
-                    "created_at":{at},"updated_at":{at},"phase":"running"}}],
-                    "pagination":{{"page":1,"per_page":20,"total":1,"total_pages":1}}}}"#
-                )
-            } else if path == "/api/v1/auth/me" {
-                r#"{"id":7,"username":"alice","display_name":"Alice","roles":[],"permissions":[]}"#
-                    .into()
-            } else {
-                r#"{"data":[],"pagination":{"per_page":50,"total":null,"total_pages":null,
-                "has_more":false,"next_cursor":null}}"#
-                    .into()
-            }
-        });
-        let subs = own_recent_submissions(&client, "Spring Round").unwrap();
+        let (client, asked) = serve(spring_round);
+        let subs = own_recent_submissions(&client, "Spring Round", None).unwrap();
         assert!(subs.data.is_empty());
         assert_eq!(
             asked.lock().unwrap().last().unwrap(),
             "/api/v1/contests/3/submissions?user_id=7&per_page=50"
+        );
+    }
+
+    #[test]
+    fn status_lists_only_the_problem_it_is_given() {
+        let (client, asked) = serve(spring_round);
+        own_recent_submissions(&client, "3", Some("A")).unwrap();
+        assert_eq!(
+            asked.lock().unwrap().last().unwrap(),
+            "/api/v1/contests/3/submissions?problem_id=42&user_id=7&per_page=50"
         );
     }
 

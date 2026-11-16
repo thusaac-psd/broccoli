@@ -195,6 +195,13 @@ the language with `-l` when you need to. Add `-w` to wait for the verdict right
 there instead of checking it later. With `-w` the command exits with status 3
 when the verdict is anything but Accepted.
 
+While it waits, Broccoli says what for: a free judge while the submission is
+queued, the judge while it runs, or the contest's plugin while an organiser has
+it switched off. After 5 minutes without a verdict it stops waiting and exits
+with status 4. The submission is not cancelled: it is judged as soon as a judge
+or the plugin is free, and `broccoli status` shows the verdict then. A remote
+`test` waits the same way, for up to 2 minutes.
+
 ```bash
 broccoli submit sol.cpp -c "Spring Round" -p A -w
 ```
@@ -229,12 +236,19 @@ broccoli status 12345
 ```
 
 Print your recent submissions as a plain table with `--recent`. Picking from
-recent needs to know the contest, which Broccoli reads from your `.broccoli` file
-or your saved default.
+recent needs to know the contest, which Broccoli reads from `-c`, your
+`.broccoli` file or your saved default. Add `-p` to see only one problem's
+submissions.
 
 ```bash
-broccoli status --recent
+broccoli status --recent -c "Spring Round" -p A
 ```
+
+A submission reads `Hidden` while the contest keeps results back from you, for
+example during a scoreboard freeze, and `Waiting for plugin` while the plugin
+that judges the contest is switched off or not answering. A hidden result stays
+hidden until the organisers release it; a waiting one is judged once the plugin
+is back.
 
 ## Watch the contest live
 
@@ -336,6 +350,7 @@ server, so it keeps working offline.
 | `1`    | Something went wrong, such as no connection or no login            |
 | `2`    | The command line was not understood                                |
 | `3`    | `test` had a sample fail, or `submit -w` got a verdict other than Accepted |
+| `4`    | `submit -w` or `test` stopped waiting for the judge; the work is not cancelled |
 
 ## Every command
 
