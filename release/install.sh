@@ -333,11 +333,13 @@ env_set_if_changed() {
   echo "updated $1 in $ENV_FILE to $2"
 }
 
+# start_role: run the role's containers from the images already loaded;
+# nothing is pulled.
 start_role() {
   if [ "$ROLE" = "infra" ] && ! using_object_storage; then
-    compose up -d db redis
+    compose up -d --pull never db redis
   else
-    compose up -d
+    compose up -d --pull never
   fi
 }
 
@@ -970,7 +972,7 @@ wait_until() {
 }
 
 http_ok() {
-  curl -fsS "$1" >/dev/null 2>&1
+  curl -fsS "$1" >/dev/null 2>&1 # offline-ok: probes this install's own server
 }
 
 service_healthy() {
@@ -1037,7 +1039,7 @@ if ! is_dry_run; then
   need docker "Install Docker Engine from https://docs.docker.com/engine/install/."
   need gzip "Install gzip with your OS package manager."
   if [ "$ROLE" = "server" ] || [ "$ROLE" = "gateway" ] || [ "$ROLE" = "single-host" ]; then
-    need curl "Install curl with your OS package manager."
+    need curl "Install curl with your OS package manager." # offline-ok: for http_ok
   fi
   docker compose version >/dev/null 2>&1 || die "docker compose is required. Install the Docker Compose plugin from the official Docker docs."
 fi
