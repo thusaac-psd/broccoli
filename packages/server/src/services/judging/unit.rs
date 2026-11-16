@@ -12,7 +12,7 @@ use super::fault::{DispatchFailure, SystemErrorClass};
 use crate::dispatcher::prefer_local_handler;
 use crate::dlq::{DlqService, DlqSubject};
 use crate::entity::{code_run, submission, submission_judgement};
-use crate::plugin_lifecycle::contest_type_open;
+use crate::plugin_lifecycle::work_runnable;
 
 /// The kind of row the dispatcher judges.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +58,24 @@ impl Unit {
             Unit::Judgement => "s.contest_type",
             Unit::CodeRun => "u.contest_type",
         }
+    }
+
+    /// The type of the unit's problem, as SQL over a [`Unit::scan_from`]
+    /// scan.
+    fn problem_type(self) -> &'static str {
+        match self {
+            Unit::Judgement => {
+                "(SELECT pt.problem_type FROM problem pt WHERE pt.id = s.problem_id)"
+            }
+            Unit::CodeRun => "(SELECT pt.problem_type FROM problem pt WHERE pt.id = u.problem_id)",
+        }
+    }
+
+    /// SQL over a [`Unit::scan_from`] scan: the unit may run now, every
+    /// plugin it needs having an enabled provider ([`work_runnable`]). A unit
+    /// that may not is parked.
+    pub(crate) fn runnable(self) -> String {
+        work_runnable(self.contest_type(), self.problem_type())
     }
 
     /// `SET` items, each led by `, `, that claiming a row of this unit adds to
@@ -453,7 +471,7 @@ fn claim_statement(unit: Unit, server_id: &str, limit: ClaimLimit, local: &[Stri
         from = unit.scan_from(),
         queued = crate::dispatcher::QUEUED_PREDICATE,
         handled = prefer_local_handler(unit.contest_type(), &local),
-        open = contest_type_open(unit.contest_type()),
+        open = unit.runnable(),
         lock = unit.scan_lock(),
         table = unit.table(),
         pending = SubmissionStatus::Pending,
@@ -615,7 +633,7 @@ struct Picked {
     dispatch_retries: i32,
     /// Its submission's spent system-error retries (0 for a code run).
     system_error_retries: i32,
-    /// Its contest type may be judged now ([`contest_type_open`]).
+    /// It may run now ([`Unit::runnable`]).
     open: bool,
 }
 
@@ -644,7 +662,7 @@ async fn pick(
     let rows = txn
         .query_all_raw(b.statement(format!(
             "SELECT {columns}, {open} AS open FROM {from} WHERE {filter} ORDER BY u.id {limit} {lock}",
-            open = contest_type_open(unit.contest_type()),
+            open = unit.runnable(),
             from = unit.scan_from(),
             lock = unit.scan_lock(),
         )))
@@ -1109,7 +1127,7 @@ pub(crate) async fn retry_system_errors(
          AND ({handled} OR ({open} AND s.system_error_retries >= {max}))",
         undecided = awaits_retry_decision("u", "s"),
         handled = prefer_local_handler("s.contest_type", &local),
-        open = contest_type_open("s.contest_type"),
+        open = Unit::Judgement.runnable(),
     );
     let picked = pick(&txn, Unit::Judgement, b, filter, Some(limit)).await?;
     let decided = |decision: RetryDecision| -> Vec<i32> {
@@ -1222,23 +1240,26 @@ pub(crate) async fn fail_dispatch(
         // the row's.
         Unit::Judgement => format!(
             "WITH locked AS (SELECT s.id, {open} AS open FROM submission s \
-                             JOIN submission_judgement j ON j.submission_id = s.id \
-                             WHERE j.id = $1 FOR NO KEY UPDATE OF s), \
+                             JOIN submission_judgement u ON u.submission_id = s.id \
+                             WHERE u.id = $1 FOR NO KEY UPDATE OF s), \
                   moved AS ({finalize} FROM locked \
                             WHERE {open_now} AND t.submission_id = locked.id AND locked.open \
                             RETURNING t.*){mirror}, \
                   parked AS (SELECT t.id FROM submission_judgement t, locked \
                              WHERE {open_now} AND NOT locked.open) \
              SELECT (SELECT COUNT(*) FROM moved) AS moved, (SELECT COUNT(*) FROM parked) AS parked",
-            open = contest_type_open("s.contest_type"),
+            open = unit.runnable(),
             finalize = unit.finalize_system_error("$3", "$4", failure.class),
             mirror = unit.cascade(),
         ),
         Unit::CodeRun => format!(
-            "WITH moved AS ({finalize} WHERE {open_now} AND {open} RETURNING t.id), \
-                  parked AS (SELECT t.id FROM code_run t WHERE {open_now} AND NOT {open}) \
+            "WITH locked AS (SELECT u.id, {open} AS open FROM code_run u WHERE u.id = $1), \
+                  moved AS ({finalize} FROM locked \
+                            WHERE {open_now} AND t.id = locked.id AND locked.open RETURNING t.id), \
+                  parked AS (SELECT t.id FROM code_run t, locked \
+                             WHERE {open_now} AND NOT locked.open) \
              SELECT (SELECT COUNT(*) FROM moved) AS moved, (SELECT COUNT(*) FROM parked) AS parked",
-            open = contest_type_open("t.contest_type"),
+            open = unit.runnable(),
             finalize = unit.finalize_system_error("$3", "$4", failure.class),
         ),
     };
@@ -1281,7 +1302,7 @@ async fn hand_back(
             DbBackend::Postgres,
             format!(
                 "SELECT {open} AS open FROM {from} WHERE {open_now} {lock}",
-                open = contest_type_open(unit.contest_type()),
+                open = unit.runnable(),
                 from = unit.scan_from(),
                 open_now = unit.open_dispatch("u", "$1", "$2"),
                 lock = match unit {

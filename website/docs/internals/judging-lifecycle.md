@@ -115,12 +115,19 @@ type is disabled, a submission to its contests is refused with
 (with `Retry-After`) means only that the serving replica has not loaded the
 plugin yet.
 
-## A disabled contest plugin parks its work
+## A disabled plugin parks the work that needs it
 
-A contest type is parked while every plugin that recorded it (`plugin.governs`)
-is disabled fleet-wide; `contest_type_open` states that in SQL and
-`PluginLifecycle::disabled_provider` in Rust. Work of a parked type waits
-`Queued` and resumes once a provider is enabled again:
+A unit of work needs two plugins: the one that provides its contest type and
+the evaluator of its problem's type. It is parked while every plugin that
+recorded either key (`plugin.governs`, `contest_types` and `problem_types`)
+is disabled fleet-wide; `work_runnable` states that in SQL
+(`judging::Unit::runnable` over a unit's scan) and
+`PluginLifecycle::closed_by` in Rust. Parked work waits `Queued` and resumes
+once a provider is enabled again. A new submission or code run that would be
+parked is refused: `503 CONTEST_TYPE_DISABLED` for its contest type,
+`503 PLUGIN_DISABLED` naming the evaluator for its problem type, neither with
+`Retry-After`. A system error a plugin writes without a code is recorded as
+`PLUGIN_ERROR`, so none is shown without one:
 
 - The claim statement takes no judgement or code run of a parked type, so
   nothing is dispatched to a plugin that is not there.

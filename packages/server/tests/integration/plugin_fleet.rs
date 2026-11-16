@@ -602,7 +602,7 @@ async fn a_missing_visibility_plugin_fails_closed_only_for_its_contest_types() {
     // The plugin, when it last loaded, registered the `fleet-only` type.
     for sql in [
         format!(
-            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"]}}' \
+            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": []}}' \
              WHERE id = '{PLUGIN}'"
         ),
         format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {governed}"),
@@ -641,7 +641,7 @@ async fn a_disabled_visibility_plugin_fails_closed_for_its_contest_types() {
     assert_eq!(res.status, 200, "{}", res.text);
     for sql in [
         format!(
-            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"]}}' \
+            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": []}}' \
              WHERE id = '{PLUGIN}'"
         ),
         format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {governed}"),
@@ -697,12 +697,12 @@ async fn a_type_another_enabled_plugin_provides_is_not_withheld_by_a_disabled_on
     assert_eq!(res.status, 200, "{}", res.text);
     for sql in [
         format!(
-            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"]}}' \
+            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": []}}' \
              WHERE id = '{PLUGIN}'"
         ),
         // Another plugin provides the same type and is enabled.
         "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
-         ('second-provider', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [\"fleet-only\"]}')"
+         ('second-provider', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [\"fleet-only\"], \"problem_types\": []}')"
             .to_string(),
         format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {governed}"),
     ] {
@@ -728,7 +728,10 @@ async fn a_type_another_enabled_plugin_provides_is_not_withheld_by_a_disabled_on
     plugin_lifecycle::reconcile(&a.state).await.unwrap();
 
     assert_eq!(
-        a.state.plugin_lifecycle.disabled_provider("fleet-only"),
+        a.state.plugin_lifecycle.disabled_provider(
+            server::plugin_lifecycle::Provided::ContestType,
+            "fleet-only"
+        ),
         None
     );
     let res = a
@@ -773,7 +776,7 @@ async fn a_plugin_lists_its_running_contests_while_disabled() {
     let running = a.create_contest(&token, "Running", true, true).await;
     for sql in [
         format!(
-            "UPDATE plugin SET governs = '{{\"visibility\": false, \"contest_types\": [\"fleet-only\"]}}' \
+            "UPDATE plugin SET governs = '{{\"visibility\": false, \"contest_types\": [\"fleet-only\"], \"problem_types\": []}}' \
              WHERE id = '{PLUGIN}'"
         ),
         format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {running}"),
@@ -878,7 +881,7 @@ async fn a_missing_visibility_plugin_also_hides_its_contests_problems_outside_th
         format!(
             "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
              ('{PLUGIN}', TRUE, 1, NOW(), \
-              '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"]}}')"
+              '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": []}}')"
         ),
         format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {governed}"),
     ] {
@@ -1194,4 +1197,82 @@ async fn the_heartbeat_touches_only_the_rows_liveness() {
     server::plugin_fleet::retire(&a.db, &id).await.unwrap();
     server::plugin_fleet::heartbeat(&a.db, &id).await.unwrap();
     assert_eq!(ages().await, None, "a retired row stays retired");
+}
+
+/// A problem type whose every evaluator plugin is disabled fleet-wide closes
+/// its problems as a disabled contest type closes its contests: a new
+/// submission or code run is refused with `PLUGIN_DISABLED`, since accepting
+/// it would only park it, and the overview counts the parked work.
+#[tokio::test(flavor = "multi_thread")]
+async fn work_on_a_problem_type_whose_evaluator_is_disabled_is_refused_and_parked() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    let a = TestApp::spawn().await;
+    let token = admin(&a).await;
+    let user = a
+        .create_authenticated_user("evaluator_user", "pass1234")
+        .await;
+    let problem_id = a.create_problem(&token, "Evaluated").await;
+    for sql in [
+        "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
+         ('evaluator-off', FALSE, 1, NOW(), \
+          '{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"evaluated-x\"]}')"
+            .to_string(),
+        format!(
+            "UPDATE problem SET problem_type = 'evaluated-x', is_public = TRUE WHERE id = {problem_id}"
+        ),
+    ] {
+        a.db.execute_raw(Statement::from_string(DbBackend::Postgres, sql))
+            .await
+            .unwrap();
+    }
+    plugin_lifecycle::reconcile(&a.state).await.unwrap();
+
+    let files = json!([{"filename": "main.cpp", "content": "int main() {}"}]);
+    let res = a
+        .post_with_token(
+            &routes::problem_submissions(problem_id),
+            &json!({"files": files, "language": "cpp"}),
+            &user,
+        )
+        .await;
+    assert_eq!(res.status, 503, "{}", res.text);
+    assert_eq!(res.body["code"], "PLUGIN_DISABLED", "{}", res.text);
+    let res = a
+        .post_with_token(
+            &routes::problem_code_runs(problem_id),
+            &json!({"files": files, "language": "cpp", "custom_test_cases": [{"input": "", "expected_output": null}]}),
+            &user,
+        )
+        .await;
+    assert_eq!(res.status, 503, "{}", res.text);
+    assert_eq!(res.body["code"], "PLUGIN_DISABLED", "{}", res.text);
+
+    // Work already queued for it waits, counted as parked.
+    let user_id: i32 =
+        a.db.query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT id FROM \"user\" WHERE username = 'evaluator_user'",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "id")
+        .unwrap();
+    a.insert_submission(server::entity::submission::ActiveModel {
+        files: sea_orm::Set(json!([])),
+        language: sea_orm::Set("cpp".into()),
+        user_id: sea_orm::Set(user_id),
+        problem_id: sea_orm::Set(problem_id),
+        contest_id: sea_orm::Set(None),
+        contest_type: sea_orm::Set("standard".into()),
+        status: sea_orm::Set(common::SubmissionStatus::Queued),
+        judge_epoch: sea_orm::Set(0),
+        created_at: sea_orm::Set(chrono::Utc::now()),
+        ..Default::default()
+    })
+    .await;
+    let res = a.get_with_token(routes::SYSTEM_OVERVIEW, &token).await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(res.body["submissions_parked"], 1, "{}", res.text);
 }

@@ -1471,7 +1471,7 @@ async fn provider(db: &DatabaseConnection, enabled: bool) {
         db,
         &format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
-             VALUES ('std', {enabled}, '{{\"visibility\": false, \"contest_types\": [\"standard\"]}}') \
+             VALUES ('std', {enabled}, '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         ),
     )
@@ -1533,6 +1533,66 @@ async fn work_of_a_disabled_contest_plugin_is_parked_until_it_is_enabled() {
     assert_eq!(sub(&db, waiting.id).await.status, SubmissionStatus::Queued);
 
     provider(&db, true).await;
+    assert_eq!(claimable(&db).await, 2, "both resume");
+}
+
+/// Records `standard` (the problem type [`new_submission`] uses) as
+/// evaluated by one plugin, enabled or not.
+async fn evaluator(db: &DatabaseConnection, enabled: bool) {
+    exec(
+        db,
+        &format!(
+            "INSERT INTO plugin (id, is_enabled, governs) \
+             VALUES ('eval', {enabled}, \
+                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"standard\"]}}') \
+             ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
+        ),
+    )
+    .await;
+}
+
+/// A unit needs its problem type's evaluator as much as its contest type's
+/// plugin: while every evaluator of the problem type is disabled, its work
+/// is parked exactly as for a disabled contest plugin. A failure the disable
+/// causes goes back to `Queued` spending nothing, a system error awaiting
+/// its retry is handed back instead of burning the budget, and nothing is
+/// claimed until an evaluator is enabled.
+#[tokio::test]
+async fn work_whose_evaluator_plugin_is_disabled_is_parked_until_it_is_enabled() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    evaluator(&db, true).await;
+    let (cut, _) = new_submission(&db).await;
+    let claimed = claim_one(&db, "srv").await;
+    let (erred, _) = new_submission(&db).await;
+    let failed = claim_one(&db, "srv").await;
+    finish(&db, &failed.judgement, Verdict::SystemError).await;
+
+    evaluator(&db, false).await;
+    assert_eq!(
+        fail_dispatch(
+            &db,
+            Unit::Judgement,
+            claimed.judgement.id,
+            claimed.judgement.judge_epoch,
+            &DispatchFailure::judging(HostCode::PluginExecutionError, "no evaluator"),
+        )
+        .await
+        .unwrap(),
+        DispatchFailed::HandedBack
+    );
+    let pass = retry_system_errors(&db, RetryBudget::new(1), 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(pass.handed_back, 1, "{pass:?}");
+    assert_eq!(pass.requeued, 0, "{pass:?}");
+    for id in [cut.id, erred.id] {
+        let s = sub(&db, id).await;
+        assert_eq!(s.status, SubmissionStatus::Queued);
+        assert_eq!(s.system_error_retries, 0, "no budget is spent");
+    }
+    assert_eq!(claimable(&db).await, 0, "parked work is not claimed");
+
+    evaluator(&db, true).await;
     assert_eq!(claimable(&db).await, 2, "both resume");
 }
 

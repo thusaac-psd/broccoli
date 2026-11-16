@@ -267,14 +267,17 @@ binaries warn about every key they do not read.
   follows expand/contract (see `release/docs/upgrade.md`).
 - When changing plugin execution behavior, check both manifest-level permissions
   and host-side registration/resolution.
-- Work of a contest type whose every provider is disabled fleet-wide is parked,
-  not failed: the claim, the system-error retry and the stuck detector all skip
-  or hand it back through one predicate (`plugin_lifecycle::contest_type_open`),
-  and it resumes when a provider is enabled. A new scan that hands out or
-  retries judging work uses that predicate too. A judgement whose session the
-  disable cut goes straight back to `Queued` (`judging::fail_dispatch`), never
-  through `SystemError`, on every replica alike, since the decision reads the
-  fleet-wide `plugin` table.
+- A unit of work runs only while every plugin it needs has an enabled provider:
+  its contest type's plugin and its problem type's evaluator. Work that cannot
+  run because one is disabled fleet-wide is parked, not failed: the claim, the
+  system-error retry, the stuck detector and the overview's parked count read
+  one predicate (`judging::Unit::runnable`, built on
+  `plugin_lifecycle::work_runnable`; `PluginLifecycle::closed_by` in Rust), the
+  submit paths refuse it (`accepting_handler`), and it resumes when a provider
+  is enabled. A new scan that hands out or retries judging work uses that
+  predicate too. A judgement whose session the disable cut goes straight back to
+  `Queued` (`judging::fail_dispatch`), never through `SystemError`, on every
+  replica alike, since the decision reads the fleet-wide `plugin` table.
 - A worker that lacks a platform tool takes no work
   (`HeartbeatPayload::accepts_work`): it stays live, its heartbeat lists what is
   missing, and while no live worker takes work the claim claims nothing

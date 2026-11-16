@@ -161,8 +161,8 @@ struct Backlog {
 }
 
 /// The overview's counts in one statement: submissions in flight, queued
-/// (and of those, parked: their contest type has no enabled provider,
-/// `plugin_lifecycle::contest_type_open`), and unresolved dead letters.
+/// (and of those, parked: a plugin they need has no enabled provider,
+/// `plugin_lifecycle::work_runnable`), and unresolved dead letters.
 /// Aggregate operator telemetry behind `system:view` (pinned by
 /// `contestant_cannot_view_system_overview`): counts only, never a row the
 /// visibility kernel governs.
@@ -172,11 +172,11 @@ async fn read_backlog(db: &common::db::DatabaseConnection) -> Result<Backlog, se
         .query_one_raw(Statement::from_string(
             DbBackend::Postgres,
             format!(
-                "WITH waiting AS (SELECT contest_type, status IN {queued} AS queued, \
-                                         COUNT(*) AS n \
-                                  FROM submission \
-                                  WHERE status IN {queued} OR status IN {in_flight} \
-                                  GROUP BY 1, 2), \
+                "WITH waiting AS (SELECT s.contest_type, p.problem_type, \
+                                         s.status IN {queued} AS queued, COUNT(*) AS n \
+                                  FROM submission s JOIN problem p ON p.id = s.problem_id \
+                                  WHERE s.status IN {queued} OR s.status IN {in_flight} \
+                                  GROUP BY 1, 2, 3), \
                       typed AS (SELECT queued, {open} AS open, n FROM waiting) \
                  SELECT COALESCE(SUM(n) FILTER (WHERE NOT queued), 0)::bigint AS in_progress, \
                         COALESCE(SUM(n) FILTER (WHERE queued AND open), 0)::bigint AS queued, \
@@ -186,7 +186,10 @@ async fn read_backlog(db: &common::db::DatabaseConnection) -> Result<Backlog, se
                  FROM typed",
                 queued = StatusPhase::Queued.sql_list(),
                 in_flight = StatusPhase::InFlight.sql_list(),
-                open = crate::plugin_lifecycle::contest_type_open("waiting.contest_type"),
+                open = crate::plugin_lifecycle::work_runnable(
+                    "waiting.contest_type",
+                    "waiting.problem_type"
+                ),
             ),
         ))
         .await?

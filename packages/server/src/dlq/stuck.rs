@@ -84,8 +84,9 @@ pub async fn detect_once(state: &AppState, config: &DlqConfig) -> anyhow::Result
     Ok(())
 }
 
-/// Warns about queued work older than the threshold. Work of a parked contest
-/// type waits for its provider on purpose and is not counted.
+/// Warns about queued work older than the threshold. Parked work (a plugin
+/// it needs has no enabled provider, see `Unit::runnable`) waits for its
+/// provider on purpose and is not counted.
 async fn observe_old_queued_backlog(db: &DatabaseConnection) -> anyhow::Result<()> {
     for unit in [Unit::Judgement, Unit::CodeRun] {
         let row = db
@@ -98,7 +99,7 @@ async fn observe_old_queued_backlog(db: &DatabaseConnection) -> anyhow::Result<(
                        AND {open}",
                     from = unit.scan_from(),
                     queued = crate::dispatcher::QUEUED_PREDICATE,
-                    open = crate::plugin_lifecycle::contest_type_open(unit.contest_type()),
+                    open = unit.runnable(),
                 ),
                 [(QUEUED_OBSERVABILITY_THRESHOLD_SECS as f64).into()],
             ))

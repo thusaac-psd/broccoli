@@ -50,9 +50,10 @@ have no worker section for the same reason.
 ## What a plugin governs
 
 The row's `governs` column records what the published version governs: whether
-it declares a visibility query, and every contest type its `init()` registered.
-A server that cannot load the plugin reads it to fail closed for exactly that,
-and `contest_type_open` reads it to tell which plugins provide a type. Every
+it declares a visibility query, every contest type its `init()` registered, and
+every problem type it registered an evaluator for. A server that cannot load
+the plugin reads it to fail closed for exactly that, and `work_runnable` reads
+it to tell which plugins provide a type. Every
 change that loads a version (enable, reload, upload, removing an upload) writes
 it in the same statement that publishes the version, so a change refused at
 publish (`409 CONFLICT`, or a database error) leaves the record of the version

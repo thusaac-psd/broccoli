@@ -4664,8 +4664,9 @@ export interface components {
       submissions_in_progress: number;
       /**
        * Format: int64
-       * @description Submissions waiting `Queued` whose contest type has no enabled
-       *     provider: no server claims them until one is enabled again.
+       * @description Submissions waiting `Queued` that a plugin they need (their contest
+       *     type's, or their problem type's evaluator) keeps parked: it has no
+       *     enabled provider, so no server claims them until one is enabled again.
        * @example 0
        */
       submissions_parked: number;
