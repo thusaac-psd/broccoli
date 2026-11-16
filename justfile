@@ -56,6 +56,7 @@ test-stress:
 # Run clippy on all workspace crates, as CI does
 clippy:
     cargo clippy --workspace --all-targets --locked -- -D warnings
+    cargo clippy -p server -p worker -p broccoli-compare -p broccoli-contestant-cli -p broccoli-dev-cli --locked -- -D warnings
 
 # Run clippy on every plugin crate and on the server SDK's guest surface
 clippy-plugins:

@@ -1016,7 +1016,10 @@ async fn a_submission_cut_by_disabling_its_contest_plugin_waits_and_is_judged_on
         .create_authenticated_user("ioi_disable_user", "password")
         .await;
     let problem_id = app.create_problem(&admin, "IOI Disable").await;
-    app.create_test_case(problem_id, &admin).await;
+    // A scored test case (IOI leaves samples out of the score) whose output
+    // the problem's exact checker accepts.
+    app.create_test_case_with(problem_id, "5\n1 2 3 4 5", "15\n", 100, false, &admin)
+        .await;
     let contest_id = app
         .create_typed_contest(&admin, "IOI Disable Contest", "ioi", true, true)
         .await;

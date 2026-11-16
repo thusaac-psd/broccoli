@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { mockApi, NOW } from './api';
+import { mockApi, NOW, runClockUntil } from './api';
 
 const UNAVAILABLE = {
   status: 503,
@@ -23,8 +23,12 @@ test('the print queue with its backend down says it could not load the jobs', as
     page.getByRole('heading', { name: 'Print Queue' }),
   ).toBeVisible();
 
-  await page.clock.runFor(120_000);
-  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+  // A busy server is waited out: six retries, at most 16 s apart.
+  await runClockUntil(page, () =>
+    expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({
+      timeout: 500,
+    }),
+  );
   await expect(page.getByText('No print jobs')).toHaveCount(0);
 });
 
@@ -37,7 +41,10 @@ test('the home page with the contest list failing does not say there are no cont
     route.fulfill({ status: 500, json: { code: 'INTERNAL', message: '' } }),
   );
   await page.goto('/');
-  await page.clock.runFor(10_000);
-  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+  await runClockUntil(page, () =>
+    expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({
+      timeout: 500,
+    }),
+  );
   await expect(page.getByText(/no contests available/)).toHaveCount(0);
 });

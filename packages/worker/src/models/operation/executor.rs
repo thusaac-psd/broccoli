@@ -12,9 +12,9 @@ use super::models::{MountSource, OperationTask};
 use super::sandbox::SandboxManager;
 use super::sandbox::isolate::IsolateSandboxManager;
 use super::sandbox::mock::MockSandboxManager;
-use super::task_cache::{
-    DatabaseTaskCacheStore, MemoizedTaskCacheStore, NoopTaskCacheStore, TaskCacheStore,
-};
+#[cfg(any(test, feature = "test-support"))]
+use super::task_cache::NoopTaskCacheStore;
+use super::task_cache::{DatabaseTaskCacheStore, MemoizedTaskCacheStore, TaskCacheStore};
 use crate::config::WorkerAppConfig;
 use crate::models::operation::handler::{
     BoxIds, CompileCache, OperationHandler, isolate_num_boxes,

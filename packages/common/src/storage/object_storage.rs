@@ -581,7 +581,17 @@ pub mod testing {
                 .with_exposed_port(8333.tcp())
                 .with_wait_for(WaitFor::message_on_stderr("Start Seaweed S3 API Server"))
                 .with_copy_to("/etc/s3.json", S3_CONFIG.as_bytes().to_vec())
-                .with_cmd(["server", "-s3", "-s3.config=/etc/s3.json", "-dir=/data"])
+                // SeaweedFS refuses to grow a volume when its disk has under 1%
+                // free by default, so on a large, mostly full host disk every
+                // write fails. A test stores a few bytes: an absolute floor
+                // makes the container's behaviour independent of the host.
+                .with_cmd([
+                    "server",
+                    "-s3",
+                    "-s3.config=/etc/s3.json",
+                    "-dir=/data",
+                    "-volume.minFreeSpace=64MiB",
+                ])
                 .start()
                 .await
                 .expect("start seaweedfs");

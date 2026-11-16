@@ -59,6 +59,14 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # The workspace run unifies features across members, so test-only
+      # features (`test-support`) are on in every crate. The shipped binaries
+      # build without them; this lints them the way a release builds them.
+      - name: Clippy (shipped binaries, own features)
+        run:
+          cargo clippy -p server -p worker -p broccoli-compare -p
+          broccoli-contestant-cli -p broccoli-dev-cli --locked -- -D warnings
+
       # `cargo clippy --workspace` above does not reach plugin crates either.
       - name: Clippy plugins
         run: ./scripts/clippy-plugins.sh
