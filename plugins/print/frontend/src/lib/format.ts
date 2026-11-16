@@ -2,20 +2,6 @@ import type { Formatters } from '@broccoli/web-sdk/i18n';
 
 import type { PrintStatus } from '../types';
 
-// Mirrors the server-side page estimate (plugins/print/src/models.rs).
-const WRAP_COLS = 90;
-const LINES_PER_PAGE = 54;
-
-export function estimatePages(source: string): number {
-  if (!source) return 1;
-  let visual = 0;
-  for (const line of source.split('\n')) {
-    const w = [...line].length;
-    visual += w === 0 ? 1 : Math.ceil(w / WRAP_COLS);
-  }
-  return Math.max(1, Math.ceil(Math.max(1, visual) / LINES_PER_PAGE));
-}
-
 /** How long ago a server epoch-seconds value was, or a dash when unset. */
 export function formatRelative(
   format: Formatters,
