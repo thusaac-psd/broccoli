@@ -290,7 +290,7 @@
 'submissionDetail.rejudgeQueued' = "Rejudge queued."
 'submissionDetail.rejudgeError' = "Failed to queue rejudge."
 'submissionDetail.judgementApplied' = "Version applied."
-'submissionDetail.configIssues.judged' = "Judged while this problem's stored settings had issues: its score may come from settings its plugin now refuses."
+'submissionDetail.configIssues.judged' = "Judged while this problem's settings had issues: its score may be wrong."
 'submissionDetail.configIssues.current' = "The problem's settings with issues now:"
 'submissionDetail.configIssues.fixed' = "The problem's settings have no issues now. Rejudge to score this submission with them."
 'submissionDetail.configIssues.badge' = "Settings had issues"
@@ -728,8 +728,11 @@
 
 # Test Cases (admin)
 'admin.manageTestCases' = "Manage Test Cases"
-'admin.configIssues.title' = "Some settings no longer match this problem's test cases. Fix them, or submissions are scored wrong."
+'admin.configIssues.title' = "Some settings of this problem have issues. Fix them, or its test data, or submissions are judged wrong."
+'admin.configIssues.contestTitle' = "Some settings of this contest or its problems have issues. Fix them, or the problems' test data, or the contest is judged wrong."
 'admin.configIssues.onProblem' = "{config} on this problem"
+'admin.configIssues.onContest' = "{config} on this contest"
+'admin.configIssues.forProblem' = "{config} for problem {problemId}"
 'admin.configIssues.inContest' = "{config} in contest {contestId}"
 'admin.configIssues.breakTitle' = "Save this change anyway?"
 'admin.configIssues.breakDescription' = "These settings would no longer match the problem's test cases, and submissions would be scored with them until they are fixed."

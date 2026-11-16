@@ -65,8 +65,10 @@ import { ResourceConfigDialog } from '@/components/config';
 import { Markdown } from '@/components/Markdown';
 import { MarkdownEditor } from '@/components/MarkdownEditor';
 import { RecordLoader } from '@/components/RecordLoader';
+import { ContestConfigIssues } from '@/features/admin/components/ContestConfigIssues';
 import { ManageParticipantsDialog } from '@/features/admin/components/ManageParticipantsDialog';
 import { SwitchField } from '@/features/admin/components/SwitchField';
+import { contestConfigIssuesQueryKey } from '@/features/admin/hooks/use-contest-config-issues';
 import { ContestSlotProvider } from '@/features/contest/components/ContestSlotProvider';
 import { nextProblemLabel } from '@/features/contest/utils/problem-label';
 import { getContestStatus } from '@/features/contest/utils/status';
@@ -585,6 +587,14 @@ export function ContestProblemsDialog({
   const [previewProblemId, setPreviewProblemId] = useState<number | null>(null);
   const [configCPOpen, setConfigCPOpen] = useState(false);
   const [configProblemId, setConfigProblemId] = useState<number | null>(null);
+  // Adding or removing a problem, or saving one of its configs, changes
+  // what the contest's configs are checked against.
+  const refetchContestProblems = () => {
+    queryClient.invalidateQueries({ queryKey: contestProblemsKey });
+    queryClient.invalidateQueries({
+      queryKey: contestConfigIssuesQueryKey(contest.id),
+    });
+  };
 
   useEffect(() => {
     if (open) {
@@ -635,8 +645,7 @@ export function ContestProblemsDialog({
     setAddingId(null);
     if (
       toastUnsettled(apiError, t, {
-        refetch: () =>
-          queryClient.invalidateQueries({ queryKey: contestProblemsKey }),
+        refetch: refetchContestProblems,
       })
     ) {
       return;
@@ -645,7 +654,7 @@ export function ContestProblemsDialog({
       toast.error(errorMessage(apiError, t('toast.problem.addError')));
     } else {
       toast.success(t('toast.problem.added'));
-      queryClient.invalidateQueries({ queryKey: contestProblemsKey });
+      refetchContestProblems();
     }
   }
 
@@ -667,7 +676,7 @@ export function ContestProblemsDialog({
         );
         if (error) throw error;
         toast.success(t('toast.problem.removed'));
-        queryClient.invalidateQueries({ queryKey: contestProblemsKey });
+        refetchContestProblems();
       },
     });
   }
@@ -686,6 +695,8 @@ export function ContestProblemsDialog({
           <DialogTitle>{t('admin.contestProblems')}</DialogTitle>
           <DialogDescription>{contest.title}</DialogDescription>
         </DialogHeader>
+
+        <ContestConfigIssues contestId={contest.id} enabled={open} />
 
         {!isLoading && contestProblems.length > 0 && (
           <div className="rounded-md border overflow-y-auto max-h-60">
@@ -867,7 +878,10 @@ export function ContestProblemsDialog({
               t('admin.problemFallbackLabel', { id: configProblemId })
             }
             open={configCPOpen}
-            onOpenChange={setConfigCPOpen}
+            onOpenChange={(next) => {
+              setConfigCPOpen(next);
+              if (!next) refetchContestProblems();
+            }}
           />
         )}
         {confirmDialog}
@@ -1059,6 +1073,7 @@ export function useDeleteContestConfirm(): [
 
 export function AdminContestsTab() {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const [confirmDelete, deleteDialog] = useDeleteContestConfirm();
   const table = useTableSearchParams({
     defaultSortBy: 'created_at',
@@ -1163,7 +1178,14 @@ export function AdminContestsTab() {
           scope={{ scope: 'contest', contestId: configContest.id }}
           resourceLabel={configContest.title}
           open={configDialogOpen}
-          onOpenChange={setConfigDialogOpen}
+          onOpenChange={(next) => {
+            setConfigDialogOpen(next);
+            if (!next) {
+              queryClient.invalidateQueries({
+                queryKey: contestConfigIssuesQueryKey(configContest.id),
+              });
+            }
+          }}
         />
       )}
       {deleteDialog}
