@@ -293,6 +293,12 @@ const TABLES: &[Table] = &[
     },
 ];
 
+/// Columns a bundle never carries: what the target works out for itself.
+/// Whether a problem's configs have issues depends on the plugins that
+/// check them, so an imported problem starts clear and the target's next
+/// start checks its configs (`services::config_issues`).
+const DERIVED: &[(&str, &str)] = &[("problem", "config_issues")];
+
 /// The tables import empties before restoring problems.
 fn problem_tables() -> impl Iterator<Item = &'static str> {
     TABLES
@@ -378,7 +384,11 @@ pub async fn export(
         let Some(rows) = (table.rows)(&scope) else {
             continue;
         };
-        let columns = columns(&mut tx, table.name).await?;
+        let columns: Vec<String> = columns(&mut tx, table.name)
+            .await?
+            .into_iter()
+            .filter(|c| !DERIVED.contains(&(table.name, c.as_str())))
+            .collect();
         let select: Vec<String> = columns
             .iter()
             .map(|c| match (table.name, c.as_str(), options.with_secrets) {

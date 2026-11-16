@@ -520,3 +520,42 @@ async fn replacing_problems_removes_the_configs_of_the_replaced_ones() {
         "only the contest's own config, which no replaced problem owns, stays"
     );
 }
+
+/// Whether a problem's configs have issues is a fact about the target's
+/// plugins, so a bundle does not carry the flag: an imported problem starts
+/// clear and the server's next start checks its configs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_imported_problem_does_not_carry_the_config_issues_flag() {
+    let source = TestApp::spawn().await;
+    let admin = source
+        .create_user_with_role("bundle_flag_admin", "pass1234", "admin")
+        .await;
+    let problem = source.create_problem(&admin, "Flagged").await;
+    exec(
+        &source,
+        &format!("UPDATE problem SET config_issues = true WHERE id = {problem}"),
+    )
+    .await;
+    let archive = export(
+        &source,
+        ExportOptions {
+            selection: Selection::Problems(vec![problem]),
+            with_secrets: false,
+        },
+    )
+    .await
+    .expect("export");
+
+    let target = TestApp::spawn().await;
+    import(&target, &archive, ImportOptions::default())
+        .await
+        .expect("import");
+    assert_eq!(
+        text(
+            &target,
+            &format!("SELECT config_issues::text AS v FROM problem WHERE id = {problem}")
+        )
+        .await,
+        "false"
+    );
+}
