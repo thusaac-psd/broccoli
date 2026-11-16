@@ -155,7 +155,7 @@ pnpm --filter @broccoli/web test:e2e   # browser checks of the built app (pnpm b
 just build-plugins                # every plugin and server test fixture
 just build-plugin plugins/ioi --install
 just test-plugins                 # each plugin crate's tests
-just clippy-plugins               # plugin crates and the server SDK guest build
+just clippy-plugins               # plugin crates for the target each ships as, and the server SDK guest build
 just gen-api                      # regenerate web-sdk API types from OpenAPI
 just test-sandbox                 # isolate suites (needs isolate, cgroup v2)
 just e2e-local                    # server e2e in-process with the mock sandbox

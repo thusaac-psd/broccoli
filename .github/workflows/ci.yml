@@ -68,6 +68,9 @@ jobs:
           broccoli-contestant-cli -p broccoli-dev-cli --locked -- -D warnings
 
       # `cargo clippy --workspace` above does not reach plugin crates either.
+      # The script lints each plugin crate for the target it ships as: the
+      # host for its tests, and wasm32-wasip1 for a WASM backend, the only
+      # build that sees its `cfg(target_arch = "wasm32")` code.
       - name: Clippy plugins
         run: ./scripts/clippy-plugins.sh
 

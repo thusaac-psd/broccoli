@@ -74,7 +74,7 @@ pub fn evaluate_communication(input: String) -> FnResult<String> {
             contest_id: req.contest_id,
             overrides: None,
         })
-        .map_err(|e| extism_pdk::Error::msg(format!("{e}")))?;
+        .map_err(|e| extism_pdk::Error::msg(e.to_string()))?;
 
     if comm_config.manager_sources.is_empty() {
         return Err(extism_pdk::Error::msg(
@@ -109,7 +109,7 @@ pub fn evaluate_communication(input: String) -> FnResult<String> {
         &comm_config,
         &sandbox_config,
     )
-    .map_err(|e| extism_pdk::Error::msg(format!("{e}")))?;
+    .map_err(|e| extism_pdk::Error::msg(e.to_string()))?;
 
     let compile_units = u32::from(manager_lang.compile.is_some())
         + if contestant_lang.compile.is_some() {
@@ -127,7 +127,7 @@ pub fn evaluate_communication(input: String) -> FnResult<String> {
         .operations
         .windowed(&operations)
         .collect(result_timeout_ms)
-        .map_err(|e| extism_pdk::Error::msg(format!("{e}")))?;
+        .map_err(|e| extism_pdk::Error::msg(e.to_string()))?;
     if results.len() != 1 {
         return Err(extism_pdk::Error::msg(format!(
             "expected exactly one operation result, got {}",

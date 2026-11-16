@@ -1106,9 +1106,9 @@ fn run_judge(host: &Host, req: &OnSubmissionInput) -> Result<OnSubmissionOutput,
                 "ICPC: Submission {} epoch {} is stale, stopping",
                 req.submission_id, req.judge_epoch
             ));
-            return Ok(OnSubmissionOutput::ok());
+            Ok(OnSubmissionOutput::ok())
         }
-        Err(e) => return Err(e),
+        Err(e) => Err(e),
     }
 }
 

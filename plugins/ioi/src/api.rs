@@ -222,7 +222,7 @@ pub(crate) fn handle_task_config(
     let (test_cases_list, effective_subtasks) =
         load_effective_subtasks(host, problem_id, &task_config)?;
 
-    let expose_full_task_feedback = can_view_privileged_submission_feedback(&req)
+    let expose_full_task_feedback = can_view_privileged_submission_feedback(req)
         || (tokens_enabled(&contest_config) && req.user_id().is_some())
         || contest_config.feedback_level == FeedbackLevel::Full;
 
@@ -323,11 +323,11 @@ pub(crate) fn handle_submission_status(
 
     let contest_config: ContestConfig = contest::load_config(host, contest_id)?;
 
-    let can_view_full_feedback = can_view_privileged_submission_feedback(&req)
+    let can_view_full_feedback = can_view_privileged_submission_feedback(req)
         || match last_submission_id {
             Some(sid) => {
                 tokens_enabled(&contest_config)
-                    && viewer_has_token_feedback_for_submission(host, &req, contest_id, sid)?
+                    && viewer_has_token_feedback_for_submission(host, req, contest_id, sid)?
             }
             None => false,
         };
@@ -682,13 +682,13 @@ pub(crate) fn handle_submission_subtask_scores(
         .ok_or_else(|| PluginHttpResponse::error(404, "Submission not found"))?;
     let problem_id = sub_info.problem_id;
 
-    let can_view_all_submissions = can_view_privileged_submission_feedback(&req);
+    let can_view_all_submissions = can_view_privileged_submission_feedback(req);
 
     // Only spend the storage read on a token lookup when it could actually
     // change the outcome for `subtask_scores_access_decision` below.
     let tokened_feedback = if !can_view_all_submissions && phase != "after" {
         tokens_enabled(&contest_config)
-            && viewer_has_token_feedback_for_submission(host, &req, contest_id, submission_id)?
+            && viewer_has_token_feedback_for_submission(host, req, contest_id, submission_id)?
     } else {
         false
     };

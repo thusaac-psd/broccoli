@@ -538,6 +538,9 @@ pub fn sql_parameterized(input: String) -> FnResult<String> {
         )?
     };
     let res: HostDbResponse = serde_json::from_str(&res_json)?;
+    if let Some(error) = res.error {
+        return Err(extism_pdk::Error::msg(error).into());
+    }
 
     let rows: Vec<serde_json::Value> = serde_json::from_value(res.data.unwrap_or_default())?;
 
