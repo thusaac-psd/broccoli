@@ -6,6 +6,7 @@ use broccoli_server_sdk::prelude::*;
 use serde::Deserialize;
 
 use crate::model::{RoundDef, Setup, ThirdPlaceConfig};
+use crate::refusal::Refusal;
 use crate::storage;
 
 /// Validate a full bracket setup before it is persisted. Every failure here
@@ -210,12 +211,16 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     let info = req.contest()?;
     let contest_id = info.id;
 
-    let body = req
-        .body
-        .clone()
-        .ok_or_else(|| PluginHttpResponse::error(400, "Missing request body"))?;
-    let body: SetupRequest = serde_json::from_value(body)
-        .map_err(|e| PluginHttpResponse::error(400, format!("Invalid request body: {e}")))?;
+    let body = req.body.clone().ok_or_else(|| {
+        PluginHttpResponse::refuse(400, Refusal::InvalidRequestBody, "Missing request body")
+    })?;
+    let body: SetupRequest = serde_json::from_value(body).map_err(|e| {
+        PluginHttpResponse::refuse(
+            400,
+            Refusal::InvalidRequestBody,
+            format!("Invalid request body: {e}"),
+        )
+    })?;
 
     let mut setup = Setup {
         rounds: body.rounds,
@@ -232,15 +237,17 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     for round in &mut setup.rounds {
         round.wins_to_advance = Some(round.win_target());
     }
-    validate_setup(&setup, &setup.seeds).map_err(|msg| PluginHttpResponse::error(400, msg))?;
+    validate_setup(&setup, &setup.seeds)
+        .map_err(|msg| PluginHttpResponse::refuse(400, Refusal::InvalidSetup, msg))?;
     if setup.rounds.iter().any(|r| r.start_at_ms.is_some()) {
         let times = crate::clock::contest_times(host, contest_id)?;
         for round in &setup.rounds {
             if let Some(at) = round.start_at_ms
                 && (at < times.start_ms || times.end_ms.is_some_and(|end| at >= end))
             {
-                return Err(PluginHttpResponse::error(
+                return Err(PluginHttpResponse::refuse(
                     400,
+                    Refusal::StageOutsideContest,
                     "Stage starts must be within the contest window",
                 )
                 .into());
@@ -255,7 +262,7 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         if let Some(previous) = snapshot.as_ref() {
             let previous: Setup = serde_json::from_str(&previous.value)?;
             validate_edit(&previous, &setup, info.phase.stage() != "before")
-                .map_err(|msg| PluginHttpResponse::error(409, msg))?;
+                .map_err(|msg| PluginHttpResponse::refuse(409, Refusal::SetupEditRefused, msg))?;
             crate::stages::carry_progress(previous, &mut setup);
         }
         let previous: Option<Setup> = snapshot
@@ -278,8 +285,9 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         if !changed_starts.is_empty() {
             let now = crate::clock::now_ms(host)?;
             if changed_starts.iter().any(|at| *at <= now) {
-                return Err(PluginHttpResponse::error(
+                return Err(PluginHttpResponse::refuse(
                     400,
+                    Refusal::StageStartInPast,
                     "New stage start times must be in the future",
                 )
                 .into());
@@ -295,9 +303,12 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         }
     }
     if !saved {
-        return Err(
-            PluginHttpResponse::error(409, "Setup changed concurrently; retry the edit").into(),
-        );
+        return Err(PluginHttpResponse::refuse(
+            409,
+            Refusal::SetupChanged,
+            "Setup changed concurrently; retry the edit",
+        )
+        .into());
     }
     // Also recover an interrupted opening of the most recently frozen stage.
     for round in 1..=setup.rounds.len() {

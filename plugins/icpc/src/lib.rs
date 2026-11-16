@@ -1,6 +1,7 @@
 pub mod config;
 pub mod evaluate;
 pub mod persist;
+pub mod refusal;
 pub mod standings;
 
 /// Whether a viewer looking at someone ELSE's submission must have its judged
@@ -1136,8 +1137,9 @@ fn handle_reveal(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRespo
     let info = req.contest()?;
     let contest_id = info.id;
     if !info.phase.has_ended() {
-        return Err(PluginHttpResponse::error(
+        return Err(PluginHttpResponse::refuse(
             409,
+            crate::refusal::Refusal::RevealBeforeEnd,
             "The scoreboard can be revealed only after the contest ends",
         )
         .into());
@@ -1149,8 +1151,9 @@ fn handle_reveal(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRespo
         times.start_epoch_ms,
         times.duration_ms,
     ) else {
-        return Err(PluginHttpResponse::error(
+        return Err(PluginHttpResponse::refuse(
             409,
+            crate::refusal::Refusal::NoFreezeToReveal,
             "This contest has no scoreboard freeze to reveal",
         )
         .into());
@@ -1218,6 +1221,7 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
                     status: 200,
                     body: Some(serde_json::json!({
                         "phase": phase,
+                        "live": contest::results_may_change(host, contest_id, info.phase)?,
                         "penalty_minutes": config.penalty_minutes,
                         "problem_labels": problem_labels,
                         "full_board": false,
@@ -1454,6 +1458,11 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         status: 200,
         body: Some(serde_json::json!({
             "phase": phase,
+            // Whether the board may still change: the contest runs, a
+            // submission is still being judged, or a frozen board awaits its
+            // reveal. The board polls while it does.
+            "live": (frozen && !revealed)
+                || contest::results_may_change(host, contest_id, info.phase)?,
             "frozen": frozen,
             "revealed": revealed,
             // Organizer-only Reveal button - shown only while the board is actually

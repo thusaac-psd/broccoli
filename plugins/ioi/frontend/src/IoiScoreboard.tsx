@@ -189,14 +189,15 @@ export function IoiScoreboard({ contestId }: IoiScoreboardProps) {
     enabled: contestId !== undefined,
     queryFn: () => api.getScoreboard(contestId!),
     retry: 2,
-    // A board refreshes until its contest is over (one opened before the
-    // start learns from the server that it has started), and every board
-    // turns over when the contest's phase does (`contestPollPace`): one that
-    // ended stops.
+    // A board refreshes while the server says it may still change (`live`:
+    // the contest runs or a submission is still being judged; one opened
+    // before the start learns from the server that it has started), and
+    // every board turns over when the contest's phase does
+    // (`contestPollPace`).
     refetchInterval: pollInterval<ScoreboardResponse>((scoreboard) => {
       if (!autoRefresh || scoreboard === undefined) return false;
       const pace = contest ? contestPollPace(contest, serverNow()) : false;
-      if (scoreboard.phase === 'after') return pace;
+      if (!scoreboard.live) return pace;
       return Math.min(LIVE_BOARD_POLL_MS, pace === false ? Infinity : pace);
     }),
   });
@@ -293,10 +294,11 @@ function Rankings({
     String.fromCharCode(65 + i),
   );
 
-  // Per-problem max scores from backend (sum of subtask max_scores or test case scores)
+  // The server sends every problem's maximum: the sum of its subtasks'
+  // maximums, the default subtask's for a problem with no subtask config.
   const maxPerProblem: Record<number, number> = {};
   for (const pid of problemIds) {
-    maxPerProblem[pid] = scoreboard.max_scores?.[String(pid)] ?? 100;
+    maxPerProblem[pid] = scoreboard.max_scores[String(pid)] ?? 0;
   }
   const maxTotal =
     Object.values(maxPerProblem).reduce((sum, v) => sum + v, 0) || 1;
@@ -451,7 +453,7 @@ function RankRow({
       </td>
       {problemIds.map((pid) => {
         const score = problemScoreMap[pid] ?? 0;
-        const max = maxPerProblem[pid] ?? 100;
+        const max = maxPerProblem[pid] ?? 0;
         return <ScoreCell key={pid} score={score} max={max} />;
       })}
       {showTimeTiebreaker && (

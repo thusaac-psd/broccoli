@@ -31,6 +31,18 @@ impl FeedbackLevel {
         }
     }
 
+    /// The level a viewer reads one submission's scores at, wherever they
+    /// show (its subtask scores, its problem's last-submission status): a
+    /// token the viewer spent on it unlocks full feedback on that one
+    /// submission, otherwise [`Self::for_scores`] holds.
+    pub fn for_submission_scores(self, staff: bool, phase: &str, tokened: bool) -> Self {
+        if tokened {
+            Self::Full
+        } else {
+            self.for_scores(staff, phase)
+        }
+    }
+
     /// Whether this level shows a total score.
     pub fn shows_total(self) -> bool {
         self != Self::None

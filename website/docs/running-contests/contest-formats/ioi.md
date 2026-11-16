@@ -56,6 +56,12 @@ subtask config gets one `sum` subtask named All Tests, covering every test
 case that is not a sample and is worth more than zero points, with a max
 score equal to the sum of those points.
 
+A problem none of whose subtasks can score is not judged: every submission
+to it ends as a system error that stands (`NOTHING_TO_SCORE`), and the
+problem's config issues say so. A subtask can score when its max score is
+above zero and one of its labels names a test case of the problem, one worth
+more than zero points for a `sum` subtask.
+
 Partial credit inside a subtask only appears when the checker scores a test
 as a fraction, for example a testlib points checker. The built in
 comparators are all or nothing.
@@ -94,12 +100,20 @@ The submission view itself hides per test case results at every level below
 
 :::
 
+A submission shows the subtasks it was judged with and the score each one
+got, so a change to a problem's subtasks after judging changes no result a
+submission already shows; judge it again to score it under the new subtasks.
+The `sum_best_subtask` scoreboard combines every submission under the
+problem's current subtasks.
+
 The scoreboard follows the same level. At `none` it shows a contestant no
 score at all, their own row included, so it lists names only, without ranks.
 At `total_only` it shows totals without the per problem scores. Staff
 (holders of `contest:manage` or `submission:view_all`) see every score, and
-once the contest ends so does every contestant, on the scoreboard and in a
-submission's subtask scores.
+once the contest ends so does every contestant, on the scoreboard, in a
+submission's subtask scores and in a problem's last submission status. A
+token a contestant spent on a submission shows them that submission's scores
+in both places at any level.
 
 ## Tokens
 

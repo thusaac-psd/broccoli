@@ -11,6 +11,7 @@ mod lifecycle;
 mod operation;
 mod persistence;
 mod query;
+mod refusal;
 mod submission;
 mod submission_admission;
 mod user;
@@ -55,6 +56,7 @@ pub use persistence::{
     sanitize_result_text_field, sanitize_text_field,
 };
 pub use query::{ProblemCheckerInfo, TestCaseData, TestCaseRow};
+pub use refusal::{RefusalCode, SdkRefusal};
 pub use submission::{OnSubmissionInput, OnSubmissionOutput, SourceFile};
 pub use submission_admission::*;
 pub use user::UserIdentity;

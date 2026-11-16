@@ -46,3 +46,15 @@ declared twice: in `plugins/batch-evaluator/plugin.toml` and in
 its own plugin's namespaces. The two differ on purpose only in their defaults
 (the interactive evaluator's wall-time multiplier is larger). Extract it if
 manifests gain a way to declare a namespace from a shared schema.
+
+## The config cascade's field rule
+
+Each scope that stores a plugin config sets the fields it stores and leaves the
+rest to the next scope up, objects merging field by field. The plugin reads the
+effective config through `resolve_cascade` and `overlay` in
+`packages/server-sdk/src/sdk/config.rs` (Rust, in the WASM guest), and the admin
+forms preview what a contest problem inherits through `deepMerge` and
+`resolveInheritedValue` in `packages/web-sdk/src/slot/config-cascade.ts`
+(TypeScript, in the browser). The language boundary keeps them apart; each has
+its own tests of the rule. Extract it if the server answers the effective config
+of a scope itself, so the forms read it instead of recomputing it.

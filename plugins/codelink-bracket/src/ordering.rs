@@ -18,6 +18,7 @@ use serde::Deserialize;
 
 use crate::bracket;
 use crate::model::{MatchState, Phase};
+use crate::refusal::Refusal;
 use crate::storage;
 
 /// The rejection message for a ranking sent after a match has left
@@ -46,14 +47,12 @@ impl OrderRejection {
     /// outside the match (the code the submission gate uses for the same
     /// condition), 400 for a bad ranking from a player.
     pub fn response(self) -> PluginHttpResponse {
-        match self {
-            OrderRejection::NotParticipant(_) => {
-                PluginHttpResponse::error_with_code(403, "NOT_IN_MATCH", self.to_string())
-            }
-            OrderRejection::LeftOrdering | OrderRejection::NotPermutation => {
-                PluginHttpResponse::error(400, self.to_string())
-            }
-        }
+        let (status, code) = match self {
+            OrderRejection::NotParticipant(_) => (403, Refusal::NotInMatch),
+            OrderRejection::LeftOrdering => (400, Refusal::OrderingClosed),
+            OrderRejection::NotPermutation => (400, Refusal::InvalidOrder),
+        };
+        PluginHttpResponse::refuse(status, code, self.to_string())
     }
 }
 
@@ -134,15 +133,20 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     let match_id: u8 = req.param("match_id")?;
     let submitter = req.require_user_id()?;
 
-    let body = req
-        .body
-        .clone()
-        .ok_or_else(|| PluginHttpResponse::error(400, "Missing request body"))?;
-    let body: OrderRequest = serde_json::from_value(body)
-        .map_err(|e| PluginHttpResponse::error(400, format!("Invalid request body: {e}")))?;
+    let body = req.body.clone().ok_or_else(|| {
+        PluginHttpResponse::refuse(400, Refusal::InvalidRequestBody, "Missing request body")
+    })?;
+    let body: OrderRequest = serde_json::from_value(body).map_err(|e| {
+        PluginHttpResponse::refuse(
+            400,
+            Refusal::InvalidRequestBody,
+            format!("Invalid request body: {e}"),
+        )
+    })?;
 
-    let current = storage::load_match(host, contest_id, match_id)?
-        .ok_or_else(|| PluginHttpResponse::error(404, "Match not found"))?;
+    let current = storage::load_match(host, contest_id, match_id)?.ok_or_else(|| {
+        PluginHttpResponse::refuse(404, Refusal::MatchNotFound, "Match not found")
+    })?;
     let ordering_window = storage::load_setup(host, contest_id)?.and_then(|setup| {
         setup
             .stage_clocks
@@ -160,10 +164,20 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         let Some(stage_at) =
             bracket::stage_open_at_ms(&setup, &matches, current.round, contest_start)
         else {
-            return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
+            return Err(PluginHttpResponse::refuse(
+                409,
+                Refusal::StageNotOpen,
+                "This stage has not opened yet",
+            )
+            .into());
         };
         if crate::clock::now_ms(host)? < stage_at {
-            return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
+            return Err(PluginHttpResponse::refuse(
+                409,
+                Refusal::StageNotOpen,
+                "This stage has not opened yet",
+            )
+            .into());
         }
     }
 
@@ -200,7 +214,11 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         SdkError::Other(ref msg)
             if msg == LEFT_ORDERING_PHASE_MSG || msg == ORDERING_CLOSED_MSG =>
         {
-            ApiError::from(PluginHttpResponse::error(409, msg.clone()))
+            ApiError::from(PluginHttpResponse::refuse(
+                409,
+                Refusal::OrderingClosed,
+                msg.clone(),
+            ))
         }
         other => ApiError::from(other),
     })?;

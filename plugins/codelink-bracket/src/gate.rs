@@ -28,6 +28,7 @@
 //! All of those restrictions are owned here, rather than inferred by the host.
 
 use crate::model::{MatchState, Phase, RoundDef};
+use crate::refusal::Refusal;
 use crate::storage;
 use broccoli_server_sdk::prelude::*;
 
@@ -36,27 +37,27 @@ use broccoli_server_sdk::prelude::*;
 /// "eliminated" rather than showing one generic error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmissionRejection {
-    pub code: String,
-    pub message: String,
+    pub code: Refusal,
+    pub message: &'static str,
 }
 
 impl SubmissionRejection {
-    fn new(code: &str, message: &str) -> Self {
-        SubmissionRejection {
-            code: code.to_string(),
-            message: message.to_string(),
-        }
+    fn new(code: Refusal, message: &'static str) -> Self {
+        SubmissionRejection { code, message }
     }
 
     fn not_your_problem() -> Self {
         Self::new(
-            "NOT_YOUR_PROBLEM",
+            Refusal::NotYourProblem,
             "This is not your current problem in this 小局.",
         )
     }
 
     fn xiaoju_closed() -> Self {
-        Self::new("XIAOJU_CLOSED", "This game is closed for submissions.")
+        Self::new(
+            Refusal::XiaojuClosed,
+            "This game is closed for submissions.",
+        )
     }
 
     /// Produced by the host wiring below, never by [`check`]: `problem_id`
@@ -66,7 +67,7 @@ impl SubmissionRejection {
     /// round's problem id directly).
     fn not_in_match() -> Self {
         Self::new(
-            "NOT_IN_MATCH",
+            Refusal::NotInMatch,
             "You are not a participant in a match for this problem.",
         )
     }
@@ -78,7 +79,7 @@ impl SubmissionRejection {
     /// mean "not open for submission right now", so they share one code.
     fn match_not_started() -> Self {
         Self::new(
-            "MATCH_NOT_STARTED",
+            Refusal::MatchNotStarted,
             "This match is not currently accepting submissions.",
         )
     }
@@ -150,7 +151,7 @@ fn resolve_rejection(
     )?;
     if feedback.pending_submission_id.is_some() {
         return Ok(Err(SubmissionRejection::new(
-            "SUBMISSION_IN_FLIGHT",
+            Refusal::SubmissionInFlight,
             "Wait for your previous submission's result before submitting again.",
         )));
     }
@@ -166,7 +167,7 @@ fn resolve_rejection(
     let deadline_ms = clock.cutoff(game.deadline_ms);
     if clock.now >= deadline_ms {
         return Ok(Err(SubmissionRejection::new(
-            "SUBMISSION_TOO_LATE",
+            Refusal::SubmissionTooLate,
             "The submission window for this game has closed.",
         )));
     }
@@ -223,7 +224,7 @@ pub fn dispatch_submission_gate(
     };
     Ok(if blocked {
         HookResponse::reject(
-            "CONTEST_SUBMISSION_REQUIRED",
+            Refusal::ContestSubmissionRequired,
             "Submit this problem through its bracket contest.",
             400,
             None,
@@ -337,7 +338,7 @@ mod tests {
         let m = match_at_xiaoju(0, false);
         assert_eq!(
             check(&m, &round_def(), 10, 101).unwrap_err().code,
-            "NOT_YOUR_PROBLEM"
+            Refusal::NotYourProblem
         );
     }
 
@@ -348,7 +349,7 @@ mod tests {
         let m = match_at_xiaoju(0, false);
         assert_eq!(
             check(&m, &round_def(), 10, 201).unwrap_err().code,
-            "NOT_YOUR_PROBLEM"
+            Refusal::NotYourProblem
         );
     }
 
@@ -357,7 +358,7 @@ mod tests {
         let m = match_at_xiaoju(0, true);
         assert_eq!(
             check(&m, &round_def(), 10, 103).unwrap_err().code,
-            "XIAOJU_CLOSED"
+            Refusal::XiaojuClosed
         );
     }
 

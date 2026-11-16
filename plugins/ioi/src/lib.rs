@@ -5,6 +5,7 @@ pub mod evaluate_batch;
 pub mod feedback;
 pub mod judge;
 pub mod persist;
+pub mod refusal;
 pub mod score;
 pub mod scoreboard;
 pub mod scoring;

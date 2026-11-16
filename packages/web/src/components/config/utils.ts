@@ -4,7 +4,7 @@ import type { MessageKey } from '@/lib/i18n/catalog';
 
 import type { FieldProblem, JsonSchema, JsonSchemaProperty } from './types';
 
-export { resolveInheritedValue } from '@broccoli/web-sdk/slot';
+export { deepMerge, resolveInheritedValue } from '@broccoli/web-sdk/slot';
 
 export function extractDefaults(schema: JsonSchema): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -14,31 +14,6 @@ export function extractDefaults(schema: JsonSchema): Record<string, unknown> {
       result[key] = prop.default;
     } else if (prop.type === 'object' && prop.properties) {
       result[key] = extractDefaults(prop as JsonSchema);
-    }
-  }
-  return result;
-}
-
-export function deepMerge(
-  base: Record<string, unknown>,
-  override: Record<string, unknown>,
-): Record<string, unknown> {
-  const result = { ...base };
-  for (const [key, val] of Object.entries(override)) {
-    if (
-      val &&
-      typeof val === 'object' &&
-      !Array.isArray(val) &&
-      result[key] &&
-      typeof result[key] === 'object' &&
-      !Array.isArray(result[key])
-    ) {
-      result[key] = deepMerge(
-        result[key] as Record<string, unknown>,
-        val as Record<string, unknown>,
-      );
-    } else {
-      result[key] = val;
     }
   }
   return result;

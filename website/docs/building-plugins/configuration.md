@@ -229,11 +229,15 @@ let config: ContestConfig = host.config.get_contest(contest_id, "contest")?.pars
 fails loudly where it is read.
 
 `host.config.get_effective(namespace, problem_id, contest_id)` reads the
-config a namespace has at one problem: the most specific scope that stores it
-wins, in the order contest problem, contest, problem, then the plugin-wide
-value, and with nothing stored anywhere it is the schema's defaults. An
-override switched off leaves the config it overrode. `source` on the result
-names where the config came from.
+config a namespace has at one problem. Each scope that stores it sets the
+fields it stores and leaves the rest to the next scope up, in the order
+contest problem, contest, problem, the plugin-wide value, then the schema's
+defaults: objects merge field by field, and any other value, an array
+included, is replaced whole. The most specific scope that says whether the
+config is on decides it. An override switched off contributes nothing, and
+when the deciding scope is switched off the config is the plugin-wide one.
+`source` on the result names the most specific scope the config takes fields
+from.
 
 ## Hold a problem's checker source
 

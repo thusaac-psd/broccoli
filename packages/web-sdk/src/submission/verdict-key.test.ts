@@ -6,8 +6,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import type { SubmissionStatus } from '@broccoli/web-sdk/submission';
-
+import type { SubmissionStatus } from './types.ts';
 import { getVerdictKey } from './verdict-key.ts';
 
 const TERMINAL_STATUSES: SubmissionStatus[] = [

@@ -7,7 +7,9 @@
 /** Inherited config from a parent scope in the cascade. */
 export interface ParentScopeConfig {
   values: Record<string, unknown> | null;
-  enabled: boolean;
+  /** Whether the scope switches the config on or off; `null` leaves that to
+   * the next scope up. */
+  enabled: boolean | null;
 }
 
 /** Inherited config from parent scopes (contest and/or problem). */
@@ -106,30 +108,4 @@ export interface ConfigFieldSlotProps {
 export interface InheritedValue {
   value: unknown;
   source: string;
-}
-
-/**
- * Resolve the effective inherited value for a field key from parent scopes.
- *
- * Mirrors the backend cascade (`resolve_cascade` in the server SDK): the most
- * specific scope with a stored config wins with its WHOLE config. Contest is
- * more specific than Problem. Fields the winning scope does not set fall back
- * to schema defaults; they are never filled in per field from a less specific
- * scope, so this never falls through to the next level. A disabled winning
- * scope contributes no effective values (the plugin does not run).
- */
-export function resolveInheritedValue(
-  fieldKey: string,
-  inherited: InheritedConfig | undefined,
-): InheritedValue | null {
-  if (!inherited) return null;
-  const winner = inherited.contest?.values
-    ? { scope: inherited.contest, source: 'Contest' }
-    : inherited.problem?.values
-      ? { scope: inherited.problem, source: 'Problem' }
-      : null;
-  if (!winner || winner.scope.enabled === false) return null;
-  const value = winner.scope.values?.[fieldKey];
-  if (value === undefined) return null;
-  return { value, source: winner.source };
 }

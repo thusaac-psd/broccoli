@@ -6,8 +6,8 @@
  * displays the full cascade hierarchy.
  */
 import { useTranslation } from '@/i18n';
+import { resolveInheritedValue } from '@/slot/config-cascade';
 import type { ConfigFormSlotProps } from '@/slot/config-field-slot-props';
-import { resolveInheritedValue } from '@/slot/config-field-slot-props';
 import { cn } from '@/utils';
 
 /**
@@ -18,11 +18,7 @@ export interface ConfigInheritanceInfoProps
   extends Partial<
     Pick<
       ConfigFormSlotProps,
-      | 'scope'
-      | 'schema'
-      | 'hasExplicitValue'
-      | 'isUsingDefaultsOnly'
-      | 'inherited'
+      'scope' | 'schema' | 'hasExplicitValue' | 'inherited'
     >
   > {
   fieldKey: string;
@@ -51,7 +47,6 @@ function extractField(
 export function ConfigInheritanceInfo({
   scope,
   hasExplicitValue,
-  isUsingDefaultsOnly,
   inherited,
   schema,
   fieldKey,
@@ -79,13 +74,10 @@ export function ConfigInheritanceInfo({
       }
     : null;
 
+  // A field this scope stores overrides the parent scopes; one it does not
+  // store inherits from them.
   const hasLocalOverride = hasExplicitValue?.(fieldKey) ?? false;
-  // The judging cascade is wholesale: if ANY field is stored at this scope,
-  // the whole local config is effective and no field inherits from a parent
-  // scope (unset local fields resolve to the schema default instead).
-  const localConfigWins =
-    isUsingDefaultsOnly === undefined ? hasLocalOverride : !isUsingDefaultsOnly;
-  const activeInherited = localConfigWins ? null : effective;
+  const activeInherited = hasLocalOverride ? null : effective;
 
   const properties = schema?.properties as
     | Record<string, { default?: unknown }>

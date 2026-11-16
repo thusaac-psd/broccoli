@@ -23,11 +23,10 @@
 'submission-limit.notSet' = '未设置'
 'submission-limit.notSetWithDefault' = '未设置（默认：{default}）'
 'submission-limit.active' = '生效中'
-'submission-limit.source.problem' = '来自题目'
-'submission-limit.source.contest' = '来自比赛'
-'submission-limit.source.contest_problem' = '覆盖'
 
 # Why a submission was refused, by the rejection's code
 'submission-limit.apiError.SUBMISSION_LIMIT_EXCEEDED' = '本题的 {max_submissions} 次提交机会已全部用完。'
 'plugin.submission-limit.name' = '提交次数限制'
 'plugin.submission-limit.description' = '限制选手每道题的提交次数。'
+'submission-limit.apiError.INVALID_PATH_PARAMETER' = '此链接无效。'
+'submission-limit.apiError.SIGN_IN_REQUIRED' = '请先登录。'

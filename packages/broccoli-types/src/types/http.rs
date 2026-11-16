@@ -63,23 +63,28 @@ impl PluginHttpRequest {
     }
 
     /// The path parameter `name`, parsed. A missing or unparsable value is
-    /// the caller's mistake: a 400 `VALIDATION_ERROR` response.
+    /// the caller's mistake: a 400 `INVALID_PATH_PARAMETER` response.
     pub fn param<T: FromStr>(&self, name: &str) -> Result<T, PluginHttpResponse> {
         self.params
             .get(name)
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| {
-                PluginHttpResponse::error(400, format!("Invalid path parameter: {name}"))
+                PluginHttpResponse::refuse(
+                    400,
+                    super::SdkRefusal::InvalidPathParameter,
+                    format!("Invalid path parameter: {name}"),
+                )
             })
     }
 
     /// The caller's user id. Only a `public` route can be reached without
-    /// one; there, an anonymous caller gets a 403 `PERMISSION_DENIED`
+    /// one; there, an anonymous caller gets a 403 `SIGN_IN_REQUIRED`
     /// response (a route every caller must be signed in for declares it in
     /// its manifest, and the host answers 401 before the handler runs).
     pub fn require_user_id(&self) -> Result<i32, PluginHttpResponse> {
-        self.user_id()
-            .ok_or_else(|| PluginHttpResponse::error(403, "Sign in to do this"))
+        self.user_id().ok_or_else(|| {
+            PluginHttpResponse::refuse(403, super::SdkRefusal::SignInRequired, "Sign in to do this")
+        })
     }
 
     /// The contest the route addresses. A route that does not declare
@@ -116,25 +121,21 @@ pub struct PluginHttpResponse {
 }
 
 impl PluginHttpResponse {
-    /// A client error in the host's error shape, `{"code", "message"}`, with
-    /// the code for `status` (see [`error_code_for_status`]).
-    pub fn error(status: u16, message: impl Into<String>) -> Self {
-        Self::error_with_code(status, error_code_for_status(status), message)
-    }
-
-    /// A client error with a code of the plugin's own, for a condition its
-    /// frontend tells apart from other errors of the same status.
-    pub fn error_with_code(status: u16, code: &str, message: impl Into<String>) -> Self {
+    /// A client error in the host's error shape, `{"code", "message"}`: one
+    /// of the plugin's refusal codes (see [`super::RefusalCode`]), which a
+    /// client shows in the user's language, and the plugin's English words
+    /// for logs and a client without a text for the code.
+    pub fn refuse(status: u16, code: impl super::RefusalCode, message: impl Into<String>) -> Self {
         Self {
             status,
-            body: Some(serde_json::json!({ "code": code, "message": message.into() })),
+            body: Some(serde_json::json!({ "code": code.as_str(), "message": message.into() })),
         }
     }
 }
 
-/// The error code [`PluginHttpResponse::error`] gives a client error status
-/// (the host sends it under the plugin's id). The host answers every 5xx
-/// from a plugin route itself, with `INTERNAL_ERROR` and no detail, so a
+/// The error code the host gives a plugin route's client error whose body
+/// names no code (it sends it under the plugin's id). The host answers every
+/// 5xx from a plugin route itself, with `INTERNAL_ERROR` and no detail, so a
 /// plugin has no 5xx to name.
 pub fn error_code_for_status(status: u16) -> &'static str {
     match status {

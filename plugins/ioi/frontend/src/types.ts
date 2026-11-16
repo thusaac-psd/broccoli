@@ -19,6 +19,8 @@ export interface SubtaskInfo {
 export interface TaskConfigResponse {
   scoring_mode: ScoringMode;
   feedback_level: FeedbackLevel;
+  /** The problem's maximum score, the sum of its subtasks' maximums. */
+  max_score: number;
   subtasks?: SubtaskInfo[];
   /** Maps test case label -\> test_case_id when full testcase mapping is available. */
   label_map?: Record<string, number>;
@@ -67,6 +69,8 @@ export interface ScoreboardEntry extends UserDisplayIdentity {
 
 export interface ScoreboardResponse {
   phase: 'before' | 'during' | 'after';
+  /** Whether the board may still change: the contest runs or a submission is still being judged. */
+  live: boolean;
   scoring_mode: ScoringMode;
   feedback_level: FeedbackLevel;
   scoreboard_visibility: ScoreboardVisibility;

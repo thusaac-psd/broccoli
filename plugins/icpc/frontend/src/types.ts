@@ -27,6 +27,8 @@ export interface StandingsEntry extends UserDisplayIdentity {
 
 export interface StandingsResponse {
   phase: 'before' | 'during' | 'after';
+  /** Whether the board may still change: the contest runs, a submission is still being judged, or a frozen board awaits its reveal. */
+  live: boolean;
   /** True when the contestant view is currently frozen (final N minutes). */
   frozen?: boolean;
   /** True once an organizer has manually revealed the final board. */

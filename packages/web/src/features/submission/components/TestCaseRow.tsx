@@ -3,80 +3,11 @@ import {
   type ShownStatus,
   TestCaseOutput,
   type TestCaseResult,
+  verdictStyle,
 } from '@broccoli/web-sdk/submission';
 import { Button } from '@broccoli/web-sdk/ui';
 import { cn, formatKibibytes } from '@broccoli/web-sdk/utils';
-import {
-  AlertCircle,
-  CheckCircle2,
-  Clock,
-  MinusCircle,
-  XCircle,
-} from 'lucide-react';
 import { useState } from 'react';
-
-import type { VerdictKey } from './verdict-key';
-import { getVerdictKey } from './verdict-key';
-
-const VERDICT_CONFIG: Record<
-  VerdictKey,
-  {
-    icon: typeof CheckCircle2;
-    color: string;
-    bgColor: string;
-  }
-> = {
-  accepted: {
-    icon: CheckCircle2,
-    color: 'text-green-500',
-    bgColor: 'bg-green-500/10',
-  },
-  wrong_answer: {
-    icon: XCircle,
-    color: 'text-red-500',
-    bgColor: 'bg-red-500/10',
-  },
-  time_limit: {
-    icon: Clock,
-    color: 'text-yellow-500',
-    bgColor: 'bg-yellow-500/10',
-  },
-  memory_limit: {
-    icon: Clock,
-    color: 'text-yellow-500',
-    bgColor: 'bg-yellow-500/10',
-  },
-  runtime_error: {
-    icon: AlertCircle,
-    color: 'text-orange-500',
-    bgColor: 'bg-orange-500/10',
-  },
-  system_error: {
-    icon: AlertCircle,
-    color: 'text-gray-500',
-    bgColor: 'bg-gray-500/10',
-  },
-  skipped: {
-    icon: MinusCircle,
-    color: 'text-gray-400',
-    bgColor: 'bg-gray-400/10',
-  },
-  cancelled: {
-    icon: MinusCircle,
-    color: 'text-gray-400',
-    bgColor: 'bg-gray-400/10',
-  },
-  custom: {
-    icon: AlertCircle,
-    color: 'text-blue-500',
-    bgColor: 'bg-blue-500/10',
-  },
-  pending: {
-    icon: Clock,
-    color: 'text-gray-500',
-    bgColor: 'bg-gray-500/10',
-  },
-};
 
 /** The outputs a test case's details show, in order. */
 const DETAIL_FIELDS = [
@@ -109,15 +40,14 @@ export function TestCaseRow({
     testCase.stdout ||
     testCase.stderr
   );
-  const verdictKey = getVerdictKey(testCase.verdict, status);
-  const config = VERDICT_CONFIG[verdictKey];
-  const Icon = config.icon;
+  const style = verdictStyle(testCase.verdict, status);
+  const Icon = style.icon;
 
   return (
-    <div className={cn('rounded-lg border', config.bgColor)}>
+    <div className={cn('rounded-lg border', style.surface)}>
       <div className="flex items-center justify-between p-3">
         <div className="flex items-center gap-3">
-          <Icon className={cn('h-5 w-5', config.color)} />
+          <Icon className={cn('h-5 w-5', style.text)} />
           <div>
             <div className="font-medium">
               {t('result.testCase', { id: String(index) })}

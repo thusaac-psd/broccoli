@@ -1,3 +1,4 @@
+pub mod refusal;
 pub mod reservation;
 
 #[cfg(target_arch = "wasm32")]
@@ -98,7 +99,7 @@ mod plugin {
 
         let count = held_count(&host, &key)?;
         let resp = HookResponse::reject(
-            "SUBMISSION_LIMIT_EXCEEDED",
+            crate::refusal::Refusal::SubmissionLimitExceeded,
             format!("Submission limit reached ({}/{})", count, max),
             429,
             Some(serde_json::json!({

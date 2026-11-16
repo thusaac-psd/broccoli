@@ -4,6 +4,7 @@ import { pollInterval, unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { formatRelativeSeconds, useTranslation } from '@broccoli/web-sdk/i18n';
 import { useContestSlotContext } from '@broccoli/web-sdk/slot';
 import {
+  Button,
   Label,
   QueryView,
   Switch,
@@ -190,15 +191,14 @@ export function IcpcScoreboard({ contestId }: IcpcScoreboardProps) {
     queryFn: () => api.getStandings(contestId!),
     retry: 2,
     refetchInterval: pollInterval<StandingsResponse>((d) => {
-      // A board refreshes until its contest is over (one opened before the
-      // start learns from the server that it has started), as does a frozen
-      // board awaiting its reveal, so the reveal reaches viewers who leave
-      // the tab open; every board also turns over when the contest's phase
-      // does (`contestPollPace`).
+      // A board refreshes while the server says it may still change
+      // (`live`: the contest runs, a submission is still being judged, or a
+      // frozen board awaits its reveal, so the reveal reaches viewers who
+      // leave the tab open); every board also turns over when the contest's
+      // phase does (`contestPollPace`).
       if (!autoRefresh || d === undefined) return false;
       const pace = contest ? contestPollPace(contest, serverNow()) : false;
-      const live = d.phase !== 'after' || (!!d.frozen && !d.revealed);
-      if (!live) return pace;
+      if (!d.live) return pace;
       return Math.min(LIVE_BOARD_POLL_MS, pace === false ? Infinity : pace);
     }),
   });
@@ -292,13 +292,14 @@ function Standings({
         <PhaseBar phase={phase} frozen={frozen} />
         <div className="flex items-center gap-3">
           {can_reveal && (
-            <button
+            <Button
               type="button"
+              variant="destructive"
+              size="sm"
               onClick={onReveal}
-              className="rounded-md bg-amber-500 px-3 py-1 text-[12px] font-semibold text-white hover:bg-amber-600 disabled:opacity-50"
             >
               {t('icpc.scoreboard.reveal')}
-            </button>
+            </Button>
           )}
           <span className="text-[11px] text-muted-foreground">
             {t('icpc.scoreboard.lastUpdated', { when: updated })}

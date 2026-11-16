@@ -100,7 +100,12 @@ fn handle_submission_status(
     let contest = req.contest()?;
     let problem_id = req.problem_id()?;
     if contest.phase != ContestPhase::Running {
-        return Err(PluginHttpResponse::error(409, "The contest is not running").into());
+        return Err(PluginHttpResponse::refuse(
+            409,
+            Refusal::ContestNotRunning,
+            "The contest is not running",
+        )
+        .into());
     }
     // ...
 }
@@ -118,18 +123,18 @@ the plugin and fails the request as an internal error.
 
 Other path parameters, such as a match or submission id, are yours to read with
 `req.param::<T>("name")`. A missing or unparsable value is a `400
-VALIDATION_ERROR` response.
+INVALID_PATH_PARAMETER` response.
 
 ## Errors
 
 A handler returns `Result<PluginHttpResponse, ApiError>`, and an `ApiError` is
 one of two things:
 
-- A client error, built with `PluginHttpResponse::error(status, message)`. Its
-  body is the server's error shape, `{"code": ..., "message": ...}`, with a
-  code for the status (`404` is `NOT_FOUND`, `409` is `CONFLICT`, and so on).
-  Use `PluginHttpResponse::error_with_code(status, code, message)` when your
-  frontend needs to tell one condition apart from others with the same status.
+- A client error, built with `PluginHttpResponse::refuse(status, code,
+  message)`. Its body is the server's error shape, `{"code": ..., "message":
+  ...}`. `code` is one of your plugin's refusal codes, which you declare once
+  with `refusal_codes!` (see below), and `message` is your English text for
+  logs.
 - An internal error: every `SdkError` that `?` converts, such as a failed
   query, and anything you wrap with `ApiError::internal(detail)`. The detail
   goes to the server log. The caller receives `500 INTERNAL_ERROR` with a
@@ -144,7 +149,29 @@ therefore never reads as one of the server's own, such as `TOKEN_INVALID` or
 `400`, `403`, `404`, `409`, `413` or `429`; any other client error status is
 sent as `400`. Whether the caller is signed in is the server's to say: declare
 `access` in the manifest rather than answering `401`. `req.require_user_id()`
-on a `public` route answers an anonymous caller `403 PERMISSION_DENIED`.
+on a `public` route answers an anonymous caller `403 SIGN_IN_REQUIRED`.
+
+Declare every code your routes and hooks refuse with in one enum, and pin with
+one test that each has a text in every pack, so no refusal reaches a user as a
+generic message that means something else:
+
+```rust
+broccoli_server_sdk::refusal_codes! {
+    pub enum Refusal {
+        /// A token is spent while the contest is not running.
+        ContestNotRunning = "CONTEST_NOT_RUNNING",
+    }
+}
+
+#[test]
+fn every_refusal_code_has_a_text_in_every_pack() {
+    broccoli_server_sdk::testing::assert_refusal_codes_translated::<Refusal>();
+}
+```
+
+The test reads your `plugin.toml` and the packs it declares, and also asks for
+the codes the SDK itself answers your routes with (`INVALID_PATH_PARAMETER`,
+`SIGN_IN_REQUIRED`).
 
 The server answers every `5xx` from a plugin route itself, so database or host
 text can never reach a response body, even from a handler that builds a `500`

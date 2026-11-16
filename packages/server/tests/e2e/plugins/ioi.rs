@@ -194,24 +194,134 @@ async fn ioi_feedback_none_withholds_every_score_on_the_scoreboard() {
     assert_eq!(rows[0]["rank"], json!(1), "{}", staff.text);
 }
 
-/// A judged submission's subtask scores, read back by the subtask-scores
-/// route and by the sum-best-subtask scoreboard, are the ones judging gave it.
+/// At `feedback_level = "none"` a contestant reads a submission's scores
+/// nowhere until a token unlocks that one submission or the contest ends:
+/// the subtask-scores route and the problem's submission status follow the
+/// same rule.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_judged_ioi_submission_reads_back_the_subtask_scores_it_was_judged_with() {
+async fn ioi_feedback_none_shows_a_submissions_scores_only_by_token_or_after_the_contest() {
     let app = E2eTestApp::spawn().await;
     let admin = app
-        .create_user_with_role("ioi_readback_admin", "password", "admin")
+        .create_user_with_role("ioi_none_scores_admin", "password", "admin")
+        .await;
+    let tokened = app
+        .create_authenticated_user("ioi_none_scores_a", "password")
+        .await;
+    let plain = app
+        .create_authenticated_user("ioi_none_scores_b", "password")
+        .await;
+    let problem_id = app.create_problem(&admin, "IOI None Scores").await;
+    app.create_test_case_with(problem_id, "2\n1 2", "3\n", 100, false, &admin)
+        .await;
+    let contest_id = app
+        .create_typed_contest(&admin, "IOI None Scores", "ioi", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &tokened).await;
+    app.register_for_contest(contest_id, &plain).await;
+    let res = app
+        .put_with_token(
+            &format!("/api/v1/contests/{contest_id}/config/ioi/contest"),
+            &json!({
+                "config": {
+                    "feedback_level": "none",
+                    "tokens": { "mode": "fixed_budget", "initial": 1 }
+                },
+                "enabled": true
+            }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+
+    let mut subs = Vec::new();
+    for who in [&tokened, &plain] {
+        let sub_id = app
+            .create_contest_submission(contest_id, problem_id, who, "cpp", CPP_SUM)
+            .await;
+        let judged = app.wait_for_submission_terminal(sub_id, &admin, 60).await;
+        assert_eq!(judged.body["status"], "Judged", "{}", judged.text);
+        subs.push(sub_id);
+    }
+    app.judging_idle().await;
+
+    let base = format!("/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}");
+    let shown = |who: &str, sub_id: i32| {
+        let app = &app;
+        let base = &base;
+        let who = who.to_string();
+        async move {
+            let scores = app
+                .get_with_token(&format!("{base}/submissions/{sub_id}/subtask-scores"), &who)
+                .await;
+            assert_eq!(scores.status, 200, "{}", scores.text);
+            let status = app
+                .get_with_token(
+                    &format!("{base}/problems/{problem_id}/submission-status"),
+                    &who,
+                )
+                .await;
+            assert_eq!(status.status, 200, "{}", status.text);
+            (
+                !scores.body["subtasks"].is_null(),
+                !status.body["last_submission_score"].is_null(),
+            )
+        }
+    };
+
+    for (who, sub_id) in [(&tokened, subs[0]), (&plain, subs[1])] {
+        assert_eq!(shown(who, sub_id).await, (false, false), "withheld");
+    }
+    let spent = app
+        .post_with_token(
+            &format!("{base}/submissions/{}/token", subs[0]),
+            &json!({}),
+            &tokened,
+        )
+        .await;
+    assert_eq!(spent.status, 200, "{}", spent.text);
+    assert_eq!(shown(&tokened, subs[0]).await, (true, true), "the token");
+    assert_eq!(shown(&plain, subs[1]).await, (false, false), "no token");
+
+    let now = Utc::now();
+    let mut ended: server::entity::contest::ActiveModel =
+        server::entity::contest::Entity::find_by_id(contest_id)
+            .one(&app.db)
+            .await
+            .expect("query contest")
+            .expect("contest exists")
+            .into();
+    ended.start_time = Set(now - Duration::hours(2));
+    ended.end_time = Set(now - Duration::minutes(1));
+    ended.update(&app.db).await.expect("end the contest");
+    assert_eq!(
+        shown(&plain, subs[1]).await,
+        (true, true),
+        "after the contest"
+    );
+}
+
+/// An IOI contest scored by the sum of best subtasks, with one problem of two
+/// cases (40 and 60 points) and one judged correct submission: the admin's
+/// token, the contest, the problem and the submission.
+async fn judged_sum_best_subtask_submission(
+    app: &E2eTestApp,
+    name: &str,
+) -> (String, i32, i32, i32) {
+    let admin = app
+        .create_user_with_role(&format!("{name}_admin"), "password", "admin")
         .await;
     let contestant = app
-        .create_authenticated_user("ioi_readback_user", "password")
+        .create_authenticated_user(&format!("{name}_user"), "password")
         .await;
-    let problem_id = app.create_problem(&admin, "IOI Read Back").await;
+    let problem_id = app.create_problem(&admin, name).await;
     app.create_test_case_with(problem_id, "2\n1 2", "3\n", 40, false, &admin)
         .await;
     app.create_test_case_with(problem_id, "3\n1 2 3", "6\n", 60, false, &admin)
         .await;
     let contest_id = app
-        .create_typed_contest(&admin, "IOI Read Back", "ioi", true, true)
+        .create_typed_contest(&admin, name, "ioi", true, true)
         .await;
     app.add_problem_to_contest(contest_id, problem_id, &admin)
         .await;
@@ -231,6 +341,16 @@ async fn a_judged_ioi_submission_reads_back_the_subtask_scores_it_was_judged_wit
     let judged = app.wait_for_submission_terminal(sub_id, &admin, 60).await;
     assert_eq!(judged.body["status"], "Judged", "{}", judged.text);
     app.judging_idle().await;
+    (admin, contest_id, problem_id, sub_id)
+}
+
+/// A judged submission's subtask scores, read back by the subtask-scores
+/// route and by the sum-best-subtask scoreboard, are the ones judging gave it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_judged_ioi_submission_reads_back_the_subtask_scores_it_was_judged_with() {
+    let app = E2eTestApp::spawn().await;
+    let (admin, contest_id, _, sub_id) =
+        judged_sum_best_subtask_submission(&app, "ioi_readback").await;
 
     let scores = app
         .get_with_token(
@@ -258,6 +378,111 @@ async fn a_judged_ioi_submission_reads_back_the_subtask_scores_it_was_judged_wit
     assert_eq!(
         board.body["rankings"][0]["total_score"].as_f64(),
         Some(100.0),
+        "{}",
+        board.text
+    );
+}
+
+/// A judgement's subtask scores read back as it was scored, after the
+/// problem's subtasks changed: the result panel shows what the judgement's
+/// total was made of, never the stored total beside a rescoring.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_judgements_subtask_scores_are_the_ones_it_was_scored_with_after_the_config_changes() {
+    let app = E2eTestApp::spawn().await;
+    let (admin, contest_id, problem_id, sub_id) =
+        judged_sum_best_subtask_submission(&app, "ioi_config_changed").await;
+
+    let mut first: server::entity::test_case::ActiveModel =
+        server::entity::test_case::Entity::find()
+            .filter(server::entity::test_case::Column::ProblemId.eq(problem_id))
+            .one(&app.db)
+            .await
+            .expect("query test cases")
+            .expect("the problem has test cases")
+            .into();
+    first.label = Set("first".into());
+    first.update(&app.db).await.expect("label the first case");
+    let res = app
+        .put_with_token(
+            &format!("/api/v1/contests/{contest_id}/problems/{problem_id}/config/ioi/task"),
+            &json!({ "config": { "subtasks": [
+                { "name": "S1", "max_score": 30, "test_cases": ["first"] },
+            ]}}),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+
+    let scores = app
+        .get_with_token(
+            &format!(
+                "/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}/submissions/{sub_id}/subtask-scores"
+            ),
+            &admin,
+        )
+        .await;
+    assert_eq!(scores.status, 200, "{}", scores.text);
+    assert_eq!(
+        scores.body["subtasks"],
+        json!([{ "name": "All Tests", "scoring_method": "sum", "score": 100.0, "max_score": 100.0 }]),
+        "{}",
+        scores.text
+    );
+}
+
+/// A judgement whose later attempt stands as a system error scores nothing
+/// in any view: the ratios an earlier attempt the platform lost stored are
+/// never credited to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn ratios_a_lost_attempt_stored_are_not_credited_to_the_judgement_that_stands() {
+    let app = E2eTestApp::spawn().await;
+    let (admin, contest_id, _, sub_id) =
+        judged_sum_best_subtask_submission(&app, "ioi_lost_attempt").await;
+
+    // The judgement's next attempt stands as a system error, storing no
+    // ratios of its own.
+    let mut judgement: submission_judgement::ActiveModel =
+        current_judgement(&app, sub_id).await.into();
+    judgement.judge_epoch = Set(2);
+    judgement.verdict = Set(Some(Verdict::SystemError));
+    judgement.score = Set(Some(0.0));
+    judgement
+        .update(&app.db)
+        .await
+        .expect("stand the next attempt");
+    let mut sub: submission::ActiveModel = submission::Entity::find_by_id(sub_id)
+        .one(&app.db)
+        .await
+        .expect("query submission")
+        .expect("the submission exists")
+        .into();
+    sub.judge_epoch = Set(2);
+    sub.max_judge_epoch = Set(2);
+    sub.verdict = Set(Some(Verdict::SystemError));
+    sub.score = Set(Some(0.0));
+    sub.update(&app.db).await.expect("stand the submission");
+
+    let scores = app
+        .get_with_token(
+            &format!(
+                "/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}/submissions/{sub_id}/subtask-scores"
+            ),
+            &admin,
+        )
+        .await;
+    assert_eq!(scores.status, 200, "{}", scores.text);
+    assert_eq!(scores.body["subtasks"], json!(null), "{}", scores.text);
+
+    let board = app
+        .get_with_token(
+            &format!("/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}/scoreboard"),
+            &admin,
+        )
+        .await;
+    assert_eq!(board.status, 200, "{}", board.text);
+    assert_eq!(
+        board.body["rankings"][0]["total_score"].as_f64(),
+        Some(0.0),
         "{}",
         board.text
     );
@@ -1516,11 +1741,13 @@ async fn ioi_task_config_naming_a_missing_test_case_is_refused() {
         .await;
     assert_eq!(res.status, 400, "{}", res.text);
     assert_eq!(res.body["code"], "VALIDATION_ERROR", "{}", res.text);
-    assert_eq!(
-        res.body["details"]["fields"][0]["path"], "subtasks[0].test_cases[0]",
-        "{}",
-        res.text
-    );
+    let paths: Vec<&str> = res.body["details"]["fields"]
+        .as_array()
+        .expect("the refused fields")
+        .iter()
+        .filter_map(|field| field["path"].as_str())
+        .collect();
+    assert!(paths.contains(&"subtasks[0].test_cases[0]"), "{}", res.text);
     let stored = app.get_with_token(&path, &admin).await;
     assert_eq!(stored.status, 404, "{}", stored.text);
 

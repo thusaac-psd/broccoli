@@ -17,11 +17,10 @@
 'cooldown.notSet' = '未设置'
 'cooldown.notSetWithDefault' = '未设置（默认：{default}）'
 'cooldown.active' = '生效中'
-'cooldown.source.problem' = '来自题目'
-'cooldown.source.contest' = '来自比赛'
-'cooldown.source.contest_problem' = '覆盖'
 
 # Why a submission was refused, by the rejection's code
 'cooldown.apiError.COOLDOWN_ACTIVE' = '请再等待 {remaining_seconds} 秒后提交。'
 'plugin.cooldown.name' = '提交冷却'
 'plugin.cooldown.description' = '限制选手两次提交之间的最短间隔。'
+'cooldown.apiError.INVALID_PATH_PARAMETER' = '此链接无效。'
+'cooldown.apiError.SIGN_IN_REQUIRED' = '请先登录。'

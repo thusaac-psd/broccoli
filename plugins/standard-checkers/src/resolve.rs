@@ -533,7 +533,7 @@ fn load_checker_source(host: &Host, problem_id: Option<i32>) -> Result<Vec<Sourc
         .config
         .get_problem(problem_id, "checker_source")
         .map_err(|e| format!("failed to load checker source config: {e}"))?;
-    if result.is_default {
+    if result.is_default() {
         return Err("Testlib checker requires checker_source".to_string());
     }
     #[derive(serde::Deserialize)]

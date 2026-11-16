@@ -60,14 +60,17 @@ impl HookResponse {
         HookResponse::Stop
     }
 
+    /// Refuse the event with one of the plugin's refusal codes (see
+    /// [`super::RefusalCode`]), the plugin's English words, the status the
+    /// client gets and details a client's text may name.
     pub fn reject(
-        code: impl Into<String>,
+        code: impl super::RefusalCode,
         message: impl Into<String>,
         status_code: u16,
         details: Option<serde_json::Value>,
     ) -> Self {
         HookResponse::Reject {
-            code: code.into(),
+            code: code.as_str().to_string(),
             details,
             message: message.into(),
             status_code,
@@ -132,10 +135,16 @@ mod tests {
         assert_eq!(json, r#"{"action":"stop"}"#);
     }
 
+    crate::refusal_codes! {
+        enum Refusal {
+            CooldownActive = "COOLDOWN_ACTIVE",
+        }
+    }
+
     #[test]
     fn reject_serializes_to_its_wire_format_and_round_trips() {
         let resp = HookResponse::reject(
-            "COOLDOWN_ACTIVE",
+            Refusal::CooldownActive,
             "Please wait 3 more seconds",
             429,
             Some(serde_json::json!({

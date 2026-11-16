@@ -36,3 +36,7 @@
 
 # Judge error codes (a judgement records them as `icpc.<CODE>`)
 'icpc.apiError.NO_TEST_CASES' = '该题目没有测试点，无法评测。请联系比赛工作人员添加测试点。'
+'icpc.apiError.REVEAL_BEFORE_END' = '比赛结束后才能揭晓排行榜。'
+'icpc.apiError.NO_FREEZE_TO_REVEAL' = '本场比赛没有可揭晓的封榜。'
+'icpc.apiError.INVALID_PATH_PARAMETER' = '此链接无效。'
+'icpc.apiError.SIGN_IN_REQUIRED' = '请先登录。'

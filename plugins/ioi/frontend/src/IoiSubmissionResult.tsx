@@ -4,29 +4,23 @@ import { isStaff } from '@broccoli/web-sdk/permissions';
 import { useSlotPermissions } from '@broccoli/web-sdk/slot';
 import {
   isTerminalStatus,
+  type ShownStatus,
   type Submission,
   TestCaseOutput,
   type TestCaseResult,
   useTestCasePage,
+  verdictStyle,
 } from '@broccoli/web-sdk/submission';
 import { Badge, PaginatedList } from '@broccoli/web-sdk/ui';
 import { cn, formatKibibytes } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import {
-  AlertCircle,
-  CheckCircle2,
-  ChevronDown,
-  Clock,
-  Loader2,
-  MinusCircle,
-  XCircle,
-} from 'lucide-react';
+import { AlertCircle, ChevronDown } from 'lucide-react';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 
 import { resolveFeedbackVisibility } from './feedback-visibility';
 import { useIoiApi } from './hooks/useIoiApi';
 import { useIoiContestInfo } from './hooks/useIoiContestInfo';
-import { memberCell } from './subtask-members';
+import { type DisplayTestCaseResult, memberCell } from './subtask-members';
 import type {
   SubtaskInfo,
   SubtaskScoreEntry,
@@ -60,81 +54,6 @@ const METHOD_META: Record<string, { abbrKey: string; color: string }> = {
   group_mul: { abbrKey: 'ioi.submission.method.groupMul', color: '#f59e0b' },
 };
 
-const VERDICT_META: Record<string, { color: string; bg: string }> = {
-  Accepted: { color: '#10b981', bg: 'rgba(16,185,129,0.1)' },
-  WrongAnswer: { color: '#ef4444', bg: 'rgba(239,68,68,0.1)' },
-  TimeLimitExceeded: { color: '#f59e0b', bg: 'rgba(245,158,11,0.1)' },
-  MemoryLimitExceeded: { color: '#f97316', bg: 'rgba(249,115,22,0.1)' },
-  RuntimeError: { color: '#a855f7', bg: 'rgba(168,85,247,0.1)' },
-  SystemError: { color: '#6b7280', bg: 'rgba(107,114,128,0.1)' },
-  Skipped: { color: '#9ca3af', bg: 'rgba(156,163,175,0.08)' },
-  Pending: { color: '#94a3b8', bg: 'rgba(148,163,184,0.1)' },
-  Running: { color: '#3b82f6', bg: 'rgba(59,130,246,0.1)' },
-};
-
-const VERDICT_ICONS = {
-  Accepted: CheckCircle2,
-  WrongAnswer: XCircle,
-  TimeLimitExceeded: Clock,
-  MemoryLimitExceeded: Clock,
-  RuntimeError: AlertCircle,
-  SystemError: AlertCircle,
-  Skipped: MinusCircle,
-  Pending: Clock,
-  Running: Loader2,
-} as const;
-
-const UNKNOWN_VERDICT_META = { color: '#6b7280', bg: 'rgba(0,0,0,0.04)' };
-
-/**
- * `TestCaseResultResponse.verdict` is `string | null | undefined` on the
- * wire: a `FieldMask` (e.g. `subtask_scores`'s
- * `result.test_case_results.*.verdict`) can blank it to `null` for a viewer
- * who isn't entitled to the per-test-case breakdown - see that field's doc
- * comment in the generated schema. This component only ever renders
- * test-case rows under `effectiveFeedback === 'full'` (see the comment
- * above `allTestCases` in `IoiSubmissionResult`), and `full` feedback is
- * never masked, so in practice a `null`/`undefined` verdict should never
- * reach these call sites - but the wire type doesn't (and shouldn't)
- * encode that. Render it as an explicit "withheld" state instead of
- * silently guessing a real verdict or crashing.
- */
-function verdictMeta(verdict: string | null | undefined) {
-  if (!verdict) return UNKNOWN_VERDICT_META;
-  return VERDICT_META[verdict] ?? UNKNOWN_VERDICT_META;
-}
-
-function VerdictIcon({
-  verdict,
-  size = 14,
-}: {
-  verdict: string | null | undefined;
-  size?: number;
-}) {
-  if (!verdict) {
-    return (
-      <MinusCircle
-        size={size}
-        color={UNKNOWN_VERDICT_META.color}
-        className="shrink-0"
-      />
-    );
-  }
-
-  const meta = VERDICT_META[verdict];
-  const c = meta?.color ?? '#6b7280';
-  const Icon =
-    VERDICT_ICONS[verdict as keyof typeof VERDICT_ICONS] ?? AlertCircle;
-
-  return (
-    <Icon
-      size={size}
-      color={c}
-      className={cn('shrink-0', verdict === 'Running' && 'animate-spin')}
-    />
-  );
-}
-
 function scoreColor(score: number, maxScore: number): string {
   if (maxScore <= 0) return '#6b7280';
   const frac = score / maxScore;
@@ -147,6 +66,12 @@ function formatMs(ms: number): string {
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(2)}s`;
 }
 
+/**
+ * The subtasks a result shows: the ones its judgement was scored with
+ * (`subtaskScores`, stored when it was judged), each listing the members of
+ * the problem's current subtask of the same name. Until those arrive, the
+ * problem's current subtasks, unscored.
+ */
 function buildSubtaskResults({
   taskSubtasks,
   subtaskScores,
@@ -154,18 +79,18 @@ function buildSubtaskResults({
   taskSubtasks: SubtaskInfo[];
   subtaskScores: SubtaskScoreEntry[] | null | undefined;
 }): DisplaySubtaskResult[] {
-  const count = Math.max(taskSubtasks.length, subtaskScores?.length ?? 0);
-  return Array.from({ length: count }, (_, index) => {
-    const entry = subtaskScores?.[index];
-    return {
-      subtask: taskSubtasks[index] ?? {
-        name: entry?.name ?? '',
-        scoring_method: entry?.scoring_method ?? 'sum',
-        max_score: entry?.max_score ?? 0,
-      },
-      score: entry?.score ?? 0,
-    };
-  });
+  if (!subtaskScores) {
+    return taskSubtasks.map((subtask) => ({ subtask, score: 0 }));
+  }
+  return subtaskScores.map((entry) => ({
+    subtask: {
+      name: entry.name,
+      scoring_method: entry.scoring_method,
+      max_score: entry.max_score,
+      test_cases: taskSubtasks.find((s) => s.name === entry.name)?.test_cases,
+    },
+    score: entry.score,
+  }));
 }
 
 function tcHasDetails(tc: TestCaseResult): boolean {
@@ -187,19 +112,16 @@ function TestCaseDetailPanel({
   index: number;
   submission: Submission;
 }) {
-  const vm = verdictMeta(tc.verdict);
+  const style = verdictStyle(tc.verdict, submission.status);
+  const Icon = style.icon;
   const { t } = useTranslation();
 
   return (
     <div
-      className="rounded-md px-3 py-2.5"
-      style={{
-        background: vm.bg,
-        border: `1px solid ${vm.color}22`,
-      }}
+      className={cn('rounded-md border px-3 py-2.5', style.surface, style.edge)}
     >
       <div className="mb-2 flex items-center gap-1.5 border-b border-border pb-2">
-        <VerdictIcon verdict={tc.verdict} size={16} />
+        <Icon size={16} className={cn('shrink-0', style.text)} />
         <span className="text-xs font-semibold text-foreground">
           {t('ioi.submission.testCase', { index: index + 1 })}
         </span>
@@ -245,6 +167,106 @@ function TestCaseDetailPanel({
   );
 }
 
+/**
+ * One case of a result's case grid: its verdict, score, time and memory, and
+ * a toggle for its details when it has any.
+ */
+function TestCaseTile({
+  tc,
+  index,
+  status,
+  selected,
+  onToggle,
+}: {
+  tc: DisplayTestCaseResult;
+  index: number;
+  status: ShownStatus;
+  selected: boolean;
+  onToggle: () => void;
+}) {
+  const { t } = useTranslation();
+  const style = verdictStyle(tc.verdict, status);
+  const Icon = tc.isMissing ? AlertCircle : style.icon;
+  const clickable = tcHasDetails(tc);
+  const tcScore = tc.score ?? 0;
+  const tcScoreColor =
+    tc.verdict === 'Accepted' ? '#10b981' : tcScore > 0 ? '#f59e0b' : '#6b7280';
+  return (
+    <div
+      role={clickable ? 'button' : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      aria-expanded={clickable ? selected : undefined}
+      onClick={clickable ? onToggle : undefined}
+      onKeyDown={
+        clickable
+          ? (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onToggle();
+              }
+            }
+          : undefined
+      }
+      className={cn(
+        'flex items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-all duration-150',
+        selected ? style.surfaceActive : style.surface,
+        clickable
+          ? [
+              'cursor-pointer hover:opacity-80',
+              selected
+                ? ['border-[1.5px]', style.edgeActive]
+                : ['border-b-[1.5px]', style.edge],
+            ]
+          : 'cursor-default',
+      )}
+    >
+      <Icon
+        size={14}
+        className={cn(
+          'shrink-0',
+          tc.isMissing ? 'text-amber-700 dark:text-amber-300' : style.text,
+        )}
+        aria-hidden
+      />
+      <span className="text-[11px] text-muted-foreground">#{index + 1}</span>
+      {tc.isMissing && (
+        <span className="truncate text-[11px] text-amber-700 dark:text-amber-300">
+          {t('ioi.submission.missingTestCase', { label: tc.label ?? '' })}
+        </span>
+      )}
+      {tc.score != null && (
+        <span
+          className="font-mono tabular-nums text-[10px] font-semibold"
+          style={{ color: tcScoreColor }}
+        >
+          {tc.score}
+        </span>
+      )}
+      <span className="flex-1" />
+      {tc.time_used != null && (
+        <span className="font-mono tabular-nums text-[10px] text-muted-foreground">
+          {formatMs(tc.time_used)}
+        </span>
+      )}
+      {tc.memory_used != null && (
+        <span className="font-mono tabular-nums text-[10px] text-muted-foreground">
+          {formatKibibytes(tc.memory_used)}
+        </span>
+      )}
+      {clickable && (
+        <ChevronDown
+          size={10}
+          className={cn(
+            'shrink-0 opacity-50 transition-transform duration-200',
+            style.text,
+            selected && 'rotate-180',
+          )}
+        />
+      )}
+    </div>
+  );
+}
+
 function TestCaseResultList({ submission }: { submission: Submission }) {
   const [page, setPage] = useState(1);
   const query = useTestCasePage({
@@ -256,7 +278,6 @@ function TestCaseResultList({ submission }: { submission: Submission }) {
   const testCases = query.data?.test_case_results ?? [];
   const { t } = useTranslation();
   const [selectedTcIndex, setSelectedTcIndex] = useState<number | null>(null);
-  const [hoveredTcIndex, setHoveredTcIndex] = useState<number | null>(null);
   const selectedTc =
     selectedTcIndex != null
       ? testCases[selectedTcIndex - (page - 1) * 20]
@@ -281,101 +302,23 @@ function TestCaseResultList({ submission }: { submission: Submission }) {
         onPageChange={(nextPage) => {
           setPage(nextPage);
           setSelectedTcIndex(null);
-          setHoveredTcIndex(null);
         }}
       >
         {(cases, offset) => (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-0.5 px-2.5 py-2">
             {cases.map((tc, pageIndex) => {
               const i = offset + pageIndex;
-              const vm = verdictMeta(tc.verdict);
-              const clickable = tcHasDetails(tc);
-              const isSelected = selectedTcIndex === i;
-              const tcScore = tc.score ?? 0;
-              const tcScoreColor =
-                tc.verdict === 'Accepted'
-                  ? '#10b981'
-                  : tcScore > 0
-                    ? '#f59e0b'
-                    : '#6b7280';
-
               return (
-                <div
+                <TestCaseTile
                   key={tc.id}
-                  role={clickable ? 'button' : undefined}
-                  tabIndex={clickable ? 0 : undefined}
-                  onClick={
-                    clickable
-                      ? () => setSelectedTcIndex(isSelected ? null : i)
-                      : undefined
+                  tc={tc}
+                  index={i}
+                  status={submission.status}
+                  selected={selectedTcIndex === i}
+                  onToggle={() =>
+                    setSelectedTcIndex(selectedTcIndex === i ? null : i)
                   }
-                  onKeyDown={
-                    clickable
-                      ? (e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault();
-                            setSelectedTcIndex(isSelected ? null : i);
-                          }
-                        }
-                      : undefined
-                  }
-                  onMouseEnter={
-                    clickable ? () => setHoveredTcIndex(i) : undefined
-                  }
-                  onMouseLeave={
-                    clickable ? () => setHoveredTcIndex(null) : undefined
-                  }
-                  className={cn(
-                    'flex items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-all duration-150',
-                    clickable ? 'cursor-pointer' : 'cursor-default',
-                  )}
-                  style={{
-                    background:
-                      isSelected || hoveredTcIndex === i
-                        ? `${vm.color}20`
-                        : vm.bg,
-                    outline: isSelected ? `1.5px solid ${vm.color}66` : 'none',
-                    borderBottom: clickable
-                      ? `1.5px solid ${isSelected ? vm.color + '66' : vm.color + '30'}`
-                      : 'none',
-                  }}
-                >
-                  <VerdictIcon verdict={tc.verdict} size={14} />
-                  <span className="text-[11px] text-muted-foreground">
-                    #{i + 1}
-                  </span>
-                  {tc.score != null && (
-                    <span
-                      className="font-mono tabular-nums text-[10px] font-semibold"
-                      style={{ color: tcScoreColor }}
-                    >
-                      {tc.score}
-                    </span>
-                  )}
-                  <span className="flex-1" />
-                  {tc.time_used != null && (
-                    <span className="font-mono tabular-nums text-[10px] text-muted-foreground">
-                      {formatMs(tc.time_used)}
-                    </span>
-                  )}
-                  {tc.memory_used != null && (
-                    <span className="font-mono tabular-nums text-[10px] text-muted-foreground">
-                      {formatKibibytes(tc.memory_used)}
-                    </span>
-                  )}
-                  {clickable && (
-                    <ChevronDown
-                      size={10}
-                      color={vm.color}
-                      className="shrink-0 opacity-50 transition-transform duration-200"
-                      style={{
-                        transform: isSelected
-                          ? 'rotate(180deg)'
-                          : 'rotate(0deg)',
-                      }}
-                    />
-                  )}
-                </div>
+                />
               );
             })}
           </div>
@@ -466,7 +409,6 @@ function SubtaskCard({
     ),
   );
   const [selectedTcIndex, setSelectedTcIndex] = useState<number | null>(null);
-  const [hoveredTcIndex, setHoveredTcIndex] = useState<number | null>(null);
   const maxScore = subtask.max_score;
   const frac = maxScore > 0 ? score / maxScore : 0;
   const color = scoreColor(score, maxScore);
@@ -551,117 +493,23 @@ function SubtaskCard({
             onPageChange={(nextPage) => {
               setPage(nextPage);
               setSelectedTcIndex(null);
-              setHoveredTcIndex(null);
             }}
           >
             {(cases, offset) => (
               <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-0.5">
                 {cases.map((tc, pageIndex) => {
                   const i = offset + pageIndex;
-                  const vm = verdictMeta(tc.verdict);
-                  const clickable = tcHasDetails(tc);
-                  const isSelected = selectedTcIndex === i;
-                  const tcScore = tc.score ?? 0;
-                  const tcScoreColor =
-                    tc.verdict === 'Accepted'
-                      ? '#10b981'
-                      : tcScore > 0
-                        ? '#f59e0b'
-                        : '#6b7280';
                   return (
-                    <div
+                    <TestCaseTile
                       key={tc.id}
-                      role={clickable ? 'button' : undefined}
-                      tabIndex={clickable ? 0 : undefined}
-                      onClick={
-                        clickable
-                          ? () => setSelectedTcIndex(isSelected ? null : i)
-                          : undefined
+                      tc={tc}
+                      index={i}
+                      status={submission.status}
+                      selected={selectedTcIndex === i}
+                      onToggle={() =>
+                        setSelectedTcIndex(selectedTcIndex === i ? null : i)
                       }
-                      onKeyDown={
-                        clickable
-                          ? (e) => {
-                              if (e.key === 'Enter' || e.key === ' ') {
-                                e.preventDefault();
-                                setSelectedTcIndex(isSelected ? null : i);
-                              }
-                            }
-                          : undefined
-                      }
-                      className={cn(
-                        'flex items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-all duration-150',
-                        clickable ? 'cursor-pointer' : 'cursor-default',
-                      )}
-                      style={{
-                        background:
-                          isSelected || hoveredTcIndex === i
-                            ? `${vm.color}20`
-                            : vm.bg,
-                        outline: isSelected
-                          ? `1.5px solid ${vm.color}66`
-                          : 'none',
-                        borderBottom: clickable
-                          ? `1.5px solid ${isSelected ? vm.color + '66' : vm.color + '30'}`
-                          : 'none',
-                      }}
-                      onMouseEnter={
-                        clickable ? () => setHoveredTcIndex(i) : undefined
-                      }
-                      onMouseLeave={
-                        clickable ? () => setHoveredTcIndex(null) : undefined
-                      }
-                    >
-                      {tc.isMissing ? (
-                        <AlertCircle
-                          size={14}
-                          className="shrink-0 text-amber-700 dark:text-amber-300"
-                          aria-hidden
-                        />
-                      ) : (
-                        <VerdictIcon verdict={tc.verdict} size={14} />
-                      )}
-                      <span className="text-[11px] text-muted-foreground">
-                        #{i + 1}
-                      </span>
-                      {tc.isMissing && (
-                        <span className="truncate text-[11px] text-amber-700 dark:text-amber-300">
-                          {t('ioi.submission.missingTestCase', {
-                            label: tc.label ?? '',
-                          })}
-                        </span>
-                      )}
-                      {tc.score != null && (
-                        <span
-                          className="font-mono tabular-nums text-[10px] font-semibold"
-                          style={{ color: tcScoreColor }}
-                        >
-                          {tc.score}
-                        </span>
-                      )}
-                      <span className="flex-1" />
-                      {tc.time_used != null && (
-                        <span className="font-mono tabular-nums text-[10px] text-muted-foreground">
-                          {formatMs(tc.time_used)}
-                        </span>
-                      )}
-                      {tc.memory_used != null && (
-                        <span className="font-mono tabular-nums text-[10px] text-muted-foreground">
-                          {formatKibibytes(tc.memory_used)}
-                        </span>
-                      )}
-                      {clickable && (
-                        <ChevronDown
-                          size={10}
-                          color={vm.color}
-                          className="shrink-0 opacity-50 transition-transform duration-200"
-                          style={{
-                            transform: isSelected
-                              ? 'rotate(180deg)'
-                              : 'rotate(0deg)',
-                          }}
-                        />
-                      )}
-                    </div>
+                    />
                   );
                 })}
               </div>
@@ -835,17 +683,11 @@ export function IoiSubmissionResult({
 
   if (!submission.result || !taskConfig || !visibility) return null;
 
-  // Per-test-case detail (verdict/score/etc.) is only ever rendered below
-  // under `effectiveFeedback === 'full'` (see `buildSubtaskResults` and the
-  // `full`-gated block in `SubtaskCard`), and `full` feedback is never
-  // masked -- IOI's own field masks only ever narrow `subtask_scores`,
-  // `total_only`, and `none`, none of which reach per-test-case rendering
-  // here. A masked (`null`) verdict/score therefore never reaches this
-  // component's own rendering; the `null` -> "Skipped"/0 rendered
-  // equivalence is instead handled once, at the host level, by
-  // `packages/web/src/features/submission/components/TestCaseRow.tsx`'s
-  // `getVerdictKey`, which is also what the IOI fallback slot content
-  // (`children`, below) renders through.
+  // Per-test-case detail (verdict/score/etc.) is rendered only under
+  // `effectiveFeedback === 'full'`, which no IOI field mask narrows. Every
+  // case's verdict is styled by the SDK's `verdictStyle`, which renders a
+  // masked (`null`) verdict of a finished judgement as skipped, as the
+  // host's own test case rows do.
   const allTestCases = testCases ?? submission.result.test_case_results ?? [];
   const { effectiveFeedback } = visibility;
   const taskSubtasks = taskConfig.subtasks ?? [];
@@ -865,11 +707,7 @@ export function IoiSubmissionResult({
     );
   }
 
-  // Compute max possible score from task config subtasks (fallback to 100 if not available)
-  const configMaxScore =
-    taskSubtasks.length > 0
-      ? taskSubtasks.reduce((sum, s) => sum + s.max_score, 0)
-      : 100;
+  const configMaxScore = taskConfig.max_score;
 
   // Feedback: total_only
   if (effectiveFeedback === 'total_only') {
