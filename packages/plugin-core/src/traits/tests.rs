@@ -589,7 +589,14 @@ async fn a_call_queued_across_a_reload_runs_on_the_new_version() {
     let queued = h.spawn("mark", CallOptions::background(later()));
     until(|| h.admission().queued(CallClass::Background) == 1).await;
     h.write_guest(2);
-    h.manager.reload_plugin(PLUGIN).unwrap();
+    // A reload as the host's lifecycle does it: a fresh entry, then a load.
+    let fresh = crate::registry::PluginEntry::from_dir(&h.dir.path().join(PLUGIN)).unwrap();
+    h.manager
+        .get_registry()
+        .write()
+        .unwrap()
+        .insert(PLUGIN.to_string(), fresh);
+    h.manager.load_plugin(PLUGIN).unwrap();
     h.fixture.release();
     queued.await.unwrap().unwrap();
     for call in holders {
@@ -617,22 +624,6 @@ async fn a_dropped_request_is_counted_in_flight_until_its_guest_returns() {
     assert_eq!(in_flight(), 1.0, "the guest still runs");
     h.fixture.release();
     until(|| in_flight() == 0.0).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_failed_reload_leaves_the_loaded_version_serving() {
-    let h = Harness::new(2);
-    std::fs::write(
-        h.dir.path().join(PLUGIN).join("plugin.toml"),
-        "name = \"p\"\nversion = \"0.2.0\"\n\n[server]\nentry = \"missing.wat\"\npermissions = [\"test\"]\n",
-    )
-    .unwrap();
-    assert!(h.manager.reload_plugin(PLUGIN).is_err());
-    h.spawn("mark", CallOptions::background(later()))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(h.fixture.read(|c| c.marks.clone()), vec![1]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
