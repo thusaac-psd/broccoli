@@ -9,11 +9,23 @@ use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
 use crate::common::E2eTestApp;
 
-/// Statements one more test case may cost a judged submission, whatever its
-/// checker: its one result row. The app's background loops (claim ticks,
-/// leases) run meanwhile and count too, so the budget sits half a statement
-/// above; a second statement per case fails.
-const MAX_PER_TEST_CASE: f64 = 1.5;
+/// Statements one more judged test case may cost a submission: its result
+/// row; the problem and its additional files, which the evaluate window that
+/// judges it reads (ICPC judges one case per window); and the worker's
+/// existence probe before it uploads the case's output, a statement here
+/// because the test's blob store is the database. A fifth fails.
+///
+/// Only statements that run at least once per added case count
+/// ([`per_case_statements`]): the app's background loops (claim ticks,
+/// leases) run meanwhile, but they tick with how long judging takes, not with
+/// what it does, so they show up at a fraction per case that depends on the
+/// machine.
+const MAX_PER_TEST_CASE: f64 = 4.0;
+
+/// Marks the statements this test issues to wait for a submission, which the
+/// counts leave out: waiting by polling the API would count statements that
+/// grow with how long judging takes, not with what it does.
+const WAIT_MARK: &str = "statement_counts:wait";
 
 /// Statements one `GET /submissions/{id}` of a judged submission may cost:
 /// the submission, its results and the view context. Half a statement of
@@ -28,7 +40,8 @@ async fn snapshot(app: &E2eTestApp) -> HashMap<String, i64> {
             DbBackend::Postgres,
             "SELECT query, sum(calls)::bigint AS calls FROM pg_stat_statements \
              WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) \
-             AND query NOT LIKE '%pg_stat_statements%' GROUP BY query",
+             AND query NOT LIKE '%pg_stat_statements%' \
+             AND query NOT LIKE '%statement_counts:wait%' GROUP BY query",
         ))
         .await
         .expect("pg_stat_statements is loaded in the test database server")
@@ -53,6 +66,12 @@ fn since(before: &HashMap<String, i64>, after: &HashMap<String, i64>) -> Vec<(St
     delta
 }
 
+/// The statements of `delta` (calls the `added` more cases caused) that ran
+/// at least once per added case, and their calls per case.
+fn per_case_statements(delta: &[(String, i64)], added: i64) -> Vec<(String, i64)> {
+    delta.iter().filter(|(_, n)| *n >= added).cloned().collect()
+}
+
 fn total(calls: &[(String, i64)]) -> i64 {
     calls.iter().map(|(_, n)| n).sum()
 }
@@ -70,8 +89,36 @@ fn print_top(label: &str, calls: &[(String, i64)], per: f64) {
 /// config reads matter.
 const CHECKER: &str = "#include \"testlib.h\"\nint main(int c, char* v[]) { registerTestlibCmd(c, v); quitf(_ok, \"ok\"); }\n";
 
+/// Waits until submission `id` is judged, reading its status with a
+/// statement the counts leave out ([`WAIT_MARK`]).
+async fn wait_judged_unmeasured(app: &E2eTestApp, id: i32) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let row = app
+            .db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                format!("SELECT /* {WAIT_MARK} */ status::text AS status FROM submission WHERE id = {id}"),
+            ))
+            .await
+            .unwrap()
+            .expect("the submission");
+        let status: String = row.try_get("", "status").unwrap();
+        if status == "Judged" {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "submission {id} still {status}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// Judges two submissions over `cases` test cases and returns the statements
-/// the second cost, from submit to the terminal poll.
+/// the second cost, from submit to its last verdict. With the `exact`
+/// checker every case must be accepted, so the count is of cases judged, not
+/// of cases a first wrong answer skipped.
 async fn judge(app: &E2eTestApp, admin: &str, checker: &str, cases: usize) -> Vec<(String, i64)> {
     let problem_id = app
         .create_problem_with_checker_format(admin, &format!("Count {checker} {cases}"), checker)
@@ -99,9 +146,21 @@ async fn judge(app: &E2eTestApp, admin: &str, checker: &str, cases: usize) -> Ve
         let sub = app
             .create_submission(problem_id, admin, "cpp", super::CPP_SUM)
             .await;
-        let res = app.wait_for_submission_terminal(sub, admin, 120).await;
-        assert_eq!(res.body["status"], "Judged", "{}", res.text);
+        wait_judged_unmeasured(app, sub).await;
         measured = since(&before, &snapshot(app).await);
+        let res = app
+            .get_with_token(&format!("/api/v1/submissions/{sub}"), admin)
+            .await;
+        assert_eq!(res.body["status"], "Judged", "{}", res.text);
+        if checker == "exact" {
+            // ICPC accepts a submission only when every case is accepted.
+            assert_eq!(res.body["result"]["verdict"], "Accepted", "{}", res.text);
+            assert_eq!(
+                res.body["result"]["test_case_pagination"]["total"], cases,
+                "{}",
+                res.text
+            );
+        }
     }
     measured
 }
@@ -136,7 +195,7 @@ async fn a_test_case_and_a_poll_stay_within_their_statement_budgets() {
             &large,
             1.0,
         );
-        let per_case = (total(&large) - total(&small)) as f64 / 20.0;
+        let per_case = total(&per_case_statements(&delta, 20)) as f64 / 20.0;
         assert!(
             per_case <= MAX_PER_TEST_CASE,
             "{label}: {per_case:.1} statements, budget {MAX_PER_TEST_CASE} (run with --nocapture for the list)"

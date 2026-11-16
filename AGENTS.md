@@ -206,7 +206,10 @@ binaries warn about every key they do not read.
   manifest parsing, the registry, instance pools, hooks, admission, config, i18n
   and the plugin HTTP proxy types.
 - `packages/contestant-cli` and `packages/dev-cli` talk to the server through
-  `packages/cli-core`.
+  `packages/cli-core`. A request path names a contest or problem only by
+  `broccoli_cli_core::ids::{ContestId, ProblemId}`, which come from the server's
+  answers or from `broccoli_cli_core::resolve`, so text a user typed (a title, a
+  label) never reaches a URL.
 - `packages/server-sdk` and `packages/broccoli-types` are the plugin-facing Rust
   API: change them together with the host side they mirror.
 
@@ -249,6 +252,23 @@ binaries warn about every key they do not read.
   or hand it back through one predicate (`plugin_lifecycle::contest_type_open`),
   and it resumes when a provider is enabled. A new scan that hands out or
   retries judging work uses that predicate too.
+- A worker that lacks a platform tool takes no work
+  (`HeartbeatPayload::accepts_work`): it stays live, its heartbeat lists what is
+  missing, and while no live worker takes work the claim claims nothing
+  (`ClaimPass::CANNOT_RUN`), so submissions wait `Queued` instead of failing. A
+  missing tool is the worker's fault, a hand-back that spends no retry.
+- Every submit path (practice and contest submissions, code runs) accepts work
+  through one rule, `plugin_lifecycle::accepting_handler`, which refuses a
+  contest type no provider can judge now; a new submit path calls it too.
+- A change to a problem's test data goes through
+  `services::test_data::TestDataEdit`, whose commit checks the problem's stored
+  configs against the data as the change leaves it and refuses a change that
+  breaks one with 409 `CONFIG_WOULD_BREAK` unless the request says `force=true`.
+  The problem's `config_issues` flag, which judging copies onto every judgement
+  it claims, is kept by `services::config_issues`: a new path that changes what
+  a stored config is checked against (test data, a plugin, a contest- or
+  plugin-scope config) rechecks it there, after it commits and off the judging
+  path.
 - A plugin route declares its access in `plugin.toml` (`access`, `permission`,
   `contest`, `problem`); the proxy resolves the route's contest or problem
   through the visibility kernel and checks the token's freshness before the
