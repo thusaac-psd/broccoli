@@ -4,8 +4,21 @@ use std::time::Duration;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PluginConfig {
+    /// The plugins shipped with this node (the release bundle). Only read,
+    /// so it may be mounted read-only.
     #[serde(default = "default_plugins_dir")]
     pub plugins_dir: PathBuf,
+    /// Where this server unpacks plugin archives uploaded through the admin
+    /// API, fetched from the shared blob store. Must be writable and private
+    /// to this server; everything in it can be fetched again, so losing it
+    /// only costs a download.
+    #[serde(default = "default_cache_dir")]
+    pub cache_dir: PathBuf,
+    /// Whether admins may upload plugin archives. When `false` the upload
+    /// endpoints refuse every archive and this server refuses to load a
+    /// previously uploaded version, so only bundled plugin code runs.
+    #[serde(default = "default_uploads_enabled")]
+    pub uploads_enabled: bool,
     #[serde(default = "default_enable_wasi")]
     pub enable_wasi: bool,
     /// Wall-clock execution deadline for a single guest call, applied to the
@@ -76,6 +89,14 @@ fn default_plugins_dir() -> PathBuf {
     PathBuf::from("./plugins")
 }
 
+fn default_cache_dir() -> PathBuf {
+    PathBuf::from("./data/plugin-cache")
+}
+
+fn default_uploads_enabled() -> bool {
+    true
+}
+
 fn default_enable_wasi() -> bool {
     true
 }
@@ -112,6 +133,8 @@ impl Default for PluginConfig {
     fn default() -> Self {
         Self {
             plugins_dir: default_plugins_dir(),
+            cache_dir: default_cache_dir(),
+            uploads_enabled: default_uploads_enabled(),
             enable_wasi: default_enable_wasi(),
             call_timeout_secs: default_call_timeout(),
             pool_acquire_timeout_secs: default_pool_acquire_timeout(),

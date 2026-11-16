@@ -27,16 +27,15 @@ grep -qE '\$COMPOSE .*restart gateway' "$inst" \
 [ "$(grep -c 'runtime_compose' "$inst")" = "1" ] \
   || { echo "FAIL: COMPOSE should be resolved once (hoisted), found duplicates"; exit 1; }
 # rootless Podman under SELinux Enforcing relabels bind-mount SOURCES or the
-# container cannot read them. The ./plugins:/plugins mount is bind-mounted by
-# BOTH the server and worker roles; if its source dir is not relabeled the
+# container cannot read them. The server role bind-mounts ./plugins:/plugins;
+# if its source dir is not relabeled the
 # plugin registry loads EMPTY and nothing judges (the same catastrophic-silent
-# class as an unreadable plugin dir). Assert install.sh relabels the plugins dir
-# on both deploy paths. runtime_relabel is a proven no-op off podman+SELinux
+# class as an unreadable plugin dir). Assert install.sh relabels the plugins dir. runtime_relabel is a proven no-op off podman+SELinux
 # (runtime_detect_test.sh), so this is safe for docker/standalone installs.
 grep -qE 'runtime_relabel .*plugins' "$inst" \
   || { echo "FAIL: install.sh does not SELinux-relabel the ./plugins bind-mount source (podman+SELinux would read an empty plugin dir -> nothing judges)"; exit 1; }
-# both deploy roles relabel (server: leaf+Caddyfile+plugins; worker: plugins) —
-# expect a call site in each branch
+# the server role relabels on both of its paths (with and without a gateway
+# leaf) — expect a call site on each
 [ "$(grep -c 'runtime_relabel' "$inst")" -ge 2 ] \
-  || { echo "FAIL: install.sh must relabel bind mounts for BOTH server and worker roles"; exit 1; }
+  || { echo "FAIL: install.sh must relabel bind mounts on both server-role paths"; exit 1; }
 echo "PASS: install.sh migrated to \$COMPOSE"

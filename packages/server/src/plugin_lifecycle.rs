@@ -2,18 +2,21 @@
 //!
 //! Several identical server replicas share one database, so a plugin's
 //! lifecycle cannot live in any one process. The desired state is the
-//! `plugin` table: `is_enabled`, plus a `generation` that every lifecycle
-//! change (enable, disable, reload, upload) bumps. Each replica converges its
-//! local registry onto that table:
+//! `plugin` table: `is_enabled`, the published source (bundled files or an
+//! uploaded archive, see [`crate::plugin_distribution`]), plus a `generation`
+//! that every lifecycle change (enable, disable, reload, upload, removing an
+//! upload) bumps. Each replica converges its local registry onto that table:
 //!
 //! - [`run`] polls the table every [`RECONCILE_INTERVAL`] and applies any row
 //!   whose generation this replica has not applied yet. The table holds one
 //!   row per installed plugin, so a poll is one tiny indexless scan.
 //! - The admin endpoints call the `enable` / `disable` / `reload` /
-//!   `reload_all` / `install` functions here, which apply the change on the
-//!   serving replica first and only then publish it (bump the generation), so
-//!   a change that cannot even load here never reaches the rest of the fleet.
-//!   Every peer then picks it up on its next poll.
+//!   `reload_all` / `install` / `remove_upload` functions here, which apply
+//!   the change on the serving replica first and only then publish it (one
+//!   write to the row), so a change that cannot even load here never reaches
+//!   the rest of the fleet. Every peer then picks it up on its next poll. A row that
+//!   disappears (an upload removed with no bundled copy to fall back to)
+//!   unloads the plugin everywhere.
 //!
 //! A local failure stays local: an `init()` that fails is retried with
 //! exponential backoff instead of leaving the plugin `Failed` until restart,
@@ -24,23 +27,24 @@
 //! All of this is plugin-agnostic: the host only knows ids, the enabled flag,
 //! and what each manifest declares.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use plugin_core::error::PluginError;
 use plugin_core::registry::PluginStatus;
-use sea_orm::{
-    ColumnTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, QueryFilter, Set, Statement,
-};
+use sea_orm::{ConnectionTrait, DbBackend, DbErr, EntityTrait, Set, Statement};
 
 use crate::entity::plugin as plugin_entity;
 use crate::error::AppError;
 use crate::models::plugin::{ReloadAllResponse, ReloadFailure};
+use crate::plugin_archive::PluginArchive;
+use crate::plugin_distribution::{self, PluginSource};
 use crate::plugin_fleet::{self, ReplicaPluginState, ReplicaPluginStatus, ReplicaReport};
+use crate::plugin_id::PluginId;
 use crate::state::AppState;
 use crate::utils::plugin::{
-    self as plugin_utils, Fingerprint, LoadFailure, PluginActivationFailure, PreviousVersion,
+    self as plugin_utils, Fingerprint, LoadFailure, PluginActivationFailure,
     purge_plugin_registrations,
 };
 
@@ -94,6 +98,10 @@ struct Applied {
     /// Set when what is loaded here is not what the fleet published (loaded
     /// anyway because nothing else was running here).
     mismatch: Option<String>,
+    /// Set when the last load failed before the plugin reached this
+    /// replica's registry (its files could not be located or fetched): the
+    /// error, since there is no registry entry to carry it.
+    unavailable: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -108,6 +116,8 @@ struct Desired {
     generation: i64,
     /// What the fleet published for this plugin, if anything yet.
     published: Option<Fingerprint>,
+    /// Where the published files come from.
+    source: PluginSource,
 }
 
 impl Desired {
@@ -115,6 +125,7 @@ impl Desired {
         Self {
             enabled: row.is_enabled,
             generation: row.generation,
+            source: PluginSource::of(row.archive_hash.as_deref()),
             published: row
                 .version
                 .clone()
@@ -207,6 +218,16 @@ impl PluginLifecycle {
     pub(crate) fn set_desired(&self, plugin_id: &str, enabled: bool) {
         if let Ok(mut d) = self.desired.write() {
             d.insert(plugin_id.to_string(), enabled);
+        }
+    }
+
+    /// Drop everything recorded about a plugin the fleet no longer has.
+    fn forget(&self, plugin_id: &str) {
+        if let Ok(mut d) = self.desired.write() {
+            d.remove(plugin_id);
+        }
+        if let Ok(mut g) = self.governs.write() {
+            g.remove(plugin_id);
         }
     }
 }
@@ -311,7 +332,10 @@ fn build_report(
                 ),
                 Some(PluginStatus::Loaded) => (ReplicaPluginStatus::Loaded, None),
                 Some(PluginStatus::Failed(e)) => (ReplicaPluginStatus::Failed, Some(e.clone())),
-                None if a.is_some_and(|a| a.enabled) => (ReplicaPluginStatus::NotInstalled, None),
+                None if a.is_some_and(|a| a.enabled) => (
+                    ReplicaPluginStatus::NotInstalled,
+                    a.and_then(|a| a.unavailable.clone()),
+                ),
                 _ => (ReplicaPluginStatus::Unloaded, None),
             };
             let retry_in_ms = a
@@ -460,6 +484,16 @@ async fn reconcile_locked(
 
     let now = Instant::now();
     let mut failures = Vec::new();
+    // Rows deleted since the last pass: the fleet no longer has the plugin.
+    let gone: Vec<String> = applied
+        .keys()
+        .filter(|id| !rows.iter().any(|r| &r.id == *id))
+        .cloned()
+        .collect();
+    for id in &gone {
+        forget(state, applied, id).await;
+    }
+    let published_archives = published_archives(&rows);
     for row in rows {
         if let Some(governs) = row
             .governs
@@ -474,14 +508,88 @@ async fn reconcile_locked(
         // plugin is still loading here, the visibility kernel must already
         // treat it as enabled-but-not-loaded (fail closed), not as disabled.
         state.plugin_lifecycle.set_desired(&row.id, row.is_enabled);
-        if let Err(error) = apply(state, applied, &row.id, desired, now).await {
+        let Some(id) = row_id(&row) else { continue };
+        if let Err(error) = apply(state, applied, &id, desired, now).await {
             failures.push(PluginActivationFailure {
                 plugin_id: row.id.clone(),
                 error,
             });
         }
     }
+    if fleet_changed || !gone.is_empty() {
+        retain_cache(state, published_archives).await;
+    }
     Ok(failures)
+}
+
+/// The row's plugin id, if it is a valid one. A row with an invalid id was
+/// not written by this host; it is never applied, so its id never reaches a
+/// path.
+fn row_id(row: &plugin_entity::Model) -> Option<PluginId> {
+    PluginId::parse(row.id.as_str())
+        .inspect_err(|e| tracing::warn!(error = %e, "Ignoring a plugin row"))
+        .ok()
+}
+
+/// The cache entries every published upload maps to.
+fn published_archives(rows: &[plugin_entity::Model]) -> HashSet<String> {
+    rows.iter()
+        .filter_map(|r| plugin_distribution::cache_entry_for(r.archive_hash.as_deref()?))
+        .collect()
+}
+
+/// Drop cached archives that are neither in `keep` (published) nor loaded
+/// here: a version kept serving after a failed update is still loaded, so
+/// its files stay until it is replaced.
+async fn retain_cache(state: &AppState, mut keep: HashSet<String>) {
+    if let Ok(registry) = state.plugins.get_registry().read() {
+        keep.extend(
+            registry
+                .values()
+                .filter_map(|e| plugin_distribution::cache_entry_of(state, &e.root_dir)),
+        );
+    }
+    plugin_distribution::retain(state, keep).await;
+}
+
+/// Unload a plugin whose row was deleted and forget it on this replica.
+async fn forget(state: &AppState, applied: &mut HashMap<String, Applied>, plugin_id: &str) {
+    purge_plugin_registrations(&state.registries, plugin_id).await;
+    if let Ok(mut registry) = state.plugins.get_registry().write() {
+        registry.remove(plugin_id);
+    }
+    if let Err(e) = state.plugins.update_translations() {
+        tracing::warn!(plugin_id, error = %e, "Failed to refresh translations after removing a plugin");
+    }
+    applied.remove(plugin_id);
+    state.plugin_lifecycle.forget(plugin_id);
+    tracing::info!(plugin_id, "Plugin removed from the fleet; unloaded it here");
+}
+
+/// Locate the files `desired` publishes and fingerprint them. An uploaded
+/// copy that does not match the published fingerprint is a damaged cache
+/// entry (the archive itself was verified by hash when it was fetched), so
+/// it is dropped and fetched once more.
+async fn locate_published(
+    state: &AppState,
+    id: &PluginId,
+    desired: &Desired,
+) -> Result<(std::path::PathBuf, Option<Fingerprint>), PluginError> {
+    let root = plugin_distribution::locate(state, id, &desired.source).await?;
+    let local = plugin_utils::fingerprint(&root).await;
+    let damaged = matches!(desired.source, PluginSource::Upload(_))
+        && mismatch(desired.published.as_ref(), local.as_ref()).is_some();
+    if !damaged {
+        return Ok((root, local));
+    }
+    tracing::warn!(
+        plugin_id = %id,
+        "This server's copy of the uploaded plugin differs from the published one; fetching it again"
+    );
+    plugin_distribution::evict(state, &desired.source).await;
+    let root = plugin_distribution::locate(state, id, &desired.source).await?;
+    let local = plugin_utils::fingerprint(&root).await;
+    Ok((root, local))
 }
 
 /// Bring one plugin to `desired` on this replica, honouring the retry backoff
@@ -489,15 +597,29 @@ async fn reconcile_locked(
 async fn apply(
     state: &AppState,
     applied: &mut HashMap<String, Applied>,
-    plugin_id: &str,
+    id: &PluginId,
     desired: Desired,
     now: Instant,
 ) -> Result<(), PluginError> {
+    let plugin_id = id.as_str();
     let loaded = state.plugins.is_plugin_loaded(plugin_id).unwrap_or(false);
 
     if !desired.enabled {
         if loaded {
             deactivate(state, plugin_id).await?;
+        }
+        let changed = applied
+            .get(plugin_id)
+            .is_none_or(|a| a.generation != desired.generation);
+        if changed {
+            // Keep the published version's manifest listed here while it is
+            // off, so the admin pages describe what enabling would load.
+            match plugin_distribution::locate(state, id, &desired.source).await {
+                Ok(root) => plugin_utils::register_unloaded(state, plugin_id, &root),
+                Err(e) => {
+                    tracing::debug!(plugin_id, error = %e, "Disabled plugin's files are not available here");
+                }
+            }
         }
         applied.insert(
             plugin_id.to_string(),
@@ -508,6 +630,7 @@ async fn apply(
                 kept_previous: None,
                 fingerprint: None,
                 mismatch: None,
+                unavailable: None,
             },
         );
         return Ok(());
@@ -528,15 +651,28 @@ async fn apply(
     // published: this replica's copy may be stale or half-synced. With
     // nothing running here, load them anyway and flag the difference, so a
     // fleet restarted onto new files without a Reload still serves.
-    let _ = discover(state, plugin_id);
-    let local = plugin_utils::fingerprint(state, plugin_id).await;
-    let differs = mismatch(desired.published.as_ref(), local.as_ref());
-    let result = match &differs {
-        Some(reason) if loaded => Err(LoadFailure {
-            error: PluginError::LoadFailed(reason.clone()),
-            kept_previous: true,
-        }),
-        _ => load_from_disk(state, plugin_id).await.map(drop),
+    let (local, differs, result) = match locate_published(state, id, &desired).await {
+        Err(error) => (
+            None,
+            None,
+            Err(LoadFailure {
+                error,
+                kept_previous: loaded,
+            }),
+        ),
+        Ok((root, local)) => {
+            let differs = mismatch(desired.published.as_ref(), local.as_ref());
+            let result = match &differs {
+                Some(reason) if loaded => Err(LoadFailure {
+                    error: PluginError::LoadFailed(reason.clone()),
+                    kept_previous: true,
+                }),
+                _ => plugin_utils::load_from_dir(state, plugin_id, &root)
+                    .await
+                    .map(drop),
+            };
+            (local, differs, result)
+        }
     };
     if result.is_ok() {
         record_governs(state, plugin_id).await;
@@ -549,6 +685,7 @@ async fn apply(
             kept_previous: None,
             fingerprint: local,
             mismatch: differs,
+            unavailable: None,
         },
         Err(failure) => {
             let r = Retry::after(retry, now);
@@ -567,35 +704,12 @@ async fn apply(
                 kept_previous: failure.kept_previous.then(|| failure.error.to_string()),
                 fingerprint: if failure.kept_previous { running } else { None },
                 mismatch: None,
+                unavailable: (!failure.kept_previous).then(|| failure.error.to_string()),
             }
         }
     };
     applied.insert(plugin_id.to_string(), entry);
     result.map_err(|f| f.error)
-}
-
-/// (Re)load a plugin from this replica's disk, keeping a working loaded
-/// version if the new one fails (see [`plugin_utils::reload_from_disk`]).
-async fn load_from_disk(
-    state: &AppState,
-    plugin_id: &str,
-) -> Result<Option<PreviousVersion>, LoadFailure> {
-    match discover(state, plugin_id) {
-        Ok(true) => {}
-        Ok(false) => {
-            return Err(LoadFailure {
-                error: PluginError::NotFound(plugin_id.to_string()),
-                kept_previous: false,
-            });
-        }
-        Err(error) => {
-            return Err(LoadFailure {
-                error,
-                kept_previous: false,
-            });
-        }
-    }
-    plugin_utils::reload_from_disk(state, plugin_id).await
 }
 
 async fn deactivate(state: &AppState, plugin_id: &str) -> Result<(), PluginError> {
@@ -608,10 +722,19 @@ async fn deactivate(state: &AppState, plugin_id: &str) -> Result<(), PluginError
 /// enabled (a newly installed plugin is on by default). Idempotent, so
 /// replicas booting together cannot fail on the primary key.
 async fn register_rows(state: &AppState, ids: &[String]) -> Result<(), DbErr> {
+    // A bundle directory whose name is not a valid id is never a plugin.
+    let ids: Vec<&String> = ids
+        .iter()
+        .filter(|id| {
+            PluginId::parse(id.as_str())
+                .inspect_err(|e| tracing::warn!(error = %e, "Ignoring a bundled plugin directory"))
+                .is_ok()
+        })
+        .collect();
     if ids.is_empty() {
         return Ok(());
     }
-    plugin_entity::Entity::insert_many(ids.iter().map(|id| plugin_entity::ActiveModel {
+    plugin_entity::Entity::insert_many(ids.into_iter().map(|id| plugin_entity::ActiveModel {
         id: Set(id.clone()),
         is_enabled: Set(true),
         generation: Set(0),
@@ -694,45 +817,65 @@ pub fn declares_visibility(manifest: &plugin_core::manifest::PluginManifest) -> 
 
 /// A lifecycle change to record in the desired state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Change {
-    /// Enable (creating the row if needed).
+enum Change<'a> {
+    /// Enable (creating the row if needed). Refused if another replica
+    /// published a different source meanwhile, so an enable never undoes an
+    /// upload it did not load.
     Enable,
-    /// Disable.
+    /// Disable. Refused unless the plugin is enabled, checked in the same
+    /// statement so it sees every replica's latest change. It changes only
+    /// `is_enabled` and keeps whichever source is published, so it cannot
+    /// undo another change.
     Disable,
     /// Re-apply an enabled plugin. Never enables: if another admin disabled
-    /// the plugin meanwhile, the reload is refused instead of undoing that.
+    /// the plugin meanwhile, the reload is refused instead of undoing that;
+    /// likewise if the published source changed.
     Reload,
+    /// Publish an uploaded archive as the plugin's source, and enable it.
+    /// Carries what the uploader saw published when it checked the archive
+    /// (`None`: no such plugin yet), and is refused if that changed since.
+    Upload(Option<&'a PluginSource>),
+    /// Remove the uploaded archive with this hash, so the bundled copy is
+    /// the source again. Refused if a different upload was published since.
+    RemoveUpload(&'a str),
 }
 
 /// Record `change` for one plugin and bump its generation, so every replica
-/// re-applies it. Returns the new generation, or `None` for a `Disable` or
-/// `Reload` of a plugin that is not enabled. The enabled check is part of
-/// the statement, so it sees every replica's latest change.
+/// re-applies it. Returns the new generation, or `None` when the change was
+/// refused (see [`Change`]).
 ///
-/// `fingerprint` is what the serving replica loaded; it becomes the version
-/// every other replica checks its own files against. `None` (a disable)
-/// keeps the recorded one.
+/// `fingerprint` is what the serving replica loaded from `source`; it
+/// becomes the version every other replica checks its own copy against.
+/// `None` (a disable) keeps the recorded one.
 async fn publish(
     state: &AppState,
     plugin_id: &str,
-    change: Change,
+    change: Change<'_>,
     fingerprint: Option<&Fingerprint>,
+    source: &PluginSource,
 ) -> Result<Option<i64>, DbErr> {
     let version = fingerprint.map(|f| f.version.clone());
     let hash = fingerprint.map(|f| f.hash.clone());
+    let archive = source.archive_hash().map(str::to_string);
     let statement = match change {
         Change::Enable => Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash)
-               VALUES ($1, $2, 1, NOW(), $3, $4)
+            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash)
+               VALUES ($1, TRUE, 1, NOW(), $2, $3, $4)
                ON CONFLICT (id) DO UPDATE
-                 SET is_enabled = EXCLUDED.is_enabled,
+                 SET is_enabled = TRUE,
                      generation = plugin.generation + 1,
                      updated_at = NOW(),
                      version = COALESCE(EXCLUDED.version, plugin.version),
                      content_hash = COALESCE(EXCLUDED.content_hash, plugin.content_hash)
+                 WHERE plugin.archive_hash IS NOT DISTINCT FROM EXCLUDED.archive_hash
                RETURNING generation"#,
-            [plugin_id.into(), true.into(), version.into(), hash.into()],
+            [
+                plugin_id.into(),
+                version.into(),
+                hash.into(),
+                archive.into(),
+            ],
         ),
         Change::Disable => Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -742,15 +885,65 @@ async fn publish(
                RETURNING generation"#,
             [plugin_id.into()],
         ),
+        // Inserts only when the uploader expected a new plugin, updates only
+        // when it expected exactly the source that is published. The
+        // candidate row exists whenever a plugin row does, so the conflict
+        // clause decides; without either, nothing is written.
+        Change::Upload(replaces) => Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash)
+               SELECT $1, TRUE, 1, NOW(), $2, $3, $4
+                WHERE $5 OR EXISTS (SELECT 1 FROM plugin WHERE id = $1)
+               ON CONFLICT (id) DO UPDATE
+                 SET is_enabled = TRUE,
+                     generation = plugin.generation + 1,
+                     updated_at = NOW(),
+                     version = COALESCE(EXCLUDED.version, plugin.version),
+                     content_hash = COALESCE(EXCLUDED.content_hash, plugin.content_hash),
+                     archive_hash = EXCLUDED.archive_hash
+                 WHERE NOT $5 AND plugin.archive_hash IS NOT DISTINCT FROM $6
+               RETURNING generation"#,
+            [
+                plugin_id.into(),
+                version.into(),
+                hash.into(),
+                archive.into(),
+                replaces.is_none().into(),
+                replaces
+                    .and_then(PluginSource::archive_hash)
+                    .map(str::to_string)
+                    .into(),
+            ],
+        ),
         Change::Reload => Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"UPDATE plugin
                   SET generation = generation + 1, updated_at = NOW(),
                       version = COALESCE($2, version),
                       content_hash = COALESCE($3, content_hash)
-               WHERE id = $1 AND is_enabled
+               WHERE id = $1 AND is_enabled AND archive_hash IS NOT DISTINCT FROM $4
                RETURNING generation"#,
-            [plugin_id.into(), version.into(), hash.into()],
+            [
+                plugin_id.into(),
+                version.into(),
+                hash.into(),
+                archive.into(),
+            ],
+        ),
+        Change::RemoveUpload(removed) => Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE plugin
+                  SET generation = generation + 1, updated_at = NOW(), archive_hash = NULL,
+                      version = COALESCE($2, version),
+                      content_hash = COALESCE($3, content_hash)
+               WHERE id = $1 AND archive_hash = $4
+               RETURNING generation"#,
+            [
+                plugin_id.into(),
+                version.into(),
+                hash.into(),
+                removed.into(),
+            ],
         ),
     };
     match state.db.query_one_raw(statement).await? {
@@ -771,6 +964,9 @@ enum ChangeError {
     /// A reload of a plugin that is no longer enabled (disabled through
     /// another replica since this one last looked).
     NotEnabled(String),
+    /// Another replica published a different source for the plugin since
+    /// this one read it.
+    Stale(String),
 }
 
 impl std::fmt::Display for ChangeError {
@@ -779,6 +975,7 @@ impl std::fmt::Display for ChangeError {
             ChangeError::Load(e) => e.fmt(f),
             ChangeError::Db(e) => e.fmt(f),
             ChangeError::NotEnabled(id) => write!(f, "Plugin '{id}' is not enabled"),
+            ChangeError::Stale(id) => write!(f, "Plugin '{id}' changed on another server"),
         }
     }
 }
@@ -791,34 +988,54 @@ impl From<ChangeError> for AppError {
             ChangeError::NotEnabled(id) => {
                 AppError::Conflict(format!("Plugin '{id}' is not enabled. Use enable instead."))
             }
+            ChangeError::Stale(id) => AppError::Conflict(format!(
+                "Plugin '{id}' was changed through another server meanwhile; refresh and try again"
+            )),
         }
     }
 }
 
-/// Load on this replica, then publish: the shared path behind enable, reload
-/// and upload. A plugin that cannot load here is not pushed to the fleet;
-/// the reconcile loop keeps retrying it locally against the old desired
-/// state.
+/// Load on this replica, then publish: the shared path behind enable,
+/// reload, upload and removing an upload. A plugin that cannot load here is
+/// not pushed to the fleet; the reconcile loop keeps retrying it locally
+/// against the old desired state.
 async fn load_then_publish(
     state: &AppState,
     applied: &mut HashMap<String, Applied>,
-    plugin_id: &str,
-    change: Change,
+    id: &PluginId,
+    change: Change<'_>,
+    source: &PluginSource,
 ) -> Result<(), ChangeError> {
-    let previous = match load_from_disk(state, plugin_id).await {
-        Ok(previous) => previous,
+    let plugin_id = id.as_str();
+    let before = Registered::now(state, plugin_id);
+    let loaded = async {
+        let root = plugin_distribution::locate(state, id, source)
+            .await
+            .map_err(|error| LoadFailure {
+                error,
+                kept_previous: false,
+            })?;
+        let previous = plugin_utils::load_from_dir(state, plugin_id, &root).await?;
+        Ok::<_, LoadFailure>((root, previous))
+    }
+    .await;
+    let (root, previous) = match loaded {
+        Ok(loaded) => loaded,
         Err(failure) => {
             if let Some(a) = applied.get_mut(plugin_id) {
                 a.retry = Some(Retry::after(a.retry, Instant::now()));
             }
+            if !failure.kept_previous {
+                before.restore(state, plugin_id).await;
+            }
             return Err(ChangeError::Load(failure.error));
         }
     };
-    let fingerprint = plugin_utils::fingerprint(state, plugin_id).await;
+    let fingerprint = plugin_utils::fingerprint(&root).await;
     record_governs(state, plugin_id).await;
-    let published = match publish(state, plugin_id, change, fingerprint.as_ref()).await {
+    let published = match publish(state, plugin_id, change, fingerprint.as_ref(), source).await {
         Ok(Some(generation)) => Ok(generation),
-        Ok(None) => Err(ChangeError::NotEnabled(plugin_id.to_string())),
+        Ok(None) => Err(refused(state, plugin_id, change).await),
         Err(e) => Err(ChangeError::Db(e)),
     };
     let generation = match published {
@@ -832,6 +1049,7 @@ async fn load_then_publish(
                     if let Err(e) = deactivate(state, plugin_id).await {
                         tracing::warn!(plugin_id, error = %e, "Failed to unload an unpublished plugin");
                     }
+                    before.restore(state, plugin_id).await;
                 }
             }
             return Err(e);
@@ -846,6 +1064,7 @@ async fn load_then_publish(
             kept_previous: None,
             fingerprint,
             mismatch: None,
+            unavailable: None,
         },
     );
     state.plugin_lifecycle.set_desired(plugin_id, true);
@@ -860,40 +1079,93 @@ async fn enabled_in_db(state: &AppState, plugin_id: &str) -> Result<bool, DbErr>
         .is_some_and(|row| row.is_enabled))
 }
 
-/// Whether `plugin_id` is in this replica's registry, looking for newly added
-/// plugin directories first if it is not.
-fn discover(state: &AppState, plugin_id: &str) -> Result<bool, PluginError> {
-    if state.plugins.has_plugin(plugin_id)? {
-        return Ok(true);
-    }
-    state.plugins.rediscover_plugins()?;
-    state.plugins.has_plugin(plugin_id)
+/// What this replica had registered for a plugin that was not loaded, so a
+/// change that publishes nothing can leave the registry as it found it
+/// (a loaded plugin is put back by [`plugin_utils::roll_back`] instead).
+enum Registered {
+    /// Loaded, or registered from the directory a failed load used.
+    Kept,
+    /// Registered, unloaded, from this directory.
+    Unloaded(std::path::PathBuf),
+    /// Not registered at all.
+    Absent,
 }
 
-fn require_known(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
-    if discover(state, plugin_id)? {
-        Ok(())
-    } else {
-        Err(AppError::NotFound(format!(
+impl Registered {
+    fn now(state: &AppState, plugin_id: &str) -> Self {
+        let Ok(registry) = state.plugins.get_registry().read() else {
+            return Registered::Kept;
+        };
+        match registry.get(plugin_id) {
+            None => Registered::Absent,
+            Some(entry) if entry.status == PluginStatus::Loaded => Registered::Kept,
+            Some(entry) => Registered::Unloaded(entry.root_dir.clone()),
+        }
+    }
+
+    async fn restore(self, state: &AppState, plugin_id: &str) {
+        match self {
+            Registered::Kept => {}
+            Registered::Unloaded(root) => plugin_utils::register_unloaded(state, plugin_id, &root),
+            Registered::Absent => {
+                purge_plugin_registrations(&state.registries, plugin_id).await;
+                if let Ok(mut registry) = state.plugins.get_registry().write() {
+                    registry.remove(plugin_id);
+                }
+            }
+        }
+    }
+}
+
+/// Why [`publish`] refused `change`.
+async fn refused(state: &AppState, plugin_id: &str, change: Change<'_>) -> ChangeError {
+    if change == Change::Reload {
+        let enabled = plugin_entity::Entity::find_by_id(plugin_id)
+            .one(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|row| row.is_enabled);
+        if !enabled {
+            return ChangeError::NotEnabled(plugin_id.to_string());
+        }
+    }
+    ChangeError::Stale(plugin_id.to_string())
+}
+
+/// The source the fleet publishes for `plugin_id`: the row's, or this
+/// replica's bundled copy for a plugin with no row yet.
+async fn published_source(state: &AppState, id: &PluginId) -> Result<PluginSource, AppError> {
+    let plugin_id = id.as_str();
+    match plugin_entity::Entity::find_by_id(plugin_id)
+        .one(&state.db)
+        .await?
+    {
+        Some(row) => Ok(PluginSource::of(row.archive_hash.as_deref())),
+        None if plugin_distribution::bundled_root(state, id).is_some() => Ok(PluginSource::Bundle),
+        None => Err(AppError::NotFound(format!(
             "Plugin '{plugin_id}' not found"
-        )))
+        ))),
     }
 }
 
 /// Enable a plugin fleet-wide.
 ///
 /// Also the retry for a plugin that is enabled but failed on this replica.
-pub async fn enable(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
+pub async fn enable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
+    let plugin_id = id.as_str();
     with_applied(state, async |applied| {
-        require_known(state, plugin_id)?;
+        let source = published_source(state, id).await?;
         // This replica may not have applied a peer's disable yet, so the
         // desired state comes from the database, not the local cache.
-        if enabled_in_db(state, plugin_id).await? && state.plugins.is_plugin_loaded(plugin_id)? {
+        if enabled_in_db(state, plugin_id).await?
+            && state.plugins.is_plugin_loaded(plugin_id).unwrap_or(false)
+        {
             return Err(AppError::Conflict(format!(
                 "Plugin '{plugin_id}' is already enabled"
             )));
         }
-        Ok(load_then_publish(state, applied, plugin_id, Change::Enable).await?)
+        Ok(load_then_publish(state, applied, id, Change::Enable, &source).await?)
     })
     .await
 }
@@ -903,9 +1175,12 @@ pub async fn enable(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
 ///
 /// Keyed on the desired state, not on this replica's load state, so a plugin
 /// that failed to load here can still be turned off.
-pub async fn disable(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
+pub async fn disable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
+    let plugin_id = id.as_str();
     with_applied(state, async |applied| {
-        let Some(generation) = publish(state, plugin_id, Change::Disable, None).await? else {
+        let source = published_source(state, id).await?;
+        let Some(generation) = publish(state, plugin_id, Change::Disable, None, &source).await?
+        else {
             return Err(AppError::Conflict(format!(
                 "Plugin '{plugin_id}' is not currently enabled"
             )));
@@ -915,78 +1190,222 @@ pub async fn disable(state: &AppState, plugin_id: &str) -> Result<(), AppError> 
             enabled: false,
             generation,
             published: None,
+            source,
         };
-        apply(state, applied, plugin_id, desired, Instant::now()).await?;
-        if let Err(e) =
-            crate::dispatcher::plugin_timer::delete_timers_for_plugin(&state.db, plugin_id).await
-        {
-            tracing::error!(
-                plugin_id,
-                error = %e,
-                "Failed to delete pending timers for a disabled plugin"
-            );
-        }
+        apply(state, applied, id, desired, Instant::now()).await?;
+        delete_timers(state, plugin_id).await;
         Ok(())
     })
     .await
 }
 
-/// Reload an enabled plugin from disk, fleet-wide. This is also the retry
-/// for a plugin that failed to load: it is accepted whatever this replica's
-/// own load state, and a successful load here bumps the generation, so every
-/// failing replica retries at once instead of waiting out its backoff.
-pub async fn reload(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
+/// Delete a plugin's pending timers once it is off or gone everywhere: they
+/// can never be delivered. Best-effort.
+async fn delete_timers(state: &AppState, plugin_id: &str) {
+    if let Err(e) =
+        crate::dispatcher::plugin_timer::delete_timers_for_plugin(&state.db, plugin_id).await
+    {
+        tracing::error!(
+            plugin_id,
+            error = %e,
+            "Failed to delete pending timers for a plugin that is off"
+        );
+    }
+}
+
+/// Reload an enabled plugin from its published source, fleet-wide. This is
+/// also the retry for a plugin that failed to load: it is accepted whatever
+/// this replica's own load state, and a successful load here bumps the
+/// generation, so every failing replica retries at once instead of waiting
+/// out its backoff.
+pub async fn reload(state: &AppState, id: &PluginId) -> Result<(), AppError> {
+    let plugin_id = id.as_str();
     with_applied(state, async |applied| {
-        require_known(state, plugin_id)?;
+        let source = published_source(state, id).await?;
         // Checked against the database so a peer's recent enable or disable
         // counts; `publish` re-checks atomically for a change in between.
         if !enabled_in_db(state, plugin_id).await? {
             return Err(ChangeError::NotEnabled(plugin_id.to_string()).into());
         }
-        Ok(load_then_publish(state, applied, plugin_id, Change::Reload).await?)
+        Ok(load_then_publish(state, applied, id, Change::Reload, &source).await?)
     })
     .await
 }
 
-/// (Re)load a plugin whose files were just written to this replica's disk
-/// (admin upload), and enable it fleet-wide.
-pub async fn install(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
+/// Publish an uploaded plugin archive fleet-wide: store it in the blob
+/// store, load it here, then record it as the plugin's source and enable it.
+/// Every other replica fetches it from the blob store on its next poll.
+///
+/// `replaces` is the source the admin saw published when the archive was
+/// checked (`None`: a new plugin). If another change landed since, nothing
+/// is published and the upload is refused as a conflict. A load failure
+/// here is returned as [`AppError::PluginLoadFailed`] and publishes nothing.
+pub async fn install(
+    state: &AppState,
+    archive: PluginArchive,
+    replaces: Option<PluginSource>,
+) -> Result<(), AppError> {
+    let stored = state.blob_store.put(archive.bytes()).await?;
+    if stored != archive.hash() {
+        return Err(AppError::Internal(format!(
+            "blob store keyed the plugin archive {} as {stored}",
+            archive.hash()
+        )));
+    }
+    let id = archive.id().clone();
+    let source = PluginSource::Upload(archive.hash().to_hex());
     with_applied(state, async |applied| {
-        Ok(load_then_publish(state, applied, plugin_id, Change::Enable).await?)
+        // Unpack from the bytes in hand rather than fetching them back.
+        let stored = plugin_distribution::store(state, archive).await;
+        let result = match stored {
+            Ok(_) => {
+                let change = Change::Upload(replaces.as_ref());
+                load_then_publish(state, applied, &id, change, &source).await
+            }
+            Err(e) => Err(ChangeError::Load(e)),
+        };
+        refresh_cache(state).await;
+        result.map_err(|e| match e {
+            ChangeError::Load(e) => AppError::PluginLoadFailed(e.to_string()),
+            other => other.into(),
+        })
+    })
+    .await
+}
+
+/// [`retain_cache`] against the rows as they are now.
+async fn refresh_cache(state: &AppState) {
+    match plugin_entity::Entity::find().all(&state.db).await {
+        Ok(rows) => retain_cache(state, published_archives(&rows)).await,
+        Err(e) => tracing::warn!(error = %e, "Skipped plugin cache cleanup"),
+    }
+}
+
+/// What removing a plugin's upload does.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadRemoval {
+    /// The bundled copy is the plugin's source again.
+    BundleRestored,
+    /// No bundled copy exists, so the plugin is gone from the fleet.
+    Removed,
+}
+
+/// Remove a plugin's uploaded version fleet-wide. With a bundled copy on
+/// this replica, that copy becomes the source again (loaded here first if
+/// the plugin is enabled); without one, the plugin's row is deleted, which
+/// unloads it on every replica, and its pending timers go with it.
+///
+/// `expect` is the outcome the admin confirmed. Which one happens depends on
+/// this replica's bundle, so if it differs nothing is changed and the call
+/// is refused as a conflict.
+pub async fn remove_upload(
+    state: &AppState,
+    id: &PluginId,
+    expect: UploadRemoval,
+) -> Result<UploadRemoval, AppError> {
+    let plugin_id = id.as_str();
+    with_applied(state, async |applied| {
+        let row = plugin_entity::Entity::find_by_id(plugin_id)
+            .one(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Plugin '{plugin_id}' not found")))?;
+        let Some(archive) = row.archive_hash.clone() else {
+            return Err(AppError::Conflict(format!(
+                "Plugin '{plugin_id}' has no uploaded version"
+            )));
+        };
+        let bundled = plugin_distribution::bundled_root(state, id);
+        let would = match bundled {
+            Some(_) => UploadRemoval::BundleRestored,
+            None => UploadRemoval::Removed,
+        };
+        if would != expect {
+            return Err(AppError::Conflict(match would {
+                UploadRemoval::BundleRestored => format!(
+                    "This server has a bundled copy of '{plugin_id}', so removing the upload \
+                     would restore it rather than remove the plugin; confirm again"
+                ),
+                UploadRemoval::Removed => format!(
+                    "This server has no bundled copy of '{plugin_id}', so removing the upload \
+                     would remove the plugin from every server; confirm again"
+                ),
+            }));
+        }
+        let change = Change::RemoveUpload(&archive);
+        let stale = || ChangeError::Stale(plugin_id.to_string());
+        let outcome = match bundled {
+            Some(_) if row.is_enabled => {
+                load_then_publish(state, applied, id, change, &PluginSource::Bundle).await?;
+                UploadRemoval::BundleRestored
+            }
+            Some(root) => {
+                let fingerprint = plugin_utils::fingerprint(&root).await;
+                let generation = publish(
+                    state,
+                    plugin_id,
+                    change,
+                    fingerprint.as_ref(),
+                    &PluginSource::Bundle,
+                )
+                .await?
+                .ok_or_else(stale)?;
+                let desired = Desired {
+                    enabled: false,
+                    generation,
+                    published: fingerprint,
+                    source: PluginSource::Bundle,
+                };
+                apply(state, applied, id, desired, Instant::now()).await?;
+                UploadRemoval::BundleRestored
+            }
+            None => {
+                let deleted = state
+                    .db
+                    .execute_raw(Statement::from_sql_and_values(
+                        DbBackend::Postgres,
+                        "DELETE FROM plugin WHERE id = $1 AND archive_hash = $2",
+                        [plugin_id.into(), archive.clone().into()],
+                    ))
+                    .await?;
+                if deleted.rows_affected() == 0 {
+                    return Err(stale().into());
+                }
+                forget(state, applied, plugin_id).await;
+                delete_timers(state, plugin_id).await;
+                UploadRemoval::Removed
+            }
+        };
+        refresh_cache(state).await;
+        Ok(outcome)
     })
     .await
 }
 
 /// Reload every enabled plugin (including ones that failed to load here)
-/// and pick up new plugin directories, fleet-wide.
+/// and pick up new plugin directories in the bundle, fleet-wide.
 pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError> {
     with_applied(state, async |applied| {
-        // The fleet's desired state, not this replica's cache of it, so a
-        // peer's recent enable or disable counts.
-        let enabled_in_db: std::collections::HashSet<String> = plugin_entity::Entity::find()
-            .filter(plugin_entity::Column::IsEnabled.eq(true))
-            .all(&state.db)
-            .await?
-            .into_iter()
-            .map(|row| row.id)
-            .collect();
-        let enabled_ids: Vec<String> = state
-            .plugins
-            .list_plugins()?
-            .into_iter()
-            .map(|p| p.id)
-            .filter(|id| enabled_in_db.contains(id))
+        let rows = plugin_entity::Entity::find().all(&state.db).await?;
+        let enabled: Vec<(PluginId, PluginSource)> = rows
+            .iter()
+            // The fleet's desired state, not this replica's cache of it, so a
+            // peer's recent enable or disable counts.
+            .filter(|r| r.is_enabled)
+            .filter_map(|r| Some((row_id(r)?, PluginSource::of(r.archive_hash.as_deref()))))
             .collect();
 
         let mut reloaded = Vec::new();
         let mut failed = Vec::new();
-        for id in enabled_ids {
-            match load_then_publish(state, applied, &id, Change::Reload).await {
-                Ok(()) => reloaded.push(id),
+        for (id, source) in enabled {
+            match load_then_publish(state, applied, &id, Change::Reload, &source).await {
+                Ok(()) => reloaded.push(id.to_string()),
                 Err(e) => {
                     tracing::error!(plugin_id = %id, error = %e, "Failed to reload plugin");
                     failed.push(ReloadFailure {
-                        id,
+                        id: id.to_string(),
                         error: e.to_string(),
                     });
                 }
@@ -1003,8 +1422,9 @@ pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError>
         let rows = plugin_entity::Entity::find().all(&state.db).await?;
         let now = Instant::now();
         for row in rows.into_iter().filter(|r| new_ids.contains(&r.id)) {
+            let Some(id) = row_id(&row) else { continue };
             let desired = Desired::of(&row);
-            if let Err(e) = apply(state, applied, &row.id, desired, now).await {
+            if let Err(e) = apply(state, applied, &id, desired, now).await {
                 tracing::error!(plugin_id = %row.id, error = %e, "Failed to load new plugin");
                 failed.push(ReloadFailure {
                     id: row.id.clone(),

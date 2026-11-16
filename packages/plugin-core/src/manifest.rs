@@ -9,6 +9,13 @@ pub use broccoli_types::manifest::*;
 
 use crate::error::PluginError;
 
+/// Parses a `plugin.toml`. Config schema includes are left unresolved (see
+/// [`resolve_schema_includes`]).
+pub fn parse_manifest(toml_content: &str) -> Result<PluginManifest, PluginError> {
+    toml::from_str(toml_content)
+        .map_err(|e| PluginError::LoadFailed(format!("Invalid manifest syntax: {}", e)))
+}
+
 /// Replaces the properties of every config namespace that names an external
 /// `schema` file with the properties read from that file. Schema paths are
 /// resolved against `root_dir` and must stay inside it.
@@ -92,7 +99,6 @@ mod tests {
             version: "1.0.0".into(),
             description: None,
             server: None,
-            worker: None,
             web: None,
             translations: HashMap::new(),
             config: HashMap::from([(
@@ -135,7 +141,6 @@ mod tests {
             version: "1.0.0".into(),
             description: None,
             server: None,
-            worker: None,
             web: None,
             translations: HashMap::new(),
             config: HashMap::from([(

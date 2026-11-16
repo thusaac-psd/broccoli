@@ -1,28 +1,38 @@
-use std::io::Read as IoRead;
-use std::path::PathBuf;
-
 use axum::extract::DefaultBodyLimit;
 use axum::{
     Json,
-    extract::{Multipart, State},
-    http::StatusCode,
-    response::IntoResponse,
+    extract::{Multipart, Query, State},
 };
 use broccoli_server_sdk::permissions as perm;
+use sea_orm::EntityTrait;
 use tracing::instrument;
 
 // visibility-bypass-audited: every handler in this module (list_all_plugins,
 // get_plugin_details, enable_plugin, disable_plugin, reload_plugin,
-// reload_all_plugins, upload_plugin) requires perm::PLUGIN_MANAGE, pinned by
+// reload_all_plugins, get_plugin_upload_policy, inspect_plugin_archive,
+// upload_plugin, remove_plugin_upload) requires perm::PLUGIN_MANAGE, pinned by
 // tests/integration/plugin.rs's `contestant_cannot_manage_plugins`. This is
 // operator tooling over the plugin registry, never a per-row
 // Contest/Problem/Submission/Clarification view the kernel governs.
+use crate::entity::plugin as plugin_entity;
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::path::AppPath;
-use crate::models::plugin::{PluginDetailResponse, PluginFullDetailResponse, ReloadAllResponse};
+use crate::models::plugin::{
+    PluginArchiveForm, PluginArchiveSummary, PluginDetailResponse, PluginFullDetailResponse,
+    PluginUploadPolicy, PluginUploadResponse, PublishedPluginResponse, ReloadAllResponse,
+    RemoveUploadQuery, RemoveUploadResponse,
+};
+use crate::plugin_archive::{MAX_ARCHIVE_BYTES, PluginArchive};
+use crate::plugin_distribution::{PluginSource, bundled_root};
+use crate::plugin_id::PluginId;
+use crate::plugin_lifecycle::UploadRemoval;
 use crate::state::AppState;
-use crate::upload_limits::{LARGE_UPLOAD_LIMIT_BYTES, LARGE_UPLOAD_LIMIT_MIB};
+
+/// Whether this replica's bundle has a copy of the plugin `id`.
+fn is_bundled(state: &AppState, id: &str) -> bool {
+    PluginId::parse(id).is_ok_and(|id| bundled_root(state, &id).is_some())
+}
 
 #[utoipa::path(
     get,
@@ -30,7 +40,7 @@ use crate::upload_limits::{LARGE_UPLOAD_LIMIT_BYTES, LARGE_UPLOAD_LIMIT_MIB};
     tag = "Admin",
     operation_id = "listAllPlugins",
     summary = "List all discovered plugins",
-    description = "Returns a list of all plugins discovered on any server replica (a plugin whose files are not on the serving replica is listed with its id as its name and no manifest details), along with their manifest information, whether each is enabled, and its load state on every live server replica (`fleet`). Requires `plugin:manage` permission.",
+    description = "Returns a list of all plugins known to the fleet (a plugin whose files are not on the serving replica is listed with its id as its name and no manifest details), along with their manifest information, whether each is enabled, where its files come from (`source`: bundled with each node, or an uploaded archive), and its load state on every live server replica (`fleet`). Requires `plugin:manage` permission.",
     responses(
         (status = 200, description = "List of plugins retrieved successfully", body = Vec<PluginDetailResponse>),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
@@ -51,7 +61,10 @@ pub async fn list_all_plugins(
         .list_plugins()
         .map_err(AppError::from)?
         .into_iter()
-        .map(|info| PluginDetailResponse::new(info, &fleet))
+        .map(|info| {
+            let bundled = is_bundled(&state, &info.id);
+            PluginDetailResponse::new(info, &fleet, bundled)
+        })
         .collect();
     // Plugins installed on other replicas but not on this one: still listed,
     // so the page shows the same set whichever replica serves it.
@@ -64,7 +77,7 @@ pub async fn list_all_plugins(
     plugins.extend(
         remote
             .into_iter()
-            .map(|id| PluginDetailResponse::without_manifest(id, &fleet)),
+            .map(|id| PluginDetailResponse::without_manifest(id, &fleet, is_bundled(&state, id))),
     );
 
     Ok(Json(plugins))
@@ -76,7 +89,7 @@ pub async fn list_all_plugins(
     tag = "Admin",
     operation_id = "getPluginDetails",
     summary = "Get details of a specific plugin",
-    description = "Returns detailed information about a specific plugin, including its manifest, whether it is enabled, and its load state (with any load error) on every live server replica (`fleet`). Requires `plugin:manage` permission.",
+    description = "Returns detailed information about a specific plugin, including its manifest, whether it is enabled, where its files come from (`source`), and its load state (with any load error) on every live server replica (`fleet`). Requires `plugin:manage` permission.",
     params(("id" = String, Path, description = "Plugin ID")),
     responses(
         (status = 200, description = "Plugin details retrieved successfully", body = PluginFullDetailResponse),
@@ -90,7 +103,7 @@ pub async fn list_all_plugins(
 pub async fn get_plugin_details(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    AppPath(id): AppPath<String>,
+    AppPath(id): AppPath<PluginId>,
 ) -> Result<Json<PluginFullDetailResponse>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
 
@@ -99,12 +112,13 @@ pub async fn get_plugin_details(
         .list_plugins()
         .map_err(AppError::from)?
         .into_iter()
-        .find(|p| p.id == id);
+        .find(|p| p.id == id.as_str());
     let fleet = crate::plugin_fleet::read(&state.db).await?;
+    let bundled = bundled_root(&state, &id).is_some();
     match plugin {
-        Some(plugin) => Ok(Json(PluginFullDetailResponse::new(plugin, &fleet))),
-        None if fleet.plugin_ids().any(|known| known == id) => Ok(Json(
-            PluginFullDetailResponse::without_manifest(&id, &fleet),
+        Some(plugin) => Ok(Json(PluginFullDetailResponse::new(plugin, &fleet, bundled))),
+        None if fleet.plugin_ids().any(|known| known == id.as_str()) => Ok(Json(
+            PluginFullDetailResponse::without_manifest(&id, &fleet, bundled),
         )),
         None => Err(AppError::NotFound(format!("Plugin '{}' not found", id))),
     }
@@ -131,7 +145,7 @@ pub async fn get_plugin_details(
 pub async fn enable_plugin(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
-    AppPath(id): AppPath<String>,
+    AppPath(id): AppPath<PluginId>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
 
@@ -163,7 +177,7 @@ pub async fn enable_plugin(
 pub async fn disable_plugin(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
-    AppPath(id): AppPath<String>,
+    AppPath(id): AppPath<PluginId>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
 
@@ -180,14 +194,14 @@ pub async fn disable_plugin(
     tag = "Admin",
     operation_id = "reloadPlugin",
     summary = "Reload a plugin",
-    description = "Reloads a plugin by re-reading its manifest from disk and re-creating the WASM runtime. The plugin must be enabled; it need not be loaded on the serving replica, so this is also how to retry a plugin that failed to load. Reloads on the serving replica first; if that succeeds, every other replica reloads from its own plugins directory within a few seconds. Requires `plugin:manage` permission.",
+    description = "Reloads a plugin from its published source (each node's bundled copy, or the uploaded archive) and re-creates the WASM runtime. The plugin must be enabled; it need not be loaded on the serving replica, so this is also how to retry a plugin that failed to load. Reloads on the serving replica first; if that succeeds, every other replica reloads within a few seconds. Requires `plugin:manage` permission.",
     params(("id" = String, Path, description = "Plugin ID")),
     responses(
         (status = 200, description = "Plugin reloaded successfully", body = serde_json::Value),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Plugin not found (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "Plugin not enabled (CONFLICT)", body = ErrorBody),
+        (status = 409, description = "Plugin not enabled, or changed through another replica meanwhile (CONFLICT)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -195,7 +209,7 @@ pub async fn disable_plugin(
 pub async fn reload_plugin(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
-    AppPath(id): AppPath<String>,
+    AppPath(id): AppPath<PluginId>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
 
@@ -212,7 +226,7 @@ pub async fn reload_plugin(
     tag = "Admin",
     operation_id = "reloadAllPlugins",
     summary = "Reload all plugins and discover new ones",
-    description = "Reloads all currently loaded plugins and discovers any new plugins in the plugins directory, on every server replica: the serving replica reloads first and the others follow within a few seconds, each from its own plugins directory. The response reports the serving replica. Requires `plugin:manage` permission.",
+    description = "Reloads every enabled plugin from its published source and discovers any new plugins in the bundled plugins directory, on every server replica: the serving replica reloads first and the others follow within a few seconds. The response reports the serving replica. Requires `plugin:manage` permission.",
     responses(
         (status = 200, description = "Reload results", body = ReloadAllResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
@@ -230,258 +244,272 @@ pub async fn reload_all_plugins(
     Ok(Json(crate::plugin_lifecycle::reload_all(&state).await?))
 }
 
+/// Room for the multipart framing around the archive.
+const MULTIPART_OVERHEAD_BYTES: usize = 1024 * 1024;
+
 pub fn upload_body_limit() -> DefaultBodyLimit {
-    DefaultBodyLimit::max(LARGE_UPLOAD_LIMIT_BYTES)
+    DefaultBodyLimit::max(MAX_ARCHIVE_BYTES + MULTIPART_OVERHEAD_BYTES)
 }
 
-/// Canonical plugin-id validation, shared by the plugin-upload path and the
-/// plugin-config handlers so the two can never disagree (they previously did:
-/// one enforced an alphanumeric first char, the other a 128-char cap). A plugin
-/// id becomes a filesystem path segment, so it is deliberately strict: non-empty,
-/// at most 128 chars, starts with an ASCII alphanumeric, and otherwise contains
-/// only ASCII alphanumeric, `_`, or `-`.
-pub(crate) fn is_valid_plugin_id(id: &str) -> bool {
-    if id.is_empty() || id.len() > 128 {
-        return false;
-    }
-    let first = id.as_bytes()[0];
-    if !first.is_ascii_alphanumeric() {
-        return false;
-    }
-    id.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+/// Read and validate the `plugin` field of an upload form.
+/// The fields of a plugin upload form.
+struct ArchiveForm {
+    archive: PluginArchive,
+    /// The `replaces` field, if sent.
+    replaces: Option<String>,
 }
 
-const MAX_FILE_SIZE: u64 = LARGE_UPLOAD_LIMIT_BYTES as u64;
-const MAX_AGGREGATE_SIZE: u64 = 2 * LARGE_UPLOAD_LIMIT_BYTES as u64;
+/// `body_len` is the request's `Content-Length`, if sent: the archive buffer
+/// is sized from it once instead of growing (and copying) as chunks arrive.
+async fn read_archive(
+    state: &AppState,
+    body_len: Option<usize>,
+    mut multipart: Multipart,
+) -> Result<ArchiveForm, AppError> {
+    if !state.config.plugin.uploads_enabled {
+        return Err(AppError::PluginUploadDisabled);
+    }
+    let too_large = || {
+        AppError::PayloadTooLarge(format!(
+            "Plugin archives are limited to {} MiB",
+            MAX_ARCHIVE_BYTES / (1024 * 1024)
+        ))
+    };
+    let unreadable = |e: axum::extract::multipart::MultipartError| {
+        if e.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+            too_large()
+        } else {
+            AppError::Validation(format!("Failed to read the upload: {e}"))
+        }
+    };
+    let (mut bytes, mut replaces) = (None, None);
+    while let Some(mut field) = multipart.next_field().await.map_err(unreadable)? {
+        match field.name() {
+            Some("plugin") => {
+                // Chunk by chunk, so an oversized archive is refused as soon
+                // as it crosses the limit rather than read to the end.
+                let mut buf = Vec::with_capacity(body_len.unwrap_or(0).min(MAX_ARCHIVE_BYTES));
+                while let Some(chunk) = field.chunk().await.map_err(unreadable)? {
+                    if buf.len() + chunk.len() > MAX_ARCHIVE_BYTES {
+                        return Err(too_large());
+                    }
+                    buf.extend_from_slice(&chunk);
+                }
+                bytes = Some(buf);
+            }
+            Some("replaces") => replaces = Some(field.text().await.map_err(unreadable)?),
+            _ => {}
+        }
+    }
+    let bytes = bytes
+        .ok_or_else(|| AppError::Validation("Missing 'plugin' field in multipart form".into()))?;
+    // Decompressing and checking up to the unpacked limit is CPU work.
+    let archive = tokio::task::spawn_blocking(move || PluginArchive::parse(bytes))
+        .await
+        .map_err(|e| AppError::Internal(format!("Archive check task failed: {e}")))?
+        .map_err(|e| AppError::Validation(e.to_string()))?;
+    Ok(ArchiveForm { archive, replaces })
+}
+
+/// The `replaces` field: `new` for a plugin that does not exist yet,
+/// `bundle`, or the hash of the uploaded archive being replaced, exactly as
+/// inspecting the archive reported the current source.
+fn parse_replaces(value: Option<&str>) -> Result<Option<PluginSource>, AppError> {
+    let missing = || {
+        AppError::Validation(
+            "The 'replaces' field must be 'new', 'bundle' or the archive hash being replaced, \
+             as inspecting the archive reported it"
+                .into(),
+        )
+    };
+    match value.ok_or_else(missing)?.trim() {
+        "new" => Ok(None),
+        "bundle" => Ok(Some(PluginSource::Bundle)),
+        hash => {
+            let hash = common::storage::ContentHash::from_hex(hash).map_err(|_| missing())?;
+            Ok(Some(PluginSource::Upload(hash.to_hex())))
+        }
+    }
+}
+
+fn content_length(headers: &axum::http::HeaderMap) -> Option<usize> {
+    headers
+        .get(axum::http::header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
+}
+
+/// One archive at a time per server: each holds up to [`MAX_ARCHIVE_BYTES`]
+/// in memory while it is read and checked, so uploads and inspections queue
+/// here instead of adding up.
+static ARCHIVE_INTAKE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+async fn archive_intake() -> Result<tokio::sync::SemaphorePermit<'static>, AppError> {
+    ARCHIVE_INTAKE
+        .acquire()
+        .await
+        .map_err(|e| AppError::Internal(format!("archive intake closed: {e}")))
+}
+
+#[utoipa::path(
+    get,
+    path = "/plugins/upload",
+    tag = "Admin",
+    operation_id = "getPluginUploadPolicy",
+    summary = "Whether plugin uploads are accepted",
+    description = "Reports whether this server accepts plugin archive uploads (operators can switch them off with `plugin.uploads_enabled`) and the largest archive accepted. Requires `plugin:manage` permission.",
+    responses(
+        (status = 200, description = "Upload policy", body = PluginUploadPolicy),
+        (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
+    ),
+    security(("jwt" = [])),
+)]
+#[instrument(skip(state, auth_user))]
+pub async fn get_plugin_upload_policy(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<PluginUploadPolicy>, AppError> {
+    auth_user.require_permission(perm::PLUGIN_MANAGE)?;
+    Ok(Json(PluginUploadPolicy {
+        enabled: state.config.plugin.uploads_enabled,
+        max_archive_bytes: MAX_ARCHIVE_BYTES as u64,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/plugins/upload/inspect",
+    tag = "Admin",
+    operation_id = "inspectPluginArchive",
+    summary = "Check a plugin archive without publishing it",
+    description = "Validates a tar.gz plugin archive exactly as an upload would and reports what it would publish: the plugin id, version, the host permissions it requests, and what the fleet runs under that id now. Publishes nothing. Requires `plugin:manage` permission.",
+    request_body(content_type = "multipart/form-data", content = PluginArchiveForm),
+    responses(
+        (status = 200, description = "The archive is valid", body = PluginArchiveSummary),
+        (status = 400, description = "Invalid archive (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED, PLUGIN_UPLOAD_DISABLED)", body = ErrorBody),
+        (status = 413, description = "Archive too large (PAYLOAD_TOO_LARGE)", body = ErrorBody),
+    ),
+    security(("jwt" = [])),
+)]
+#[instrument(skip(state, auth_user, headers, multipart))]
+pub async fn inspect_plugin_archive(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    multipart: Multipart,
+) -> Result<Json<PluginArchiveSummary>, AppError> {
+    auth_user.require_permission(perm::PLUGIN_MANAGE)?;
+    let _intake = archive_intake().await?;
+    let archive = read_archive(&state, content_length(&headers), multipart)
+        .await?
+        .archive;
+    let current = plugin_entity::Entity::find_by_id(archive.id().as_str())
+        .one(&state.db)
+        .await?
+        .map(|row| PublishedPluginResponse {
+            source: PluginSource::of(row.archive_hash.as_deref()).kind(),
+            archive_hash: row.archive_hash,
+            version: row.version,
+            enabled: row.is_enabled,
+        });
+    let manifest = archive.manifest();
+    Ok(Json(PluginArchiveSummary {
+        id: archive.id().to_string(),
+        name: manifest.name.clone(),
+        version: manifest.version.clone(),
+        description: manifest.description.clone(),
+        permissions: manifest
+            .server
+            .as_ref()
+            .map(|s| s.permissions.clone())
+            .unwrap_or_default(),
+        has_server: manifest.has_server(),
+        has_web: manifest.has_web(),
+        archive_hash: archive.hash().to_hex(),
+        size_bytes: archive.bytes().len() as u64,
+        current,
+    }))
+}
 
 #[utoipa::path(
     post,
     path = "/plugins/upload",
     tag = "Admin",
     operation_id = "uploadPlugin",
-    summary = "Upload a plugin archive",
-    description = "Uploads a tar.gz plugin archive. Files are merged into the plugins directory (existing files not in the archive are preserved). The plugin is automatically loaded after upload and enabled on every replica; other replicas load it from their own plugins directory, so the directory must be shared (or the archive installed on each node). Requires `plugin:manage` permission.",
-    request_body(content_type = "multipart/form-data", content = Vec<u8>, description = "tar.gz archive with a single top-level directory containing plugin.toml"),
+    summary = "Upload and publish a plugin archive",
+    description = "Publishes a tar.gz plugin archive to every server replica. The archive is validated, stored in the shared blob store under its content hash, and loaded on the serving replica; only if that load succeeds is it recorded as the plugin's source and enabled, and every other replica then fetches it, verifies its hash and loads it within a few seconds. The archive replaces the plugin's files entirely, and takes precedence over a copy bundled with the nodes until the upload is removed. The form's `replaces` field states what the upload replaces, as inspecting the archive reported it, so an upload never silently replaces a change made meanwhile. A replica that cannot load it keeps serving the version it had. Requires `plugin:manage` permission.",
+    request_body(content_type = "multipart/form-data", content = PluginArchiveForm),
     responses(
-        (status = 200, description = "Plugin uploaded and loaded successfully", body = serde_json::Value),
+        (status = 200, description = "Plugin published and loaded on the serving replica", body = PluginUploadResponse),
         (status = 400, description = "Invalid archive (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
-        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED, PLUGIN_UPLOAD_DISABLED)", body = ErrorBody),
+        (status = 413, description = "Archive too large (PAYLOAD_TOO_LARGE)", body = ErrorBody),
+        (status = 409, description = "What the archive replaces (`replaces`) is no longer what is published: another change landed since the archive was inspected (CONFLICT)", body = ErrorBody),
+        (status = 422, description = "The plugin failed to load on the serving replica; nothing was published (PLUGIN_LOAD_FAILED)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user, multipart))]
+#[instrument(skip(state, auth_user, headers, multipart))]
 pub async fn upload_plugin(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
-    mut multipart: Multipart,
-) -> Result<impl IntoResponse, AppError> {
+    headers: axum::http::HeaderMap,
+    multipart: Multipart,
+) -> Result<Json<PluginUploadResponse>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
+    let _intake = archive_intake().await?;
+    let ArchiveForm { archive, replaces } =
+        read_archive(&state, content_length(&headers), multipart).await?;
+    let replaces = parse_replaces(replaces.as_deref())?;
+    let plugin_id = archive.id().to_string();
+    let version = archive.manifest().version.clone();
+    let archive_hash = archive.hash().to_hex();
+    crate::plugin_lifecycle::install(&state, archive, replaces).await?;
+    Ok(Json(PluginUploadResponse {
+        message: format!("Plugin '{plugin_id}' v{version} uploaded and published"),
+        plugin_id,
+        version,
+        archive_hash,
+    }))
+}
 
-    let mut archive_bytes: Option<Vec<u8>> = None;
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::Validation(format!("Multipart error: {}", e)))?
-    {
-        let name = field.name().unwrap_or("").to_string();
-        if name == "plugin" {
-            let data = field
-                .bytes()
-                .await
-                .map_err(|e| AppError::Validation(format!("Failed to read upload: {}", e)))?;
-            archive_bytes = Some(data.to_vec());
-            break;
+#[utoipa::path(
+    delete,
+    path = "/plugins/{id}/upload",
+    tag = "Admin",
+    operation_id = "removePluginUpload",
+    summary = "Remove a plugin's uploaded version",
+    description = "Removes the uploaded archive a plugin runs from, on every server replica. If the serving replica's bundle has a copy of the plugin, that copy becomes the source again (loaded on the serving replica first when the plugin is enabled); otherwise the plugin is removed from the fleet and its pending timers are deleted. `expect` names the outcome the admin confirmed; if this replica would do the other, nothing changes and the call answers 409. Allowed even when uploads are switched off. Requires `plugin:manage` permission.",
+    params(("id" = String, Path, description = "Plugin ID"), RemoveUploadQuery),
+    responses(
+        (status = 200, description = "Upload removed", body = RemoveUploadResponse),
+        (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
+        (status = 404, description = "Plugin not found (NOT_FOUND)", body = ErrorBody),
+        (status = 409, description = "The plugin has no uploaded version, it changed through another replica meanwhile, or this replica would do something other than `expect` (CONFLICT)", body = ErrorBody),
+    ),
+    security(("jwt" = [])),
+)]
+#[instrument(skip(state, auth_user), fields(id))]
+pub async fn remove_plugin_upload(
+    auth_user: FreshAuthUser,
+    State(state): State<AppState>,
+    AppPath(id): AppPath<PluginId>,
+    Query(query): Query<RemoveUploadQuery>,
+) -> Result<Json<RemoveUploadResponse>, AppError> {
+    auth_user.require_permission(perm::PLUGIN_MANAGE)?;
+    let outcome = crate::plugin_lifecycle::remove_upload(&state, &id, query.expect).await?;
+    let message = match outcome {
+        UploadRemoval::BundleRestored => {
+            format!("Removed the upload; plugin '{id}' runs its bundled version again")
         }
-    }
-
-    let archive_bytes = archive_bytes
-        .ok_or_else(|| AppError::Validation("Missing 'plugin' field in multipart form".into()))?;
-
-    let plugins_dir = &state.plugins.get_config().plugins_dir;
-
-    let mut plugin_id: Option<String> = None;
-    let mut has_manifest = false;
-    let mut validated_entries: Vec<(PathBuf, Vec<u8>)> = Vec::new();
-    let mut aggregate_size: u64 = 0;
-
-    let decoder = flate2::read::GzDecoder::new(&archive_bytes[..]);
-    let mut archive = tar::Archive::new(decoder);
-
-    for entry_result in archive
-        .entries()
-        .map_err(|e| AppError::Validation(format!("Failed to read archive entries: {}", e)))?
-    {
-        let entry =
-            entry_result.map_err(|e| AppError::Validation(format!("Invalid tar entry: {}", e)))?;
-
-        let entry_type = entry.header().entry_type();
-
-        if entry_type != tar::EntryType::Regular && entry_type != tar::EntryType::Directory {
-            return Err(AppError::Validation(
-                "Archive contains unsupported entry types (only regular files and directories allowed)".into(),
-            ));
-        }
-
-        let raw_path = entry
-            .path()
-            .map_err(|e| AppError::Validation(format!("Invalid path in archive: {}", e)))?
-            .to_path_buf();
-
-        for component in raw_path.components() {
-            if let std::path::Component::ParentDir = component {
-                return Err(AppError::Validation(
-                    "Archive contains path traversal (.. component)".into(),
-                ));
-            }
-            if let std::path::Component::RootDir = component {
-                return Err(AppError::Validation(
-                    "Archive contains absolute paths".into(),
-                ));
-            }
-        }
-
-        let components: Vec<_> = raw_path.components().collect();
-        if components.is_empty() {
-            continue;
-        }
-
-        let top_level = components[0].as_os_str().to_string_lossy().to_string();
-
-        if let Some(ref existing_id) = plugin_id {
-            if top_level != *existing_id {
-                return Err(AppError::Validation(
-                    "Archive must contain exactly one top-level directory".into(),
-                ));
-            }
-        } else if !is_valid_plugin_id(&top_level) {
-            return Err(AppError::Validation(format!(
-                "Invalid plugin ID '{}'. Must match [a-zA-Z0-9][a-zA-Z0-9_-]*",
-                top_level
-            )));
-        } else {
-            plugin_id = Some(top_level.clone());
-        }
-
-        if entry_type == tar::EntryType::Directory {
-            continue;
-        }
-
-        if components.len() == 2 && components[1].as_os_str() == "plugin.toml" {
-            has_manifest = true;
-        }
-
-        let mut limited_reader = entry.take(MAX_FILE_SIZE + 1);
-        let mut contents = Vec::new();
-        limited_reader
-            .read_to_end(&mut contents)
-            .map_err(|e| AppError::Validation(format!("Failed to read archive entry: {}", e)))?;
-
-        if contents.len() as u64 > MAX_FILE_SIZE {
-            return Err(AppError::Validation(format!(
-                "File '{}' exceeds maximum size of {}MB",
-                raw_path.display(),
-                LARGE_UPLOAD_LIMIT_MIB
-            )));
-        }
-
-        aggregate_size += contents.len() as u64;
-        if aggregate_size > MAX_AGGREGATE_SIZE {
-            return Err(AppError::Validation(format!(
-                "Total extracted size exceeds maximum of {}MB",
-                MAX_AGGREGATE_SIZE / (1024 * 1024)
-            )));
-        }
-
-        validated_entries.push((raw_path, contents));
-    }
-
-    let plugin_id = plugin_id.ok_or_else(|| {
-        AppError::Validation("Archive is empty or has no top-level directory".into())
-    })?;
-
-    if !has_manifest {
-        return Err(AppError::Validation(format!(
-            "Archive does not contain {}/plugin.toml",
-            plugin_id
-        )));
-    }
-
-    let dest_root = plugins_dir.join(&plugin_id);
-    let dest_root_clone = dest_root.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        for (path, contents) in &validated_entries {
-            let relative = path.iter().skip(1).collect::<PathBuf>();
-            let dest = dest_root_clone.join(&relative);
-
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    AppError::Internal(format!(
-                        "Failed to create directory '{}': {}",
-                        parent.display(),
-                        e
-                    ))
-                })?;
-
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let dir_perms = std::fs::Permissions::from_mode(0o755);
-                    let mut dir = parent.to_path_buf();
-                    while dir.starts_with(&dest_root_clone) {
-                        if let Err(e) = std::fs::set_permissions(&dir, dir_perms.clone()) {
-                            tracing::warn!(path = %dir.display(), error = %e, "Failed to set plugin directory permissions during unpack");
-                        }
-                        if !dir.pop() {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            std::fs::write(&dest, contents).map_err(|e| {
-                AppError::Internal(format!("Failed to write '{}': {}", dest.display(), e))
-            })?;
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let perms = std::fs::Permissions::from_mode(0o644);
-                if let Err(e) = std::fs::set_permissions(&dest, perms) {
-                    tracing::warn!(path = %dest.display(), error = %e, "Failed to set plugin file permissions during unpack");
-                }
-            }
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o755);
-            if let Err(e) = std::fs::set_permissions(&dest_root_clone, perms) {
-                tracing::warn!(path = %dest_root_clone.display(), error = %e, "Failed to set plugin root directory permissions during unpack");
-            }
-        }
-
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(format!("Extraction task panicked: {}", e)))??;
-
-    crate::plugin_lifecycle::install(&state, &plugin_id)
-        .await
-        .map_err(|e| match e {
-            AppError::Internal(detail) => {
-                AppError::Internal(format!("Failed to activate plugin after upload: {detail}"))
-            }
-            other => other,
-        })?;
-
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "plugin_id": plugin_id,
-            "message": format!("Plugin '{}' uploaded and loaded successfully", plugin_id)
-        })),
-    ))
+        UploadRemoval::Removed => format!("Removed plugin '{id}'"),
+    };
+    Ok(Json(RemoveUploadResponse { outcome, message }))
 }

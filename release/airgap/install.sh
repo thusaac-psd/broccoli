@@ -254,14 +254,8 @@ EOF
     worker_env="$BUNDLE/compose/.env.worker"
     [ -f "$worker_env" ] || { echo "missing $worker_env — run setup.sh --role worker (or copy compose/.env.worker.example and fill in secrets)" >&2; exit 2; }
     [ -n "$COMPOSE" ] || { echo "no working docker/podman compose provider found" >&2; exit 2; }
-    # ./plugins:/plugins:ro is bind-mounted from the bundle; build-bundle.sh
-    # stages the real plugin set there (manifest-verified above), so the source
-    # dir already exists and carries the evaluators/checkers the worker runs.
-    # Relabel that source for rootless Podman under SELinux Enforcing (no-op
-    # otherwise) — else SELinux denies the read and the worker loads no
-    # evaluators/checkers. Runs before compose up so the label is set first.
-    enable_requested_plugins "$BUNDLE/compose"
-    runtime_relabel "$ENGINE" "$BUNDLE/compose/plugins" 2>/dev/null || true
+    # No plugin step: workers run no plugin code (evaluators, checkers and
+    # contest types all run on the servers), so nothing is mounted for them.
     # A worker is its own Compose project (COMPOSE_PROJECT_NAME in a newly
     # generated .env.worker), so a worker on the server host gets its own
     # network and is never an orphan of the server stack. A .env.worker from

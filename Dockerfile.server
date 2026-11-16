@@ -156,6 +156,10 @@ RUN if [ "$USE_CN_MIRRORS" = "true" ]; then \
 # and nothing judges. Create the dir in this shell-bearing stage; the runtime
 # stage COPYs it with --chown (distroless has no shell to mkdir/chown itself).
 RUN mkdir -p /out/home/nonroot/.cache
+# The server unpacks uploaded plugin archives here (plugin.cache_dir). It
+# must be writable by uid 65532; a named volume mounted over it starts out
+# with this ownership.
+RUN mkdir -p /out/plugin-cache
 
 FROM ${RUNTIME_IMAGE} AS runtime
 
@@ -184,9 +188,11 @@ COPY --from=tini-stage --chown=65532:65532 /usr/bin/tini /usr/bin/tini
 # evaluator/checker/hook plugin registers at boot. Without HOME set explicitly a
 # base bump could silently reintroduce the empty-registry / no-judging failure.
 COPY --from=tini-stage --chown=65532:65532 /out/home/nonroot /home/nonroot
+COPY --from=tini-stage --chown=65532:65532 /out/plugin-cache /var/cache/broccoli/plugins
 
 ENV HOME=/home/nonroot \
     BROCCOLI__PLUGIN__PLUGINS_DIR=/plugins \
+    BROCCOLI__PLUGIN__CACHE_DIR=/var/cache/broccoli/plugins \
     BROCCOLI__SERVER__FRONTEND_DIST=/srv/dist \
     BROCCOLI__SERVER__HOST=0.0.0.0 \
     BROCCOLI__SERVER__PORT=3000 \

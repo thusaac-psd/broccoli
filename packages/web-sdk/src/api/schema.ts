@@ -13,7 +13,7 @@ export interface paths {
     };
     /**
      * List all discovered plugins
-     * @description Returns a list of all plugins discovered on any server replica (a plugin whose files are not on the serving replica is listed with its id as its name and no manifest details), along with their manifest information, whether each is enabled, and its load state on every live server replica (`fleet`). Requires `plugin:manage` permission.
+     * @description Returns a list of all plugins known to the fleet (a plugin whose files are not on the serving replica is listed with its id as its name and no manifest details), along with their manifest information, whether each is enabled, where its files come from (`source`: bundled with each node, or an uploaded archive), and its load state on every live server replica (`fleet`). Requires `plugin:manage` permission.
      */
     get: operations['listAllPlugins'];
     put?: never;
@@ -35,7 +35,7 @@ export interface paths {
     put?: never;
     /**
      * Reload all plugins and discover new ones
-     * @description Reloads all currently loaded plugins and discovers any new plugins in the plugins directory, on every server replica: the serving replica reloads first and the others follow within a few seconds, each from its own plugins directory. The response reports the serving replica. Requires `plugin:manage` permission.
+     * @description Reloads every enabled plugin from its published source and discovers any new plugins in the bundled plugins directory, on every server replica: the serving replica reloads first and the others follow within a few seconds. The response reports the serving replica. Requires `plugin:manage` permission.
      */
     post: operations['reloadAllPlugins'];
     delete?: never;
@@ -51,13 +51,37 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
+    /**
+     * Whether plugin uploads are accepted
+     * @description Reports whether this server accepts plugin archive uploads (operators can switch them off with `plugin.uploads_enabled`) and the largest archive accepted. Requires `plugin:manage` permission.
+     */
+    get: operations['getPluginUploadPolicy'];
+    put?: never;
+    /**
+     * Upload and publish a plugin archive
+     * @description Publishes a tar.gz plugin archive to every server replica. The archive is validated, stored in the shared blob store under its content hash, and loaded on the serving replica; only if that load succeeds is it recorded as the plugin's source and enabled, and every other replica then fetches it, verifies its hash and loads it within a few seconds. The archive replaces the plugin's files entirely, and takes precedence over a copy bundled with the nodes until the upload is removed. The form's `replaces` field states what the upload replaces, as inspecting the archive reported it, so an upload never silently replaces a change made meanwhile. A replica that cannot load it keeps serving the version it had. Requires `plugin:manage` permission.
+     */
+    post: operations['uploadPlugin'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/admin/plugins/upload/inspect': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
     get?: never;
     put?: never;
     /**
-     * Upload a plugin archive
-     * @description Uploads a tar.gz plugin archive. Files are merged into the plugins directory (existing files not in the archive are preserved). The plugin is automatically loaded after upload and enabled on every replica; other replicas load it from their own plugins directory, so the directory must be shared (or the archive installed on each node). Requires `plugin:manage` permission.
+     * Check a plugin archive without publishing it
+     * @description Validates a tar.gz plugin archive exactly as an upload would and reports what it would publish: the plugin id, version, the host permissions it requests, and what the fleet runs under that id now. Publishes nothing. Requires `plugin:manage` permission.
      */
-    post: operations['uploadPlugin'];
+    post: operations['inspectPluginArchive'];
     delete?: never;
     options?: never;
     head?: never;
@@ -73,7 +97,7 @@ export interface paths {
     };
     /**
      * Get details of a specific plugin
-     * @description Returns detailed information about a specific plugin, including its manifest, whether it is enabled, and its load state (with any load error) on every live server replica (`fleet`). Requires `plugin:manage` permission.
+     * @description Returns detailed information about a specific plugin, including its manifest, whether it is enabled, where its files come from (`source`), and its load state (with any load error) on every live server replica (`fleet`). Requires `plugin:manage` permission.
      */
     get: operations['getPluginDetails'];
     put?: never;
@@ -171,10 +195,30 @@ export interface paths {
     put?: never;
     /**
      * Reload a plugin
-     * @description Reloads a plugin by re-reading its manifest from disk and re-creating the WASM runtime. The plugin must be enabled; it need not be loaded on the serving replica, so this is also how to retry a plugin that failed to load. Reloads on the serving replica first; if that succeeds, every other replica reloads from its own plugins directory within a few seconds. Requires `plugin:manage` permission.
+     * @description Reloads a plugin from its published source (each node's bundled copy, or the uploaded archive) and re-creates the WASM runtime. The plugin must be enabled; it need not be loaded on the serving replica, so this is also how to retry a plugin that failed to load. Reloads on the serving replica first; if that succeeds, every other replica reloads within a few seconds. Requires `plugin:manage` permission.
      */
     post: operations['reloadPlugin'];
     delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/admin/plugins/{id}/upload': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /**
+     * Remove a plugin's uploaded version
+     * @description Removes the uploaded archive a plugin runs from, on every server replica. If the serving replica's bundle has a copy of the plugin, that copy becomes the source again (loaded on the serving replica first when the plugin is enabled); otherwise the plugin is removed from the fleet and its pending timers are deleted. `expect` names the outcome the admin confirmed; if this replica would do the other, nothing changes and the call answers 409. Allowed even when uploads are switched off. Requires `plugin:manage` permission.
+     */
+    delete: operations['removePluginUpload'];
     options?: never;
     head?: never;
     patch?: never;
@@ -3409,6 +3453,53 @@ export interface components {
       /** @example manage_users */
       permission: string;
     };
+    /**
+     * @description The multipart form the plugin upload endpoints read. Documentation only:
+     *     the handlers read the field themselves, after the permission and
+     *     upload-policy checks, so a refused upload is answered before its body is
+     *     read.
+     */
+    PluginArchiveForm: {
+      /**
+       * Format: binary
+       * @description A tar.gz archive with a single top-level directory, named after the
+       *     plugin id, containing `plugin.toml`.
+       */
+      plugin: Blob;
+      /**
+       * @description Upload only: what the archive replaces, as inspecting it reported:
+       *     `new` (no such plugin yet), `bundle`, or the hash of the uploaded
+       *     archive now published. A mismatch means another change landed since,
+       *     and the upload is refused with `409 CONFLICT`.
+       * @example bundle
+       */
+      replaces?: string | null;
+    };
+    /** @description What a plugin archive would publish, for the admin to confirm. */
+    PluginArchiveSummary: {
+      /** @description Content hash of the archive: its key in the blob store. */
+      archive_hash: string;
+      current?: null | components['schemas']['PublishedPluginResponse'];
+      description?: string | null;
+      has_server: boolean;
+      has_web: boolean;
+      /** @example my-plugin */
+      id: string;
+      /** @example My Plugin */
+      name: string;
+      /**
+       * @description Host permissions the plugin's server component requests.
+       * @example [
+       *       "storage",
+       *       "sql"
+       *     ]
+       */
+      permissions: string[];
+      /** Format: int64 */
+      size_bytes: number;
+      /** @example 1.2.0 */
+      version: string;
+    };
     PluginConfigResponse: {
       config: unknown;
       description?: string | null;
@@ -3438,12 +3529,12 @@ export interface components {
       has_server: boolean;
       /** @example true */
       has_web: boolean;
-      /** @example false */
-      has_worker: boolean;
       /** @example plugin-123 */
       id: string;
       /** @example An Awesome Plugin */
       name: string;
+      /** @description Where the fleet takes the plugin's files from. */
+      source: components['schemas']['PluginSourceResponse'];
       /**
        * @description Load state on the replica that served this request only. Prefer
        *     `enabled` and `fleet`, which cover every server replica.
@@ -3494,13 +3585,13 @@ export interface components {
       has_server: boolean;
       /** @example true */
       has_web: boolean;
-      /** @example false */
-      has_worker: boolean;
       /** @example plugin-123 */
       id: string;
       /** @example An Awesome Plugin */
       name: string;
-      server?: components['schemas']['ServerDetailResponse'] | null;
+      server?: null | components['schemas']['ServerDetailResponse'];
+      /** @description Where the fleet takes the plugin's files from. */
+      source: components['schemas']['PluginSourceResponse'];
       /**
        * @description Load state on the replica that served this request only. Prefer
        *     `enabled` and `fleet`, which cover every server replica.
@@ -3509,8 +3600,7 @@ export interface components {
       translations: string[];
       /** @example 1.0.0 */
       version: string;
-      web?: components['schemas']['WebDetailResponse'] | null;
-      worker?: components['schemas']['WorkerDetailResponse'] | null;
+      web?: null | components['schemas']['WebDetailResponse'];
     };
     /** @description One live replica's view of a plugin. */
     PluginReplicaResponse: {
@@ -3532,8 +3622,45 @@ export interface components {
        */
       version?: string | null;
     };
+    /**
+     * @description Where a plugin's files come from, as the admin API reports it.
+     * @enum {string}
+     */
+    PluginSourceKind: 'bundle' | 'upload';
+    /** @description The source the fleet runs a plugin from. */
+    PluginSourceResponse: {
+      /**
+       * @description Content hash of the uploaded archive, when `kind` is `upload`.
+       * @example 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+       */
+      archive_hash?: string | null;
+      /**
+       * @description Whether the serving replica's bundle has a copy of the plugin: what
+       *     removing the upload falls back to.
+       */
+      bundled: boolean;
+      kind: components['schemas']['PluginSourceKind'];
+    };
     /** @enum {string} */
     PluginStatusResponse: 'Unloaded' | 'Loaded' | 'Failed';
+    /** @description Whether this server accepts plugin uploads. */
+    PluginUploadPolicy: {
+      /** @description `false` when the operator switched uploads off (`plugin.uploads_enabled`). */
+      enabled: boolean;
+      /**
+       * Format: int64
+       * @description Largest archive accepted, in bytes.
+       */
+      max_archive_bytes: number;
+    };
+    PluginUploadResponse: {
+      archive_hash: string;
+      message: string;
+      /** @example my-plugin */
+      plugin_id: string;
+      /** @example 1.2.0 */
+      version: string;
+    };
     /** @description Response to `POST /contests/{id}/prewarm`. */
     PrewarmResponse: {
       /** Format: int32 */
@@ -3658,6 +3785,21 @@ export interface components {
     ProblemSamplesResponse: {
       samples: components['schemas']['SampleCase'][];
     };
+    /** @description What the fleet currently publishes for a plugin id. */
+    PublishedPluginResponse: {
+      /**
+       * @description Hash of the uploaded archive, when `source` is `upload`. An upload
+       *     that replaces this plugin sends it (or `bundle`) as `replaces`.
+       */
+      archive_hash?: string | null;
+      enabled: boolean;
+      source: components['schemas']['PluginSourceKind'];
+      /**
+       * @description Published manifest version, once one has been published.
+       * @example 1.1.0
+       */
+      version?: string | null;
+    };
     QueueInfo: {
       /**
        * @description `unread` (no consumer has taken them) and `pending` (taken, not yet
@@ -3747,6 +3889,10 @@ export interface components {
     ReloadFailure: {
       error: string;
       id: string;
+    };
+    RemoveUploadResponse: {
+      message: string;
+      outcome: components['schemas']['UploadRemoval'];
     };
     ReorderContestProblemsRequest: {
       /**
@@ -4376,6 +4522,11 @@ export interface components {
     UploadCheckerSourceRequest: {
       files: components['schemas']['CheckerSourceFile'][];
     };
+    /**
+     * @description What removing a plugin's upload does.
+     * @enum {string}
+     */
+    UploadRemoval: 'bundle_restored' | 'removed';
     /** @enum {string} */
     UploadTestCasesMergeStrategy: 'abort' | 'skip' | 'overwrite' | 'replace';
     UploadTestCasesRequest: {
@@ -4505,9 +4656,6 @@ export interface components {
     };
     WebVitalsPayload: {
       vitals: components['schemas']['WebVital'][];
-    };
-    WorkerDetailResponse: {
-      permissions: string[];
     };
     WorkerInfo: {
       /**
@@ -4689,6 +4837,44 @@ export interface operations {
       };
     };
   };
+  getPluginUploadPolicy: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Upload policy */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['PluginUploadPolicy'];
+        };
+      };
+      /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Forbidden (PERMISSION_DENIED) */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
   uploadPlugin: {
     parameters: {
       query?: never;
@@ -4696,20 +4882,19 @@ export interface operations {
       path?: never;
       cookie?: never;
     };
-    /** @description tar.gz archive with a single top-level directory containing plugin.toml */
     requestBody: {
       content: {
-        'multipart/form-data': number[];
+        'multipart/form-data': components['schemas']['PluginArchiveForm'];
       };
     };
     responses: {
-      /** @description Plugin uploaded and loaded successfully */
+      /** @description Plugin published and loaded on the serving replica */
       200: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': unknown;
+          'application/json': components['schemas']['PluginUploadResponse'];
         };
       };
       /** @description Invalid archive (VALIDATION_ERROR) */
@@ -4730,8 +4915,95 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden (PERMISSION_DENIED, PLUGIN_UPLOAD_DISABLED) */
       403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description What the archive replaces (`replaces`) is no longer what is published: another change landed since the archive was inspected (CONFLICT) */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Archive too large (PAYLOAD_TOO_LARGE) */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin failed to load on the serving replica; nothing was published (PLUGIN_LOAD_FAILED) */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  inspectPluginArchive: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'multipart/form-data': components['schemas']['PluginArchiveForm'];
+      };
+    };
+    responses: {
+      /** @description The archive is valid */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['PluginArchiveSummary'];
+        };
+      };
+      /** @description Invalid archive (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Forbidden (PERMISSION_DENIED, PLUGIN_UPLOAD_DISABLED) */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Archive too large (PAYLOAD_TOO_LARGE) */
+      413: {
         headers: {
           [name: string]: unknown;
         };
@@ -5183,7 +5455,69 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin not enabled (CONFLICT) */
+      /** @description Plugin not enabled, or changed through another replica meanwhile (CONFLICT) */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  removePluginUpload: {
+    parameters: {
+      query: {
+        /** @description The outcome the admin confirmed: `bundle_restored` or `removed`. */
+        expect: components['schemas']['UploadRemoval'];
+      };
+      header?: never;
+      path: {
+        /** @description Plugin ID */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Upload removed */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RemoveUploadResponse'];
+        };
+      };
+      /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Forbidden (PERMISSION_DENIED) */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Plugin not found (NOT_FOUND) */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin has no uploaded version, it changed through another replica meanwhile, or this replica would do something other than `expect` (CONFLICT) */
       409: {
         headers: {
           [name: string]: unknown;
