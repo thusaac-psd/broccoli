@@ -1,7 +1,7 @@
 #[cfg(any(target_arch = "wasm32", test))]
 use std::collections::HashMap;
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(target_arch = "wasm32")]
 use broccoli_server_sdk::permissions as perm;
 // Host/PluginHttpRequest/SdkError/WireDecision/VisibilityQueryInput/Params are
 // used by both the wasm32-gated handlers below and the #[cfg(test)] unit
@@ -149,45 +149,18 @@ struct SubmissionVisibilityRow {
 }
 
 /// Core decision logic. Exercised directly by tests via `Host::mock()` (no
-/// wasm32 target required); the organiser-bypass branch is additionally
-/// pinned end-to-end by
+/// wasm32 target required). That organisers see unredacted judgements, which
+/// the host rule decides, is pinned end-to-end by
 /// `ioi_feedback_organiser_without_submission_view_all_sees_unredacted_judgement`
-/// in `packages/server/tests/e2e/plugins/ioi.rs` (see below). No e2e test
-/// pins every other branch of this function's behavior, so those unit tests
-/// remain the evidence they still work.
+/// in `packages/server/tests/e2e/plugins/ioi.rs`.
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn decide_visibility_decisions(
     host: &Host,
     req: &VisibilityQueryInput,
 ) -> Result<Vec<WireDecision>, SdkError> {
-    // Admin / view-all / organiser bypass, for the whole batch at once -- it
-    // does not depend on any individual resource.
-    //
-    // Both `SUBMISSION_VIEW_ALL` and `CONTEST_MANAGE` bypass, matching
-    // `can_view_privileged_submission_feedback` (top of this file), `api.rs`'s
-    // scoreboard ranking and ICPC's scoreboard-freeze decision: an organiser
-    // holding `contest:manage` without `submission:view_all` (a problem-setter
-    // or judge role) sees full data. See
-    // `ioi_feedback_organiser_without_submission_view_all_sees_unredacted_judgement`
-    // in `packages/server/tests/e2e/plugins/ioi.rs`.
-    //
-    // Note: this bypass does not change host-level reachability.
-    // `decide_submission` (host rule) does not bypass on `CONTEST_MANAGE`,
-    // so a non-enrolled `contest:manage` organiser still gets a 404 before
-    // this plugin ever runs -- "organisers always see the real data" holds
-    // only for organisers who are also enrolled participants.
-    if req
-        .subject
-        .permissions
-        .iter()
-        .any(|p| p == perm::SUBMISSION_VIEW_ALL || p == perm::CONTEST_MANAGE)
-    {
-        return Ok(req
-            .resources
-            .iter()
-            .map(|_| WireDecision::Allow {})
-            .collect());
-    }
+    // The host never asks this about staff (`contest:manage` or
+    // `submission:view_all`): organisers see the real data by the host's
+    // rule, so nothing here decides for them.
 
     // Resources this plugin has any opinion about at all: `kind ==
     // "submission"` with a resolvable id and a known contest_id. Everything
@@ -465,58 +438,6 @@ mod visibility_tests {
     fn seed_ioi_config(host: &Host, contest_id: i32, config: serde_json::Value) {
         host.config
             .seed("contest", &contest_id.to_string(), "contest", config);
-    }
-
-    #[test]
-    fn decide_visibility_admin_bypass_allows_everything_without_querying() {
-        let host = Host::mock();
-        let mut sub = subject(Some(99));
-        sub.permissions.push(perm::SUBMISSION_VIEW_ALL.to_string());
-        let req = VisibilityQueryInput {
-            subject: sub,
-            action: "view".to_string(),
-            context: QueryContext {
-                contest_id: Some(10),
-            },
-            resources: vec![submission_resource(7, 10), submission_resource(8, 10)],
-        };
-        let decisions = decide_visibility_decisions(&host, &req).unwrap();
-        assert_eq!(decisions.len(), 2);
-        assert!(
-            decisions
-                .iter()
-                .all(|d| matches!(d, WireDecision::Allow {}))
-        );
-        assert!(host.db.queries().is_empty());
-    }
-
-    /// Deliberate BEHAVIOUR CHANGE (see the comment on
-    /// `decide_visibility_decisions`): a viewer holding `contest:manage`
-    /// without `submission:view_all` -- a plausible problem-setter or judge
-    /// role -- must also bypass the whole batch, matching
-    /// `can_view_privileged_submission_feedback` and mirroring ICPC's Task
-    /// 17 fix.
-    #[test]
-    fn decide_visibility_contest_manage_bypass_allows_everything_without_querying() {
-        let host = Host::mock();
-        let mut sub = subject(Some(99));
-        sub.permissions.push(perm::CONTEST_MANAGE.to_string());
-        let req = VisibilityQueryInput {
-            subject: sub,
-            action: "view".to_string(),
-            context: QueryContext {
-                contest_id: Some(10),
-            },
-            resources: vec![submission_resource(7, 10), submission_resource(8, 10)],
-        };
-        let decisions = decide_visibility_decisions(&host, &req).unwrap();
-        assert_eq!(decisions.len(), 2);
-        assert!(
-            decisions
-                .iter()
-                .all(|d| matches!(d, WireDecision::Allow {}))
-        );
-        assert!(host.db.queries().is_empty());
     }
 
     #[test]

@@ -18,7 +18,6 @@
 //! >
 //! > | Condition | Decision |
 //! > |---|---|
-//! > | V holds `submission:view_all` | `Allow` |
 //! > | V is O's opponent, and the match is in the ordering phase |
 //! >   `Allow` -- V must read it to rank it |
 //! > | V is O, and the problem is V's current open 小局 | `Allow` |
@@ -27,12 +26,15 @@
 //! > | During preparation, game breaks, or after a match ends | `Deny` |
 //! > | otherwise | `Deny` |
 //!
-//! `Resource::Submission`: `Allow` iff the viewer owns it or holds
-//! `submission:view_all`; otherwise `Deny`. This single rule also delivers
+//! `Resource::Submission`: `Allow` iff the viewer owns it; otherwise `Deny`.
+//! This single rule also delivers
 //! "eliminated players see only their own past matches" with no separate
 //! elimination branch: an eliminated player has no current 小局 anywhere, so
 //! every problem query of theirs falls through to `Deny` while their own
 //! submission history stays visible.
+//!
+//! The host never asks this query about staff (`contest:manage` or
+//! `submission:view_all`): they see what the host rules show them.
 
 use broccoli_server_sdk::prelude::*;
 
@@ -47,8 +49,6 @@ use crate::model::PhaseName;
 #[cfg(any(target_arch = "wasm32", test))]
 use std::collections::HashMap;
 
-#[cfg(any(target_arch = "wasm32", test))]
-use broccoli_server_sdk::permissions as perm;
 #[cfg(any(target_arch = "wasm32", test))]
 use serde::Deserialize;
 
@@ -145,8 +145,8 @@ pub fn decide_problem(
 
 /// Decide whether `viewer` may see a submission owned by `owner`. Players
 /// never see each other's submissions, during or after a match.
-pub fn decide_submission(owner: i32, viewer: i32, can_view_all: bool) -> WireDecision {
-    if can_view_all || viewer == owner {
+pub fn decide_submission(owner: i32, viewer: i32) -> WireDecision {
+    if viewer == owner {
         WireDecision::Allow {}
     } else {
         WireDecision::Deny {}
@@ -250,18 +250,6 @@ fn decide_visibility_decisions(
     host: &Host,
     req: &VisibilityQueryInput,
 ) -> Result<Vec<WireDecision>, SdkError> {
-    if req
-        .subject
-        .permissions
-        .iter()
-        .any(|p| p == perm::SUBMISSION_VIEW_ALL)
-    {
-        return Ok(req
-            .resources
-            .iter()
-            .map(|_| WireDecision::Allow {})
-            .collect());
-    }
     let viewer = req.subject.user_id;
 
     // -- Problem parts (problem, sample, attachment): resolve contest_type,
@@ -455,7 +443,7 @@ fn decide_visibility_decisions(
                 let Some(v) = viewer else {
                     return WireDecision::Deny {};
                 };
-                decide_submission(owner, v, false)
+                decide_submission(owner, v)
             }
             _ => WireDecision::Allow {},
         })
@@ -626,28 +614,19 @@ mod tests {
 
     #[test]
     fn a_submission_is_visible_to_its_owner() {
-        assert_eq!(decide_submission(10, 10, false), WireDecision::Allow {});
+        assert_eq!(decide_submission(10, 10), WireDecision::Allow {});
     }
 
     #[test]
-    fn a_submission_is_hidden_from_a_non_owner_without_view_all() {
-        assert_eq!(decide_submission(10, 20, false), WireDecision::Deny {});
+    fn a_submission_is_hidden_from_a_non_owner() {
+        assert_eq!(decide_submission(10, 20), WireDecision::Deny {});
     }
 
-    #[test]
-    fn view_all_sees_a_submission_it_does_not_own() {
-        assert_eq!(decide_submission(10, 20, true), WireDecision::Allow {});
-    }
-
-    fn subject(user_id: Option<i32>, can_view_all: bool) -> QuerySubject {
+    fn subject(user_id: Option<i32>) -> QuerySubject {
         QuerySubject {
             user_id,
             authenticated: user_id.is_some(),
-            permissions: if can_view_all {
-                vec![perm::SUBMISSION_VIEW_ALL.to_string()]
-            } else {
-                vec![]
-            },
+            permissions: vec![],
         }
     }
 
@@ -835,7 +814,7 @@ mod tests {
         let host = Host::mock();
         seed_bracket_contest(&host, 7);
         let req = VisibilityQueryInput {
-            subject: subject(Some(20), false),
+            subject: subject(Some(20)),
             action: "view".to_string(),
             context: QueryContext {
                 contest_id: Some(7),
@@ -854,7 +833,7 @@ mod tests {
             { "contest_id": 7, "contest_type": "codelink-bracket" }
         ]));
         let req_owner = VisibilityQueryInput {
-            subject: subject(Some(10), false),
+            subject: subject(Some(10)),
             action: "view".to_string(),
             context: QueryContext {
                 contest_id: Some(7),
@@ -891,7 +870,7 @@ mod tests {
             let host = Host::mock();
             seed_bracket_contest(&host, 7);
             let req = VisibilityQueryInput {
-                subject: subject(Some(viewer), false),
+                subject: subject(Some(viewer)),
                 action: "view".to_string(),
                 context: QueryContext {
                     contest_id: Some(7),
@@ -918,7 +897,7 @@ mod tests {
             { "contest_id": 7, "contest_type": "icpc" }
         ]));
         let req = VisibilityQueryInput {
-            subject: subject(Some(999), false),
+            subject: subject(Some(999)),
             action: "view".to_string(),
             context: QueryContext {
                 contest_id: Some(7),
@@ -934,7 +913,7 @@ mod tests {
         let host = Host::mock();
         seed_bracket_contest(&host, 7);
         let req = VisibilityQueryInput {
-            subject: subject(Some(10), false),
+            subject: subject(Some(10)),
             action: "view".to_string(),
             context: QueryContext {
                 contest_id: Some(7),
@@ -956,22 +935,6 @@ mod tests {
             matches!(decisions[1], WireDecision::Allow {}),
             "no opinion on Resource::Contest"
         );
-    }
-
-    #[test]
-    fn decide_visibility_admin_bypass_allows_everything_without_querying() {
-        let host = Host::mock();
-        let req = VisibilityQueryInput {
-            subject: subject(Some(1), true),
-            action: "view".to_string(),
-            context: QueryContext {
-                contest_id: Some(7),
-            },
-            resources: vec![problem_resource(7, 101)],
-        };
-        let decisions = decide_visibility_decisions(&host, &req).unwrap();
-        assert!(matches!(decisions[0], WireDecision::Allow {}));
-        assert!(host.db.queries().is_empty());
     }
 
     // =====================================================================
@@ -1017,7 +980,7 @@ mod tests {
         ]));
         seed_setup_and_match(&host, 7, &m);
         let contest_scoped_req = VisibilityQueryInput {
-            subject: subject(Some(10), false),
+            subject: subject(Some(10)),
             action: "view".to_string(),
             context: QueryContext {
                 contest_id: Some(7),
@@ -1039,7 +1002,7 @@ mod tests {
         ]));
         seed_setup_and_match(&host, 7, &m);
         let standalone_req = VisibilityQueryInput {
-            subject: subject(Some(10), false),
+            subject: subject(Some(10)),
             action: "view".to_string(),
             context: QueryContext { contest_id: None },
             resources: vec![context_free_problem_resource(future_problem)],
@@ -1079,7 +1042,7 @@ mod tests {
         ]));
         seed_setup_and_match(&host, 7, &m);
         let contest_scoped_req = VisibilityQueryInput {
-            subject: subject(Some(20), false),
+            subject: subject(Some(20)),
             action: "view".to_string(),
             context: QueryContext {
                 contest_id: Some(7),
@@ -1095,7 +1058,7 @@ mod tests {
         ]));
         seed_setup_and_match(&host, 7, &m);
         let standalone_req = VisibilityQueryInput {
-            subject: subject(Some(20), false),
+            subject: subject(Some(20)),
             action: "view".to_string(),
             context: QueryContext { contest_id: None },
             resources: vec![context_free_problem_resource(101)],
@@ -1117,7 +1080,7 @@ mod tests {
         let host = Host::mock();
         host.db.queue_query_result(serde_json::json!([])); // no bracket-contest membership found
         let req = VisibilityQueryInput {
-            subject: subject(Some(10), false),
+            subject: subject(Some(10)),
             action: "view".to_string(),
             context: QueryContext { contest_id: None },
             resources: vec![context_free_problem_resource(555)],
@@ -1156,7 +1119,7 @@ mod tests {
         seed_setup_and_match(&host, 7, &m);
 
         let req = VisibilityQueryInput {
-            subject: subject(Some(10), false), // the OWNER -- the strictest viewer while live.
+            subject: subject(Some(10)), // the OWNER -- the strictest viewer while live.
             action: "view".to_string(),
             context: QueryContext { contest_id: None },
             resources: vec![context_free_problem_resource(103)],
@@ -1217,7 +1180,7 @@ mod tests {
         seed_setup_and_match(&host, 8, &visible_in_contest_8);
 
         let req = VisibilityQueryInput {
-            subject: subject(Some(10), false),
+            subject: subject(Some(10)),
             action: "view".to_string(),
             context: QueryContext { contest_id: None },
             resources: vec![context_free_problem_resource(101)],
@@ -1257,7 +1220,7 @@ mod tests {
         seed_setup_and_match(&host, 7, &m);
 
         let req = VisibilityQueryInput {
-            subject: subject(Some(20), false), // player B
+            subject: subject(Some(20)), // player B
             action: "view".to_string(),
             context: QueryContext { contest_id: None },
             resources: vec![
@@ -1319,7 +1282,7 @@ mod tests {
     fn standalone_submissions_are_allowed_without_a_lookup() {
         let host = Host::mock();
         let req = VisibilityQueryInput {
-            subject: subject(Some(7), false),
+            subject: subject(Some(7)),
             action: "read".to_string(),
             context: QueryContext { contest_id: None },
             resources: vec![QueryResource {
