@@ -153,8 +153,20 @@ fn interpret_checker_fn(
         request_bytes,
     )?;
 
-    let _verdict: CheckerVerdict = serde_json::from_slice(&output_bytes)
+    let verdict: CheckerVerdict = serde_json::from_slice(&output_bytes)
         .map_err(|e| extism::Error::msg(format!("Failed to deserialize checker verdict: {e}")))?;
+    // A checker that failed itself fails every attempt alike: the dispatch's
+    // system error stands under `CHECKER_FAILED`, with how it failed for
+    // staff, instead of being judged again.
+    if let Some(failure) = verdict.checker_failure
+        && let Some(faults) = crate::services::judging::DispatchFaults::of_current_call()
+    {
+        tracing::warn!(checker_format = %input.format, failure = %failure, "The problem's checker failed");
+        faults.record(
+            crate::services::judging::DispatchFault::CheckerFailed,
+            failure,
+        );
+    }
 
     super::write_bytes(plugin, outputs, &output_bytes)
 }

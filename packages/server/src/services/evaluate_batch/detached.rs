@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::judging_sessions::RunningSession;
 
 pub fn start_detached_windowed_evaluate(
     caller_plugin_id: String,
@@ -15,10 +16,9 @@ pub fn start_detached_windowed_evaluate(
     };
     // Counted from now: the session ends only after it has finalized its
     // judgement and run the after-judging hooks.
-    let running = deps.judging_sessions.enter();
+    let running = deps.judging_sessions.enter(&caller_plugin_id);
     tokio::spawn(async move {
-        let _running = running;
-        run_detached_windowed_evaluate(caller_plugin_id, deps, session_id, input).await;
+        run_detached_windowed_evaluate(caller_plugin_id, deps, session_id, input, running).await;
     });
     Ok(session)
 }
@@ -42,6 +42,8 @@ struct EvaluateDriver {
     op_retries: HashMap<i32, u32>,
     /// The problem inputs every window of the session judges with.
     problem_inputs: ProblemInputsCache,
+    /// This session as the server counts it; dropped after `on_end`.
+    running: RunningSession,
 }
 
 #[async_trait]
@@ -199,12 +201,29 @@ impl WindowedSession for EvaluateDriver {
         );
     }
 
+    async fn cut(&self) {
+        self.running.cut().await
+    }
+
+    fn attempt_lost(&self) -> bool {
+        self.submission_completion.is_some()
+            && self
+                .deps
+                .operation_deps
+                .faults
+                .as_ref()
+                .is_some_and(|faults| faults.lost().is_some())
+    }
+
     async fn on_end(&self, end: SessionEnd) {
         let Some(completion) = self.submission_completion.as_ref() else {
             return;
         };
         let (error_code, error_message) = match end {
             SessionEnd::Interrupted => return,
+            // The fault that lost the attempt decides the code, which hands
+            // the judgement back.
+            SessionEnd::Lost => (SESSION_ABORTED, "The platform lost the attempt".to_string()),
             SessionEnd::Aborted(error) => (
                 SESSION_ABORTED,
                 format!("The contest plugin's judging callback failed: {error}"),
@@ -223,6 +242,7 @@ async fn run_detached_windowed_evaluate(
     deps: EvaluateHostDeps,
     session_id: String,
     input: StartDetachedWindowedEvaluateInput,
+    running: RunningSession,
 ) {
     let StartDetachedWindowedEvaluateInput {
         batch,
@@ -265,6 +285,7 @@ async fn run_detached_windowed_evaluate(
         retry_pool,
         op_retries: HashMap::new(),
         problem_inputs: ProblemInputsCache::default(),
+        running,
     };
     run_windowed_session(
         driver,
@@ -283,12 +304,14 @@ pub const SESSION_ABORTED: &str = "PLUGIN_SESSION_ABORTED";
 /// recording a verdict.
 pub const SESSION_ENDED_WITHOUT_VERDICT: &str = "PLUGIN_NO_VERDICT";
 
-/// Leave the judgement a session judged terminal: finalize it as
+/// Leave the judgement a session judged settled: finalize it as
 /// `SystemError` if the plugin did not (a no-op when it did, or when the
-/// judgement was since requeued or superseded), or hand it back when its
-/// contest type is parked (`fail_dispatch`), then fire its after-judging
-/// hooks, which fire only for a terminal judgement. A platform fault the session's operations met decides the error
-/// code, as for a failed dispatch (`submission_dispatch::record_dispatch_failure`).
+/// judgement was since requeued or superseded), or hand it back when the
+/// platform lost the attempt or its contest type is parked
+/// (`fail_dispatch`), then fire its after-judging hooks, which fire only for
+/// a terminal judgement. A platform fault the session's operations met
+/// decides the error code, as for a failed dispatch
+/// (`submission_dispatch::record_dispatch_failure`).
 async fn finish_judgement(
     deps: &EvaluateHostDeps,
     completion: &DetachedSubmissionCompletion,
@@ -325,7 +348,7 @@ async fn finish_judgement(
             submission_id = completion.submission_id,
             judgement_id = completion.judgement_id,
             error_code,
-            "Judging session ended while its contest type is parked; handed back"
+            "Judging session ended with its attempt lost or its contest type parked; handed back"
         ),
         Ok(DispatchFailed::Stale) => {}
         Err(e) => tracing::error!(

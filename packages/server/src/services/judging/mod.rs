@@ -77,8 +77,9 @@
 //! a submission's `system_error_retries` counts system-error retries since
 //! the last rejudge (budget `max_system_error_retries`). Only a failure of
 //! judging the submission spends it: a system error is classed by its error
-//! code (see `fault`), and one the platform caused (the queue was unreachable
-//! or lost an operation) goes back to the queue for free, while a platform
+//! code (see `fault`). An attempt the platform lost (the queue was
+//! unreachable or lost an operation, or no worker could run it) is never
+//! finalized: it goes back to the queue for free, while a platform
 //! misconfiguration that fails every attempt alike stands at once and is
 //! dead-lettered.
 //!
@@ -101,8 +102,8 @@ mod unit;
 mod tests;
 
 pub(crate) use budget::RetryBudget;
-pub use fault::DispatchFaults;
 pub(crate) use fault::SystemErrorClass;
+pub use fault::{DispatchFault, DispatchFaults};
 pub use notify::CLAIM_CHANNEL;
 pub(crate) use notify::ClaimWake;
 #[cfg(test)]
@@ -113,7 +114,7 @@ pub(crate) use open::{
     open_judgement,
 };
 pub(crate) use plugin_writes::{
-    SqlBindSink, code_run_write, code_run_write_fence, judgement_write, with_dispatch_fault,
+    SqlBindSink, code_run_write, code_run_write_fence, judgement_write, under_dispatch_fault,
     write_fence,
 };
 pub(crate) use unit::{

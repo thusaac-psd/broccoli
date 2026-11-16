@@ -116,6 +116,7 @@ pub fn interpret_fused_result(
         exit_code: sandbox.exit_code,
         stderr: message,
         sandbox_status: Some(sandbox.status.clone()),
+        signal: sandbox.signal,
     };
 
     match checker.interpret(checker_format, &outcome) {

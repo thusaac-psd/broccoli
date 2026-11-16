@@ -316,6 +316,7 @@ pub fn interpret_checker(format: &str, result: &CheckerRunOutcome) -> CheckerVer
         // inline (no check step is scheduled), so this is reached only by a
         // direct caller; keep it coherent - a reached interpretation is Accepted.
         CheckerVerdict {
+            checker_failure: None,
             verdict: Verdict::Accepted,
             score: 1.0,
             message: None,
@@ -334,16 +335,19 @@ pub fn interpret_checker(format: &str, result: &CheckerRunOutcome) -> CheckerVer
 fn interpret_builtin(result: &CheckerRunOutcome) -> CheckerVerdict {
     match result.exit_code {
         Some(0) => CheckerVerdict {
+            checker_failure: None,
             verdict: Verdict::Accepted,
             score: 1.0,
             message: message_from(&result.stderr),
         },
         Some(1) => CheckerVerdict {
+            checker_failure: None,
             verdict: Verdict::WrongAnswer,
             score: 0.0,
             message: message_from(&result.stderr),
         },
         Some(2) => CheckerVerdict {
+            checker_failure: None,
             verdict: Verdict::WrongAnswer,
             score: 0.0,
             message: message_from(&result.stderr).or_else(|| Some("Presentation error".into())),
@@ -358,8 +362,57 @@ fn interpret_builtin(result: &CheckerRunOutcome) -> CheckerVerdict {
 fn interpret_testlib(result: &CheckerRunOutcome) -> CheckerVerdict {
     match result.exit_code {
         Some(code) => crate::checkers::testlib::interpret_testlib_exit_code(code, &result.stderr),
-        None => sandbox_failure_verdict("Checker", result),
+        None => match testlib_crash(result) {
+            Some(failure) => CheckerVerdict {
+                checker_failure: Some(failure.clone()),
+                verdict: Verdict::SystemError,
+                score: 0.0,
+                message: Some(failure),
+            },
+            None => sandbox_failure_verdict("Checker", result),
+        },
     }
+}
+
+/// How the problem's testlib checker crashed, when the sandbox says it did:
+/// it was killed by a signal (an `abort()`, a segfault), or failed at run
+/// time without an exit code (it could not even start). Every attempt
+/// repeats that, so it is the problem's failure. A timeout, a step that never
+/// ran or a sandbox that failed is the platform's, and is judged again.
+fn testlib_crash(result: &CheckerRunOutcome) -> Option<String> {
+    let how = match result.sandbox_status.as_deref() {
+        Some("SG") => match result.signal {
+            Some(n) => match signal_name(n) {
+                Some(name) => format!("Checker was terminated by signal {n} ({name})"),
+                None => format!("Checker was terminated by signal {n}"),
+            },
+            None => "Checker was terminated by a signal".to_string(),
+        },
+        Some("RE") => "Checker failed at run time without an exit code".to_string(),
+        _ => return None,
+    };
+    let detail = result.stderr.trim();
+    let failure = if detail.is_empty() {
+        how
+    } else {
+        format!("{how}: {detail}")
+    };
+    Some(crate::util::truncate(&failure, 1024))
+}
+
+/// The name of POSIX signal `n`, for the ones a crashing program meets.
+fn signal_name(n: i32) -> Option<&'static str> {
+    Some(match n {
+        4 => "SIGILL",
+        6 => "SIGABRT",
+        7 => "SIGBUS",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        15 => "SIGTERM",
+        _ => return None,
+    })
 }
 
 /// Map a sandbox failure (no exit code) to a SystemError verdict, over the
@@ -394,6 +447,7 @@ fn message_from(stderr: &str) -> Option<String> {
 
 fn system_error(message: impl Into<String>) -> CheckerVerdict {
     CheckerVerdict {
+        checker_failure: None,
         verdict: Verdict::SystemError,
         score: 0.0,
         message: Some(message.into()),
@@ -682,6 +736,7 @@ mod tests {
             exit_code,
             stderr: stderr.to_string(),
             sandbox_status: status.map(|s| s.to_string()),
+            signal: None,
         }
     }
 
@@ -735,6 +790,41 @@ mod tests {
         let partial = interpret_checker("testlib", &small(Some(7), "points 0.5 half", None));
         assert_eq!(partial.verdict, Verdict::WrongAnswer);
         assert_eq!(partial.score, 0.5);
+    }
+
+    #[test]
+    fn a_crashing_testlib_checker_is_a_checker_failure_naming_how_it_crashed() {
+        let mut aborted = small(None, "checker.cpp:9: main: Assertion failed", Some("SG"));
+        aborted.signal = Some(6);
+        let v = interpret_checker("testlib", &aborted);
+        assert_eq!(v.verdict, Verdict::SystemError);
+        assert_eq!(
+            v.checker_failure.as_deref(),
+            Some(
+                "Checker was terminated by signal 6 (SIGABRT): checker.cpp:9: main: Assertion failed"
+            )
+        );
+        let v = interpret_checker("testlib", &small(None, "", Some("RE")));
+        assert!(v.checker_failure.unwrap().contains("without an exit code"));
+        let v = interpret_checker("testlib", &small(Some(42), "", Some("RE")));
+        assert!(v.checker_failure.unwrap().contains("code 42"));
+    }
+
+    #[test]
+    fn only_the_checkers_own_failure_is_a_checker_failure() {
+        for outcome in [
+            small(None, "", Some("TO")),
+            small(None, "", Some("UNKNOWN")),
+            small(None, "", Some("XX")),
+            small(Some(3), "FAIL jury answer is wrong", None),
+            small(Some(1), "wrong answer", None),
+        ] {
+            let v = interpret_checker("testlib", &outcome);
+            assert_eq!(v.checker_failure, None, "{outcome:?}");
+        }
+        let mut builtin = small(None, "", Some("SG"));
+        builtin.signal = Some(11);
+        assert_eq!(interpret_checker("tokens", &builtin).checker_failure, None);
     }
 
     #[test]

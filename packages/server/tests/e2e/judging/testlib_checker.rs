@@ -95,12 +95,17 @@ int main() {
 /// dedicated checker-source endpoint, which writes the problem-scoped plugin
 /// config the resolver reads back at judge time.
 async fn upload_checker_source(app: &E2eTestApp, problem_id: i32, token: &str) {
+    upload_checker(app, problem_id, token, WCMP_CHECKER).await;
+}
+
+/// Upload `checker` (with testlib.h) as the problem's checker source.
+async fn upload_checker(app: &E2eTestApp, problem_id: i32, token: &str, checker: &str) {
     let res = app
         .put_with_token(
             &format!("/api/v1/problems/{problem_id}/checker-source"),
             &serde_json::json!({
                 "files": [
-                    { "filename": "checker.cpp", "content": WCMP_CHECKER },
+                    { "filename": "checker.cpp", "content": checker },
                     { "filename": "testlib.h", "content": TESTLIB_H },
                 ]
             }),
@@ -267,4 +272,80 @@ async fn testlib_checker_judges_via_problem_config() {
         "testlib checker should reject the wrong solution: {}",
         wa.text
     );
+}
+
+/// A testlib checker that reads its files and then crashes.
+const ABORTING_CHECKER: &str = r#"#include "testlib.h"
+#include <cstdlib>
+
+int main(int argc, char* argv[]) {
+    registerTestlibCmd(argc, argv);
+    ans.readWord();
+    std::abort();
+}
+"#;
+
+/// A checker that crashes is the problem's fault, which every attempt
+/// repeats: the submission's system error stands at once under
+/// `CHECKER_FAILED`, judged once and never retried. Staff see how the checker
+/// failed (the signal); the contestant sees only the system error, with the
+/// judgement id to quote.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crashing_checker_stands_as_checker_failed_once_with_its_signal_for_staff_only() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("crash_checker_admin", "pass1234", "admin")
+        .await;
+    let problem_id = app
+        .create_problem_with_checker_format(&admin, "Crashing checker", "testlib")
+        .await;
+    upload_checker(&app, problem_id, &admin, ABORTING_CHECKER).await;
+    app.create_test_case_with(problem_id, "5\n1 2 3 4 5", "15", 100, true, &admin)
+        .await;
+    let res = app
+        .patch_with_token(
+            &format!("/api/v1/problems/{problem_id}"),
+            &serde_json::json!({"is_public": true}),
+            &admin,
+        )
+        .await;
+    assert!(res.status < 300, "{}", res.text);
+    let contestant = app
+        .create_authenticated_user("crash_checker_user", "pass1234")
+        .await;
+
+    let id = app
+        .create_submission(problem_id, &contestant, "cpp", SOLUTION_ACCEPTED)
+        .await;
+    let seen = app.wait_for_submission_terminal(id, &contestant, 120).await;
+    app.judging_idle().await;
+
+    let staff = app
+        .get_with_token(&format!("/api/v1/submissions/{id}"), &admin)
+        .await;
+    assert_eq!(staff.status, 200, "{}", staff.text);
+    let result = &staff.body["result"];
+    assert_eq!(result["verdict"], "SystemError", "{}", staff.text);
+    assert_eq!(result["error_code"], "CHECKER_FAILED", "{}", staff.text);
+    let diagnostic = result["error_message"].as_str().unwrap_or_default();
+    assert!(
+        diagnostic.contains("signal 6 (SIGABRT)"),
+        "staff see how the checker failed: {}",
+        staff.text
+    );
+
+    let result = &seen.body["result"];
+    assert_eq!(result["verdict"], "SystemError", "{}", seen.text);
+    assert!(result["error_code"].is_null(), "{}", seen.text);
+    assert!(result["error_message"].is_null(), "{}", seen.text);
+    assert!(result["judgement_id"].is_i64(), "{}", seen.text);
+
+    use sea_orm::EntityTrait;
+    let row = server::entity::submission::Entity::find_by_id(id)
+        .one(&app.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.system_error_retries, 0, "never retried");
+    assert_eq!(row.judge_epoch, 0, "judged once");
 }

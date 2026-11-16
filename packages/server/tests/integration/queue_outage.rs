@@ -266,7 +266,7 @@ async fn work_at_the_queue_is_handed_back_when_no_worker_takes_work() {
     assert_eq!(result.fault, Some(OperationFault::NoCapableWorker));
     assert_eq!(
         faults.get().map(|f| f.fault),
-        Some(OperationFault::NoCapableWorker)
+        Some(OperationFault::NoCapableWorker.into())
     );
     assert!(deps.operation_waiters.is_empty());
 
@@ -277,7 +277,7 @@ async fn work_at_the_queue_is_handed_back_when_no_worker_takes_work() {
         .expect_err("nothing can run it");
     assert_eq!(
         refused.get().map(|f| f.fault),
-        Some(OperationFault::NoCapableWorker)
+        Some(OperationFault::NoCapableWorker.into())
     );
     assert!(deps.operation_waiters.is_empty());
     hand_back.abort();

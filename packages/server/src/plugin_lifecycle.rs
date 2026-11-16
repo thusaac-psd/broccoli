@@ -832,9 +832,22 @@ async fn apply(
     result.map_err(|f| f.error)
 }
 
+/// Unload a plugin for good (a disable, or the fleet forgot it). Its judging
+/// sessions end now rather than as their results arrive: each ends as its
+/// plugin being gone does (`fail_dispatch`), which hands the judgement back
+/// while its type is parked. Every replica unloads through here, the one
+/// that took the change and every one that applies it in its reconcile.
 async fn deactivate(state: &AppState, plugin_id: &str) -> Result<(), PluginError> {
     purge_plugin_registrations(&state.registries, plugin_id).await;
     state.plugins.unload_plugin(plugin_id)?;
+    let cut = state.registries.judging_sessions.cut(plugin_id);
+    if cut > 0 {
+        tracing::info!(
+            plugin_id,
+            sessions = cut,
+            "Cut the judging sessions of an unloaded plugin"
+        );
+    }
     state.plugin_sql.forget(plugin_id);
     state.plugins.update_translations();
     Ok(())

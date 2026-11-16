@@ -451,6 +451,7 @@ mod tests {
             operation_waiters: Arc::new(dashmap::DashMap::new()),
             evaluate_batches: Default::default(),
             hook_registry: crate::hooks::new_shared_registry(),
+            judging_sessions: Default::default(),
         }
     }
 

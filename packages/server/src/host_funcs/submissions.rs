@@ -75,10 +75,14 @@ host_fn!(pub submission_update(user_data: Arc<(String, DatabaseConnection)>; inp
 
     let update: SubmissionUpdate = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid submission_update input: {e}")))?;
-    let update = judging::with_dispatch_fault(
+    // A write that would finalize an attempt the platform lost is fenced
+    // out, as a stale dispatch's is: 0 judgements written.
+    let Some(update) = judging::under_dispatch_fault(
         update,
         judging::DispatchFaults::of_current_call().and_then(|faults| faults.get()),
-    );
+    ) else {
+        return ok_affected(0);
+    };
 
     // An update that sets nothing is not a fenced-out write.
     let Some((sql, args)) = submission_update_statement(&update) else {

@@ -1001,10 +1001,10 @@ async fn ioi_scoreboard_uses_time_taken_as_score_tiebreaker() {
 }
 
 /// Disabling the contest-type plugin while one of its submissions is being
-/// judged hands that judgement back instead of failing it: it waits queued,
-/// spending neither retry budget and never showing a `SystemError`, while the
-/// contestant sees its outcome withheld for the disabled plugin, and the
-/// operator sees why it waits. A new submission or code run of the type, to
+/// judged ends its session at once and hands that judgement back instead of
+/// failing it: it waits queued, spending neither retry budget and never
+/// showing a `SystemError`, while the contestant sees its outcome withheld
+/// for the disabled plugin, and the operator sees why it waits. A new submission or code run of the type, to
 /// the contest or as practice, is refused with `CONTEST_TYPE_DISABLED`, which
 /// is not a retry-later answer, and the problem names the outage. Enabling the
 /// plugin again judges the parked submission to its verdict.
@@ -1066,42 +1066,6 @@ async fn exec(app: &E2eTestApp, sql: &str) {
     app.db.execute_unprepared(sql).await.expect(sql);
 }
 
-/// Records every status a submission or judgement row takes, in order, so a
-/// test sees a transient status no poll would catch.
-async fn log_statuses(app: &E2eTestApp) {
-    exec(
-        app,
-        "CREATE TABLE status_log (seq BIGSERIAL PRIMARY KEY, tbl TEXT NOT NULL, status TEXT NOT NULL); \
-         CREATE FUNCTION log_status() RETURNS trigger LANGUAGE plpgsql AS $$ \
-         BEGIN INSERT INTO status_log (tbl, status) VALUES (TG_TABLE_NAME, NEW.status::text); \
-         RETURN NEW; END $$; \
-         CREATE TRIGGER log_submission_status AFTER INSERT OR UPDATE OF status ON submission \
-         FOR EACH ROW EXECUTE FUNCTION log_status(); \
-         CREATE TRIGGER log_judgement_status AFTER INSERT OR UPDATE OF status ON submission_judgement \
-         FOR EACH ROW EXECUTE FUNCTION log_status();",
-    )
-    .await;
-}
-
-async fn logged_statuses(app: &E2eTestApp) -> Vec<(String, String)> {
-    use sea_orm::{ConnectionTrait, DbBackend, Statement};
-    app.db
-        .query_all_raw(Statement::from_string(
-            DbBackend::Postgres,
-            "SELECT tbl, status FROM status_log ORDER BY seq",
-        ))
-        .await
-        .expect("read the status log")
-        .iter()
-        .map(|r| {
-            (
-                r.try_get("", "tbl").unwrap(),
-                r.try_get("", "status").unwrap(),
-            )
-        })
-        .collect()
-}
-
 async fn cut_by_a_disable(change: Change) {
     let app = E2eTestApp::spawn().await;
     let admin = app
@@ -1131,7 +1095,7 @@ async fn cut_by_a_disable(change: Change) {
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
 
-    log_statuses(&app).await;
+    app.log_statuses().await;
     // Hold every operation in the queue, so the judging session is started
     // and waiting for its first result when the plugin goes away.
     app.pause_worker();
@@ -1153,6 +1117,15 @@ async fn cut_by_a_disable(change: Change) {
     };
 
     change.set_enabled(&app, &admin, false).await;
+    // The disable ends the session at once, on the replica that made it and
+    // on one that applied it alike, though no result arrives: the worker
+    // still holds every operation.
+    tokio::time::timeout(std::time::Duration::from_secs(60), app.judging_idle())
+        .await
+        .expect("the disable cut the judging session");
+    let handed_back = current_judgement(&app, sub_id).await;
+    assert_eq!(handed_back.status, SubmissionStatus::Queued);
+    assert!(handed_back.judge_epoch > cut.judge_epoch);
     app.resume_worker();
 
     // The cut judgement goes back to the queue under a fresh epoch and stays
@@ -1255,7 +1228,7 @@ async fn cut_by_a_disable(change: Change) {
         .await;
     assert_eq!(res.body["plugin_outage"], outage, "{}", res.text);
 
-    let cut_statuses = logged_statuses(&app).await;
+    let cut_statuses = app.logged_statuses().await;
     assert!(
         !cut_statuses
             .iter()
