@@ -434,8 +434,8 @@ impl Mq {
     /// Move the private streams nobody reads to the shared stream: those of
     /// dead workers, and of live workers that take no work
     /// (`common::worker::Intake::Refusing`), less the entries such a worker
-    /// still holds. Streams of workers that take work are left alone. Returns
-    /// the entries moved.
+    /// still holds (refreshed within [`crate::CLAIM_IDLE`]). Streams of
+    /// workers that take work are left alone. Returns the entries moved.
     pub async fn drain_unread_private_streams(&self) -> Result<usize, MqError> {
         let t = &self.topology;
         let owners = self.pinned_workers().await?;
@@ -455,6 +455,7 @@ impl Mq {
                             .arg(WORKERS_GROUP)
                             .arg(DRAIN_BATCH)
                             .arg(DEAD_LETTER_MAXLEN)
+                            .arg(crate::group::CLAIM_IDLE.as_millis() as u64)
                             .invoke_async(&mut c)
                             .await
                     })

@@ -200,15 +200,20 @@ return lost
 /// Move the private stream of a worker that takes no work (dead, or live
 /// and refusing it) to the shared stream, keeping each entry's delivery count
 /// in `n`. Does nothing while the worker takes work. A dead worker's entries
-/// all move; a live worker keeps the entries it holds (read and not settled),
-/// since it is still running or giving them back.
+/// all move; a live worker keeps the entries it holds: read, not settled,
+/// and refreshed within the claim threshold (idle less than `ARGV[5]` ms),
+/// since it is still running or giving them back. An entry idle longer has
+/// lost its owner, as for a reclaim (a previous instance of the worker read
+/// it), and moves; a moved entry is acknowledged, so an owner that stalled
+/// past the threshold settles nothing.
 ///
 /// An entry without a payload cannot be run anywhere: it becomes a
 /// `DESERIALIZATION_ERROR` dead letter (a `common::DlqEnvelope`) instead.
 ///
 /// KEYS: worker liveness key, private stream, shared stream, pinned set,
 /// dead-letter stream. ARGV: worker id, group, batch size, dead-letter length
-/// cap. Returns the entries moved, or -1 when the worker takes work.
+/// cap, claim threshold in ms. Returns the entries moved, or -1 when the
+/// worker takes work.
 pub(crate) static DRAIN_PRIVATE: LazyLock<Script> = LazyLock::new(|| {
     Script::new(&format!(
         r#"{TAKES_WORK}
@@ -238,9 +243,10 @@ for _, e in ipairs(entries) do
   end
   local ok, p = pcall(redis.call, 'XPENDING', KEYS[2], ARGV[2], id, id, 1)
   local pending = ok and #p == 1
-  if not (live and pending) then
+  if not (live and pending and p[1][3] < tonumber(ARGV[5])) then
     if pending then
       prior = prior + p[1][4]
+      redis.call('XACK', KEYS[2], ARGV[2], id)
     end
     if payload then
       redis.call('XADD', KEYS[3], '*', 'p', payload, 'n', prior)

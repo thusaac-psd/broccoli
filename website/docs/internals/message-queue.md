@@ -91,8 +91,12 @@ stream is drained by whichever worker that takes work runs the drain script next
 (every reclaim tick, below). The script returns at once while the owner takes
 work; otherwise it moves up to 64 entries to the shared stream, carrying their
 delivery counts in `n`, and deletes the private stream and its `<q>:pinned`
-member once it is empty. A live owner keeps the entries it holds (read and not
-yet settled): it is still running them or giving them back. A worker that
+member once it is empty. A live owner keeps the entries it holds (read, not
+yet settled, and refreshed within `CLAIM_IDLE`): it is still running them or
+giving them back. An entry idle longer has lost its owner, as for a reclaim:
+a worker restarted under the same id without a platform tool takes no work
+and never adopts what its previous instance read, so those entries move too,
+acknowledged and with their delivery counts. A worker that
 stalled past its liveness TTL and comes back finds its private stream gone,
 gets `NOGROUP` on the next read, and recreates the group. When no live worker
 takes work at all, nothing drains and nothing could run the task anyway: the
