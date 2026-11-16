@@ -20,13 +20,19 @@ pub struct Model {
     #[sea_orm(unique)]
     pub user_code: String,
 
-    /// The user who approved the code. The access token is minted from this
-    /// user's current grants when the CLI collects it, never stored.
-    pub authorized_user_id: Option<i32>,
+    /// The sign-in session that approved the code; `None` while it is
+    /// pending. Ending the session deletes the approval. The CLI's access
+    /// token is minted from the session's user's current grants when the CLI
+    /// collects it, never stored.
+    #[sea_orm(nullable, indexed)]
+    pub approved_by: Option<i64>,
 
     pub created_at: DateTimeUtc,
     pub expires_at: DateTimeUtc,
     pub last_poll_at: Option<DateTimeUtc>,
+
+    #[sea_orm(belongs_to, from = "approved_by", to = "id", on_delete = "Cascade")]
+    pub approver: HasOne<super::auth_session::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}
