@@ -24,13 +24,11 @@ const WAIT_MARK: &str = "statement_counts:wait";
 
 /// The statements the app's periodic loops issue whether or not anything is
 /// being judged, by how their normalized text starts: the claim fiber's
-/// in-flight count and its judgement and code-run scans, the recovery scans
-/// that reclaim and retry work, and transaction control. They run at a rate
-/// set by time, so they are no part of what a case or a poll costs.
+/// judgement and code-run claims, the recovery scans that reclaim and retry
+/// work, and transaction control. They run at a rate set by time, so they are
+/// no part of what a case or a poll costs.
 const PERIODIC: &[&str] = &[
-    "SELECT ((SELECT COUNT(*) FROM submission_judgement WHERE owner_server_id",
-    "WITH picked AS (SELECT u.id FROM submission_judgement u",
-    "WITH picked AS (SELECT u.id FROM code_run u",
+    "WITH room AS (SELECT",
     "SELECT u.id, u.submission_id, u.is_current, u.dispatch_retries",
     "BEGIN",
     "COMMIT",
