@@ -149,20 +149,15 @@ pub struct Lease {
 impl Lease {
     /// A connection of the lease's pool for one statement, and the pid of
     /// its backend, so a statement cut at its call's deadline is cancelled
-    /// there ([`PluginSqlPools::cancel_backend`]).
-    pub async fn connection(
-        &self,
-    ) -> Result<
-        (
-            sea_orm::sqlx::pool::PoolConnection<sea_orm::sqlx::Postgres>,
-            i32,
-        ),
-        sea_orm::sqlx::Error,
-    > {
-        let mut conn = sqlx_pool(&self.db).acquire().await?;
+    /// there ([`PluginSqlPools::cancel_backend`]). It is checked out through
+    /// the pool's handle, so it fails fast while the database is unreachable
+    /// and counts as busy while held, like the pool's transactions.
+    pub async fn connection(&self) -> Result<(common::db::PooledConnection, i32), DbErr> {
+        let mut conn = self.db.acquire().await?;
         let pid = sea_orm::sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *conn)
-            .await?;
+            .await
+            .map_err(|e| DbErr::Query(sea_orm::RuntimeErr::SqlxError(e.into())))?;
         Ok((conn, pid))
     }
 }

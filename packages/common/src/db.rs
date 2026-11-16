@@ -28,7 +28,7 @@ use sea_orm::{DbErr, RuntimeErr, SqlxPostgresConnector};
 
 mod handle;
 mod reachability;
-pub use handle::{DatabaseConnection, DatabaseTransaction};
+pub use handle::{DatabaseConnection, DatabaseTransaction, PooledConnection};
 
 /// Default server-side `statement_timeout`. Matches the HTTP `TimeoutLayer`: a
 /// handler's statement cannot usefully outlive the request that issued it.

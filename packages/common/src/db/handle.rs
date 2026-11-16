@@ -10,21 +10,24 @@
 //! the statement and the call stack, so no statement fails on a NUL and no
 //! unsanitized source goes unnoticed.
 //!
-//! It is also the one owner of fail-fast on an outage: every statement and
-//! transaction it starts passes the pool's [`Reachability`], so while the
-//! database cannot be reached a caller is refused at once instead of waiting
-//! out the acquire timeout.
+//! It is also the one owner of fail-fast on an outage: every statement,
+//! transaction and checked-out connection ([`PooledConnection`]) it starts
+//! passes the pool's [`Reachability`], so while the database cannot be
+//! reached a caller is refused at once instead of waiting out the acquire
+//! timeout.
 
 use std::backtrace::Backtrace;
 use std::future::Future;
+use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::Arc;
 
 use broccoli_types::types::sanitize_text_field;
 use sea_orm::sea_query::Value;
 use sea_orm::{
-    AccessMode, ConnectionTrait, DbBackend, DbErr, ExecResult, IsolationLevel, QueryResult,
-    Statement, TransactionError, TransactionOptions, TransactionSession, TransactionTrait,
+    AccessMode, ConnAcquireErr, ConnectionTrait, DbBackend, DbErr, ExecResult, IsolationLevel,
+    QueryResult, RuntimeErr, Statement, TransactionError, TransactionOptions, TransactionSession,
+    TransactionTrait,
 };
 use serde_json::Value as Json;
 
@@ -41,6 +44,32 @@ pub struct DatabaseConnection(sea_orm::DatabaseConnection, Arc<Reachability>);
 /// pool's record of whether the database can be reached.
 #[derive(Debug)]
 pub struct DatabaseTransaction(sea_orm::DatabaseTransaction, Held);
+
+/// A connection checked out of a [`DatabaseConnection`]'s pool for
+/// statements its holder runs on it directly, as raw sqlx (a plugin's own
+/// SQL). Checking it out passes the pool's [`Reachability`] like every
+/// statement the handle starts, and while it is held it counts as busy, not
+/// lost, as a transaction's connection does. Statements run on it skip the
+/// NUL check. Dropping it returns the connection to the pool.
+#[derive(Debug)]
+pub struct PooledConnection {
+    conn: sea_orm::sqlx::pool::PoolConnection<sea_orm::sqlx::Postgres>,
+    _held: Held,
+}
+
+impl Deref for PooledConnection {
+    type Target = sea_orm::sqlx::PgConnection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.conn
+    }
+}
+
+impl DerefMut for PooledConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.conn
+    }
+}
 
 impl From<sea_orm::DatabaseConnection> for DatabaseConnection {
     fn from(inner: sea_orm::DatabaseConnection) -> Self {
@@ -63,6 +92,17 @@ impl DatabaseConnection {
     /// Check that the database answers.
     pub async fn ping(&self) -> Result<(), DbErr> {
         self.guarded(self.0.ping()).await
+    }
+
+    /// Check a connection out of the pool (see [`PooledConnection`]).
+    pub async fn acquire(&self) -> Result<PooledConnection, DbErr> {
+        let pool = self.0.get_postgres_connection_pool();
+        self.guarded(async { pool.acquire().await.map_err(acquire_err) })
+            .await
+            .map(|conn| PooledConnection {
+                conn,
+                _held: self.reachability().hold(),
+            })
     }
 
     /// Run `op`, which acquires a connection from the pool, past the pool's
@@ -102,6 +142,17 @@ impl DatabaseTransaction {
 
     fn reachability(&self) -> &Arc<Reachability> {
         self.1.reachability()
+    }
+}
+
+/// The error a failed pool acquire answers, as sea-orm reports its own.
+fn acquire_err(e: sea_orm::sqlx::Error) -> DbErr {
+    match e {
+        sea_orm::sqlx::Error::PoolTimedOut => DbErr::ConnectionAcquire(ConnAcquireErr::Timeout),
+        sea_orm::sqlx::Error::PoolClosed => {
+            DbErr::ConnectionAcquire(ConnAcquireErr::ConnectionClosed)
+        }
+        e => DbErr::Conn(RuntimeErr::SqlxError(e.into())),
     }
 }
 
@@ -374,9 +425,9 @@ mod tests {
         assert_eq!(bound(values.clone()), values);
     }
 
-    /// While the database cannot be reached, a statement waits for no
-    /// connection: the one probe in flight waits, every other is refused at
-    /// once as an outage.
+    /// While the database cannot be reached, a statement, a transaction or a
+    /// checked-out connection waits for no connection: the one probe in
+    /// flight waits, every other is refused at once as an outage.
     #[tokio::test]
     async fn statements_fail_fast_while_the_database_is_unreachable() {
         use std::task::Poll;
@@ -417,6 +468,11 @@ mod tests {
             futures::poll!(&mut refused),
             Poll::Ready(Err(DbErr::ConnectionAcquire(_)))
         ));
+        let mut refused = Box::pin(db.acquire());
+        match futures::poll!(&mut refused) {
+            Poll::Ready(Err(e)) => assert!(super::super::is_outage(&e), "{e}"),
+            other => panic!("refused at once, got {:?}", other.map(|r| r.map(|_| ()))),
+        }
         assert!(probe.await.is_err());
     }
 

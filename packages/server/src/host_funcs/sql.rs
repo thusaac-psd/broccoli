@@ -47,14 +47,18 @@ impl PluginSql {
         plugin_id: &str,
         call: &crate::plugin_db::SqlCall,
         statement: impl AsyncFnOnce(&mut sea_orm::sqlx::PgConnection) -> Result<T, sea_orm::sqlx::Error>,
-    ) -> Result<Result<T, sea_orm::sqlx::Error>, crate::plugin_db::Unavailable> {
+    ) -> Result<Result<T, sea_orm::DbErr>, crate::plugin_db::Unavailable> {
         let lease = self.lease(plugin_id, call).await?;
         let (mut conn, pid) = match by_deadline(call.deadline, lease.connection()).await? {
             Ok(opened) => opened,
             Err(e) => return Ok(Err(e)),
         };
         match by_deadline(call.deadline, statement(&mut conn)).await {
-            Ok(result) => Ok(result),
+            // A failed statement reads as one in a plugin transaction does.
+            Ok(result) => {
+                Ok(result
+                    .map_err(|e| sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(e.into()))))
+            }
             Err(cut) => {
                 // The connection stays held until the cancel is sent, so the
                 // cancel never lands on a later statement that reuses it.
