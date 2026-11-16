@@ -55,8 +55,10 @@ results, and organizers always see the real board, frozen or not. Ranks on a
 frozen board come only from submissions made before the freeze, so a team's
 own results inside the window show on its row without moving its rank.
 
-Freezing only matters once `public_standings` is on, since a contestant with
-public standings off already sees only their own row, which never freezes.
+Freezing matters whatever `public_standings` says. With public standings off,
+a contestant sees only their own row while the contest runs, but once it ends
+every contestant sees the whole board, and that board stays frozen until it is
+revealed.
 
 :::note[Reveal after the freeze]
 
