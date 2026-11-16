@@ -1,48 +1,32 @@
-use common::db::DatabaseConnection;
+//! Per-user quotas on the authenticated endpoints that create rows: abuse
+//! guards nobody typing reaches.
+//!
+//! Each quota is a fixed window per user, counted in Redis by
+//! [`crate::services::window_quota::admit`]. A request takes its place in the
+//! window before it does any work, so parallel requests can never all pass a
+//! check made before any of them is stored, and a request refused later (by a
+//! plugin hook or validation) still spends its place.
 
-use chrono::{DateTime, Duration, Utc};
-use sea_orm::*;
+use std::time::Duration;
 
 use crate::error::AppError;
+use crate::services::window_quota;
 
-/// The window `rate_limit_per_minute` counts over.
-const WINDOW: Duration = Duration::minutes(1);
+/// The window every per-user quota counts over.
+const WINDOW: Duration = Duration::from_secs(60);
 
-/// Refuse with `RATE_LIMITED` when `user_id` created `limit_per_minute` or
-/// more submissions and code runs together in the minute before `now`, the
-/// platform clock (which also stamped their `created_at`). One statement.
-pub async fn check_rate_limit(
-    db: &DatabaseConnection,
-    now: DateTime<Utc>,
-    user_id: i32,
-    limit_per_minute: u32,
-) -> Result<(), AppError> {
+/// Admit one submission or code run of `user_id`, or refuse it with
+/// `RATE_LIMITED` past `limit_per_minute` of them together
+/// (`submission.rate_limit_per_minute`; `0` turns the quota off).
+pub async fn admit_work(mq: &mq::Mq, user_id: i32, limit_per_minute: u32) -> Result<(), AppError> {
     if limit_per_minute == 0 {
         return Ok(());
     }
-
-    let since = now - WINDOW;
-    let row = db
-        .query_one_raw(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"SELECT count(*) AS n, min(created_at) AS oldest FROM (
-                   SELECT created_at FROM submission WHERE user_id = $1 AND created_at > $2
-                   UNION ALL
-                   SELECT created_at FROM code_run WHERE user_id = $1 AND created_at > $2
-               ) recent"#,
-            [user_id.into(), since.into()],
-        ))
-        .await?
-        .ok_or_else(|| AppError::Internal("rate limit query returned no row".into()))?;
-    let count: i64 = row.try_get("", "n")?;
-    let oldest: Option<DateTime<Utc>> = row.try_get("", "oldest")?;
-
-    if count >= i64::from(limit_per_minute) {
-        let retry_after = oldest
-            .map(|t| std::cmp::max((t + WINDOW - now).num_seconds(), 1) as u64)
-            .unwrap_or(60);
-        return Err(AppError::RateLimited { retry_after });
-    }
-
-    Ok(())
+    window_quota::admit(
+        mq,
+        &format!("work:user:{user_id}"),
+        u64::from(limit_per_minute),
+        WINDOW,
+    )
+    .await
 }

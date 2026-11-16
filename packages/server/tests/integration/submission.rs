@@ -410,6 +410,67 @@ mod rate_limiting {
 
         assert_eq!(res.status, 201);
     }
+
+    #[tokio::test]
+    async fn a_parallel_burst_is_admitted_exactly_up_to_the_limit() {
+        let app = TestApp::spawn_with_options(SpawnOptions {
+            rate_limit_per_minute: Some(5),
+            ..Default::default()
+        })
+        .await;
+        let admin_token = app
+            .create_user_with_role("admin1", "pass1234", "admin")
+            .await;
+        let problem_id = app.create_problem(&admin_token, "Test Problem").await;
+        let user_token = app.create_authenticated_user("user1", "pass1234").await;
+        let body = valid_submission_body("cpp");
+        let route = routes::problem_submissions(problem_id);
+
+        let burst = (0..20).map(|_| app.post_with_token(&route, &body, &user_token));
+        let statuses: Vec<u16> = futures::future::join_all(burst)
+            .await
+            .into_iter()
+            .map(|res| res.status)
+            .collect();
+
+        assert_eq!(
+            statuses.iter().filter(|s| **s == 201).count(),
+            5,
+            "{statuses:?}"
+        );
+        assert_eq!(
+            statuses.iter().filter(|s| **s == 429).count(),
+            15,
+            "{statuses:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_request_still_spends_its_place() {
+        let app = TestApp::spawn_with_options(SpawnOptions {
+            rate_limit_per_minute: Some(2),
+            ..Default::default()
+        })
+        .await;
+        let admin_token = app
+            .create_user_with_role("admin1", "pass1234", "admin")
+            .await;
+        let problem_id = app.create_problem(&admin_token, "Test Problem").await;
+        let user_token = app.create_authenticated_user("user1", "pass1234").await;
+        let body = valid_submission_body("cpp");
+
+        for _ in 0..2 {
+            let res = app
+                .post_with_token(&routes::problem_submissions(i32::MAX), &body, &user_token)
+                .await;
+            assert_eq!(res.status, 404, "{}", res.text);
+        }
+        let res = app
+            .post_with_token(&routes::problem_submissions(problem_id), &body, &user_token)
+            .await;
+        assert_eq!(res.status, 429, "{}", res.text);
+        assert_eq!(res.body["code"], "RATE_LIMITED");
+    }
 }
 
 mod submission_listing {

@@ -32,7 +32,7 @@ use crate::utils::contest::{
 use crate::utils::diagnostics::{Diagnostics, is_system_error};
 use crate::utils::judging::{files_from_json, files_to_json, validate_run_language};
 use crate::utils::problem::find_problem;
-use crate::utils::rate_limit::check_rate_limit;
+use crate::utils::rate_limit;
 use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 async fn build_code_run_response(
@@ -163,9 +163,8 @@ pub async fn run_code(
 ) -> Result<impl IntoResponse, AppError> {
     auth_user.require_permission(perm::SUBMISSION_SUBMIT)?;
     validate_run_code(&payload, state.config.submission.max_size)?;
-    check_rate_limit(
-        &state.db,
-        state.clock.now(),
+    rate_limit::admit_work(
+        &state.mq,
         auth_user.user_id,
         state.config.submission.rate_limit_per_minute,
     )
@@ -276,9 +275,8 @@ pub async fn run_contest_code(
 ) -> Result<impl IntoResponse, AppError> {
     auth_user.require_permission(perm::SUBMISSION_SUBMIT)?;
     validate_run_code(&payload, state.config.submission.max_size)?;
-    check_rate_limit(
-        &state.db,
-        state.clock.now(),
+    rate_limit::admit_work(
+        &state.mq,
         auth_user.user_id,
         state.config.submission.rate_limit_per_minute,
     )

@@ -43,7 +43,7 @@ use crate::utils::diagnostics::Diagnostics;
 use crate::utils::judging::{files_to_json, validate_code_payload, validate_submission_contract};
 use crate::utils::problem::find_problem;
 use crate::utils::query::validate_sorting_params;
-use crate::utils::rate_limit::check_rate_limit;
+use crate::utils::rate_limit;
 use crate::visibility::{Action, Resource, ResourceScope, Subject, VisibilityKernel};
 
 mod dispatch;
@@ -103,9 +103,8 @@ pub async fn create_submission(
         &payload.language,
         state.config.submission.max_size,
     )?;
-    check_rate_limit(
-        &state.db,
-        state.clock.now(),
+    rate_limit::admit_work(
+        &state.mq,
         auth_user.user_id,
         state.config.submission.rate_limit_per_minute,
     )
@@ -687,9 +686,8 @@ pub async fn create_contest_submission(
         &payload.language,
         state.config.submission.max_size,
     )?;
-    check_rate_limit(
-        &state.db,
-        state.clock.now(),
+    rate_limit::admit_work(
+        &state.mq,
         auth_user.user_id,
         state.config.submission.rate_limit_per_minute,
     )

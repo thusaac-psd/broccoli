@@ -19,4 +19,5 @@ pub mod submission_dispatch;
 pub mod submission_feedback;
 pub(crate) mod test_data;
 pub mod user_accounts;
+pub mod window_quota;
 pub mod windowed_session;

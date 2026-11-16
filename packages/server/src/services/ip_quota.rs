@@ -1,14 +1,8 @@
 //! Per-client-address quotas on the unauthenticated endpoints a script could
 //! hammer: signing in, registering and minting device codes.
 //!
-//! Each quota is a fixed window counted in Redis (see
-//! [`mq::Mq::count_in_window`]), so it holds across the whole fleet behind a
-//! round-robin gateway, and its clock is Redis's, so replicas' clocks never
-//! matter. A window opens at an address's first request and closes a fixed
-//! time later; requests past the limit count but never extend it, so a client
-//! retrying in a loop waits out the same window as one that stopped. One
-//! round trip per request. When Redis cannot answer, the request is admitted:
-//! these quotas guard against abuse, and an outage must not lock a venue out.
+//! Each quota is a fixed window per address, counted in Redis by
+//! [`super::window_quota::admit`].
 
 use std::net::IpAddr;
 use std::time::Duration;
@@ -54,18 +48,7 @@ impl IpQuota {
         let Some(ip) = ip else {
             return Ok(());
         };
-        match mq
-            .count_in_window(&format!("{}:{ip}", self.name), self.window)
+        super::window_quota::admit(mq, &format!("{}:{ip}", self.name), self.limit, self.window)
             .await
-        {
-            Ok((count, left)) if count > self.limit => Err(AppError::RateLimited {
-                retry_after: left.as_millis().div_ceil(1000).max(1) as u64,
-            }),
-            Ok(_) => Ok(()),
-            Err(e) => {
-                tracing::warn!(quota = self.name, error = %e, "Rate limit check failed; admitting");
-                Ok(())
-            }
-        }
     }
 }
