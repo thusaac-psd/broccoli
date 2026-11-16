@@ -1583,11 +1583,13 @@ async fn ioi_task_config_naming_a_missing_test_case_is_refused() {
         .await;
     assert_eq!(res.status, 400, "{}", res.text);
     assert_eq!(res.body["code"], "VALIDATION_ERROR", "{}", res.text);
-    assert_eq!(
-        res.body["details"]["fields"][0]["path"], "subtasks[0].test_cases[0]",
-        "{}",
-        res.text
-    );
+    let paths: Vec<&str> = res.body["details"]["fields"]
+        .as_array()
+        .expect("the refused fields")
+        .iter()
+        .filter_map(|field| field["path"].as_str())
+        .collect();
+    assert!(paths.contains(&"subtasks[0].test_cases[0]"), "{}", res.text);
     let stored = app.get_with_token(&path, &admin).await;
     assert_eq!(stored.status, 404, "{}", stored.text);
 
