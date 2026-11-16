@@ -16,7 +16,7 @@ use crate::services::window_quota;
 const WINDOW: Duration = Duration::from_secs(60);
 
 /// Clarifications one user may post per minute.
-const CLARIFICATIONS_PER_MINUTE: u64 = 10;
+pub const CLARIFICATIONS_PER_MINUTE: u64 = 10;
 
 /// Admit one submission or code run of `user_id`, or refuse it with
 /// `RATE_LIMITED` past `limit_per_minute` of them together
