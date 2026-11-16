@@ -71,6 +71,7 @@ pub fn persist_and_track(
         compile_output: Some(compile_output),
         error_code: None,
         error_message: None,
+        ..Default::default()
     })?;
 
     if affected == 0 {

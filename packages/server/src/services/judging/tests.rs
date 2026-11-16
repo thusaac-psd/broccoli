@@ -469,8 +469,7 @@ async fn a_lapsed_lease_requeues_under_a_new_epoch_and_spends_a_retry() {
             Unit::Judgement,
             j.id,
             claimed.judgement.judge_epoch,
-            "X",
-            "late"
+            &DispatchFailure::judging("X", "late"),
         )
         .await
         .unwrap(),
@@ -656,8 +655,7 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
             Unit::Judgement,
             claimed.judgement.id,
             claimed.judgement.judge_epoch,
-            "PLUGIN_ERROR",
-            "boom"
+            &DispatchFailure::judging("PLUGIN_ERROR", "boom"),
         )
         .await
         .unwrap(),
@@ -694,8 +692,7 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
         Unit::Judgement,
         again.judgement.id,
         again.judgement.judge_epoch,
-        "PLUGIN_ERROR",
-        "boom",
+        &DispatchFailure::judging("PLUGIN_ERROR", "boom"),
     )
     .await
     .unwrap();
@@ -730,10 +727,14 @@ async fn a_contestant_verdict_or_a_failure_that_stands_is_never_retried() {
     let wrong = claim_one(&db, "srv").await;
     finish(&db, &wrong.judgement, Verdict::WrongAnswer).await;
     let mut standing = Vec::new();
-    for code in [
-        common::SubmissionDlqErrorCode::PLUGIN_REFUSED,
-        DispatchFault::CheckerFailed.code(),
+    for failure in [
+        DispatchFailure::refused("no"),
+        DispatchFailure::from(super::fault::Recorded {
+            fault: DispatchFault::CheckerFailed,
+            message: "no".into(),
+        }),
     ] {
+        let code = failure.code;
         let (_, _) = new_submission(&db).await;
         let claimed = claim_one(&db, "srv").await;
         assert_eq!(
@@ -742,8 +743,7 @@ async fn a_contestant_verdict_or_a_failure_that_stands_is_never_retried() {
                 Unit::Judgement,
                 claimed.judgement.id,
                 claimed.judgement.judge_epoch,
-                code,
-                "no",
+                &failure,
             )
             .await
             .unwrap(),
@@ -853,9 +853,15 @@ async fn a_code_run_follows_the_same_claim_and_requeue_rules() {
     assert_eq!(after.judge_epoch, run.judge_epoch + 1);
     assert_eq!(after.dispatch_retries, 1);
     assert_eq!(
-        fail_dispatch(&db, Unit::CodeRun, run.id, run.judge_epoch, "X", "late")
-            .await
-            .unwrap(),
+        fail_dispatch(
+            &db,
+            Unit::CodeRun,
+            run.id,
+            run.judge_epoch,
+            &DispatchFailure::judging("X", "late")
+        )
+        .await
+        .unwrap(),
         DispatchFailed::Stale,
         "the lost dispatch is fenced"
     );
@@ -1327,8 +1333,10 @@ async fn a_judgement_the_platform_lost_is_handed_back_without_a_verdict_or_a_ret
                 Unit::Judgement,
                 claimed.judgement.id,
                 claimed.judgement.judge_epoch,
-                fault.code(),
-                "the queue",
+                &DispatchFailure::from(super::fault::Recorded {
+                    fault: fault.into(),
+                    message: "the queue".into(),
+                }),
             )
             .await
             .unwrap(),
@@ -1348,34 +1356,6 @@ async fn a_judgement_the_platform_lost_is_handed_back_without_a_verdict_or_a_ret
             .unwrap();
         assert_eq!(pass, SystemErrorPass::default(), "nothing awaits a retry");
     }
-}
-
-/// A plugin that writes a hand-back code onto a verdict itself is handed
-/// back by the system-error retry, spending nothing.
-#[tokio::test]
-async fn a_plugin_verdict_carrying_a_hand_back_code_is_requeued_without_a_retry() {
-    let (_pg, db) = crate::test_support::postgres().await;
-    let (s, _) = new_submission(&db).await;
-    let claimed = claim_one(&db, "srv").await;
-    exec(
-        &db,
-        &format!(
-            "UPDATE submission_judgement SET status = 'Judged', verdict = 'SystemError', \
-             error_code = '{}', is_finalized = TRUE, finalized_at = NOW() WHERE id = {}",
-            OperationFault::NoCapableWorker.code(),
-            claimed.judgement.id
-        ),
-    )
-    .await;
-    let pass = retry_system_errors(&db, RetryBudget::new(1), 10, NO_TYPES)
-        .await
-        .unwrap();
-    assert_eq!((pass.handed_back, pass.requeued), (1, 0));
-    assert_eq!(
-        judgement(&db, claimed.judgement.id).await.status,
-        SubmissionStatus::Queued
-    );
-    assert_eq!(sub(&db, s.id).await.system_error_retries, 0);
 }
 
 /// Records `standard` (the type [`new_submission`] uses) as provided by one
@@ -1419,8 +1399,7 @@ async fn work_of_a_disabled_contest_plugin_is_parked_until_it_is_enabled() {
             Unit::Judgement,
             claimed.judgement.id,
             claimed.judgement.judge_epoch,
-            "PLUGIN_SESSION_ABORTED",
-            "the callback is gone",
+            &DispatchFailure::judging("PLUGIN_SESSION_ABORTED", "the callback is gone"),
         )
         .await
         .unwrap(),
@@ -1477,8 +1456,7 @@ async fn a_system_error_awaiting_its_retry_is_handed_back_when_its_type_is_parke
             Unit::Judgement,
             claimed.judgement.id,
             claimed.judgement.judge_epoch,
-            "PLUGIN_ERROR",
-            "boom",
+            &DispatchFailure::judging("PLUGIN_ERROR", "boom"),
         )
         .await
         .unwrap();
@@ -1508,6 +1486,184 @@ async fn a_system_error_awaiting_its_retry_is_handed_back_when_its_type_is_parke
         )
         .await;
     }
+}
+
+/// A system error that stands stays what the submission shows when its
+/// contest type is parked: parking holds back only work still undecided, so
+/// a decided error is never taken back. A plugin's standing error, a refusal
+/// and an error the retry confirmed alike.
+#[tokio::test]
+async fn a_system_error_that_stands_stays_shown_when_its_type_is_parked() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    provider(&db, true).await;
+    let budget = RetryBudget::new(0);
+    let (_, refused) = new_submission(&db).await;
+    let claimed = claim_one(&db, "srv").await;
+    fail_dispatch(
+        &db,
+        Unit::Judgement,
+        claimed.judgement.id,
+        claimed.judgement.judge_epoch,
+        &DispatchFailure::refused("no"),
+    )
+    .await
+    .unwrap();
+    let (_, confirmed) = new_submission(&db).await;
+    let claimed = claim_one(&db, "srv").await;
+    fail_dispatch(
+        &db,
+        Unit::Judgement,
+        claimed.judgement.id,
+        claimed.judgement.judge_epoch,
+        &DispatchFailure::judging("PLUGIN_ERROR", "boom"),
+    )
+    .await
+    .unwrap();
+    let pass = retry_system_errors(&db, budget, 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(pass.confirmed.len(), 1);
+
+    provider(&db, false).await;
+    let pass = retry_system_errors(&db, budget, 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(pass, SystemErrorPass::default(), "nothing is taken back");
+    for j in [refused, confirmed] {
+        let shown = sub(&db, j.submission_id).await;
+        assert_eq!(shown.status, SubmissionStatus::SystemError);
+        let j = judgement(&db, j.id).await;
+        assert!(j.error_stands && j.is_finalized);
+    }
+}
+
+/// While its type is parked no system error spends budget, however many
+/// await a decision and however small the batch: one pick decides each.
+#[tokio::test]
+async fn no_system_error_retry_is_spent_while_its_type_is_parked() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    provider(&db, true).await;
+    let mut failed = Vec::new();
+    for _ in 0..3 {
+        let (s, _) = new_submission(&db).await;
+        let claimed = claim_one(&db, "srv").await;
+        fail_dispatch(
+            &db,
+            Unit::Judgement,
+            claimed.judgement.id,
+            claimed.judgement.judge_epoch,
+            &DispatchFailure::judging("PLUGIN_ERROR", "boom"),
+        )
+        .await
+        .unwrap();
+        failed.push(s.id);
+    }
+    provider(&db, false).await;
+    let pass = retry_system_errors(&db, RetryBudget::new(5), 2, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!((pass.handed_back, pass.requeued), (2, 0));
+    let pass = retry_system_errors(&db, RetryBudget::new(5), 2, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!((pass.handed_back, pass.requeued), (1, 0));
+    for id in failed {
+        let s = sub(&db, id).await;
+        assert_eq!(s.status, SubmissionStatus::Queued);
+        assert_eq!(s.system_error_retries, 0, "no budget spent while parked");
+    }
+}
+
+/// A code run ends by the judgement's rule: an attempt the platform lost
+/// goes back to the queue with no retry spent, so does one whose type is
+/// parked, and anything else is finalized as a system error.
+#[tokio::test]
+async fn a_failed_code_run_is_handed_back_or_finalized_by_the_judgements_rule() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    provider(&db, true).await;
+    let claim = |db: DatabaseConnection| async move {
+        let mut runs = claim_code_runs(&db, "srv", 10, NO_TYPES)
+            .await
+            .unwrap()
+            .units;
+        assert_eq!(runs.len(), 1, "exactly one code run is claimable");
+        runs.remove(0)
+    };
+    let run = new_code_run(&db).await;
+    let lost = DispatchFailure::from(super::fault::Recorded {
+        fault: OperationFault::OperationLost.into(),
+        message: "lost".into(),
+    });
+    let judging = DispatchFailure::judging("PLUGIN_ERROR", "boom");
+    let find = |db: DatabaseConnection, id| async move {
+        code_run::Entity::find_by_id(id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+
+    let claimed = claim(db.clone()).await;
+    let outcome = fail_dispatch(&db, Unit::CodeRun, run.id, claimed.judge_epoch, &lost)
+        .await
+        .unwrap();
+    assert_eq!(outcome, DispatchFailed::HandedBack);
+    let after = find(db.clone(), run.id).await;
+    assert_eq!(after.status, SubmissionStatus::Queued);
+    assert_eq!(after.dispatch_retries, 0);
+    assert!(
+        after.judge_epoch > claimed.judge_epoch,
+        "the lost dispatch is fenced"
+    );
+
+    let claimed = claim(db.clone()).await;
+    provider(&db, false).await;
+    let outcome = fail_dispatch(&db, Unit::CodeRun, run.id, claimed.judge_epoch, &judging)
+        .await
+        .unwrap();
+    assert_eq!(outcome, DispatchFailed::HandedBack, "parked");
+    assert_eq!(
+        find(db.clone(), run.id).await.status,
+        SubmissionStatus::Queued
+    );
+
+    provider(&db, true).await;
+    let claimed = claim(db.clone()).await;
+    let outcome = fail_dispatch(&db, Unit::CodeRun, run.id, claimed.judge_epoch, &judging)
+        .await
+        .unwrap();
+    assert_eq!(outcome, DispatchFailed::SystemError);
+    let after = find(db.clone(), run.id).await;
+    assert_eq!(after.status, SubmissionStatus::SystemError);
+    assert_eq!(after.error_code.as_deref(), Some("PLUGIN_ERROR"));
+}
+
+/// A judgement superseded before it finished never got a verdict: it ends
+/// as a `SUPERSEDED` system error that stands, a decided outcome no retry
+/// takes for a failed attempt. Applied back, the submission shows it as it
+/// is instead of judging it again.
+#[tokio::test]
+async fn a_judgement_superseded_unfinished_stands_as_superseded() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (s, first) = new_submission(&db).await;
+    claim_one(&db, "srv").await;
+    rejudge(&db, s.id, true).await;
+    let superseded = judgement(&db, first.id).await;
+    assert_eq!(superseded.status, SubmissionStatus::SystemError);
+    assert_eq!(superseded.error_code.as_deref(), Some("SUPERSEDED"));
+    assert!(superseded.is_finalized && superseded.error_stands);
+
+    let txn = db.begin().await.unwrap();
+    let ApplyJudgement::Applied(applied) = apply_judgement(&txn, s.id, first.id).await.unwrap()
+    else {
+        panic!("applied");
+    };
+    txn.commit().await.unwrap();
+    assert_eq!(applied.status, SubmissionStatus::SystemError);
+    let pass = retry_system_errors(&db, RetryBudget::new(5), 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(pass, SystemErrorPass::default(), "nothing to re-judge");
 }
 
 /// In-flight work of a parked type whose owner was lost goes back without

@@ -1283,6 +1283,8 @@
 'apiError.PLUGIN_ERROR' = "A plugin failed while handling this request. Try again, or ask an administrator."
 'apiError.PLUGIN_SESSION_ABORTED' = "Judging stopped because the plugin judging it failed or was turned off."
 'apiError.PLUGIN_NO_VERDICT' = "The judging plugin finished without giving a verdict."
+'apiError.PLUGIN_EXECUTION_ERROR' = "The judging plugin failed while handling this."
+'apiError.PLUGIN_INVALID_OUTPUT' = "The judging plugin returned output the server cannot read."
 'apiError.OPERATION_LOST' = "A judging step was lost when the message queue restarted; it is retried."
 'apiError.QUEUE_UNREACHABLE' = "A judging step could not reach the message queue; it is retried."
 'apiError.PLATFORM_TOOL_MISSING' = "The worker that took this attempt lacks a platform tool it needs. The attempt goes back to the queue for a worker that has it."

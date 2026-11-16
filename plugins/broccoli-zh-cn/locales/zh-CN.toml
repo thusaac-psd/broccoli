@@ -1284,6 +1284,8 @@
 'apiError.PLUGIN_ERROR' = "插件处理此请求时出错。请重试，或联系管理员。"
 'apiError.PLUGIN_SESSION_ABORTED' = "评测此提交的插件出错或已停用，评测已中止。"
 'apiError.PLUGIN_NO_VERDICT' = "评测插件结束时没有给出结果。"
+'apiError.PLUGIN_EXECUTION_ERROR' = "评测插件在处理时出错。"
+'apiError.PLUGIN_INVALID_OUTPUT' = "评测插件返回了服务器无法读取的输出。"
 'apiError.OPERATION_LOST' = "消息队列重启时丢失了一个评测步骤，该步骤会重试。"
 'apiError.QUEUE_UNREACHABLE' = "某个评测步骤无法连接消息队列，将自动重试。"
 'apiError.PLATFORM_TOOL_MISSING' = "接收本次尝试的评测机缺少所需的平台工具。该尝试已退回队列，由具备该工具的评测机重新评测。"

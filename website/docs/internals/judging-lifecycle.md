@@ -26,7 +26,8 @@ current judgement from the moment it exists.
 | fail | in flight | `SystemError` (finalized) | dispatch, an ended judging session (`fail_dispatch`) |
 | requeue | in flight | `Queued`, new epoch, no owner | `release_leases`, `reclaim_abandoned` |
 | exhaust | in flight | `SystemError` (finalized), dead-lettered | `reclaim_abandoned` |
-| system-error retry | finalized `SystemError`, current | `Queued`, new epoch | `retry_system_errors` |
+| system-error retry | finalized `SystemError` that does not stand, current | `Queued`, new epoch | `retry_system_errors` |
+| confirm | finalized `SystemError` that does not stand, current, budget spent | stands, shown on the submission | `retry_system_errors` |
 
 Only the claim fiber moves work into flight, so the in-flight cap and
 dispatcher admission apply to first dispatches and retries alike. Every
@@ -39,7 +40,7 @@ recovery is a requeue:
   `stuck_job_timeout_secs` or dispatched more than `max_inflight_secs` ago
   (`reclaim_abandoned`);
 - the SystemError-retry reaper requeues a current judgement that finalized as
-  a `SystemError` (`retry_system_errors`).
+  a `SystemError` that does not stand (`retry_system_errors`).
 
 One lease-steal or stuck-job scan takes over everything it selects: it works
 in transactions of `steal_batch_size` rows (256 for the detector) and repeats
@@ -121,20 +122,24 @@ is disabled fleet-wide; `contest_type_open` states that in SQL and
   than when its next result arrives. The replica that made the disable and
   every replica that applies it through its reconcile unload through the same
   `deactivate`.
-- A judgement that fails while its type is parked (its session aborted when
-  the plugin went away, or nothing was registered to dispatch it to) goes
-  straight back to `Queued` under a fresh epoch, whatever the failure said
-  (`judging::fail_dispatch`): it is never finalized as a `SystemError`, spends
-  no budget, and the submission follows it in the same statement. The
-  decision reads the fleet-wide `plugin` table, so the replica that made the
-  disable and a replica that applied it through its reconcile hand the work
-  back the same way.
+- A judgement or code run whose dispatch fails while its type is parked (its
+  session aborted when the plugin went away, or nothing was registered to
+  dispatch it to) goes straight back to `Queued` under a fresh epoch,
+  whatever the failure said (`judging::fail_dispatch`): it is never finalized
+  as a `SystemError`, spends no budget, and the submission follows it in the
+  same statement. The decision reads the fleet-wide `plugin` table, so the
+  replica that made the disable and a replica that applied it through its
+  reconcile hand the work back the same way.
 - The reaper retries no system error of a parked type and confirms none:
   one still awaiting its decision goes back to `Queued` spending nothing, so
-  the judgement history shows no finalized attempt the parked submission does
-  not, and the budget is not spent on attempts nothing can judge. The
-  stuck-job detector hands back lapsed work of a parked type without spending
-  a dispatch retry.
+  the budget is not spent on attempts nothing can judge. One pick decides
+  every awaiting error, so a batch never retries one of a parked type that a
+  smaller batch would have handed back. The stuck-job detector hands back
+  lapsed work of a parked type without spending a dispatch retry.
+- A system error that stands (see [Retry budgets](#retry-budgets)) is a
+  decision, not an attempt: it stays what the submission shows while its type
+  is parked, whether the dispatch, the plugin or the reaper's confirmation
+  made it stand.
 
 A viewer whose submission the plugin governs sees its outcome withheld under
 the contest's `plugin_outage`; staff see it `Queued`. Once the plugin is
@@ -150,13 +155,13 @@ plugin's result write is one statement that writes the judgement and the
 submission together.
 
 One projection waits: a current judgement that finalized as a system error
-the system-error retry may still re-judge (anything but `PLUGIN_REFUSED` or
-`CHECKER_FAILED`, which stand).
+that does not stand yet (`error_stands` is false), which the system-error
+retry may still re-judge.
 The submission keeps showing the attempt in flight until the reaper decides
 it within one scan (5 s): it requeues the judgement while the submission has
 retries left, so the submission goes on to `Queued` and the next attempt; or
-it confirms the error once the budget is spent, which projects it and fires
-the after-judging hooks. A client therefore never sees a terminal status
+it confirms the error once the budget is spent, which marks it standing,
+projects it and fires the after-judging hooks. A client therefore never sees a terminal status
 that a retry takes back: within an attempt the statuses only move forward,
 and a terminal status is final.
 
@@ -179,7 +184,8 @@ are keyed on it.
   `sj.judge_epoch = tcr.judge_epoch`). `apply_judgement` gives the applied
   judgement a fresh epoch and moves its kept results to it.
 - A judgement that stops being current while still in flight is finalized as
-  `SystemError` with `SUPERSEDED`.
+  a `SystemError` with `SUPERSEDED` that stands: it never got a verdict, and
+  no retry takes it for a failed attempt, even when an admin applies it back.
 - The plugin write fence (`write_fence`) admits a write only to the named
   judgement, of the named submission, at the dispatched epoch, while it is not
   finalized.
@@ -214,8 +220,12 @@ nothing. The submission follows in the same transaction, so no client and no
 after-judging hook sees a `SystemError` that is then taken back.
 
 A failure every attempt repeats stands at once (`SystemErrorClass::Stands`): a
-contest plugin's refusal (`PLUGIN_REFUSED`), or the problem's checker failing
-(`CHECKER_FAILED`). A checker plugin reports the latter on its verdict
+contest plugin's refusal (`PLUGIN_REFUSED`), a problem its contest plugin says
+cannot be judged (a `SystemError` written with `SubmissionUpdate::stands`,
+for example IOI's and ICPC's `NO_TEST_CASES`), or the problem's checker
+failing (`CHECKER_FAILED`). The judgement records it in `error_stands`, which
+the reaper reads; the submission shows it at once. A checker plugin reports
+the checker failing on its verdict
 (`CheckerVerdict::checker_failure`, set by the standard testlib checker when
 the checker was killed by a signal, failed to start, or exited with a code
 testlib gives no meaning); the host records it as the dispatch's fault, so the
@@ -223,14 +233,34 @@ system error carries the code and how the checker failed (staff only, like
 every system-error diagnostic). Any other system error is retried within the
 budget.
 
-The classes read only the host's own codes. Every write a plugin makes goes
-through one rule (`judging::as_recorded`): the plugin's own error code is
-recorded as `<plugin_id>.<CODE>`, and a fault the dispatch met decides the code
-of a system error, recorded bare. Every code of the hand-back and standing
-classes is bare, so no code a plugin writes, whatever its text, can class as
-anything but a failure of judging (pinned by
-`fault::no_code_a_plugin_writes_classes_as_a_host_code`). The UI translates a
-plugin's code from that plugin's pack only.
+A system error's class is decided where the failure is observed and recorded
+with it (`DispatchFailure` for a dispatch, `judging::as_recorded` for a
+plugin's write), never read back from its error code, so no code a plugin
+writes, whatever its text, can pass for a host class. Every write a plugin
+makes to a judgement or a code run goes through `as_recorded`: the plugin's own
+error code is recorded as `<plugin_id>.<CODE>`, its word that a system error
+stands counts only on the write that ends the unit in one, and a fault the
+dispatch met decides the code of a system error, recorded bare, and whether it
+stands. A plugin's system error is a terminal write with a `SystemError`
+verdict, whichever terminal status it carries; the judging scans read a
+finished row by the same rule. The UI translates a plugin's code from that
+plugin's pack only.
+
+How a dispatch's plugin call ended is one rule for both dispatchers
+(`judging::CallEnd::of`): a call the host could not serve (its deadline,
+admission, the plugin between loads, an instance it could not build) ends as
+`PLUGIN_UNAVAILABLE`, any other call error as `PLUGIN_EXECUTION_ERROR`, a
+refusal as `PLUGIN_REFUSED`, output the host cannot read as
+`PLUGIN_INVALID_OUTPUT`. A host function that calls into another plugin
+(a checker or language resolver) passes on the callee's unavailability: the
+caller's call fails as unavailable too (`PluginInvoker::call_raw`). A call
+that runs out of time is a judging failure, not a hand-back, so a unit that
+always outlasts its deadline still ends.
+
+A code run follows the judgement's rules: its plugin call carries the
+dispatch's faults, a write that would finalize an attempt the platform lost is
+fenced out, and `fail_dispatch` hands a lost or parked run back. A code run is
+never retried as a system error, so every other failure stands.
 
 A missing platform tool is the worker's fault, never the submission's. A worker
 that lacks one reads no task at all: it stays live, and its heartbeat lists the

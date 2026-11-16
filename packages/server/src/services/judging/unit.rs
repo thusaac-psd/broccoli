@@ -6,7 +6,7 @@ use common::{DlqErrorCode, StatusPhase, SubmissionDlqErrorCode, SubmissionStatus
 use sea_orm::{ConnectionTrait, DbBackend, DbErr, EntityTrait, Statement, TransactionTrait, Value};
 
 use super::RetryBudget;
-use super::SystemErrorClass;
+use super::fault::{DispatchFailure, SystemErrorClass};
 use crate::dispatcher::prefer_local_handler;
 use crate::dlq::{DlqService, DlqSubject};
 use crate::entity::{code_run, submission, submission_judgement};
@@ -79,6 +79,38 @@ impl Unit {
         }
     }
 
+    /// SQL: the row `alias` is unit `id` at epoch `epoch`, still in the
+    /// dispatch that epoch names.
+    fn open_dispatch(self, alias: &str, id: &str, epoch: &str) -> String {
+        let finalized = match self {
+            Unit::Judgement => format!(" AND NOT {alias}.is_finalized"),
+            Unit::CodeRun => String::new(),
+        };
+        format!(
+            "{alias}.id = {id} AND {alias}.judge_epoch = {epoch} \
+             AND {alias}.status IN {in_flight}{finalized}",
+            in_flight = StatusPhase::InFlight.sql_list(),
+        )
+    }
+
+    /// `UPDATE` (as `t`, without its `WHERE`) that finalizes rows of this
+    /// unit as `SystemError` with the error code and message the placeholders
+    /// `code` and `message` bind. A judgement records whether its error
+    /// stands; a code run is never retried, so its error always does.
+    fn finalize_system_error(self, code: &str, message: &str, class: SystemErrorClass) -> String {
+        let stands = match self {
+            Unit::Judgement => format!(", error_stands = {}", class == SystemErrorClass::Stands),
+            Unit::CodeRun => String::new(),
+        };
+        format!(
+            "UPDATE {table} t SET status = '{system_error}', error_code = {code}, \
+             error_message = {message}, {finalize}{stands}",
+            table = self.table(),
+            system_error = SubmissionStatus::SystemError,
+            finalize = self.finalize_sets(),
+        )
+    }
+
     /// `SET` items that clear every judged-output column, ready for a new
     /// dispatch.
     fn cleared_output_sets(self) -> &'static str {
@@ -86,7 +118,7 @@ impl Unit {
             Unit::Judgement => {
                 "verdict = NULL, score = NULL, time_used = NULL, memory_used = NULL, \
                  compile_output = NULL, error_code = NULL, error_message = NULL, \
-                 is_finalized = FALSE, finalized_at = NULL"
+                 error_stands = FALSE, is_finalized = FALSE, finalized_at = NULL"
             }
             Unit::CodeRun => {
                 "verdict = NULL, score = NULL, time_used = NULL, memory_used = NULL, \
@@ -133,14 +165,16 @@ impl Unit {
     }
 }
 
-/// SQL: the unit row `alias` finished as a system error in any shape, a
-/// `SystemError` status or a plugin's `SystemError` verdict.
+/// SQL: the unit row `alias` finished as a system error in any shape: a
+/// `SystemError` status (the host's), or a terminal status with a
+/// `SystemError` verdict (a plugin's, as `plugin_writes::as_recorded` reads
+/// the write that ends it).
 fn system_error(alias: &str) -> String {
     format!(
         "({alias}.status = '{system_error}' \
-          OR ({alias}.status = '{judged}' AND {alias}.verdict IS NOT DISTINCT FROM '{verdict}'))",
+          OR ({alias}.status IN {terminal} AND {alias}.verdict IS NOT DISTINCT FROM '{verdict}'))",
         system_error = SubmissionStatus::SystemError,
-        judged = SubmissionStatus::Judged,
+        terminal = StatusPhase::Terminal.sql_list(),
         verdict = common::Verdict::SystemError,
     )
 }
@@ -152,9 +186,8 @@ fn system_error(alias: &str) -> String {
 /// the retry budget, either requeues the judgement or confirms the error.
 fn awaits_retry_decision(alias: &str) -> String {
     format!(
-        "({alias}.is_finalized AND {system_error} AND NOT {stands})",
+        "({alias}.is_finalized AND {system_error} AND NOT {alias}.error_stands)",
         system_error = system_error(alias),
-        stands = SystemErrorClass::Stands.sql_matches(&format!("{alias}.error_code")),
     )
 }
 
@@ -542,6 +575,8 @@ struct Picked {
     submission_id: Option<i32>,
     is_current: bool,
     dispatch_retries: i32,
+    /// Its submission's spent system-error retries (0 for a code run).
+    system_error_retries: i32,
     /// Its contest type may be judged now ([`contest_type_open`]).
     open: bool,
 }
@@ -560,9 +595,12 @@ async fn pick(
         None => String::new(),
     };
     let columns = match unit {
-        Unit::Judgement => "u.id, u.submission_id, u.is_current, u.dispatch_retries",
+        Unit::Judgement => {
+            "u.id, u.submission_id, u.is_current, u.dispatch_retries, s.system_error_retries"
+        }
         Unit::CodeRun => {
-            "u.id, NULL::int AS submission_id, FALSE AS is_current, u.dispatch_retries"
+            "u.id, NULL::int AS submission_id, FALSE AS is_current, u.dispatch_retries, \
+             0 AS system_error_retries"
         }
     };
     let rows = txn
@@ -580,6 +618,7 @@ async fn pick(
                 submission_id: r.try_get("", "submission_id")?,
                 is_current: r.try_get("", "is_current")?,
                 dispatch_retries: r.try_get("", "dispatch_retries")?,
+                system_error_retries: r.try_get("", "system_error_retries")?,
                 open: r.try_get("", "open")?,
             })
         })
@@ -921,13 +960,9 @@ async fn finalize_system_error(
         .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             format!(
-                "WITH moved AS (UPDATE {table} t SET status = '{system_error}', \
-                                    error_code = $2, error_message = $3, {finalize} \
-                                WHERE t.id = ANY($1) RETURNING t.*){mirror} \
+                "WITH moved AS ({finalize} WHERE t.id = ANY($1) RETURNING t.*){mirror} \
                  SELECT id FROM moved",
-                table = unit.table(),
-                system_error = SubmissionStatus::SystemError,
-                finalize = unit.finalize_sets(),
+                finalize = unit.finalize_system_error("$2", "$3", SystemErrorClass::Judging),
                 mirror = unit.cascade(),
             ),
             [ids.into(), error_code.into(), message.into()],
@@ -986,20 +1021,41 @@ pub(crate) struct SystemErrorPass {
     pub confirmed: Vec<ConfirmedSystemError>,
 }
 
-/// Decides up to `limit` current judgements of each kind that finalized as a
-/// system error in any shape (a plugin's `SystemError` verdict, or a
-/// `SystemError` status from a dispatch failure or exhaustion), which the
-/// submission row has not shown (see [`awaits_retry_decision`]), by the
-/// [`SystemErrorClass`] of the error code it carries:
-///
-/// - `HandBack`: requeued, spending nothing (no dispatch finalizes one, but
-///   a plugin may write its code);
-/// - `Judging`: requeued while its submission has system-error retries left,
-///   spending one, and confirmed once they are spent; while its contest type
-///   is parked, requeued spending nothing, so it waits parked;
-/// - `Stands`: never awaits a decision; the submission shows it at once.
-///
-/// A confirmed error is what the submission shows from then on.
+/// What the system-error retry does with a judgement awaiting its decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetryDecision {
+    /// Its contest type is parked: a retry would only spend budget on an
+    /// attempt nothing can judge, and confirming the error would make the
+    /// disable's outage a verdict. It goes back to the queue spending
+    /// nothing, parked with its submission, and is judged again once a
+    /// provider is enabled.
+    HandBack,
+    /// Requeued for another attempt, spending one of its submission's
+    /// system-error retries.
+    Retry,
+    /// Its budget is spent: the error stands, and the submission shows it.
+    Confirm,
+}
+
+impl RetryDecision {
+    fn of(picked: &Picked, budget: RetryBudget) -> Self {
+        if !picked.open {
+            Self::HandBack
+        } else if budget.allows(picked.system_error_retries) {
+            Self::Retry
+        } else {
+            Self::Confirm
+        }
+    }
+}
+
+/// Decides up to `limit` current judgements that finalized as a system error
+/// in any shape (a plugin's `SystemError` verdict, or a `SystemError` status
+/// from a dispatch failure or exhaustion) that does not stand yet, which the
+/// submission row has not shown (see [`awaits_retry_decision`]), each by
+/// [`RetryDecision::of`]. One pick takes every judgement awaiting a decision
+/// that this replica may decide: one it can judge, or one to confirm, which
+/// any replica may, whatever it can judge.
 pub(crate) async fn retry_system_errors(
     db: &DatabaseConnection,
     budget: RetryBudget,
@@ -1007,69 +1063,39 @@ pub(crate) async fn retry_system_errors(
     local: &[String],
 ) -> Result<SystemErrorPass, DbErr> {
     let txn = db.begin().await?;
-    let undecided = awaits_retry_decision("u");
-    let class = |c: SystemErrorClass| c.sql_matches("u.error_code");
-
-    // A retry while the contest type is parked would only spend budget on
-    // an attempt nothing can judge, and confirming the error would make the
-    // disable's outage a verdict: the attempt goes back to the queue, parked
-    // with its submission, and is judged again once a provider is enabled.
-    let filter = format!(
-        "({} OR NOT {})",
-        class(SystemErrorClass::HandBack),
-        contest_type_open("s.contest_type"),
-    );
-    let ids = pick_current_system_errors(&txn, Binds::default(), &filter, limit, local).await?;
-    let handed_back = requeue(&txn, Unit::Judgement, &ids, Requeue::HandedBack).await?;
-
     let mut b = Binds::default();
-    let filter = format!(
-        "{} AND s.system_error_retries < {}",
-        class(SystemErrorClass::Judging),
-        b.bind(budget.max()),
-    );
-    let ids = pick_current_system_errors(&txn, b, &filter, limit, local).await?;
-    let requeued = requeue(&txn, Unit::Judgement, &ids, Requeue::SystemErrorRetry).await?;
-
-    // Errors that stand: the submission shows each, once. Any replica may
-    // confirm, whatever it can judge; none confirms one of a parked type.
-    let mut b = Binds::default();
+    let max = b.bind(budget.max());
+    let local = b.bind(local.to_vec());
     let filter = format!(
         "u.is_current AND {undecided} \
-         AND {judging} AND s.system_error_retries >= {max} AND {open} \
-         AND (s.judge_epoch IS DISTINCT FROM u.judge_epoch OR s.status IS DISTINCT FROM u.status)",
-        judging = class(SystemErrorClass::Judging),
-        max = b.bind(budget.max()),
+         AND ({handled} OR ({open} AND s.system_error_retries >= {max}))",
+        undecided = awaits_retry_decision("u"),
+        handled = prefer_local_handler("s.contest_type", &local),
         open = contest_type_open("s.contest_type"),
     );
-    let ids: Vec<i32> = pick(&txn, Unit::Judgement, b, filter, Some(limit))
-        .await?
-        .into_iter()
-        .map(|p| p.id)
-        .collect();
-    let mut confirmed = Vec::with_capacity(ids.len());
-    if !ids.is_empty() {
-        let rows = txn
-            .query_all_raw(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                format!(
-                    "UPDATE submission s SET {MIRROR_SETS} FROM submission_judgement j \
-                     WHERE j.id = ANY($1) AND s.id = j.submission_id \
-                     RETURNING s.id, s.user_id, s.problem_id, s.contest_id"
-                ),
-                [ids.into()],
-            ))
-            .await?;
-        for r in rows {
-            let submission_id: i32 = r.try_get("", "id")?;
-            confirmed.push(ConfirmedSystemError {
-                submission_id,
-                user_id: r.try_get("", "user_id")?,
-                problem_id: r.try_get("", "problem_id")?,
-                contest_id: r.try_get("", "contest_id")?,
-            });
-        }
-    }
+    let picked = pick(&txn, Unit::Judgement, b, filter, Some(limit)).await?;
+    let decided = |decision: RetryDecision| -> Vec<i32> {
+        picked
+            .iter()
+            .filter(|p| RetryDecision::of(p, budget) == decision)
+            .map(|p| p.id)
+            .collect()
+    };
+    let handed_back = requeue(
+        &txn,
+        Unit::Judgement,
+        &decided(RetryDecision::HandBack),
+        Requeue::HandedBack,
+    )
+    .await?;
+    let requeued = requeue(
+        &txn,
+        Unit::Judgement,
+        &decided(RetryDecision::Retry),
+        Requeue::SystemErrorRetry,
+    )
+    .await?;
+    let confirmed = confirm_system_errors(&txn, &decided(RetryDecision::Confirm)).await?;
     txn.commit().await?;
     Ok(SystemErrorPass {
         handed_back,
@@ -1078,32 +1104,45 @@ pub(crate) async fn retry_system_errors(
     })
 }
 
-/// Locks up to `limit` current judgements awaiting a retry decision that
-/// match `filter` and this replica can judge.
-async fn pick_current_system_errors(
+/// Marks the locked current judgements `ids` as standing and shows each on
+/// its submission.
+async fn confirm_system_errors(
     txn: &DatabaseTransaction,
-    mut b: Binds,
-    filter: &str,
-    limit: u32,
-    local: &[String],
-) -> Result<Vec<i32>, DbErr> {
-    let local = b.bind(local.to_vec());
-    let filter = format!(
-        "u.is_current AND {undecided} AND {filter} AND {handled}",
-        undecided = awaits_retry_decision("u"),
-        handled = prefer_local_handler("s.contest_type", &local),
-    );
-    Ok(pick(txn, Unit::Judgement, b, filter, Some(limit))
-        .await?
-        .into_iter()
-        .map(|p| p.id)
-        .collect())
+    ids: &[i32],
+) -> Result<Vec<ConfirmedSystemError>, DbErr> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = txn
+        .query_all_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!(
+                "WITH moved AS (UPDATE submission_judgement t SET error_stands = TRUE \
+                                WHERE t.id = ANY($1) RETURNING t.*){mirror} \
+                 SELECT s.id, s.user_id, s.problem_id, s.contest_id \
+                 FROM submission s JOIN moved ON moved.submission_id = s.id",
+                mirror = Unit::Judgement.cascade(),
+            ),
+            [ids.to_vec().into()],
+        ))
+        .await?;
+    rows.iter()
+        .map(|r| {
+            Ok(ConfirmedSystemError {
+                submission_id: r.try_get("", "id")?,
+                user_id: r.try_get("", "user_id")?,
+                problem_id: r.try_get("", "problem_id")?,
+                contest_id: r.try_get("", "contest_id")?,
+            })
+        })
+        .collect()
 }
 
 /// What [`fail_dispatch`] did with the unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DispatchFailed {
-    /// Finalized as `SystemError`; the system-error retry decides what next.
+    /// Finalized as `SystemError`: a judgement's error stands or awaits the
+    /// system-error retry, as its class says; a code run's stands.
     SystemError,
     /// Back to `Queued` without spending a retry: the platform lost the
     /// attempt, or every provider of its contest type is disabled fleet-wide,
@@ -1115,38 +1154,30 @@ pub(crate) enum DispatchFailed {
     Stale,
 }
 
-/// Ends a unit whose dispatch failed, fenced on its epoch: a failure reported
-/// by a dispatch that was since requeued or superseded changes nothing. A
-/// judgement goes straight back to `Queued`, so it never shows a
-/// `SystemError` it does not have, when the platform lost the attempt (an
-/// `error_code` of [`SystemErrorClass::HandBack`]) or its contest type is
-/// parked; anything else is finalized as `SystemError`.
+/// Ends a unit (a judgement or a code run alike) whose dispatch failed,
+/// fenced on its epoch: a failure reported by a dispatch that was since
+/// requeued or superseded changes nothing. The unit goes straight back to
+/// `Queued`, so it never shows a `SystemError` it does not have, when the
+/// platform lost the attempt ([`SystemErrorClass::HandBack`]) or its contest
+/// type is parked; anything else is finalized as `SystemError`, a
+/// judgement's standing at once when its class is
+/// [`SystemErrorClass::Stands`].
 ///
 /// Every judging session ends here, most after their plugin finalized the
-/// judgement, so the common case is one statement: it finalizes a judgement
-/// whose type is open, or finds nothing to do. Only a judgement to hand back
-/// takes a second, transactional pass.
+/// unit, so the common case is one statement: it finalizes a unit whose type
+/// is open, or finds nothing to do. Only a unit to hand back takes a second,
+/// transactional pass.
 pub(crate) async fn fail_dispatch(
     db: &DatabaseConnection,
     unit: Unit,
     id: i32,
     judge_epoch: i32,
-    error_code: &str,
-    error_message: &str,
+    failure: &DispatchFailure,
 ) -> Result<DispatchFailed, DbErr> {
-    if unit == Unit::Judgement
-        && SystemErrorClass::of_code(error_code) == SystemErrorClass::HandBack
-    {
-        return hand_back(db, id, judge_epoch, None).await;
+    if failure.class == SystemErrorClass::HandBack {
+        return hand_back(db, unit, id, judge_epoch, None).await;
     }
-    let in_flight = StatusPhase::InFlight.sql_list();
-    let finalize = format!(
-        "UPDATE {table} t SET status = '{system_error}', error_code = $3, error_message = $4, \
-         {finalize_sets}",
-        table = unit.table(),
-        system_error = SubmissionStatus::SystemError,
-        finalize_sets = unit.finalize_sets(),
-    );
+    let open_now = unit.open_dispatch("t", "$1", "$2");
     let sql = match unit {
         // A judgement locks its submission first, as every judgement
         // transition does; the UPDATE joins the lock so it is taken before
@@ -1156,20 +1187,21 @@ pub(crate) async fn fail_dispatch(
                              JOIN submission_judgement j ON j.submission_id = s.id \
                              WHERE j.id = $1 FOR NO KEY UPDATE OF s), \
                   moved AS ({finalize} FROM locked \
-                            WHERE t.id = $1 AND t.judge_epoch = $2 AND t.status IN {in_flight} \
-                              AND t.submission_id = locked.id AND NOT t.is_finalized AND locked.open \
+                            WHERE {open_now} AND t.submission_id = locked.id AND locked.open \
                             RETURNING t.*){mirror}, \
                   parked AS (SELECT t.id FROM submission_judgement t, locked \
-                             WHERE t.id = $1 AND t.judge_epoch = $2 AND t.status IN {in_flight} \
-                               AND NOT t.is_finalized AND NOT locked.open) \
+                             WHERE {open_now} AND NOT locked.open) \
              SELECT (SELECT COUNT(*) FROM moved) AS moved, (SELECT COUNT(*) FROM parked) AS parked",
             open = contest_type_open("s.contest_type"),
+            finalize = unit.finalize_system_error("$3", "$4", failure.class),
             mirror = unit.cascade(),
         ),
         Unit::CodeRun => format!(
-            "WITH moved AS ({finalize} WHERE t.id = $1 AND t.judge_epoch = $2 \
-                            AND t.status IN {in_flight} RETURNING t.id) \
-             SELECT (SELECT COUNT(*) FROM moved) AS moved, 0::bigint AS parked"
+            "WITH moved AS ({finalize} WHERE {open_now} AND {open} RETURNING t.id), \
+                  parked AS (SELECT t.id FROM code_run t WHERE {open_now} AND NOT {open}) \
+             SELECT (SELECT COUNT(*) FROM moved) AS moved, (SELECT COUNT(*) FROM parked) AS parked",
+            open = contest_type_open("t.contest_type"),
+            finalize = unit.finalize_system_error("$3", "$4", failure.class),
         ),
     };
     let row = db
@@ -1179,8 +1211,8 @@ pub(crate) async fn fail_dispatch(
             [
                 id.into(),
                 judge_epoch.into(),
-                error_code.into(),
-                error_message.into(),
+                failure.code.into(),
+                failure.message.as_str().into(),
             ],
         ))
         .await?
@@ -1191,57 +1223,59 @@ pub(crate) async fn fail_dispatch(
     if row.try_get::<i64>("", "parked")? == 0 {
         return Ok(DispatchFailed::Stale);
     }
-    hand_back(db, id, judge_epoch, Some((error_code, error_message))).await
+    hand_back(db, unit, id, judge_epoch, Some(failure)).await
 }
 
-/// The second pass of [`fail_dispatch`]: under the submission's lock, hands
-/// back the in-flight judgement. With `unless_open`, the failure is the
-/// disable's only while the judgement's type is still parked: if a provider
-/// was enabled since, it is finalized as `SystemError` with that code and
-/// message instead.
+/// The second pass of [`fail_dispatch`]: under the unit's locks, hands back
+/// the in-flight unit. With `unless_open`, the failure is the disable's only
+/// while the unit's type is still parked: if a provider was enabled since, it
+/// is finalized with that failure instead.
 async fn hand_back(
     db: &DatabaseConnection,
+    unit: Unit,
     id: i32,
     judge_epoch: i32,
-    unless_open: Option<(&str, &str)>,
+    unless_open: Option<&DispatchFailure>,
 ) -> Result<DispatchFailed, DbErr> {
     let txn = db.begin().await?;
     let row = txn
         .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             format!(
-                "SELECT {open} AS open FROM {from} \
-                 WHERE u.id = $1 AND u.judge_epoch = $2 AND u.status IN {in_flight} \
-                   AND NOT u.is_finalized \
-                 FOR NO KEY UPDATE OF s",
-                open = contest_type_open(Unit::Judgement.contest_type()),
-                from = Unit::Judgement.scan_from(),
-                in_flight = StatusPhase::InFlight.sql_list(),
+                "SELECT {open} AS open FROM {from} WHERE {open_now} {lock}",
+                open = contest_type_open(unit.contest_type()),
+                from = unit.scan_from(),
+                open_now = unit.open_dispatch("u", "$1", "$2"),
+                lock = match unit {
+                    Unit::Judgement => "FOR NO KEY UPDATE OF s",
+                    Unit::CodeRun => "FOR NO KEY UPDATE OF u",
+                },
             ),
             [id.into(), judge_epoch.into()],
         ))
         .await?;
     let outcome = match (row, unless_open) {
         (None, _) => DispatchFailed::Stale,
-        (Some(row), Some((error_code, error_message))) if row.try_get::<bool>("", "open")? => {
+        (Some(row), Some(failure)) if row.try_get::<bool>("", "open")? => {
             txn.execute_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 format!(
-                    "WITH moved AS (UPDATE submission_judgement t SET status = '{system_error}', \
-                                    error_code = $2, error_message = $3, {finalize} \
-                                    WHERE t.id = $1 RETURNING t.*){mirror} \
+                    "WITH moved AS ({finalize} WHERE t.id = $1 RETURNING t.*){mirror} \
                      SELECT id FROM moved",
-                    system_error = SubmissionStatus::SystemError,
-                    finalize = Unit::Judgement.finalize_sets(),
-                    mirror = Unit::Judgement.cascade(),
+                    finalize = unit.finalize_system_error("$2", "$3", failure.class),
+                    mirror = unit.cascade(),
                 ),
-                [id.into(), error_code.into(), error_message.into()],
+                [
+                    id.into(),
+                    failure.code.into(),
+                    failure.message.as_str().into(),
+                ],
             ))
             .await?;
             DispatchFailed::SystemError
         }
         (Some(_), _) => {
-            requeue(&txn, Unit::Judgement, &[id], Requeue::HandedBack).await?;
+            requeue(&txn, unit, &[id], Requeue::HandedBack).await?;
             DispatchFailed::HandedBack
         }
     };

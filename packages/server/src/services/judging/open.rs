@@ -204,9 +204,10 @@ impl SupersededBy {
 
 /// Takes the submission's current judgement out of service in one
 /// statement: clears `is_current` and, if it was not finalized, finalizes it
-/// as `SystemError`. A finalized judgement accepts no plugin writes and is
-/// never dispatched again; an already finalized one keeps its verdict as
-/// version history.
+/// as a `SUPERSEDED` system error that stands: it never got a verdict, and no
+/// retry takes it for a failed attempt, even applied back. A finalized
+/// judgement accepts no plugin writes and is never dispatched again; an
+/// already finalized one keeps its verdict as version history.
 async fn supersede_current_judgement<C: ConnectionTrait>(
     txn: &C,
     submission_id: i32,
@@ -219,6 +220,7 @@ async fn supersede_current_judgement<C: ConnectionTrait>(
                status = CASE WHEN is_finalized THEN status ELSE $1 END,
                error_code = CASE WHEN is_finalized THEN error_code ELSE $2 END,
                error_message = CASE WHEN is_finalized THEN error_message ELSE $3 END,
+               error_stands = CASE WHEN is_finalized THEN error_stands ELSE TRUE END,
                finalized_at = CASE WHEN is_finalized THEN finalized_at ELSE NOW() END,
                is_finalized = TRUE
            WHERE submission_id = $4 AND is_current = TRUE"#,

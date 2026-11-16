@@ -77,149 +77,160 @@ pub trait PluginInvoker: Send + Sync {
         input: Vec<u8>,
         options: CallOptions,
     ) -> Result<Vec<u8>, PluginError> {
-        let start = std::time::Instant::now();
-        // First, before anything else: once the host is shutting down every
-        // call is refused the same way, whatever plugin it is for.
-        let guard = match self.call_gate() {
-            Some(gate) => Some(gate.enter().ok_or(PluginError::ShuttingDown)?),
-            None => None,
-        };
-        let unavailable = || PluginError::Unavailable {
-            plugin_id: plugin_id.to_string(),
-            func_name: func_name.to_string(),
-        };
-        let resolved = crate::executor::resolve(
-            options,
-            self.get_config().call_timeout(),
-            plugin_id,
-            func_name,
-        )?;
-        let admission = self.executor().admission().clone();
+        // A nested call the host cannot serve leaves the call that made it
+        // unable to finish too, whatever the host function in between makes
+        // of the error: the caller's call fails as unavailable.
+        let nested = options.is_nested();
+        let result = async {
+            let start = std::time::Instant::now();
+            // First, before anything else: once the host is shutting down every
+            // call is refused the same way, whatever plugin it is for.
+            let guard = match self.call_gate() {
+                Some(gate) => Some(gate.enter().ok_or(PluginError::ShuttingDown)?),
+                None => None,
+            };
+            let unavailable = || PluginError::Unavailable {
+                plugin_id: plugin_id.to_string(),
+                func_name: func_name.to_string(),
+            };
+            let resolved = crate::executor::resolve(
+                options,
+                self.get_config().call_timeout(),
+                plugin_id,
+                func_name,
+            )?;
+            let admission = self.executor().admission().clone();
 
-        // Admission comes before the thread and before the pool lookup: a
-        // queued call holds no thread, and one queued across a reload runs on
-        // the new version.
-        let admitted = match resolved.queue {
-            Some(kind) => {
-                let waited = std::time::Instant::now();
-                let outcome = admission
-                    .admit(kind, plugin_id, func_name, resolved.deadline)
-                    .await;
-                if let Some(metrics) = self.get_metrics() {
-                    if outcome
-                        .as_ref()
-                        .is_ok_and(|(admitted, _)| admitted.queued())
-                    {
-                        metrics
-                            .plugin_admission_queued_total
-                            .add(1, &[KeyValue::new("plugin.kind", kind.as_str())]);
+            // Admission comes before the thread and before the pool lookup: a
+            // queued call holds no thread, and one queued across a reload runs on
+            // the new version.
+            let admitted = match resolved.queue {
+                Some(kind) => {
+                    let waited = std::time::Instant::now();
+                    let outcome = admission
+                        .admit(kind, plugin_id, func_name, resolved.deadline)
+                        .await;
+                    if let Some(metrics) = self.get_metrics() {
+                        if outcome
+                            .as_ref()
+                            .is_ok_and(|(admitted, _)| admitted.queued())
+                        {
+                            metrics
+                                .plugin_admission_queued_total
+                                .add(1, &[KeyValue::new("plugin.kind", kind.as_str())]);
+                        }
+                        metrics.plugin_admission_wait_duration.record(
+                            waited.elapsed().as_secs_f64(),
+                            &[
+                                KeyValue::new("plugin.kind", kind.as_str()),
+                                KeyValue::new(
+                                    "outcome",
+                                    if outcome.is_ok() {
+                                        "admitted"
+                                    } else {
+                                        "expired"
+                                    },
+                                ),
+                            ],
+                        );
                     }
-                    metrics.plugin_admission_wait_duration.record(
-                        waited.elapsed().as_secs_f64(),
-                        &[
-                            KeyValue::new("plugin.kind", kind.as_str()),
-                            KeyValue::new(
-                                "outcome",
-                                if outcome.is_ok() {
-                                    "admitted"
-                                } else {
-                                    "expired"
-                                },
-                            ),
-                        ],
-                    );
+                    Some(outcome.map_err(|_| unavailable())?)
                 }
-                Some(outcome.map_err(|_| unavailable())?)
+                None => None,
+            };
+
+            let pool = {
+                let registry = self.get_registry().read().map_err(|_| {
+                    PluginError::Internal("Failed to acquire registry read lock".into())
+                })?;
+
+                let plugin_entry = registry
+                    .get(plugin_id)
+                    .ok_or_else(|| PluginError::NotFound(plugin_id.to_string()))?;
+
+                if plugin_entry.status != PluginStatus::Loaded {
+                    return Err(PluginError::NotLoaded(plugin_id.to_string()));
+                }
+
+                plugin_entry
+                    .runtime
+                    .as_ref()
+                    .ok_or_else(|| PluginError::NoRuntime(plugin_id.to_string()))?
+                    .clone()
+            };
+
+            let metrics = self.get_metrics().cloned();
+            let plugin_id_owned = plugin_id.to_string();
+            let func_name_owned = func_name.to_string();
+            let parent_span = tracing::Span::current();
+
+            // Counted until the guest returns, whether or not anyone still
+            // awaits it.
+            let in_flight = InFlight::enter(metrics.as_ref(), &plugin_id_owned);
+            let runtime = tokio::runtime::Handle::current();
+            let (done, result) = tokio::sync::oneshot::channel();
+            let class = resolved.class;
+            self.executor().threads().run({
+                let plugin_id = plugin_id_owned.clone();
+                let func_name = func_name_owned.clone();
+                move || {
+                    let _in_flight = in_flight;
+                    // Host functions bridge back into the runtime with `block_on`.
+                    let _runtime = runtime.enter();
+                    let _ = done.send(run_guest(
+                        guard,
+                        parent_span,
+                        admitted,
+                        admission,
+                        resolved,
+                        pool,
+                        plugin_id,
+                        func_name,
+                        input,
+                    ));
+                }
+            });
+            let result = result
+                .await
+                .map_err(|_| PluginError::Internal("plugin guest thread panicked".into()));
+            let result = result?;
+
+            let duration = start.elapsed();
+            if let Some(metrics) = self.get_metrics() {
+                let outcome = if result.is_ok() { "success" } else { "error" };
+                let attrs = [
+                    KeyValue::new("plugin.id", plugin_id.to_string()),
+                    KeyValue::new("plugin.function", func_name.to_string()),
+                    KeyValue::new("plugin.class", class_label(class)),
+                    KeyValue::new("outcome", outcome),
+                ];
+                metrics
+                    .plugin_call_duration
+                    .record(duration.as_secs_f64(), &attrs);
+                if result.is_err() {
+                    metrics.plugin_call_failures.add(1, &attrs);
+                }
+                let host_fn_attrs = [
+                    KeyValue::new("host_fn", func_name.to_string()),
+                    KeyValue::new("outcome", outcome),
+                ];
+                metrics
+                    .host_fn_duration
+                    .record(duration.as_secs_f64(), &host_fn_attrs);
+                metrics.host_fn_calls_total.add(1, &host_fn_attrs);
             }
-            None => None,
-        };
+            debug!(
+                duration_ms = duration.as_millis() as u64,
+                success = result.is_ok(),
+                "plugin call completed"
+            );
 
-        let pool = {
-            let registry = self.get_registry().read().map_err(|_| {
-                PluginError::Internal("Failed to acquire registry read lock".into())
-            })?;
-
-            let plugin_entry = registry
-                .get(plugin_id)
-                .ok_or_else(|| PluginError::NotFound(plugin_id.to_string()))?;
-
-            if plugin_entry.status != PluginStatus::Loaded {
-                return Err(PluginError::NotLoaded(plugin_id.to_string()));
-            }
-
-            plugin_entry
-                .runtime
-                .as_ref()
-                .ok_or_else(|| PluginError::NoRuntime(plugin_id.to_string()))?
-                .clone()
-        };
-
-        let metrics = self.get_metrics().cloned();
-        let plugin_id_owned = plugin_id.to_string();
-        let func_name_owned = func_name.to_string();
-        let parent_span = tracing::Span::current();
-
-        // Counted until the guest returns, whether or not anyone still
-        // awaits it.
-        let in_flight = InFlight::enter(metrics.as_ref(), &plugin_id_owned);
-        let runtime = tokio::runtime::Handle::current();
-        let (done, result) = tokio::sync::oneshot::channel();
-        let class = resolved.class;
-        self.executor().threads().run({
-            let plugin_id = plugin_id_owned.clone();
-            let func_name = func_name_owned.clone();
-            move || {
-                let _in_flight = in_flight;
-                // Host functions bridge back into the runtime with `block_on`.
-                let _runtime = runtime.enter();
-                let _ = done.send(run_guest(
-                    guard,
-                    parent_span,
-                    admitted,
-                    admission,
-                    resolved,
-                    pool,
-                    plugin_id,
-                    func_name,
-                    input,
-                ));
-            }
-        });
-        let result = result
-            .await
-            .map_err(|_| PluginError::Internal("plugin guest thread panicked".into()));
-        let result = result?;
-
-        let duration = start.elapsed();
-        if let Some(metrics) = self.get_metrics() {
-            let outcome = if result.is_ok() { "success" } else { "error" };
-            let attrs = [
-                KeyValue::new("plugin.id", plugin_id.to_string()),
-                KeyValue::new("plugin.function", func_name.to_string()),
-                KeyValue::new("plugin.class", class_label(class)),
-                KeyValue::new("outcome", outcome),
-            ];
-            metrics
-                .plugin_call_duration
-                .record(duration.as_secs_f64(), &attrs);
-            if result.is_err() {
-                metrics.plugin_call_failures.add(1, &attrs);
-            }
-            let host_fn_attrs = [
-                KeyValue::new("host_fn", func_name.to_string()),
-                KeyValue::new("outcome", outcome),
-            ];
-            metrics
-                .host_fn_duration
-                .record(duration.as_secs_f64(), &host_fn_attrs);
-            metrics.host_fn_calls_total.add(1, &host_fn_attrs);
+            result
         }
-        debug!(
-            duration_ms = duration.as_millis() as u64,
-            success = result.is_ok(),
-            "plugin call completed"
-        );
-
+        .await;
+        if nested && result.as_ref().is_err_and(PluginError::is_unavailable) {
+            crate::executor::fail_unavailable();
+        }
         result
     }
 }

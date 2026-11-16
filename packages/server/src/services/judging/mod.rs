@@ -76,12 +76,15 @@
 //! counts requeues after it was abandoned (budget `max_dispatch_retries`);
 //! a submission's `system_error_retries` counts system-error retries since
 //! the last rejudge (budget `max_system_error_retries`). Only a failure of
-//! judging the submission spends it: a system error is classed by its error
-//! code (see `fault`). An attempt the platform lost (the queue was
+//! judging the submission spends it. A system error's class is decided where
+//! the failure is observed and recorded with it, never read back from its
+//! error code (see `fault`). An attempt the platform lost (the queue was
 //! unreachable or lost an operation, or no worker could run it) is never
-//! finalized: it goes back to the queue for free, while a platform
-//! misconfiguration that fails every attempt alike stands at once and is
-//! dead-lettered.
+//! finalized: it goes back to the queue for free. A failure every attempt
+//! repeats (a refusal, a checker that fails, a problem its plugin says
+//! cannot be judged) stands at once: the judgement records it
+//! (`error_stands`), the retry never re-judges it and the submission shows
+//! it. A judging failure whose budget is spent is confirmed the same way.
 //!
 //! # Locks
 //!
@@ -102,7 +105,7 @@ mod unit;
 mod tests;
 
 pub(crate) use budget::RetryBudget;
-pub(crate) use fault::SystemErrorClass;
+pub(crate) use fault::{CallEnd, DispatchFailure};
 pub use fault::{DispatchFault, DispatchFaults};
 pub use notify::CLAIM_CHANNEL;
 pub(crate) use notify::ClaimWake;

@@ -6,27 +6,31 @@ use tracing::{Instrument, error, info, instrument, warn};
 
 use crate::entity::{code_run, problem};
 use crate::models::code_run::CustomTestCaseInput;
-use crate::services::judging::{self, Unit};
+use crate::services::judging::{self, CallEnd, DispatchFailure, DispatchFaults, Unit};
 use crate::state::AppState;
 use crate::utils::judging::files_log_summary;
 
-/// Finalizes a code run whose dispatch failed as SystemError, fenced on the
-/// dispatch's epoch, logging a failure of the write itself: the run then
-/// stays in flight until a detector requeues it.
-async fn mark_code_run_error_or_log(
+/// Ends a code run whose dispatch failed with `failure`, or, when its
+/// operations met a platform fault, with that fault (see
+/// `judging::fail_dispatch`), fenced on the dispatch's epoch, logging a
+/// failure of the write itself: the run then stays in flight until a
+/// detector requeues it.
+async fn record_dispatch_failure(
     db: &common::db::DatabaseConnection,
     code_run_id: i32,
-    code: &str,
-    message: &str,
     judge_epoch: i32,
+    faults: &DispatchFaults,
+    failure: DispatchFailure,
 ) {
+    let failure = failure.unless_fault(faults);
     if let Err(e) =
-        judging::fail_dispatch(db, Unit::CodeRun, code_run_id, judge_epoch, code, message).await
+        judging::fail_dispatch(db, Unit::CodeRun, code_run_id, judge_epoch, &failure).await
     {
         error!(
             code_run_id,
+            error_code = failure.code,
             error = %e,
-            "Failed to mark code_run as SystemError; the row may be left stuck"
+            "Failed to record the code run's dispatch failure; the row may be left stuck"
         );
     }
 }
@@ -43,6 +47,9 @@ async fn mark_code_run_error_or_log(
     )
 )]
 pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_run::Model) {
+    // What the dispatch's operations meet, wherever they run: its plugin
+    // call starts with these faults in its call locals.
+    let faults = DispatchFaults::default();
     tracing::Span::current().record(
         "contest_id",
         tracing::field::display(
@@ -65,15 +72,18 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                 contest_type = %code_run.contest_type,
                 "No plugin registered for contest type"
             );
-            mark_code_run_error_or_log(
+            record_dispatch_failure(
                 &state.db,
                 code_run.id,
-                "NO_HANDLER_REGISTERED",
-                &format!(
-                    "No plugin registered for contest type {:?}",
-                    code_run.contest_type
-                ),
                 code_run.judge_epoch,
+                &faults,
+                DispatchFailure::judging(
+                    "NO_HANDLER_REGISTERED",
+                    format!(
+                        "No plugin registered for contest type {:?}",
+                        code_run.contest_type
+                    ),
+                ),
             )
             .await;
             return;
@@ -87,24 +97,30 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
         Ok(Some(p)) => p,
         Ok(None) => {
             error!(problem_id = code_run.problem_id, "Problem not found");
-            mark_code_run_error_or_log(
+            record_dispatch_failure(
                 &state.db,
                 code_run.id,
-                "PROBLEM_NOT_FOUND",
-                &format!("Problem {} not found", code_run.problem_id),
                 code_run.judge_epoch,
+                &faults,
+                DispatchFailure::judging(
+                    "PROBLEM_NOT_FOUND",
+                    format!("Problem {} not found", code_run.problem_id),
+                ),
             )
             .await;
             return;
         }
         Err(e) => {
             error!(error = %e, "DB error fetching problem");
-            mark_code_run_error_or_log(
+            record_dispatch_failure(
                 &state.db,
                 code_run.id,
-                "DATABASE_ERROR",
-                &format!("Failed to fetch problem: {}", e),
                 code_run.judge_epoch,
+                &faults,
+                DispatchFailure::judging(
+                    "DATABASE_ERROR",
+                    format!("Failed to fetch problem: {}", e),
+                ),
             )
             .await;
             return;
@@ -115,12 +131,15 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
         Ok(f) => f,
         Err(e) => {
             error!(error = %e, "Failed to parse code run files");
-            mark_code_run_error_or_log(
+            record_dispatch_failure(
                 &state.db,
                 code_run.id,
-                "INVALID_FILES",
-                &format!("Failed to parse code run files: {}", e),
                 code_run.judge_epoch,
+                &faults,
+                DispatchFailure::judging(
+                    "INVALID_FILES",
+                    format!("Failed to parse code run files: {}", e),
+                ),
             )
             .await;
             return;
@@ -167,12 +186,15 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
         Ok(b) => b,
         Err(e) => {
             error!(error = %e, "Failed to serialize code run input");
-            mark_code_run_error_or_log(
+            record_dispatch_failure(
                 &state.db,
                 code_run.id,
-                "SERIALIZATION_ERROR",
-                &format!("Failed to serialize input: {}", e),
                 code_run.judge_epoch,
+                &faults,
+                DispatchFailure::judging(
+                    "SERIALIZATION_ERROR",
+                    format!("Failed to serialize input: {}", e),
+                ),
             )
             .await;
             return;
@@ -207,80 +229,38 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
     );
     tokio::spawn(async move {
         async move {
-            let options = plugins.get_config().judging_call();
+            let options = plugins
+                .get_config()
+                .judging_call()
+                .with_locals(faults.call_locals());
             let result = plugins
                 .call_raw(&plugin_id, &function_name, input_bytes, options)
                 .await;
-
-            match result {
-                Ok(output_bytes) => match serde_json::from_slice::<OnCodeRunOutput>(&output_bytes)
-                {
-                    Ok(output) => {
-                        if !output.success {
-                            error!(
-                                code_run_id,
-                                problem_id,
-                                contest_id = ?contest_id,
-                                error = ?output.error_message,
-                                "Plugin reported failure"
-                            );
-                            mark_code_run_error_or_log(
-                                &db,
-                                code_run_id,
-                                "PLUGIN_ERROR",
-                                &output
-                                    .error_message
-                                    .unwrap_or_else(|| "Unknown plugin error".to_string()),
-                                judge_epoch,
-                            )
-                            .await;
-                        } else {
-                            info!(
-                                code_run_id,
-                                problem_id,
-                                contest_id = ?contest_id,
-                                "Plugin completed code run successfully"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        error!(code_run_id, problem_id, contest_id = ?contest_id, error = %e, "Failed to parse plugin output");
-                        mark_code_run_error_or_log(
-                            &db,
-                            code_run_id,
-                            "PLUGIN_INVALID_OUTPUT",
-                            &format!("Plugin returned invalid output: {}", e),
-                            judge_epoch,
-                        )
-                        .await;
-                    }
-                },
-                Err(plugin_core::error::PluginError::ShuttingDown) => {
-                    // This server is stopping: leave the code run in flight for
-                    // a peer (see the matching arm in submission dispatch).
-                    warn!(code_run_id, "Server shutting down; leaving code run for a peer");
-                }
-                Err(e @ plugin_core::error::PluginError::Unavailable { .. }) => {
-                    error!(code_run_id, problem_id, contest_id = ?contest_id, error = %e, "Code run dispatch reached its deadline");
-                    mark_code_run_error_or_log(
-                        &db,
+            match CallEnd::of::<OnCodeRunOutput>(result, &faults) {
+                CallEnd::Handled => info!(
+                    code_run_id,
+                    problem_id,
+                    contest_id = ?contest_id,
+                    "Plugin completed code run successfully"
+                ),
+                CallEnd::Failed(failure) => {
+                    error!(
                         code_run_id,
-                        "DISPATCH_TIMEOUT",
-                        &e.to_string(),
-                        judge_epoch,
-                    )
-                    .await;
+                        problem_id,
+                        contest_id = ?contest_id,
+                        error_code = failure.code,
+                        error = %failure.message,
+                        "Code run plugin call ended without a verdict"
+                    );
+                    record_dispatch_failure(&db, code_run_id, judge_epoch, &faults, failure).await;
                 }
-                Err(e) => {
-                    error!(code_run_id, problem_id, contest_id = ?contest_id, error = %e, "Plugin execution failed");
-                    mark_code_run_error_or_log(
-                        &db,
+                // This server is stopping: leave the code run in flight for
+                // a peer (see the matching arm in submission dispatch).
+                CallEnd::ShuttingDown => {
+                    warn!(
                         code_run_id,
-                        "PLUGIN_EXECUTION_ERROR",
-                        &e.to_string(),
-                        judge_epoch,
-                    )
-                    .await;
+                        "Server shutting down; leaving code run for a peer"
+                    );
                 }
             }
         }

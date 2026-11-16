@@ -9,17 +9,13 @@ pub fn judge(host: &Host, req: &OnSubmissionInput) -> Result<(), SdkError> {
     if req.test_cases.is_empty() {
         return update(
             host,
-            SubmissionUpdate {
-                submission_id: req.submission_id,
-                judgement_id: req.judgement_id,
-                judge_epoch: req.judge_epoch,
-                status: Some(SubmissionStatus::Judged),
-                verdict: Some(Some(Verdict::SystemError)),
-                score: Some(0.0),
-                error_code: Some(Some("CODELINK_NO_TEST_CASES".into())),
-                error_message: Some(Some("Codelink problems require test cases".into())),
-                ..Default::default()
-            },
+            SubmissionUpdate::standing_system_error(
+                req.submission_id,
+                req.judgement_id,
+                req.judge_epoch,
+                "CODELINK_NO_TEST_CASES",
+                "Codelink problems require test cases",
+            ),
         );
     }
 
@@ -133,6 +129,7 @@ fn persist(host: &Host, progress: &JudgeProgress<'_>) -> Result<(), SdkError> {
             compile_output: Some(compile_output),
             error_code: Some(None),
             error_message: Some(None),
+            ..Default::default()
         },
     )
 }

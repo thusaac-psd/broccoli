@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use broccoli_server_sdk::types::TestCaseBodyRef;
 use broccoli_server_sdk::types::TestCaseRow;
 
-use crate::config::{SubtaskDef, SubtaskScoringMethod, resolve_tc_label, round_score};
+use crate::config::{SubtaskDef, SubtaskScoringMethod, resolve_tc_label, round_score, total_score};
 
 #[derive(Debug, Clone)]
 pub struct SubtaskResult {
@@ -224,7 +224,7 @@ pub fn effective_subtasks(
 
 /// A problem's maximum score: the sum of its subtasks' maximum scores.
 pub fn problem_max_score(subtasks: &[SubtaskDef]) -> f64 {
-    subtasks.iter().map(|s| s.max_score).sum()
+    total_score(subtasks.iter().map(|s| s.max_score))
 }
 
 /// Build a default "All Tests" subtask (Sum scoring) over the non-sample,
@@ -237,11 +237,11 @@ fn build_default_subtasks(test_cases: &[TestCaseRow]) -> Vec<SubtaskDef> {
     if scoring_test_cases.is_empty() {
         return vec![];
     }
-    let total_score: f64 = scoring_test_cases.iter().map(|tc| tc.score).sum();
+    let max_score = total_score(scoring_test_cases.iter().map(|tc| tc.score));
     vec![SubtaskDef {
         name: "All Tests".into(),
         scoring_method: SubtaskScoringMethod::Sum,
-        max_score: total_score,
+        max_score,
         test_cases: scoring_test_cases
             .iter()
             .map(|tc| resolve_tc_label(tc))
@@ -514,6 +514,14 @@ mod tests {
             problem_max_score(&effective_subtasks(&[], &test_cases)),
             90.0
         );
+    }
+
+    /// A problem with nothing to score has a maximum of 0, never `-0`.
+    #[test]
+    fn a_problem_with_no_subtasks_has_a_maximum_of_zero() {
+        let max = problem_max_score(&effective_subtasks(&[], &[]));
+        assert!(max == 0.0 && max.is_sign_positive(), "{max}");
+        assert_eq!(serde_json::json!(max).to_string(), "0.0");
     }
 
     #[test]

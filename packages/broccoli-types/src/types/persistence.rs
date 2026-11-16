@@ -135,6 +135,15 @@ pub struct SubmissionUpdate {
         deserialize_with = "double_option"
     )]
     pub error_message: Option<Option<String>>,
+    /// Whether the system error this update ends the judgement with stands:
+    /// every attempt would fail the same way (the problem cannot be judged as
+    /// configured, for example it has nothing to score), so the host never
+    /// re-judges it and the submission shows it at once. Without it, a system
+    /// error is re-judged while the submission's system-error budget lasts.
+    /// Read only on an update that finalizes the judgement with a
+    /// `SystemError` verdict; any other update ignores it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stands: bool,
 }
 
 impl SubmissionUpdate {
@@ -144,6 +153,31 @@ impl SubmissionUpdate {
             judgement_id,
             judge_epoch,
             ..Default::default()
+        }
+    }
+
+    /// Finishes the judgement as a system error that stands (see
+    /// [`Self::stands`]), under the plugin's own `code` and `message`: the
+    /// way a plugin refuses a problem it cannot judge. The host records the
+    /// code under the plugin's id, so the UI shows its translation from the
+    /// plugin's pack (`<plugin_id>.apiError.<code>`).
+    pub fn standing_system_error(
+        submission_id: i32,
+        judgement_id: i32,
+        judge_epoch: i32,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            status: Some(SubmissionStatus::Judged),
+            verdict: Some(Some(Verdict::SystemError)),
+            score: Some(0.0),
+            time_used: Some(None),
+            memory_used: Some(None),
+            error_code: Some(Some(code.into())),
+            error_message: Some(Some(message.into())),
+            stands: true,
+            ..Self::new(submission_id, judgement_id, judge_epoch)
         }
     }
 }

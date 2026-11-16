@@ -26,6 +26,8 @@ fn guest(version: i64) -> String {
         (import "extism:host/user" "mark" (func $mark (param i64) (result i64)))
         (import "extism:host/user" "await_child" (func $await_child (param i64) (result i64)))
         (import "extism:host/user" "busy" (func $busy (param i64) (result i64)))
+        (import "extism:host/user" "nest_spin" (func $nest_spin (param i64) (result i64)))
+        (func (export "nest_spin") (result i32) (drop (call $nest_spin (i64.const 0))) (i32.const 0))
         (func (export "busy") (result i32) (drop (call $busy (i64.const 0))) (i32.const 0))
         (func (export "parent") (result i32) (drop (call $await_child (i64.const 0))) (i32.const 0))
         (func (export "hold") (result i32) (drop (call $hold (i64.const 0))) (i32.const 0))
@@ -197,6 +199,23 @@ fn await_child(ctx: &Ctx, _: i64) -> Result<(), extism::Error> {
     .map_err(|e| extism::Error::msg(e.to_string()))
 }
 
+/// A host function that calls back into a guest that never returns, so the
+/// nested call ends at its own deadline, and reports its failure as any host
+/// function does, without marking the call.
+fn nest_spin(ctx: &Ctx, _: i64) -> Result<(), extism::Error> {
+    let manager = ctx.1.upgrade().expect("manager alive");
+    crate::executor::parked(|| {
+        tokio::runtime::Handle::current().block_on(manager.call_raw(
+            PLUGIN,
+            "spin",
+            vec![],
+            CallOptions::nested(),
+        ))
+    })
+    .map(|_| ())
+    .map_err(|e| extism::Error::msg(e.to_string()))
+}
+
 /// A host function that cannot serve the call right now.
 fn busy(_: &Ctx, _: i64) -> Result<(), extism::Error> {
     crate::executor::fail_unavailable();
@@ -226,12 +245,20 @@ impl Harness {
     }
 
     fn build(capacity: Capacity, metrics: Option<common::metrics::Metrics>) -> Self {
+        Self::build_with(capacity, metrics, PluginConfig::default())
+    }
+
+    fn build_with(
+        capacity: Capacity,
+        metrics: Option<common::metrics::Metrics>,
+        config: PluginConfig,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let fixture = Arc::new(Fixture::default());
         let config = PluginConfig {
             plugins_dir: dir.path().to_path_buf(),
             cache_dir: dir.path().join(".cache"),
-            ..PluginConfig::default()
+            ..config
         };
         let executor = Executor::new(capacity, MemoryBudget::new(u64::MAX, Box::new(|| 0)));
         let manager = Arc::new_cyclic(|weak: &Weak<TestManager>| {
@@ -245,6 +272,7 @@ impl Harness {
                     host_fn("mark", ctx.clone(), mark),
                     host_fn("await_child", ctx.clone(), await_child),
                     host_fn("busy", ctx.clone(), busy),
+                    host_fn("nest_spin", ctx.clone(), nest_spin),
                 ]
             });
             TestManager {
@@ -633,6 +661,30 @@ async fn a_failed_reload_leaves_the_loaded_version_serving() {
         .unwrap()
         .unwrap();
     assert_eq!(h.fixture.read(|c| c.marks.clone()), vec![1]);
+}
+
+/// A nested call the host cannot serve (here: it reached its own deadline,
+/// which the call timeout bounds below the caller's) fails the call that made
+/// it as unavailable too, whatever the host function in between reports, so
+/// callers answer the whole call as "try again".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_whose_nested_call_is_unavailable_is_unavailable() {
+    let config = PluginConfig {
+        call_timeout_secs: 1,
+        ..PluginConfig::default()
+    };
+    let h = Harness::build_with(Capacity::new(2), None, config);
+    let err = h
+        .manager
+        .call_raw(
+            PLUGIN,
+            "nest_spin",
+            vec![],
+            CallOptions::background(later()),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PluginError::Unavailable { .. }), "{err:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

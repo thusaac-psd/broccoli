@@ -309,14 +309,12 @@ host_fn!(pub submission_query_test_cases(user_data: Arc<(String, DatabaseConnect
 
 /// The write fence against real Postgres, driven through the same builders and
 /// in the same order as `submission_update`.
-/// The statement behind `plugin_id`'s `code_run_update`, with its bound
-/// arguments. `None` when the update sets nothing.
-fn code_run_update_statement(
-    plugin_id: &str,
-    update: CodeRunUpdate,
-) -> Option<(String, Vec<JsonValue>)> {
+/// The statement behind a `code_run_update` as the host records it
+/// (`judging::as_recorded`), with its bound arguments. `None` when the update
+/// sets nothing.
+fn code_run_update_statement(update: &CodeRunUpdate) -> Option<(String, Vec<JsonValue>)> {
     let mut p = Params::new();
-    let sql = judging::code_run_write(&mut p, plugin_id, update)?;
+    let sql = judging::code_run_write(&mut p, update)?;
     Some((sql, p.into_args()))
 }
 
@@ -326,8 +324,17 @@ host_fn!(pub code_run_update(user_data: Arc<(String, DatabaseConnection)>; input
 
     let update: CodeRunUpdate = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid code_run_update input: {e}")))?;
+    // As for a judgement: a write that would finalize an attempt the
+    // platform lost is fenced out, 0 runs written.
+    let Some(update) = judging::as_recorded(
+        plugin_id,
+        update,
+        judging::DispatchFaults::of_current_call().and_then(|faults| faults.get()),
+    ) else {
+        return ok_affected(0);
+    };
     // An update that sets nothing is not a fenced-out write.
-    let Some((sql, args)) = code_run_update_statement(plugin_id, update) else {
+    let Some((sql, args)) = code_run_update_statement(&update) else {
         return ok_affected(1);
     };
     let args = serde_json::to_string(&args)?;
@@ -694,7 +701,7 @@ mod tests {
                         verdict: Some(Some(Verdict::Accepted)),
                         ..Default::default()
                     };
-                    let (sql, args) = code_run_update_statement("judge", update).expect("sets");
+                    let (sql, args) = code_run_update_statement(&update).expect("sets");
                     (inserted, execute(&db, sql, args))
                 })
                 .await
@@ -788,6 +795,99 @@ mod tests {
         assert!(row.resolved);
         assert!(row.resolved_at.is_some());
         assert_eq!(row.resolved_by, None);
+    }
+
+    /// A plugin's standing system error shows on the submission at once and
+    /// the system-error retry never re-judges it; the same error not marked
+    /// standing awaits the retry, which re-judges it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plugin_system_error_that_stands_is_never_re_judged() {
+        use crate::services::judging::{RetryBudget, SystemErrorPass, retry_system_errors};
+
+        let (_pg, db) = crate::test_support::postgres().await;
+        let (sub, _) = seed_judged(&db).await;
+        for stands in [true, false] {
+            let j = open(
+                &db,
+                sub.id,
+                OpenJudgement::Rejudge {
+                    triggered_by_user_id: sub.user_id,
+                    target_worker_id: None,
+                },
+            )
+            .await;
+            let update = SubmissionUpdate {
+                stands,
+                ..SubmissionUpdate::standing_system_error(
+                    j.submission_id,
+                    j.id,
+                    j.judge_epoch,
+                    "NO_TEST_CASES",
+                    "Problem has no test cases",
+                )
+            };
+            let update = judging::as_recorded("judge", update, None).expect("recorded");
+            assert_eq!(submission_update(&db, update).await, 1);
+
+            let pass = retry_system_errors(&db, RetryBudget::new(10), 10, &[])
+                .await
+                .expect("retry");
+            let shown = submission::Entity::find_by_id(sub.id)
+                .one(&db)
+                .await
+                .expect("db")
+                .expect("row");
+            if stands {
+                assert_eq!(pass, SystemErrorPass::default(), "nothing to re-judge");
+                assert_eq!(shown.status, common::SubmissionStatus::Judged);
+                assert_eq!(shown.verdict, Some(common::Verdict::SystemError));
+                assert_eq!(shown.error_code.as_deref(), Some("judge.NO_TEST_CASES"));
+                assert_eq!(shown.system_error_retries, 0);
+            } else {
+                assert_eq!(pass.requeued, 1, "re-judged within the budget");
+                assert_eq!(shown.status, common::SubmissionStatus::Queued);
+            }
+        }
+    }
+
+    /// Whatever terminal status a plugin's `SystemError` verdict comes with,
+    /// the host reads it as the system error the write rule
+    /// (`judging::as_recorded`) took it for: it awaits the system-error retry
+    /// instead of showing as a verdict that stands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_system_error_verdict_is_a_system_error_whatever_its_status() {
+        use crate::services::judging::{RetryBudget, retry_system_errors};
+
+        let (_pg, db) = crate::test_support::postgres().await;
+        let (sub, _) = seed_judged(&db).await;
+        let j = open(
+            &db,
+            sub.id,
+            OpenJudgement::Rejudge {
+                triggered_by_user_id: sub.user_id,
+                target_worker_id: None,
+            },
+        )
+        .await;
+        let update = SubmissionUpdate {
+            status: Some(SubmissionStatus::CompilationError),
+            ..finish(&j, Verdict::SystemError, 0.0)
+        };
+        assert_eq!(submission_update(&db, update).await, 1);
+        let shown = submission::Entity::find_by_id(sub.id)
+            .one(&db)
+            .await
+            .expect("db")
+            .expect("row");
+        assert_eq!(
+            shown.status,
+            common::SubmissionStatus::Queued,
+            "the submission keeps showing the attempt"
+        );
+        let pass = retry_system_errors(&db, RetryBudget::new(1), 10, &[])
+            .await
+            .expect("retry");
+        assert_eq!(pass.requeued, 1);
     }
 
     /// A result insert from a dispatch whose judgement is being requeued waits

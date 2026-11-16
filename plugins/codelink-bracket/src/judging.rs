@@ -127,6 +127,7 @@ impl ContestJudge for CodelinkBracketJudge {
             compile_output: Some(compile_output),
             error_code: None,
             error_message: None,
+            ..Default::default()
         })?;
         if affected == 0 {
             return Err(SdkError::StaleEpoch);
@@ -146,8 +147,8 @@ impl ContestJudge for CodelinkBracketJudge {
 /// `plugins/icpc/src/lib.rs::run_judge` exactly, including its guard
 /// against a misconfigured problem with zero test cases: crediting that as
 /// `Accepted` would hand a free 小局 win to whoever submitted first, so it
-/// is surfaced as a terminal `SystemError` instead of ever reaching the
-/// judge.
+/// is surfaced as a `SystemError` that stands (every attempt repeats it)
+/// instead of ever reaching the judge.
 pub fn evaluate_detached(
     host: &Host,
     req: &OnSubmissionInput,
@@ -156,21 +157,15 @@ pub fn evaluate_detached(
         let _ = host
             .log
             .info("codelink-bracket: No test cases found; marking as SystemError (not a solve)");
-        let affected = host.submission.update(&SubmissionUpdate {
-            submission_id: req.submission_id,
-            judgement_id: req.judgement_id,
-            judge_epoch: req.judge_epoch,
-            status: Some(SubmissionStatus::Judged),
-            verdict: Some(Some(Verdict::SystemError)),
-            score: Some(0.0),
-            time_used: Some(None),
-            memory_used: Some(None),
-            compile_output: None,
-            error_code: Some(Some("NO_TEST_CASES".to_string())),
-            error_message: Some(Some(
-                "Problem has no test cases; cannot be judged".to_string(),
-            )),
-        })?;
+        let affected = host
+            .submission
+            .update(&SubmissionUpdate::standing_system_error(
+                req.submission_id,
+                req.judgement_id,
+                req.judge_epoch,
+                "NO_TEST_CASES",
+                "Problem has no test cases; cannot be judged",
+            ))?;
         if affected == 0 {
             return Err(SdkError::StaleEpoch);
         }

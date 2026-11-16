@@ -117,17 +117,27 @@ catalog does not translate shows a generic system-error message, never the
 host's text for a code of the same name. For example:
 
 ```rust
-host.submission.update(&SubmissionUpdate {
-    verdict: Some(Some(Verdict::SystemError)),
-    error_code: Some(Some("NO_TEST_CASES".to_string())),
-    error_message: Some(Some("Problem has no test cases; cannot be judged".to_string())),
-    // ...
-})?;
+host.submission.update(&SubmissionUpdate::standing_system_error(
+    req.submission_id,
+    req.judgement_id,
+    req.judge_epoch,
+    "NO_TEST_CASES",
+    "Problem has no test cases; cannot be judged",
+))?;
 ```
 
 ```toml
 'icpc.apiError.NO_TEST_CASES' = 'This problem has no test cases, so it cannot be judged. Ask the contest staff to add them.'
 ```
+
+The host re-judges a system error while the submission's system-error budget
+lasts, and the submission shows it only once the budget is spent. A failure
+every attempt would repeat, such as a problem that cannot be judged as
+configured, should stand at once instead: `standing_system_error` sets
+`SubmissionUpdate::stands`, so the submission shows the error right away and
+nothing judges it again until the problem changes and staff rejudge it. Leave
+`stands` unset for a failure a later attempt might not meet. Never end such a
+submission as `Accepted` with score 0: it would read as a solve.
 
 ## Translate your manifest and config schemas
 

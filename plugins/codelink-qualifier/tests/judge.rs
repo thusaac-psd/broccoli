@@ -148,6 +148,10 @@ fn empty_tests_and_incomplete_evaluation_cannot_grant_an_ac() {
         host.submission.last_update().verdict,
         Some(Some(Verdict::SystemError))
     );
+    assert!(
+        host.submission.last_update().stands,
+        "every attempt would fail the same way"
+    );
     assert!(host.eval.detached_windowed_requests().is_empty());
 
     let first = result(&host, start(&host), TestCaseVerdict::accepted(1));

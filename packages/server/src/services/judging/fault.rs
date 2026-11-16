@@ -8,8 +8,9 @@
 //! a platform tool, a problem's checker that crashed. When the dispatch then
 //! ends its judgement as a system error, the judgement carries the fault's
 //! code ([`DispatchFault::code`]) and description instead of whatever the
-//! plugin reported, and [`SystemErrorClass::of_fault`] decides what the
-//! retry does with it. A plugin never classifies a failure itself.
+//! plugin reported, and [`SystemErrorClass::of_fault`] decides what becomes
+//! of it. A plugin never classifies a fault: the most it says is that a
+//! system error it writes stands (`SubmissionUpdate::stands`).
 
 use std::sync::{Arc, Mutex};
 
@@ -29,15 +30,6 @@ pub enum DispatchFault {
 }
 
 impl DispatchFault {
-    /// Every fault, beside the definition so a new one is listed with it.
-    pub const ALL: [DispatchFault; 5] = [
-        Self::Operation(OperationFault::ALL[0]),
-        Self::Operation(OperationFault::ALL[1]),
-        Self::Operation(OperationFault::ALL[2]),
-        Self::Operation(OperationFault::ALL[3]),
-        Self::CheckerFailed,
-    ];
-
     /// The error code a judgement this fault ends carries.
     pub fn code(self) -> &'static str {
         match self {
@@ -124,8 +116,10 @@ fn loses(fault: DispatchFault) -> bool {
     SystemErrorClass::of_fault(fault) == SystemErrorClass::HandBack
 }
 
-/// What the system-error retry does with a judgement that ended as a system
-/// error, by the error code it carries.
+/// What becomes of a unit whose attempt ended in a system error. The class is
+/// decided where the failure is observed (a dispatch fault, the dispatcher's
+/// own failure, a plugin's write) and recorded with it, never read back from
+/// the error code, so no code a plugin writes can pass for another class.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SystemErrorClass {
     /// A failure judging the submission: retried while its submission's
@@ -139,7 +133,8 @@ pub(crate) enum SystemErrorClass {
     /// has them.
     HandBack,
     /// A failure every attempt repeats: the contest plugin refused the
-    /// submission, or the problem's checker fails. It stands at once.
+    /// submission or found the problem cannot be judged, or the problem's
+    /// checker fails. It stands at once (`error_stands`).
     Stands,
 }
 
@@ -155,50 +150,148 @@ impl SystemErrorClass {
             DispatchFault::CheckerFailed => Self::Stands,
         }
     }
+}
 
-    /// The class of a system error carrying `code`.
-    pub(crate) fn of_code(code: &str) -> Self {
-        [Self::HandBack, Self::Stands]
-            .into_iter()
-            .find(|class| class.codes().contains(&code))
-            .unwrap_or(Self::Judging)
-    }
+/// Why a dispatch ended its unit without a verdict: the code and message the
+/// unit records, and the class that decides what becomes of it
+/// ([`super::fail_dispatch`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DispatchFailure {
+    pub code: &'static str,
+    pub message: String,
+    pub class: SystemErrorClass,
+}
 
-    /// The error codes of this class; a `Judging` error carries any other
-    /// code, or none.
-    fn codes(self) -> Vec<&'static str> {
-        let faults = DispatchFault::ALL
-            .into_iter()
-            .filter(|f| Self::of_fault(*f) == self)
-            .map(DispatchFault::code);
-        match self {
-            Self::Judging => Vec::new(),
-            Self::Stands => [SubmissionDlqErrorCode::PLUGIN_REFUSED]
-                .into_iter()
-                .chain(faults)
-                .collect(),
-            Self::HandBack => faults.collect(),
+impl DispatchFailure {
+    /// A failure judging the submission, retried within its budget.
+    pub(crate) fn judging(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            class: SystemErrorClass::Judging,
         }
     }
 
-    /// SQL: the error code `column` puts its row in this class.
-    pub(crate) fn sql_matches(self, column: &str) -> String {
-        let list = |codes: Vec<&str>| {
-            let quoted: Vec<String> = codes.iter().map(|c| format!("'{c}'")).collect();
-            format!("({})", quoted.join(", "))
-        };
-        match self {
-            Self::Judging => {
-                let special = [Self::HandBack, Self::Stands]
-                    .into_iter()
-                    .flat_map(Self::codes)
-                    .collect();
-                format!("({column} IS NULL OR {column} NOT IN {})", list(special))
+    /// The contest plugin refused the work as one every attempt would fail.
+    pub(crate) fn refused(message: impl Into<String>) -> Self {
+        Self {
+            code: SubmissionDlqErrorCode::PLUGIN_REFUSED,
+            message: message.into(),
+            class: SystemErrorClass::Stands,
+        }
+    }
+
+    /// This failure, unless the dispatch met a fault: then the fault decides,
+    /// whatever the dispatch saw of it.
+    pub(crate) fn unless_fault(self, faults: &DispatchFaults) -> Self {
+        faults.get().map_or(self, Self::from)
+    }
+}
+
+/// How the plugin call of a dispatch (a judgement's or a code run's) ended,
+/// the one rule both dispatchers read it by.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CallEnd {
+    /// The plugin handled the unit; what it wrote stands.
+    Handled,
+    /// The unit ends with this failure (see [`super::fail_dispatch`]).
+    Failed(DispatchFailure),
+    /// This server is shutting down and refused the call. Not a failure of
+    /// the work: the unit stays in flight, and shutdown releases it to a
+    /// peer.
+    ShuttingDown,
+}
+
+/// The output of a dispatch's plugin call.
+pub(crate) trait DispatchOutput: serde::de::DeserializeOwned {
+    /// The failure the plugin reported, if it reported one.
+    fn failure(self) -> Option<DispatchFailure>;
+}
+
+impl DispatchOutput for broccoli_server_sdk::types::OnSubmissionOutput {
+    fn failure(self) -> Option<DispatchFailure> {
+        (!self.success).then(|| {
+            let message = self
+                .error_message
+                .unwrap_or_else(|| "Unknown plugin error".to_string());
+            if self.retryable {
+                DispatchFailure::judging("PLUGIN_ERROR", message)
+            } else {
+                DispatchFailure::refused(message)
             }
-            other => format!(
-                "({column} IS NOT NULL AND {column} IN {})",
-                list(other.codes())
-            ),
+        })
+    }
+}
+
+impl DispatchOutput for broccoli_server_sdk::types::OnCodeRunOutput {
+    fn failure(self) -> Option<DispatchFailure> {
+        (!self.success).then(|| {
+            DispatchFailure::judging(
+                "PLUGIN_ERROR",
+                self.error_message
+                    .unwrap_or_else(|| "Unknown plugin error".to_string()),
+            )
+        })
+    }
+}
+
+impl CallEnd {
+    /// How a dispatch's plugin call that returned `result` ended, read as
+    /// output `O`. A call that could not finish because the host could not
+    /// serve it (its deadline, admission, the plugin between loads, an
+    /// instance it could not build; see `PluginError::is_unavailable`) says
+    /// nothing about the work and ends as `PLUGIN_UNAVAILABLE`; any other
+    /// error as `PLUGIN_EXECUTION_ERROR`. Both are judging failures, retried
+    /// within the budget, so a unit that always outlasts its deadline still
+    /// ends. A call that succeeded while the platform lost its attempt
+    /// ([`DispatchFaults::lost`]) fails, so the fault hands it back.
+    pub(crate) fn of<O: DispatchOutput>(
+        result: Result<Vec<u8>, plugin_core::error::PluginError>,
+        faults: &DispatchFaults,
+    ) -> Self {
+        let bytes = match result {
+            Ok(bytes) => bytes,
+            Err(plugin_core::error::PluginError::ShuttingDown) => return Self::ShuttingDown,
+            Err(e) if e.is_unavailable() => {
+                return Self::Failed(DispatchFailure::judging(
+                    "PLUGIN_UNAVAILABLE",
+                    e.to_string(),
+                ));
+            }
+            Err(e) => {
+                return Self::Failed(DispatchFailure::judging(
+                    "PLUGIN_EXECUTION_ERROR",
+                    e.to_string(),
+                ));
+            }
+        };
+        let output = match serde_json::from_slice::<O>(&bytes) {
+            Ok(output) => output,
+            Err(e) => {
+                return Self::Failed(DispatchFailure::judging(
+                    "PLUGIN_INVALID_OUTPUT",
+                    format!("Plugin returned invalid output: {e}"),
+                ));
+            }
+        };
+        match output.failure() {
+            Some(failure) => Self::Failed(failure),
+            // The plugin's verdict, if it wrote one, was fenced out.
+            None if faults.lost().is_some() => Self::Failed(DispatchFailure::judging(
+                "PLUGIN_ERROR",
+                "The platform lost the attempt",
+            )),
+            None => Self::Handled,
+        }
+    }
+}
+
+impl From<Recorded> for DispatchFailure {
+    fn from(recorded: Recorded) -> Self {
+        Self {
+            code: recorded.fault.code(),
+            message: recorded.message,
+            class: SystemErrorClass::of_fault(recorded.fault),
         }
     }
 }
@@ -208,43 +301,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_fault_belongs_to_a_class_with_its_code() {
-        for fault in DispatchFault::ALL {
-            let class = SystemErrorClass::of_fault(fault);
-            assert!(class.codes().contains(&fault.code()), "{fault:?}");
-            assert_eq!(SystemErrorClass::of_code(fault.code()), class, "{fault:?}");
-            assert!(!SystemErrorClass::Judging.sql_matches("c").contains("IN ()"));
-        }
-        assert_eq!(
-            SystemErrorClass::of_code(SubmissionDlqErrorCode::PLUGIN_REFUSED),
-            SystemErrorClass::Stands
-        );
-        for fault in OperationFault::ALL {
-            assert!(DispatchFault::ALL.contains(&fault.into()), "{fault:?}");
-        }
-        assert_eq!(
-            SystemErrorClass::of_code("PLUGIN_NO_VERDICT"),
-            SystemErrorClass::Judging
-        );
+    fn a_recorded_fault_decides_the_failure() {
+        let faults = DispatchFaults::default();
+        let own = DispatchFailure::judging("PLUGIN_ERROR", "boom");
+        assert_eq!(own.clone().unless_fault(&faults), own);
+        faults.record(DispatchFault::CheckerFailed, "signal 6");
+        let failure = own.unless_fault(&faults);
+        assert_eq!(failure.code, "CHECKER_FAILED");
+        assert_eq!(failure.message, "signal 6");
+        assert_eq!(failure.class, SystemErrorClass::Stands);
     }
 
-    /// Only the host's own codes class as a hand-back or as standing: every
-    /// one is bare, and a plugin's code is always recorded under its id
-    /// (`plugin_writes::plugin_error_code`), so no code a plugin writes,
-    /// whatever its text, can class as anything but a judging failure.
-    #[test]
-    fn no_code_a_plugin_writes_classes_as_a_host_code() {
-        for class in [SystemErrorClass::HandBack, SystemErrorClass::Stands] {
-            for code in class.codes() {
-                assert!(!code.contains('.'), "{code} must stay bare");
-                let as_plugin = super::super::plugin_writes::plugin_error_code("p", code);
-                assert_eq!(
-                    SystemErrorClass::of_code(&as_plugin),
-                    SystemErrorClass::Judging,
-                    "{as_plugin}"
-                );
-            }
+    fn end(result: Result<Vec<u8>, plugin_core::error::PluginError>) -> CallEnd {
+        CallEnd::of::<broccoli_server_sdk::types::OnSubmissionOutput>(
+            result,
+            &DispatchFaults::default(),
+        )
+    }
+
+    fn code(end: CallEnd) -> &'static str {
+        match end {
+            CallEnd::Failed(failure) => failure.code,
+            other => panic!("{other:?}"),
         }
+    }
+
+    /// Every way a plugin call fails maps to one outcome, the same for a
+    /// judgement and a code run: a call the host could not serve is
+    /// unavailable, whatever made it so.
+    #[test]
+    fn a_plugin_call_error_maps_to_one_dispatch_outcome() {
+        use plugin_core::error::PluginError;
+        let unavailable = [
+            PluginError::Unavailable {
+                plugin_id: "p".into(),
+                func_name: "f".into(),
+            },
+            PluginError::NotLoaded("p".into()),
+            PluginError::InstanceBuild {
+                plugin_id: "p".into(),
+                message: "oom".into(),
+            },
+        ];
+        for e in unavailable {
+            assert_eq!(code(end(Err(e))), "PLUGIN_UNAVAILABLE");
+        }
+        let failed = PluginError::ExecutionFailed {
+            plugin_id: "p".into(),
+            func_name: "f".into(),
+            depth: 1,
+            message: "trap".into(),
+        };
+        assert_eq!(code(end(Err(failed))), "PLUGIN_EXECUTION_ERROR");
+        assert_eq!(end(Err(PluginError::ShuttingDown)), CallEnd::ShuttingDown);
+        assert_eq!(code(end(Ok(b"nope".to_vec()))), "PLUGIN_INVALID_OUTPUT");
+        let refused = br#"{"success":false,"error_message":"no","retryable":false}"#;
+        let CallEnd::Failed(refusal) = end(Ok(refused.to_vec())) else {
+            panic!("refused");
+        };
+        assert_eq!(refusal.class, SystemErrorClass::Stands);
+        let ok = br#"{"success":true,"error_message":null}"#;
+        assert_eq!(end(Ok(ok.to_vec())), CallEnd::Handled);
+        let lost = DispatchFaults::default();
+        lost.record(OperationFault::OperationLost, "lost");
+        let run =
+            CallEnd::of::<broccoli_server_sdk::types::OnCodeRunOutput>(Ok(ok.to_vec()), &lost);
+        assert_eq!(
+            code(run),
+            "PLUGIN_ERROR",
+            "a lost attempt fails, to be handed back"
+        );
     }
 
     #[test]
