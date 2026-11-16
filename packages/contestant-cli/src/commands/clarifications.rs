@@ -130,10 +130,7 @@ fn ask(client: &Client, contest: ContestId, message: Option<String>) -> anyhow::
     }
     // `clar ask "Spring Round"` reads as naming the contest, not asking it
     // something; posting that would publish the contest's name as a question.
-    let contests = client
-        .contests(Some(&content))
-        .context("Failed to list contests")?;
-    if let Some(named) = resolve::contests_named(&contests, &content).first() {
+    if let Some(named) = resolve::contest_named(client, &content)? {
         bail!(
             "'{}' names contest #{} ({}), so it is not sent as a question. Ask with \
              `broccoli clarifications ask \"<question>\" -c {}`.",

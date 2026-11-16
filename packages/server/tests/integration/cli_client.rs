@@ -150,3 +150,37 @@ async fn contests_past_the_first_page_are_listed_and_found_by_name() {
     assert_eq!(found.to_string(), oldest.to_string());
     assert_eq!(exact.to_string(), (oldest + 1).to_string());
 }
+
+/// Text that is a contest's id names that contest, whatever its title, and
+/// so does its whole title; a question that merely mentions either does not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_contest_is_named_by_its_id_whatever_its_title() {
+    let app = TestApp::spawn().await;
+    let token = app
+        .create_user_with_role("organiser", "password123", "admin")
+        .await;
+    let id = app
+        .create_contest(&token, "Spring Round", true, false)
+        .await;
+
+    let client = Client::new(broccoli_cli_core::session::Session::explicit(
+        server(&app.url("")),
+        token,
+    ));
+    let named = blocking(move || {
+        [
+            id.to_string(),
+            "spring round".to_string(),
+            (id + 1000).to_string(),
+            "Is Spring Round rated?".to_string(),
+        ]
+        .map(|q| {
+            broccoli_cli_core::resolve::contest_named(&client, &q)
+                .unwrap()
+                .map(|c| c.id.to_string())
+        })
+    })
+    .await;
+    let id = Some(id.to_string());
+    assert_eq!(named, [id.clone(), id, None, None]);
+}

@@ -67,15 +67,47 @@ pub fn offline_contest_id(input: &str) -> Option<ContestId> {
 
 /// The contests `input` names exactly: by id, or by title ignoring case, the
 /// way a contest reference does before it falls back to part of a title.
-pub fn contests_named<'a>(
-    contests: &'a [ContestListItem],
-    input: &str,
-) -> Vec<&'a ContestListItem> {
+fn contests_named<'a>(contests: &'a [ContestListItem], input: &str) -> Vec<&'a ContestListItem> {
     let q = input.trim().to_lowercase();
     contests
         .iter()
         .filter(|c| c.id.to_string() == q || c.title.to_lowercase() == q)
         .collect()
+}
+
+/// A contest `input` names exactly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedContest {
+    pub id: ContestId,
+    pub title: String,
+}
+
+/// The contest `input` names exactly, if any: the contest whose id it is,
+/// else one whose whole title it is, ignoring case. Unlike [`contest_id`], an
+/// id is checked against the server, since text that is only a number may
+/// still be meant as something else.
+pub fn contest_named(client: &Client, input: &str) -> anyhow::Result<Option<NamedContest>> {
+    if let Some(id) = offline_contest_id(input) {
+        match client.get_contest(id) {
+            Ok(contest) => {
+                return Ok(Some(NamedContest {
+                    id,
+                    title: contest.title,
+                }));
+            }
+            Err(crate::client::ClientError::Api(e)) if e.status == 404 => {}
+            Err(e) => return Err(e).context("Failed to look up the contest"),
+        }
+    }
+    let contests = client
+        .contests(Some(input))
+        .context("Failed to list contests")?;
+    Ok(contests_named(&contests, input)
+        .first()
+        .map(|c| NamedContest {
+            id: ContestId::from_server(c.id),
+            title: c.title.clone(),
+        }))
 }
 
 /// A contest problem a reference resolved to.
