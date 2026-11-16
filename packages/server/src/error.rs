@@ -21,6 +21,10 @@ pub const PLUGIN_RETRY_AFTER_SECS: u64 = 2;
 /// The `Retry-After` of a `STORAGE_UNAVAILABLE` answer.
 pub const STORAGE_RETRY_AFTER_SECS: u64 = 5;
 
+/// The `Retry-After` of a `DATABASE_UNAVAILABLE` answer: about one pool
+/// acquire timeout, after which a database that came back serves again.
+pub const DATABASE_RETRY_AFTER_SECS: u64 = 5;
+
 #[derive(Debug)]
 pub enum AppError {
     Validation(String),
@@ -91,6 +95,10 @@ pub enum AppError {
     /// Blob storage did not answer through its retries: an outage, retried
     /// by the client after [`STORAGE_RETRY_AFTER_SECS`].
     StorageUnavailable,
+    /// The database cannot be reached or cannot serve connections
+    /// ([`common::db::is_outage`]): an outage, retried by the client after
+    /// [`DATABASE_RETRY_AFTER_SECS`].
+    DatabaseUnavailable,
     PluginRejection {
         code: String,
         message: String,
@@ -311,6 +319,16 @@ impl AppError {
                     ),
                 ),
             ),
+            AppError::DatabaseUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                simple(
+                    "DATABASE_UNAVAILABLE",
+                    format!(
+                        "The server's database is not answering; retry in \
+                         {DATABASE_RETRY_AFTER_SECS} seconds"
+                    ),
+                ),
+            ),
             AppError::PluginRejection {
                 code,
                 message,
@@ -392,6 +410,7 @@ impl IntoResponse for AppError {
             AppError::ContestTypeUnavailable(_) => Some(CONTEST_TYPE_RETRY_AFTER_SECS),
             AppError::PluginUnavailable => Some(PLUGIN_RETRY_AFTER_SECS),
             AppError::StorageUnavailable => Some(STORAGE_RETRY_AFTER_SECS),
+            AppError::DatabaseUnavailable => Some(DATABASE_RETRY_AFTER_SECS),
             _ => None,
         };
 
@@ -407,7 +426,12 @@ impl IntoResponse for AppError {
 
 impl From<DbErr> for AppError {
     fn from(err: DbErr) -> Self {
-        AppError::Internal(err.to_string())
+        if common::db::is_outage(&err) {
+            tracing::warn!("Database unavailable: {err}");
+            AppError::DatabaseUnavailable
+        } else {
+            AppError::Internal(err.to_string())
+        }
     }
 }
 

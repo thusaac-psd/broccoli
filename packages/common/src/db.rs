@@ -263,6 +263,37 @@ pub fn connect_lazy_with(
         .into()
 }
 
+/// Whether `err` says the database cannot be reached or cannot serve
+/// connections right now, rather than refusing this statement: no pooled
+/// connection came free in time, the connection broke, or the server is
+/// shutting down, starting up or out of connection slots (SQLSTATE class 08,
+/// 57P01-57P03, 53300). A caller answers it as a retryable outage; every
+/// other error is about the statement.
+pub fn is_outage(err: &DbErr) -> bool {
+    match err {
+        DbErr::ConnectionAcquire(_) => true,
+        DbErr::Conn(RuntimeErr::SqlxError(e))
+        | DbErr::Exec(RuntimeErr::SqlxError(e))
+        | DbErr::Query(RuntimeErr::SqlxError(e)) => sqlx_outage(e),
+        _ => false,
+    }
+}
+
+fn sqlx_outage(e: &sea_orm::sqlx::Error) -> bool {
+    use sea_orm::sqlx::Error;
+    match e {
+        Error::Io(_)
+        | Error::Tls(_)
+        | Error::PoolTimedOut
+        | Error::PoolClosed
+        | Error::WorkerCrashed => true,
+        Error::Database(db) => db.code().is_some_and(|code| {
+            code.starts_with("08") || matches!(&*code, "57P01" | "57P02" | "57P03" | "53300")
+        }),
+        _ => false,
+    }
+}
+
 fn sqlx_err(e: sea_orm::sqlx::Error) -> DbErr {
     DbErr::Conn(RuntimeErr::SqlxError(e.into()))
 }
@@ -270,6 +301,33 @@ fn sqlx_err(e: sea_orm::sqlx::Error) -> DbErr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lost_or_exhausted_database_is_an_outage() {
+        use sea_orm::ConnAcquireErr;
+        use sea_orm::sqlx::Error;
+        let io = || std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        assert!(is_outage(&DbErr::ConnectionAcquire(
+            ConnAcquireErr::Timeout
+        )));
+        assert!(is_outage(&sqlx_err(Error::Io(io()))));
+        assert!(is_outage(&DbErr::Query(RuntimeErr::SqlxError(
+            Error::Io(io()).into()
+        ))));
+        assert!(is_outage(&DbErr::Exec(RuntimeErr::SqlxError(
+            Error::PoolTimedOut.into()
+        ))));
+    }
+
+    #[test]
+    fn a_refused_statement_is_not_an_outage() {
+        use sea_orm::sqlx::Error;
+        assert!(!is_outage(&DbErr::RecordNotFound("user".into())));
+        assert!(!is_outage(&DbErr::Query(RuntimeErr::SqlxError(
+            Error::RowNotFound.into()
+        ))));
+        assert!(!is_outage(&DbErr::Custom("bad".into())));
+    }
 
     fn startup_options(o: &PgConnectOptions) -> String {
         o.get_options().unwrap_or_default().to_string()

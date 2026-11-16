@@ -172,8 +172,7 @@ pub(crate) async fn fresh_user(
             FRESH_USER_SQL,
             [claims.uid.into(), claims.sid.into()],
         ))
-        .await
-        .map_err(|e| AppError::Internal(format!("credential freshness lookup failed: {e}")))?
+        .await?
         // No row: the session ended, or the user was deleted or deactivated.
         .ok_or(AppError::TokenInvalid)?;
     let username: String = row.try_get("", "username")?;

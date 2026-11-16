@@ -17,6 +17,7 @@ mod codelink_bracket_gating;
 mod codelink_bracket_timing;
 mod common;
 mod contest;
+mod database_outage;
 mod device_flow;
 mod display_name;
 mod dlq;
