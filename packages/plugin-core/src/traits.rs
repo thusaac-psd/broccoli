@@ -102,7 +102,9 @@ pub trait PluginInvoker: Send + Sync {
         let admitted = match resolved.queue {
             Some(kind) => {
                 let waited = std::time::Instant::now();
-                let outcome = admission.admit(kind, resolved.deadline).await;
+                let outcome = admission
+                    .admit(kind, plugin_id, func_name, resolved.deadline)
+                    .await;
                 if let Some(metrics) = self.get_metrics() {
                     if outcome
                         .as_ref()
