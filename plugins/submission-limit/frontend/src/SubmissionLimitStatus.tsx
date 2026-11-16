@@ -5,6 +5,7 @@
 import { usePluginApi } from '@broccoli/web-sdk/api';
 import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { type ConfigSource, configSourceLabel } from '@broccoli/web-sdk/plugin';
 import { useSubmitGate } from '@broccoli/web-sdk/submission';
 import { cn } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -22,7 +23,7 @@ interface LimitStatus {
   max_submissions: number;
   remaining: number | null;
   unlimited: boolean;
-  source?: string;
+  source: ConfigSource;
 }
 
 const ROUTES = '/api/plugins/submission-limit';
@@ -82,6 +83,7 @@ export function SubmissionLimitStatus({
   if (status.enabled === false || status.unlimited) return null;
 
   const { submissions_made, max_submissions, remaining } = status;
+  const sourceLabel = configSourceLabel(status.source, t);
   const pct = Math.min((submissions_made / max_submissions) * 100, 100);
 
   return (
@@ -124,9 +126,9 @@ export function SubmissionLimitStatus({
           style={{ width: `${pct}%` }}
         />
       </div>
-      {status.source && status.source !== 'default' && (
+      {sourceLabel && (
         <div className="mt-1.5 text-[11px] text-muted-foreground opacity-60">
-          ({t(`submission-limit.source.${status.source}`)})
+          ({sourceLabel})
         </div>
       )}
     </div>

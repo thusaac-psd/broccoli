@@ -963,6 +963,11 @@
 'config.description' = "此资源的插件配置。"
 'config.noSchemas' = "此资源没有可用的插件配置。"
 'config.loadFailed' = "无法加载设置。"
+'config.source.contestProblem' = "本比赛中此题的设置"
+'config.source.contest' = "来自比赛"
+'config.source.problem' = "来自题目"
+'config.source.plugin' = "全站设置"
+'config.source.disabled' = "覆盖已关闭"
 
 # Language switcher
 'locale.switch' = "语言"

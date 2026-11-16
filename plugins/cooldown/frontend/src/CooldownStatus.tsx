@@ -5,6 +5,7 @@ import { usePluginApi } from '@broccoli/web-sdk/api';
 import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { pollInterval, useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { type ConfigSource, configSourceLabel } from '@broccoli/web-sdk/plugin';
 import { useSubmitGate } from '@broccoli/web-sdk/submission';
 import { QueryErrorState, RefreshFailedNotice } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
@@ -25,7 +26,7 @@ interface CooldownStatusData {
   cooldown_seconds: number;
   /** Seconds until the gate lets a submission pass, by the gate's own rule. */
   wait_seconds: number;
-  source?: string;
+  source: ConfigSource;
 }
 
 /** The answer, with the monotonic clock reading it arrived at. */
@@ -98,6 +99,7 @@ export function CooldownStatus({ submission, contestId, problemId }: Props) {
   if (data.enabled === false || data.cooldown_seconds === 0) return null;
 
   const isReady = remaining === 0;
+  const sourceLabel = configSourceLabel(data.source, t);
   const pct =
     ((data.cooldown_seconds - remaining) / data.cooldown_seconds) * 100;
 
@@ -139,10 +141,8 @@ export function CooldownStatus({ submission, contestId, problemId }: Props) {
 
       <div className="mt-2 text-[11px] text-muted-foreground">
         {t('cooldown.betweenSubmissions', { seconds: data.cooldown_seconds })}
-        {data.source && data.source !== 'default' && (
-          <span className="ml-1 opacity-60">
-            ({t(`cooldown.source.${data.source}`)})
-          </span>
+        {sourceLabel && (
+          <span className="ml-1 opacity-60">({sourceLabel})</span>
         )}
       </div>
       {view.status === 'data' && view.refreshError != null && (

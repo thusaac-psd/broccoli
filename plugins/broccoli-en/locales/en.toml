@@ -962,6 +962,11 @@
 'config.description' = "Plugin configuration for this resource."
 'config.noSchemas' = "No plugin configuration available for this resource."
 'config.loadFailed' = "Could not load the settings."
+'config.source.contestProblem' = "set for this problem in this contest"
+'config.source.contest' = "from the contest"
+'config.source.problem' = "from the problem"
+'config.source.plugin' = "server-wide"
+'config.source.disabled' = "override switched off"
 
 # Language switcher
 'locale.switch' = "Language"

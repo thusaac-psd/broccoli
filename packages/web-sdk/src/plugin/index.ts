@@ -1,3 +1,4 @@
+export * from '@/plugin/config-source';
 export * from '@/plugin/ConfigInheritanceInfo';
 export * from '@/plugin/PluginErrorBoundary';
 export type { PluginRegistryContextValue } from '@/plugin/registry/plugin-registry-context';
