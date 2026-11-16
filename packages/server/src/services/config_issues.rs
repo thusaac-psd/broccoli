@@ -17,7 +17,11 @@
 //! - a change to a plugin (enabled, disabled, reloaded, upgraded, its upload
 //!   removed) changes which configs are checked and how, so it rechecks the
 //!   problems with a config of that plugin, both ways
-//!   ([`recheck_problems_of_plugins`]).
+//!   ([`recheck_problems_of_plugins`]);
+//! - a server start loads plugins that may check configs differently than
+//!   the ones that last checked them, and finds configs no running server
+//!   checked (a restored bundle's), so it rechecks every problem that has a
+//!   config or a set flag, both ways ([`recheck_every_problem`]).
 //!
 //! The rechecks run after the change committed, on the action that made it,
 //! never on the judging path. A recheck that fails is logged and leaves the
@@ -72,6 +76,32 @@ pub(crate) async fn recheck_problems_of_plugins(
             ?plugin_ids,
             ?error,
             "could not find the problems whose config issues a plugin change affects"
+        ),
+    }
+}
+
+/// Rechecks the flag of every problem that has a stored config or a set
+/// flag, at a server start.
+pub(crate) async fn recheck_every_problem(db: &DatabaseConnection, plugins: &dyn PluginManager) {
+    let problems = async {
+        let mut problems = problems_with_configs_of(db, None).await?;
+        let flagged = problem::Entity::find()
+            .select_only()
+            .column(problem::Column::Id)
+            .filter(problem::Column::ConfigIssues.eq(true))
+            .into_tuple::<i32>()
+            .all(db)
+            .await?;
+        problems.extend(flagged);
+        Ok::<_, AppError>(problems)
+    };
+    match problems.await {
+        Ok(problems) => {
+            recheck_problems(db, plugins, problems, Recheck::Both, Reads::Committed).await
+        }
+        Err(error) => tracing::warn!(
+            ?error,
+            "could not find the problems whose config issues a server start rechecks"
         ),
     }
 }

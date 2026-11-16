@@ -1727,3 +1727,23 @@ async fn deleting_a_contest_clears_the_config_issues_its_configs_had() {
     assert_eq!(res.status, 204, "{}", res.text);
     assert!(!app.config_issues_flag(problem_id).await);
 }
+
+/// A server start loads plugins that may check configs differently than the
+/// ones that checked them last, and finds configs no running server checked
+/// (a restored bundle's), so it rechecks the flag of every problem with a
+/// stored config, both ways.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_start_rechecks_the_config_issues_of_every_configured_problem() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_start_issues_admin", "password", "admin")
+        .await;
+    let (broken, _) = ioi_problem_with_a_config_issue(&app, &admin).await;
+    let (clean, _, _) = ioi_problem_with_two_subtasks(&app, &admin).await;
+    app.set_config_issues_flag(broken, false).await;
+    app.set_config_issues_flag(clean, true).await;
+
+    app.restart_plugins().await;
+    assert!(app.config_issues_flag(broken).await);
+    assert!(!app.config_issues_flag(clean).await);
+}

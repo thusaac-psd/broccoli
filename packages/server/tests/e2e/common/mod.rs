@@ -354,6 +354,17 @@ impl E2eTestApp {
         assert!(failures.is_empty(), "reconcile failed to apply a plugin");
     }
 
+    /// Runs this server's start-up plugin sync again: what its next start
+    /// does with the plugins and data it finds.
+    pub async fn restart_plugins(&self) {
+        let state = self
+            .state
+            .as_ref()
+            .expect("restart_plugins needs the in-process server");
+        let failures = sync_plugins(state).await.expect("sync the plugins");
+        assert!(failures.is_empty(), "a plugin failed to load");
+    }
+
     /// The problem's `config_issues` flag, as stored: what judging copies
     /// onto the judgements it claims.
     pub async fn config_issues_flag(&self, problem_id: i32) -> bool {
