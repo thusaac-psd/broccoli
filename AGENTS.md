@@ -212,7 +212,10 @@ binaries warn about every key they do not read.
   `packages/cli-core`. A request path names a contest or problem only by
   `broccoli_cli_core::ids::{ContestId, ProblemId}`, which come from the server's
   answers or from `broccoli_cli_core::resolve`, so text a user typed (a title, a
-  label) never reaches a URL.
+  label) never reaches a URL. Text a user typed reaches a request only as a
+  query value (the contest search, `?search=`): the client percent-encodes every
+  value (`ApiClient::get_query`), and the server matches it as data (an escaped
+  `LIKE` pattern), never as a path, an id or a filter expression.
 - `packages/server-sdk` and `packages/broccoli-types` are the plugin-facing Rust
   API: change them together with the host side they mirror.
 
@@ -240,6 +243,16 @@ binaries warn about every key they do not read.
   `broccoli_api_types::error::HostCode`, and every language pack has an
   `apiError.<CODE>` text for it unless the variant is marked `generic`;
   `packages/api-types/tests/host_code_text.rs` fails otherwise.
+- An outage of something a request needs answers a retryable 503 with
+  `Retry-After` through one `AppError` variant per dependency
+  (`DATABASE_UNAVAILABLE`, `QUEUE_UNAVAILABLE`, `STORAGE_UNAVAILABLE`), each
+  decided by that dependency's one outage rule (`common::db::is_outage`,
+  `common::redis_conn::is_outage`); an answer no retry changes stays a 500.
+  Per-address quotas admit while Redis is down, so an outage never locks a venue
+  out.
+- A per-address quota counts what abuse leaves behind, never what a venue does:
+  failed sign-ins, not sign-ins; device codes left pending, not device codes
+  requested. A venue shows the server one address for all its contestants.
 - Prefer permission helpers instead of checking roles directly.
 - Think about transaction boundaries before editing write paths.
 - The schema changes only through versioned forward migrations in
@@ -275,6 +288,35 @@ binaries warn about every key they do not read.
   fenced out, and a system error under a dispatch fault carries the fault's bare
   code. `SystemErrorClass` matches only bare host codes, so a plugin can never
   write a code that hands back or stands; a new host code stays bare.
+- A judgement or code run goes to the plugin that provides its contest type as a
+  `services::judging::Dispatch`, which that call, its nested calls and the
+  detached sessions it starts carry in their call locals. Every plugin write to
+  a unit passes `Dispatch::owned` (the owning plugin, the dispatched unit)
+  before the database fence sees it. A unit is live while any clone of its
+  dispatch exists (`judging::LiveDispatches`), and the lease refresh keeps only
+  live units' leases, so work a server owns but lost lapses and is stolen.
+- A failure every attempt would repeat stands: its `DispatchFault` classes as
+  standing (a problem's checker or its own program failing, `CHECKER_FAILED`,
+  `PROBLEM_FAILED`), and the system-error retry never re-judges it. An evaluator
+  reports a problem's failure generically, in
+  `TestCaseVerdict::problem_failure`; the host never reads a plugin's verdict
+  for it. A system error the retry may still take back is not shown: the
+  submission and its judgement history show the attempt in flight until the
+  retry decides.
+- Unloading a plugin retires its instance pool (`plugin_core::pool::Liveness`):
+  a call already running on a retired instance is refused at its next host
+  function (`plugin_core::executor::instance_retired`), so nothing an unloaded
+  plugin does lands.
+- What a plugin says to a client passes `services::plugin_output`: its codes go
+  out as `<plugin_id>.<CODE>` (`plugin_code`), its refusals only with a
+  client-error status the host allows, and a route answers only a status and a
+  JSON body, so the host writes every header (no cookie, redirect or page from a
+  plugin). A plugin never speaks as the host or as another plugin.
+- Several plugins may provide one key (a contest type, a problem type, a checker
+  format, a language). `registry::Providers` keeps every registration and
+  resolves a key to the provider whose plugin id sorts first, so replicas that
+  load the same plugins agree and an unload hands the key to the next provider.
+  Register and resolve through it, never through a map of your own.
 - Every submit path (practice and contest submissions, code runs) accepts work
   through one rule, `plugin_lifecycle::accepting_handler`, which refuses a
   contest type no provider can judge now; a new submit path calls it too.
