@@ -3051,6 +3051,7 @@ mod soft_deleted_contest_children {
             .create_user_with_role("ac_p", "password123", "contestant")
             .await;
         let cid = app.create_contest(&admin, "C", true, false).await;
+        app.register_for_contest(cid, &contestant).await;
         let q = app
             .post_with_token(
                 &routes::contest_clarifications(cid),

@@ -5593,6 +5593,7 @@ dependencies = [
  "flume 0.11.1",
  "futures",
  "hex",
+ "hmac 0.12.1",
  "hostname",
  "hyper",
  "hyper-util",

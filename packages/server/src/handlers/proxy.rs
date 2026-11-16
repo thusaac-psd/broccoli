@@ -26,9 +26,9 @@ use crate::utils::jwt;
 
 /// The caller of a plugin request, from its bearer token.
 ///
-/// No `Authorization` header, or a non-Bearer scheme (e.g. the print plugin's
-/// station secret), yields `None`: public plugin routes take anonymous
-/// callers.
+/// No `Authorization` header, or a non-Bearer scheme (a secret a client
+/// addresses to the plugin itself), yields `None`: public plugin routes take
+/// anonymous callers.
 ///
 /// A Bearer token that is PRESENT but fails verification (expired, bad
 /// signature, malformed) or is no longer fresh ([`fresh_user`]) is
@@ -55,10 +55,9 @@ async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Option<Au
 /// Never forward the caller's *platform* credentials: a plugin receives identity
 /// via the `auth` field, not raw headers. The access JWT rides `Authorization:
 /// Bearer …` and the long-lived HttpOnly refresh token rides `Cookie`, so both
-/// are dropped. A non-Bearer `Authorization` scheme (e.g. the print plugin's
-/// `PrintStation <token>` station secret) is NOT a platform credential — it is a
-/// plugin-scoped secret the client deliberately addresses to the plugin — so it
-/// passes through. An undecodable `Authorization` value is treated as a
+/// are dropped. A non-Bearer `Authorization` scheme (such as `Station <token>`)
+/// is NOT a platform credential — it is a plugin-scoped secret the client
+/// deliberately addresses to the plugin — so it passes through. An undecodable `Authorization` value is treated as a
 /// credential and dropped.
 fn is_forwardable_header(name: &str, value: Option<&str>) -> bool {
     if name.eq_ignore_ascii_case("cookie") {
@@ -457,12 +456,11 @@ mod tests {
 
     #[test]
     fn forwards_non_bearer_authorization_scheme() {
-        // The print plugin's station secret is addressed to the plugin, not a
-        // platform credential — it must pass through so `authenticate_station`
-        // can validate it.
+        // A plugin-scoped secret is addressed to the plugin, not a platform
+        // credential — it must pass through so the plugin can validate it.
         assert!(is_forwardable_header(
             "authorization",
-            Some("PrintStation tok-7f3a")
+            Some("Station tok-7f3a")
         ));
         assert!(is_forwardable_header("Authorization", Some("ApiKey k123")));
     }

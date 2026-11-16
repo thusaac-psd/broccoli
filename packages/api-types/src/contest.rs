@@ -32,7 +32,7 @@ pub struct CreateContestRequest {
     /// The contest type (format) that judges this contest's submissions.
     /// Required: the server never picks one, because any "first registered"
     /// choice depends on plugin names.
-    #[schema(example = "ioi")]
+    #[schema(example = "my-contest-type")]
     pub contest_type: String,
 }
 
@@ -70,7 +70,7 @@ pub struct ContestResponse {
     pub show_compile_output: bool,
     #[schema(example = true)]
     pub show_participants_list: bool,
-    #[schema(example = "ioi")]
+    #[schema(example = "my-contest-type")]
     pub contest_type: Option<String>,
     #[schema(example = "2025-09-25T10:00:00Z")]
     pub created_at: DateTime<Utc>,
@@ -107,7 +107,7 @@ pub struct ContestListItem {
     pub show_compile_output: bool,
     #[schema(example = true)]
     pub show_participants_list: bool,
-    #[schema(example = "ioi")]
+    #[schema(example = "my-contest-type")]
     pub contest_type: Option<String>,
     #[schema(example = "2025-09-25T10:00:00Z")]
     pub created_at: DateTime<Utc>,

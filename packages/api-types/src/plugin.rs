@@ -34,7 +34,7 @@ pub struct RegistriesResponse {
     #[schema(example = "lines")]
     pub default_checker_format: Option<String>,
 
-    #[schema(example = json!(["icpc", "ioi"]))]
+    #[schema(example = json!(["my-contest-type"]))]
     pub contest_types: Vec<String>,
 
     pub languages: Vec<LanguageRegistryItem>,
@@ -69,11 +69,11 @@ pub struct EvaluatorEntry {
 /// part of it: plugins govern visibility through their `visibility` queries.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContestTypeEntry {
-    /// Contest type identifier (e.g. "icpc", "ioi").
-    #[schema(example = "icpc")]
+    /// Contest type identifier, as the plugin that registered it names it.
+    #[schema(example = "my-contest-type")]
     pub contest_type: String,
     /// Plugin that registered this contest type.
-    #[schema(example = "icpc")]
+    #[schema(example = "my-plugin")]
     pub plugin_id: String,
     /// Function name invoked on submission.
     #[schema(example = "on_submission")]
@@ -305,7 +305,7 @@ impl std::fmt::Display for FieldErrorKind {
 /// A stored config that its plugin would no longer accept.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct IncompatibleConfig {
-    #[schema(example = "ioi")]
+    #[schema(example = "my-plugin")]
     pub plugin_id: String,
     pub scope: broccoli_types::manifest::ConfigScope,
     /// What the config belongs to: the problem id, contest id or

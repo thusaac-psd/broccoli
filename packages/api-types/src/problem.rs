@@ -26,7 +26,7 @@ pub struct CreateProblemRequest {
     /// Required: the server never picks one, because any "first registered"
     /// choice depends on plugin names and can land on a tournament format that
     /// makes no sense for practice.
-    #[schema(example = "ioi")]
+    #[schema(example = "my-contest-type")]
     pub default_contest_type: String,
     #[schema(example = false)]
     pub show_test_details: Option<bool>,
@@ -52,7 +52,7 @@ pub struct ProblemResponse {
     pub problem_type: String,
     #[schema(example = "lines")]
     pub checker_format: String,
-    #[schema(example = "ioi")]
+    #[schema(example = "my-contest-type")]
     pub default_contest_type: String,
     #[schema(example = false)]
     pub show_test_details: bool,

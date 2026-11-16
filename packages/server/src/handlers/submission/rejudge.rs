@@ -21,8 +21,9 @@ use crate::dispatcher::queue_depth::enforce_queue_depth_admission;
 // `system:admin` are independent of `Resource::Submission`'s own Read
 // reachability: an operator can trigger a rejudge on a submission they could
 // not themselves `GET` (not the owner, no `submission:view_all`, not a
-// contest participant), and a frozen ICPC contest / restricted IOI feedback
-// level must redact this response exactly as it would that `GET`. Only the
+// contest participant), and a contest type plugin's frozen standings or
+// restricted feedback must redact this response exactly as it would that
+// `GET`. Only the
 // *mutation* is authorised by `submission:rejudge` alone; what comes back
 // reflects the actor's own Read visibility, not a blanket admin view. Pinned
 // by `tests/integration/rejudge_visibility.rs`.

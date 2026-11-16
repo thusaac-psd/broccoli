@@ -190,6 +190,7 @@ mod clarification_visibility {
             .create_user_with_role("u2", "pass1234", "contestant")
             .await;
         let cid = app.create_contest(&admin, "C1", true, false).await;
+        app.register_for_contest(cid, &u1).await;
 
         let q_res = app
             .post_with_token(
@@ -274,6 +275,7 @@ mod clarification_actions {
             .create_user_with_role("u1", "pass1234", "contestant")
             .await;
         let cid = app.create_contest(&admin, "C1", true, false).await;
+        app.register_for_contest(cid, &u1).await;
 
         let q_res = app
             .post_with_token(
@@ -323,6 +325,7 @@ mod clarification_actions {
             .create_user_with_role("u2", "pass1234", "contestant")
             .await;
         let cid = app.create_contest(&admin, "C1", true, false).await;
+        app.register_for_contest(cid, &u1).await;
 
         let q_res = app
             .post_with_token(
@@ -547,5 +550,206 @@ mod clarification_reply_publishing {
             rep_res.body["replies"][0]["is_public"], false,
             "a non-admin's reply is_public:true must be forced private"
         );
+    }
+}
+
+mod clarification_admission {
+    use super::*;
+
+    async fn user_id(app: &TestApp, token: &str) -> i32 {
+        app.get_with_token(routes::ME, token).await.id()
+    }
+
+    fn question(content: &str) -> serde_json::Value {
+        json!({ "content": content, "clarification_type": "question" })
+    }
+
+    /// Seeing a public contest is not enough to write into its
+    /// clarification channel: a question comes from a participant.
+    #[tokio::test]
+    async fn a_stranger_to_a_public_contest_cannot_ask() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("admin1", "pass1234", "admin")
+            .await;
+        let stranger = app
+            .create_user_with_role("stranger", "pass1234", "contestant")
+            .await;
+        let cid = app.create_contest(&admin, "C1", true, false).await;
+
+        let res = app
+            .post_with_token(
+                &routes::contest_clarifications(cid),
+                &question("Hello?"),
+                &stranger,
+            )
+            .await;
+        assert_eq!(res.status, 403, "{}", res.text);
+        assert_eq!(res.body["code"], "CONTEST_NOT_REGISTERED");
+    }
+
+    #[tokio::test]
+    async fn a_participant_asks_at_most_ten_questions_a_minute() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("admin1", "pass1234", "admin")
+            .await;
+        let user = app
+            .create_user_with_role("user1", "pass1234", "contestant")
+            .await;
+        let cid = app.create_contest(&admin, "C1", true, false).await;
+        app.register_for_contest(cid, &user).await;
+
+        for i in 0..10 {
+            let res = app
+                .post_with_token(
+                    &routes::contest_clarifications(cid),
+                    &question(&format!("Question {i}")),
+                    &user,
+                )
+                .await;
+            assert_eq!(res.status, 201, "question {i}: {}", res.text);
+        }
+        let res = app
+            .post_with_token(
+                &routes::contest_clarifications(cid),
+                &question("One more"),
+                &user,
+            )
+            .await;
+        assert_eq!(res.status, 429, "{}", res.text);
+        assert_eq!(res.body["code"], "RATE_LIMITED");
+    }
+
+    /// A direct message goes to an active participant of the contest, never
+    /// to a deleted account or a user outside it.
+    #[tokio::test]
+    async fn a_direct_message_names_an_active_participant() {
+        use sea_orm::ConnectionTrait;
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("admin1", "pass1234", "admin")
+            .await;
+        let participant = app
+            .create_user_with_role("participant", "pass1234", "contestant")
+            .await;
+        let outsider = app
+            .create_user_with_role("outsider", "pass1234", "contestant")
+            .await;
+        let deleted = app
+            .create_user_with_role("deleted", "pass1234", "contestant")
+            .await;
+        let cid = app.create_contest(&admin, "C1", true, false).await;
+        app.register_for_contest(cid, &participant).await;
+        app.register_for_contest(cid, &deleted).await;
+        let deleted_id = user_id(&app, &deleted).await;
+        app.db
+            .execute_unprepared(&format!(
+                "UPDATE \"user\" SET deleted_at = NOW() WHERE id = {deleted_id}"
+            ))
+            .await
+            .unwrap();
+
+        let dm = |recipient_id: i32| {
+            json!({
+                "content": "A note for you",
+                "clarification_type": "direct_message",
+                "recipient_id": recipient_id,
+            })
+        };
+        for recipient in [user_id(&app, &outsider).await, deleted_id] {
+            let res = app
+                .post_with_token(&routes::contest_clarifications(cid), &dm(recipient), &admin)
+                .await;
+            assert_eq!(res.status, 404, "recipient {recipient}: {}", res.text);
+            assert_eq!(res.body["code"], "NOT_FOUND");
+        }
+        let res = app
+            .post_with_token(
+                &routes::contest_clarifications(cid),
+                &dm(user_id(&app, &participant).await),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 201, "{}", res.text);
+        assert_eq!(res.body["recipient_name"], "participant");
+    }
+}
+
+mod clarification_write_results {
+    use super::*;
+
+    async fn seed_kv(app: &TestApp, key: &str, value: &str) {
+        let route = routes::plugin_proxy("server-plugin", &format!("kv/{key}"));
+        let res = app
+            .post_without_token(&route, &json!({ "value": value }))
+            .await;
+        assert_eq!(res.status, 200, "seeding KV `{key}` failed: {}", res.text);
+    }
+
+    /// What a write returns is the clarification as the kernel shows it to
+    /// the caller: a plugin's field mask on it holds on the reply and resolve
+    /// results exactly as on the list.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plugin_field_mask_holds_on_every_write_result() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("admin1", "pass1234", "admin")
+            .await;
+        let user = app
+            .create_user_with_role("user1", "pass1234", "contestant")
+            .await;
+        let cid = app.create_contest(&admin, "C1", true, false).await;
+        app.register_for_contest(cid, &user).await;
+        let res = app
+            .post_with_token(
+                &routes::contest_clarifications(cid),
+                &json!({ "content": "Is N <= 1000?", "clarification_type": "question" }),
+                &user,
+            )
+            .await;
+        assert_eq!(res.status, 201, "{}", res.text);
+        let clar_id = res.id();
+
+        seed_kv(
+            &app,
+            "redact_resource_keys",
+            &format!("clarification:{clar_id}"),
+        )
+        .await;
+        seed_kv(&app, "redact_resource_fields", "content").await;
+
+        let listed = app
+            .get_with_token(&routes::contest_clarifications(cid), &user)
+            .await;
+        assert_eq!(listed.status, 200, "{}", listed.text);
+        assert!(
+            listed.body["data"][0]["content"].is_null(),
+            "{}",
+            listed.text
+        );
+
+        let replied = app
+            .post_with_token(
+                &routes::contest_clarification_reply(cid, clar_id),
+                &json!({ "content": "More detail", "is_public": false }),
+                &user,
+            )
+            .await;
+        assert_eq!(replied.status, 200, "{}", replied.text);
+        assert_eq!(replied.body["id"], clar_id);
+        assert!(replied.body["content"].is_null(), "{}", replied.text);
+        assert_eq!(replied.body["replies"][0]["content"], "More detail");
+
+        let resolved = app
+            .post_with_token(
+                &routes::contest_clarification_resolve(cid, clar_id),
+                &json!({ "resolved": true }),
+                &user,
+            )
+            .await;
+        assert_eq!(resolved.status, 200, "{}", resolved.text);
+        assert_eq!(resolved.body["resolved"], true);
+        assert!(resolved.body["content"].is_null(), "{}", resolved.text);
     }
 }

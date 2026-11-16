@@ -156,7 +156,7 @@ export interface paths {
     };
     /**
      * List what depends on a plugin right now
-     * @description Returns the contests running now (started, not yet ended, not deleted) whose contest type the plugin registered when it last loaded, so an admin can see what disabling it would stop. The answer is the same whether the plugin is enabled or disabled. Requires `plugin:manage` permission.
+     * @description Returns the contests running now (in their running phase and not deleted) whose contest type the plugin registered when it last loaded, so an admin can see what disabling it would stop. The answer is the same whether the plugin is enabled or disabled. Requires `plugin:manage` permission.
      */
     get: operations['getPluginDependents'];
     put?: never;
@@ -674,7 +674,7 @@ export interface paths {
     put?: never;
     /**
      * Create a clarification
-     * @description Users can create questions. Users with `contest:manage` permission can also create announcements and direct messages to specific participants.
+     * @description Participants can ask questions, at most 10 a minute each. Users with `contest:manage` permission can also create announcements and direct messages to specific participants.
      */
     post: operations['createClarification'];
     delete?: never;
@@ -2349,7 +2349,7 @@ export interface components {
        * @description For a practice submission, the contest type that judges it instead of
        *     the problem's default. A contest submission is judged under its
        *     contest's type; naming another is a validation error.
-       * @example ioi
+       * @example my-contest-type
        */
       contest_type?: string | null;
       files: components['schemas']['SubmissionFileDto'][];
@@ -2640,7 +2640,7 @@ export interface components {
        * @example 1
        */
       contest_id?: number | null;
-      /** @example ioi */
+      /** @example my-contest-type */
       contest_type: string;
       /**
        * Format: date-time
@@ -2744,7 +2744,7 @@ export interface components {
        * @example 2025-09-30T12:00:00Z
        */
       activate_time?: string | null;
-      /** @example ioi */
+      /** @example my-contest-type */
       contest_type?: string | null;
       /**
        * Format: date-time
@@ -2863,7 +2863,7 @@ export interface components {
        * @example 2025-09-30T12:00:00Z
        */
       activate_time?: string | null;
-      /** @example ioi */
+      /** @example my-contest-type */
       contest_type?: string | null;
       /**
        * Format: date-time
@@ -2925,13 +2925,13 @@ export interface components {
        */
       code_run_fn: string;
       /**
-       * @description Contest type identifier (e.g. "icpc", "ioi").
-       * @example icpc
+       * @description Contest type identifier, as the plugin that registered it names it.
+       * @example my-contest-type
        */
       contest_type: string;
       /**
        * @description Plugin that registered this contest type.
-       * @example icpc
+       * @example my-plugin
        */
       plugin_id: string;
       /**
@@ -2982,7 +2982,7 @@ export interface components {
        * @description The contest type (format) that judges this contest's submissions.
        *     Required: the server never picks one, because any "first registered"
        *     choice depends on plugin names.
-       * @example ioi
+       * @example my-contest-type
        */
       contest_type: string;
       /**
@@ -3029,7 +3029,7 @@ export interface components {
        *     Required: the server never picks one, because any "first registered"
        *     choice depends on plugin names and can land on a tournament format that
        *     makes no sense for practice.
-       * @example ioi
+       * @example my-contest-type
        */
       default_contest_type: string;
       /** @example false */
@@ -3065,7 +3065,7 @@ export interface components {
       title: string;
     };
     CreateSubmissionRequest: {
-      /** @example ioi */
+      /** @example my-contest-type */
       contest_type?: string | null;
       files: components['schemas']['SubmissionFileDto'][];
       /** @example cpp */
@@ -3522,7 +3522,7 @@ export interface components {
       errors: components['schemas']['FieldError'][];
       /** @example contest */
       namespace: string;
-      /** @example ioi */
+      /** @example my-plugin */
       plugin_id: string;
       /**
        * @description What the config belongs to: the problem id, contest id or
@@ -3803,9 +3803,9 @@ export interface components {
     /** @description What depends on a plugin right now. */
     PluginDependentsResponse: {
       /**
-       * @description Contests running now (started, not ended) whose contest type this
-       *     plugin provides on the serving replica. Disabling the plugin stops
-       *     their submissions from being accepted and judged.
+       * @description Contests in their running phase now whose contest type this plugin
+       *     recorded when it last loaded. Disabling the plugin stops their
+       *     submissions from being accepted and judged.
        */
       running_contests: components['schemas']['RunningContestRef'][];
     };
@@ -3900,7 +3900,7 @@ export interface components {
     /** @description Why a plugin cannot serve what it provides right now. */
     PluginOutage:
       | {
-          /** @example ioi */
+          /** @example my-plugin */
           plugin_id: string;
           /** @enum {string} */
           state: 'disabled';
@@ -4004,7 +4004,7 @@ export interface components {
        * @example 2025-09-01T08:00:00Z
        */
       created_at: string;
-      /** @example ioi */
+      /** @example my-contest-type */
       default_contest_type: string;
       /**
        * Format: int32
@@ -4049,7 +4049,7 @@ export interface components {
        * @example 2025-09-01T08:00:00Z
        */
       created_at: string;
-      /** @example ioi */
+      /** @example my-contest-type */
       default_contest_type: string;
       /**
        * Format: int32
@@ -4172,8 +4172,7 @@ export interface components {
       contest_type_handlers: components['schemas']['ContestTypeEntry'][];
       /**
        * @example [
-       *       "icpc",
-       *       "ioi"
+       *       "my-contest-type"
        *     ]
        */
       contest_types: string[];
@@ -4282,7 +4281,7 @@ export interface components {
     };
     /** @description A running contest whose format a plugin provides. */
     RunningContestRef: {
-      /** @example icpc */
+      /** @example my-contest-type */
       contest_type: string;
       /** Format: date-time */
       end_time: string;
@@ -4441,7 +4440,7 @@ export interface components {
     SubmissionListItem: {
       /** Format: int32 */
       contest_id?: number | null;
-      /** @example ioi */
+      /** @example my-contest-type */
       contest_type: string;
       /**
        * Format: date-time
@@ -4512,7 +4511,7 @@ export interface components {
        * @example 1
        */
       contest_id?: number | null;
-      /** @example ioi */
+      /** @example my-contest-type */
       contest_type: string;
       /**
        * Format: date-time
@@ -4586,7 +4585,7 @@ export interface components {
        * @example 1
        */
       contest_id?: number | null;
-      /** @example ioi */
+      /** @example my-contest-type */
       contest_type?: string | null;
       /**
        * Format: date-time
@@ -4861,7 +4860,7 @@ export interface components {
       activate_time?: string | null;
       /**
        * @description Omit to keep the current type. A contest type cannot be removed.
-       * @example icpc
+       * @example my-contest-type
        */
       contest_type?: string | null;
       /**
@@ -4897,7 +4896,7 @@ export interface components {
       checker_format?: string | null;
       /** @example Updated problem statement... */
       content?: string | null;
-      /** @example ioi */
+      /** @example my-contest-type */
       default_contest_type?: string | null;
       /** @example true */
       is_public?: boolean | null;
@@ -5076,8 +5075,8 @@ export interface components {
       component: string;
       /**
        * @description Restrict rendering to contests of this type. When set, the host only
-       *     renders this slot entry on contest pages whose contest matches this
-       *     type (e.g. "ioi", "icpc"). When unset, the slot is rendered everywhere.
+       *     renders this slot entry on the pages of a contest of this type. When
+       *     unset, the slot is rendered everywhere.
        */
       contest_type?: string | null;
       name: string;
@@ -7170,7 +7169,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden (PERMISSION_DENIED), or the caller is not registered for this public contest (CONTEST_NOT_REGISTERED) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -7179,8 +7178,17 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Contest or recipient not found (NOT_FOUND) */
+      /** @description Contest not found, or the recipient is not an active participant of it (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Too many clarifications from this user in the last minute (RATE_LIMITED); carries Retry-After */
+      429: {
         headers: {
           [name: string]: unknown;
         };

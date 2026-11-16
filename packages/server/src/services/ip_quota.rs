@@ -1,14 +1,8 @@
 //! Per-client-address quotas on the unauthenticated endpoints a script could
 //! hammer: failed sign-ins, registering and minting device codes.
 //!
-//! Each quota is a fixed window counted in Redis (see
-//! [`mq::Mq::count_in_window`]), so it holds across the whole fleet behind a
-//! round-robin gateway, and its clock is Redis's, so replicas' clocks never
-//! matter. A window opens at an address's first request and closes a fixed
-//! time later; requests past the limit count but never extend it, so a client
-//! retrying in a loop waits out the same window as one that stopped. One
-//! round trip per request. When Redis cannot answer, the request is admitted:
-//! these quotas guard against abuse, and an outage must not lock a venue out.
+//! Each quota is a fixed window per address, counted in Redis by
+//! [`super::window_quota`].
 
 use std::net::IpAddr;
 use std::time::Duration;
@@ -59,8 +53,7 @@ impl IpQuota {
         let Some(ip) = ip else {
             return Ok(());
         };
-        let counted = mq.count_in_window(&self.window_of(ip), self.window).await;
-        self.refuse_past(counted, self.limit)
+        super::window_quota::admit(mq, &self.window_of(ip), self.limit, self.window).await
     }
 
     /// Refuse a request from `ip` with `RATE_LIMITED` once the window holds
@@ -71,8 +64,7 @@ impl IpQuota {
         let Some(ip) = ip else {
             return Ok(());
         };
-        let held = mq.window_count(&self.window_of(ip)).await;
-        self.refuse_past(held, self.limit.saturating_sub(1))
+        super::window_quota::check(mq, &self.window_of(ip), self.limit).await
     }
 
     /// Count one event from `ip` toward [`check`](Self::check).
@@ -80,31 +72,10 @@ impl IpQuota {
         let Some(ip) = ip else {
             return;
         };
-        if let Err(e) = mq.count_in_window(&self.window_of(ip), self.window).await {
-            tracing::warn!(quota = self.name, error = %e, "Rate limit count failed");
-        }
+        super::window_quota::record(mq, &self.window_of(ip), self.window).await;
     }
 
     fn window_of(&self, ip: IpAddr) -> String {
         format!("{}:{ip}", self.name)
-    }
-
-    /// Refuse when the window holds more than `allowed` events; admit when
-    /// Redis could not answer.
-    fn refuse_past(
-        &self,
-        window: Result<(u64, Duration), mq::MqError>,
-        allowed: u64,
-    ) -> Result<(), AppError> {
-        match window {
-            Ok((count, left)) if count > allowed => Err(AppError::RateLimited {
-                retry_after: left.as_millis().div_ceil(1000).max(1) as u64,
-            }),
-            Ok(_) => Ok(()),
-            Err(e) => {
-                tracing::warn!(quota = self.name, error = %e, "Rate limit check failed; admitting");
-                Ok(())
-            }
-        }
     }
 }

@@ -84,7 +84,8 @@ mod plugin_management {
     }
 
     /// Disabling a contest-format plugin is confirmed against the contests it
-    /// would stop: those running now in a format the plugin provides.
+    /// would stop: those in their running phase now, in a format the plugin
+    /// provides.
     #[tokio::test]
     async fn dependents_lists_the_running_contests_of_the_formats_a_plugin_provides() {
         let app = TestApp::spawn().await;
@@ -121,12 +122,21 @@ mod plugin_management {
             json!({
                 "title": title,
                 "description": "A contest.",
+                "activate_time": start,
                 "start_time": start,
                 "end_time": end,
                 "is_public": true,
                 "contest_type": contest_type,
             })
         };
+        // Inside its start and end times but never activated: not running.
+        let mut unactivated = contest(
+            "unactivated",
+            "fmt-x",
+            "2020-01-01T00:00:00Z",
+            "2099-01-01T00:00:00Z",
+        );
+        unactivated["activate_time"] = serde_json::Value::Null;
         let mut ids = Vec::new();
         for body in [
             contest(
@@ -153,6 +163,7 @@ mod plugin_management {
                 "2020-01-01T00:00:00Z",
                 "2099-01-01T00:00:00Z",
             ),
+            unactivated,
         ] {
             let res = app.post_with_token(routes::CONTESTS, &body, &admin).await;
             assert_eq!(res.status, 201, "{}", res.text);

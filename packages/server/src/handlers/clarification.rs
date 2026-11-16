@@ -12,31 +12,31 @@ use tracing::instrument;
 // visibility-bypass-audited: `list_clarifications`/`create_clarification`/
 // `reply_clarification`/`resolve_clarification` all route contest
 // reachability through `VisibilityKernel` (`Resource::Contest` below)
-// BEFORE any row lookup, and `list_clarifications`'s per-row visibility is
-// the kernel's `fetch_visible_batch`
-// (`visibility::host_rules::decide_clarification`) - see the comments at
-// those call sites. `reply_clarification`/`toggle_reply_public`/
-// `resolve_clarification` are write paths on a single clarification the
-// caller must already be the admin, author, or recipient of (asserted
-// inline, since "is a party to this thread" has no `Resource::Clarification`
-// read-decision equivalent) - the contest-reachability gate only prevents
-// an unreachable contest's existing-vs-missing clarification id from being
-// distinguishable via 403-vs-404; it does not replace the inline
-// admin/author/recipient check. Every response they return reflects only
-// that one clarification the caller was just authorized to act on - the
-// same write-reflects-own-result pattern as `handlers/submission/rejudge.rs`.
-// `user` here is only used by `resolve_usernames`, a post-authorization
-// display helper. Pinned by the frozen
+// BEFORE any row lookup, and every clarification they return goes through
+// `render_threads`, which renders it only through the kernel's
+// `fetch_visible_batch` (`visibility::host_rules::decide_clarification`) and
+// masks it with `into_masked_json`. `reply_clarification`/
+// `toggle_reply_public`/`resolve_clarification` are write paths on a single
+// clarification the caller must already be the admin, author, or recipient
+// of (asserted inline, since "is a party to this thread" has no
+// `Resource::Clarification` read-decision equivalent) - the
+// contest-reachability gate only prevents an unreachable contest's
+// existing-vs-missing clarification id from being distinguishable via
+// 403-vs-404; it does not replace the inline admin/author/recipient check.
+// `user` here is read by `resolve_usernames`, a display helper, and by the
+// recipient lookup, which accepts only an active participant. Pinned by the
 // `tests/integration/visibility_matrix.rs::contest_clarification_list` suite
 // and `tests/integration/clarification.rs::clarification_actions`.
-use crate::entity::{clarification, clarification_reply, contest, user};
+use crate::entity::{clarification, clarification_reply, contest, contest_user, user};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::clarification::*;
 use crate::state::AppState;
-use crate::utils::soft_delete::find_active_child;
+use crate::utils::contest::{find_contest, require_contest_participant};
+use crate::utils::rate_limit;
+use crate::utils::soft_delete::{SoftDeletable, find_active_child};
 use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 async fn resolve_usernames(
@@ -55,71 +55,18 @@ async fn resolve_usernames(
     Ok(users.into_iter().map(|u| (u.id, u.username)).collect())
 }
 
-#[utoipa::path(
-    get,
-    path = "/",
-    tag = "Clarifications",
-    operation_id = "listClarifications",
-    summary = "List clarifications for a contest",
-    description = "Returns clarifications visible to the current user. Users with `contest:manage` see all; \
-                   others see their own questions, public announcements, public replies, \
-                   and direct messages addressed to them.",
-    params(
-        ("id" = i32, Path, description = "Contest ID"),
-        ClarificationListQuery,
-    ),
-    responses(
-        (status = 200, description = "List of clarifications", body = ClarificationListResponse),
-        (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
-        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
-        (status = 404, description = "Contest not found (NOT_FOUND)", body = ErrorBody),
-    ),
-    security(("jwt" = [])),
-)]
-#[instrument(skip(state, auth_user, query))]
-pub async fn list_clarifications(
-    auth_user: AuthUser,
-    State(state): State<AppState>,
-    AppPath(contest_id): AppPath<i32>,
-    AppQuery(query): AppQuery<ClarificationListQuery>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    // The kernel OWNS the subject: one kernel per request per subject.
-    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
-
-    // Fail fast, before reading any clarification rows below, on a contest
-    // the kernel knows is unreachable (missing, outside its activation
-    // window, or private to a non-member - see
-    // `visibility::host_rules::decide_contest`). This is a pure
-    // reachability gate: the contest itself is never rendered from this
-    // decision, so a `Redact` counts as `Allow` here.
-    if kernel
-        .decide(Action::Read, Resource::Contest(contest_id))
-        .await?
-        .is_denied()
-    {
-        return Err(AppError::NotFound("Contest not found".into()));
-    }
-
+/// `rows` as the caller of `kernel` is shown them, in order: each with the
+/// replies the caller may read, decided and masked by the kernel, and `None`
+/// where the kernel denies the row. Every clarification a handler returns is
+/// rendered here, so a plugin's rule on `Resource::Clarification` holds for
+/// reads and writes alike.
+async fn render_threads(
+    state: &AppState,
+    kernel: &VisibilityKernel<'_>,
+    auth_user: &AuthUser,
+    rows: Vec<clarification::Model>,
+) -> Result<Vec<Option<serde_json::Value>>, AppError> {
     let is_admin = auth_user.has_permission(perm::CONTEST_MANAGE);
-
-    let mut select =
-        clarification::Entity::find().filter(clarification::Column::ContestId.eq(contest_id));
-
-    if let Some(ref type_filter) = query.r#type {
-        select = select.filter(clarification::Column::ClarificationType.eq(type_filter.as_str()));
-    }
-
-    // Which rows this viewer may see is the kernel's job
-    // (`visibility::host_rules::decide_clarification`, rule 10): every row
-    // for this contest (matching the optional type filter) is fetched, and a
-    // row this viewer may not see comes back `Deny` from
-    // `fetch_visible_batch` below and is dropped from `data`, never rendered
-    // as a placeholder.
-    let rows = select
-        .order_by_desc(clarification::Column::CreatedAt)
-        .all(&state.db)
-        .await?;
-
     let clarification_ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
 
     let all_replies = if clarification_ids.is_empty() {
@@ -215,17 +162,102 @@ pub async fn list_clarifications(
         })
         .collect();
 
-    // Per-row kernel decision: a denied row (kernel `Deny`, e.g. a private
-    // question this viewer is neither the author, the recipient, nor
-    // `contest:manage` for) is omitted from `data` outright via `.flatten()`
-    // - never rendered as a placeholder, which would itself confirm the row
+    // A denied row (kernel `Deny`, e.g. a private question this viewer is
+    // neither the author, the recipient, nor `contest:manage` for) comes
+    // back `None`, never as a placeholder, which would itself confirm the row
     // exists - see `visibility::host_rules::decide_clarification`.
-    let visible = kernel.fetch_visible_batch(Action::Read, items).await?;
-    let data: Vec<serde_json::Value> = visible
+    kernel
+        .fetch_visible_batch(Action::Read, items)
+        .await?
+        .into_iter()
+        .map(|visible| visible.map(|v| v.into_masked_json()).transpose())
+        .collect()
+}
+
+/// The clarification a write just stored, as its author is shown it: only
+/// its id when the kernel denies the caller a read of it, the same rule as
+/// every other write that reflects its own result.
+async fn render_written(
+    state: &AppState,
+    kernel: &VisibilityKernel<'_>,
+    auth_user: &AuthUser,
+    model: clarification::Model,
+) -> Result<serde_json::Value, AppError> {
+    let id = model.id;
+    let rendered = render_threads(state, kernel, auth_user, vec![model]).await?;
+    Ok(rendered
+        .into_iter()
+        .next()
+        .flatten()
+        .unwrap_or_else(|| serde_json::json!({ "id": id })))
+}
+
+#[utoipa::path(
+    get,
+    path = "/",
+    tag = "Clarifications",
+    operation_id = "listClarifications",
+    summary = "List clarifications for a contest",
+    description = "Returns clarifications visible to the current user. Users with `contest:manage` see all; \
+                   others see their own questions, public announcements, public replies, \
+                   and direct messages addressed to them.",
+    params(
+        ("id" = i32, Path, description = "Contest ID"),
+        ClarificationListQuery,
+    ),
+    responses(
+        (status = 200, description = "List of clarifications", body = ClarificationListResponse),
+        (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
+        (status = 404, description = "Contest not found (NOT_FOUND)", body = ErrorBody),
+    ),
+    security(("jwt" = [])),
+)]
+#[instrument(skip(state, auth_user, query))]
+pub async fn list_clarifications(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    AppPath(contest_id): AppPath<i32>,
+    AppQuery(query): AppQuery<ClarificationListQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+
+    // Fail fast, before reading any clarification rows below, on a contest
+    // the kernel knows is unreachable (missing, outside its activation
+    // window, or private to a non-member - see
+    // `visibility::host_rules::decide_contest`). This is a pure
+    // reachability gate: the contest itself is never rendered from this
+    // decision, so a `Redact` counts as `Allow` here.
+    if kernel
+        .decide(Action::Read, Resource::Contest(contest_id))
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Contest not found".into()));
+    }
+
+    let mut select =
+        clarification::Entity::find().filter(clarification::Column::ContestId.eq(contest_id));
+
+    if let Some(ref type_filter) = query.r#type {
+        select = select.filter(clarification::Column::ClarificationType.eq(type_filter.as_str()));
+    }
+
+    // Which rows this viewer may see is the kernel's job
+    // (`visibility::host_rules::decide_clarification`, rule 10): every row
+    // for this contest (matching the optional type filter) is fetched, and a
+    // row this viewer may not see comes back `None` from `render_threads`
+    // and is dropped from `data`.
+    let rows = select
+        .order_by_desc(clarification::Column::CreatedAt)
+        .all(&state.db)
+        .await?;
+    let data: Vec<serde_json::Value> = render_threads(&state, &kernel, &auth_user, rows)
+        .await?
         .into_iter()
         .flatten()
-        .map(|v| v.into_masked_json())
-        .collect::<Result<_, _>>()?;
+        .collect();
 
     Ok(Json(serde_json::json!({ "data": data })))
 }
@@ -236,15 +268,16 @@ pub async fn list_clarifications(
     tag = "Clarifications",
     operation_id = "createClarification",
     summary = "Create a clarification",
-    description = "Users can create questions. Users with `contest:manage` permission can also create announcements and direct messages to specific participants.",
+    description = "Participants can ask questions, at most 10 a minute each. Users with `contest:manage` permission can also create announcements and direct messages to specific participants.",
     params(("id" = i32, Path, description = "Contest ID")),
     request_body = CreateClarificationRequest,
     responses(
         (status = 201, description = "Clarification created", body = ClarificationResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
-        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
-        (status = 404, description = "Contest or recipient not found (NOT_FOUND)", body = ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED), or the caller is not registered for this public contest (CONTEST_NOT_REGISTERED)", body = ErrorBody),
+        (status = 404, description = "Contest not found, or the recipient is not an active participant of it (NOT_FOUND)", body = ErrorBody),
+        (status = 429, description = "Too many clarifications from this user in the last minute (RATE_LIMITED); carries Retry-After", body = ErrorBody),
         (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
@@ -283,18 +316,33 @@ pub async fn create_clarification(
         return Err(AppError::PermissionDenied);
     }
 
+    // A question comes from a participant: seeing a public contest does not
+    // let a stranger write into its clarification channel. Staff are exempt
+    // from the participation rule and the per-user quota alike.
+    if !is_admin {
+        let contest = find_contest(&state.db, contest_id).await?;
+        require_contest_participant(&state.db, &auth_user, &contest).await?;
+        rate_limit::admit_clarification(&state.mq, auth_user.user_id).await?;
+    }
+
     // Only admins may direct a clarification to a specific recipient. Honoring a
     // caller-supplied recipient_id for a non-admin would let a contestant inject
     // a privately-visible clarification into any chosen user's view.
     let recipient_id = if is_admin { payload.recipient_id } else { None };
 
-    let mut recipient_name = None;
+    // A recipient is an active (not deleted) participant of this contest,
+    // checked in one statement.
     if let Some(recipient_id) = recipient_id {
-        let recipient = user::Entity::find_by_id(recipient_id)
+        let participants = contest_user::Entity::find()
+            .select_only()
+            .column(contest_user::Column::UserId)
+            .filter(contest_user::Column::ContestId.eq(contest_id))
+            .into_query();
+        user::Entity::find_active_by_id(recipient_id)
+            .filter(user::Column::Id.in_subquery(participants))
             .one(&state.db)
             .await?
-            .ok_or_else(|| AppError::NotFound("Recipient user not found".into()))?;
-        recipient_name = Some(recipient.username);
+            .ok_or_else(|| AppError::NotFound("Recipient not found in this contest".into()))?;
     }
 
     // Only admins may publish a clarification to ALL participants. A non-admin's
@@ -323,25 +371,7 @@ pub async fn create_clarification(
 
     let model = new.insert(&state.db).await?;
 
-    let resp = ClarificationResponse {
-        id: model.id,
-        contest_id: model.contest_id,
-        author_id: model.author_id,
-        author_name: auth_user.username.clone(),
-        content: model.content,
-        clarification_type: model.clarification_type,
-        recipient_id: model.recipient_id,
-        recipient_name,
-        is_public: model.is_public,
-        replies: vec![],
-        resolved: model.resolved,
-        resolved_at: model.resolved_at,
-        resolved_by: model.resolved_by,
-        resolved_by_name: None,
-        created_at: model.created_at,
-        updated_at: model.updated_at,
-    };
-
+    let resp = render_written(&state, &kernel, &auth_user, model).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -375,7 +405,7 @@ pub async fn reply_clarification(
     State(state): State<AppState>,
     AppPath((contest_id, clarification_id)): AppPath<(i32, i32)>,
     AppJson(payload): AppJson<ReplyClarificationRequest>,
-) -> Result<Json<ClarificationResponse>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     validate_reply_clarification(&payload)?;
 
     // The kernel OWNS the subject: one kernel per request per subject.
@@ -444,70 +474,9 @@ pub async fn reply_clarification(
 
     txn.commit().await?;
 
-    let reply_rows = clarification_reply::Entity::find()
-        .filter(clarification_reply::Column::ClarificationId.eq(clarification_id))
-        .order_by_asc(clarification_reply::Column::CreatedAt)
-        .all(&state.db)
-        .await?;
-
-    let mut user_ids = HashSet::new();
-    user_ids.insert(model.author_id);
-    if let Some(rid) = model.recipient_id {
-        user_ids.insert(rid);
-    }
-    if let Some(rb) = model.resolved_by {
-        user_ids.insert(rb);
-    }
-    for rep in &reply_rows {
-        user_ids.insert(rep.author_id);
-    }
-
-    let user_map = resolve_usernames(&state.db, &user_ids).await?;
-
-    let author_name = user_map
-        .get(&model.author_id)
-        .cloned()
-        .unwrap_or_else(|| "[Deleted]".into());
-    let recipient_name = model
-        .recipient_id
-        .and_then(|rid| user_map.get(&rid).cloned());
-    let resolved_by_name = model
-        .resolved_by
-        .and_then(|uid| user_map.get(&uid).cloned());
-
-    let replies = reply_rows
-        .into_iter()
-        .map(|rep| ClarificationReplyResponse {
-            id: rep.id,
-            author_id: rep.author_id,
-            author_name: user_map
-                .get(&rep.author_id)
-                .cloned()
-                .unwrap_or_else(|| "[Deleted]".into()),
-            content: rep.content,
-            is_public: rep.is_public,
-            created_at: rep.created_at,
-        })
-        .collect();
-
-    Ok(Json(ClarificationResponse {
-        id: model.id,
-        contest_id: model.contest_id,
-        author_id: model.author_id,
-        author_name,
-        content: model.content,
-        clarification_type: model.clarification_type,
-        recipient_id: model.recipient_id,
-        recipient_name,
-        is_public: model.is_public,
-        replies,
-        resolved: model.resolved,
-        resolved_at: model.resolved_at,
-        resolved_by: model.resolved_by,
-        resolved_by_name,
-        created_at: model.created_at,
-        updated_at: model.updated_at,
-    }))
+    Ok(Json(
+        render_written(&state, &kernel, &auth_user, model).await?,
+    ))
 }
 
 #[utoipa::path(
@@ -614,7 +583,7 @@ pub async fn resolve_clarification(
     State(state): State<AppState>,
     AppPath((contest_id, clarification_id)): AppPath<(i32, i32)>,
     AppJson(payload): AppJson<ResolveClarificationRequest>,
-) -> Result<Json<ClarificationResponse>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     // The kernel OWNS the subject: one kernel per request per subject.
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
 
@@ -648,7 +617,7 @@ pub async fn resolve_clarification(
     }
 
     let now = state.clock.now();
-    let mut active: clarification::ActiveModel = existing.clone().into();
+    let mut active: clarification::ActiveModel = existing.into();
     active.resolved = Set(payload.resolved);
     active.resolved_at = Set(if payload.resolved { Some(now) } else { None });
     active.resolved_by = Set(if payload.resolved {
@@ -659,68 +628,7 @@ pub async fn resolve_clarification(
     active.updated_at = Set(now);
     let model = active.update(&state.db).await?;
 
-    let reply_rows = clarification_reply::Entity::find()
-        .filter(clarification_reply::Column::ClarificationId.eq(clarification_id))
-        .order_by_asc(clarification_reply::Column::CreatedAt)
-        .all(&state.db)
-        .await?;
-
-    let mut user_ids = HashSet::new();
-    user_ids.insert(model.author_id);
-    if let Some(rid) = model.recipient_id {
-        user_ids.insert(rid);
-    }
-    if let Some(rb) = model.resolved_by {
-        user_ids.insert(rb);
-    }
-    for rep in &reply_rows {
-        user_ids.insert(rep.author_id);
-    }
-
-    let user_map = resolve_usernames(&state.db, &user_ids).await?;
-
-    let author_name = user_map
-        .get(&model.author_id)
-        .cloned()
-        .unwrap_or_else(|| "[Deleted]".into());
-    let recipient_name = model
-        .recipient_id
-        .and_then(|rid| user_map.get(&rid).cloned());
-    let resolved_by_name = model
-        .resolved_by
-        .and_then(|uid| user_map.get(&uid).cloned());
-
-    let replies = reply_rows
-        .into_iter()
-        .map(|rep| ClarificationReplyResponse {
-            id: rep.id,
-            author_id: rep.author_id,
-            author_name: user_map
-                .get(&rep.author_id)
-                .cloned()
-                .unwrap_or_else(|| "[Deleted]".into()),
-            content: rep.content,
-            is_public: rep.is_public,
-            created_at: rep.created_at,
-        })
-        .collect();
-
-    Ok(Json(ClarificationResponse {
-        id: model.id,
-        contest_id: model.contest_id,
-        author_id: model.author_id,
-        author_name,
-        content: model.content,
-        clarification_type: model.clarification_type,
-        recipient_id: model.recipient_id,
-        recipient_name,
-        is_public: model.is_public,
-        replies,
-        resolved: model.resolved,
-        resolved_at: model.resolved_at,
-        resolved_by: model.resolved_by,
-        resolved_by_name,
-        created_at: model.created_at,
-        updated_at: model.updated_at,
-    }))
+    Ok(Json(
+        render_written(&state, &kernel, &auth_user, model).await?,
+    ))
 }

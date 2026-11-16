@@ -45,6 +45,38 @@ pub fn phase_at(
     }
 }
 
+/// [`phase_at`] as a SQL expression over the `contest` row aliased `row` at
+/// the SQL instant `now` (`NOW()` in a query, the database clock every
+/// replica shares). It yields [`phase_sql_label`] of the phase, so a query
+/// filters on a phase with `{phase_sql} = '{label}'` and keeps the same
+/// boundaries as every other contest rule.
+pub fn phase_sql(row: &str, now: &str) -> String {
+    use ContestPhase::*;
+    format!(
+        "(CASE WHEN {row}.activate_time IS NULL OR {row}.activate_time > {now} THEN '{unactivated}' \
+               WHEN {row}.deactivate_time <= {now} THEN '{deactivated}' \
+               WHEN {now} < {row}.start_time THEN '{upcoming}' \
+               WHEN {now} < {row}.end_time THEN '{running}' \
+               ELSE '{ended}' END)",
+        unactivated = phase_sql_label(Unactivated),
+        deactivated = phase_sql_label(Deactivated),
+        upcoming = phase_sql_label(Upcoming),
+        running = phase_sql_label(Running),
+        ended = phase_sql_label(Ended),
+    )
+}
+
+/// The value [`phase_sql`] yields for `phase`.
+pub fn phase_sql_label(phase: ContestPhase) -> &'static str {
+    match phase {
+        ContestPhase::Unactivated => "unactivated",
+        ContestPhase::Upcoming => "upcoming",
+        ContestPhase::Running => "running",
+        ContestPhase::Ended => "ended",
+        ContestPhase::Deactivated => "deactivated",
+    }
+}
+
 /// Whether `contest`'s `start_time` has passed at `now`, whatever its
 /// activation state: the boundary between [`ContestPhase::Upcoming`] and
 /// [`ContestPhase::Running`]. From then on standings may exist.
@@ -303,6 +335,63 @@ mod tests {
     fn contest_without_deactivate_time_stays_ended() {
         let c = timeline(Some(0), None);
         assert_eq!(contest_phase(&c, at(10_000)), ContestPhase::Ended);
+    }
+
+    #[tokio::test]
+    async fn the_sql_phase_agrees_with_phase_at_at_every_boundary() {
+        use sea_orm::ConnectionTrait;
+        let (_pg, db) = crate::test_support::postgres().await;
+        let ts = |t: Option<DateTime<Utc>>| {
+            t.map_or("NULL::timestamptz".to_string(), |t| {
+                format!("'{}'::timestamptz", t.to_rfc3339())
+            })
+        };
+        let bounds = [None, Some(0), Some(10), Some(15), Some(20), Some(30)];
+        let mut cases = Vec::new();
+        for activate in bounds {
+            for deactivate in bounds {
+                for minute in [-1, 0, 9, 10, 15, 19, 20, 29, 30, 31] {
+                    cases.push((activate.map(at), deactivate.map(at), at(minute)));
+                }
+            }
+        }
+        let rows: Vec<String> = cases
+            .iter()
+            .enumerate()
+            .map(|(i, (activate, deactivate, now))| {
+                format!(
+                    "({i}, {}, {}, {}, {}, {})",
+                    ts(*activate),
+                    ts(Some(at(10))),
+                    ts(Some(at(20))),
+                    ts(*deactivate),
+                    ts(Some(*now)),
+                )
+            })
+            .collect();
+        let sql = format!(
+            "SELECT t.i AS i, {} AS phase FROM (VALUES {}) \
+             AS t(i, activate_time, start_time, end_time, deactivate_time, now) ORDER BY t.i",
+            phase_sql("t", "t.now"),
+            rows.join(", "),
+        );
+        let got = db
+            .query_all_raw(sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Postgres,
+                sql,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(got.len(), cases.len());
+        for (row, (activate, deactivate, now)) in got.iter().zip(&cases) {
+            let phase: String = row.try_get("", "phase").unwrap();
+            let expected = phase_at(*activate, at(10), at(20), *deactivate, *now);
+            assert_eq!(
+                phase,
+                phase_sql_label(expected),
+                "activate {activate:?}, deactivate {deactivate:?}, now {now}"
+            );
+        }
     }
 
     #[test]

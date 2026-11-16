@@ -22,7 +22,7 @@ use super::FieldMask;
 /// segment and imposes no depth limit of its own.
 ///
 /// A path that simply doesn't match anything in `value` is deliberately left
-/// undiagnosed: ICPC and IOI each ship one *union* `FieldMask` reused across
+/// undiagnosed: a contest type plugin may ship one *union* `FieldMask` reused across
 /// several different resource shapes (submission detail, standings row,
 /// etc.), so "most of these paths don't exist in this particular shape" is
 /// the normal, intended case, not a mistake — a real typo in a path segment

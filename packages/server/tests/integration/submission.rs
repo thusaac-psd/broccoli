@@ -410,6 +410,67 @@ mod rate_limiting {
 
         assert_eq!(res.status, 201);
     }
+
+    #[tokio::test]
+    async fn a_parallel_burst_is_admitted_exactly_up_to_the_limit() {
+        let app = TestApp::spawn_with_options(SpawnOptions {
+            rate_limit_per_minute: Some(5),
+            ..Default::default()
+        })
+        .await;
+        let admin_token = app
+            .create_user_with_role("admin1", "pass1234", "admin")
+            .await;
+        let problem_id = app.create_problem(&admin_token, "Test Problem").await;
+        let user_token = app.create_authenticated_user("user1", "pass1234").await;
+        let body = valid_submission_body("cpp");
+        let route = routes::problem_submissions(problem_id);
+
+        let burst = (0..20).map(|_| app.post_with_token(&route, &body, &user_token));
+        let statuses: Vec<u16> = futures::future::join_all(burst)
+            .await
+            .into_iter()
+            .map(|res| res.status)
+            .collect();
+
+        assert_eq!(
+            statuses.iter().filter(|s| **s == 201).count(),
+            5,
+            "{statuses:?}"
+        );
+        assert_eq!(
+            statuses.iter().filter(|s| **s == 429).count(),
+            15,
+            "{statuses:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_request_still_spends_its_place() {
+        let app = TestApp::spawn_with_options(SpawnOptions {
+            rate_limit_per_minute: Some(2),
+            ..Default::default()
+        })
+        .await;
+        let admin_token = app
+            .create_user_with_role("admin1", "pass1234", "admin")
+            .await;
+        let problem_id = app.create_problem(&admin_token, "Test Problem").await;
+        let user_token = app.create_authenticated_user("user1", "pass1234").await;
+        let body = valid_submission_body("cpp");
+
+        for _ in 0..2 {
+            let res = app
+                .post_with_token(&routes::problem_submissions(i32::MAX), &body, &user_token)
+                .await;
+            assert_eq!(res.status, 404, "{}", res.text);
+        }
+        let res = app
+            .post_with_token(&routes::problem_submissions(problem_id), &body, &user_token)
+            .await;
+        assert_eq!(res.status, 429, "{}", res.text);
+        assert_eq!(res.body["code"], "RATE_LIMITED");
+    }
 }
 
 mod submission_listing {
@@ -666,6 +727,127 @@ mod submission_listing {
             }
         }
         assert_eq!(seen, created);
+    }
+
+    /// A status-sorted page resumes after the status its last row was shown
+    /// at: that row changing status while the list is walked skips no other
+    /// row.
+    #[tokio::test]
+    async fn a_status_sort_resumes_where_the_page_ended_when_its_last_row_changes_status() {
+        use sea_orm::ConnectionTrait;
+        let app = TestApp::spawn().await;
+        let admin_token = app
+            .create_user_with_role("cursor_admin", "pass1234", "admin")
+            .await;
+        let problem_id = app.create_problem(&admin_token, "Cursor Problem").await;
+        let mut ids = Vec::new();
+        for status in ["CompilationError", "Judged", "Judged", "SystemError"] {
+            let id = app
+                .create_submission(problem_id, &admin_token, "cpp", "int main() {}")
+                .await;
+            app.db
+                .execute_unprepared(&format!(
+                    "UPDATE submission SET status = '{status}' WHERE id = {id}"
+                ))
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+        let list = |cursor: Option<&str>| {
+            let url = match cursor {
+                Some(c) => format!(
+                    "{}?per_page=2&sort_by=status&sort_order=asc&cursor={c}",
+                    routes::SUBMISSIONS
+                ),
+                None => format!(
+                    "{}?per_page=2&sort_by=status&sort_order=asc",
+                    routes::SUBMISSIONS
+                ),
+            };
+            let app = &app;
+            let token = admin_token.clone();
+            async move {
+                let res = app.get_with_token(&url, &token).await;
+                assert_eq!(res.status, 200, "{}", res.text);
+                res
+            }
+        };
+        let page_ids = |res: &test_support::TestResponse| -> Vec<i32> {
+            res.body["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s["id"].as_i64().unwrap() as i32)
+                .collect()
+        };
+
+        let first = list(None).await;
+        assert_eq!(page_ids(&first), ids[..2]);
+        let cursor = first.body["pagination"]["next_cursor"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        app.db
+            .execute_unprepared(&format!(
+                "UPDATE submission SET status = 'SystemError' WHERE id = {}",
+                ids[1]
+            ))
+            .await
+            .unwrap();
+
+        let second = list(Some(&cursor)).await;
+        let cursor = second.body["pagination"]["next_cursor"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let third = list(Some(&cursor)).await;
+        assert_eq!(
+            third.body["pagination"]["has_more"], false,
+            "{}",
+            third.text
+        );
+        let rest: Vec<i32> = [page_ids(&second), page_ids(&third)].concat();
+        // The other Judged row is not skipped; the changed row is listed
+        // again, at its new status.
+        assert_eq!(rest, [ids[2], ids[1], ids[3]]);
+    }
+
+    /// A cursor is the server's: one with its position edited is refused.
+    #[tokio::test]
+    async fn an_edited_cursor_is_refused() {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let app = TestApp::spawn().await;
+        let admin_token = app
+            .create_user_with_role("cursor_admin", "pass1234", "admin")
+            .await;
+        let problem_id = app.create_problem(&admin_token, "Cursor Problem").await;
+        for _ in 0..3 {
+            app.create_submission(problem_id, &admin_token, "cpp", "int main() {}")
+                .await;
+        }
+        let res = app
+            .get_with_token(&format!("{}?per_page=1", routes::SUBMISSIONS), &admin_token)
+            .await;
+        let cursor = res.body["pagination"]["next_cursor"].as_str().unwrap();
+        let (payload, tag) = cursor.split_once('.').unwrap();
+        let mut position: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+        position["at"]["shown"]["id"] = json!(i32::MAX);
+        let forged = format!(
+            "{}.{tag}",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&position).unwrap())
+        );
+
+        let res = app
+            .get_with_token(
+                &format!("{}?per_page=1&cursor={forged}", routes::SUBMISSIONS),
+                &admin_token,
+            )
+            .await;
+        assert_eq!(res.status, 400, "{}", res.text);
+        assert_eq!(res.body["code"], "VALIDATION_ERROR");
     }
 }
 

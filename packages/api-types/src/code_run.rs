@@ -38,7 +38,7 @@ pub struct CodeRunResponse {
     pub problem_title: String,
     #[schema(example = 1)]
     pub contest_id: Option<i32>,
-    #[schema(example = "ioi")]
+    #[schema(example = "my-contest-type")]
     pub contest_type: String,
     pub custom_test_cases: Vec<CustomTestCaseInput>,
     #[schema(example = "2025-10-01T14:30:00Z")]

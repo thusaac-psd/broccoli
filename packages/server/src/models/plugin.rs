@@ -14,7 +14,7 @@ pub struct RunningContestRef {
     pub id: i32,
     #[schema(example = "Spring Contest")]
     pub title: String,
-    #[schema(example = "icpc")]
+    #[schema(example = "my-contest-type")]
     pub contest_type: String,
     pub end_time: chrono::DateTime<chrono::Utc>,
 }
@@ -22,9 +22,9 @@ pub struct RunningContestRef {
 /// What depends on a plugin right now.
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct PluginDependentsResponse {
-    /// Contests running now (started, not ended) whose contest type this
-    /// plugin provides on the serving replica. Disabling the plugin stops
-    /// their submissions from being accepted and judged.
+    /// Contests in their running phase now whose contest type this plugin
+    /// recorded when it last loaded. Disabling the plugin stops their
+    /// submissions from being accepted and judged.
     pub running_contests: Vec<RunningContestRef>,
 }
 

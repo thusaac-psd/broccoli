@@ -675,7 +675,8 @@ impl BatchFacts<'_> {
 /// skips everything that is keyed on the contest:
 ///   - contest-scoped plugin config such as submission-limit and cooldown,
 ///     because `resource_enablements(problem_id, None)` ignores it;
-///   - IOI/ICPC feedback masking, which only runs when `contest_id` is set;
+///   - a contest type plugin's feedback masking, which only runs when
+///     `contest_id` is set;
 ///   - standings, and the contest's own `contest_type`, since the caller may
 ///     pick any `contest_type`.
 ///

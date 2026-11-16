@@ -33,7 +33,7 @@ pub struct UpdateProblemRequest {
     pub problem_type: Option<String>,
     #[schema(example = "ignore_case")]
     pub checker_format: Option<String>,
-    #[schema(example = "ioi")]
+    #[schema(example = "my-contest-type")]
     pub default_contest_type: Option<String>,
     #[schema(example = true)]
     pub show_test_details: Option<bool>,
@@ -61,7 +61,7 @@ pub struct ProblemListItem {
     pub problem_type: String,
     #[schema(example = "lines")]
     pub checker_format: String,
-    #[schema(example = "ioi")]
+    #[schema(example = "my-contest-type")]
     pub default_contest_type: String,
     #[schema(example = false)]
     pub show_test_details: bool,
