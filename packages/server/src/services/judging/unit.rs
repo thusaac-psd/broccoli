@@ -212,14 +212,14 @@ fn claim_statement(unit: Unit, server_id: &str, limit: u32, local: &[String]) ->
         Unit::CodeRun => "u.created_at",
     };
     b.statement(format!(
-        "WITH picked AS (SELECT u.id FROM {from} WHERE u.status IN {queued} AND {handled} \
+        "WITH picked AS (SELECT u.id FROM {from} WHERE u.{queued} AND {handled} \
                          ORDER BY {order} LIMIT {limit} {lock}), \
               moved AS (UPDATE {table} t SET status = '{pending}', owner_server_id = {owner}, \
                             lease_heartbeat_at = NOW(), leased_at = NOW() \
                         FROM picked WHERE t.id = picked.id RETURNING t.*){mirror} \
          SELECT * FROM moved",
         from = unit.scan_from(),
-        queued = StatusPhase::Queued.sql_list(),
+        queued = crate::dispatcher::QUEUED_PREDICATE,
         handled = prefer_local_handler(unit.contest_type(), &local),
         lock = unit.scan_lock(),
         table = unit.table(),

@@ -1482,6 +1482,7 @@ async fn scheduled_stages_require_rescheduling_and_feed_both_final_matches_throu
         .post_with_token(&setup_route, &body, &fx.staff_token)
         .await;
     assert_eq!(saved.status, 200, "{}", saved.text);
+    advance_clock_to_ms(&fx.app, first_at + 100).await;
     crate::codelink_bracket::poll_match(
         &fx.app,
         contest_id,
@@ -1532,6 +1533,7 @@ async fn scheduled_stages_require_rescheduling_and_feed_both_final_matches_throu
         .post_with_token(&setup_route, &body, &fx.staff_token)
         .await;
     assert_eq!(saved.status, 200, "{}", saved.text);
+    advance_clock_to_ms(&fx.app, rescheduled_at + 100).await;
     for (id, a, b, kind) in [
         (2, seeds[0], seeds[2], "final"),
         (3, seeds[1], seeds[3], "third_place"),
@@ -2373,9 +2375,9 @@ async fn feedback_publication_failure_retries_after_committing_the_match() {
         max_attempts: 1,
         ..Default::default()
     };
-        let key = format!("match:{}:0:effective:1:{}", fx.contest_id, accepted.id());
-        for _ in 0..2 {
-            advance_clock_to_ms(&fx.app, timer_fire_at_ms(&fx.app, &key).await).await;
+    let key = format!("match:{}:0:effective:1:{}", fx.contest_id, accepted.id());
+    for _ in 0..2 {
+        advance_clock_to_ms(&fx.app, timer_fire_at_ms(&fx.app, &key).await).await;
         tick_once(&fx.app.state, &config).await.unwrap();
         let committed = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
         assert_eq!(committed["state"], "decided", "{committed}");

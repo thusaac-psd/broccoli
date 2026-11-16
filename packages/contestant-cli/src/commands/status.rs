@@ -60,7 +60,7 @@ pub fn run(args: StatusArgs) -> anyhow::Result<()> {
         }
     }
     let self_uid = self_uid.expect("loop sets uid or returns early");
-    let subs = client.list_contest_submissions(&cid, None, Some(&self_uid), Some(1), Some(50))?;
+    let subs = client.list_contest_submissions(&cid, None, Some(&self_uid), None, Some(50))?;
     if subs.data.is_empty() {
         println!("  No submissions yet.");
         return Ok(());

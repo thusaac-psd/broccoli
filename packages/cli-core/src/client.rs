@@ -412,13 +412,15 @@ impl Client {
         self.parse_response(resp)
     }
 
-    /// List submissions for a contest/problem with pagination; `user_id` scopes to one contestant.
+    /// List submissions for a contest/problem, one page at a time; `user_id`
+    /// scopes to one contestant. `cursor` is the previous page's
+    /// `pagination.next_cursor` (URL-safe already); omit it for the first page.
     pub fn list_contest_submissions(
         &self,
         contest_id: &str,
         problem_id: Option<&str>,
         user_id: Option<&str>,
-        page: Option<u32>,
+        cursor: Option<&str>,
         per_page: Option<u32>,
     ) -> ClientResult<SubmissionListResponse> {
         let mut path = format!("/api/v1/contests/{}/submissions", contest_id);
@@ -429,8 +431,8 @@ impl Client {
         if let Some(uid) = user_id {
             params.push(format!("user_id={}", uid));
         }
-        if let Some(p) = page {
-            params.push(format!("page={}", p));
+        if let Some(c) = cursor {
+            params.push(format!("cursor={}", c));
         }
         if let Some(pp) = per_page {
             params.push(format!("per_page={}", pp));
