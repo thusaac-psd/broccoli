@@ -4,9 +4,11 @@
  */
 import { usePluginApi } from '@broccoli/web-sdk/api';
 import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { type ConfigSource, configSourceLabel } from '@broccoli/web-sdk/plugin';
 import { useSubmitGate } from '@broccoli/web-sdk/submission';
+import { QueryErrorState, RefreshFailedNotice } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef } from 'react';
@@ -40,7 +42,7 @@ export function SubmissionLimitStatus({
   const queryClient = useQueryClient();
 
   const viewerKey = viewerCacheKey(user);
-  const { data: status } = useQuery({
+  const query = useQuery({
     queryKey: [
       'submission-limit-status',
       contestId ?? null,
@@ -55,6 +57,8 @@ export function SubmissionLimitStatus({
           : `${ROUTES}/problems/${problemId}/status`,
       ),
   });
+  const view = useQueryState(query);
+  const { data: status } = query;
 
   // A new submission of this problem uses up one more.
   const submissionId = submission?.id;
@@ -78,7 +82,19 @@ export function SubmissionLimitStatus({
     t('submission-limit.reached'),
   );
 
-  if (!problemId || !status) return null;
+  if (!problemId) return null;
+  if (view.status === 'error') {
+    return (
+      <div className="rounded-lg border border-border bg-card p-4">
+        <QueryErrorState
+          error={view.error}
+          retry={view.retry}
+          retrying={view.retrying}
+        />
+      </div>
+    );
+  }
+  if (!status) return null;
 
   if (status.enabled === false || status.unlimited) return null;
 
@@ -130,6 +146,9 @@ export function SubmissionLimitStatus({
         <div className="mt-1.5 text-[11px] text-muted-foreground opacity-60">
           ({sourceLabel})
         </div>
+      )}
+      {view.status === 'data' && view.refreshError != null && (
+        <RefreshFailedNotice retry={view.retry} className="mt-2" />
       )}
     </div>
   );
