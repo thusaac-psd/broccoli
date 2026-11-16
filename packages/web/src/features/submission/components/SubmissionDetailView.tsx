@@ -10,6 +10,7 @@ import { formatKibibytes } from '@broccoli/web-sdk/utils';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router';
 
+import { useJudgementConfigIssues } from '@/features/submission/hooks/use-judgement-config-issues';
 import { useSubmissionDetail } from '@/features/submission/hooks/use-submission-detail';
 import {
   usePreviousLocationKey,
@@ -22,6 +23,7 @@ import {
 import { getSubmissionScoreDisplay } from '@/features/submission/utils/score-display';
 import { getVerdictBadge } from '@/features/submission/utils/verdict';
 
+import { JudgementConfigIssuesNotice } from './JudgementConfigIssuesNotice';
 import { SubmissionJudgementHistory } from './SubmissionJudgementHistory';
 import { SubmissionResult } from './SubmissionResult';
 
@@ -45,6 +47,10 @@ export function SubmissionDetailView({
     submission,
     detail.status === 'loading',
     contestId,
+  );
+  const judgedWithConfigIssues = useJudgementConfigIssues(
+    submissionId,
+    submission?.result?.judgement_id,
   );
 
   if (detail.status === 'loading' || detail.status === 'idle') {
@@ -194,6 +200,9 @@ export function SubmissionDetailView({
         )}
 
         <SubmissionResult submission={submission} />
+        {judgedWithConfigIssues && (
+          <JudgementConfigIssuesNotice problemId={submission.problem_id} />
+        )}
       </div>
 
       <SubmissionJudgementHistory submissionId={submission.id} />

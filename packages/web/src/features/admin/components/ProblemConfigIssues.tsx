@@ -1,10 +1,8 @@
-import { useApiClient } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { useQuery } from '@tanstack/react-query';
 import { AlertTriangle } from 'lucide-react';
 
 import { ConfigIssueList } from '@/features/admin/components/ConfigIssueList';
-import { problemConfigIssuesQueryKey } from '@/features/admin/hooks/test-case-queries';
+import { useProblemConfigIssues } from '@/features/admin/hooks/use-problem-config-issues';
 
 /**
  * The problem's stored configs that their plugins now refuse, such as
@@ -12,18 +10,7 @@ import { problemConfigIssuesQueryKey } from '@/features/admin/hooks/test-case-qu
  */
 export function ProblemConfigIssues({ problemId }: { problemId: number }) {
   const { t } = useTranslation();
-  const apiClient = useApiClient();
-  const { data: issues } = useQuery({
-    queryKey: problemConfigIssuesQueryKey(problemId),
-    queryFn: async () => {
-      const { data, error } = await apiClient.GET(
-        '/problems/{id}/config/issues',
-        { params: { path: { id: problemId } } },
-      );
-      if (error) throw error;
-      return data;
-    },
-  });
+  const { data: issues } = useProblemConfigIssues(problemId);
   if (!issues || issues.length === 0) return null;
 
   return (
