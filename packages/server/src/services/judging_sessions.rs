@@ -1,8 +1,9 @@
-//! The judging sessions running on this server: a detached evaluate session
-//! counts from the moment a plugin starts it until it has finalized its
-//! judgement and run its after-judging hooks. A submission reads `Judged` as
-//! soon as its judgement is finalized, before the hooks run, so "no session
-//! running" is what says this server's judging work for it is over.
+//! The judging work running on this server: a detached evaluate session
+//! counts from the moment a plugin starts it, and a contest plugin's
+//! submission call from its dispatch, until it has finalized its judgement
+//! and run its after-judging hooks. A submission reads `Judged` as soon as
+//! its judgement is finalized, before the hooks run, so "nothing running" is
+//! what says this server's judging work for it is over.
 //!
 //! A session belongs to the contest plugin that started it. Unloading that
 //! plugin for good (a disable, or the fleet forgetting it) cuts every one of
@@ -49,6 +50,20 @@ impl JudgingSessions {
             sessions: self.clone(),
             plugin_id: plugin_id.to_string(),
             cut: cut.clone(),
+        }
+    }
+
+    /// Counts judging work that is not a session of its own (a contest
+    /// plugin's submission call) as running until the returned guard is
+    /// dropped. It is never cut.
+    pub fn track(&self) -> TrackedJudging {
+        self.0.running.fetch_add(1, Ordering::AcqRel);
+        TrackedJudging(self.clone())
+    }
+
+    fn leave(&self) {
+        if self.0.running.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.idle.notify_waiters();
         }
     }
 
@@ -107,10 +122,16 @@ impl Drop for RunningSession {
                 }
             }
         }
-        let inner = &self.sessions.0;
-        if inner.running.fetch_sub(1, Ordering::AcqRel) == 1 {
-            inner.idle.notify_waiters();
-        }
+        self.sessions.leave();
+    }
+}
+
+/// Judging work [`JudgingSessions::track`] counts; dropping it ends it.
+pub struct TrackedJudging(JudgingSessions);
+
+impl Drop for TrackedJudging {
+    fn drop(&mut self) {
+        self.0.leave();
     }
 }
 
@@ -158,5 +179,21 @@ mod tests {
         drop((later, other));
         assert_eq!(sessions.cut("q"), 0, "an ended session holds nothing");
         assert_eq!(sessions.running(), 0);
+    }
+
+    #[tokio::test]
+    async fn tracked_judging_counts_toward_idle_and_is_never_cut() {
+        let sessions = JudgingSessions::default();
+        let tracked = sessions.track();
+        assert_eq!(sessions.running(), 1);
+        assert_eq!(sessions.cut("p"), 0, "no plugin's session to cut");
+        let waiter = tokio::spawn({
+            let sessions = sessions.clone();
+            async move { sessions.idle().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        drop(tracked);
+        waiter.await.unwrap();
     }
 }
