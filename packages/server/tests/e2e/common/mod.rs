@@ -148,6 +148,9 @@ pub struct E2eTestApp {
     /// This server's own test database, dropped with it. `None` against an
     /// external server.
     _database: Option<TestDatabase>,
+    /// The in-process server's detached judging sessions (see
+    /// [`E2eTestApp::judging_idle`]). `None` against an external server.
+    judging_sessions: Option<server::services::judging_sessions::JudgingSessions>,
     /// A contest type this server actually registers, for problem creation
     /// (which requires one): `icpc` from the real plugins, or the stub
     /// `standard` a plugin-less server registers instead.
@@ -281,6 +284,18 @@ async fn spawn_worker(
 
 #[allow(dead_code)]
 impl E2eTestApp {
+    /// Completes once the in-process server runs no judging session: every
+    /// submission it judged has finalized its judgement and run its
+    /// after-judging hooks. A submission reads `Judged` before its hooks run,
+    /// so a test that counts or inspects what judging did waits for this.
+    pub async fn judging_idle(&self) {
+        self.judging_sessions
+            .as_ref()
+            .expect("judging_idle needs the in-process server")
+            .idle()
+            .await;
+    }
+
     /// Default app DB pool size. Small on purpose: e2e runs many isolated test
     /// databases and Postgres backend slots are finite.
     const DEFAULT_DB_MAX_CONNECTIONS: u32 = 3;
@@ -397,6 +412,7 @@ impl E2eTestApp {
             _node_heartbeat: None,
             _plugin_cache: None,
             _database: None,
+            judging_sessions: None,
             // An external server runs with the real plugins.
             contest_type: "icpc",
         }
@@ -529,6 +545,7 @@ impl E2eTestApp {
         let evaluate_batches = EvaluateBatches::default();
         let hook_registry = server::hooks::new_shared_registry();
 
+        let judging_sessions = server::services::judging_sessions::JudgingSessions::default();
         let plugin_config_cache =
             server::services::plugin_config_cache::PluginConfigCache::default();
         let worker_slots = server::dispatcher::fanout::WorkerSlots::default();
@@ -561,6 +578,7 @@ impl E2eTestApp {
                 redis_client: None,
                 worker_slots: worker_slots.clone(),
                 plugin_config_cache: plugin_config_cache.clone(),
+                judging_sessions: judging_sessions.clone(),
             },
             None,
         )
@@ -761,6 +779,7 @@ impl E2eTestApp {
             _node_heartbeat: Some(node_heartbeat),
             _plugin_cache: Some(plugin_cache),
             _database: Some(database),
+            judging_sessions: Some(judging_sessions),
             contest_type: if load_plugins { "icpc" } else { "standard" },
         }
     }

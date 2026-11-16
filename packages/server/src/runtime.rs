@@ -274,6 +274,7 @@ impl ServerRuntime {
                 redis_client: redis_client.clone(),
                 worker_slots: worker_slots.clone(),
                 plugin_config_cache: plugin_config_cache.clone(),
+                judging_sessions: Default::default(),
             },
             Some(metrics.clone()),
         )

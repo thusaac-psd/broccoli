@@ -37,6 +37,8 @@ pub struct HostFunctionSystemDeps {
     /// Task slots of the live workers; sizes the judging fan-out.
     pub worker_slots: crate::dispatcher::fanout::WorkerSlots,
     pub plugin_config_cache: crate::services::plugin_config_cache::PluginConfigCache,
+    /// The detached judging sessions running on this server.
+    pub judging_sessions: crate::services::judging_sessions::JudgingSessions,
 }
 
 /// The plugin manager as the host functions it owns hold it: weakly, so the
@@ -129,6 +131,8 @@ pub struct EvaluateHostDeps {
     pub redis_client: Option<Arc<redis::Client>>,
     pub plugin_config_cache: crate::services::plugin_config_cache::PluginConfigCache,
     pub cancel_primitive_enabled: bool,
+    /// Counts the detached judging session this starts while it runs.
+    pub judging_sessions: crate::services::judging_sessions::JudgingSessions,
 }
 
 impl EvaluateHostDeps {
@@ -190,6 +194,7 @@ impl HostFunctionDeps {
             redis_client: self.system.redis_client.clone(),
             plugin_config_cache: self.system.plugin_config_cache.clone(),
             cancel_primitive_enabled: self.system.config.server.cancel_primitive_enabled,
+            judging_sessions: self.system.judging_sessions.clone(),
         }
     }
 
