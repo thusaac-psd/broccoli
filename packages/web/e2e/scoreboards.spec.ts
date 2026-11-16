@@ -1,6 +1,6 @@
 import { expect, type Page, test } from '@playwright/test';
 
-import { mockApi, NOW, runClockUntil } from './api';
+import { mockApi, NOW, PLUGIN_ROUTES, runClockUntil } from './api';
 
 // A contest-format plugin's scoreboard and contest card say when they cannot
 // load or refresh: a failed call never reads as "this contest has no
@@ -122,3 +122,36 @@ test('a Codelink bracket whose refreshes fail keeps the bracket and says it is n
   );
   await expect(bracket).toBeVisible();
 });
+
+for (const [plugin, path, url] of [
+  ['icpc', '/contests/1/rankings', `${ICPC}/standings`],
+  ['ioi', '/contests/4/rankings', `${IOI}/scoreboard`],
+] as const) {
+  test(`an ${plugin.toUpperCase()} scoreboard opened before the start shows the contest once it starts`, async ({
+    page,
+  }) => {
+    await open(page, plugin);
+    let started = false;
+    await page.route(url, (route) => {
+      if (started) return route.fallback();
+      const path = new URL(route.request().url()).pathname.replace(
+        /^\/api\/v1/,
+        '',
+      );
+      const live = PLUGIN_ROUTES.find(([, pattern]) => pattern.test(path));
+      const board = live?.[2](new URL(route.request().url()), 'contestant', []);
+      return route.fulfill({
+        json: { ...(board as object), phase: 'before', rows: [], rankings: [] },
+      });
+    });
+    await page.goto(path);
+    await expect(page.getByText(/not started/i).first()).toBeVisible();
+
+    started = true;
+    await runClockUntil(page, () =>
+      expect(page.getByRole('cell', { name: 'Alice' })).toBeVisible({
+        timeout: 500,
+      }),
+    );
+  });
+}

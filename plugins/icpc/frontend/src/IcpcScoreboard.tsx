@@ -185,9 +185,12 @@ export function IcpcScoreboard({ contestId }: IcpcScoreboardProps) {
     queryFn: () => api.getStandings(contestId!),
     retry: 2,
     refetchInterval: pollInterval<StandingsResponse>((d) => {
-      // Poll during the contest, and also while a frozen board is awaiting reveal
-      // (the 'after' phase) so the reveal reaches viewers who leave the tab open.
-      const live = d?.phase === 'during' || (!!d?.frozen && !d?.revealed);
+      // Poll until the contest is over (a board opened before the start
+      // learns from the server that it has started), and also while a frozen
+      // board awaits its reveal, so the reveal reaches viewers who leave the
+      // tab open.
+      const live =
+        d !== undefined && (d.phase !== 'after' || (!!d.frozen && !d.revealed));
       return autoRefresh && live ? 30000 : false;
     }),
   });
