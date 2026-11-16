@@ -715,6 +715,7 @@ async fn apply(
 async fn deactivate(state: &AppState, plugin_id: &str) -> Result<(), PluginError> {
     purge_plugin_registrations(&state.registries, plugin_id).await;
     state.plugins.unload_plugin(plugin_id)?;
+    state.plugin_sql.forget(plugin_id);
     state.plugins.update_translations()
 }
 
@@ -1374,6 +1375,10 @@ pub async fn remove_upload(
                 }
                 forget(state, applied, plugin_id).await;
                 delete_timers(state, plugin_id).await;
+                state.plugin_sql.forget(plugin_id);
+                if let Err(e) = crate::plugin_db::schema::retire(&state.db, plugin_id).await {
+                    tracing::warn!(plugin_id, error = %e, "Could not retire the plugin's database role");
+                }
                 UploadRemoval::Removed
             }
         };

@@ -223,6 +223,25 @@ export function PluginUploadDialog({
                   </p>
                 )}
               </div>
+              {summary.sql_read.length > 0 && (
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-muted-foreground flex items-center gap-1">
+                    <ShieldAlert className="h-3.5 w-3.5" />
+                    {t('plugins.upload.sqlRead')}
+                  </p>
+                  <div className="flex flex-wrap gap-1">
+                    {summary.sql_read.map((scope) => (
+                      <Badge
+                        key={scope}
+                        variant="secondary"
+                        className="font-mono text-xs"
+                      >
+                        {scope}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
               <p className="font-mono text-[11px] text-muted-foreground break-all">
                 {t('plugins.archiveHash', { hash: summary.archive_hash })}
               </p>

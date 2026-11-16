@@ -26,7 +26,10 @@
 //! deadline thread, fails with
 //! [`PluginError::Unavailable`].
 
+use std::any::{Any, TypeId};
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::admission::{Admission, CallClass, CallKind, Capacity, Token};
@@ -150,12 +153,55 @@ impl Executor {
     }
 }
 
+/// State a top-level call shares with the calls nested in it, one value per
+/// type, created on first use and dropped when the last call of the tree
+/// ends. Host functions keep per-call resources here (see [`call_locals`]).
+#[derive(Default)]
+pub struct CallLocals {
+    slots: Mutex<HashMap<TypeId, Box<dyn Any + Send>>>,
+}
+
+impl CallLocals {
+    /// Run `f` on this call tree's `T`, created with `Default` on first use.
+    /// `f` runs under the tree's lock, so it must not block.
+    pub fn with<T: Default + Send + 'static, R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+        let slot = slots
+            .entry(TypeId::of::<T>())
+            .or_insert_with(|| Box::new(T::default()));
+        f(slot
+            .downcast_mut::<T>()
+            .expect("a slot holds the type it is keyed by"))
+    }
+}
+
+/// Set on a call tree by [`fail_unavailable`].
+#[derive(Default)]
+pub(crate) struct MarkedUnavailable(pub bool);
+
+/// Mark the call running on this thread as one the host could not serve right
+/// now. A host function calls this before it traps the guest; the call then
+/// fails with [`PluginError::Unavailable`] instead of an execution error, so
+/// callers answer it as "try again".
+pub fn fail_unavailable() {
+    if let Some(locals) = call_locals() {
+        locals.with(|marked: &mut MarkedUnavailable| marked.0 = true);
+    }
+}
+
+/// The state shared by the call running on this thread and the calls nested
+/// in it; `None` outside a plugin call.
+pub fn call_locals() -> Option<Arc<CallLocals>> {
+    SCOPE.with(|scope| scope.borrow().as_ref().map(|s| s.locals.clone()))
+}
+
 /// What the thread running a guest knows about its call.
 struct CallScope {
     admission: Option<Admission>,
     class: Option<CallClass>,
     deadline: Instant,
     depth: u8,
+    locals: Arc<CallLocals>,
     /// Held while guest code runs; `None` while parked, and always for a
     /// lifecycle call.
     token: Option<Token>,
@@ -166,11 +212,12 @@ thread_local! {
 }
 
 /// The parent a nested call inherits from.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct Parent {
     pub class: Option<CallClass>,
     pub deadline: Instant,
     pub depth: u8,
+    pub locals: Arc<CallLocals>,
 }
 
 /// The call running on this thread, if any.
@@ -180,6 +227,7 @@ pub(crate) fn current_parent() -> Option<Parent> {
             class: s.class,
             deadline: s.deadline,
             depth: s.depth,
+            locals: s.locals.clone(),
         })
     })
 }
@@ -202,6 +250,7 @@ pub(crate) struct NewScope {
     pub class: Option<CallClass>,
     pub deadline: Instant,
     pub depth: u8,
+    pub locals: Arc<CallLocals>,
     pub token: Option<Token>,
 }
 
@@ -212,6 +261,7 @@ impl ScopeGuard {
             class: new.class,
             deadline: new.deadline,
             depth: new.depth,
+            locals: new.locals,
             token: new.token,
         };
         let previous = SCOPE.with(|s| s.borrow_mut().replace(scope));
@@ -294,6 +344,7 @@ pub(crate) fn resolve(
             class: kind.class(),
             deadline,
             depth: 1,
+            locals: Arc::default(),
         }),
         Admit::Nested => {
             let parent = current_parent().ok_or_else(|| {
@@ -313,12 +364,13 @@ pub(crate) fn resolve(
                 class: parent.class,
                 deadline: parent.deadline.min(Instant::now() + call_timeout),
                 depth: parent.depth + 1,
+                locals: parent.locals,
             })
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct Resolved {
     /// The kind to admit as; `None` (a nested call) skips admission.
     pub queue: Option<CallKind>,
@@ -327,4 +379,43 @@ pub(crate) struct Resolved {
     pub class: Option<CallClass>,
     pub deadline: Instant,
     pub depth: u8,
+    /// The top-level call's [`CallLocals`], shared by its nested calls.
+    pub locals: Arc<CallLocals>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scope(locals: Arc<CallLocals>, depth: u8) -> ScopeGuard {
+        ScopeGuard::enter(NewScope {
+            admission: None,
+            class: None,
+            deadline: Instant::now() + Duration::from_secs(60),
+            depth,
+            locals,
+            token: None,
+        })
+    }
+
+    #[test]
+    fn a_nested_call_shares_its_parents_call_locals() {
+        assert!(call_locals().is_none(), "no call, no locals");
+        let top = scope(Arc::default(), 1);
+        call_locals().unwrap().with(|n: &mut u32| *n += 1);
+        let nested = resolve(CallOptions::nested(), Duration::from_secs(60), "p", "f")
+            .expect("a nested call");
+        drop(top);
+        let _nested = scope(nested.locals, nested.depth);
+        assert_eq!(call_locals().unwrap().with(|n: &mut u32| *n), 1);
+    }
+
+    #[test]
+    fn top_level_calls_get_their_own_call_locals() {
+        let options = CallOptions::background(Instant::now() + Duration::from_secs(60));
+        let a = resolve(options, Duration::from_secs(60), "p", "f").unwrap();
+        let b = resolve(options, Duration::from_secs(60), "p", "f").unwrap();
+        a.locals.with(|n: &mut u32| *n = 7);
+        assert_eq!(b.locals.with(|n: &mut u32| *n), 0);
+    }
 }

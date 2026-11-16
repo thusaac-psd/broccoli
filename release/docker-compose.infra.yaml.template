@@ -5,9 +5,32 @@ services:
     ports:
       - "${POSTGRES_BIND:-0.0.0.0:5432}:5432"
     environment:
+      # The superuser initializes the database; the servers and workers log in
+      # as BROCCOLI_DB_USER, which owns it and holds CREATEROLE and nothing
+      # more (it provisions each plugin's own role).
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+      BROCCOLI_DB_USER: ${BROCCOLI_DB_USER:-broccoli}
+      BROCCOLI_DB_PASSWORD: ${BROCCOLI_DB_PASSWORD:?BROCCOLI_DB_PASSWORD is the app role's password}
+    # On an empty volume the image runs /docker-entrypoint-initdb.d once, as
+    # the superuser: create the app role there.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        mkdir -p /docker-entrypoint-initdb.d
+        cat > /docker-entrypoint-initdb.d/20-broccoli-app-role.sh <<'INIT'
+        psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" \
+          -v app="$$BROCCOLI_DB_USER" -v pw="$$BROCCOLI_DB_PASSWORD" -v db="$$POSTGRES_DB" <<'SQL'
+        CREATE ROLE :"app" LOGIN CREATEROLE PASSWORD :'pw';
+        ALTER DATABASE :"db" OWNER TO :"app";
+        -- The statement statistics need the superuser to create the extension.
+        CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+        SQL
+        INIT
+        exec docker-entrypoint.sh "$$@"
+      - sh
     # Sized for contest-scale fleets. A server holds at most 66 connections, a
     # worker 3, and each server fits its pools to its share at boot. 500 fits
     # 5 servers and 30 workers at their peak with a tenth kept for operators;

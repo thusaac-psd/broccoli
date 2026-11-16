@@ -25,6 +25,8 @@ fn guest(version: i64) -> String {
         (import "extism:host/user" "nest" (func $nest (param i64) (result i64)))
         (import "extism:host/user" "mark" (func $mark (param i64) (result i64)))
         (import "extism:host/user" "await_child" (func $await_child (param i64) (result i64)))
+        (import "extism:host/user" "busy" (func $busy (param i64) (result i64)))
+        (func (export "busy") (result i32) (drop (call $busy (i64.const 0))) (i32.const 0))
         (func (export "parent") (result i32) (drop (call $await_child (i64.const 0))) (i32.const 0))
         (func (export "hold") (result i32) (drop (call $hold (i64.const 0))) (i32.const 0))
         (func (export "park") (result i32) (drop (call $park (i64.const 0))) (i32.const 0))
@@ -195,6 +197,14 @@ fn await_child(ctx: &Ctx, _: i64) -> Result<(), extism::Error> {
     .map_err(|e| extism::Error::msg(e.to_string()))
 }
 
+/// A host function that cannot serve the call right now.
+fn busy(_: &Ctx, _: i64) -> Result<(), extism::Error> {
+    crate::executor::fail_unavailable();
+    Err(extism::Error::msg(
+        "the host cannot serve this call right now",
+    ))
+}
+
 fn mark(ctx: &Ctx, version: i64) -> Result<(), extism::Error> {
     ctx.0.update(|c| c.marks.push(version));
     Ok(())
@@ -234,6 +244,7 @@ impl Harness {
                     host_fn("nest", ctx.clone(), nest),
                     host_fn("mark", ctx.clone(), mark),
                     host_fn("await_child", ctx.clone(), await_child),
+                    host_fn("busy", ctx.clone(), busy),
                 ]
             });
             TestManager {
@@ -560,4 +571,20 @@ async fn a_failed_reload_leaves_the_loaded_version_serving() {
         .unwrap()
         .unwrap();
     assert_eq!(h.fixture.read(|c| c.marks.clone()), vec![1]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_function_can_fail_its_call_as_unavailable() {
+    let h = Harness::new(2);
+    let err = h
+        .manager
+        .call_raw(PLUGIN, "busy", vec![], CallOptions::interactive(later()))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PluginError::Unavailable { .. }), "{err:?}");
+    // The mark belongs to that call alone.
+    h.manager
+        .call_raw(PLUGIN, "mark", vec![], CallOptions::interactive(later()))
+        .await
+        .expect("the next call runs");
 }

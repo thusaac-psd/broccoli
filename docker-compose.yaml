@@ -1,6 +1,9 @@
 # Local development infrastructure. `docker compose up -d` needs no setup: the
 # credentials default to the ones config/config.example.toml uses. Set
-# POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB or REDIS_PASSWORD to change them.
+# POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, BROCCOLI_DB_USER,
+# BROCCOLI_DB_PASSWORD or REDIS_PASSWORD to change them. The server logs in as
+# BROCCOLI_DB_USER, a non-superuser that owns the database and holds
+# CREATEROLE; the superuser only initializes it.
 services:
   db:
     image: postgres:17-alpine
@@ -12,8 +15,11 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-broccoli_pg_secret}
       POSTGRES_DB: ${POSTGRES_DB:-broccoli}
+      BROCCOLI_DB_USER: ${BROCCOLI_DB_USER:-broccoli}
+      BROCCOLI_DB_PASSWORD: ${BROCCOLI_DB_PASSWORD:-broccoli_app_secret}
     volumes:
       - pg_data:/var/lib/postgresql/data
+      - ./config/postgres-init/20-broccoli-app-role.sh:/docker-entrypoint-initdb.d/20-broccoli-app-role.sh:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-broccoli}']
       interval: 5s

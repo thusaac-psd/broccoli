@@ -62,6 +62,7 @@ CLS="$OUTPUT/broccoli-airgap-$VERSION.cluster-secret"
 rm -rf "$CLS"; mkdir -p "$CLS"; chmod 700 "$CLS"
 {
   printf 'POSTGRES_PASSWORD=%s\n' "$(envgen_secret 24)"
+  printf 'BROCCOLI_DB_PASSWORD=%s\n' "$(envgen_secret 24)"
   printf 'REDIS_PASSWORD=%s\n' "$(envgen_secret 24)"
   printf 'BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY=%s\n' "$(envgen_secret 18)"
   printf 'BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY=%s\n' "$(envgen_secret 24)"

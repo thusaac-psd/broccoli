@@ -43,7 +43,7 @@ printf '%s\n' "$out" | grep -q -- '--lan-host' && fail "a server behind a gatewa
 [ ! -e "$T/infra.server-secret" ] || fail "fixture: no server-secret dir expected"
 join="$T/infra/compose/server-join.env"
 [ "$(stat -c %a "$join")" = 600 ] || fail "server-join.env is not private"
-for k in POSTGRES_PASSWORD REDIS_PASSWORD BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY \
+for k in BROCCOLI_DB_PASSWORD REDIS_PASSWORD BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY \
          BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY; do
   [ -n "$(env_get "$join" "$k")" ] && [ "$(env_get "$join" "$k")" = "$(env_get "$T/infra/compose/.env.infra" "$k")" ] \
     || fail "server-join.env $k does not match the infra node"
@@ -69,7 +69,7 @@ out="$(run_setup --role server --bundle "$T/extra" --infra-host 10.0.0.10 \
   --gateway-host 10.0.0.5 --server-id server-b)" || fail "joining server setup: $out"
 xs="$T/extra/compose/.env.server"
 [ ! -e "$T/extra/compose/.env.infra" ] || fail "a joining server generated infra settings"
-[ "$(env_get "$xs" BROCCOLI__DATABASE__URL)" = "postgres://postgres:$(env_get "$join" POSTGRES_PASSWORD)@10.0.0.10:5432/broccoli" ] \
+[ "$(env_get "$xs" BROCCOLI__DATABASE__URL)" = "postgres://broccoli:$(env_get "$join" BROCCOLI_DB_PASSWORD)@10.0.0.10:5432/broccoli" ] \
   || fail "joining server database URL: $(env_get "$xs" BROCCOLI__DATABASE__URL)"
 [ "$(env_get "$xs" BROCCOLI__MQ__URL)" = "redis://:$(env_get "$join" REDIS_PASSWORD)@10.0.0.10:6379" ] || fail "joining server MQ URL"
 [ "$(env_get "$xs" BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT)" = http://10.0.0.10:8333 ] || fail "joining server S3 endpoint"

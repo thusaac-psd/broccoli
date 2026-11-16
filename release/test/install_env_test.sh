@@ -85,22 +85,23 @@ fi
 # Operator passwords survive as themselves: single-quoted in env files (no
 # Compose interpolation, no ' #' comment) and percent-encoded inside URLs.
 mkdir quoting && cp -r install.sh lib docker-compose.*.template quoting/ && cd quoting
-POSTGRES_PASSWORD='p@ss #1/$x?' REDIS_PASSWORD='r%d' BROCCOLI_ADMIN_PASSWORD='Adm$n #1' \
+POSTGRES_PASSWORD='p@ss #1/$x?' BROCCOLI_DB_PASSWORD='a@pp #2/$y?' REDIS_PASSWORD='r%d' BROCCOLI_ADMIN_PASSWORD='Adm$n #1' \
   BROCCOLI_INFRA_HOST=10.0.0.10 run infra || fail "infra dry run with punctuated passwords"
 [ "$(env_get .env.infra POSTGRES_PASSWORD)" = 'p@ss #1/$x?' ] || fail "POSTGRES_PASSWORD not kept verbatim"
+[ "$(env_get .env.infra BROCCOLI_DB_PASSWORD)" = 'a@pp #2/$y?' ] || fail "BROCCOLI_DB_PASSWORD not kept verbatim"
 [ "$(env_get server-secrets.env BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD)" = 'Adm$n #1' ] || fail "admin password not kept verbatim"
-[ "$(env_get connection.env BROCCOLI__DATABASE__URL)" = 'postgres://postgres:p%40ss%20%231%2F%24x%3F@10.0.0.10:5432/broccoli' ] \
+[ "$(env_get connection.env BROCCOLI__DATABASE__URL)" = 'postgres://broccoli:a%40pp%20%232%2F%24y%3F@10.0.0.10:5432/broccoli' ] \
   || fail "database URL password not percent-encoded"
 [ "$(env_get connection.env BROCCOLI__MQ__URL)" = 'redis://:r%25d@10.0.0.10:6379' ] || fail "redis URL password not percent-encoded"
 # Re-running infra with a new address (rehearsal to venue) hands out the new
 # address with the same credentials.
 BROCCOLI_INFRA_HOST=10.0.0.20 run infra || fail "infra re-run with a new address"
-[ "$(env_get connection.env BROCCOLI__DATABASE__URL)" = 'postgres://postgres:p%40ss%20%231%2F%24x%3F@10.0.0.20:5432/broccoli' ] \
+[ "$(env_get connection.env BROCCOLI__DATABASE__URL)" = 'postgres://broccoli:a%40pp%20%232%2F%24y%3F@10.0.0.20:5432/broccoli' ] \
   || fail "infra re-run kept the old database address: $(env_get connection.env BROCCOLI__DATABASE__URL)"
 [ "$(env_get connection.env BROCCOLI__MQ__URL)" = 'redis://:r%25d@10.0.0.20:6379' ] || fail "infra re-run kept the old MQ address"
 [ "$(env_get connection.env BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT)" = 'http://10.0.0.20:8333' ] \
   || fail "infra re-run kept the old S3 address"
-[ "$(env_get .env.infra POSTGRES_PASSWORD)" = 'p@ss #1/$x?' ] || fail "infra re-run changed the database password"
+[ "$(env_get .env.infra BROCCOLI_DB_PASSWORD)" = 'a@pp #2/$y?' ] || fail "infra re-run changed the database password"
 cd ..
 
 # A value no env-file reader agrees on is refused, and no env file is left.

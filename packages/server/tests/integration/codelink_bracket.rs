@@ -130,6 +130,12 @@ pub(crate) async fn spawn_bracket_app() -> (TestApp, tempfile::TempDir) {
     let app = TestApp::spawn_with_plugins_and_options(SpawnOptions {
         plugins_dir: Some(tmp.path().to_path_buf()),
         start_dispatcher: true,
+        // The judge fixture's `SYSTEM_ERROR` source always judges to
+        // `SystemError`, so a reaper retry only re-judges it to the same
+        // verdict, and can land after a test writes the submission's late
+        // result by hand. A stuck submission changes only when the test
+        // changes it.
+        max_system_error_retries: Some(0),
         ..Default::default()
     })
     .await;

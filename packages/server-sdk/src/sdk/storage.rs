@@ -85,8 +85,8 @@ pub(super) struct StorageMock {
     /// bump this counter - only `get()` itself does. That asymmetry is
     /// exactly the point: it lets a plugin-side test assert that a batch of
     /// lookups issued exactly one real `get()` (one extism host-fn crossing
-    /// on the wasm32 side) rather than one `get_one()` per key, mirroring
-    /// `host.db.queries()`'s role in the SQL-batching regression tests.
+    /// on the wasm32 side) rather than one `get_one()` per key, as
+    /// `host.db.queries()` does for batched SQL.
     get_calls: std::cell::RefCell<usize>,
     revisions: std::cell::RefCell<HashMap<String, i64>>,
 }

@@ -10,6 +10,10 @@ zh-CN = "i18n/zh-CN.toml"
 entry = "print_plugin.wasm"
 permissions = ["logger", "sql", "config:read"]
 
+# Prints a submission's own source, so its SQL reads submission.files.
+[server.sql]
+read = ["submission.files"]
+
 # -- Contestant endpoints (JWT; access checked in-handler via contest::) --
 [[server.routes]]
 method = "POST"

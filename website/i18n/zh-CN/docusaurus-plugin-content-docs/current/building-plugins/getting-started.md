@@ -77,6 +77,7 @@ handler = "get_cooldown_status_standalone"
 
 - `entry` 是构建产物的 WASM 文件名。
 - `permissions` 控制宿主访问权限。没有 `sql` 时，数据库宿主函数不可用，其余权限同理。
+- 有 `sql` 时，插件的表落在它自己的模式中，宿主表对它只读。选手源代码、测试数据、程序输出和消息正文默认不可读，除非 `[server.sql] read` 列出这些列，例如 `read = ["submission.files"]`；管理员在安装插件时会看到它们。参见[插件数据库访问](../internals/plugin-database.md)。
 - 钩子将一个函数订阅到平台事件，此处为 `before_submission`。
   `scope = "resource"`（默认值）表示钩子只在插件适用的范围内运行，即设置中启用了该插件的比赛或题目，以及该插件自身注册的比赛类型下的所有比赛。`scope = "global"` 表示对服务器上的所有提交运行。
 - 路由将一个 HTTP 方法与路径映射到导出的函数。`{problem_id}` 这类路径参数在处理函数内

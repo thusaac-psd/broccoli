@@ -86,6 +86,88 @@ pub struct ServerConfig {
 
     #[serde(default)]
     pub timers: Vec<ServerTimer>,
+
+    /// `[server.sql]`: what the plugin's raw SQL may read beyond the default.
+    #[serde(default)]
+    pub sql: SqlConfig,
+}
+
+/// Host content columns, as `table.column`, that a plugin's SQL reads only
+/// when its manifest declares them under `[server.sql] read`: contestant
+/// source, test data, program output and message bodies. The other columns
+/// of a plugin-readable host table are readable to every plugin with the
+/// `sql` permission. Credentials are in no table a plugin can read and are
+/// never grantable.
+pub const SQL_READ_SCOPES: &[&str] = &[
+    "clarification.content",
+    "clarification_reply.content",
+    "code_run.compile_output",
+    "code_run.custom_test_cases",
+    "code_run.files",
+    "code_run_result.checker_output",
+    "code_run_result.stderr",
+    "code_run_result.stdout",
+    "problem.content",
+    "submission.compile_output",
+    "submission.files",
+    "submission_judgement.compile_output",
+    "test_case.expected_output",
+    "test_case.expected_output_blob_hash",
+    "test_case.expected_output_preview",
+    "test_case.input",
+    "test_case.input_blob_hash",
+    "test_case.input_preview",
+    "test_case_result.checker_output",
+    "test_case_result.stderr",
+    "test_case_result.stdout",
+];
+
+/// `[server.sql]`.
+#[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SqlConfig {
+    /// Content columns the plugin reads, each one of [`SQL_READ_SCOPES`].
+    #[serde(default)]
+    pub read: Vec<SqlReadScope>,
+}
+
+/// One entry of [`SQL_READ_SCOPES`]; any other string fails to parse.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct SqlReadScope(String);
+
+impl SqlReadScope {
+    pub fn parse(scope: &str) -> Result<Self, String> {
+        if SQL_READ_SCOPES.contains(&scope) {
+            Ok(Self(scope.to_string()))
+        } else {
+            Err(format!(
+                "unknown SQL read scope '{scope}'; the grantable scopes are: {}",
+                SQL_READ_SCOPES.join(", ")
+            ))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The host table the scope belongs to.
+    pub fn table(&self) -> &str {
+        self.0.split_once('.').map_or("", |(table, _)| table)
+    }
+
+    /// The column it grants.
+    pub fn column(&self) -> &str {
+        self.0.split_once('.').map_or("", |(_, column)| column)
+    }
+}
+
+impl<'de> Deserialize<'de> for SqlReadScope {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

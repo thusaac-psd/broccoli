@@ -211,6 +211,15 @@ pub async fn connect_with(
     Ok(SqlxPostgresConnector::from_sqlx_postgres_pool(pool).into())
 }
 
+/// [`connect_with`], but the pool opens no connection until its first use.
+pub fn connect_lazy_with(
+    pool_options: PgPoolOptions,
+    connect_options: PgConnectOptions,
+) -> DatabaseConnection {
+    SqlxPostgresConnector::from_sqlx_postgres_pool(pool_options.connect_lazy_with(connect_options))
+        .into()
+}
+
 fn sqlx_err(e: sea_orm::sqlx::Error) -> DbErr {
     DbErr::Conn(RuntimeErr::SqlxError(e.into()))
 }

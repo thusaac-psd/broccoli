@@ -171,24 +171,18 @@ const FUNCTION: &str = "broccoli_plugin_config_changed";
 /// The row trigger is a deferred constraint trigger, so the counter advances
 /// as the writing transaction commits rather than when it first writes: a
 /// reader can only see it advance once the change is about to be visible.
-/// `TRUNCATE` fires no row trigger, so a statement trigger covers it. The
-/// function is `SECURITY DEFINER` so a write under the plugin role can advance
-/// a sequence that role has no privileges on.
+/// `TRUNCATE` fires no row trigger, so a statement trigger covers it. Only
+/// the host writes `plugin_config`; plugins have no privilege on it or on the
+/// counter.
 pub async fn install_plugin_config_epoch<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     let channel = crate::services::judging::CLAIM_CHANNEL;
     db.execute_unprepared(&format!(
         "CREATE SEQUENCE IF NOT EXISTS {EPOCH_SEQUENCE}; \
-         SELECT nextval('{EPOCH_SEQUENCE}') WHERE NOT (SELECT is_called FROM {EPOCH_SEQUENCE}); \
-         DO $$ BEGIN \
-           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'broccoli_plugin') THEN \
-             REVOKE ALL ON SEQUENCE {EPOCH_SEQUENCE} FROM broccoli_plugin; \
-           END IF; \
-         END $$"
+         SELECT nextval('{EPOCH_SEQUENCE}') WHERE NOT (SELECT is_called FROM {EPOCH_SEQUENCE})"
     ))
     .await?;
     db.execute_unprepared(&format!(
-        "CREATE OR REPLACE FUNCTION {FUNCTION}() RETURNS trigger LANGUAGE plpgsql \
-         SECURITY DEFINER SET search_path = public AS $$ \
+        "CREATE OR REPLACE FUNCTION {FUNCTION}() RETURNS trigger LANGUAGE plpgsql AS $$ \
          BEGIN \
            PERFORM nextval('{EPOCH_SEQUENCE}'); \
            PERFORM pg_notify('{channel}', '{CHANGED}'); \

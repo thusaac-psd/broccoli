@@ -202,15 +202,9 @@ pub(crate) fn host_fn_span(host_fn: &'static str, plugin_id: &str) -> Span {
 
 pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
     let mut hr = HostFunctionRegistry::new();
-    // `broccoli_plugin` pool: backs the raw `sql` capability. Full read + write
-    // DML on data, but no schema DDL on core and no app-role powers. (`config:read`
-    // runs on the PRIVILEGED pool - see its registration below.)
-    let db = &deps.system.db;
-    // PRIVILEGED pool (runs as the app role): backs the server-owned structured
-    // host fns - `host.storage.*`, `host.submission.*`, `host.timer.*` and
-    // `config:*` - which build plugin-scoped SQL the server controls and run
-    // outside the plugin role's boundary (core DDL, `plugin_login_secret`).
-    let privileged_db = &deps.system.privileged_db;
+    // The host function pool: every other host fn that touches the database
+    // runs SQL the host builds itself there, under the app role.
+    let host_db = &deps.system.host_db;
 
     register_fn(
         &mut hr,
@@ -221,13 +215,24 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
         Waits::Returns,
         logger::log_info,
     );
-    register_storage_functions(&mut hr, privileged_db);
-    register_timer_functions(&mut hr, privileged_db);
-    register_sql_functions(&mut hr, db);
-    register_submission_functions(&mut hr, privileged_db);
+    register_storage_functions(&mut hr, host_db);
+    register_timer_functions(&mut hr, host_db);
+    register_sql_functions(
+        &mut hr,
+        &sql::PluginSql {
+            pools: deps.system.plugin_sql.clone(),
+            registry: deps
+                .plugin_manager
+                .get()
+                .expect("the manager registers its host functions while it is alive")
+                .get_registry()
+                .clone(),
+        },
+    );
+    register_submission_functions(&mut hr, host_db);
     register_registry_functions(&mut hr, &deps);
     register_evaluation_functions(&mut hr, &deps);
-    register_config_functions(&mut hr, &deps, privileged_db);
+    register_config_functions(&mut hr, &deps, host_db);
     hr
 }
 
@@ -270,15 +275,15 @@ fn with_db(
     move |plugin_id| (plugin_id.to_string(), db.clone())
 }
 
-/// `host.storage.*`: plugin-scoped key-value storage, on the privileged pool.
-fn register_storage_functions(hr: &mut HostFunctionRegistry, privileged_db: &DatabaseConnection) {
+/// `host.storage.*`: plugin-scoped key-value storage, on the host function pool.
+fn register_storage_functions(hr: &mut HostFunctionRegistry, host_db: &DatabaseConnection) {
     let cap = "storage";
     register_fn(
         hr,
         cap,
         "store_set",
         (&[I64], &[]),
-        with_db(privileged_db),
+        with_db(host_db),
         Waits::Blocks,
         storage::store_set,
     );
@@ -287,7 +292,7 @@ fn register_storage_functions(hr: &mut HostFunctionRegistry, privileged_db: &Dat
         cap,
         "store_get",
         (&[I64], &[I64]),
-        with_db(privileged_db),
+        with_db(host_db),
         Waits::Blocks,
         storage::store_get,
     );
@@ -296,7 +301,7 @@ fn register_storage_functions(hr: &mut HostFunctionRegistry, privileged_db: &Dat
         cap,
         "store_compare_and_set",
         (&[I64], &[I64]),
-        with_db(privileged_db),
+        with_db(host_db),
         Waits::Blocks,
         storage::store_compare_and_set,
     );
@@ -305,7 +310,7 @@ fn register_storage_functions(hr: &mut HostFunctionRegistry, privileged_db: &Dat
         cap,
         "store_delete",
         (&[I64], &[]),
-        with_db(privileged_db),
+        with_db(host_db),
         Waits::Blocks,
         storage::store_delete,
     );
@@ -314,24 +319,23 @@ fn register_storage_functions(hr: &mut HostFunctionRegistry, privileged_db: &Dat
         cap,
         "store_scan",
         (&[I64], &[I64]),
-        with_db(privileged_db),
+        with_db(host_db),
         Waits::Blocks,
         storage::store_scan,
     );
 }
 
 /// `host.timer.*`. One manifest permission gates both functions, so a plugin
-/// without `"timer"` never sees either. Runs on the PRIVILEGED pool since
-/// `plugin_timer` is a server-owned core table, not plugin-scoped data
-/// reachable through the restricted `broccoli_plugin` role.
-fn register_timer_functions(hr: &mut HostFunctionRegistry, privileged_db: &DatabaseConnection) {
+/// without `"timer"` never sees either. Runs on the host function pool:
+/// `plugin_timer` is host state, written only through these functions.
+fn register_timer_functions(hr: &mut HostFunctionRegistry, host_db: &DatabaseConnection) {
     let cap = "timer";
     register_fn(
         hr,
         cap,
         "timer_schedule",
         (&[I64], &[I64]),
-        with_db(privileged_db),
+        with_db(host_db),
         Waits::Blocks,
         timer::timer_schedule,
     );
@@ -340,22 +344,27 @@ fn register_timer_functions(hr: &mut HostFunctionRegistry, privileged_db: &Datab
         cap,
         "timer_cancel",
         (&[I64], &[I64]),
-        with_db(privileged_db),
+        with_db(host_db),
         Waits::Blocks,
         timer::timer_cancel,
     );
 }
 
-/// The raw `sql` capability on the restricted pool, including explicit
-/// transactions shared across one plugin's calls through `txn_map`.
-fn register_sql_functions(hr: &mut HostFunctionRegistry, db: &DatabaseConnection) {
+/// The raw `sql` capability: each plugin's statements run on its own pool, as
+/// its own role (see [`crate::plugin_db`]), including explicit transactions
+/// shared across one plugin's calls through `txn_map`.
+fn register_sql_functions(hr: &mut HostFunctionRegistry, pools: &sql::PluginSql) {
     let cap = "sql";
+    let with_pools = || {
+        let pools = pools.clone();
+        move |plugin_id: &str| (plugin_id.to_string(), pools.clone())
+    };
     register_fn(
         hr,
         cap,
         "db_execute",
         (&[I64, I64], &[I64]),
-        with_db(db),
+        with_pools(),
         Waits::Blocks,
         sql::db_execute,
     );
@@ -364,15 +373,15 @@ fn register_sql_functions(hr: &mut HostFunctionRegistry, db: &DatabaseConnection
         cap,
         "db_query",
         (&[I64, I64], &[I64]),
-        with_db(db),
+        with_pools(),
         Waits::Blocks,
         sql::db_query,
     );
 
     let txn_map: sql::TransactionMap = Arc::new(StdMutex::new(HashMap::new()));
     let with_txns = || {
-        let (db, txn_map) = (db.clone(), txn_map.clone());
-        move |plugin_id: &str| (plugin_id.to_string(), db.clone(), txn_map.clone())
+        let (pools, txn_map) = (pools.clone(), txn_map.clone());
+        move |plugin_id: &str| (plugin_id.to_string(), pools.clone(), txn_map.clone())
     };
     register_fn(
         hr,
@@ -422,13 +431,9 @@ fn register_sql_functions(hr: &mut HostFunctionRegistry, db: &DatabaseConnection
 }
 
 /// `host.submission.*`: the structured, capability-gated core-WRITE path. It
-/// builds its SQL server-side from structured input and runs on the
-/// PRIVILEGED pool, since the raw `sql` channel is restricted to the
-/// `broccoli_plugin` role.
-fn register_submission_functions(
-    hr: &mut HostFunctionRegistry,
-    privileged_db: &DatabaseConnection,
-) {
+/// builds its SQL server-side from structured input and runs on the host
+/// function pool.
+fn register_submission_functions(hr: &mut HostFunctionRegistry, host_db: &DatabaseConnection) {
     let cap = "submission";
     let functions: [(&'static str, HostFnDb); 9] = [
         ("submission_update", submissions::submission_update),
@@ -465,7 +470,7 @@ fn register_submission_functions(
             cap,
             name,
             (&[I64], &[I64]),
-            with_db(privileged_db),
+            with_db(host_db),
             Waits::Blocks,
             f,
         );
@@ -549,7 +554,7 @@ fn register_evaluation_functions(hr: &mut HostFunctionRegistry, deps: &HostFunct
     });
 }
 
-/// `config:read` and `config:write`, both on the PRIVILEGED pool.
+/// `config:read` and `config:write`, both on the host function pool.
 ///
 /// `config:read` reads `plugin_config`, which raw plugin SQL cannot SELECT
 /// (so one plugin cannot read another's config). The SQL is server-owned and
@@ -560,9 +565,9 @@ fn register_evaluation_functions(hr: &mut HostFunctionRegistry, deps: &HostFunct
 fn register_config_functions(
     hr: &mut HostFunctionRegistry,
     deps: &HostFunctionDeps,
-    privileged_db: &DatabaseConnection,
+    host_db: &DatabaseConnection,
 ) {
-    let db = privileged_db.clone();
+    let db = host_db.clone();
     let registry = deps
         .plugin_manager
         .get()
@@ -579,7 +584,7 @@ fn register_config_functions(
         )
     });
 
-    let db = privileged_db.clone();
+    let db = host_db.clone();
     let cache = deps.system.plugin_config_cache.clone();
     hr.register("config:write", move |plugin_id| {
         config::create_config_set_function(plugin_id.to_string(), db.clone(), cache.clone())

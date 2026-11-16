@@ -3497,6 +3497,14 @@ export interface components {
       permissions: string[];
       /** Format: int64 */
       size_bytes: number;
+      /**
+       * @description Content columns, as `table.column`, the plugin's SQL would read
+       *     (`[server.sql] read`).
+       * @example [
+       *       "submission.files"
+       *     ]
+       */
+      sql_read: string[];
       /** @example 1.2.0 */
       version: string;
     };
@@ -3967,6 +3975,14 @@ export interface components {
     ServerDetailResponse: {
       permissions: string[];
       routes: components['schemas']['ServerRouteConfig'][];
+      /**
+       * @description Content columns, as `table.column`, the plugin's SQL may read
+       *     (`[server.sql] read`).
+       * @example [
+       *       "submission.files"
+       *     ]
+       */
+      sql_read: string[];
     };
     ServerRouteConfig: {
       handler: string;

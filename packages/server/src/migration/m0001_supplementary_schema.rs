@@ -1,9 +1,10 @@
 use sea_orm_migration::prelude::*;
 
 /// The schema the entity `sync()` cannot express: partial and named indexes,
-/// CHECK constraints and column defaults, the `plugin_user_public` view, the
-/// `submission_feedback` table, the optional `pg_stat_statements` extension
-/// and the `broccoli_plugin` role with its grants.
+/// CHECK constraints and column defaults, the
+/// `submission_feedback` and `plugin_login_secret` tables, the optional
+/// `pg_stat_statements` extension and the database's plugin group role with
+/// its grants.
 pub struct Migration;
 
 impl MigrationName for Migration {
@@ -14,8 +15,7 @@ impl MigrationName for Migration {
 
 /// Optional observability extension. Creating it needs privileges a managed
 /// app role may lack, or contrib files a Postgres build may lack, so a failure
-/// is a warning and boot continues. It runs before [`PLUGIN_ROLE`] so the
-/// extension's views get the same grants as every other relation.
+/// is a warning and boot continues.
 const OPTIONAL_EXTENSIONS: &str = r#"
 DO $$
 BEGIN
@@ -68,9 +68,6 @@ const SCHEMA: &[&str] = &[
     // judgement's in-flight count uses its entity's `status` index.
     r#"CREATE INDEX idx_code_run_in_flight ON code_run (owner_server_id)
         WHERE status IN ('Pending', 'Compiling', 'Running')"#,
-    // Curated, PII-free projection of `user` for plugin reads.
-    r#"CREATE VIEW plugin_user_public AS
-        SELECT id, username FROM "user" WHERE deleted_at IS NULL"#,
     // Withheld-feedback records owned by plugins; `metadata` is opaque to the
     // host. At most one pending record per plugin slot.
     r#"CREATE TABLE submission_feedback (
@@ -92,48 +89,124 @@ const SCHEMA: &[&str] = &[
     r#"CREATE INDEX submission_feedback_match ON submission_feedback (plugin_id, state_key)"#,
     r#"CREATE INDEX submission_feedback_slot
         ON submission_feedback (plugin_id, slot_key, submission_id)"#,
+    // The database's plugin group role (see `plugin_db::schema::group_role`).
+    r#"CREATE TABLE plugin_group_role (name TEXT NOT NULL)"#,
+    // Each plugin role's login password (see `plugin_db::schema::provision`).
+    r#"CREATE TABLE plugin_login_secret (
+        role TEXT PRIMARY KEY,
+        password TEXT NOT NULL
+    )"#,
 ];
 
-/// The `broccoli_plugin` role that raw plugin SQL runs under.
-///
-/// It is a NOLOGIN group role the app role is a member of, with read and
-/// write DML on every table and sequence, now and future: contest admins are
-/// trusted and install plugins deliberately. It owns no core table, so core
-/// schema DDL (`DROP`/`ALTER`) and `TRUNCATE` stay with the app role; a
-/// plugin's own tables, created under this role, are owned by it. The
-/// restricted pool's credential table `plugin_login_secret` is created and
-/// revoked at runtime (see `database::provision_restricted_plugin_login`).
+/// Host relations every plugin may read: contest data with no secret in it.
+/// Their content columns ([`plugin_core::manifest::SQL_READ_SCOPES`]) are
+/// left out and granted to a plugin only by its manifest's `[server.sql]
+/// read` (see `plugin_db::schema::provision`). Every other host relation is
+/// unreadable to plugins; the integration test
+/// `plugin_db::every_host_relation_is_classified` requires each one to be
+/// classified.
+pub const PLUGIN_READABLE: &[&str] = &[
+    "additional_file",
+    "clarification",
+    "clarification_reply",
+    "code_run",
+    "code_run_result",
+    "contest",
+    "contest_problem",
+    "contest_user",
+    "problem",
+    "problem_attachment",
+    "submission",
+    "submission_judgement",
+    "test_case",
+    "test_case_result",
+];
+
+/// Host relations plugins may read only these columns of: an account's public
+/// profile, never its credentials.
+pub const PLUGIN_READABLE_COLUMNS: &[(&str, &[&str])] = &[(
+    "user",
+    &["id", "username", "display_name", "created_at", "deleted_at"],
+)];
+
+/// The database's plugin group role, `group`, every plugin role belongs to
+/// (`plugin_db::schema::group_role`), and the only privileges
+/// plugins hold outside their
+/// own schemas: `USAGE` on schema `public` and `SELECT` on
+/// [`PLUGIN_READABLE`] (but its content columns) and
+/// [`PLUGIN_READABLE_COLUMNS`]. No write, `TRUNCATE`,
+/// sequence or `CREATE` privilege on anything the host owns, so host state
+/// changes only through host functions, with their guards.
 ///
 /// `CREATE ROLE` needs CREATEROLE, which a managed app role may lack. Then the
-/// whole block is skipped with a warning and boot continues degraded: the
-/// runtime disables raw plugin SQL (`RestrictedPluginAuth::AppRoleDegraded`).
-const PLUGIN_ROLE: &str = r#"
+/// block is skipped with a warning and boot continues; plugin roles cannot be
+/// provisioned either, so raw plugin SQL fails.
+fn plugin_role(group: &str) -> String {
+    use crate::plugin_db::schema::{content_columns, quote_ident};
+    let group_literal = format!("'{group}'");
+    let group_table = crate::plugin_db::schema::GROUP_TABLE;
+    let group = quote_ident(group);
+    let mut grants = String::new();
+    for table in PLUGIN_READABLE {
+        let content = content_columns(table);
+        if content.is_empty() {
+            grants.push_str(&format!(
+                "GRANT SELECT ON {} TO {group};\n",
+                quote_ident(table)
+            ));
+            continue;
+        }
+        // Every column but the content ones, read from the catalog.
+        let content = content
+            .iter()
+            .map(|c| format!("'{c}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        grants.push_str(&format!(
+            "EXECUTE (SELECT format('GRANT SELECT (%s) ON %I TO %s', \
+               string_agg(quote_ident(attname), ', ' ORDER BY attnum), '{table}', '{group}') \
+             FROM pg_attribute WHERE attrelid = 'public.{t}'::regclass AND attnum > 0 \
+               AND NOT attisdropped AND attname <> ALL (ARRAY[{content}]::name[]));\n",
+            t = quote_ident(table),
+        ));
+    }
+    for (table, columns) in PLUGIN_READABLE_COLUMNS {
+        let columns = columns
+            .iter()
+            .map(|c| quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        grants.push_str(&format!(
+            "GRANT SELECT ({columns}) ON {} TO {group};\n",
+            quote_ident(table)
+        ));
+    }
+    format!(
+        r#"
 DO $$
 BEGIN
   BEGIN
-    CREATE ROLE broccoli_plugin NOLOGIN;
+    CREATE ROLE {group} NOLOGIN;
   EXCEPTION
     WHEN duplicate_object THEN NULL;
     WHEN insufficient_privilege THEN
-      RAISE WARNING 'broccoli_plugin role not provisioned: the application role lacks CREATEROLE. Raw plugin SQL (host.db.*) will be disabled at runtime (fail-closed degrade). Grant the app role CREATEROLE, or set database.plugin_url to a dedicated non-privileged role, to enable it.';
+      RAISE WARNING 'plugin group role not provisioned: the application role lacks CREATEROLE. Raw plugin SQL (host.db.*) will fail until the app role is granted CREATEROLE.';
       RETURN;
   END;
+  INSERT INTO {group_table} (name) VALUES ({group_literal});
 
   BEGIN
-    GRANT broccoli_plugin TO CURRENT_USER;
-    GRANT USAGE, CREATE ON SCHEMA public TO broccoli_plugin;
-    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO broccoli_plugin;
-    ALTER DEFAULT PRIVILEGES IN SCHEMA public
-      GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO broccoli_plugin;
-    GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO broccoli_plugin;
-    ALTER DEFAULT PRIVILEGES IN SCHEMA public
-      GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO broccoli_plugin;
+    REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+    GRANT USAGE ON SCHEMA public TO {group};
+    {grants}
   EXCEPTION
     WHEN insufficient_privilege THEN
-      RAISE WARNING 'broccoli_plugin grants skipped (insufficient privilege): %', SQLERRM;
+      RAISE WARNING 'plugin group grants skipped (insufficient privilege): %', SQLERRM;
   END;
 END $$;
-"#;
+"#
+    )
+}
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
@@ -150,19 +223,16 @@ impl MigrationTrait for Migration {
             stamp = super::SCHEMA_STAMP,
         ))
         .await?;
-        // Last, so the grants cover every relation created above.
-        db.execute_unprepared(PLUGIN_ROLE).await?;
-        // Plugins read everything but must not rewrite what boot trusts: the
-        // schema stamp and the record of applied migrations.
-        db.execute_unprepared(&format!(
-            "DO $$ BEGIN \
-               IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'broccoli_plugin') THEN \
-                 REVOKE INSERT, UPDATE, DELETE ON {table}, seaql_migrations FROM broccoli_plugin; \
-               END IF; \
-             END $$",
-            table = super::STAMP_TABLE,
-        ))
-        .await?;
+        let database: String = db
+            .query_one_raw(sea_orm_migration::sea_orm::Statement::from_string(
+                manager.get_database_backend(),
+                "SELECT current_database()::text AS database",
+            ))
+            .await?
+            .ok_or_else(|| DbErr::Custom("current_database() returned no row".into()))?
+            .try_get("", "database")?;
+        let group = crate::plugin_db::schema::group_role(&database);
+        db.execute_unprepared(&plugin_role(&group)).await?;
         Ok(())
     }
 

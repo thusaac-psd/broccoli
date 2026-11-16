@@ -9,6 +9,8 @@ use sea_orm_migration::prelude::*;
 
 mod m0001_supplementary_schema;
 
+pub use m0001_supplementary_schema::{PLUGIN_READABLE, PLUGIN_READABLE_COLUMNS};
+
 /// The schema this build creates, as a stamp over its schema sources (see
 /// `build.rs`). m0001 records it; boot refuses a database recorded with any
 /// other stamp, since schema sync adds tables and columns but never changes

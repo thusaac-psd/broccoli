@@ -26,8 +26,9 @@ envgen_write() {
   [ -f "$server" ] || cp "$server_ex" "$server"
 
   # Shared machine secrets: reuse an existing real value, else generate once.
-  local pg redis s3a s3s jwt
+  local pg app redis s3a s3s jwt
   pg="$(env_get "$infra" POSTGRES_PASSWORD)";                                   [ -n "$pg" ]    || pg="$(envgen_secret 24)"
+  app="$(env_get "$infra" BROCCOLI_DB_PASSWORD)";                               [ -n "$app" ]   || app="$(envgen_secret 24)"
   redis="$(env_get "$infra" REDIS_PASSWORD)";                                   [ -n "$redis" ] || redis="$(envgen_secret 24)"
   s3a="$(env_get "$infra" BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY)";      [ -n "$s3a" ]   || s3a="$(envgen_secret 18)"
   s3s="$(env_get "$infra" BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY)";      [ -n "$s3s" ]   || s3s="$(envgen_secret 24)"
@@ -35,6 +36,7 @@ envgen_write() {
 
   # --- infra: secrets + service-name endpoints + neutralize any change-me ---
   env_set "$infra" POSTGRES_PASSWORD "$pg"
+  env_set "$infra" BROCCOLI_DB_PASSWORD "$app"
   env_set "$infra" REDIS_PASSWORD "$redis"
   env_set "$infra" BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "$s3a"
   env_set "$infra" BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "$s3s"
@@ -47,7 +49,7 @@ envgen_write() {
   env_set "$server" BROCCOLI__AUTH__JWT_SECRET "$jwt"
   env_set "$server" BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "$s3a"
   env_set "$server" BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "$s3s"
-  env_set "$server" BROCCOLI__DATABASE__URL "$(postgres_url postgres "$pg" db 5432 broccoli)"
+  env_set "$server" BROCCOLI__DATABASE__URL "$(postgres_url broccoli "$app" db 5432 broccoli)"
   env_set "$server" BROCCOLI__MQ__URL "$(redis_url "$redis" redis 6379)"
   env_set "$server" BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "http://seaweedfs:8333"
   env_set "$server" BROCCOLI_BOOTSTRAP_ADMIN_USERNAME "$admin_user"
@@ -62,7 +64,7 @@ cluster_seed_infra() {
   local infra="$1" sidecar="$2" k v
   [ -f "$sidecar" ] || return 0
   [ -f "$infra" ] || : > "$infra"
-  for k in POSTGRES_PASSWORD REDIS_PASSWORD \
+  for k in POSTGRES_PASSWORD BROCCOLI_DB_PASSWORD REDIS_PASSWORD \
            BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY \
            BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY; do
     # Adopt the sidecar value ONLY into a slot that is empty or still a
@@ -90,7 +92,7 @@ workergen_write() {
 # The settings a server or worker needs to reach the infra node's Postgres,
 # Redis and S3. The cluster-secret sidecar and server-join.env both carry
 # them under these names.
-_ENVGEN_INFRA_KEYS=(POSTGRES_PASSWORD REDIS_PASSWORD
+_ENVGEN_INFRA_KEYS=(BROCCOLI_DB_PASSWORD REDIS_PASSWORD
   BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY)
 # What every server must share besides that: a token one server signs must
 # verify on the others, and each server resets the bootstrap admin to its own
@@ -106,7 +108,7 @@ _envgen_infra_endpoints() {
     [ -n "$(env_get "$secrets" "$k")" ] || { echo "envgen: $secrets has no $k" >&2; return 2; }
   done
   env_set "$env" BROCCOLI__DATABASE__URL \
-    "$(postgres_url postgres "$(env_get "$secrets" POSTGRES_PASSWORD)" "$host" 5432 broccoli)"
+    "$(postgres_url broccoli "$(env_get "$secrets" BROCCOLI_DB_PASSWORD)" "$host" 5432 broccoli)"
   env_set "$env" BROCCOLI__MQ__URL "$(redis_url "$(env_get "$secrets" REDIS_PASSWORD)" "$host" 6379)"
   env_set "$env" BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "http://${host}:8333"
   env_set "$env" BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY \

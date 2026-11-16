@@ -896,6 +896,7 @@ export const en: Record<string, string> = {
   'plugins.upload.replacesUpload': 'Replaces the uploaded v{version}',
   'plugins.upload.permissions': 'Host permissions it requests',
   'plugins.upload.noPermissions': 'None',
+  'plugins.upload.sqlRead': 'Content its SQL reads',
   'plugins.upload.rollout':
     'Every server loads this version within a few seconds. A server that cannot load it keeps its current version and reports why.',
   'plugins.upload.publish': 'Publish',
@@ -961,6 +962,7 @@ export const en: Record<string, string> = {
   'plugins.detail.web': 'Web',
   'plugins.detail.translations': 'Translations',
   'plugins.detail.permissions': 'Permissions',
+  'plugins.detail.sqlRead': 'Content its SQL reads',
   'plugins.detail.routes': 'Routes',
   'plugins.detail.slots': 'Slots',
   'plugins.detail.components': 'Components',

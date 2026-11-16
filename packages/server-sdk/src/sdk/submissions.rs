@@ -64,8 +64,8 @@ impl Submissions {
     }
 
     pub fn update(&self, update: &SubmissionUpdate) -> Result<u64, SdkError> {
-        // Pre-DB guard preserved from the old SQL-building path: a non-positive
-        // judgement id is a stale epoch and must not reach the server.
+        // A non-positive judgement id is a stale epoch and never reaches the
+        // server.
         if update.judgement_id <= 0 {
             return Err(SdkError::StaleEpoch);
         }
@@ -81,8 +81,9 @@ impl Submissions {
     }
 
     pub fn insert_results(&self, results: &[TestCaseResultRow]) -> Result<(), SdkError> {
-        // Match the old early-return and per-row stale-epoch guards before the
-        // host call; the server owns the INSERT + result-text sanitization.
+        // An empty batch is a no-op and a non-positive judgement id is a stale
+        // epoch, both settled before the host call; the server owns the INSERT
+        // and result-text sanitization.
         if results.is_empty() {
             return Ok(());
         }

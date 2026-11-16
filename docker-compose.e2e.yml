@@ -2,7 +2,7 @@
 #
 # Usage:
 #   docker compose -f docker-compose.e2e.yml up --build -d
-#   E2E_SERVER_URL=http://127.0.0.1:3000 E2E_DATABASE_URL=postgres://postgres:password@127.0.0.1:5433/broccoli cargo test -p server --test e2e
+#   E2E_SERVER_URL=http://127.0.0.1:3000 E2E_DATABASE_URL=postgres://broccoli:app_password@127.0.0.1:5433/broccoli cargo test -p server --test e2e
 #   docker compose -f docker-compose.e2e.yml down -v
 #
 # China mirrors:
@@ -35,7 +35,7 @@ x-worker-common: &worker-common
     seaweedfs-init:
       condition: service_completed_successfully
   environment: &worker-env
-    BROCCOLI__DATABASE__URL: "postgres://postgres:password@db:5432/broccoli"
+    BROCCOLI__DATABASE__URL: "postgres://broccoli:app_password@db:5432/broccoli"
     BROCCOLI__MQ__URL: "redis://redis:6379"
     BROCCOLI__MQ__ENABLED: "true"
     BROCCOLI__WORKER__SANDBOX_BACKEND: "isolate"
@@ -67,8 +67,11 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
       POSTGRES_DB: broccoli
+      BROCCOLI_DB_USER: broccoli
+      BROCCOLI_DB_PASSWORD: app_password
     volumes:
       - e2e_pg_data:/var/lib/postgresql/data
+      - ./config/postgres-init/20-broccoli-app-role.sh:/docker-entrypoint-initdb.d/20-broccoli-app-role.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d broccoli"]
       interval: 3s
@@ -137,7 +140,7 @@ services:
     environment:
       BROCCOLI__SERVER__HOST: "0.0.0.0"
       BROCCOLI__SERVER__PORT: "3000"
-      BROCCOLI__DATABASE__URL: "postgres://postgres:password@db:5432/broccoli"
+      BROCCOLI__DATABASE__URL: "postgres://broccoli:app_password@db:5432/broccoli"
       BROCCOLI__MQ__URL: "redis://redis:6379"
       BROCCOLI__MQ__ENABLED: "true"
       BROCCOLI__AUTH__JWT_SECRET: "e2e-docker-jwt-secret"

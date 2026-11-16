@@ -59,4 +59,6 @@ pub struct AppState {
     pub worker_slots: crate::dispatcher::fanout::WorkerSlots,
     /// What this replica applied of the fleet-wide plugin desired state.
     pub plugin_lifecycle: Arc<crate::plugin_lifecycle::PluginLifecycle>,
+    /// The plugins' raw SQL pools, the same the `sql` host functions use.
+    pub plugin_sql: crate::plugin_db::PluginSqlPools,
 }

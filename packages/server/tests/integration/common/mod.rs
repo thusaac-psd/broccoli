@@ -528,6 +528,11 @@ pub struct SpawnOptions {
     /// Submissions and code runs per user per minute; `None` keeps the
     /// fixture default (no limit tested).
     pub rate_limit_per_minute: Option<u32>,
+    /// `server.max_system_error_retries`; `None` keeps the fixture default
+    /// (50). A test that owns the fate of a `SystemError` submission sets
+    /// `Some(0)` so the dispatcher's retry reaper never re-judges it behind
+    /// the test's back.
+    pub max_system_error_retries: Option<u32>,
 }
 
 impl TestApp {
@@ -625,7 +630,7 @@ impl TestApp {
                 steal_scan_interval_secs: 15,
                 steal_batch_size: 8,
                 max_dispatch_retries: 5,
-                max_system_error_retries: 50,
+                max_system_error_retries: options.max_system_error_retries.unwrap_or(50),
                 cancel_primitive_enabled: false,
                 // Enable the claim fiber by default so integration
                 // tests that rely on the `Queued`-on-POST flow see the
@@ -637,7 +642,6 @@ impl TestApp {
             },
             database: DatabaseConfig {
                 url: db_url.clone(),
-                plugin_url: None,
                 ..Default::default()
             },
             auth: AuthConfig {
@@ -689,15 +693,20 @@ impl TestApp {
 
         let plugin_config_cache =
             server::services::plugin_config_cache::PluginConfigCache::default();
+        let plugin_sql = server::plugin_db::PluginSqlPools::new(
+            db.clone(),
+            &db_url,
+            8,
+            std::time::Duration::from_secs(30),
+            &server::database::app_session(&app_config.database),
+        );
         let server_plugins = ServerManager::new(
             app_config.plugin.clone(),
             server::host_funcs::context::HostFunctionSystemDeps {
-                db: db.clone(),
-                // Test harness reuses the single app-role pool for both the
-                // restricted and privileged plugin pools; the phase-2 role
-                // restriction is proven directly against a real DB in
-                // `server::database`'s unit tests.
-                privileged_db: db.clone(),
+                // Plugin SQL runs as each plugin's own role, as in production;
+                // the host function pool shares the app pool.
+                plugin_sql: plugin_sql.clone(),
+                host_db: db.clone(),
                 mq: None,
                 operation_batches: operation_batches.clone(),
                 operation_waiters: operation_waiters.clone(),
@@ -811,6 +820,7 @@ impl TestApp {
             dispatcher_permits: server::dispatcher::permits::DispatcherSemaphore::default(),
             worker_slots: Default::default(),
             plugin_lifecycle: Default::default(),
+            plugin_sql,
             login_throttle: std::sync::Arc::new(server::utils::login_throttle::LoginThrottle::new(
                 0,
                 std::time::Duration::from_secs(60),

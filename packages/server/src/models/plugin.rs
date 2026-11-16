@@ -124,6 +124,10 @@ pub struct PluginFullDetailResponse {
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct ServerDetailResponse {
     pub permissions: Vec<String>,
+    /// Content columns, as `table.column`, the plugin's SQL may read
+    /// (`[server.sql] read`).
+    #[schema(example = json!(["submission.files"]))]
+    pub sql_read: Vec<String>,
     pub routes: Vec<ServerRouteConfig>,
 }
 
@@ -293,6 +297,7 @@ impl PluginFullDetailResponse {
 
         let server = info.manifest.server.as_ref().map(|s| ServerDetailResponse {
             permissions: s.permissions.clone(),
+            sql_read: sql_read(s),
             routes: s.routes.clone(),
         });
 
@@ -367,6 +372,10 @@ pub struct PluginArchiveSummary {
     /// Host permissions the plugin's server component requests.
     #[schema(example = json!(["storage", "sql"]))]
     pub permissions: Vec<String>,
+    /// Content columns, as `table.column`, the plugin's SQL would read
+    /// (`[server.sql] read`).
+    #[schema(example = json!(["submission.files"]))]
+    pub sql_read: Vec<String>,
     pub has_server: bool,
     pub has_web: bool,
     /// Content hash of the archive: its key in the blob store.
@@ -419,4 +428,14 @@ pub struct RemoveUploadQuery {
 pub struct RemoveUploadResponse {
     pub outcome: crate::plugin_lifecycle::UploadRemoval,
     pub message: String,
+}
+
+/// The `[server.sql] read` scopes of a manifest's server section.
+pub fn sql_read(server: &plugin_core::manifest::ServerConfig) -> Vec<String> {
+    server
+        .sql
+        .read
+        .iter()
+        .map(|scope| scope.as_str().to_string())
+        .collect()
 }

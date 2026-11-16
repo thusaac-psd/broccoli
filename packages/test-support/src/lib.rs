@@ -101,14 +101,16 @@ pub async fn shared_pg_port() -> u16 {
                 let Ok(admin_db) = Database::connect(ConnectOptions::new(&admin_url)).await else {
                     continue;
                 };
-                if admin_db
-                    .execute_raw(Statement::from_string(
-                        DbBackend::Postgres,
-                        "CREATE DATABASE \"template_test\"".to_string(),
-                    ))
-                    .await
-                    .is_ok()
-                {
+                let created = async {
+                    admin_db.execute_unprepared(&ensure_app_role()).await?;
+                    admin_db
+                        .execute_unprepared(&format!(
+                            "CREATE DATABASE \"template_test\" OWNER {APP_ROLE}"
+                        ))
+                        .await
+                }
+                .await;
+                if created.is_ok() {
                     drop(admin_db);
                     template_created = true;
                     break;
@@ -122,18 +124,30 @@ pub async fn shared_pg_port() -> u16 {
 
             remove_at_exit(container.id());
 
-            let template_url =
+            // The superuser sets up what the app role cannot: the statement
+            // statistics extension and the test clock. The app role then
+            // migrates and seeds its own database, as a server boots.
+            let superuser_url =
                 format!("postgres://postgres:postgres@127.0.0.1:{port}/template_test");
+            let superuser = Database::connect(ConnectOptions::new(&superuser_url))
+                .await
+                .expect("Failed to connect to the template as the superuser");
+            superuser
+                .execute_unprepared(&format!(
+                    "CREATE EXTENSION IF NOT EXISTS pg_stat_statements; {INSTALL_CLOCK} \
+                     GRANT UPDATE ON broccoli_test_clock.state TO {APP_ROLE};"
+                ))
+                .await
+                .expect("Failed to install the test clock");
+            drop(superuser);
+            let template_url =
+                format!("postgres://{APP_ROLE}:{APP_ROLE_PASSWORD}@127.0.0.1:{port}/template_test");
             let template_db = server::database::init_db(&template_url)
                 .await
                 .expect("Failed to initialize template database");
             server::seed::seed_role_permissions(&template_db)
                 .await
                 .expect("Failed to seed template database");
-            template_db
-                .execute_unprepared(INSTALL_CLOCK)
-                .await
-                .expect("Failed to install the test clock");
             drop(template_db);
 
             (container, port)
@@ -155,38 +169,45 @@ fn admin_runtime() -> &'static tokio::runtime::Handle {
         .handle()
 }
 
+/// The process's admin connection to the shared cluster, opened on first use
+/// on the admin runtime. Call only from a task on that runtime.
+async fn admin(port: u16) -> &'static DatabaseConnection {
+    if SHARED_ADMIN_CONN.get().is_none() {
+        let admin_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut admin_opts = ConnectOptions::new(&admin_url);
+        admin_opts
+            .max_connections(1)
+            .min_connections(1)
+            .acquire_timeout(Duration::from_secs(60))
+            .idle_timeout(Duration::from_secs(600));
+        let conn = Database::connect(admin_opts)
+            .await
+            .expect("Failed to initialize shared admin database pool");
+        let _ = SHARED_ADMIN_CONN.set(conn.into());
+    }
+    SHARED_ADMIN_CONN
+        .get()
+        .expect("shared admin connection must be initialized")
+}
+
 async fn clone_template(port: u16, db_name: &str) {
     let handle = admin_runtime().clone();
     let db_name = db_name.to_string();
 
     handle
         .spawn(async move {
-            if SHARED_ADMIN_CONN.get().is_none() {
-                let admin_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-                let mut admin_opts = ConnectOptions::new(&admin_url);
-                admin_opts
-                    .max_connections(1)
-                    .min_connections(1)
-                    .acquire_timeout(Duration::from_secs(60))
-                    .idle_timeout(Duration::from_secs(600));
-                let conn = Database::connect(admin_opts)
-                    .await
-                    .expect("Failed to initialize shared admin database pool");
-                let _ = SHARED_ADMIN_CONN.set(conn.into());
-            }
-
-            let admin = SHARED_ADMIN_CONN
-                .get()
-                .expect("shared admin connection must be initialized");
+            let admin = admin(port).await;
             admin
                 .execute_raw(Statement::from_string(
                     DbBackend::Postgres,
-                    format!("CREATE DATABASE \"{db_name}\" TEMPLATE template_test"),
+                    format!(
+                        "CREATE DATABASE \"{db_name}\" TEMPLATE template_test OWNER {APP_ROLE}"
+                    ),
                 ))
                 .await
                 .expect("Failed to create test database from template");
             // A database-level setting, so every session on the clone (the
-            // server's pools and the plugin login's) resolves the clock.
+            // server's pools and the plugin logins') resolves the clock.
             admin
                 .execute_raw(Statement::from_string(
                     DbBackend::Postgres,
@@ -197,6 +218,50 @@ async fn clone_template(port: u16, db_name: &str) {
         })
         .await
         .expect("admin runtime task panicked");
+}
+
+/// The role every test database belongs to and every test server logs in
+/// as: `LOGIN CREATEROLE` and nothing more, the rights a production app role
+/// has. The superuser only creates databases and what the app role cannot.
+pub const APP_ROLE: &str = "broccoli_test_app";
+const APP_ROLE_PASSWORD: &str = "broccoli_test_app";
+
+fn ensure_app_role() -> String {
+    format!(
+        "DO $$ BEGIN \
+           CREATE ROLE {APP_ROLE} LOGIN CREATEROLE PASSWORD '{APP_ROLE_PASSWORD}'; \
+         EXCEPTION WHEN duplicate_object THEN NULL; END $$"
+    )
+}
+
+/// An empty database owned by [`APP_ROLE`], whose URL connects as that role.
+/// Nothing is migrated: the test boots it as the app role, as a server would.
+pub async fn create_app_owned_database(db_name: &str) -> TestDatabase {
+    let port = shared_pg_port().await;
+    {
+        let _lock = CREATE_DB_LOCK.lock().await;
+        let name = db_name.to_string();
+        admin_runtime()
+            .clone()
+            .spawn(async move {
+                let admin = admin(port).await;
+                for sql in [
+                    ensure_app_role(),
+                    format!("CREATE DATABASE \"{name}\" OWNER {APP_ROLE}"),
+                ] {
+                    admin
+                        .execute_unprepared(&sql)
+                        .await
+                        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+                }
+            })
+            .await
+            .expect("admin runtime task panicked");
+    }
+    TestDatabase(Arc::new(TestDatabaseInner {
+        name: db_name.to_string(),
+        url: format!("postgres://{APP_ROLE}:{APP_ROLE_PASSWORD}@127.0.0.1:{port}/{db_name}"),
+    }))
 }
 
 /// One test's database, cloned from `template_test` and dropped when the last
@@ -247,7 +312,7 @@ pub async fn create_test_database(db_name: &str) -> TestDatabase {
     }
     TestDatabase(Arc::new(TestDatabaseInner {
         name: db_name.to_string(),
-        url: format!("postgres://postgres:postgres@127.0.0.1:{port}/{db_name}"),
+        url: format!("postgres://{APP_ROLE}:{APP_ROLE_PASSWORD}@127.0.0.1:{port}/{db_name}"),
     }))
 }
 

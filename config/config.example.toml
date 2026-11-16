@@ -5,7 +5,7 @@
 # overrides. The URLs and keys match `docker compose up -d` at the repo root.
 
 [database]
-url = "postgres://postgres:broccoli_pg_secret@localhost:5433/broccoli"
+url = "postgres://broccoli:broccoli_app_secret@localhost:5433/broccoli"
 
 [mq]
 url = "redis://:broccoli_redis_secret@localhost:6379"

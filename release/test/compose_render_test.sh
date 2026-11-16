@@ -58,7 +58,7 @@ render worker --env-file .env.worker -f docker-compose.worker.yaml.template
 BROCCOLI_UPSTREAMS='10.0.0.21:3000 10.0.0.22:3000' install_dry gateway
 render gateway --env-file .env.gateway -f docker-compose.gateway.yaml.template
 
-POSTGRES_PASSWORD='p@ss #1/x' REDIS_PASSWORD='r%d' install_dry single-host
+BROCCOLI_DB_PASSWORD='p@ss #1/x' REDIS_PASSWORD='r%d' install_dry single-host
 render single-host --env-file .env.single-host \
   -f docker-compose.single-host.object-storage.yaml.template
 # A punctuated password reaches the containers percent-encoded in their URLs.
@@ -67,7 +67,7 @@ single_env() {
     config --format json 2>/dev/null \
     | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"][sys.argv[1]]["environment"][sys.argv[2]])' "$1" "$2"
 }
-[ "$(single_env server BROCCOLI__DATABASE__URL)" = 'postgres://postgres:p%40ss%20%231%2Fx@db:5432/broccoli' ] \
+[ "$(single_env server BROCCOLI__DATABASE__URL)" = 'postgres://broccoli:p%40ss%20%231%2Fx@db:5432/broccoli' ] \
   || fail "single-host database URL: $(single_env server BROCCOLI__DATABASE__URL)"
 [ "$(single_env worker BROCCOLI__MQ__URL)" = 'redis://:r%25d@redis:6379' ] || fail "single-host MQ URL"
 # The host's secrets stay out of the containers that do not need them, and a
@@ -83,8 +83,9 @@ env = json.load(sys.stdin)["services"]
 worker, server = env["worker"]["environment"], env["server"]["environment"]
 leaked = [k for k in worker if k in (
     "BROCCOLI__AUTH__JWT_SECRET", "BROCCOLI__BOOTSTRAP__ADMIN_PASSWORD",
-    "BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD", "POSTGRES_PASSWORD", "REDIS_PASSWORD")]
-leaked += [k for k in server if k in ("POSTGRES_PASSWORD", "REDIS_PASSWORD")]
+    "BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD", "POSTGRES_PASSWORD", "BROCCOLI_DB_PASSWORD",
+    "REDIS_PASSWORD")]
+leaked += [k for k in server if k in ("POSTGRES_PASSWORD", "BROCCOLI_DB_PASSWORD", "REDIS_PASSWORD")]
 if leaked:
     sys.exit("secrets reach a container that does not read them: " + ", ".join(leaked))
 if worker.get("BROCCOLI__WORKER__MAX_CONCURRENCY") != "2":
@@ -95,7 +96,7 @@ rm .env.single-host.worker
 # An env file from before these URLs existed gets them on a re-run.
 sed -i '/^BROCCOLI_LOCAL_/d' .env.single-host
 install_dry single-host
-[ "$(single_env server BROCCOLI__DATABASE__URL)" = 'postgres://postgres:p%40ss%20%231%2Fx@db:5432/broccoli' ] \
+[ "$(single_env server BROCCOLI__DATABASE__URL)" = 'postgres://broccoli:p%40ss%20%231%2Fx@db:5432/broccoli' ] \
   || fail "a single-host re-run did not restore the in-container URLs"
 
 BROCCOLI_ENV_FILE=.env.single-host-db BROCCOLI__STORAGE__BACKEND=database install_dry single-host
@@ -190,7 +191,7 @@ render_plan "airgap gateway-only node" --role gateway --bundle "$T/ag-gw"
 [ "$(planned_env gateway LAN_HOST_ALIASES)" = 10.0.0.5 ] || fail "gateway LAN host aliases"
 [ "${#plan_vars[@]}" -eq 0 ] || unset "${plan_vars[@]}"
 
-printf 'POSTGRES_PASSWORD=p\nREDIS_PASSWORD=r\nBROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY=a\nBROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY=s\n' \
+printf 'POSTGRES_PASSWORD=p\nBROCCOLI_DB_PASSWORD=d\nREDIS_PASSWORD=r\nBROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY=a\nBROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY=s\n' \
   > "$T/ag/cluster-secrets.env"
 workergen_write "$T/ag/.env.worker" "$rel/.env.worker.example" "$T/ag/cluster-secrets.env" 10.0.0.10 worker-1
 render "airgap worker" --env-file "$T/ag/.env.worker" -f docker-compose.worker.yaml.template

@@ -202,12 +202,14 @@ above, and the server command prompts you for exactly one thing: the bootstrap
 admin password (or pass it non-interactively with `--admin-pass` /
 `$BROCCOLI_SETUP_ADMIN_PASS`). Everything else is generated locally with
 `openssl rand` — no key is dropped, and the same secret value is kept consistent
-across both files even where the key name differs. The Postgres and Redis
-passwords are written as `POSTGRES_PASSWORD`/ `REDIS_PASSWORD` only in
-`compose/.env.infra`; in `compose/.env.server` the same values are embedded
-inside the `BROCCOLI__DATABASE__URL` / `BROCCOLI__MQ__URL` connection strings
-rather than repeated as bare keys. The JWT secret (`BROCCOLI__AUTH__JWT_SECRET`)
-and the S3 access/secret keys (`BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY` /
+across both files even where the key name differs. The Postgres superuser
+password `POSTGRES_PASSWORD` only initializes the database; the servers and
+workers log in as the app role `broccoli`, whose password `BROCCOLI_DB_PASSWORD`
+is written, with `REDIS_PASSWORD`, only in `compose/.env.infra`; in
+`compose/.env.server` the same values are embedded inside the
+`BROCCOLI__DATABASE__URL` / `BROCCOLI__MQ__URL` connection strings rather than
+repeated as bare keys. The JWT secret (`BROCCOLI__AUTH__JWT_SECRET`) and the S3
+access/secret keys (`BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY` /
 `..._SECRET_KEY`) are written identically, under the same key names, into both
 files. Re-running `setup.sh` against an existing install reuses any real
 (non-`change-me`) values already present in those files instead of rotating
@@ -255,8 +257,9 @@ cp compose/.env.server.example compose/.env.server
 
 Then edit both files and fill in real values, at minimum:
 
-- Postgres and Redis passwords (`POSTGRES_PASSWORD`, `REDIS_PASSWORD` in
-  `.env.infra`, mirrored into `BROCCOLI__DATABASE__URL` / `BROCCOLI__MQ__URL` in
+- Postgres and Redis passwords (`POSTGRES_PASSWORD`, the app role's
+  `BROCCOLI_DB_PASSWORD` and `REDIS_PASSWORD` in `.env.infra`, the last two
+  mirrored into `BROCCOLI__DATABASE__URL` / `BROCCOLI__MQ__URL` in
   `.env.server`).
 - `BROCCOLI__AUTH__JWT_SECRET` (at least 32 characters).
 - SeaweedFS/S3 credentials (`BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY` /
@@ -306,14 +309,15 @@ This:
    entrypoint. Host-local `curl http://127.0.0.1:3000/...` still works for
    operator troubleshooting. The server override
    (`docker-compose.server-airgap.yaml.template`) makes the server trust
-   `X-Forwarded-*` only from the gateway, so login limits see each
-   contestant's real IP rather than the gateway's, and the session cookie is
-   `Secure` because the gateway forwards the `https` scheme. The gateway and the server share a small `edge` network
-   (`BROCCOLI_EDGE_SUBNET`, default `172.31.250.0/28`) that holds nothing else.
-   The gateway sits at a fixed address on it (`BROCCOLI_GATEWAY_EDGE_IP`,
-   default `172.31.250.2`, outside the `BROCCOLI_EDGE_RANGE` Docker hands out),
-   and that one address is the whole trust list: not the subnet, which also
-   holds the Docker bridge, and never a LAN range.
+   `X-Forwarded-*` only from the gateway, so login limits see each contestant's
+   real IP rather than the gateway's, and the session cookie is `Secure` because
+   the gateway forwards the `https` scheme. The gateway and the server share a
+   small `edge` network (`BROCCOLI_EDGE_SUBNET`, default `172.31.250.0/28`) that
+   holds nothing else. The gateway sits at a fixed address on it
+   (`BROCCOLI_GATEWAY_EDGE_IP`, default `172.31.250.2`, outside the
+   `BROCCOLI_EDGE_RANGE` Docker hands out), and that one address is the whole
+   trust list: not the subnet, which also holds the Docker bridge, and never a
+   LAN range.
 
    To run several servers behind one gateway-only node instead, see
    "Multi-server topology" below.
