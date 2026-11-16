@@ -1,5 +1,5 @@
 use super::wait;
-use super::{Rejected, context};
+use super::{Rejected, ResultHidden, context};
 use anyhow::Context;
 use broccoli_cli_core::api::submission::SubmissionFileDto;
 use broccoli_cli_core::client::Client;
@@ -200,6 +200,11 @@ fn watch_verdict(client: &Client, submission_id: i32) -> anyhow::Result<()> {
         Ok((Standing::of_submission(&sub), sub))
     })?;
 
+    if Standing::of_submission(&sub) == Standing::Hidden {
+        println!("{}", hidden_line(submission_id, elapsed.as_secs_f64()));
+        return Err(ResultHidden.into());
+    }
+
     let accepted = sub
         .result
         .as_ref()
@@ -239,6 +244,15 @@ fn watch_verdict(client: &Client, submission_id: i32) -> anyhow::Result<()> {
     }
 }
 
+/// The line a submission whose verdict the contest hides ends on: neutral,
+/// since nothing is decided for the viewer yet.
+fn hidden_line(submission_id: i32, secs: f64) -> String {
+    format!(
+        "{}  Result hidden until the contest releases it ({secs:.1}s). See it then with `broccoli status {submission_id}`.",
+        style("•").cyan().bold()
+    )
+}
+
 /// The line a judged submission ends on. The score appears only when the
 /// server reports one, as the bare number it sent: what it measures (points,
 /// a fraction, a count) depends on the contest, so no unit is added.
@@ -255,6 +269,17 @@ fn verdict_line(label: &str, accepted: bool, score: Option<f64>, secs: f64) -> S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_hidden_result_reads_as_neither_accepted_nor_rejected() {
+        let line = super::hidden_line(7, 2.0);
+        assert!(
+            line.contains("Result hidden until the contest releases it"),
+            "{line}"
+        );
+        assert!(!line.contains('✗') && !line.contains('✓'), "{line}");
+        assert!(line.contains("broccoli status 7"), "{line}");
+    }
+
     #[test]
     fn a_verdict_shows_the_score_the_server_reports_without_a_unit() {
         let line = super::verdict_line("Accepted", true, Some(1.0), 2.0);

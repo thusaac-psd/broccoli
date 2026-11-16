@@ -74,6 +74,25 @@ impl Rejected {
     pub const EXIT_CODE: u8 = 3;
 }
 
+/// The command did its work and the contest hides the answer from the
+/// caller for now (a freeze, results released later): neither accepted nor
+/// rejected. The command already said so; `broccoli` exits with
+/// [`ResultHidden::EXIT_CODE`].
+#[derive(Debug)]
+pub struct ResultHidden;
+
+impl ResultHidden {
+    pub const EXIT_CODE: u8 = 5;
+}
+
+impl std::fmt::Display for ResultHidden {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("result hidden by the contest for now")
+    }
+}
+
+impl std::error::Error for ResultHidden {}
+
 impl std::fmt::Display for Rejected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
