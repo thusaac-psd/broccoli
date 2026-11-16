@@ -32,10 +32,10 @@ const REFUSAL_STATUSES: [StatusCode; 6] = [
 ];
 
 /// A plugin's refusal of a request (a route's client error or a blocking
-/// hook's rejection) in the host's error shape: one of
-/// [`REFUSAL_STATUSES`] and the plugin's code under its id
-/// ([`plugin_code`]). The only way to build one is [`Self::new`], so no
-/// refusal reaches a client unconfined.
+/// hook's rejection) in the host's error shape: a status a plugin may refuse
+/// with (400, 403, 404, 409, 413 or 429) and the plugin's code under its id,
+/// `<plugin_id>.<CODE>`. Its constructors are the only way to build one, so
+/// no refusal reaches a client unconfined.
 #[derive(Debug)]
 pub struct PluginRefusal {
     status: StatusCode,

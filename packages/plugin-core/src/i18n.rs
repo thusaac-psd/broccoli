@@ -48,7 +48,8 @@ fn under(key: Option<&str>, id: &str) -> bool {
 
 /// The keys of `plugin_id`'s pack that it may not provide, sorted. A plugin
 /// speaks only for itself: its keys are its own (`<plugin_id>.…`) or its
-/// manifest text ([`is_manifest_text`]), so it can never reword a host string
+/// manifest text (`plugin.<id>.…`, `config.<id>.…` and the names of the
+/// identifiers it registers), so it can never reword a host string
 /// or another plugin's. A language pack carries the host's strings, so every
 /// key is its own.
 pub fn foreign_keys<'a>(
