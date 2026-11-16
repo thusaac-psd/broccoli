@@ -204,7 +204,12 @@ stored, so a failed import changes nothing. It refuses:
   first;
 - a database that already has problems, unless `--replace-problems`; and, with
   `--replace-problems`, problems that submissions, code runs or contests still
-  reference, unless `--wipe-dependents` deletes those too.
+  reference, unless `--wipe-dependents` deletes those too;
+- a contest bundle onto a database that has a contest with the bundle's contest
+  id, unless `--replace-contest`. The bundle's contest replaces that one: its
+  roster, problem links and contest configs go, and so do its clarifications,
+  submissions and code runs, which needs `--wipe-dependents` too. A contest is
+  never merged with another one that happens to share its id.
 
 Accounts merge by username, ignoring case:
 
@@ -217,6 +222,15 @@ Accounts merge by username, ignoring case:
   cannot sign in until an admin sets one.
 - A role the target lacks is created with the bundle's permissions. A role the
   target has keeps its own permissions.
+
+Plugin configs travel by the rules in the plugin configuration guide's _Move it
+with a bundle_ section (`website/docs/building-plugins/configuration.md`,
+"Configuration" under "Building plugins" on the documentation site): a bundle
+carries its problems' and contest's configs, never a plugin-wide one, and an
+import replaces the configs of every problem it replaces. An import runs without
+the plugin runtime, so it checks none of the configs it restores. Restart the
+servers after an import: each start rechecks every problem's config issues, so
+the imported problems show theirs.
 
 ## Logs
 

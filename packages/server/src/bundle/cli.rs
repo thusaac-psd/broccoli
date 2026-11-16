@@ -50,9 +50,14 @@ enum Command {
         /// Replace the problems the database already has.
         #[arg(long)]
         replace_problems: bool,
-        /// With --replace-problems, also delete the submissions, code runs
-        /// and contest links that reference them.
-        #[arg(long, requires = "replace_problems")]
+        /// Replace the contest the database has with the bundle's contest
+        /// id.
+        #[arg(long)]
+        replace_contest: bool,
+        /// With --replace-problems or --replace-contest, also delete the
+        /// submissions, code runs, contest links and clarifications that
+        /// reference what is replaced.
+        #[arg(long)]
         wipe_dependents: bool,
     },
 }
@@ -136,6 +141,7 @@ async fn execute(config: &AppConfig, command: Command) -> anyhow::Result<super::
         Command::Import {
             archive,
             replace_problems,
+            replace_contest,
             wipe_dependents,
         } => {
             let input: Box<dyn Read> = match archive {
@@ -146,6 +152,7 @@ async fn execute(config: &AppConfig, command: Command) -> anyhow::Result<super::
             };
             let options = ImportOptions {
                 replace_problems,
+                replace_contest,
                 wipe_dependents,
             };
             super::import(&db, store, options, input).await

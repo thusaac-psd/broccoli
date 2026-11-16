@@ -262,17 +262,34 @@ async fn a_contest_bundle_restores_every_row_and_blob_onto_another_server() {
         &archive,
         ImportOptions {
             replace_problems: true,
-            wipe_dependents: false,
+            ..Default::default()
         },
     )
     .await
     .expect_err("contest links reference the problems");
     assert!(refused.to_string().contains("contest_problem"), "{refused}");
+    // The target holds the bundle's contest id: the contest it has now.
+    let refused = import(
+        &target,
+        &archive,
+        ImportOptions {
+            replace_problems: true,
+            wipe_dependents: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("the contest exists");
+    assert!(
+        refused.to_string().contains("--replace-contest"),
+        "{refused}"
+    );
     import(
         &target,
         &archive,
         ImportOptions {
             replace_problems: true,
+            replace_contest: true,
             wipe_dependents: true,
         },
     )
@@ -282,6 +299,83 @@ async fn a_contest_bundle_restores_every_row_and_blob_onto_another_server() {
         rows(&target, "problem", "id").await,
         rows(&source, "problem", "id").await
     );
+}
+
+/// A contest bundle restores the contest as it was exported: imported onto a
+/// server whose contest has the same id, it replaces that contest, keeping
+/// none of its roster, its clarifications or its contest-scope configs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_contest_import_replaces_the_contest_with_its_id() {
+    let source = TestApp::spawn().await;
+    let (contest, _) = seed_contest(&source).await;
+    let archive = export(
+        &source,
+        ExportOptions {
+            selection: Selection::Contest(contest),
+            with_secrets: false,
+        },
+    )
+    .await
+    .expect("export");
+
+    let target = TestApp::spawn().await;
+    import(&target, &archive, ImportOptions::default())
+        .await
+        .expect("import onto an empty server");
+    // The target's contest with that id gains what the bundle lacks.
+    let erin = target
+        .create_user_with_role("erin", "pass1234", "contestant")
+        .await;
+    target.register_for_contest(contest, &erin).await;
+    exec(
+        &target,
+        &format!(
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+             VALUES ('contest', '{contest}', 'someplugin:extra', '{{}}', 0, now()); \
+             INSERT INTO clarification (contest_id, author_id, content, clarification_type, created_at, updated_at) \
+             SELECT {contest}, id, 'Is it open?', 'question', now(), now() FROM \"user\" WHERE username = 'erin'"
+        ),
+    )
+    .await;
+
+    import(
+        &target,
+        &archive,
+        ImportOptions {
+            replace_problems: true,
+            replace_contest: true,
+            wipe_dependents: true,
+        },
+    )
+    .await
+    .expect("replace the contest");
+
+    for (what, sql) in [
+        (
+            "roster",
+            format!(
+                "SELECT string_agg(u.username, ',' ORDER BY u.username) AS v FROM contest_user cu \
+                 JOIN \"user\" u ON u.id = cu.user_id WHERE cu.contest_id = {contest}"
+            ),
+        ),
+        (
+            "contest configs",
+            format!(
+                "SELECT string_agg(namespace, ',' ORDER BY namespace) AS v FROM plugin_config \
+                 WHERE scope = 'contest' AND ref_id = '{contest}'"
+            ),
+        ),
+        (
+            "clarifications",
+            format!("SELECT count(*)::text AS v FROM clarification WHERE contest_id = {contest}"),
+        ),
+    ] {
+        assert_eq!(
+            text(&target, &sql).await,
+            text(&source, &sql).await,
+            "{what}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -516,6 +610,7 @@ async fn replacing_problems_removes_the_configs_of_the_replaced_ones() {
         ImportOptions {
             replace_problems: true,
             wipe_dependents: true,
+            ..Default::default()
         },
     )
     .await

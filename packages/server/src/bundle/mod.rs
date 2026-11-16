@@ -66,9 +66,13 @@ pub struct ImportOptions {
     /// Replace the problems the target already has. Refused while anything
     /// references them, unless `wipe_dependents`.
     pub replace_problems: bool,
-    /// With `replace_problems`, also delete every row that references the
-    /// replaced problems (submissions and their results, code runs, contest
-    /// problem links).
+    /// Replace the target's contest that has the bundle's contest id.
+    /// Refused while anything but its roster and problem links references
+    /// it, unless `wipe_dependents`.
+    pub replace_contest: bool,
+    /// With `replace_problems` or `replace_contest`, also delete every row
+    /// that references what is replaced (submissions and their results, code
+    /// runs, contest problem links, clarifications).
     pub wipe_dependents: bool,
 }
 
@@ -583,6 +587,10 @@ pub async fn import(
         manifest.schema
     );
 
+    ensure!(
+        !options.wipe_dependents || options.replace_problems || options.replace_contest,
+        "wiping dependents needs --replace-problems or --replace-contest"
+    );
     let mut tx = pool(db).begin().await?;
     let target = schema_version(&mut tx).await?;
     ensure!(
@@ -638,6 +646,10 @@ pub async fn import(
         summary.blobs,
         manifest.blobs.len()
     );
+
+    if loaded.iter().any(|(table, _)| table.name == "contest") {
+        prepare_contest(&mut tx, options).await?;
+    }
 
     // Restore in table order, whatever order the archive held them in.
     loaded.sort_by_key(|(table, _)| TABLES.iter().position(|t| t.name == table.name));
@@ -696,6 +708,121 @@ async fn prepare_problem_tables(
         .execute(&mut **tx)
         .await?;
     Ok(())
+}
+
+/// Clear the target's contest that has the bundle's contest id. A contest
+/// bundle restores the contest as it was exported, so a target contest
+/// holding that id is replaced, never merged with: refused unless asked to
+/// replace it. Then its roster, problem links and contest-scope configs go,
+/// and so does every other row that references it (its clarifications,
+/// submissions, code runs), which is refused unless asked to delete that
+/// too. The contest row itself is overwritten by the bundle's.
+async fn prepare_contest(
+    tx: &mut Transaction<'_, Postgres>,
+    options: ImportOptions,
+) -> anyhow::Result<()> {
+    let Some(contest): Option<i32> = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT b.id FROM {} b JOIN contest c ON c.id = b.id",
+        staging("contest")
+    )))
+    .fetch_optional(&mut **tx)
+    .await?
+    else {
+        return Ok(());
+    };
+    ensure!(
+        options.replace_contest,
+        "the database already has contest {contest}; pass --replace-contest to replace it with \
+         the bundle's"
+    );
+    // What the bundle restores for the contest; anything else is a dependent.
+    const RESTORED: [&str; 2] = ["contest_problem", "contest_user"];
+    let mut counts = Vec::new();
+    for (table, column, _) in foreign_keys_to(tx, "contest").await? {
+        if RESTORED.contains(&table.as_str()) {
+            continue;
+        }
+        let n: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT count(*) FROM {table} WHERE {} = $1",
+            ident(&column)
+        )))
+        .bind(contest)
+        .fetch_one(&mut **tx)
+        .await?;
+        if n > 0 {
+            counts.push(format!("{table}={n}"));
+        }
+    }
+    ensure!(
+        counts.is_empty() || options.wipe_dependents,
+        "rows reference contest {contest} ({}); pass --wipe-dependents to delete them too",
+        counts.join(", ")
+    );
+    for (table, column, _) in foreign_keys_to(tx, "contest").await? {
+        delete_with_dependents(
+            tx,
+            &table,
+            format!("{} = {contest}", ident(&column)),
+            &mut Vec::new(),
+        )
+        .await?;
+    }
+    sqlx::query("DELETE FROM plugin_config WHERE scope = $1 AND ref_id = $2")
+        .bind(ConfigScope::Contest.as_str())
+        .bind(contest.to_string())
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// The single-column foreign keys that reference `table` (a name as
+/// `regclass` prints it): each referencing table, as `regclass` prints it,
+/// its column, and the referenced column.
+async fn foreign_keys_to(
+    tx: &mut Transaction<'_, Postgres>,
+    table: &str,
+) -> anyhow::Result<Vec<(String, String, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT c.conrelid::regclass::text, a.attname::text, pa.attname::text \
+         FROM pg_constraint c \
+         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1] \
+         JOIN pg_attribute pa ON pa.attrelid = c.confrelid AND pa.attnum = c.confkey[1] \
+         WHERE c.contype = 'f' AND c.confrelid = $1::regclass AND cardinality(c.conkey) = 1 \
+         ORDER BY 1, 2",
+    )
+    .bind(table)
+    .fetch_all(&mut **tx)
+    .await?)
+}
+
+/// Delete the rows of `table` that `filter` selects, after every row that
+/// references them, however deep. `path` holds the tables being deleted
+/// from above this one, so a self-reference ends the walk.
+fn delete_with_dependents<'a>(
+    tx: &'a mut Transaction<'_, Postgres>,
+    table: &'a str,
+    filter: String,
+    path: &'a mut Vec<String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
+    Box::pin(async move {
+        path.push(table.to_string());
+        for (child, column, parent) in foreign_keys_to(tx, table).await? {
+            if path.contains(&child) {
+                continue;
+            }
+            let rows = format!(
+                "{} IN (SELECT {} FROM {table} WHERE {filter})",
+                ident(&column),
+                ident(&parent)
+            );
+            delete_with_dependents(tx, &child, rows, path).await?;
+        }
+        path.pop();
+        sqlx::query(AssertSqlSafe(format!("DELETE FROM {table} WHERE {filter}")))
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    })
 }
 
 /// Delete the target's `existing` problems and, with `wipe_dependents`,
