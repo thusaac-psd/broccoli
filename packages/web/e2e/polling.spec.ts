@@ -143,9 +143,11 @@ test('a contest page that first loads during an outage fills in by itself once t
   );
 
   const before = asked;
-  await runClockUntil(page, () => expect(asked).toBeGreaterThan(before + 2), {
-    stepMs: 10_000,
-  });
+  await runClockUntil(
+    page,
+    async () => expect(asked).toBeGreaterThan(before + 2),
+    { stepMs: 10_000 },
+  );
 
   down = false;
   await runClockUntil(page, () =>
