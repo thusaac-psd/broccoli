@@ -80,6 +80,7 @@ scope = "resource"
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/cooldown/problems/{problem_id}/status"
+problem = "{problem_id}"
 handler = "get_cooldown_status_standalone"
 ```
 
@@ -96,8 +97,10 @@ handler = "get_cooldown_status_standalone"
   applies: in a contest or problem whose settings turn the plugin on, and in
   every contest of a type the plugin itself registered. With
   `scope = "global"` it runs for every submission on the server.
-- A route maps an HTTP method and path to an exported function. Path parameters
-  like `{problem_id}` are read inside the handler.
+- A route maps an HTTP method and path to an exported function. `problem`
+  names the path parameter that addresses a problem: the server checks the
+  caller may read that problem before the handler runs and hands the handler
+  its id. See [Routes](routes.md) for access rules, contests and errors.
 - An optional `[bundle]` section says how release bundles ship the plugin.
   `mode = "default"` (the default) ships it and loads it. `mode = "optional"`
   ships it in `plugins-available/`, where operators enable it with
@@ -144,10 +147,8 @@ fn handle_status(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let user_id = req
-        .require_user_id()
-        .map_err(|_| PluginHttpResponse::error(401, "Authentication required"))?;
-    let problem_id: i32 = req.param("problem_id")?;
+    let user_id = req.require_user_id()?;
+    let problem_id = req.problem_id()?;
 
     let eff = host.config.get_effective("cooldown", problem_id, None)?;
 

@@ -106,38 +106,47 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
         let claims = bearer_claims(parts, &app_state)?;
-
-        // One indexed read of the active user's credential-change stamp. A
-        // missing row means the user was soft-deleted/deactivated -> reject.
-        let credentials_changed_at: chrono::DateTime<chrono::Utc> = user::Entity::find_active()
-            .filter(user::Column::Id.eq(claims.uid))
-            .select_only()
-            .column(user::Column::CredentialsChangedAt)
-            .into_tuple()
-            .one(&app_state.db)
-            .await
-            .map_err(|e| AppError::Internal(format!("credential freshness lookup failed: {e}")))?
-            .ok_or(AppError::TokenInvalid)?;
-
-        // Tokens predating the last credential change are stale -> force a
-        // re-auth. Both
-        // sides of the comparison are DB-clock values (`iat` is stamped from
-        // `statement_timestamp()` in `services::auth_tokens`), so it holds even
-        // when server replicas' clocks disagree.
-        //
-        // Strict `<` (NOT `<=`) is deliberate: `iat` is second-granularity per the
-        // JWT spec, so a token minted by a re-login in the SAME second as the
-        // credential change has `iat == credentials_changed_at`. `<=` would revoke
-        // that fresh token, breaking login/refresh right after a password/role
-        // change (a login loop). The residual sub-second window (a token issued
-        // <1s BEFORE the change surviving) is negligible: the access token lives
-        // only ~5 min and the same change already revokes the refresh tokens.
-        if (claims.iat as i64) < credentials_changed_at.timestamp() {
-            return Err(AppError::TokenInvalid);
-        }
-
-        Ok(FreshAuthUser(AuthUser::from(claims)))
+        Ok(FreshAuthUser(fresh_user(&app_state, claims).await?))
     }
+}
+
+/// The caller of a verified access token, if the token is still fresh: its
+/// user is active and it was minted no earlier than the user's last
+/// credential change. A stale token is `TokenInvalid`, a 401, so the client
+/// refreshes and gets a token carrying the user's current roles. The one
+/// freshness rule of the platform: [`FreshAuthUser`] and the plugin proxy
+/// both apply it.
+pub(crate) async fn fresh_user(
+    state: &AppState,
+    claims: jwt::Claims,
+) -> Result<AuthUser, AppError> {
+    // One indexed read of the active user's credential-change stamp. A
+    // missing row means the user was soft-deleted/deactivated -> reject.
+    let credentials_changed_at: chrono::DateTime<chrono::Utc> = user::Entity::find_active()
+        .filter(user::Column::Id.eq(claims.uid))
+        .select_only()
+        .column(user::Column::CredentialsChangedAt)
+        .into_tuple()
+        .one(&state.db)
+        .await
+        .map_err(|e| AppError::Internal(format!("credential freshness lookup failed: {e}")))?
+        .ok_or(AppError::TokenInvalid)?;
+
+    // Both sides of the comparison are DB-clock values (`iat` is stamped from
+    // `statement_timestamp()` in `services::auth_tokens`), so it holds even
+    // when server replicas' clocks disagree.
+    //
+    // Strict `<` (NOT `<=`): `iat` is second-granularity per the JWT spec, so
+    // a token minted by a re-login in the SAME second as the credential change
+    // has `iat == credentials_changed_at`. `<=` would revoke that fresh token,
+    // breaking login/refresh right after a password/role change (a login
+    // loop). The residual sub-second window (a token issued <1s BEFORE the
+    // change surviving) is negligible: the access token lives only ~5 min and
+    // the same change already revokes the refresh tokens.
+    if (claims.iat as i64) < credentials_changed_at.timestamp() {
+        return Err(AppError::TokenInvalid);
+    }
+    Ok(AuthUser::from(claims))
 }
 
 /// A permission an [`Authorized`] extractor demands. Implemented by zero-sized

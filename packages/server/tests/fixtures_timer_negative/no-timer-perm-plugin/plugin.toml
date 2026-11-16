@@ -9,4 +9,5 @@ permissions = []
 [[server.routes]]
 path = "/schedule"
 method = "POST"
+access = "public"
 handler = "schedule"

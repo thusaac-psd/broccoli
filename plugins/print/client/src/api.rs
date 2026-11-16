@@ -146,12 +146,7 @@ fn status_error(e: ureq::Error) -> anyhow::Error {
             let msg = resp
                 .into_json::<serde_json::Value>()
                 .ok()
-                .and_then(|v| {
-                    v.get("error")
-                        .or_else(|| v.get("message"))
-                        .and_then(|m| m.as_str())
-                        .map(String::from)
-                })
+                .and_then(|v| v.get("message")?.as_str().map(String::from))
                 .unwrap_or_else(|| format!("HTTP {code}"));
             anyhow!("server returned {code}: {msg}")
         }

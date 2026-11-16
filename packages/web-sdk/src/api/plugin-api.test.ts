@@ -99,9 +99,15 @@ test('a failure without a message has an empty one', async () => {
   await assert.rejects(api.get('/x'), { message: '', status: 502 });
 });
 
-test('a plugin error body with only an error string is its message', async () => {
-  const { api } = client([json(400, { error: 'bad order' })]);
-  await assert.rejects(api.get('/x'), { message: 'bad order', status: 400 });
+test('a plugin error carries the host error shape', async () => {
+  const { api } = client([
+    json(400, { code: 'VALIDATION_ERROR', message: 'bad order' }),
+  ]);
+  await assert.rejects(api.get('/x'), {
+    message: 'bad order',
+    status: 400,
+    code: 'VALIDATION_ERROR',
+  });
 });
 
 test('post sends JSON and retries of the same request reuse its key', async () => {

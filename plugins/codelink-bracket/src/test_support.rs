@@ -1,24 +1,21 @@
 //! Fixtures shared by this crate's unit tests.
 
 use broccoli_server_sdk::Host;
+use broccoli_server_sdk::types::{ContestPhase, RouteContest};
 
 use crate::model::{MatchState, RoundDef, Setup};
 use crate::storage;
 
-/// Queue the contest row `contest::check_access` reads, for a bracket
-/// contest in `phase` (`"before"`, `"during"` or `"after"`).
-pub(crate) fn queue_bracket_contest_phase(host: &Host, phase: &str) {
-    host.db.queue_query_result(serde_json::json!([{
-        "contest_type": "codelink-bracket",
-        "is_public": true,
-        "is_active": true,
-        "phase": phase,
-    }]));
-}
-
-/// [`queue_bracket_contest_phase`] for a running contest.
-pub(crate) fn queue_bracket_contest_info(host: &Host) {
-    queue_bracket_contest_phase(host, "during");
+/// The bracket contest `id` as the host resolves it for a route, in
+/// `phase`.
+pub(crate) fn bracket_contest(id: i32, phase: ContestPhase) -> RouteContest {
+    RouteContest {
+        id,
+        contest_type: Some("codelink-bracket".into()),
+        is_public: true,
+        phase,
+        participant: true,
+    }
 }
 
 /// Queue the server time a `NOW()` read returns.

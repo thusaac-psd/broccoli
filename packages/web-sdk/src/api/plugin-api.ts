@@ -76,14 +76,11 @@ async function readBody(response: Response): Promise<unknown> {
 
 async function toError(response: Response): Promise<PluginApiError> {
   const body = (await readBody(response).catch(() => undefined)) as
-    | { code?: unknown; message?: unknown; error?: unknown; details?: unknown }
+    | { code?: unknown; message?: unknown; details?: unknown }
     | string
     | undefined;
   const fields = typeof body === 'object' ? body : undefined;
-  const message =
-    [fields?.message, fields?.error].find(
-      (value): value is string => typeof value === 'string' && value !== '',
-    ) ?? '';
+  const message = typeof fields?.message === 'string' ? fields.message : '';
   return new PluginApiError(
     message,
     response.status,

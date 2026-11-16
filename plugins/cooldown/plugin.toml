@@ -18,11 +18,15 @@ scope = "resource"
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/cooldown/contests/{contest_id}/problems/{problem_id}/status"
+access = "participant"
+contest = "{contest_id}"
+problem = "{problem_id}"
 handler = "get_cooldown_status"
 
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/cooldown/problems/{problem_id}/status"
+problem = "{problem_id}"
 handler = "get_cooldown_status_standalone"
 
 [web]

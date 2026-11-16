@@ -24,7 +24,7 @@ pub fn handle_contest_info(
         .ok_or_else(|| SdkError::Other("Missing Codelink problem count".into()))?
         .problem_count;
     let mut body = serde_json::to_value(config)?;
-    body["phase"] = serde_json::json!(info.phase);
+    body["phase"] = serde_json::json!(info.phase.stage());
     body["problem_count"] = serde_json::json!(problem_count);
     Ok(PluginHttpResponse {
         status: 200,
@@ -33,17 +33,13 @@ pub fn handle_contest_info(
     })
 }
 
-fn load_context(
+fn load_context<'r>(
     host: &Host,
-    req: &PluginHttpRequest,
-) -> Result<(i32, contest::ContestInfo, ContestConfig), ApiError> {
-    let contest_id: i32 = req
-        .param("contest_id")
-        .map_err(|_| PluginHttpResponse::error(400, "Invalid contest id"))?;
-    let info = contest::check_access(host, req, contest_id)?;
-    info.require_type("codelink-qualifier")?;
-    let config = ContestConfig::load(host, contest_id)?;
-    Ok((contest_id, info, config))
+    req: &'r PluginHttpRequest,
+) -> Result<(i32, &'r RouteContest, ContestConfig), ApiError> {
+    let info = req.contest()?;
+    let config = ContestConfig::load(host, info.id)?;
+    Ok((info.id, info, config))
 }
 
 pub fn handle_standings(
@@ -76,9 +72,9 @@ pub fn handle_standings(
         .db
         .query_with_args(include_str!("submissions.sql"), &[contest_id])?;
     let standings = calculate(participants, problems, submissions, &config)?;
-    let advancement = standings.advancement(info.phase == "after")?;
+    let advancement = standings.advancement(info.phase.has_ended())?;
     let mut body = serde_json::to_value(standings)?;
-    body["phase"] = serde_json::json!(info.phase);
+    body["phase"] = serde_json::json!(info.phase.stage());
     body["advancement"] = serde_json::to_value(advancement)?;
 
     Ok(PluginHttpResponse {

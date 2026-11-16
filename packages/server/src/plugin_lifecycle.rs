@@ -209,6 +209,19 @@ impl PluginLifecycle {
             .unwrap_or_default()
     }
 
+    /// Every plugin the fleet's desired state names, with whether it is
+    /// enabled.
+    pub(crate) fn desired_plugins(&self) -> Vec<(String, bool)> {
+        self.desired
+            .read()
+            .map(|d| {
+                d.iter()
+                    .map(|(id, enabled)| (id.clone(), *enabled))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// What `plugin_id` governs, as recorded by the replica that last loaded
     /// it; `None` if no replica ever has.
     pub fn governs(&self, plugin_id: &str) -> Option<Governs> {

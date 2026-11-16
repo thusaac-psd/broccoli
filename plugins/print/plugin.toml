@@ -18,11 +18,18 @@ read = ["submission.files"]
 [[server.routes]]
 method = "POST"
 path = "/api/plugins/print/contests/{contest_id}/submissions/{submission_id}"
+contest = "{contest_id}"
 handler = "api_print_submission"
 
 [[server.routes]]
 method = "POST"
 path = "/api/plugins/print/jobs"
+handler = "api_print_arbitrary"
+
+[[server.routes]]
+method = "POST"
+path = "/api/plugins/print/contests/{contest_id}/jobs"
+contest = "{contest_id}"
 handler = "api_print_arbitrary"
 
 [[server.routes]]
@@ -77,21 +84,25 @@ permission = "contest:manage"
 [[server.routes]]
 method = "POST"
 path = "/api/plugins/print/stations/heartbeat"
+access = "public"
 handler = "api_station_heartbeat"
 
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/print/stations/jobs"
+access = "public"
 handler = "api_station_jobs"
 
 [[server.routes]]
 method = "POST"
 path = "/api/plugins/print/stations/jobs/{id}/claim"
+access = "public"
 handler = "api_station_claim"
 
 [[server.routes]]
 method = "POST"
 path = "/api/plugins/print/stations/jobs/{id}/status"
+access = "public"
 handler = "api_station_status"
 
 # -- Configuration --

@@ -712,6 +712,7 @@ mod tests {
             id: problem_id.to_string(),
             contest_id: Some(contest_id),
             problem_id: Some(problem_id),
+            contest_phase: None,
         }
     }
 
@@ -725,6 +726,7 @@ mod tests {
             id: problem_id.to_string(),
             contest_id: None,
             problem_id: Some(problem_id),
+            contest_phase: None,
         }
     }
 
@@ -881,6 +883,7 @@ mod tests {
                     },
                     contest_id: Some(7),
                     problem_id: Some(problem_id),
+                    contest_phase: None,
                 })
                 .collect()
         };
@@ -943,6 +946,7 @@ mod tests {
                     id: "7".to_string(),
                     contest_id: Some(7),
                     problem_id: None,
+                    contest_phase: None,
                 },
             ],
         };
@@ -1323,6 +1327,7 @@ mod tests {
                 id: "42".to_string(),
                 contest_id: None,
                 problem_id: Some(3),
+                contest_phase: None,
             }],
         };
         let decisions = decide_visibility_decisions(&host, &req).unwrap();

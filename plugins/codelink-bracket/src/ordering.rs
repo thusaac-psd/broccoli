@@ -93,10 +93,8 @@ struct OrderRequest {
 /// the WASM ABI (the `api_order` wrapper in `lib.rs` adapts this) so it
 /// unit-tests on the host, matching `handle_setup` in `setup.rs`.
 pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpResponse, ApiError> {
-    let contest_id: i32 = req.param("contest_id")?;
+    let contest_id = req.contest()?.id;
     let match_id: u8 = req.param("match_id")?;
-    let info = contest::check_access(host, req, contest_id)?;
-    info.require_type("codelink-bracket")?;
     let submitter = req.require_user_id()?;
 
     let body = req
@@ -193,7 +191,7 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::queue_bracket_contest_info;
+    use crate::test_support::bracket_contest;
     use std::collections::HashMap;
 
     use super::*;
@@ -305,6 +303,8 @@ mod tests {
                 roles: vec![],
                 permissions: vec![],
             }),
+            contest: Some(bracket_contest(contest_id, ContestPhase::Running)),
+            problem_id: None,
         }
     }
 
@@ -320,7 +320,6 @@ mod tests {
     #[test]
     fn ordering_is_rejected_before_the_official_stage_opening() {
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         let mut m = match_in_ordering(10, 20, group_a(), group_b());
         m.round = 1;
         seed_match(&host, 7, 0, &m);
@@ -347,7 +346,6 @@ mod tests {
     #[test]
     fn ordering_deadline_is_enforced_inside_the_write_even_if_timer_delivery_is_late() {
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         let m = match_in_ordering(10, 20, group_a(), group_b());
         seed_match(&host, 7, 0, &m);
         let mut setup = crate::model::Setup {
@@ -387,7 +385,6 @@ mod tests {
         // `resubmitting_before_the_match_starts_replaces_the_previous_ranking`
         // above for the same control at the pure-function level.
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         let mut m = match_in_ordering(10, 20, group_a(), group_b());
         m.order_a = Some(vec![101, 102, 103]);
         seed_match(&host, 7, 0, &m);
@@ -403,7 +400,6 @@ mod tests {
         // Plugin-level mirror of the integration test
         // `a_ranking_cannot_be_resubmitted_after_the_match_has_started`.
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         let mut m = match_in_ordering(10, 20, group_a(), group_b());
         m.phase = Phase::Playing;
         m.order_a = Some(vec![101, 102, 103]);

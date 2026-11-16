@@ -57,43 +57,6 @@ async fn seed_redact_submission_id(app: &TestApp, submission_id: i32) {
     seed_kv(app, "redact_submission_ids", &submission_id.to_string()).await;
 }
 
-/// Insert a public, standalone-submittable problem directly via the DB.
-///
-/// `TestApp::create_problem` goes through the real HTTP handler, which
-/// validates `problem_type`/`checker_format` against the in-memory evaluator
-/// registry. That registry is only ever seeded with the `"__test__"` noop
-/// handlers under plain `TestApp::spawn()` - `spawn_with_plugins()` (needed
-/// here so the fixture plugin's `decide_visibility` query is actually
-/// registered) leaves it empty, so `create_problem` would 400 with
-/// `problem_type must be one of: `. None of that validation matters for
-/// these tests - only the problem's existence and `is_public` flag do.
-async fn insert_public_problem(app: &TestApp, title: &str) -> i32 {
-    use sea_orm::{ActiveModelTrait, Set};
-    use server::entity::problem;
-
-    let now = chrono::Utc::now();
-    let problem = problem::ActiveModel {
-        title: Set(title.into()),
-        content: Set("## Description\nSolve this.".into()),
-        time_limit: Set(1000),
-        memory_limit: Set(262144),
-        problem_type: Set("standard".into()),
-        checker_format: Set("exact".into()),
-        default_contest_type: Set("standard".into()),
-        show_test_details: Set(false),
-        is_public: Set(true),
-        submission_format: Set(None),
-        created_at: Set(now),
-        updated_at: Set(now),
-        deleted_at: Set(None),
-        ..Default::default()
-    }
-    .insert(&app.db)
-    .await
-    .expect("insert public problem");
-    problem.id
-}
-
 /// Insert a `Queued`, verdict-less submission directly via the DB.
 ///
 /// `TestApp::create_submission` goes through the real HTTP handler, which
@@ -140,7 +103,7 @@ async fn plugin_cannot_widen_host_decision() {
         .create_authenticated_user("widen_peer", "pass1234")
         .await;
 
-    let problem_id = insert_public_problem(&app, "Widen Test Problem").await;
+    let problem_id = app.insert_public_problem("Widen Test Problem").await;
     let owner = user::Entity::find()
         .filter(user::Column::Username.eq("widen_owner"))
         .one(&app.db)
@@ -193,7 +156,7 @@ async fn plugin_cannot_author_a_verdict() {
     let owner_token = app
         .create_authenticated_user("verdict_owner", "pass1234")
         .await;
-    let problem_id = insert_public_problem(&app, "Verdict Test Problem").await;
+    let problem_id = app.insert_public_problem("Verdict Test Problem").await;
 
     let owner = user::Entity::find()
         .filter(user::Column::Username.eq("verdict_owner"))
@@ -306,7 +269,7 @@ async fn assert_denies_single_submission_read(mode: &str) {
     let owner_token = app
         .create_authenticated_user(&format!("mode_{mode}_owner"), "pass1234")
         .await;
-    let problem_id = insert_public_problem(&app, "Failure Mode Test Problem").await;
+    let problem_id = app.insert_public_problem("Failure Mode Test Problem").await;
     let owner = user::Entity::find()
         .filter(user::Column::Username.eq(format!("mode_{mode}_owner")))
         .one(&app.db)
@@ -382,7 +345,7 @@ async fn short_decision_vector_denies_whole_batch() {
     let owner_token = app
         .create_authenticated_user("short_vector_owner", "pass1234")
         .await;
-    let problem_id = insert_public_problem(&app, "Short Vector Test Problem").await;
+    let problem_id = app.insert_public_problem("Short Vector Test Problem").await;
     let owner = user::Entity::find()
         .filter(user::Column::Username.eq("short_vector_owner"))
         .one(&app.db)
@@ -498,7 +461,7 @@ async fn setup_three_problem_contest(app: &TestApp, admin_token: &str) -> (i32, 
         ("Working Path Problem B", "B"),
         ("Working Path Problem C", "C"),
     ] {
-        let problem_id = insert_public_problem(app, title).await;
+        let problem_id = app.insert_public_problem(title).await;
         let res = app
             .post_with_token(
                 &routes::contest_problems(contest_id),
@@ -648,7 +611,7 @@ async fn decide_visibility_detail_deny() {
     let viewer_token = app
         .create_authenticated_user("detail_deny_viewer", "pass1234")
         .await;
-    let problem_id = insert_public_problem(&app, "Detail Deny Problem").await;
+    let problem_id = app.insert_public_problem("Detail Deny Problem").await;
 
     seed_kv(&app, "deny_resource_keys", &format!("problem:{problem_id}")).await;
 
@@ -940,7 +903,7 @@ async fn get_test_case_redact_on_problem_resource_still_returns_full_content() {
         .create_authenticated_user("tc_redact_viewer", "pass1234")
         .await;
 
-    let problem_id = insert_public_problem(&app, "TC Redact Problem").await;
+    let problem_id = app.insert_public_problem("TC Redact Problem").await;
     let tc_id = app.create_test_case(problem_id, &admin_token).await;
 
     seed_kv(
@@ -982,7 +945,7 @@ async fn download_attachment_redact_on_attachment_resource_still_returns_full_co
         .create_authenticated_user("attach_redact_viewer", "pass1234")
         .await;
 
-    let problem_id = insert_public_problem(&app, "Attachment Redact Problem").await;
+    let problem_id = app.insert_public_problem("Attachment Redact Problem").await;
     let file_bytes = b"the real attachment content".to_vec();
     let upload_res = app
         .upload_attachment(
@@ -1052,7 +1015,7 @@ async fn narrowed_own_submissions(app: &TestApp, username: &str) -> (String, Vec
         .await
         .expect("query owner")
         .expect("owner should exist");
-    let problem_id = insert_public_problem(app, "Narrowed List Problem").await;
+    let problem_id = app.insert_public_problem("Narrowed List Problem").await;
     let mut ids = Vec::new();
     for _ in 0..5 {
         ids.push(insert_queued_submission(app, problem_id, owner.id).await);
@@ -1175,7 +1138,9 @@ async fn typed_contest_with_submission(
         ))
         .await
         .expect("set contest type");
-    let problem_id = insert_public_problem(app, &format!("{contest_type} problem")).await;
+    let problem_id = app
+        .insert_public_problem(&format!("{contest_type} problem"))
+        .await;
     let submission = submission::ActiveModel {
         files: Set(serde_json::json!([
             { "filename": "main.cpp", "content": "int main() {}" }

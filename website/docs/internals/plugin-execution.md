@@ -187,8 +187,10 @@ plugin is not loaded here) and `InstanceBuild` (no instance could be built).
   becomes
   `AppError::PluginUnavailable`: `503 PLUGIN_UNAVAILABLE` with
   `Retry-After: 2`. It is never folded into `Deny`, which would turn a list
-  into an empty page, a cursor into a 400 and a single read into a 404. Every
-  other querier failure is a broken answer and still denies the batch.
+  into an empty page, a cursor into a 400 and a single read into a 404. A
+  resource governed by a visibility plugin that is not loaded is the same 503
+  (see [Visibility](visibility.md)). Every other querier failure is a broken
+  answer and still denies the batch.
 - A blocking hook that is unavailable is the same 503, not a fail-closed
   rejection; a notify hook that is unavailable is skipped.
 - Interactive calls are never retried server side. The web client treats the

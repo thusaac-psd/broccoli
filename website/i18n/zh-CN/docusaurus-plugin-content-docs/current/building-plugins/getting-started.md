@@ -72,6 +72,7 @@ scope = "resource"
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/cooldown/problems/{problem_id}/status"
+problem = "{problem_id}"
 handler = "get_cooldown_status_standalone"
 ```
 
@@ -80,8 +81,7 @@ handler = "get_cooldown_status_standalone"
 - 有 `sql` 时，插件的表落在它自己的模式中，宿主表对它只读。选手源代码、测试数据、程序输出和消息正文默认不可读，除非 `[server.sql] read` 列出这些列，例如 `read = ["submission.files"]`；管理员在安装插件时会看到它们。参见[插件数据库访问](../internals/plugin-database.md)。
 - 钩子将一个函数订阅到平台事件，此处为 `before_submission`。
   `scope = "resource"`（默认值）表示钩子只在插件适用的范围内运行，即设置中启用了该插件的比赛或题目，以及该插件自身注册的比赛类型下的所有比赛。`scope = "global"` 表示对服务器上的所有提交运行。
-- 路由将一个 HTTP 方法与路径映射到导出的函数。`{problem_id}` 这类路径参数在处理函数内
-  读取。
+- 路由将一个 HTTP 方法与路径映射到导出的函数。`problem` 指明表示题目的路径参数：服务器在处理函数运行之前检查调用者能否读取该题目，并把题目 ID 交给处理函数。访问规则、比赛和错误参见[路由](routes.md)。
 - 可选的 `[bundle]` 段落指定发布包如何提供该插件。`mode = "default"`（默认值）表示随发布包提供并默认加载；`mode = "optional"` 表示放在 `plugins-available/` 中，由运维人员通过 `enable-plugin.sh` 启用，适用于仅部分赛事需要的插件；`mode = "none"` 表示不随发布包提供，用于测试插件。
 
 ### Cargo.toml
@@ -123,10 +123,8 @@ fn handle_status(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let user_id = req
-        .require_user_id()
-        .map_err(|_| PluginHttpResponse::error(401, "Authentication required"))?;
-    let problem_id: i32 = req.param("problem_id")?;
+    let user_id = req.require_user_id()?;
+    let problem_id = req.problem_id()?;
 
     let eff = host.config.get_effective("cooldown", problem_id, None)?;
 

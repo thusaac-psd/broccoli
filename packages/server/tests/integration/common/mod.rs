@@ -1144,6 +1144,41 @@ impl TestApp {
         res.id()
     }
 
+    /// Insert a public, standalone-submittable problem directly via the DB.
+    ///
+    /// [`Self::create_problem`] goes through the real HTTP handler, which
+    /// validates `problem_type`/`checker_format` against the in-memory
+    /// evaluator registry. That registry is only seeded with the `"__test__"`
+    /// noop handlers under plain `TestApp::spawn()`; `spawn_with_plugins()`
+    /// leaves it empty, so `create_problem` would 400 there. Tests that need
+    /// only the problem's existence and `is_public` flag use this instead.
+    pub async fn insert_public_problem(&self, title: &str) -> i32 {
+        use sea_orm::{ActiveModelTrait, Set};
+        use server::entity::problem;
+
+        let now = chrono::Utc::now();
+        let problem = problem::ActiveModel {
+            title: Set(title.into()),
+            content: Set("## Description\nSolve this.".into()),
+            time_limit: Set(1000),
+            memory_limit: Set(262144),
+            problem_type: Set("standard".into()),
+            checker_format: Set("exact".into()),
+            default_contest_type: Set("standard".into()),
+            show_test_details: Set(false),
+            is_public: Set(true),
+            submission_format: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+            deleted_at: Set(None),
+            ..Default::default()
+        }
+        .insert(&self.db)
+        .await
+        .expect("insert public problem");
+        problem.id
+    }
+
     /// Like [`Self::create_problem`] but non-public, for tests that assert a
     /// contestant cannot reach a hidden/unreleased problem.
     pub async fn create_hidden_problem(&self, token: &str, title: &str) -> i32 {

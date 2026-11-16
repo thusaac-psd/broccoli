@@ -22,6 +22,16 @@ pub fn parse_manifest(toml_content: &str) -> Result<PluginManifest, PluginError>
             "[server.sql] read scopes need the \"sql\" permission".into(),
         ));
     }
+    if let Some(server) = &manifest.server {
+        for route in &server.routes {
+            route.access().map_err(|e| {
+                PluginError::LoadFailed(format!(
+                    "Invalid route {} {}: {}",
+                    route.method, route.path, e
+                ))
+            })?;
+        }
+    }
     Ok(manifest)
 }
 

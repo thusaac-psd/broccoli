@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-use broccoli_server_sdk::permissions as perm;
 use broccoli_server_sdk::prelude::*;
 use serde::Deserialize;
 
@@ -208,16 +207,8 @@ struct SetupRequest {
 /// Save a complete configuration. Opening a stage and editing its rules CAS
 /// the same setup document, so an edit cannot race past the frozen prefix.
 pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpResponse, ApiError> {
-    let contest_id: i32 = req.param("contest_id")?;
-    let info = contest::check_access(host, req, contest_id)?;
-    info.require_type("codelink-bracket")?;
-    if !req.has_permission(perm::CONTEST_MANAGE) {
-        return Err(PluginHttpResponse::error(
-            403,
-            "Setting up the bracket requires contest:manage",
-        )
-        .into());
-    }
+    let info = req.contest()?;
+    let contest_id = info.id;
 
     let body = req
         .body
@@ -263,7 +254,7 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         let snapshot = host.storage.snapshot(&key)?;
         if let Some(previous) = snapshot.as_ref() {
             let previous: Setup = serde_json::from_str(&previous.value)?;
-            validate_edit(&previous, &setup, info.phase != "before")
+            validate_edit(&previous, &setup, info.phase.stage() != "before")
                 .map_err(|msg| PluginHttpResponse::error(409, msg))?;
             crate::stages::carry_progress(previous, &mut setup);
         }
@@ -357,20 +348,14 @@ pub fn handle_get_setup(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let contest_id: i32 = req.param("contest_id")?;
-    let info = contest::check_access(host, req, contest_id)?;
-    info.require_type("codelink-bracket")?;
-    if !req.has_permission(perm::CONTEST_MANAGE) {
-        return Err(
-            PluginHttpResponse::error(403, "Editing the bracket requires contest:manage").into(),
-        );
-    }
+    let info = req.contest()?;
+    let contest_id = info.id;
     let times = crate::clock::contest_times(host, contest_id).ok();
     Ok(PluginHttpResponse {
         status: 200,
         headers: None,
         body: Some(
-            serde_json::json!({"setup": storage::load_setup(host, contest_id)?, "started": info.phase != "before",
+            serde_json::json!({"setup": storage::load_setup(host, contest_id)?, "started": info.phase.stage() != "before",
                 "contest_start_ms": times.as_ref().map(|t| t.start_ms), "contest_end_ms": times.and_then(|t| t.end_ms)}),
         ),
     })
@@ -379,7 +364,8 @@ pub fn handle_get_setup(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{queue_bracket_contest_info, queue_bracket_contest_phase};
+    use crate::test_support::bracket_contest;
+    use broccoli_server_sdk::permissions as perm;
 
     fn valid_seeds() -> [i32; 16] {
         std::array::from_fn(|i| (i as i32) + 1)
@@ -761,6 +747,8 @@ mod tests {
                 roles: vec![],
                 permissions: vec![perm::CONTEST_MANAGE.to_string()],
             }),
+            contest: Some(bracket_contest(contest_id, ContestPhase::Running)),
+            problem_id: None,
         }
     }
 
@@ -775,7 +763,6 @@ mod tests {
     fn setup_persists_custom_and_disabled_penalties_and_defaults_omitted_requests() {
         for penalty in [None, Some(7), Some(0)] {
             let host = Host::mock();
-            queue_bracket_contest_info(&host);
             queue_stage_open_now(&host);
             let mut req = manage_request(7);
             if let Some(seconds) = penalty {
@@ -795,10 +782,13 @@ mod tests {
     #[test]
     fn structural_edits_are_rejected_without_writes_once_the_contest_starts() {
         // Existing matches also keep the bracket frozen if staff move the start time.
-        for (phase, opened) in [("before", true), ("during", true), ("after", true)] {
+        for (phase, opened) in [
+            (ContestPhase::Upcoming, true),
+            (ContestPhase::Running, true),
+            (ContestPhase::Ended, true),
+        ] {
             for field in ["group_a", "group_b", "tiebreak", "seeds"] {
                 let host = Host::mock();
-                queue_bracket_contest_phase(&host, if opened { "during" } else { "before" });
                 host.db.queue_query_result(serde_json::json!([{
                     "start_ms": if opened { 0.0 } else { 10_000.0 },
                 }]));
@@ -818,10 +808,10 @@ mod tests {
                     body["rounds"][3][field] = first;
                 }
                 body["rounds"][0]["xiaoju_seconds"] = serde_json::json!(600);
-                queue_bracket_contest_phase(&host, phase);
+                request.contest = Some(bracket_contest(7, phase));
                 let response = handle_setup(&host, &request).unwrap_err().into_response();
-                assert_eq!(response.status, 409, "{phase}/{field}");
-                assert_eq!(host.storage.data(), original, "{phase}/{field}");
+                assert_eq!(response.status, 409, "{phase:?}/{field}");
+                assert_eq!(host.storage.data(), original, "{phase:?}/{field}");
             }
         }
     }
@@ -830,13 +820,13 @@ mod tests {
     fn assignments_and_seeds_can_be_corrected_before_the_contest_opens() {
         let host = Host::mock();
         let mut request = manage_request(7);
+        request.contest = Some(bracket_contest(7, ContestPhase::Upcoming));
         for update in [false, true] {
             if update {
                 let body = request.body.as_mut().unwrap();
                 body["seeds"].as_array_mut().unwrap().swap(0, 1);
                 body["rounds"].as_array_mut().unwrap().swap(1, 2);
             }
-            queue_bracket_contest_phase(&host, "before");
             host.db
                 .queue_query_result(serde_json::json!([{ "start_ms": 10_000.0 }]));
             host.db
@@ -855,9 +845,7 @@ mod tests {
         // Ordering. Saving timing settings with the same assignments and
         // seeds must still succeed.
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         queue_stage_open_now(&host);
-        queue_bracket_contest_info(&host);
         queue_stage_open_now(&host);
 
         let first = handle_setup(&host, &manage_request(7)).unwrap();
@@ -878,7 +866,6 @@ mod tests {
         // without this, round 1 would have 16 filled slots and zero actual
         // matches for the state machine and `ordering::handle_order` to act on.
         let host = Host::mock();
-        queue_bracket_contest_info(&host);
         queue_stage_open_now(&host);
 
         let resp = handle_setup(&host, &manage_request(7)).unwrap();

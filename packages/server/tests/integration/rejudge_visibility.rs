@@ -27,37 +27,10 @@ use common::worker::HeartbeatPayload;
 use common::{SubmissionStatus, Verdict};
 use redis::AsyncCommands;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
-use server::entity::{problem, submission, submission_judgement, user};
+use server::entity::{submission, submission_judgement, user};
 use testcontainers::runners::AsyncRunner;
 
 use crate::common::{SpawnOptions, TestApp, routes};
-
-/// Insert a public, standalone-submittable problem directly via the DB -
-/// mirrors the identical helper (and its doc comment explaining why this
-/// bypasses `TestApp::create_problem`) in `visibility_plugin.rs`.
-async fn insert_public_problem(app: &TestApp, title: &str) -> i32 {
-    let now = Utc::now();
-    let problem = problem::ActiveModel {
-        title: Set(title.into()),
-        content: Set("## Description\nSolve this.".into()),
-        time_limit: Set(1000),
-        memory_limit: Set(262144),
-        problem_type: Set("standard".into()),
-        checker_format: Set("exact".into()),
-        default_contest_type: Set("standard".into()),
-        show_test_details: Set(false),
-        is_public: Set(true),
-        submission_format: Set(None),
-        created_at: Set(now),
-        updated_at: Set(now),
-        deleted_at: Set(None),
-        ..Default::default()
-    }
-    .insert(&app.db)
-    .await
-    .expect("insert public problem");
-    problem.id
-}
 
 async fn find_user_id(app: &TestApp, username: &str) -> i32 {
     user::Entity::find()
@@ -110,7 +83,9 @@ async fn rejudge_only_user_triggers_rejudge_without_leaking_unreachable_submissi
 
     app.create_authenticated_user("rjv_owner", "pass1234").await;
     let owner_id = find_user_id(&app, "rjv_owner").await;
-    let problem_id = insert_public_problem(&app, "Rejudge Visibility Problem").await;
+    let problem_id = app
+        .insert_public_problem("Rejudge Visibility Problem")
+        .await;
     let submission_id = insert_judged_submission(&app, problem_id, owner_id).await;
 
     let operator_token = app
@@ -179,7 +154,7 @@ async fn rejudge_only_user_applies_judgement_without_leaking_unreachable_submiss
     app.create_authenticated_user("rjv_apply_owner", "pass1234")
         .await;
     let owner_id = find_user_id(&app, "rjv_apply_owner").await;
-    let problem_id = insert_public_problem(&app, "Apply Visibility Problem").await;
+    let problem_id = app.insert_public_problem("Apply Visibility Problem").await;
     let submission_id = insert_judged_submission(&app, problem_id, owner_id).await;
 
     // A second, finalized, non-current judgement candidate - as if an
@@ -264,7 +239,9 @@ async fn rejudge_with_view_all_still_sees_full_response() {
     app.create_authenticated_user("rjv_va_owner", "pass1234")
         .await;
     let owner_id = find_user_id(&app, "rjv_va_owner").await;
-    let problem_id = insert_public_problem(&app, "View All Visibility Problem").await;
+    let problem_id = app
+        .insert_public_problem("View All Visibility Problem")
+        .await;
     let submission_id = insert_judged_submission(&app, problem_id, owner_id).await;
 
     let admin_token = app
@@ -346,7 +323,7 @@ async fn rejudge_response_is_redacted_like_a_read_would_be() {
         )
         .await;
     let owner_id = find_user_id(&app, "rjv_redact_operator").await;
-    let problem_id = insert_public_problem(&app, "Redact Visibility Problem").await;
+    let problem_id = app.insert_public_problem("Redact Visibility Problem").await;
     let submission_id = insert_judged_submission(&app, problem_id, owner_id).await;
 
     // Unmasked baseline, before the plugin is armed.
@@ -481,7 +458,9 @@ async fn admin_fan_out_response_is_denied_like_a_read_would_be() {
         .await;
     assert_eq!(res.status, 200, "seeding deny KV failed: {}", res.text);
 
-    let problem_id = insert_public_problem(&app, "Fan-out Visibility Problem").await;
+    let problem_id = app
+        .insert_public_problem("Fan-out Visibility Problem")
+        .await;
     let admin_token = app
         .create_user_with_permissions("rjv_fanout_admin", "pass1234", &[perm::SYSTEM_ADMIN])
         .await;

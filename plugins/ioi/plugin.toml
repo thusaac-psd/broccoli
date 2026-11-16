@@ -17,36 +17,55 @@ permissions = [
 [[server.routes]]
 method = "POST"
 path = "/api/plugins/ioi/contests/{contest_id}/submissions/{submission_id}/token"
+access = "participant"
+contest = "{contest_id}"
+contest_type = "ioi"
 handler = "api_use_token"
 
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/ioi/contests/{contest_id}/scoreboard"
+contest = "{contest_id}"
+contest_type = "ioi"
 handler = "api_scoreboard"
 
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/ioi/contests/{contest_id}/info"
+contest = "{contest_id}"
+contest_type = "ioi"
 handler = "api_contest_info"
 
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/ioi/contests/{contest_id}/problems/{problem_id}/config"
+contest = "{contest_id}"
+contest_type = "ioi"
+problem = "{problem_id}"
 handler = "api_task_config"
 
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/ioi/contests/{contest_id}/problems/{problem_id}/submission-status"
+access = "participant"
+contest = "{contest_id}"
+contest_type = "ioi"
+problem = "{problem_id}"
 handler = "api_submission_status"
 
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/ioi/contests/{contest_id}/token-status"
+access = "participant"
+contest = "{contest_id}"
+contest_type = "ioi"
 handler = "api_token_status"
 
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/ioi/contests/{contest_id}/submissions/{submission_id}/subtask-scores"
+contest = "{contest_id}"
+contest_type = "ioi"
 handler = "api_submission_subtask_scores"
 
 [[server.queries]]
