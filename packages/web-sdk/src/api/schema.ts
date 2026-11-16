@@ -6441,7 +6441,7 @@ export interface operations {
           'application/json': components['schemas']['DeviceCodeResponse'];
         };
       };
-      /** @description Too many device codes pending for this address (RATE_LIMITED). Includes Retry-After. */
+      /** @description Too many device codes that a CLI is still polling for this address (RATE_LIMITED). A code stops counting a minute after its last poll; Retry-After is the wait until the first place opens. */
       429: {
         headers: {
           [name: string]: unknown;

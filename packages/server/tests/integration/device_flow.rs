@@ -5,7 +5,7 @@
 use sea_orm::{ConnectionTrait, EntityTrait};
 use serde_json::json;
 use server::entity::device_authorization;
-use server::services::device_auth::MAX_PENDING_PER_ADDRESS;
+use server::services::device_auth::{LIVE_SECS, MAX_LIVE_PER_ADDRESS};
 
 use crate::common::{TestApp, routes};
 
@@ -240,35 +240,86 @@ async fn one_address_starts_a_venues_sign_ins_at_once() {
     }
 }
 
-/// Fill the table with `n` pending codes requested from `addr`.
-async fn hold_pending(app: &TestApp, addr: &str, n: i64) {
+/// Fill the table with `n` pending codes requested from `addr` `age_secs`
+/// ago and never polled since.
+async fn hold_pending(app: &TestApp, addr: &str, n: i64, age_secs: u64) {
     app.db
         .execute_unprepared(&format!(
             "INSERT INTO device_authorization \
                (device_code_hash, user_code, client_addr, created_at, expires_at) \
-             SELECT '{addr}-' || g, '{addr}-' || g, '{addr}', now(), now() + interval '15 minutes' \
+             SELECT '{addr}-{age_secs}-' || g, '{addr}-{age_secs}-' || g, '{addr}', \
+                    now() - interval '{age_secs} seconds', now() + interval '10 minutes' \
              FROM generate_series(1, {n}) g"
         ))
         .await
         .unwrap();
 }
 
-/// Pending codes are bounded per client address: a source holding its whole
+async fn request_code(app: &TestApp) -> reqwest::Response {
+    app.client
+        .post(app.url(routes::DEVICE_CODE))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+}
+
+/// Live codes are bounded per client address: a source holding its whole
 /// allowance cannot keep any other address from starting a CLI sign-in.
 #[tokio::test]
-async fn pending_codes_are_bounded_per_client_address() {
+async fn live_codes_are_bounded_per_client_address() {
     let app = TestApp::spawn().await;
-    // Far more pending codes than any one address may hold, from others.
+    // Far more live codes than any one address may hold, from others.
     for i in 0..4 {
-        hold_pending(&app, &format!("10.0.0.{i}"), MAX_PENDING_PER_ADDRESS).await;
+        hold_pending(&app, &format!("10.0.0.{i}"), MAX_LIVE_PER_ADDRESS, 0).await;
     }
     start(&app).await;
 
     // This client (the test's loopback address) at its own cap is refused.
-    hold_pending(&app, "127.0.0.1", MAX_PENDING_PER_ADDRESS - 1).await;
+    hold_pending(&app, "127.0.0.1", MAX_LIVE_PER_ADDRESS - 1, 0).await;
     let res = app
         .post_without_token(routes::DEVICE_CODE, &json!({}))
         .await;
     assert_eq!(res.status, 429, "{}", res.text);
     assert_eq!(res.body["code"], "RATE_LIMITED");
+}
+
+/// A code nobody polls any more (its CLI gave up, or was interrupted and run
+/// again) stops counting, so a venue that re-runs `login` is never locked out
+/// by the codes it abandoned, while they stay collectable until they expire.
+#[tokio::test]
+async fn codes_no_cli_polls_stop_counting() {
+    let app = TestApp::spawn().await;
+    hold_pending(&app, "127.0.0.1", MAX_LIVE_PER_ADDRESS, LIVE_SECS + 5).await;
+    start(&app).await;
+}
+
+/// A polled code counts from its last poll, and the refusal's Retry-After is
+/// the wait until the address's least recently seen code stops counting.
+#[tokio::test]
+async fn a_refused_request_waits_until_a_place_opens() {
+    let app = TestApp::spawn().await;
+    let quiet_for = LIVE_SECS - 20;
+    hold_pending(&app, "127.0.0.1", MAX_LIVE_PER_ADDRESS - 1, LIVE_SECS + 5).await;
+    app.db
+        .execute_unprepared(&format!(
+            "UPDATE device_authorization \
+             SET last_poll_at = now() - interval '{quiet_for} seconds'"
+        ))
+        .await
+        .unwrap();
+    start(&app).await;
+
+    let res = request_code(&app).await;
+    assert_eq!(res.status(), 429);
+    let retry_after: u64 = res.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let wait = LIVE_SECS - quiet_for;
+    assert!(
+        (wait - 2..=wait).contains(&retry_after),
+        "Retry-After {retry_after}, a place opens in {wait} s"
+    );
 }

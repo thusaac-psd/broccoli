@@ -40,8 +40,9 @@ servers. A successful sign-in counts nothing, so a venue whose contestants all
 reach the server through one NAT address signs every one of them in with no
 setting changed. One account may fail 10 times a minute from one address
 (`auth.login_failure_limit`). Each address may register 30 times a minute. CLI
-device codes have no rate: each address holds at most 1000 pending device codes,
-and a code a contestant approves is collected at once, so a whole venue can run
-`broccoli login` together. A client
-over a limit gets `429 RATE_LIMITED` with a `Retry-After` header; retrying
-sooner does not extend the wait.
+device codes have no rate: each address may have at most 1000 device codes that
+a CLI is still waiting on. A code a contestant approves is collected at once,
+and a code whose CLI was stopped or gave up stops counting a minute after its
+last poll, so a whole venue can run `broccoli login` together, and run it again.
+A client over a limit gets `429 RATE_LIMITED` with a `Retry-After` header that
+gives the wait until a place opens; retrying sooner does not extend the wait.

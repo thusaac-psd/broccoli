@@ -430,7 +430,7 @@ fn host_header(headers: &HeaderMap) -> Option<String> {
     request_body = DeviceCodeRequest,
     responses(
         (status = 200, description = "Device code generated", body = DeviceCodeResponse),
-        (status = 429, description = "Too many device codes pending for this address (RATE_LIMITED). Includes Retry-After.", body = ErrorBody),
+        (status = 429, description = "Too many device codes that a CLI is still polling for this address (RATE_LIMITED). A code stops counting a minute after its last poll; Retry-After is the wait until the first place opens.", body = ErrorBody),
     ),
 )]
 #[instrument(skip(state, headers, forwarded))]
