@@ -1,4 +1,8 @@
-import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
+import {
+  errorKind,
+  useApiClient,
+  useErrorMessage,
+} from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { PluginArchiveSummary } from '@broccoli/web-sdk/plugin';
 import {
@@ -111,6 +115,11 @@ export function PluginUploadDialog({
         bodySerializer: () => archiveForm(file, replaces),
       });
       if (error || !data) {
+        // A conflict means what the summary showed changed meanwhile (the
+        // plugin was published or replaced): the summary no longer says what
+        // publishing would do, so it goes, and the archive is inspected again
+        // before it can be published.
+        if (errorKind(error) === 'conflict') setSummary(null);
         setError(errorMessage(error, t('plugins.upload.error')));
         return;
       }
@@ -149,6 +158,9 @@ export function PluginUploadDialog({
             data-testid="plugin-archive-input"
             onChange={(e) => {
               const selected = e.target.files?.[0];
+              // Cleared at once, so choosing the same archive again (after a
+              // failed inspection or a conflict) is a new choice.
+              e.target.value = '';
               if (selected) void inspect(selected);
             }}
           />
