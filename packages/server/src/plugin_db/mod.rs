@@ -146,6 +146,27 @@ pub struct Lease {
     pub permit: Arc<OwnedSemaphorePermit>,
 }
 
+impl Lease {
+    /// A connection of the lease's pool for one statement, and the pid of
+    /// its backend, so a statement cut at its call's deadline is cancelled
+    /// there ([`PluginSqlPools::cancel_backend`]).
+    pub async fn connection(
+        &self,
+    ) -> Result<
+        (
+            sea_orm::sqlx::pool::PoolConnection<sea_orm::sqlx::Postgres>,
+            i32,
+        ),
+        sea_orm::sqlx::Error,
+    > {
+        let mut conn = sqlx_pool(&self.db).acquire().await?;
+        let pid = sea_orm::sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *conn)
+            .await?;
+        Ok((conn, pid))
+    }
+}
+
 /// The permits a call tree holds, kept in its [`CallLocals`] while any of its
 /// leases or transactions holds them, keyed by the budget they belong to.
 #[derive(Default)]

@@ -90,6 +90,11 @@ pub enum AppError {
     RegistrationClosed,
     /// An upload meant to add a new plugin, but one with its id exists.
     PluginExists(String),
+    /// Enabling a language pack for a locale another enabled pack provides.
+    LanguagePackTaken {
+        locale: String,
+        plugin_id: String,
+    },
     PluginNotReady(String),
     /// A valid plugin archive whose plugin failed to load or initialize on
     /// the serving replica; nothing was published.
@@ -263,6 +268,16 @@ impl AppError {
                     },
                 )
             }
+            AppError::LanguagePackTaken { locale, plugin_id } => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    code: HostCode::LanguagePackTaken.as_str().into(),
+                    message: format!(
+                        "The language pack '{plugin_id}' already provides '{locale}'; disable it first"
+                    ),
+                    details: Some(serde_json::json!({ "locale": locale, "plugin_id": plugin_id })),
+                },
+            ),
             AppError::PluginExists(id) => (
                 StatusCode::CONFLICT,
                 ErrorBody {

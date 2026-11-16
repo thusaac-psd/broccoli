@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use super::sql::HostDbResponse;
-use broccoli_server_sdk::types::{SubmissionFeedbackAction, SubmissionFeedbackQuery};
+use broccoli_server_sdk::types::SubmissionFeedbackQuery;
+use broccoli_server_sdk::types::host_io::FeedbackUpdateInput;
 use common::db::DatabaseConnection;
 use extism::host_fn;
-use serde::Deserialize;
 
 host_fn!(pub submission_feedback_query(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
     let call = super::HostCall::enter(&user_data, "submission_feedback_query")?;
@@ -18,16 +18,10 @@ host_fn!(pub submission_feedback_query(user_data: Arc<(String, DatabaseConnectio
     }
 });
 
-#[derive(Deserialize)]
-struct UpdateInput {
-    submission_id: i32,
-    action: SubmissionFeedbackAction,
-}
-
 host_fn!(pub submission_feedback_update(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
     let call = super::HostCall::enter(&user_data, "submission_feedback_update")?;
     let (plugin_id, db) = &*call;
-    let input: UpdateInput = serde_json::from_str(&input)?;
+    let input: FeedbackUpdateInput = serde_json::from_str(&input)?;
     let result = tokio::runtime::Handle::current().block_on(crate::services::submission_feedback::update(
         db, plugin_id, input.submission_id, &input.action));
     match result {

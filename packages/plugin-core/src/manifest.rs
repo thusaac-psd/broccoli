@@ -10,7 +10,7 @@ pub use broccoli_types::manifest::*;
 use crate::error::PluginError;
 
 /// Parses a `plugin.toml`. Config schema includes are left unresolved (see
-/// [`resolve_schema_includes`]).
+/// [`resolve_schema_includes_with`]).
 pub fn parse_manifest(toml_content: &str) -> Result<PluginManifest, PluginError> {
     let manifest: PluginManifest = toml::from_str(toml_content)
         .map_err(|e| PluginError::LoadFailed(format!("Invalid manifest syntax: {}", e)))?;
@@ -52,13 +52,12 @@ pub fn parse_manifest(toml_content: &str) -> Result<PluginManifest, PluginError>
     Ok(manifest)
 }
 
-/// Replaces the properties of every config namespace that names an external
-/// `schema` file with the properties read from that file. Schema paths are
-/// resolved against `root_dir` and must stay inside it.
-pub fn resolve_schema_includes(
-    manifest: &mut PluginManifest,
+/// A reader of the files in plugin directory `root_dir`, given each path
+/// as the manifest names it, relative to the directory. A path that leaves
+/// the directory (through `..` or a link) is refused.
+pub fn dir_reader(
     root_dir: &Path,
-) -> Result<(), PluginError> {
+) -> Result<impl FnMut(&str) -> Result<String, String> + use<'_>, PluginError> {
     let canonical_root = root_dir.canonicalize().map_err(|e| {
         PluginError::LoadFailed(format!(
             "Failed to canonicalize plugin root '{}': {}",
@@ -66,20 +65,21 @@ pub fn resolve_schema_includes(
             e
         ))
     })?;
-    resolve_schema_includes_with(manifest, |schema_path| {
-        let full_path = root_dir.join(schema_path);
+    Ok(move |path: &str| {
+        let full_path = root_dir.join(path);
         let canonical_path = full_path
             .canonicalize()
             .map_err(|e| format!("Failed to resolve '{}': {e}", full_path.display()))?;
         if !canonical_path.starts_with(&canonical_root) {
-            return Err(format!("'{schema_path}' escapes plugin directory"));
+            return Err(format!("'{path}' escapes plugin directory"));
         }
         std::fs::read_to_string(&canonical_path)
             .map_err(|e| format!("Failed to read '{}': {e}", full_path.display()))
     })
 }
 
-/// [`resolve_schema_includes`] with the schema files read through `read`
+/// Replaces the properties of every config namespace that names an external
+/// `schema` file with the properties read from that file, through `read`
 /// (given each `schema` path as the manifest names it), so a plugin that is
 /// not on disk yet (an uploaded archive) resolves its includes exactly as
 /// loading it will.
@@ -111,7 +111,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_schema_includes_loads_external_file() {
+    fn a_schema_include_loads_its_file() {
         let dir = tempfile::tempdir().unwrap();
         let schema_dir = dir.path().join("config");
         std::fs::create_dir_all(&schema_dir).unwrap();
@@ -137,6 +137,7 @@ mod tests {
             server: None,
             web: None,
             translations: HashMap::new(),
+            language_pack: None,
             config: HashMap::from([(
                 "settings".into(),
                 ConfigNamespace {
@@ -150,7 +151,7 @@ mod tests {
             )]),
         };
 
-        resolve_schema_includes(&mut manifest, dir.path()).unwrap();
+        resolve_schema_includes_with(&mut manifest, dir_reader(dir.path()).unwrap()).unwrap();
 
         let ns = &manifest.config["settings"];
         assert_eq!(ns.properties.len(), 2);
@@ -159,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_schema_includes_rejects_path_traversal() {
+    fn a_schema_include_outside_the_plugin_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let outside_file = dir.path().join("secret.toml");
         std::fs::write(
@@ -181,6 +182,7 @@ mod tests {
             server: None,
             web: None,
             translations: HashMap::new(),
+            language_pack: None,
             config: HashMap::from([(
                 "evil".into(),
                 ConfigNamespace {
@@ -194,7 +196,8 @@ mod tests {
             )]),
         };
 
-        let err = resolve_schema_includes(&mut manifest, &plugin_dir).unwrap_err();
+        let err = resolve_schema_includes_with(&mut manifest, dir_reader(&plugin_dir).unwrap())
+            .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("escapes plugin directory"),

@@ -15,6 +15,7 @@ const UI_LOCALES = ['en', 'zh-CN'];
 
 interface Manifest {
   description?: string;
+  language_pack?: { locale: string };
   translations?: Record<string, string>;
 }
 
@@ -39,10 +40,9 @@ test('every plugin names itself and its contest types in every UI language', () 
     const manifest = parse(source) as Manifest;
     const translations = manifest.translations ?? {};
     // A language pack names itself in its own language only.
-    const languagePack = Object.keys(manifest).every(
-      (key) => !['server', 'web', 'description'].includes(key),
-    );
-    const locales = languagePack ? Object.keys(translations) : UI_LOCALES;
+    const locales = manifest.language_pack
+      ? [manifest.language_pack.locale]
+      : UI_LOCALES;
     const contestTypes = new Set(
       [...source.matchAll(/^contest_type\s*=\s*"([^"]+)"/gm)].map((m) => m[1]),
     );

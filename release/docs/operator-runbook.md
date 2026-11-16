@@ -104,6 +104,16 @@ and select **Remove upload**: every server returns to the bundled version, or,
 for a plugin that is not bundled, the plugin is removed from every server (its
 configuration is kept for a later upload).
 
+### Removing a plugin
+
+An uploaded plugin is removed through its upload: open the plugin's details on
+the admin Plugins page and select **Remove upload** (the API is
+`DELETE /api/v1/admin/plugins/{id}/upload?expect=removed`, or
+`expect=bundle_restored` for a plugin a server also bundles). A plugin with no
+bundled copy is then removed from every server; one with a bundled copy runs the
+bundled version again. A bundled plugin has no upload to remove: select
+**Disable** to switch it off on every server.
+
 Set `BROCCOLI__PLUGIN__UPLOADS_ENABLED=false` on every server to switch uploads
 off. Upload requests are then refused, and a server refuses to load an uploaded
 version, so it runs only bundled code; a plugin whose published version is an

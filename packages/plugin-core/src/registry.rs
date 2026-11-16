@@ -7,8 +7,10 @@ use serde::Serialize;
 
 use crate::error::{AssetError, PluginError};
 use crate::i18n::TranslationMap;
-use crate::manifest::{PluginManifest, RouteAccess, parse_manifest, resolve_schema_includes};
-use crate::pool::InstancePool;
+use crate::manifest::{
+    PluginManifest, RouteAccess, dir_reader, parse_manifest, resolve_schema_includes_with,
+};
+use crate::pool::{InstancePool, Liveness};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum PluginStatus {
@@ -41,6 +43,10 @@ pub struct PluginEntry {
     /// the host serves for this plugin never depends on its files staying on
     /// disk.
     pub translations: Vec<(String, TranslationMap)>,
+    /// The pools of the versions this load replaced ([`Self::succeed`]):
+    /// calls that started on them still run there, and the plugin's unload
+    /// retires them with its own pool.
+    superseded: Vec<Liveness>,
 }
 
 pub type PluginRegistry = Arc<RwLock<HashMap<String, PluginEntry>>>;
@@ -74,6 +80,14 @@ impl PluginEntry {
     ) -> Result<Self, PluginError> {
         crate::config_schema::check_manifest(&manifest)
             .map_err(|e| PluginError::LoadFailed(format!("Plugin '{id}': {e}")))?;
+        if let Some(locale) = manifest.host_locale()
+            && !manifest.translations.contains_key(locale)
+        {
+            return Err(PluginError::LoadFailed(format!(
+                "Plugin '{id}' is a language pack for '{locale}' but declares no \
+                 translation file for it"
+            )));
+        }
         let mut router = Router::new();
 
         if let Some(server_config) = &manifest.server {
@@ -130,7 +144,43 @@ impl PluginEntry {
             runtime: None,
             router,
             translations: Vec::new(),
+            superseded: Vec::new(),
         })
+    }
+
+    /// Take over from `previous`, the version of this plugin a reload
+    /// replaced: its pool, and the pools it took over in turn, stay this
+    /// load's, so calls still running on them are retired when the plugin
+    /// is unloaded ([`Self::retire`]). Pools no call runs on any more are
+    /// dropped.
+    pub fn succeed(&mut self, previous: &PluginEntry) {
+        self.superseded = previous
+            .superseded
+            .iter()
+            .cloned()
+            .chain(previous.runtime.as_ref().map(InstancePool::liveness))
+            .filter(|pool| pool.in_use())
+            .collect();
+    }
+
+    /// Unload: retire this version's pool and every pool it took over, so
+    /// no call of the plugin, whichever version it started on, runs another
+    /// host function.
+    pub fn retire(&mut self) {
+        if let Some(pool) = self.runtime.take() {
+            pool.retire();
+        }
+        for pool in self.superseded.drain(..) {
+            pool.retire();
+        }
+    }
+
+    /// Drop this version alone, a reload that did not take: its pool
+    /// retires, and the pools it took over stay with the version put back.
+    pub fn discard(mut self) {
+        if let Some(pool) = self.runtime.take() {
+            pool.retire();
+        }
     }
 
     pub fn from_dir(plugin_dir: &Path) -> Result<Self, PluginError> {
@@ -147,16 +197,26 @@ impl PluginEntry {
             .ok_or_else(|| PluginError::LoadFailed("Invalid plugin directory name".into()))?
             .to_string();
 
-        let toml_path = plugin_dir.join("plugin.toml");
-        let toml_content = std::fs::read_to_string(&toml_path)
-            .map_err(|e| PluginError::LoadFailed(format!("Failed to read manifest: {}", e)))?;
+        Self::read(id, plugin_dir.to_path_buf(), dir_reader(plugin_dir)?)
+    }
 
+    /// Build plugin `id`'s entry from its files, each read through `read`
+    /// (given its path relative to the plugin directory, as the manifest
+    /// names it): `plugin.toml`, the config schemas it includes and its
+    /// translation files. Loading a plugin directory and checking an
+    /// uploaded archive both build the entry here, so an archive uploads
+    /// exactly when it would load.
+    pub fn read(
+        id: String,
+        root_dir: PathBuf,
+        mut read: impl FnMut(&str) -> Result<String, String>,
+    ) -> Result<Self, PluginError> {
+        let toml_content = read("plugin.toml")
+            .map_err(|e| PluginError::LoadFailed(format!("Failed to read manifest: {e}")))?;
         let mut manifest = parse_manifest(&toml_content)?;
-
-        resolve_schema_includes(&mut manifest, plugin_dir)?;
-
-        let mut entry = Self::new(id, plugin_dir.to_path_buf(), manifest)?;
-        entry.translations = read_translations(plugin_dir, &entry.id, &entry.manifest)?;
+        resolve_schema_includes_with(&mut manifest, &mut read)?;
+        let mut entry = Self::new(id, root_dir, manifest)?;
+        entry.translations = read_translations(&entry.id, &entry.manifest, read)?;
         Ok(entry)
     }
 
@@ -188,39 +248,31 @@ impl PluginEntry {
     }
 }
 
-/// Every translation file `manifest` declares, read from `root`. A file
+/// Every translation file `manifest` declares, read through `read`. A file
 /// with a key the plugin may not provide (see [`crate::i18n::foreign_keys`])
 /// fails the load, naming the keys.
 fn read_translations(
-    root: &Path,
     plugin_id: &str,
     manifest: &PluginManifest,
+    mut read: impl FnMut(&str) -> Result<String, String>,
 ) -> Result<Vec<(String, TranslationMap)>, PluginError> {
     manifest
         .translations
         .iter()
         .map(|(lang, path)| {
-            let path = root.join(path);
-            let content = std::fs::read_to_string(&path).map_err(|e| {
-                PluginError::LoadFailed(format!(
-                    "Failed to read translation file '{}': {e}",
-                    path.display()
-                ))
+            let content = read(path).map_err(|e| {
+                PluginError::LoadFailed(format!("Failed to read translation file '{path}': {e}"))
             })?;
             let map = toml::from_str(&content).map_err(|e| {
-                PluginError::LoadFailed(format!(
-                    "Invalid translation file syntax in '{}': {e}",
-                    path.display()
-                ))
+                PluginError::LoadFailed(format!("Invalid translation file syntax in '{path}': {e}"))
             })?;
-            let foreign = crate::i18n::foreign_keys(plugin_id, manifest, &map);
+            let foreign = crate::i18n::foreign_keys(plugin_id, manifest, lang, &map);
             if !foreign.is_empty() {
                 return Err(PluginError::LoadFailed(format!(
-                    "Translation file '{}' has keys outside plugin '{plugin_id}': {}. \
+                    "Translation file '{path}' has keys outside plugin '{plugin_id}': {}. \
                      A plugin's keys start with '{plugin_id}.', or are its manifest text \
                      ('plugin.{plugin_id}.', 'config.{plugin_id}.') or the name of an \
                      identifier it registers ('identifier.<contestType|problemType|checker>.')",
-                    path.display(),
                     foreign.join(", ")
                 )));
             }

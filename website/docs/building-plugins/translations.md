@@ -43,8 +43,11 @@ host's text or another plugin's. The only other keys a catalog may hold are
 the text of your manifest (`plugin.<plugin id>.…` and `config.<plugin id>.…`,
 below) and the names of what you register (`identifier.contestType.…`,
 `identifier.problemType.…` and `identifier.checker.…`). A catalog with any
-other key does not load, and the error names the keys. When two plugins name
-the same identifier, the one whose id sorts first is shown, on every server.
+other key does not load, and an upload with one is refused; the error names
+the keys. An identifier's name is shown only from the plugin the identifier
+resolves to while that plugin is loaded: naming a contest type you do not
+register shows nothing. A plugin that is disabled, or failed to load, keeps
+only its manifest text, which the plugin list shows.
 
 A frontend reads them with `t()` from `useTranslation()` in
 `@broccoli/web-sdk/i18n`. `{name}` inserts a parameter.
@@ -56,9 +59,9 @@ server's clock.
 
 ## Add a language
 
-The host's own messages are language packs too: a plugin whose manifest
-declares only `[translations]`. `plugins/broccoli-en` holds the English
-messages, which are the keys every other language translates, and
+The host's own messages are language packs: a plugin whose manifest declares
+`[language_pack]` with the locale it provides. `plugins/broccoli-en` holds the
+English messages, which are the keys every other language translates, and
 `plugins/broccoli-zh-cn` holds Simplified Chinese. To add a language, ship a
 pack in the same shape:
 
@@ -67,16 +70,28 @@ pack in the same shape:
 name = 'ja-language'
 version = '0.1.0'
 
+[language_pack]
+locale = "ja"
+
 [translations]
 ja = "locales/ja.toml"
 ```
 
-A language pack's keys are the host's own, so they are not confined to its
-id. Install it like any plugin and the language appears in the language menu,
-without rebuilding the web app. The web build embeds the packs in the
-repository, so the UI speaks them before the server answers and while it is
-unreachable; what the server serves overrides them. A key a pack lacks shows
-in English.
+A language pack's catalog for its locale holds the host's own keys, so it is
+not confined to its id; its catalogs for other locales are, as any plugin's
+are. A plugin that ships translations without declaring `[language_pack]` is
+an ordinary plugin. Install a pack like any plugin and the language appears in
+the language menu, without rebuilding the web app.
+
+One enabled pack provides a locale's host text. Enabling or uploading a second
+pack for a locale another enabled pack provides is refused
+(`LANGUAGE_PACK_TAKEN`): disable the first, then enable the second. Your own
+keys and names stay yours whatever the pack says: a pack's text for a key under
+your plugin's id is shown only where your catalog has none.
+
+The web build embeds the packs in the repository, so the UI speaks them before
+the server answers and while it is unreachable; what the server serves
+overrides them. A key a pack lacks shows in English.
 
 ## Name what you register
 

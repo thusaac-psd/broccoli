@@ -1,28 +1,13 @@
+use broccoli_server_sdk::types::host_io::{
+    BatchId, CancelTestCasesInput, CancelTestCasesOutput, NextResultInput, NextResultOutput,
+};
 use broccoli_server_sdk::types::{StartDetachedWindowedEvaluateInput, StartEvaluateBatchInput};
 use extism::{Function, UserData, Val, ValType};
-use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::host_funcs::context::EvaluateHostDeps;
 use crate::services::evaluate_batch;
-
-#[derive(Deserialize)]
-struct GetNextEvaluateResultInput {
-    batch_id: String,
-    timeout_ms: u64,
-}
-
-#[derive(Deserialize)]
-struct CancelEvaluateBatchInput {
-    batch_id: String,
-}
-
-#[derive(Deserialize)]
-struct CancelEvaluateTestCasesInput {
-    evaluate_batch_id: String,
-    test_case_ids: Vec<i32>,
-}
 
 struct EvaluateContext {
     plugin_id: String,
@@ -119,8 +104,7 @@ fn start_evaluate_batch_fn(
         ))
         .map_err(|e| extism::Error::msg(e.to_string()))?;
 
-    let response = serde_json::json!({ "batch_id": batch_id });
-    super::write_json(plugin, outputs, &response, "batch_id")
+    super::write_json(plugin, outputs, &BatchId { batch_id }, "batch_id")
 }
 
 fn get_next_evaluate_result_fn(
@@ -129,7 +113,7 @@ fn get_next_evaluate_result_fn(
     outputs: &mut [Val],
     user_data: EvaluateUserData,
 ) -> Result<(), extism::Error> {
-    let input: GetNextEvaluateResultInput = super::read_json(plugin, inputs, "input")?;
+    let input: NextResultInput = super::read_json(plugin, inputs, "input")?;
     let call = super::HostCall::enter(&user_data, "get_next_evaluate_result")?;
     let deps = &call.deps;
 
@@ -140,8 +124,7 @@ fn get_next_evaluate_result_fn(
         super::within_call_deadline(Duration::from_millis(input.timeout_ms)),
     )
     .map_err(|e| extism::Error::msg(e.to_string()))?;
-    let response = serde_json::json!({ "result": result });
-    super::write_json(plugin, outputs, &response, "result")
+    super::write_json(plugin, outputs, &NextResultOutput { result }, "result")
 }
 
 fn cancel_evaluate_batch_fn(
@@ -150,7 +133,7 @@ fn cancel_evaluate_batch_fn(
     _outputs: &mut [Val],
     user_data: EvaluateUserData,
 ) -> Result<(), extism::Error> {
-    let input: CancelEvaluateBatchInput = super::read_json(plugin, inputs, "input")?;
+    let input: BatchId = super::read_json(plugin, inputs, "input")?;
     let call = super::HostCall::enter(&user_data, "cancel_evaluate_batch")?;
     let deps = &call.deps;
     if deps.cancel_primitive_enabled
@@ -185,7 +168,7 @@ fn cancel_evaluate_test_cases_fn(
     outputs: &mut [Val],
     user_data: EvaluateUserData,
 ) -> Result<(), extism::Error> {
-    let input: CancelEvaluateTestCasesInput = super::read_json(plugin, inputs, "input")?;
+    let input: CancelTestCasesInput = super::read_json(plugin, inputs, "input")?;
     let call = super::HostCall::enter(&user_data, "cancel_evaluate_test_cases")?;
     let deps = &call.deps;
 
@@ -212,6 +195,5 @@ fn cancel_evaluate_test_cases_fn(
         }
     }
 
-    let response = serde_json::json!({ "count": count });
-    super::write_json(plugin, outputs, &response, "count")
+    super::write_json(plugin, outputs, &CancelTestCasesOutput { count }, "count")
 }

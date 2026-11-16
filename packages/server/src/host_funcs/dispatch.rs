@@ -1,27 +1,11 @@
 use crate::host_funcs::context::OperationHostDeps;
 use crate::services::operation_batch;
 use broccoli_server_sdk::types::OperationTask;
+use broccoli_server_sdk::types::host_io::{BatchId, NextResultInput, NextResultOutput};
 use common::worker::TaskResult;
 use extism::{Function, UserData, Val, ValType};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-
-#[derive(Deserialize)]
-struct GetNextResultInput {
-    batch_id: String,
-    timeout_ms: u64,
-}
-
-#[derive(Deserialize)]
-struct CancelBatchInput {
-    batch_id: String,
-}
-
-#[derive(Serialize)]
-struct ResultResponse {
-    result: Option<TaskResult>,
-}
 
 struct DispatchContext {
     plugin_id: String,
@@ -84,12 +68,7 @@ fn start_operation_batch_fn(
         ))
         .map_err(|e| extism::Error::msg(e.to_string()))?;
 
-    #[derive(Serialize)]
-    struct BatchIdResponse {
-        batch_id: String,
-    }
-
-    super::write_json(plugin, outputs, &BatchIdResponse { batch_id }, "batch_id")
+    super::write_json(plugin, outputs, &BatchId { batch_id }, "batch_id")
 }
 
 fn get_next_operation_result_fn(
@@ -98,7 +77,7 @@ fn get_next_operation_result_fn(
     outputs: &mut [Val],
     user_data: DispatchUserData,
 ) -> Result<(), extism::Error> {
-    let input: GetNextResultInput = super::read_json(plugin, inputs, "input")?;
+    let input: NextResultInput = super::read_json(plugin, inputs, "input")?;
     let call = super::HostCall::enter(&user_data, "get_next_operation_result")?;
 
     let result = operation_batch::next_operation_result(
@@ -109,7 +88,11 @@ fn get_next_operation_result_fn(
     )
     .map_err(|e| extism::Error::msg(e.to_string()))?;
 
-    super::write_json(plugin, outputs, &ResultResponse { result }, "result")
+    // The guest reads what the worker reported for the operation.
+    let result = NextResultOutput {
+        result: result.map(|task: TaskResult| task.output),
+    };
+    super::write_json(plugin, outputs, &result, "result")
 }
 
 fn cancel_operation_batch_fn(
@@ -118,7 +101,7 @@ fn cancel_operation_batch_fn(
     _outputs: &mut [Val],
     user_data: DispatchUserData,
 ) -> Result<(), extism::Error> {
-    let input: CancelBatchInput = super::read_json(plugin, inputs, "input")?;
+    let input: BatchId = super::read_json(plugin, inputs, "input")?;
     let call = super::HostCall::enter(&user_data, "cancel_operation_batch")?;
 
     operation_batch::cancel_operation_batch(

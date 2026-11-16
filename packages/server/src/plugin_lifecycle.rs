@@ -159,6 +159,9 @@ pub struct Governs {
     pub visibility: bool,
     /// The contest types its `init()` registered, sorted.
     pub contest_types: Vec<String>,
+    /// The locale whose host text it provides, as a language pack: one
+    /// enabled plugin at a time does (`publish_language_pack`).
+    pub host_locale: Option<String>,
 }
 
 /// A plugin that is enabled fleet-wide but not loaded on this replica.
@@ -408,7 +411,7 @@ pub async fn boot(state: &AppState) -> anyhow::Result<Vec<PluginActivationFailur
         .into_iter()
         .map(|p| p.id)
         .collect();
-    register_rows(state, &ids).await?;
+    register_rows(&state.db, &ids).await?;
     let failures = with_applied(state, async |applied| {
         reconcile_locked(state, applied).await
     })
@@ -708,7 +711,7 @@ async fn forget(state: &AppState, applied: &mut HashMap<String, Applied>, plugin
     if let Ok(mut registry) = state.plugins.get_registry().write() {
         registry.remove(plugin_id);
     }
-    state.plugins.update_translations();
+    plugin_utils::update_translations(state).await;
     applied.remove(plugin_id);
     state.plugin_lifecycle.forget(plugin_id);
     tracing::info!(plugin_id, "Plugin removed from the fleet; unloaded it here");
@@ -881,16 +884,19 @@ async fn deactivate(state: &AppState, plugin_id: &str) -> Result<(), PluginError
         );
     }
     state.plugin_sql.forget(plugin_id).await;
-    state.plugins.update_translations();
+    plugin_utils::update_translations(state).await;
     Ok(())
 }
 
 /// Record plugins found on this replica's disk that have no row yet, as
 /// enabled (a newly installed plugin is on by default). Idempotent, so
-/// replicas booting together cannot fail on the primary key.
-async fn register_rows(state: &AppState, ids: &[String]) -> Result<(), DbErr> {
+/// replicas booting together cannot fail on the primary key, and in id
+/// order, so they cannot deadlock either: each insert locks its rows in the
+/// order it lists them, and replicas that list the same rows in one order
+/// wait for each other instead of each holding a row the other wants.
+async fn register_rows(db: &impl ConnectionTrait, ids: &[String]) -> Result<(), DbErr> {
     // A bundle directory whose name is not a valid id is never a plugin.
-    let ids: Vec<&String> = ids
+    let ids: std::collections::BTreeSet<&String> = ids
         .iter()
         .filter(|id| {
             PluginId::parse(id.as_str())
@@ -908,7 +914,7 @@ async fn register_rows(state: &AppState, ids: &[String]) -> Result<(), DbErr> {
         ..Default::default()
     }))
     .on_conflict_do_nothing_on([plugin_entity::Column::Id])
-    .exec(&state.db)
+    .exec(db)
     .await?;
     Ok(())
 }
@@ -920,19 +926,26 @@ async fn register_new_dirs(state: &AppState) -> Result<bool, DbErr> {
         tracing::error!(error = %e, "Failed to rediscover plugins");
         Vec::new()
     });
-    register_rows(state, &new_ids).await?;
+    register_rows(&state.db, &new_ids).await?;
     Ok(!new_ids.is_empty())
 }
 
 /// What the plugin loaded here governs.
 async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
-    let visibility = state
+    let (visibility, host_locale) = state
         .plugins
         .get_registry()
         .read()
         .ok()
-        .and_then(|r| r.get(plugin_id).map(|e| declares_visibility(&e.manifest)))
-        .unwrap_or(false);
+        .and_then(|r| {
+            r.get(plugin_id).map(|e| {
+                (
+                    declares_visibility(&e.manifest),
+                    e.manifest.host_locale().map(str::to_string),
+                )
+            })
+        })
+        .unwrap_or_default();
     let mut contest_types: Vec<String> = state
         .registries
         .contest_type_registry
@@ -946,6 +959,7 @@ async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
     Governs {
         visibility,
         contest_types,
+        host_locale,
     }
 }
 
@@ -1025,7 +1039,7 @@ enum Change<'a> {
 /// record only ever describes a published version. `None` (a disable, or
 /// publishing a source that is not loaded) keeps the recorded ones.
 async fn publish(
-    state: &AppState,
+    db: &impl ConnectionTrait,
     plugin_id: &str,
     change: Change<'_>,
     loaded: Loaded<'_>,
@@ -1132,10 +1146,51 @@ async fn publish(
             ],
         ),
     };
-    match state.db.query_one_raw(statement).await? {
+    match db.query_one_raw(statement).await? {
         Some(row) => Ok(Some(row.try_get("", "generation")?)),
         None => Ok(None),
     }
+}
+
+/// [`publish`] `change` for a language pack that provides `locale`'s host
+/// text, unless another enabled plugin provides it: one enabled pack at a
+/// time provides a locale, so a second never takes it over. Under a lock on
+/// the locale, so two packs enabled at once cannot both pass the check.
+async fn publish_language_pack(
+    state: &AppState,
+    plugin_id: &str,
+    locale: &str,
+    change: Change<'_>,
+    loaded: Loaded<'_>,
+    source: &PluginSource,
+) -> Result<Option<i64>, ChangeError> {
+    use sea_orm::TransactionTrait;
+
+    let txn = state.db.begin().await.map_err(ChangeError::Db)?;
+    crate::utils::advisory_lock::lock_xact(&txn, &format!("language-pack:{locale}"))
+        .await
+        .map_err(ChangeError::Db)?;
+    let taken = txn
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT id FROM plugin \
+              WHERE id <> $1 AND is_enabled AND governs->>'host_locale' = $2 \
+              ORDER BY id LIMIT 1",
+            [plugin_id.into(), locale.into()],
+        ))
+        .await
+        .map_err(ChangeError::Db)?;
+    if let Some(row) = taken {
+        return Err(ChangeError::LanguagePackTaken {
+            locale: locale.to_string(),
+            by: row.try_get("", "id").map_err(ChangeError::Db)?,
+        });
+    }
+    let generation = publish(&txn, plugin_id, change, loaded, source)
+        .await
+        .map_err(ChangeError::Db)?;
+    txn.commit().await.map_err(ChangeError::Db)?;
+    Ok(generation)
 }
 
 /// What the serving replica loaded for a change it publishes.
@@ -1162,6 +1217,8 @@ enum ChangeError {
     Stale(String),
     /// An upload meant to add a new plugin, but a plugin with its id exists.
     AlreadyExists(String),
+    /// A language pack for a locale another enabled pack provides.
+    LanguagePackTaken { locale: String, by: String },
 }
 
 impl std::fmt::Display for ChangeError {
@@ -1172,6 +1229,9 @@ impl std::fmt::Display for ChangeError {
             ChangeError::NotEnabled(id) => write!(f, "Plugin '{id}' is not enabled"),
             ChangeError::Stale(id) => write!(f, "Plugin '{id}' changed on another server"),
             ChangeError::AlreadyExists(id) => write!(f, "Plugin '{id}' already exists"),
+            ChangeError::LanguagePackTaken { locale, by } => {
+                write!(f, "The language pack '{by}' already provides '{locale}'")
+            }
         }
     }
 }
@@ -1188,6 +1248,10 @@ impl From<ChangeError> for AppError {
                 "Plugin '{id}' was changed through another server meanwhile; refresh and try again"
             )),
             ChangeError::AlreadyExists(id) => AppError::PluginExists(id),
+            ChangeError::LanguagePackTaken { locale, by } => AppError::LanguagePackTaken {
+                locale,
+                plugin_id: by,
+            },
         }
     }
 }
@@ -1234,10 +1298,18 @@ async fn load_then_publish(
         fingerprint: fingerprint.as_ref(),
         governs: Some(&governs),
     };
-    let published = match publish(state, plugin_id, change, loaded, source).await {
+    let published = match &governs.host_locale {
+        Some(locale) => {
+            publish_language_pack(state, plugin_id, locale, change, loaded, source).await
+        }
+        None => publish(&state.db, plugin_id, change, loaded, source)
+            .await
+            .map_err(ChangeError::Db),
+    };
+    let published = match published {
         Ok(Some(generation)) => Ok(generation),
         Ok(None) => Err(refused(state, plugin_id, change).await),
-        Err(e) => Err(ChangeError::Db(e)),
+        Err(e) => Err(e),
     };
     let generation = match published {
         Ok(generation) => generation,
@@ -1403,7 +1475,7 @@ pub async fn disable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
     let result = with_applied(state, async |applied| {
         let source = published_source(state, id).await?;
         let Some(generation) = publish(
-            state,
+            &state.db,
             plugin_id,
             Change::Disable,
             Loaded::default(),
@@ -1589,7 +1661,7 @@ pub async fn remove_upload(
                     fingerprint: fingerprint.as_ref(),
                     governs: None,
                 };
-                let generation = publish(state, plugin_id, change, loaded, &PluginSource::Bundle)
+                let generation = publish(&state.db, plugin_id, change, loaded, &PluginSource::Bundle)
                 .await?
                 .ok_or_else(stale)?;
                 let desired = Desired {
@@ -1663,7 +1735,7 @@ pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError>
             tracing::error!("Failed to rediscover plugins: {}", e);
             Vec::new()
         });
-        register_rows(state, &new_ids).await?;
+        register_rows(&state.db, &new_ids).await?;
         // A new row starts enabled unless an operator already recorded it as
         // disabled; apply whatever the table says.
         let rows = plugin_entity::Entity::find().all(&state.db).await?;
@@ -1703,6 +1775,84 @@ pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two replicas booting together register overlapping plugin rows. One
+    /// holds the row of `a` (its insert has not committed) while the other
+    /// registers `b` and `a`, listed in the order a hash map gave them: the
+    /// second waits on `a` before it touches `b`, so the first registering
+    /// `b` next goes through instead of deadlocking, and both finish.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replicas_registering_the_same_plugins_together_never_deadlock() {
+        use sea_orm::TransactionTrait;
+        use testcontainers::ImageExt;
+        use testcontainers::runners::AsyncRunner;
+
+        let container = testcontainers_modules::postgres::Postgres::default()
+            .with_tag("17-alpine")
+            .start()
+            .await
+            .expect("start postgres");
+        let port = container.get_host_port_ipv4(5432).await.expect("port");
+        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        crate::database::BootSession::acquire(&url)
+            .await
+            .expect("boot session")
+            .migrate()
+            .await
+            .expect("migrate");
+        let connect = || async {
+            common::db::DatabaseConnection::from(
+                sea_orm::Database::connect(&url).await.expect("connect"),
+            )
+        };
+        let (first, second, observer) = (connect().await, connect().await, connect().await);
+
+        let holding = first.begin().await.expect("begin");
+        register_rows(&holding, &["a".to_string()])
+            .await
+            .expect("insert");
+        let registering = tokio::spawn(async move {
+            register_rows(&second, &["b".to_string(), "a".to_string()]).await
+        });
+        // The second replica waits on the row the first holds.
+        loop {
+            let waiting = observer
+                .query_one_raw(Statement::from_string(
+                    DbBackend::Postgres,
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE wait_event_type = 'Lock' AND query LIKE 'INSERT INTO \"plugin\"%'",
+                ))
+                .await
+                .expect("activity")
+                .expect("row")
+                .try_get_by_index::<i64>(0)
+                .expect("count");
+            if waiting > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        holding
+            .execute_unprepared("SET LOCAL lock_timeout = '10s'")
+            .await
+            .expect("lock timeout");
+        register_rows(&holding, &["b".to_string()])
+            .await
+            .expect("insert");
+        holding.commit().await.expect("commit");
+        registering
+            .await
+            .expect("join")
+            .expect("the second replica registers too");
+        assert_eq!(
+            plugin_entity::Entity::find()
+                .all(&observer)
+                .await
+                .expect("rows")
+                .len(),
+            2
+        );
+    }
 
     #[test]
     fn retry_delay_doubles_and_is_capped() {

@@ -34,6 +34,48 @@ impl PluginSql {
         let read = self.read_scopes(plugin_id);
         self.pools.lease(plugin_id, &read, call).await
     }
+
+    /// Run `statement`, a plugin statement outside any transaction, for
+    /// `call` on a connection of its own, cut at the call's deadline. The
+    /// connection's backend is known before the statement starts, so a cut
+    /// statement is cancelled there: it never applies after its call was
+    /// answered "unavailable", and its connection returns to the pool once
+    /// the cancel lands, not when the statement would have finished. The
+    /// bound is the host's own cancel, whatever the session's settings say.
+    async fn standalone<T>(
+        &self,
+        plugin_id: &str,
+        call: &crate::plugin_db::SqlCall,
+        statement: impl AsyncFnOnce(&mut sea_orm::sqlx::PgConnection) -> Result<T, sea_orm::sqlx::Error>,
+    ) -> Result<Result<T, sea_orm::sqlx::Error>, crate::plugin_db::Unavailable> {
+        let lease = self.lease(plugin_id, call).await?;
+        let (mut conn, pid) = match by_deadline(call.deadline, lease.connection()).await? {
+            Ok(opened) => opened,
+            Err(e) => return Ok(Err(e)),
+        };
+        match by_deadline(call.deadline, statement(&mut conn)).await {
+            Ok(result) => Ok(result),
+            Err(cut) => {
+                // The connection stays held until the cancel is sent, so the
+                // cancel never lands on a later statement that reuses it.
+                self.pools.cancel_backend(pid).await;
+                drop(conn);
+                Err(cut)
+            }
+        }
+    }
+}
+
+/// `stmt` as a sqlx query, bound as sea-orm binds it, so a plugin
+/// statement prepares the same way on every path.
+fn sqlx_query(
+    stmt: &Statement,
+) -> sea_orm::sqlx::query::Query<'_, sea_orm::sqlx::Postgres, sea_query_sqlx::SqlxValues> {
+    let values = stmt.values.clone().unwrap_or(sea_orm::Values(Vec::new()));
+    sea_orm::sqlx::query_with(
+        sea_orm::sqlx::AssertSqlSafe(stmt.sql.as_str()),
+        sea_query_sqlx::SqlxValues(values),
+    )
 }
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
@@ -230,12 +272,14 @@ fn with_owned_txn<R>(
     match runtime.block_on(by_deadline(deadline, statement(txn))) {
         Ok(result) => Ok(result),
         Err(cut) => {
-            drop(guard);
+            // Cancelled under the transaction's lock, so the cancel never
+            // lands on another statement that takes the lock next.
             runtime.block_on(sql.pools.cancel_backend(entry.pid));
             txn_map
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .remove(txn_id);
+            drop(guard);
             entry.discard();
             Err(unavailable(cut))
         }
@@ -471,7 +515,8 @@ fn scrub_sql_for_guard(sql: &str) -> Result<String, ()> {
 /// Reject a raw plugin-`sql`-capability statement that changes the session role
 /// or authorization, runs an anonymous code block, or changes a host-enforced
 /// session bound ([`common::db::ENFORCED_SESSION_SETTINGS`]) in any scope,
-/// through `SET`, `SET LOCAL`, `set_config` or an `UPDATE` of `pg_settings`.
+/// through `SET`, `SET LOCAL`, `set_config` or `pg_settings` (named in any
+/// form: a view over it carries its update rule).
 /// A session-level `SET statement_timeout = 0` would outlive the call on the
 /// pooled connection and unbound every later plugin call that reuses it, and
 /// a `SET LOCAL` one would leave the rest of its transaction unbounded. Role
@@ -506,7 +551,7 @@ fn reject_session_escape(plugin_id: &str, sql: &str) -> Result<(), extism::Error
             "Rejected a role/session change on the plugin SQL path",
         );
         return Err(extism::Error::msg(
-            "not permitted on the plugin SQL capability: SET/RESET ROLE, SET SESSION AUTHORIZATION, set_config, ALTER ROLE/USER, DISCARD, anonymous code blocks, and changes to host-enforced settings (statement_timeout, tcp_keepalives_*) in any scope are forbidden",
+            "not permitted on the plugin SQL capability: SET/RESET ROLE, SET SESSION AUTHORIZATION, set_config, ALTER ROLE/USER, DISCARD, anonymous code blocks, pg_settings, and changes to host-enforced settings (statement_timeout, tcp_keepalives_*) in any scope are forbidden",
         ));
     }
     Ok(())
@@ -573,9 +618,11 @@ fn statement_escapes_session(stmt: &str) -> bool {
     {
         return true;
     }
-    // `UPDATE pg_settings SET setting = ..` is `set_config` by another name:
-    // the view's update rule applies it to the session.
-    if tokens.contains(&"pg_settings") && tokens.contains(&"update") {
+    // `pg_settings` is `set_config` by another name: its update rule applies
+    // an `UPDATE` to the session, through the view itself or any view,
+    // rule or statement built on it. A plugin never needs it, so a statement
+    // naming it in any form is refused.
+    if tokens.contains(&"pg_settings") {
         return true;
     }
     // A SET/RESET changes the role or session authorization when, allowing an
@@ -683,10 +730,9 @@ host_fn!(pub db_execute(user_data: Arc<(String, PluginSql)>; sql: String, args: 
     let stmt = plugin_statement(&sql, values);
 
     let call = crate::plugin_db::SqlCall::current();
-    let exec_result = tokio::runtime::Handle::current().block_on(async {
-        let lease = pools.lease(plugin_id, &call).await?;
-        by_deadline(call.deadline, lease.db.execute_raw(stmt)).await
-    }).map_err(unavailable)?;
+    let exec_result = tokio::runtime::Handle::current().block_on(
+        pools.standalone(plugin_id, &call, async |conn| sqlx_query(&stmt).execute(conn).await),
+    ).map_err(unavailable)?;
 
     match exec_result {
         Ok(res) => HostDbResponse::ok(JsonValue::from(res.rows_affected())).to_json_string(),
@@ -712,14 +758,15 @@ host_fn!(pub db_query(user_data: Arc<(String, PluginSql)>; sql: String, args: St
     let stmt = plugin_statement(&wrapped_sql, values);
 
     let call = crate::plugin_db::SqlCall::current();
-    let query_result = tokio::runtime::Handle::current().block_on(async {
-        let lease = pools.lease(plugin_id, &call).await?;
-        by_deadline(call.deadline, lease.db.query_one_raw(stmt)).await
-    }).map_err(unavailable)?;
+    let query_result = tokio::runtime::Handle::current().block_on(
+        pools.standalone(plugin_id, &call, async |conn| {
+            sqlx_query(&stmt).fetch_optional(conn).await
+        }),
+    ).map_err(unavailable)?;
 
     match query_result {
-        Ok(Some(res)) => {
-            let json_val: serde_json::Value = res.try_get("", "json_data")
+        Ok(Some(row)) => {
+            let json_val: serde_json::Value = sea_orm::sqlx::Row::try_get(&row, "json_data")
                 .unwrap_or(serde_json::json!([]));
             HostDbResponse::ok(json_val).to_json_string()
         },
@@ -1033,6 +1080,10 @@ mod tests {
             "SET LOCAL statement_timeout TO 5000",
             "UPDATE pg_settings SET setting = '0' WHERE name = 'statement_timeout'",
             "update pg_catalog.pg_settings set setting = '0'",
+            // any statement naming pg_settings: a view or rule over it
+            // carries its update rule to a statement that does not name it
+            "CREATE VIEW v AS SELECT name, setting FROM pg_settings",
+            "SELECT setting FROM \"pg_settings\" WHERE name = 'statement_timeout'",
             "SET SESSION statement_timeout TO 0",
             "set statement_timeout to default",
             "SELECT 1; SET tcp_keepalives_idle = 0",
@@ -1148,8 +1199,6 @@ mod tests {
             // a column named like an enforced setting is DML, not a SET command
             "UPDATE t SET statement_timeout = 5 WHERE id = 1",
             "RESET statement_timeout",
-            // reading the settings changes nothing
-            "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
             // scope keyword before a NON-role parameter must stay allowed
             "SET LOCAL lock_timeout = 5000",
             "SET SESSION search_path TO my_schema",
@@ -1297,6 +1346,84 @@ mod tests {
             .expect("the cancelled statement returns the connection")
             .expect("begin");
         reclaimed.rollback().await.expect("rollback");
+    }
+
+    /// A statement outside a transaction still running at its call's
+    /// deadline is cancelled on its backend: once the plugin's backends are
+    /// idle, the write the cut statement would have made is not there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_standalone_statement_cut_at_its_deadline_never_applies() {
+        let (_container, url, db) = one_connection().await;
+        crate::database::BootSession::acquire(&url)
+            .await
+            .expect("boot session")
+            .migrate()
+            .await
+            .expect("migrate");
+        let sql = plugin_sql(&url).await;
+        let call = |deadline: Option<Instant>| crate::plugin_db::SqlCall {
+            deadline,
+            ..Default::default()
+        };
+        sql.standalone("p", &call(None), async |conn| {
+            sqlx_query(&Statement::from_string(
+                DbBackend::Postgres,
+                "CREATE TABLE t (v text)",
+            ))
+            .execute(conn)
+            .await
+        })
+        .await
+        .expect("leased")
+        .expect("created");
+
+        let cut = sql
+            .standalone(
+                "p",
+                &call(Some(Instant::now() + Duration::from_millis(300))),
+                async |conn| {
+                    sqlx_query(&Statement::from_string(
+                        DbBackend::Postgres,
+                        "INSERT INTO t SELECT 'late' FROM pg_sleep(3)",
+                    ))
+                    .execute(conn)
+                    .await
+                },
+            )
+            .await;
+        assert!(
+            matches!(cut, Err(crate::plugin_db::Unavailable::Deadline)),
+            "the statement is cut at the deadline"
+        );
+
+        loop {
+            let active = db
+                .query_one_raw(Statement::from_string(
+                    DbBackend::Postgres,
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE state = 'active' AND query LIKE 'INSERT INTO t %'",
+                ))
+                .await
+                .expect("activity")
+                .expect("row")
+                .try_get_by_index::<i64>(0)
+                .expect("count");
+            if active == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let rows = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT count(*) FROM plugin_p.t",
+            ))
+            .await
+            .expect("count")
+            .expect("row")
+            .try_get_by_index::<i64>(0)
+            .expect("int");
+        assert_eq!(rows, 0, "the cut statement never applied");
     }
 
     /// A transaction lives no longer than the call tree that opened it: one

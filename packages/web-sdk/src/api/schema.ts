@@ -5409,7 +5409,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description What the archive replaces (`replaces`) is no longer what is published: another change landed since the archive was inspected (CONFLICT); or `replaces` is `new` but a plugin with this id exists (PLUGIN_EXISTS) */
+      /** @description What the archive replaces (`replaces`) is no longer what is published: another change landed since the archive was inspected (CONFLICT); or `replaces` is `new` but a plugin with this id exists (PLUGIN_EXISTS); or the archive is a language pack for a locale another enabled language pack provides (LANGUAGE_PACK_TAKEN) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -5940,7 +5940,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin already enabled (CONFLICT) */
+      /** @description Plugin already enabled (CONFLICT); or it is a language pack for a locale another enabled language pack provides (LANGUAGE_PACK_TAKEN) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -5999,7 +5999,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin not enabled, or changed through another replica meanwhile (CONFLICT) */
+      /** @description Plugin not enabled, or changed through another replica meanwhile (CONFLICT); or it is a language pack for a locale another enabled language pack provides (LANGUAGE_PACK_TAKEN) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -6061,7 +6061,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The plugin has no uploaded version, it changed through another replica meanwhile, or this replica would do something other than `expect` (CONFLICT) */
+      /** @description The plugin has no uploaded version, it changed through another replica meanwhile, or this replica would do something other than `expect` (CONFLICT); or the bundled copy is a language pack for a locale another enabled language pack provides (LANGUAGE_PACK_TAKEN) */
       409: {
         headers: {
           [name: string]: unknown;

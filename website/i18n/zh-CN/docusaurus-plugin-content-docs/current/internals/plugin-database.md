@@ -88,13 +88,13 @@ read = ["submission.files"]
 插件的 SQL 在执行它的调用的截止时间内运行（`executor::current_deadline`，由 `plugin_db::SqlCall` 携带）：
 
 - 租用等待许可的时间不超过截止时间与连接池获取超时中较早者，之后使调用以不可用失败；
-- 每条语句，无论是否在事务中，都在截止时间被截断。事务在开始时记录其后端的 pid；事务中在截止时间被截断的语句会在后端被取消（`pg_cancel_backend`，通过持有每个插件角色的应用角色执行），事务随之回滚，归还其连接和许可；
+- 每条语句，无论是否在事务中，都在截止时间被截断，并在其后端被取消（`pg_cancel_backend`，通过持有每个插件角色的应用角色执行），因此被截断的写入绝不会在其调用已被答复“不可用”之后生效。事务之外的语句运行在宿主为它租用的连接上，宿主事先读取了该连接后端的 pid；事务在开始时记录其后端的 pid，事务中被截断的语句还会使事务回滚，归还其连接和许可。取消在连接（或事务的锁）仍被持有时发出，因此绝不会落到之后的语句上；
 - 事务的存活时间不超过打开它的调用树：调用树结束时仍未结束的事务（客体陷入 trap、被取消或未提交就返回）此时从调用树的 `CallLocals` 中回滚；
-- 每条语句的后端仍受宿主强制的 `statement_timeout` 约束，而任何插件语句都无法修改它（见 [SQL 防护](#sql-防护)），因此事务之外被截断的语句也在那里结束。
+- 宿主强制的 `statement_timeout`（任何插件语句都无法修改它，见 [SQL 防护](#sql-防护)）约束宿主进程已不在的后端；截止时间并不依赖它。
 
 ## SQL 防护
 
-`host_funcs/sql.rs` 中的 `reject_session_escape` 拒绝角色变更、`set_config`、`ALTER ROLE` 与 `ALTER USER`、`DISCARD`、`DO`、例程定义、对 `pg_settings` 的 `UPDATE`（它像 `set_config` 一样应用设置），以及对宿主强制设置的任何 `SET`，包括 `SET LOCAL`。角色变更由引擎约束；该防护阻止插件修改自身角色的密码或默认设置，并防止插件为其连接或事务解除 `statement_timeout` 的限制。
+`host_funcs/sql.rs` 中的 `reject_session_escape` 拒绝角色变更、`set_config`、`ALTER ROLE` 与 `ALTER USER`、`DISCARD`、`DO`、例程定义、任何提及 `pg_settings` 的语句（它的更新规则像 `set_config` 一样应用设置，无论是通过该视图本身还是基于它的视图），以及对宿主强制设置的任何 `SET`，包括 `SET LOCAL`。角色变更由引擎约束；该防护阻止插件修改自身角色的密码或默认设置，并防止插件为其连接或事务解除 `statement_timeout` 的限制。
 
 ## 边界不覆盖的部分
 

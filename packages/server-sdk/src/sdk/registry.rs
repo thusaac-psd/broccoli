@@ -8,6 +8,12 @@ use crate::error::SdkError;
 pub struct Registry {}
 
 #[cfg(target_arch = "wasm32")]
+use crate::types::host_io::{
+    EvaluatorHandlers, RegisterCheckerResolverInput, RegisterContestTypeInput,
+    RegisterEvaluatorInput, RegisterLanguageResolverInput,
+};
+
+#[cfg(target_arch = "wasm32")]
 impl Registry {
     pub fn register_contest_type(
         &self,
@@ -15,11 +21,12 @@ impl Registry {
         submission_handler: &str,
         code_run_handler: &str,
     ) -> Result<(), SdkError> {
-        let input = serde_json::json!({
-            "type": contest_type,
-            "submission_handler": submission_handler,
-            "code_run_handler": code_run_handler,
-        });
+        let input = RegisterContestTypeInput {
+            contest_type: contest_type.to_string(),
+            submission_handler: submission_handler.to_string(),
+            code_run_handler: code_run_handler.to_string(),
+            submission_admission: false,
+        };
         unsafe { crate::host::raw::register_contest_type(serde_json::to_string(&input)?)? };
         Ok(())
     }
@@ -30,12 +37,12 @@ impl Registry {
         submission_handler: &str,
         code_run_handler: &str,
     ) -> Result<(), SdkError> {
-        let input = serde_json::json!({
-            "type": contest_type,
-            "submission_handler": submission_handler,
-            "code_run_handler": code_run_handler,
-            "submission_admission": true,
-        });
+        let input = RegisterContestTypeInput {
+            contest_type: contest_type.to_string(),
+            submission_handler: submission_handler.to_string(),
+            code_run_handler: code_run_handler.to_string(),
+            submission_admission: true,
+        };
         unsafe { crate::host::raw::register_contest_type(serde_json::to_string(&input)?)? };
         Ok(())
     }
@@ -43,10 +50,12 @@ impl Registry {
     /// Register `handler` to evaluate test cases of `evaluator_type`, one
     /// call per case. The handler starts and awaits its own operations.
     pub fn register_evaluator(&self, evaluator_type: &str, handler: &str) -> Result<(), SdkError> {
-        let input = serde_json::json!({
-            "type": evaluator_type,
-            "handler": handler,
-        });
+        let input = RegisterEvaluatorInput {
+            problem_type: evaluator_type.to_string(),
+            handlers: EvaluatorHandlers::Direct {
+                handler: handler.to_string(),
+            },
+        };
         unsafe { crate::host::raw::register_evaluator(serde_json::to_string(&input)?)? };
         Ok(())
     }
@@ -63,11 +72,13 @@ impl Registry {
         prepare_handler: &str,
         interpret_handler: &str,
     ) -> Result<(), SdkError> {
-        let input = serde_json::json!({
-            "type": evaluator_type,
-            "prepare_handler": prepare_handler,
-            "interpret_handler": interpret_handler,
-        });
+        let input = RegisterEvaluatorInput {
+            problem_type: evaluator_type.to_string(),
+            handlers: EvaluatorHandlers::Staged {
+                prepare_handler: prepare_handler.to_string(),
+                interpret_handler: interpret_handler.to_string(),
+            },
+        };
         unsafe { crate::host::raw::register_evaluator(serde_json::to_string(&input)?)? };
         Ok(())
     }
@@ -81,11 +92,11 @@ impl Registry {
         resolve_handler: &str,
         interpret_handler: &str,
     ) -> Result<(), SdkError> {
-        let input = serde_json::json!({
-            "format": format,
-            "resolve_handler": resolve_handler,
-            "interpret_handler": interpret_handler,
-        });
+        let input = RegisterCheckerResolverInput {
+            checker_format: format.to_string(),
+            resolve_handler: resolve_handler.to_string(),
+            interpret_handler: interpret_handler.to_string(),
+        };
         unsafe { crate::host::raw::register_checker_resolver(serde_json::to_string(&input)?)? };
         Ok(())
     }
@@ -99,14 +110,14 @@ impl Registry {
         extensions: &[&str],
         template: &str,
     ) -> Result<(), SdkError> {
-        let input = serde_json::json!({
-            "language_id": language_id,
-            "function_name": function_name,
-            "display_name": display_name,
-            "default_filename": default_filename,
-            "extensions": extensions,
-            "template": template,
-        });
+        let input = RegisterLanguageResolverInput {
+            language_id: language_id.to_string(),
+            function_name: function_name.to_string(),
+            display_name: display_name.to_string(),
+            default_filename: default_filename.to_string(),
+            extensions: extensions.iter().map(|e| e.to_string()).collect(),
+            template: template.to_string(),
+        };
         unsafe { crate::host::raw::register_language_resolver(serde_json::to_string(&input)?)? };
         Ok(())
     }

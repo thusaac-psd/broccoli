@@ -127,36 +127,28 @@ fn remaining_timeout_ms(started: Instant, timeout_ms: u64) -> Option<u64> {
 }
 
 #[cfg(target_arch = "wasm32")]
+use crate::types::host_io::{BatchId, NextResultInput, NextResultOutput};
+
+#[cfg(target_arch = "wasm32")]
 impl Operations {
     fn start_batch(&self, tasks: &[OperationTask]) -> Result<String, SdkError> {
         let ops_json = serde_json::to_string(tasks)?;
         let response_json = unsafe { crate::host::raw::start_operation_batch(ops_json)? };
-        let response: serde_json::Value = serde_json::from_str(&response_json)?;
-        response["batch_id"]
-            .as_str()
-            .map(String::from)
-            .ok_or_else(|| {
-                SdkError::HostCall("Missing batch_id in start_operation_batch response".into())
-            })
+        let started: BatchId = serde_json::from_str(&response_json)?;
+        Ok(started.batch_id)
     }
 
     fn next_result(&self, batch_id: &str, timeout_ms: u64) -> Result<OperationResult, SdkError> {
-        let input = serde_json::json!({
-            "batch_id": batch_id,
-            "timeout_ms": timeout_ms,
-        });
+        let input = NextResultInput {
+            batch_id: batch_id.to_string(),
+            timeout_ms,
+        };
         let result_json =
             unsafe { crate::host::raw::get_next_operation_result(serde_json::to_string(&input)?)? };
-        let envelope: serde_json::Value = serde_json::from_str(&result_json)?;
-
-        let task_result = envelope
-            .get("result")
-            .filter(|v| !v.is_null())
+        let next: NextResultOutput<serde_json::Value> = serde_json::from_str(&result_json)?;
+        let output = next
+            .result
             .ok_or_else(|| SdkError::HostCall("Operation timed out — no result received".into()))?;
-
-        let output = task_result
-            .get("output")
-            .ok_or_else(|| SdkError::HostCall("Missing 'output' in TaskResult".into()))?;
 
         serde_json::from_value::<OperationResult>(output.clone()).map_err(|_| {
             let error_msg = output
@@ -168,7 +160,9 @@ impl Operations {
     }
 
     fn cancel_batch(&self, batch_id: &str) -> Result<(), SdkError> {
-        let input = serde_json::json!({ "batch_id": batch_id });
+        let input = BatchId {
+            batch_id: batch_id.to_string(),
+        };
         unsafe { crate::host::raw::cancel_operation_batch(serde_json::to_string(&input)?)? };
         Ok(())
     }

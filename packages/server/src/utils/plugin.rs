@@ -102,7 +102,7 @@ pub async fn activate_plugin(state: &AppState, plugin_id: &str) -> Result<(), Pl
         let manifest = plugin_manifest(state.plugins.as_ref(), plugin_id)?;
         register_plugin_hooks(state, plugin_id, &manifest).await;
         call_plugin_init(state.plugins.as_ref(), plugin_id).await?;
-        state.plugins.update_translations();
+        update_translations(state).await;
         Ok(())
     }
     .await;
@@ -111,6 +111,28 @@ pub async fn activate_plugin(state: &AppState, plugin_id: &str) -> Result<(), Pl
         fail_plugin(state, plugin_id, error).await;
     }
     result
+}
+
+/// Rebuild the translations this replica serves from its plugins and the
+/// identifiers each one resolves (see
+/// `plugin_core::i18n::served_translations`). Every change to what is loaded
+/// or registered here ends with it.
+pub async fn update_translations(state: &AppState) {
+    use crate::registry::Provided;
+    use plugin_core::i18n::{IdentifierKind, IdentifierOwners};
+
+    let mut owners = IdentifierOwners::default();
+    let registries = &state.registries;
+    for (key, handler) in registries.contest_type_registry.read().await.iter() {
+        owners.insert(IdentifierKind::ContestType, key, handler.plugin_id());
+    }
+    for (key, handler) in registries.evaluator_registry.read().await.iter() {
+        owners.insert(IdentifierKind::ProblemType, key, handler.plugin_id());
+    }
+    for (key, handler) in registries.checker_stage_registry.read().await.iter() {
+        owners.insert(IdentifierKind::Checker, key, handler.plugin_id());
+    }
+    state.plugins.update_translations(&owners);
 }
 
 /// Drop everything a half-activated plugin registered and mark it `Failed`.
@@ -266,8 +288,11 @@ pub(crate) struct LoadFailure {
 /// aside first and put back if anything fails, so a reload that cannot load
 /// never turns a working plugin into a failed one.
 ///
-/// On success the set-aside version is returned, so a caller that must
-/// still confirm the change (publish it to the fleet) can [`roll_back`] to it.
+/// On success the fresh version takes over the set-aside version's pools
+/// (`PluginEntry::succeed`), so calls still running on them are retired when
+/// the plugin is unloaded, and the set-aside version is returned, so a caller
+/// that must still confirm the change (publish it to the fleet) can
+/// [`roll_back`] to it.
 pub(crate) async fn load_from_dir(
     state: &AppState,
     plugin_id: &str,
@@ -305,7 +330,15 @@ pub(crate) async fn load_from_dir(
     });
 
     match activate_plugin(state, plugin_id).await {
-        Ok(()) => Ok(previous),
+        Ok(()) => {
+            if let Some(previous) = &previous
+                && let Ok(mut registry) = registry.write()
+                && let Some(entry) = registry.get_mut(plugin_id)
+            {
+                entry.succeed(&previous.entry);
+            }
+            Ok(previous)
+        }
         Err(error) => match previous {
             Some(previous) => {
                 roll_back(state, plugin_id, previous).await;
@@ -336,16 +369,21 @@ pub(crate) fn register_unloaded(state: &AppState, plugin_id: &str, root: &std::p
     }
 }
 
-/// Put back the version [`load_from_dir`] replaced.
+/// Put back the version [`load_from_dir`] replaced. The refused version's
+/// pool retires: nothing it still runs lands.
 pub(crate) async fn roll_back(state: &AppState, plugin_id: &str, previous: PreviousVersion) {
     purge_plugin_registrations(&state.registries, plugin_id).await;
     let manifest = previous.entry.manifest.clone();
-    if let Ok(mut reg) = state.plugins.get_registry().write() {
-        reg.insert(plugin_id.to_string(), previous.entry);
+    let refused = match state.plugins.get_registry().write() {
+        Ok(mut reg) => reg.insert(plugin_id.to_string(), previous.entry),
+        Err(_) => None,
+    };
+    if let Some(refused) = refused {
+        refused.discard();
     }
     previous.registrations.restore(&state.registries).await;
     register_plugin_hooks(state, plugin_id, &manifest).await;
-    state.plugins.update_translations();
+    update_translations(state).await;
     tracing::warn!(
         plugin_id,
         "Kept the previously loaded version of the plugin"

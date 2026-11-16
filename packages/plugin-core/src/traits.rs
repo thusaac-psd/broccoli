@@ -509,11 +509,10 @@ pub trait PluginManager: PluginInvoker {
             .get_mut(plugin_id)
             .ok_or_else(|| PluginError::NotFound(plugin_id.to_string()))?;
 
-        // Calls still running on the old instances keep running, but their
-        // host functions are refused from now on.
-        if let Some(pool) = plugin_entry.runtime.take() {
-            pool.retire();
-        }
+        // Calls still running on the old instances, of this version or of
+        // one a reload replaced, keep running, but their host functions are
+        // refused from now on.
+        plugin_entry.retire();
         plugin_entry.status = PluginStatus::Unloaded;
 
         info!("Plugin {} unloaded successfully", plugin_entry.manifest);
@@ -567,18 +566,21 @@ pub trait PluginManager: PluginInvoker {
     }
 
     /// Rebuild the served translations from the installed plugins' entries
-    /// (see [`crate::i18n::served_translations`]), which hold their files'
-    /// contents, so it reads no file and one plugin can never fail it for the
-    /// others.
-    fn update_translations(&self) {
+    /// and the identifiers each registered (`owners`, see
+    /// [`crate::i18n::served_translations`]). The entries hold their files'
+    /// contents, so it reads no file and one plugin can never fail it for
+    /// the others.
+    fn update_translations(&self, owners: &crate::i18n::IdentifierOwners) {
         let merged = match self.get_registry().read() {
-            Ok(registry) => crate::i18n::served_translations(registry.values().map(|entry| {
-                crate::i18n::InstalledPacks {
+            Ok(registry) => crate::i18n::served_translations(
+                registry.values().map(|entry| crate::i18n::InstalledPacks {
                     plugin_id: &entry.id,
                     loaded: entry.status == PluginStatus::Loaded,
+                    host_locale: entry.manifest.host_locale(),
                     packs: &entry.translations,
-                }
-            })),
+                }),
+                owners,
+            ),
             Err(_) => {
                 error!("Plugin registry lock poisoned; keeping the served translations");
                 return;

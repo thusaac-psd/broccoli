@@ -345,8 +345,13 @@ impl Submissions {
         submission_id: i32,
         action: &SubmissionFeedbackAction,
     ) -> Result<FeedbackUpdateOutcome, SdkError> {
-        let input = serde_json::json!({"submission_id":submission_id,"action":action});
-        let json = unsafe { crate::host::raw::submission_feedback_update(input.to_string())? };
+        let input = crate::types::host_io::FeedbackUpdateInput {
+            submission_id,
+            action: action.clone(),
+        };
+        let json = unsafe {
+            crate::host::raw::submission_feedback_update(serde_json::to_string(&input)?)?
+        };
         let response: super::shared::HostDbResponse = serde_json::from_str(&json)?;
         Ok(serde_json::from_value(
             response

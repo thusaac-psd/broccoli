@@ -1,5 +1,8 @@
 name = 'zh-cn-language'
 version = '0.1.0'
 
+[language_pack]
+locale = "zh-CN"
+
 [translations]
 zh-CN = "locales/zh-CN.toml"
