@@ -5,7 +5,6 @@ use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
 use broccoli_server_sdk::types::BeforeSubmissionEvent;
 use chrono::Utc;
-use common::SubmissionStatus;
 use sea_orm::*;
 use tracing::instrument;
 
@@ -36,6 +35,7 @@ use crate::hooks;
 use crate::models::problem::validate_contest_type;
 use crate::models::shared::{PageWindow, escape_like};
 use crate::models::submission::*;
+use crate::services::judging;
 use crate::state::AppState;
 use crate::utils::contest::{
     find_contest, require_contest_participant, require_contest_running, required_contest_type,
@@ -196,14 +196,6 @@ pub async fn create_submission(
     let new_submission = submission::ActiveModel {
         files: Set(files_to_json(&payload.files)),
         language: Set(language.clone()),
-        // Persist `Queued` and return 201 immediately. The
-        // per-server claim fiber (see
-        // `dispatcher/claim.rs`) promotes the row to `Pending` and
-        // dispatches it. Spawning `dispatch_to_plugin` from the handler
-        // instead would leave a silent-loss window: an api crash between
-        // commit and spawn would lose the submission with no MQ
-        // message and no recoverable state.
-        status: Set(SubmissionStatus::Queued),
         user_id: Set(auth_user.user_id),
         problem_id: Set(problem_id),
         contest_id: Set(None),
@@ -212,7 +204,12 @@ pub async fn create_submission(
         ..Default::default()
     };
 
-    let model = new_submission.insert(&state.db).await?;
+    // Persisted `Queued` with its first judgement; the claim fiber dispatches
+    // it. Dispatching from the handler instead would lose the submission if
+    // the api crashed between commit and dispatch.
+    let txn = state.db.begin().await?;
+    let (model, _judgement) = judging::create_submission(&txn, new_submission).await?;
+    txn.commit().await?;
 
     fire_after_submission_hooks(
         &state,
@@ -589,13 +586,15 @@ async fn build_visible_judgement(
             .query_one_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "WITH old_results AS (
-                 SELECT * FROM test_case_result WHERE judgement_id = $2
+                 SELECT r.* FROM test_case_result r
+                 JOIN submission_judgement j
+                   ON j.id = r.judgement_id AND j.judge_epoch = r.judge_epoch
+                 WHERE r.judgement_id = $2
              ), current_results AS (
-                 SELECT * FROM test_case_result
-                 WHERE judgement_id = (
-                     SELECT id FROM submission_judgement
-                     WHERE submission_id = $1 AND is_current
-                 )
+                 SELECT r.* FROM test_case_result r
+                 JOIN submission_judgement j
+                   ON j.id = r.judgement_id AND j.judge_epoch = r.judge_epoch
+                 WHERE j.submission_id = $1 AND j.is_current
              )
              SELECT COUNT(*) AS count
              FROM old_results r
@@ -825,10 +824,6 @@ pub async fn create_contest_submission(
     let new_submission = submission::ActiveModel {
         files: Set(files_to_json(&payload.files)),
         language: Set(language.clone()),
-        // See the contest-free `create_submission` handler for the
-        // full rationale - `Queued` is the durable-accept state the claim
-        // fiber transitions to `Pending`.
-        status: Set(SubmissionStatus::Queued),
         user_id: Set(auth_user.user_id),
         problem_id: Set(problem_id),
         contest_id: Set(Some(contest_id)),
@@ -853,7 +848,12 @@ pub async fn create_contest_submission(
             ));
         }
         Some(_) => return Err(AppError::Internal("Unexpected submission admission".into())),
-        None => new_submission.insert(&state.db).await?,
+        None => {
+            let txn = state.db.begin().await?;
+            let (model, _judgement) = judging::create_submission(&txn, new_submission).await?;
+            txn.commit().await?;
+            model
+        }
     };
 
     fire_after_submission_hooks(

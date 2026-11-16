@@ -229,6 +229,7 @@ async fn plugin_cannot_author_a_verdict() {
         time_used: Set(Some(7)),
         memory_used: Set(Some(128)),
         judge_epoch: Set(1),
+        max_judge_epoch: Set(1),
         created_at: Set(now),
         judged_at: Set(Some(now)),
         ..Default::default()

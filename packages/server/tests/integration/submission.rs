@@ -841,6 +841,7 @@ mod judgement_history {
             memory_used: Set(Some(128)),
             compile_output: Set(Some("ok".to_string())),
             judge_epoch: Set(11),
+            max_judge_epoch: Set(11),
             created_at: Set(now),
             judged_at: Set(Some(now)),
             ..Default::default()
@@ -904,13 +905,14 @@ mod judgement_history {
         .await
         .expect("insert test case");
 
-        for (judgement_id, verdict, score) in [
-            (old.id, Verdict::WrongAnswer, 40.0),
-            (current.id, Verdict::Accepted, 100.0),
+        for (judgement, verdict, score) in [
+            (&old, Verdict::WrongAnswer, 40.0),
+            (&current, Verdict::Accepted, 100.0),
         ] {
             test_case_result::ActiveModel {
                 submission_id: Set(submission_id),
-                judgement_id: Set(judgement_id),
+                judgement_id: Set(judgement.id),
+                judge_epoch: Set(judgement.judge_epoch),
                 test_case_id: Set(Some(test_case.id)),
                 run_index: Set(None),
                 verdict: Set(verdict),
@@ -994,6 +996,8 @@ mod judgement_history {
         test_case_result::ActiveModel {
             submission_id: Set(submission_id),
             judgement_id: Set(current_judgement_id),
+            // The current judgement's epoch (see `seed_history`).
+            judge_epoch: Set(11),
             test_case_id: Set(Some(added_case.id)),
             run_index: Set(None),
             verdict: Set(Verdict::Accepted),
@@ -1073,6 +1077,8 @@ mod judgement_history {
             let result = test_case_result::ActiveModel {
                 submission_id: Set(submission_id),
                 judgement_id: Set(current_id),
+                // The current judgement's epoch (see `seed_history`).
+                judge_epoch: Set(11),
                 test_case_id: Set(Some(tc.id)),
                 verdict: Set(Verdict::Accepted),
                 score: Set(1.0),
@@ -2188,14 +2194,9 @@ mod claim_fiber {
             "claim fiber did not promote Queued submission within 5s"
         );
 
-        // Verify the fiber also wrote ownership metadata. Without these
-        // a stuck row would have no path to recovery via the existing
-        // dispatcher/steal scanner.
-        let row = submission::Entity::find_by_id(submission_id)
-            .one(&app.db)
-            .await
-            .expect("db")
-            .expect("submission row");
+        // The claim also stamps ownership on the current judgement, the unit
+        // the lease steal and the stuck detector recover.
+        let row = app.current_judgement(submission_id).await;
         assert!(
             row.owner_server_id.is_some(),
             "claim fiber should set owner_server_id when promoting"
@@ -2229,24 +2230,22 @@ mod claim_fiber {
         let user_id = me.body["id"].as_i64().expect("user id") as i32;
 
         let now = chrono::Utc::now();
-        let inserted = submission::ActiveModel {
-            files: Set(serde_json::json!([
-                {"filename": "main.cpp", "content": "int main(){}"}
-            ])),
-            language: Set("cpp".to_string()),
-            status: Set(common::SubmissionStatus::Queued),
-            user_id: Set(user_id),
-            problem_id: Set(problem_id),
-            contest_id: Set(None),
-            // A contest type this replica has a handler for; the claim fiber
-            // leaves unhandled ones to a replica that can judge them.
-            contest_type: Set("standard".to_string()),
-            created_at: Set(now),
-            ..Default::default()
-        }
-        .insert(&app.db)
-        .await
-        .expect("direct insert should succeed");
+        let inserted = app
+            .insert_submission(submission::ActiveModel {
+                files: Set(serde_json::json!([
+                    {"filename": "main.cpp", "content": "int main(){}"}
+                ])),
+                language: Set("cpp".to_string()),
+                user_id: Set(user_id),
+                problem_id: Set(problem_id),
+                contest_id: Set(None),
+                // A contest type this replica has a handler for; the claim fiber
+                // leaves unhandled ones to a replica that can judge them.
+                contest_type: Set("standard".to_string()),
+                created_at: Set(now),
+                ..Default::default()
+            })
+            .await;
 
         let final_status = poll_until_not_queued(&app, inserted.id, Duration::from_secs(5)).await;
         assert_ne!(
@@ -2295,6 +2294,7 @@ mod claim_fiber {
             contest_type: Set("standard".to_string()),
             created_at: Set(now),
             judge_epoch: Set(1),
+            max_judge_epoch: Set(1),
             ..Default::default()
         }
         .insert(&app.db)
@@ -2383,20 +2383,19 @@ mod backpressure {
     /// also lets us land on an exact depth deterministically.
     async fn stage_queued_submissions(app: &TestApp, user_id: i32, problem_id: i32, n: usize) {
         for _ in 0..n {
-            let row = submission::ActiveModel {
+            app.insert_submission(submission::ActiveModel {
                 files: Set(serde_json::json!([
                     {"filename": "main.cpp", "content": "int main(){}"}
                 ])),
                 language: Set("cpp".into()),
-                status: Set(common::SubmissionStatus::Queued),
                 user_id: Set(user_id),
                 problem_id: Set(problem_id),
                 contest_id: Set(None),
                 contest_type: Set("standard".into()),
                 created_at: Set(Utc::now() - Duration::minutes(2)),
                 ..Default::default()
-            };
-            row.insert(&app.db).await.expect("stage queued row");
+            })
+            .await;
         }
     }
 
@@ -2498,11 +2497,9 @@ mod backpressure {
 
     /// **Test 3**: covers a second site (`run_code`) to confirm the
     /// admission check is wired at the code-run endpoint too. Same
-    /// pre-staged-depth pattern: one direct-insert into the
-    /// `submission` table is enough to trip the cap because
-    /// `count_queued_rows` sums depth across the three durable-accept
-    /// tables (`submission`, `code_run`, `submission_judgement`),
-    /// not just the table being written.
+    /// pre-staged-depth pattern: one queued submission is enough to trip
+    /// the cap because `count_queued_rows` sums queued judgements and code
+    /// runs, not just the table being written.
     #[tokio::test]
     async fn run_code_rejects_when_queue_depth_at_cap() {
         let app = TestApp::spawn_with_options(SpawnOptions {
@@ -2536,9 +2533,8 @@ mod backpressure {
     /// **Test 4**: covers `rejudge_submission` - confirms that
     /// non-ingress write paths that also insert a `Queued` row are
     /// gated by the same cap. Picks the deferred-rejudge branch
-    /// (`apply_immediately=false`) because that one writes the
-    /// `Queued` row into `submission_judgement`, not `submission`,
-    /// proving the count helper sums correctly across tables.
+    /// (`apply_immediately=false`) because that one queues a non-current
+    /// judgement and leaves the submission alone.
     #[tokio::test]
     async fn rejudge_rejects_when_queue_depth_at_cap() {
         let app = TestApp::spawn_with_options(SpawnOptions {
@@ -2770,7 +2766,12 @@ mod rejudge_lifecycle {
 
     /// A judged standalone submission at `judge_epoch = 11` with one finalized
     /// current judgement, i.e. the normal state before an admin rejudges.
-    async fn seed_judged(app: &TestApp, token: &str, problem_id: i32, retry_count: i32) -> i32 {
+    async fn seed_judged(
+        app: &TestApp,
+        token: &str,
+        problem_id: i32,
+        system_error_retries: i32,
+    ) -> i32 {
         let user_id = app.get_with_token(routes::ME, token).await.id();
         let now = Utc::now();
         let sub = submission::ActiveModel {
@@ -2784,7 +2785,8 @@ mod rejudge_lifecycle {
             verdict: Set(Some(Verdict::Accepted)),
             score: Set(Some(100.0)),
             judge_epoch: Set(11),
-            retry_count: Set(retry_count),
+            max_judge_epoch: Set(11),
+            system_error_retries: Set(system_error_retries),
             created_at: Set(now),
             judged_at: Set(Some(now)),
             ..Default::default()
@@ -2801,7 +2803,6 @@ mod rejudge_lifecycle {
             verdict: Set(Some(Verdict::Accepted)),
             score: Set(Some(100.0)),
             judge_epoch: Set(11),
-            retry_count: Set(retry_count),
             created_at: Set(now),
             finalized_at: Set(Some(now)),
             ..Default::default()
@@ -3030,10 +3031,7 @@ mod rejudge_lifecycle {
             contest_type: Set("standard".into()),
             status: Set(SubmissionStatus::Running),
             judge_epoch: Set(5),
-            retry_count: Set(1),
-            owner_server_id: Set(Some("server-x".into())),
-            lease_heartbeat_at: Set(Some(now)),
-            leased_at: Set(Some(now)),
+            max_judge_epoch: Set(5),
             created_at: Set(now),
             ..Default::default()
         }
@@ -3047,7 +3045,9 @@ mod rejudge_lifecycle {
             is_finalized: Set(false),
             status: Set(SubmissionStatus::Running),
             judge_epoch: Set(5),
-            retry_count: Set(1),
+            owner_server_id: Set(Some("server-x".into())),
+            lease_heartbeat_at: Set(Some(now)),
+            leased_at: Set(Some(now)),
             created_at: Set(now),
             ..Default::default()
         }
@@ -3089,11 +3089,10 @@ mod rejudge_lifecycle {
         assert_eq!(discard.status, 204, "discard: {}", discard.text);
     }
 
-    /// A rejudge starts a fresh judging attempt with `retry_count` reset to 0, so lease
-    /// steal and stuck retries get their full budget instead of inheriting the previous
-    /// attempt's count.
+    /// A rejudge starts a fresh judging attempt: the submission's system-error retry
+    /// budget starts over, and the new judgement has its full dispatch-retry budget.
     #[tokio::test]
-    async fn rejudge_resets_retry_budget() {
+    async fn rejudge_resets_retry_budgets() {
         let app = TestApp::spawn().await;
         let token = app
             .create_user_with_role("rejudge_admin", "password123", "admin")
@@ -3112,9 +3111,10 @@ mod rejudge_lifecycle {
             .expect("db")
             .expect("submission");
         assert_eq!(
-            sub.retry_count, 0,
+            sub.system_error_retries, 0,
             "fresh judging attempt inherited the previous attempt's retry budget"
         );
+        assert_eq!(app.current_judgement(sid).await.dispatch_retries, 0);
     }
 }
 

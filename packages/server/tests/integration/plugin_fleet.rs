@@ -247,7 +247,7 @@ async fn a_replica_without_the_plugin_leaves_due_timers_for_one_that_has_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_replica_without_the_contest_type_leaves_queued_work_for_one_that_has_it() {
     use common::SubmissionStatus;
-    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+    use sea_orm::{EntityTrait, Set};
     use server::entity::submission;
 
     let a = TestApp::spawn().await;
@@ -295,25 +295,17 @@ async fn a_replica_without_the_contest_type_leaves_queued_work_for_one_that_has_
         created_at: Set(chrono::Utc::now() - chrono::Duration::hours(2)),
         ..Default::default()
     };
-    let row = queued("fleet-only").insert(&a.db).await.unwrap();
+    let row = a.insert_submission(queued("fleet-only")).await;
     // A type no live replica can judge: someone must take it and fail it.
-    let orphan = queued("nobody-has-this").insert(&a.db).await.unwrap();
+    let orphan = a.insert_submission(queued("nobody-has-this")).await;
 
     server::dispatcher::claim::claim_once(&b.state, "replica-b", 32, 0)
         .await
         .unwrap();
-    let after_b = submission::Entity::find_by_id(row.id)
-        .one(&a.db)
-        .await
-        .unwrap()
-        .unwrap();
+    let after_b = a.current_judgement(row.id).await;
     assert_eq!(after_b.status, SubmissionStatus::Queued);
     assert_eq!(after_b.owner_server_id, None, "B must not claim it");
-    let orphan = submission::Entity::find_by_id(orphan.id)
-        .one(&a.db)
-        .await
-        .unwrap()
-        .unwrap();
+    let orphan = a.current_judgement(orphan.id).await;
     assert_eq!(
         orphan.owner_server_id.as_deref(),
         Some("replica-b"),
@@ -323,11 +315,7 @@ async fn a_replica_without_the_contest_type_leaves_queued_work_for_one_that_has_
     server::dispatcher::claim::claim_once(&a.state, "replica-a", 32, 0)
         .await
         .unwrap();
-    let after_a = submission::Entity::find_by_id(row.id)
-        .one(&a.db)
-        .await
-        .unwrap()
-        .unwrap();
+    let after_a = a.current_judgement(row.id).await;
     assert_eq!(after_a.owner_server_id.as_deref(), Some("replica-a"));
 }
 
@@ -744,7 +732,7 @@ async fn a_missing_visibility_plugin_also_hides_its_contests_problems_outside_th
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dispatch_refused_at_shutdown_leaves_the_submission_for_a_peer() {
     use common::SubmissionStatus;
-    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+    use sea_orm::{EntityTrait, Set};
     use server::entity::submission;
 
     let a = TestApp::spawn_with_plugins().await;
@@ -784,21 +772,18 @@ async fn a_dispatch_refused_at_shutdown_leaves_the_submission_for_a_peer() {
         .unwrap()
         .try_get("", "id")
         .unwrap();
-    let row = submission::ActiveModel {
-        files: Set(json!([{ "filename": "main.cpp", "content": "int main() {}" }])),
-        language: Set("cpp".into()),
-        user_id: Set(user_id),
-        problem_id: Set(problem_id),
-        contest_id: Set(None),
-        contest_type: Set("gated".into()),
-        status: Set(SubmissionStatus::Queued),
-        judge_epoch: Set(0),
-        created_at: Set(chrono::Utc::now()),
-        ..Default::default()
-    }
-    .insert(&a.db)
-    .await
-    .unwrap();
+    let row = a
+        .insert_submission(submission::ActiveModel {
+            files: Set(json!([{ "filename": "main.cpp", "content": "int main() {}" }])),
+            language: Set("cpp".into()),
+            user_id: Set(user_id),
+            problem_id: Set(problem_id),
+            contest_id: Set(None),
+            contest_type: Set("gated".into()),
+            created_at: Set(chrono::Utc::now()),
+            ..Default::default()
+        })
+        .await;
 
     // Shutdown has begun: the gate refuses new plugin calls.
     a.state
@@ -822,19 +807,18 @@ async fn a_dispatch_refused_at_shutdown_leaves_the_submission_for_a_peer() {
         "still in flight: {sub:?}"
     );
     assert_eq!(sub.error_code, None, "no failure recorded: {sub:?}");
-    let (subs, _, _) = server::dispatcher::steal::release_owned_leases(&a.db, "stopping")
+    let released = server::services::judging::release_leases(&a.db, "stopping")
         .await
         .unwrap();
-    assert_eq!(subs, 1, "released for a peer to steal");
+    assert_eq!(released.judgements, 1, "requeued for a peer to claim");
 }
 
-/// The stuck-job detector re-dispatches what it recovers on the replica that
-/// runs it, so it leaves work to a live replica that can judge it, like
-/// every other dispatch path.
+/// The stuck-job detector leaves work to a live replica that can judge it,
+/// like every other scan that hands out judging work.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_stuck_detector_leaves_work_to_a_replica_that_can_judge_it() {
     use common::SubmissionStatus;
-    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+    use sea_orm::Set;
     use server::entity::submission;
 
     let a = TestApp::spawn().await;
@@ -860,32 +844,28 @@ async fn the_stuck_detector_leaves_work_to_a_replica_that_can_judge_it() {
     // Owned by a dead server and dispatched long ago: past the in-flight cap,
     // so the detector recovers it directly.
     let long_ago = chrono::Utc::now() - chrono::Duration::hours(5);
-    let row = submission::ActiveModel {
-        files: Set(json!([{ "filename": "main.cpp", "content": "int main() {}" }])),
-        language: Set("cpp".into()),
-        user_id: Set(user_id),
-        problem_id: Set(problem_id),
-        contest_id: Set(None),
-        contest_type: Set("fleet-only".into()),
-        status: Set(SubmissionStatus::Running),
-        owner_server_id: Set(Some("dead-server".into())),
-        lease_heartbeat_at: Set(Some(long_ago)),
-        leased_at: Set(Some(long_ago)),
-        judge_epoch: Set(0),
-        created_at: Set(long_ago),
-        ..Default::default()
-    }
-    .insert(&a.db)
-    .await
-    .unwrap();
+    let row = a
+        .insert_submission(submission::ActiveModel {
+            files: Set(json!([{ "filename": "main.cpp", "content": "int main() {}" }])),
+            language: Set("cpp".into()),
+            user_id: Set(user_id),
+            problem_id: Set(problem_id),
+            contest_id: Set(None),
+            contest_type: Set("fleet-only".into()),
+            created_at: Set(long_ago),
+            ..Default::default()
+        })
+        .await;
+    a.put_in_flight(
+        row.id,
+        SubmissionStatus::Running,
+        "dead-server",
+        Some(long_ago),
+        Some(long_ago),
+    )
+    .await;
     let dlq = a.state.config.mq.dlq.clone();
-    let reload = async || {
-        submission::Entity::find_by_id(row.id)
-            .one(&a.db)
-            .await
-            .unwrap()
-            .unwrap()
-    };
+    let reload = async || a.current_judgement(row.id).await;
 
     server::dlq::detect_stuck_jobs_once(&b.state, &dlq)
         .await
@@ -898,7 +878,8 @@ async fn the_stuck_detector_leaves_work_to_a_replica_that_can_judge_it() {
         .await
         .unwrap();
     let after_a = reload().await;
-    assert_ne!(after_a.judge_epoch, 0, "A recovers it: {after_a:?}");
+    assert_ne!(after_a.judge_epoch, 0, "A requeues it: {after_a:?}");
+    assert_eq!(after_a.status, SubmissionStatus::Queued);
 }
 
 /// Once shutdown has retired this replica's row, nothing may write it back

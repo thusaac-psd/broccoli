@@ -583,7 +583,6 @@ impl TestApp {
                 sweep_interval_secs: 300,
                 max_dispatch_retries: 5,
                 max_system_error_retries: 50,
-                max_stuck_retries: 5,
                 sweeper_dry_run: true,
                 operation_reaper_enabled: false,
                 operation_reaper_interval_secs: 30,
@@ -1135,6 +1134,77 @@ impl TestApp {
             .await;
         assert_eq!(res.status, 201, "create_submission failed: {}", res.text);
         res.id()
+    }
+
+    /// Inserts `new` with its first judgement, as the submit handlers do.
+    pub async fn insert_submission(
+        &self,
+        new: server::entity::submission::ActiveModel,
+    ) -> server::entity::submission::Model {
+        let txn = self.db.begin().await.expect("begin");
+        let (sub, _) = server::services::judging::create_submission(&txn, new)
+            .await
+            .expect("insert submission");
+        txn.commit().await.expect("commit");
+        sub
+    }
+
+    /// The submission's current judgement.
+    pub async fn current_judgement(
+        &self,
+        submission_id: i32,
+    ) -> server::entity::submission_judgement::Model {
+        use server::entity::submission_judgement;
+        submission_judgement::Entity::find()
+            .filter(submission_judgement::Column::SubmissionId.eq(submission_id))
+            .filter(submission_judgement::Column::IsCurrent.eq(true))
+            .one(&self.db)
+            .await
+            .expect("query judgement")
+            .expect("current judgement")
+    }
+
+    /// Puts a submission's current judgement in flight as `owner` would have
+    /// left it: `status`, owned, with the given lease stamps. The submission
+    /// cache follows.
+    pub async fn put_in_flight(
+        &self,
+        submission_id: i32,
+        status: common::SubmissionStatus,
+        owner: &str,
+        lease_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
+        leased_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        use sea_orm::sea_query::Expr;
+        use server::entity::{submission, submission_judgement};
+        submission_judgement::Entity::update_many()
+            .col_expr(
+                submission_judgement::Column::Status,
+                Expr::value(status.to_string()),
+            )
+            .col_expr(
+                submission_judgement::Column::OwnerServerId,
+                Expr::value(Some(owner.to_string())),
+            )
+            .col_expr(
+                submission_judgement::Column::LeaseHeartbeatAt,
+                Expr::value(lease_heartbeat_at),
+            )
+            .col_expr(
+                submission_judgement::Column::LeasedAt,
+                Expr::value(leased_at),
+            )
+            .filter(submission_judgement::Column::SubmissionId.eq(submission_id))
+            .filter(submission_judgement::Column::IsCurrent.eq(true))
+            .exec(&self.db)
+            .await
+            .expect("put judgement in flight");
+        submission::Entity::update_many()
+            .col_expr(submission::Column::Status, Expr::value(status.to_string()))
+            .filter(submission::Column::Id.eq(submission_id))
+            .exec(&self.db)
+            .await
+            .expect("put submission in flight");
     }
 
     pub async fn add_problem_to_contest(&self, contest_id: i32, problem_id: i32, token: &str) {

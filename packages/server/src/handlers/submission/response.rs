@@ -200,6 +200,15 @@ fn result_selection(query: &SubmissionResultQuery) -> Result<(PageWindow, Vec<i3
     Ok((window, ids))
 }
 
+/// Only results written under their judgement's current epoch: a row a
+/// requeued or superseded dispatch left behind is never shown.
+fn results_of_their_judgements_epoch() -> sea_orm::sea_query::SimpleExpr {
+    sea_orm::sea_query::Expr::cust(
+        "test_case_result.judge_epoch = (SELECT j.judge_epoch FROM submission_judgement j \
+         WHERE j.id = test_case_result.judgement_id)",
+    )
+}
+
 async fn load_result_page(
     db: &DatabaseConnection,
     blob_store: &dyn BlobStore,
@@ -211,7 +220,8 @@ async fn load_result_page(
     let default_query = SubmissionResultQuery::default();
     let (window, ids) = result_selection(query.unwrap_or(&default_query))?;
     let mut select = test_case_result::Entity::find()
-        .filter(test_case_result::Column::SubmissionId.eq(submission_id));
+        .filter(test_case_result::Column::SubmissionId.eq(submission_id))
+        .filter(results_of_their_judgements_epoch());
     if let Some(id) = judgement_id {
         select = select.filter(test_case_result::Column::JudgementId.eq(Some(id)));
     }

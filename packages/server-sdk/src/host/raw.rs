@@ -74,17 +74,14 @@ macro_rules! str_host_fns {
     };
 }
 
-// Gated to match their only consumers: every one of these 26 wrappers is
-// called exclusively from `#[cfg(target_arch = "wasm32")]`-gated code in
-// `sdk/db.rs`, `sdk/eval.rs`, `sdk/config.rs`, `sdk/submissions.rs`,
-// `sdk/operations.rs`, `sdk/checker.rs`, `sdk/language.rs`, `sdk/timer.rs`
-// and `sdk/registry.rs` (the host-target `Mock` counterparts hold their own
-// in-memory state and never reach into these FFI wrappers). Without the gate
-// they are unused on host targets and every plugin's host-target build
-// (`cargo test`, `cargo clippy`) emits a "function is never used" warning for
-// each. Same root cause as the `push_judge_sets` re-export fixed for E-2:
-// `-D warnings` only lints the crate under test, and no workspace-scoped
-// gate builds `broccoli-server-sdk` with the `guest` feature that plugins use.
+// Gated to match their only consumers: every one of these wrappers is
+// called exclusively from `#[cfg(target_arch = "wasm32")]`-gated code under
+// `sdk/` (the host-target `Mock` counterparts hold their own in-memory state
+// and never reach into these FFI wrappers). Without the gate they are unused
+// on host targets and every plugin's host-target build (`cargo test`,
+// `cargo clippy`) warns that each function is never used: `-D warnings` only
+// lints the crate under test, and no workspace-scoped gate builds
+// `broccoli-server-sdk` with the `guest` feature that plugins use.
 #[cfg(target_arch = "wasm32")]
 str_host_fns! {
     db_query(sql, args),
@@ -115,6 +112,8 @@ str_host_fns! {
     submission_insert_results(input),
     submission_delete_results(input),
     submission_query_test_cases(input),
+    code_run_update(input),
+    code_run_insert_results(input),
     timer_schedule(input),
     timer_cancel(input),
 }

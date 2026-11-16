@@ -36,6 +36,7 @@ async fn seed_counted_submission(
         verdict: Set(Some(Verdict::Accepted)),
         score: Set(Some(0.0)),
         judge_epoch: Set(1),
+        max_judge_epoch: Set(1),
         created_at: Set(now),
         judged_at: Set(Some(now)),
         ..Default::default()

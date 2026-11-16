@@ -26,6 +26,9 @@ pub struct Model {
     #[sea_orm(indexed)]
     pub error_code: String,
 
+    /// Attempts recorded in `retry_history`: failed deliveries of an
+    /// operation task, or each dead-lettering and operator retry of stuck
+    /// work.
     pub retry_count: i32,
 
     #[sea_orm(column_type = "JsonBinary")]
@@ -34,6 +37,11 @@ pub struct Model {
     pub first_failed_at: DateTimeUtc,
 
     pub created_at: DateTimeUtc,
+
+    /// When the message was last dead-lettered (a recurrence reopens it),
+    /// by the database clock.
+    #[sea_orm(default_expr = "Expr::current_timestamp()")]
+    pub last_failed_at: DateTimeUtc,
 
     #[sea_orm(default_value = false, indexed)]
     pub resolved: bool,

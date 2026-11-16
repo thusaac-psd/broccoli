@@ -1016,8 +1016,8 @@ mod tests {
     #[test]
     fn a_system_error_submission_older_than_a_later_ac_still_blocks() {
         // A `SystemError` submission has NO verdict written to it (see
-        // `mark_submission_system_error_with_epoch` and the stuck-job
-        // handler -- neither ever sets `submission.verdict`), but the
+        // the host's dispatch-failure and stuck-job
+        // paths -- neither ever sets `submission.verdict`), but the
         // platform aggressively re-judges these
         // (`max_system_error_retries`): it is still IN FLIGHT, not a
         // terminal "not accepted" outcome, so an older one must still be

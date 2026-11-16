@@ -3,6 +3,7 @@ mod attachment;
 mod auth;
 mod bootstrap_admin;
 mod claim_in_flight;
+mod claim_wake;
 mod clarification;
 mod code_run;
 mod codelink_bracket;

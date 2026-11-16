@@ -3,7 +3,7 @@ pub(crate) mod batch_wait;
 pub mod code_run_dispatch;
 pub mod device_auth;
 pub mod evaluate_batch;
-pub mod judgement_lifecycle;
+pub mod judging;
 pub mod operation_batch;
 pub mod plugin_config;
 pub mod plugin_storage;

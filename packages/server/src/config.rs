@@ -161,21 +161,17 @@ pub struct ServerConfig {
     #[serde(default = "default_dispatcher_concurrency")]
     pub dispatcher_concurrency: u32,
     /// Per-server cap on in-process dispatch tasks waiting on the
-    /// dispatcher semaphore. The durable accept path
-    /// (POST -> INSERT `Queued` -> claim fiber -> dispatch) does not
-    /// pass through the dispatcher semaphore at ingress - only the
-    /// steal-scanner (`dispatcher/steal.rs`) still calls
-    /// `dispatcher_permits.reserve()` before spawning a re-dispatch
-    /// task. Tune this to bound spawn bursts on a single server when
-    /// the steal scanner picks up many orphaned rows at once.
+    /// dispatcher semaphore. The claim fiber reserves a dispatcher slot for
+    /// every unit it claims and claims fewer when this queue is full, so
+    /// work it cannot start stays `Queued` for any server to claim.
     ///
     /// Not to be confused with `max_queued_submissions`, which is the
     /// **DB-row backpressure cap** at POST ingress.
     #[serde(default = "default_dispatcher_admission_queue_max")]
     pub dispatcher_admission_queue_max: u32,
-    /// Per-server cap on the **durable `Queued` queue depth** observed
-    /// in the `submission`, `code_run`, and `submission_judgement`
-    /// tables combined. When the live count is at or above this value,
+    /// Per-server cap on the **durable `Queued` queue depth**: queued
+    /// judgements (a queued submission counts through its judgement) and
+    /// code runs combined. When the live count is at or above this value,
     /// POST endpoints that would insert a new `Queued` row reject with
     /// `503 Service Unavailable` + `Retry-After` rather than enqueueing
     /// more work (backpressure on POST).
@@ -203,26 +199,18 @@ pub struct ServerConfig {
     pub steal_batch_size: u32,
     #[serde(default = "default_sweep_interval_secs")]
     pub sweep_interval_secs: u64,
-    /// Maximum dispatch ATTEMPTS (first dispatch included) the claim and
-    /// lease-steal paths make before finalizing a row as SystemError; compared
-    /// against the row's `retry_count`, which counts attempts.
+    /// Dispatch retries a judgement or code run gets after its owner was
+    /// lost or it got stuck (the lease steal and the stuck-job detector share
+    /// this budget). Once they are spent the unit is finalized as
+    /// SystemError and dead-lettered.
     #[serde(default = "default_max_dispatch_retries")]
     pub max_dispatch_retries: u32,
-    /// Retry budget for the global stuck detector. Rows with
-    /// `retry_count <= max_stuck_retries` (`retry_count` counts dispatch
-    /// attempts) are left for claim/lease-steal recovery; rows above the
-    /// budget are finalized as SystemError.
-    #[serde(default = "default_max_stuck_retries")]
-    pub max_stuck_retries: u32,
-    /// Retry budget for the SystemError-retry reaper. A `SystemError` verdict is
-    /// a SYSTEM condition (contention, lost result, wedge), never the
-    /// contestant's code, so it must not stand as the verdict. This budget is
-    /// deliberately much larger than `max_dispatch_retries`/`max_stuck_retries`:
-    /// the stuck-handler and dispatch-exhaustion paths SPEND those budgets before
-    /// terminalizing to `status == SystemError`, so the reaper needs headroom to
-    /// keep re-judging ("slow is fine; never abandon a system fault"). It stays
-    /// finite only as a runaway backstop and is rarely approached once the
-    /// underlying contention clears. Admission control bounds the blast radius.
+    /// System-error retries a submission gets since its last rejudge. A
+    /// `SystemError` verdict is a SYSTEM condition (contention, lost result,
+    /// wedge, spent dispatch retries), never the contestant's code, so the
+    /// SystemError-retry reaper judges it again; each retry starts with a
+    /// fresh dispatch-retry budget. Finite as a backstop against a problem
+    /// that fails deterministically.
     #[serde(default = "default_max_system_error_retries")]
     pub max_system_error_retries: u32,
     /// When true, log ghost reply queues and debounce them without deleting
@@ -297,33 +285,32 @@ pub struct ServerConfig {
     #[serde(default = "default_operation_batch_publish_concurrency")]
     pub operation_batch_publish_concurrency: u32,
     /// Master switch for the claim fiber. When `true` (default), the
-    /// per-server claim fiber polls the `submission` and `code_run` tables
-    /// for `status='Queued'` rows, transitions them to `Pending`, and
-    /// dispatches them via the existing plugin path. When `false`, the
+    /// per-server claim fiber claims `Queued` judgements and code runs,
+    /// moves them to `Pending` and dispatches them; it is the only path
+    /// into flight. When `false`, the
     /// fiber never starts - POST handlers still write `Queued`, but no one
     /// claims the rows, so they accumulate until the fiber is re-enabled.
     /// Only flip this off to stop a server from dispatching new work while
     /// debugging.
     #[serde(default = "default_claim_fiber_enabled")]
     pub claim_fiber_enabled: bool,
-    /// Poll interval (ms) for the claim fiber. Default 1000ms. Lower
-    /// values reduce POST->Pending latency but increase background SQL load
-    /// (a no-op poll is a single `SELECT ... LIMIT $batch FOR UPDATE SKIP
-    /// LOCKED` per table).
+    /// Fallback poll interval (ms) for the claim fiber. Default 1000ms. The
+    /// fiber claims as soon as a claim notification says work was queued or
+    /// room freed up; this tick only covers notifications lost while its
+    /// listening connection was down. A no-op poll is one in-flight count
+    /// and one `SELECT ... LIMIT $batch FOR UPDATE SKIP LOCKED` per table.
     #[serde(default = "default_claim_poll_interval_ms")]
     pub claim_poll_interval_ms: u64,
-    /// Bounded SELECT LIMIT for the claim fiber. The fiber claims at
-    /// most this many rows per table per tick. Defaults to 32 to match
-    /// `dispatcher_concurrency`'s order of magnitude; raise it on
-    /// deployments with bursty submission patterns so a single tick can
-    /// drain a spike.
+    /// Bounded SELECT LIMIT for one claim pass: at most this many rows per
+    /// table. Passes repeat while each fills its batch and in-flight room
+    /// is left, so this bounds one statement, not how fast a backlog drains.
     #[serde(default = "default_claim_batch_size")]
     pub claim_batch_size: u32,
-    /// Floor for how many submissions this server judges at once (claimed,
-    /// not finished). The cap in force is the larger of this and 8 x the
+    /// Floor for how many judgements and code runs this server judges at
+    /// once (claimed, not finished). The cap in force is the larger of this and 8 x the
     /// live worker slots seen in heartbeats, so it grows with the cluster
     /// and never throttles below worker capacity. The claim fiber takes at
-    /// most `cap - in_flight` rows per tick, so a burst stays `Queued` in the
+    /// most `cap - in_flight` rows, so a burst stays `Queued` in the
     /// database (claimable by any server) instead of piling into one
     /// process. Judging is detached after dispatch, so nothing else bounds
     /// this. 0 = no cap.
@@ -379,7 +366,6 @@ impl Default for ServerConfig {
             steal_batch_size: default_steal_batch_size(),
             sweep_interval_secs: default_sweep_interval_secs(),
             max_dispatch_retries: default_max_dispatch_retries(),
-            max_stuck_retries: default_max_stuck_retries(),
             max_system_error_retries: default_max_system_error_retries(),
             sweeper_dry_run: default_sweeper_dry_run(),
             operation_reaper_enabled: default_operation_reaper_enabled(),
@@ -454,15 +440,10 @@ fn default_max_dispatch_retries() -> u32 {
     5
 }
 
-fn default_max_stuck_retries() -> u32 {
-    5
-}
-
 fn default_max_system_error_retries() -> u32 {
-    // Still well above max_dispatch_retries/max_stuck_retries (both 5) so genuine
-    // transient faults get real recovery headroom, but bounded so a DETERMINISTIC
+    // Real recovery headroom for transient faults, bounded so a deterministic
     // SystemError (e.g. a checker that always dies on one case) terminalizes in
-    // minutes instead of re-judging ~50x and churning the box for a contest.
+    // minutes instead of churning the box for a contest.
     10
 }
 
@@ -928,12 +909,6 @@ mod tests {
         let resolved = cfg.effective_max_blocking_threads();
         assert_eq!(resolved, auto_max_blocking_threads());
         assert!((512..=8192).contains(&resolved));
-    }
-
-    #[test]
-    fn server_config_defaults_max_stuck_retries_to_five() {
-        let cfg = server_config_fixture(None);
-        assert_eq!(cfg.max_stuck_retries, 5);
     }
 
     #[test]

@@ -122,6 +122,11 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
                   {new Date(data.first_failed_at).toLocaleString()}
                 </span>
               </Field>
+              <Field label={t('dlq.detail.lastFailedAt')}>
+                <span className="font-mono text-xs">
+                  {new Date(data.last_failed_at).toLocaleString()}
+                </span>
+              </Field>
               <Field label={t('dlq.detail.createdAt')}>
                 <span className="font-mono text-xs">
                   {new Date(data.created_at).toLocaleString()}
@@ -139,7 +144,13 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
               )}
               <Field label={t('dlq.detail.status')}>
                 {data.resolved ? (
-                  <Badge variant="secondary">{t('dlq.row.resolved')}</Badge>
+                  <Badge variant="secondary">
+                    {data.resolved_by === null
+                      ? t('dlq.detail.resolvedAutomatically')
+                      : t('dlq.detail.resolvedByUser', {
+                          id: data.resolved_by,
+                        })}
+                  </Badge>
                 ) : (
                   <Badge
                     variant="outline"

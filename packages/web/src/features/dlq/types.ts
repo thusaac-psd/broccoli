@@ -8,8 +8,10 @@ export interface DlqMessage {
   retry_count: number;
   first_failed_at: string;
   created_at: string;
+  last_failed_at: string;
   resolved: boolean;
   resolved_at: string | null;
+  /** The operator who resolved it; null when it resolved itself. */
   resolved_by: number | null;
 }
 

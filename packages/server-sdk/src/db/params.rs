@@ -33,12 +33,6 @@ impl Default for Params {
     }
 }
 
-impl broccoli_types::types::SqlBindSink for Params {
-    fn bind_value(&mut self, value: JsonValue) -> String {
-        self.bind(value)
-    }
-}
-
 fn sanitize_json_value(value: JsonValue) -> JsonValue {
     match value {
         JsonValue::String(s) => JsonValue::String(sanitize_text_field(&s).into_owned()),

@@ -1051,7 +1051,6 @@ mod tests {
                     steal_batch_size: 8,
                     sweep_interval_secs: 300,
                     max_dispatch_retries: 5,
-                    max_stuck_retries: 5,
                     max_system_error_retries: 50,
                     sweeper_dry_run: true,
                     operation_reaper_enabled: false,

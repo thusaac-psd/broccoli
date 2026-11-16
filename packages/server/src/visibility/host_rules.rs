@@ -820,10 +820,7 @@ mod tests {
             judge_epoch: 0,
             max_judge_epoch: 0,
             target_worker_id: None,
-            owner_server_id: None,
-            lease_heartbeat_at: None,
-            leased_at: None,
-            retry_count: 0,
+            system_error_retries: 0,
             created_at: now,
             judged_at: None,
         }
