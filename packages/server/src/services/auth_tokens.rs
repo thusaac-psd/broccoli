@@ -181,13 +181,22 @@ fn validator_matches(presented: &str, stored: &str) -> bool {
 /// stolen and replayed later is still detected.
 const REFRESH_REUSE_GRACE_SECS: i32 = 30;
 
-/// Insert a new refresh-token row for `$3` and, when `$1` names a live row,
-/// retire it in the same statement. Expired rows of the user are purged on the
-/// way, which bounds retention; revoked-but-unexpired rows are kept so a
-/// replay stays detectable for the token's whole lifetime. Every timestamp is
-/// the DB clock.
+/// Insert a new refresh-token row for `$3` in sign-in session `$6` and, when
+/// `$1` names a live row, retire it in the same statement. Expired rows of the
+/// user are purged on the way, which bounds retention; revoked-but-unexpired
+/// rows are kept so a replay stays detectable for the token's whole lifetime.
+/// Every timestamp is the DB clock.
+///
+/// The session row is read `FOR KEY SHARE`, the lock the row's foreign key
+/// takes anyway: a logout or password reset that ends the session first
+/// leaves no row to insert for, so the statement inserts nothing instead of
+/// failing the key; one that ends it after waits and takes the new row with
+/// it.
 const ISSUE_REFRESH_SQL: &str = r#"
-WITH retired AS (
+WITH session AS (
+    SELECT id FROM auth_session WHERE id = $6 AND user_id = $3 FOR KEY SHARE
+),
+retired AS (
     UPDATE refresh_tokens SET revoked_at = now()
     WHERE selector = $1 AND revoked_at IS NULL
 ),
@@ -196,7 +205,8 @@ purged AS (
 )
 INSERT INTO refresh_tokens
     (selector, validator, user_id, expires_at, created_at, revoked_at, rotated_from, session_id)
-VALUES ($2, $4, $3, now() + make_interval(days => $5::int), now(), NULL, $1, $6)
+SELECT $2, $4, $3, now() + make_interval(days => $5::int), now(), NULL, $1, session.id
+  FROM session
 "#;
 
 async fn issue_refresh_token<C: ConnectionTrait>(
@@ -207,19 +217,26 @@ async fn issue_refresh_token<C: ConnectionTrait>(
 ) -> Result<String, AppError> {
     let selector = hash::generate_random_string();
     let validator = hash::generate_random_string();
-    db.execute_raw(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        ISSUE_REFRESH_SQL,
-        [
-            retire.map(str::to_owned).into(),
-            selector.clone().into(),
-            user_id.into(),
-            hash_validator(&validator).into(),
-            (refresh::REFRESH_TOKEN_EXPIRY_DAYS as i32).into(),
-            session_id.into(),
-        ],
-    ))
-    .await?;
+    let inserted = db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            ISSUE_REFRESH_SQL,
+            [
+                retire.map(str::to_owned).into(),
+                selector.clone().into(),
+                user_id.into(),
+                hash_validator(&validator).into(),
+                (refresh::REFRESH_TOKEN_EXPIRY_DAYS as i32).into(),
+                session_id.into(),
+            ],
+        ))
+        .await?
+        .rows_affected();
+    // The session ended under the request (a logout, a password reset): the
+    // credential it presented is no longer valid.
+    if inserted == 0 {
+        return Err(AppError::TokenInvalid);
+    }
     Ok(refresh::construct_refresh_token(&selector, &validator))
 }
 
@@ -451,4 +468,41 @@ pub async fn rotate_refresh_token(
         issue_refresh_token(&txn, token.user_id, session_id, Some(&token.selector)).await?;
     txn.commit().await?;
     Ok((grant, new_refresh_token))
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::TransactionTrait;
+
+    use super::*;
+
+    /// A logout that holds the session row when a token mint for it arrives:
+    /// the mint waits for it and, once the logout commits, answers
+    /// `TokenInvalid` instead of failing the session's foreign key.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mint_racing_the_sessions_logout_is_an_invalid_token() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let (user_id, _) = crate::test_support::seed_user_and_problem(&db).await;
+        let session = open_session(&db, user_id).await.unwrap();
+
+        let logout = db.begin().await.unwrap();
+        end_sessions(&logout, &[session]).await.unwrap();
+        let mint = tokio::spawn({
+            let db = db.clone();
+            async move { mint_refresh_token(&db, user_id, session).await }
+        });
+        logout.commit().await.unwrap();
+        assert!(
+            matches!(mint.await.unwrap(), Err(AppError::TokenInvalid)),
+            "the mint finds the session ended"
+        );
+
+        // A mint after the logout committed finds no session either.
+        assert!(matches!(
+            mint_refresh_token(&db, user_id, session).await,
+            Err(AppError::TokenInvalid)
+        ));
+        let rows = refresh_token::Entity::find().all(&db).await.unwrap();
+        assert!(rows.is_empty(), "{rows:?}");
+    }
 }
