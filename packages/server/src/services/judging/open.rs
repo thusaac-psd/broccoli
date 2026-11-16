@@ -1,11 +1,11 @@
 //! Transitions that create judgements or move "current" between them.
 
+use common::db::DatabaseTransaction;
 use common::{SubmissionDlqErrorCode, SubmissionStatus};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseTransaction, DbBackend, DbErr,
-    EntityTrait, ExprTrait, NotSet, QueryFilter, QueryOrder, QuerySelect, Set, Statement,
-    UpdateMany,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, ExprTrait,
+    NotSet, QueryFilter, QueryOrder, QuerySelect, Set, Statement, UpdateMany,
 };
 
 use super::unit::mirror_current;

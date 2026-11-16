@@ -1,3 +1,4 @@
+use common::db::DatabaseConnection;
 use std::collections::HashMap;
 
 use broccoli_server_sdk::permissions as perm;

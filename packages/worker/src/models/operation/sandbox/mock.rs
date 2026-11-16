@@ -602,13 +602,11 @@ impl SandboxManager for MockSandboxManager {
 mod tests {
     use super::*;
 
-    /// The mock backend must sanitize captured output the same way the isolate
-    /// backend does: `printf 'a\0b'` emits a literal NUL byte, and the shared
-    /// preview helper has to replace it before it can reach a Postgres TEXT
-    /// column.
+    /// The mock backend captures output through the shared preview helper,
+    /// byte for byte: `printf 'a\0b'` emits a literal NUL and it is kept.
     #[cfg(unix)]
     #[tokio::test]
-    async fn mock_piped_stdout_strips_nul_bytes() {
+    async fn mock_piped_stdout_keeps_nul_bytes() {
         let manager = MockSandboxManager::new(std::env::temp_dir().join(format!(
             "broccoli-mock-sandbox-nul-test-{}",
             std::process::id()
@@ -630,7 +628,6 @@ mod tests {
 
         manager.remove_sandbox("nul-test").await.unwrap();
 
-        assert_eq!(result.stdout, "a\u{FFFD}b");
-        assert!(!result.stdout.contains('\0'));
+        assert_eq!(result.stdout, "a\0b");
     }
 }

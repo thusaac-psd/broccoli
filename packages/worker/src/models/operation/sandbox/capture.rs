@@ -1,9 +1,9 @@
 //! Output-capture helpers shared by the sandbox backends.
 //!
-//! Both the isolate and mock backends persist a capped, sanitized text
-//! preview of a step's stdout/stderr. Keeping the helpers here (rather than
-//! per-backend copies) guarantees the NUL stripping below applies uniformly
-//! no matter which backend captured the output.
+//! Both the isolate and mock backends report a capped text preview of a
+//! step's stdout/stderr, built here so the two cannot drift. The preview keeps
+//! every byte's text as captured, NUL included; the database handle replaces
+//! NUL when the text is stored (`common::db`).
 
 use std::path::Path;
 use tokio::io::AsyncReadExt;
@@ -17,15 +17,6 @@ pub(super) fn text_preview_from_bytes(mut bytes: Vec<u8>, truncated: bool) -> St
     }
 
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
-    // `from_utf8_lossy` preserves NUL (0x00) bytes - they are valid UTF-8
-    // (U+0000) - but PostgreSQL TEXT columns reject 0x00. Sandbox stdout/stderr
-    // and isolate `meta` can carry stray NUL (truncated multibyte sequences,
-    // partially-flushed buffers, control bytes), so strip them at the capture
-    // origin rather than relying on every downstream persistence layer. Replace
-    // with U+FFFD to match the SDK/host sanitizers.
-    if text.contains('\0') {
-        text = text.replace('\0', "\u{FFFD}");
-    }
     if was_truncated {
         text.push_str("\n... (truncated)");
     }
@@ -46,22 +37,14 @@ mod text_preview_tests {
     use super::text_preview_from_bytes;
 
     #[test]
-    fn strips_nul_bytes_from_captured_text() {
-        // NUL in sandbox stdout/stderr/meta must not survive to a Postgres TEXT column.
-        let out = text_preview_from_bytes(b"abc\0def\0\0xyz".to_vec(), false);
-        assert_eq!(out, "abc\u{FFFD}def\u{FFFD}\u{FFFD}xyz");
-        assert!(!out.contains('\0'));
-    }
-
-    #[test]
     fn clean_text_passes_through_unchanged() {
         let out = text_preview_from_bytes(b"999 998 997\n".to_vec(), false);
         assert_eq!(out, "999 998 997\n");
     }
 
     #[test]
-    fn nul_strip_applies_before_truncation_marker() {
+    fn truncated_text_ends_with_the_marker() {
         let out = text_preview_from_bytes(b"a\0b".to_vec(), true);
-        assert_eq!(out, "a\u{FFFD}b\n... (truncated)");
+        assert_eq!(out, "a\0b\n... (truncated)");
     }
 }

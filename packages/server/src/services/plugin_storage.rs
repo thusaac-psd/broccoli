@@ -1,10 +1,9 @@
 //! Atomic writes of opaque plugin storage values.
 use crate::entity::plugin_storage;
 use crate::utils::text::plugin_storage_text;
+use common::db::DatabaseConnection;
 use sea_orm::sea_query::OnConflict;
-use sea_orm::{
-    ActiveModelTrait, DatabaseConnection, DbErr, EntityTrait, QuerySelect, Set, TransactionTrait,
-};
+use sea_orm::{ActiveModelTrait, DbErr, EntityTrait, QuerySelect, Set, TransactionTrait};
 use serde_json::Value;
 
 pub async fn compare_and_set(

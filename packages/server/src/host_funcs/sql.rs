@@ -1,12 +1,10 @@
+use common::db::{DatabaseConnection, DatabaseTransaction};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, TryLockError};
 use std::time::{Duration, Instant};
 
 use extism::host_fn;
-use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, Statement,
-    TransactionTrait,
-};
+use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use tracing::error;
@@ -139,49 +137,6 @@ fn spawn_txn_reaper_with(
     });
 }
 
-/// Database URL used to open a FRESH one-shot connection as the guaranteed
-/// last-resort fallback when pool retries are all exhausted by poisoned-
-/// connection 0x00 errors. Set once at startup (see runtime.rs). A brand-new
-/// connection has no prior in-flight query, so its write buffer / protocol
-/// state are clean by construction - it CANNOT be poisoned - making the insert
-/// succeed deterministically (modulo a genuine DB failure).
-static PLUGIN_DB_FALLBACK_URL: OnceLock<String> = OnceLock::new();
-/// Session settings (statement timeout, keepalives) for fresh fallback
-/// connections, so they are bounded exactly like the pooled plugin connections.
-static PLUGIN_DB_SESSION: OnceLock<common::db::PgSession> = OnceLock::new();
-
-/// Register the URL and the app session for the fresh-connection fallback.
-/// Idempotent.
-pub fn set_plugin_db_fallback_url(url: String, session: common::db::PgSession) {
-    let _ = PLUGIN_DB_FALLBACK_URL.set(url);
-    let _ = PLUGIN_DB_SESSION.set(crate::database::plugin_session(&session));
-}
-
-/// Connection parameters for the RESTRICTED fresh-connection fallback. When set,
-/// the restricted 0x00 fallback authenticates as the dedicated non-privileged
-/// login role (see [`crate::database::provision_restricted_plugin_login`]),
-/// exactly like the restricted pool, instead of the privileged app role - so an
-/// escape that survives the SQL text guard lands on no privileges on THIS path
-/// too, keeping the invariant "every restricted path authenticates as a
-/// non-privileged login" whole. Its `url` may differ from
-/// [`PLUGIN_DB_FALLBACK_URL`] (e.g. a DBA-managed `database.plugin_url`). When
-/// unset, the restricted fallback keeps app-role auth plus the after-connect
-/// `SET ROLE broccoli_plugin` downshift.
-static PLUGIN_DB_RESTRICTED_FALLBACK: OnceLock<RestrictedFallback> = OnceLock::new();
-
-struct RestrictedFallback {
-    url: String,
-    login: Option<crate::database::PluginLoginOverride>,
-}
-
-/// Register the restricted fresh-connection fallback target. Idempotent.
-pub fn set_plugin_db_restricted_fallback(
-    url: String,
-    login: Option<crate::database::PluginLoginOverride>,
-) {
-    let _ = PLUGIN_DB_RESTRICTED_FALLBACK.set(RestrictedFallback { url, login });
-}
-
 /// Set once, at startup, when the restricted plugin SQL pool could only degrade
 /// to privileged app-role auth (no dedicated login role, no operator-managed
 /// `database.plugin_url`). In that state the SQL text guard would be the SOLE
@@ -223,149 +178,6 @@ fn raw_sql_gate(disabled: bool, plugin_id: &str) -> Result<(), extism::Error> {
         ));
     }
     Ok(())
-}
-
-/// Resolve the (url, login-override) a fresh fallback connection should use for
-/// `role`. The restricted role prefers the dedicated-login target when set; the
-/// privileged role always uses the app-role fallback URL.
-fn fallback_target(
-    role: FallbackRole,
-) -> Result<(String, Option<crate::database::PluginLoginOverride>), sea_orm::DbErr> {
-    if role == FallbackRole::Restricted
-        && let Some(rf) = PLUGIN_DB_RESTRICTED_FALLBACK.get()
-    {
-        return Ok((rf.url.clone(), rf.login.clone()));
-    }
-    let url = PLUGIN_DB_FALLBACK_URL
-        .get()
-        .ok_or_else(|| sea_orm::DbErr::Custom("plugin DB fallback URL not set".to_string()))?
-        .clone();
-    Ok((url, None))
-}
-
-/// Open a fresh single-connection pool, applying a login override when present so
-/// the connection can authenticate as the dedicated non-privileged login role
-/// rather than the app role. Overriding on `PgConnectOptions` (not by rewriting
-/// the URL) avoids any credential-escaping concern.
-async fn connect_fresh_single(
-    url: &str,
-    login: Option<&crate::database::PluginLoginOverride>,
-) -> Result<DatabaseConnection, sea_orm::DbErr> {
-    let session = PLUGIN_DB_SESSION.get().cloned().unwrap_or_else(|| {
-        crate::database::plugin_session(&crate::database::app_session(
-            &crate::config::DatabaseConfig::default(),
-        ))
-    });
-    let mut opts = common::db::pg_connect_options(url, &session)?;
-    if let Some(login) = login {
-        opts = opts.username(&login.username).password(&login.password);
-    }
-    common::db::connect_with(common::db::PgPoolSpec::new(1, 1).pool_options(), opts).await
-}
-
-/// Which DB role a fresh fallback connection must assume before running its
-/// statement. Pooled plugin connections downshift to the `broccoli_plugin` role
-/// via `after_connect` (see [`crate::database::init_plugin_db`]), but a fresh
-/// fallback connection is opened OUTSIDE that pool and would otherwise default to
-/// the privileged app role. The raw `sql` path must re-apply the plugin role so
-/// riding the 0x00 fallback cannot slip a statement past the role's boundary
-/// (schema DDL on core, `plugin_login_secret`) by running as the app role; the
-/// server-owned structured `host.submission.*` path is privileged by design and
-/// keeps the app role.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FallbackRole {
-    /// Raw plugin SQL: `SET ROLE broccoli_plugin`, matching the restricted pool.
-    Restricted,
-    /// Server-owned structured writes (`host.submission.*`): keep the app role.
-    Privileged,
-}
-
-/// Re-apply the restricted plugin role on a freshly opened fallback connection.
-/// A no-op for [`FallbackRole::Privileged`]. The fallback pool holds exactly one
-/// connection (`max`/`min` = 1), so this `SET ROLE` and the statement that
-/// follows provably run on the same physical connection.
-async fn apply_fallback_role(
-    conn: &DatabaseConnection,
-    role: FallbackRole,
-) -> Result<(), sea_orm::DbErr> {
-    if role == FallbackRole::Restricted {
-        conn.execute_raw(Statement::from_string(
-            DbBackend::Postgres,
-            format!("SET ROLE {}", crate::database::PLUGIN_DB_ROLE),
-        ))
-        .await?;
-    }
-    Ok(())
-}
-
-/// Open a fresh single connection and execute `stmt` on it, then drop it. The
-/// connection is brand-new, so it is guaranteed free of stale wire-protocol
-/// framing from any prior operation - the guaranteed cure for a poisoned-
-/// connection 0x00 when the pool retries are exhausted. `role` decides whether
-/// the fresh connection first downshifts to the restricted plugin role, so the
-/// fallback carries the SAME privilege as the pool the call came from.
-fn execute_on_fresh_connection(
-    stmt: Statement,
-    role: FallbackRole,
-) -> Result<sea_orm::ExecResult, sea_orm::DbErr> {
-    let (url, login) = fallback_target(role)?;
-    execute_on_fresh_connection_url(&url, stmt, role, login.as_ref())
-}
-
-/// Inner helper split out from [`execute_on_fresh_connection`] so the
-/// fresh-connection behaviour (including the role downshift) is testable against
-/// a real database without the process-global fallback `OnceLock`s. `login`, when
-/// present, authenticates the fresh connection as the dedicated non-privileged
-/// login role instead of the app role.
-fn execute_on_fresh_connection_url(
-    url: &str,
-    stmt: Statement,
-    role: FallbackRole,
-    login: Option<&crate::database::PluginLoginOverride>,
-) -> Result<sea_orm::ExecResult, sea_orm::DbErr> {
-    tokio::runtime::Handle::current().block_on(async move {
-        let fresh = connect_fresh_single(url, login).await?;
-        apply_fallback_role(&fresh, role).await?;
-        let result = fresh.execute_raw(stmt).await;
-        fresh.close().await.ok();
-        result
-    })
-}
-
-/// Read-side counterpart to [`execute_on_fresh_connection`]: open a fresh single
-/// connection and run `stmt` (a json_agg-wrapped query) on it, then drop it.
-/// `db_query` previously had only the probabilistic pool-retry layer; under
-/// sustained poisoning the pool can keep handing back the same desynced
-/// connection, so a query could still surface a `0x00` error to the plugin - and
-/// a plugin DB error becomes a `SystemError`. A brand-new connection is clean by
-/// construction, turning that into a deterministic recovery, matching the
-/// guarantee the write path already has. `role` mirrors the calling pool's
-/// privilege (restricted for raw `sql`, privileged for `host.submission.*`).
-fn query_on_fresh_connection(
-    stmt: Statement,
-    role: FallbackRole,
-) -> Result<Option<sea_orm::QueryResult>, sea_orm::DbErr> {
-    let (url, login) = fallback_target(role)?;
-    query_on_fresh_connection_url(&url, stmt, role, login.as_ref())
-}
-
-/// Inner helper split out from [`query_on_fresh_connection`] so the
-/// fresh-connection behaviour is testable against a real database without
-/// depending on the process-global fallback `OnceLock`s. `login`, when present,
-/// authenticates the fresh connection as the dedicated non-privileged login role.
-fn query_on_fresh_connection_url(
-    url: &str,
-    stmt: Statement,
-    role: FallbackRole,
-    login: Option<&crate::database::PluginLoginOverride>,
-) -> Result<Option<sea_orm::QueryResult>, sea_orm::DbErr> {
-    tokio::runtime::Handle::current().block_on(async move {
-        let fresh = connect_fresh_single(url, login).await?;
-        apply_fallback_role(&fresh, role).await?;
-        let result = fresh.query_one_raw(stmt).await;
-        fresh.close().await.ok();
-        result
-    })
 }
 
 /// Look up a transaction by id, enforcing that the caller is the plugin that
@@ -456,24 +268,6 @@ impl HostDbResponse {
     pub(super) fn to_json_string(&self) -> Result<String, extism::Error> {
         serde_json::to_string(self)
             .map_err(|e| extism::Error::msg(format!("Serialization error: {}", e)))
-    }
-}
-
-fn sanitize_nul_bytes(s: String, plugin_id: &str, sql: &str) -> String {
-    if s.contains('\0') {
-        let nul_count = s.matches('\0').count();
-        let preview: String = s.chars().take(120).collect();
-        let sql_preview: String = sql.chars().take(160).collect();
-        tracing::warn!(
-            plugin_id,
-            nul_count,
-            sql = %sql_preview,
-            value_preview = %preview,
-            "Sanitized NUL bytes from plugin SQL bind value",
-        );
-        s.replace('\0', "\u{FFFD}")
-    } else {
-        s
     }
 }
 
@@ -823,35 +617,7 @@ fn statement_escapes_session(stmt: &str) -> bool {
     })
 }
 
-fn sanitize_sql_text(label: &str, plugin_id: &str, sql: String) -> String {
-    if sql.contains('\0') {
-        let nul_count = sql.matches('\0').count();
-        let mut nul_offsets: Vec<usize> = sql
-            .bytes()
-            .enumerate()
-            .filter(|(_, b)| *b == 0)
-            .map(|(i, _)| i)
-            .take(8)
-            .collect();
-        nul_offsets.sort_unstable();
-        let len = sql.len();
-        let preview: String = sql.chars().take(240).collect();
-        tracing::warn!(
-            plugin_id,
-            param = label,
-            nul_count,
-            len,
-            nul_offsets = ?nul_offsets,
-            preview = %preview,
-            "Sanitized NUL bytes from plugin SQL host_fn parameter",
-        );
-        sql.replace('\0', "\u{FFFD}")
-    } else {
-        sql
-    }
-}
-
-fn json_to_sea_value(v: JsonValue, plugin_id: &str, sql: &str) -> sea_orm::Value {
+fn json_to_sea_value(v: JsonValue) -> sea_orm::Value {
     match v {
         JsonValue::Null => sea_orm::Value::String(None),
         JsonValue::Bool(b) => sea_orm::Value::Bool(Some(b)),
@@ -864,108 +630,41 @@ fn json_to_sea_value(v: JsonValue, plugin_id: &str, sql: &str) -> sea_orm::Value
                 sea_orm::Value::String(Some(n.to_string()))
             }
         }
-        JsonValue::String(s) => sea_orm::Value::String(Some(sanitize_nul_bytes(s, plugin_id, sql))),
-        v => sea_orm::Value::Json(Some(Box::new(sanitize_json_nul_bytes(v, plugin_id, sql)))),
+        JsonValue::String(s) => sea_orm::Value::String(Some(s)),
+        v => sea_orm::Value::Json(Some(Box::new(v))),
     }
 }
 
-fn sanitize_json_nul_bytes(v: JsonValue, plugin_id: &str, sql: &str) -> JsonValue {
-    match v {
-        JsonValue::String(s) => JsonValue::String(sanitize_nul_bytes(s, plugin_id, sql)),
-        JsonValue::Array(values) => JsonValue::Array(
-            values
-                .into_iter()
-                .map(|value| sanitize_json_nul_bytes(value, plugin_id, sql))
-                .collect(),
-        ),
-        JsonValue::Object(map) => JsonValue::Object(
-            map.into_iter()
-                .map(|(key, value)| {
-                    (
-                        sanitize_nul_bytes(key, plugin_id, sql),
-                        sanitize_json_nul_bytes(value, plugin_id, sql),
-                    )
-                })
-                .collect(),
-        ),
-        other => other,
-    }
-}
-
-/// How many times a poisoned-connection 0x00 error is retried on a fresh pooled
-/// connection before the guaranteed last-resort brand-new-connection fallback
-/// below takes over. The desync is rare, so a pool retry usually clears it; this
-/// cap just bounds the probabilistic retry.
-const POISONED_CONNECTION_RETRIES: u32 = 6;
-
-/// True when a DB error is the server-side SQLSTATE 22021 "invalid byte sequence
-/// for encoding UTF8: 0x00". Because every value we bind is sanitized + swept
-/// NUL-free at the choke point, this error does NOT mean our data is dirty - it
-/// means the pooled sqlx connection is DESYNCED: sqlx 0.8.6 has no `Drop` reset
-/// for `PgConnection`, so a query future dropped mid-flush (our cross-thread
-/// `block_on(execute_raw)` bridge can produce this under load) leaves a partial
-/// message in the persistent write buffer, and `ping()` on pool checkout
-/// flushes that dirty tail (length-prefix/NUL framing bytes, which contain 0x00)
-/// as the prefix of the NEXT statement. The cure is to retry on a different
-/// connection: `execute_raw` pool-acquires a fresh one each call, and the 0x00
-/// is rejected by Postgres before execution, so retrying is side-effect-free.
-fn is_poisoned_connection_nul_error(e: &sea_orm::DbErr) -> bool {
-    let msg = e.to_string();
-    msg.contains("0x00") && msg.contains("invalid byte sequence")
-}
-
-fn json_value_contains_nul(v: &JsonValue) -> bool {
-    match v {
-        JsonValue::String(s) => s.contains('\0'),
-        JsonValue::Array(a) => a.iter().any(json_value_contains_nul),
-        JsonValue::Object(o) => o
-            .iter()
-            .any(|(k, val)| k.contains('\0') || json_value_contains_nul(val)),
-        _ => false,
-    }
-}
-
-/// Final, unbypassable NUL strip on the fully-built bound values, applied at the
-/// execute choke point right before `Statement::from_sql_and_values`. PostgreSQL
-/// TEXT columns reject 0x00; this guarantees no NUL reaches libpq regardless of
-/// what any (possibly stale or future) plugin/SDK sent, independent of the
-/// earlier per-value sanitizers in `json_to_sea_value`. Returns how many values
-/// were modified so callers can surface that a NUL slipped past upstream layers.
-fn strip_nul_from_sea_values(values: &mut [sea_orm::Value], plugin_id: &str, sql: &str) -> usize {
-    let mut stripped = 0usize;
-    for value in values.iter_mut() {
-        match value {
-            sea_orm::Value::String(Some(s)) if s.contains('\0') => {
-                let cleaned = s.replace('\0', "\u{FFFD}");
-                *s = cleaned;
-                stripped += 1;
-            }
-            sea_orm::Value::Json(Some(j)) if json_value_contains_nul(j) => {
-                let cleaned = sanitize_json_nul_bytes((**j).clone(), plugin_id, sql);
-                **j = cleaned;
-                stripped += 1;
-            }
-            _ => {}
-        }
-    }
-    stripped
-}
-
-fn parse_args(
-    args_json: &str,
-    plugin_id: &str,
-    sql: &str,
-) -> Result<Vec<sea_orm::Value>, extism::Error> {
+fn parse_args(args_json: &str) -> Result<Vec<sea_orm::Value>, extism::Error> {
     if args_json.trim().is_empty() {
         return Ok(vec![]);
     }
     let json_arr: Vec<JsonValue> = serde_json::from_str(args_json)
         .map_err(|e| extism::Error::msg(format!("Invalid args JSON: {}", e)))?;
 
-    Ok(json_arr
-        .into_iter()
-        .map(|v| json_to_sea_value(v, plugin_id, sql))
-        .collect())
+    Ok(json_arr.into_iter().map(json_to_sea_value).collect())
+}
+
+/// The statement for plugin SQL bound with `values` from [`parse_args`].
+///
+/// sqlx keeps one prepared statement per SQL text on each connection, typed by
+/// the parameters of its first execution, and later executions bind their
+/// values in binary against those types. A plugin's JSON arguments change type
+/// between calls of the same SQL (a number, then a string, then null), and an
+/// int8 bound against a statement prepared for text reaches Postgres as text
+/// bytes holding 0x00. The statement text therefore names its parameter types,
+/// so each type signature prepares its own statement.
+fn plugin_statement(sql: &str, values: Vec<sea_orm::Value>) -> Statement {
+    let sql = if values.is_empty() {
+        sql.to_string()
+    } else {
+        let types: Vec<String> = values
+            .iter()
+            .map(|value| format!("{:?}", value.array_type()))
+            .collect();
+        format!("/* {} */ {sql}", types.join(","))
+    };
+    Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
 }
 
 host_fn!(pub db_execute(user_data: Arc<(String, DatabaseConnection)>; sql: String, args: String) -> String {
@@ -973,57 +672,18 @@ host_fn!(pub db_execute(user_data: Arc<(String, DatabaseConnection)>; sql: Strin
     let (plugin_id, db) = &*call;
 
     raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
-    let sql = sanitize_sql_text("sql", plugin_id, sql);
     reject_session_escape(plugin_id, &sql)?;
-    let args = sanitize_sql_text("args", plugin_id, args);
-    let mut values = parse_args(&args, plugin_id, &sql)?;
-    let stripped = strip_nul_from_sea_values(&mut values, plugin_id, &sql);
-    if stripped > 0 {
-        tracing::warn!(
-            plugin_id = %plugin_id,
-            stripped,
-            sql = %sql.chars().take(120).collect::<String>(),
-            "Stripped NUL bytes from bound values at db_execute choke point"
-        );
-    }
-    let stmt = Statement::from_sql_and_values(DbBackend::Postgres, &sql, values);
+    let values = parse_args(&args)?;
+    let stmt = plugin_statement(&sql, values);
 
-    let mut exec_result = tokio::runtime::Handle::current().block_on(async {
-        db.execute_raw(stmt.clone()).await
-    });
-    let mut poison_retries = 0;
-    while poison_retries < POISONED_CONNECTION_RETRIES
-        && matches!(&exec_result, Err(e) if is_poisoned_connection_nul_error(e))
-    {
-        poison_retries += 1;
-        tracing::warn!(
-            plugin_id = %plugin_id,
-            attempt = poison_retries,
-            "db_execute hit a poisoned-connection 0x00 error on clean params; retrying on a fresh connection"
-        );
-        exec_result = tokio::runtime::Handle::current().block_on(async {
-            db.execute_raw(stmt.clone()).await
-        });
-    }
-
-    // GUARANTEED last resort: if every pool retry was exhausted by a
-    // poisoned-connection 0x00, run the statement once on a brand-new
-    // connection, which cannot carry stale wire framing. Turns the probabilistic
-    // retry into a deterministic recovery.
-    if matches!(&exec_result, Err(e) if is_poisoned_connection_nul_error(e)) {
-        tracing::warn!(
-            plugin_id = %plugin_id,
-            "db_execute exhausted pool retries on poisoned-connection 0x00; falling back to a fresh connection"
-        );
-        exec_result = execute_on_fresh_connection(stmt, FallbackRole::Restricted);
-    }
+    let exec_result = tokio::runtime::Handle::current().block_on(db.execute_raw(stmt));
 
     match exec_result {
         Ok(res) => HostDbResponse::ok(JsonValue::from(res.rows_affected())).to_json_string(),
         Err(e) => {
             let sql_preview: String = sql.chars().take(800).collect();
             let args_preview: String = args.chars().take(800).collect();
-            error!(plugin_id = %plugin_id, sql_len = sql.len(), args_len = args.len(), poison_retries, sql = %sql_preview, args = %args_preview, "DB execution error: {}", e);
+            error!(plugin_id = %plugin_id, sql_len = sql.len(), args_len = args.len(), sql = %sql_preview, args = %args_preview, "DB execution error: {}", e);
             HostDbResponse::err(e.to_string()).to_json_string()
         }
     }
@@ -1034,46 +694,15 @@ host_fn!(pub db_query(user_data: Arc<(String, DatabaseConnection)>; sql: String,
     let (plugin_id, db) = &*call;
 
     raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
-    let sql = sanitize_sql_text("sql", plugin_id, sql);
     reject_session_escape(plugin_id, &sql)?;
-    let args = sanitize_sql_text("args", plugin_id, args);
-    let values = parse_args(&args, plugin_id, &sql)?;
+    let values = parse_args(&args)?;
     let wrapped_sql = format!(
         "SELECT COALESCE(json_agg(t), '[]'::json) AS json_data FROM ({}) AS t",
         sql
     );
-    let stmt = Statement::from_sql_and_values(DbBackend::Postgres, wrapped_sql, values);
+    let stmt = plugin_statement(&wrapped_sql, values);
 
-    let mut query_result = tokio::runtime::Handle::current().block_on(async {
-        db.query_one_raw(stmt.clone()).await
-    });
-    let mut poison_retries = 0;
-    while poison_retries < POISONED_CONNECTION_RETRIES
-        && matches!(&query_result, Err(e) if is_poisoned_connection_nul_error(e))
-    {
-        poison_retries += 1;
-        tracing::warn!(
-            plugin_id = %plugin_id,
-            attempt = poison_retries,
-            "db_query hit a poisoned-connection 0x00 error on clean params; retrying on a fresh connection"
-        );
-        query_result = tokio::runtime::Handle::current().block_on(async {
-            db.query_one_raw(stmt.clone()).await
-        });
-    }
-
-    // GUARANTEED last resort, symmetric with db_execute: if every pool retry was
-    // exhausted by a poisoned-connection 0x00, run the query once on a brand-new
-    // connection, which cannot carry stale wire framing. Without this a poisoned
-    // db_query surfaces an error to the plugin, which a plugin turns into a
-    // SystemError - a system condition standing as the contestant's verdict.
-    if matches!(&query_result, Err(e) if is_poisoned_connection_nul_error(e)) {
-        tracing::warn!(
-            plugin_id = %plugin_id,
-            "db_query exhausted pool retries on poisoned-connection 0x00; falling back to a fresh connection"
-        );
-        query_result = query_on_fresh_connection(stmt, FallbackRole::Restricted);
-    }
+    let query_result = tokio::runtime::Handle::current().block_on(db.query_one_raw(stmt));
 
     match query_result {
         Ok(Some(res)) => {
@@ -1138,15 +767,13 @@ host_fn!(pub db_query_in(user_data: Arc<(String, DatabaseConnection, Transaction
     let (plugin_id, _, txn_map) = &*call;
 
     raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
-    let sql = sanitize_sql_text("sql", plugin_id, sql);
     reject_session_escape(plugin_id, &sql)?;
-    let args = sanitize_sql_text("args", plugin_id, args);
-    let values = parse_args(&args, plugin_id, &sql)?;
+    let values = parse_args(&args)?;
     let wrapped_sql = format!(
         "SELECT COALESCE(json_agg(t), '[]'::json) AS json_data FROM ({}) AS t",
         sql
     );
-    let stmt = Statement::from_sql_and_values(DbBackend::Postgres, wrapped_sql, values);
+    let stmt = plugin_statement(&wrapped_sql, values);
 
     let query_result = with_owned_txn(txn_map, &txn_id, plugin_id, "db_query_in", |txn| {
         tokio::runtime::Handle::current().block_on(txn.query_one_raw(stmt))
@@ -1171,20 +798,9 @@ host_fn!(pub db_execute_in(user_data: Arc<(String, DatabaseConnection, Transacti
     let (plugin_id, _, txn_map) = &*call;
 
     raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
-    let sql = sanitize_sql_text("sql", plugin_id, sql);
     reject_session_escape(plugin_id, &sql)?;
-    let args = sanitize_sql_text("args", plugin_id, args);
-    let mut values = parse_args(&args, plugin_id, &sql)?;
-    let stripped = strip_nul_from_sea_values(&mut values, plugin_id, &sql);
-    if stripped > 0 {
-        tracing::warn!(
-            plugin_id = %plugin_id,
-            stripped,
-            sql = %sql.chars().take(120).collect::<String>(),
-            "Stripped NUL bytes from bound values at db_execute_in choke point"
-        );
-    }
-    let stmt = Statement::from_sql_and_values(DbBackend::Postgres, sql, values);
+    let values = parse_args(&args)?;
+    let stmt = plugin_statement(&sql, values);
 
     let exec_result = with_owned_txn(txn_map, &txn_id, plugin_id, "db_execute_in", |txn| {
         tokio::runtime::Handle::current().block_on(txn.execute_raw(stmt))
@@ -1269,60 +885,24 @@ host_fn!(pub db_rollback(user_data: Arc<(String, DatabaseConnection, Transaction
 /// `HostDbResponse` JSON envelope `db_execute` produces (`{"data": <rows>}` or
 /// `{"error": <msg>}`). Shared by the capability-gated `host.submission.*` write
 /// host functions, which build the SQL server-side but must hit the DB through
-/// the exact same NUL-sanitization, arg-parsing, and poisoned-connection
-/// recovery path as raw `db_execute`. Kept as a separate helper (rather than
-/// refactoring `db_execute` to call it) so the raw-SQL machinery above stays
-/// byte-for-byte unchanged in this phase.
+/// the same argument parsing and statement typing as raw `db_execute`.
 pub(super) fn execute_on_pool(
     db: &DatabaseConnection,
     plugin_id: &str,
     sql: String,
     args: String,
 ) -> Result<String, extism::Error> {
-    let sql = sanitize_sql_text("sql", plugin_id, sql);
-    let args = sanitize_sql_text("args", plugin_id, args);
-    let mut values = parse_args(&args, plugin_id, &sql)?;
-    let stripped = strip_nul_from_sea_values(&mut values, plugin_id, &sql);
-    if stripped > 0 {
-        tracing::warn!(
-            plugin_id = %plugin_id,
-            stripped,
-            sql = %sql.chars().take(120).collect::<String>(),
-            "Stripped NUL bytes from bound values at submission execute choke point"
-        );
-    }
-    let stmt = Statement::from_sql_and_values(DbBackend::Postgres, &sql, values);
+    let values = parse_args(&args)?;
+    let stmt = plugin_statement(&sql, values);
 
-    let mut exec_result =
-        tokio::runtime::Handle::current().block_on(async { db.execute_raw(stmt.clone()).await });
-    let mut poison_retries = 0;
-    while poison_retries < POISONED_CONNECTION_RETRIES
-        && matches!(&exec_result, Err(e) if is_poisoned_connection_nul_error(e))
-    {
-        poison_retries += 1;
-        tracing::warn!(
-            plugin_id = %plugin_id,
-            attempt = poison_retries,
-            "submission execute hit a poisoned-connection 0x00 error on clean params; retrying on a fresh connection"
-        );
-        exec_result = tokio::runtime::Handle::current()
-            .block_on(async { db.execute_raw(stmt.clone()).await });
-    }
-
-    if matches!(&exec_result, Err(e) if is_poisoned_connection_nul_error(e)) {
-        tracing::warn!(
-            plugin_id = %plugin_id,
-            "submission execute exhausted pool retries on poisoned-connection 0x00; falling back to a fresh connection"
-        );
-        exec_result = execute_on_fresh_connection(stmt, FallbackRole::Privileged);
-    }
+    let exec_result = tokio::runtime::Handle::current().block_on(db.execute_raw(stmt));
 
     match exec_result {
         Ok(res) => HostDbResponse::ok(JsonValue::from(res.rows_affected())).to_json_string(),
         Err(e) => {
             let sql_preview: String = sql.chars().take(800).collect();
             let args_preview: String = args.chars().take(800).collect();
-            error!(plugin_id = %plugin_id, sql_len = sql.len(), args_len = args.len(), poison_retries, sql = %sql_preview, args = %args_preview, "Submission DB execution error: {}", e);
+            error!(plugin_id = %plugin_id, sql_len = sql.len(), args_len = args.len(), sql = %sql_preview, args = %args_preview, "Submission DB execution error: {}", e);
             HostDbResponse::err(e.to_string()).to_json_string()
         }
     }
@@ -1338,38 +918,14 @@ pub(super) fn query_on_pool(
     sql: String,
     args: String,
 ) -> Result<String, extism::Error> {
-    let sql = sanitize_sql_text("sql", plugin_id, sql);
-    let args = sanitize_sql_text("args", plugin_id, args);
-    let values = parse_args(&args, plugin_id, &sql)?;
+    let values = parse_args(&args)?;
     let wrapped_sql = format!(
         "SELECT COALESCE(json_agg(t), '[]'::json) AS json_data FROM ({}) AS t",
         sql
     );
-    let stmt = Statement::from_sql_and_values(DbBackend::Postgres, wrapped_sql, values);
+    let stmt = plugin_statement(&wrapped_sql, values);
 
-    let mut query_result =
-        tokio::runtime::Handle::current().block_on(async { db.query_one_raw(stmt.clone()).await });
-    let mut poison_retries = 0;
-    while poison_retries < POISONED_CONNECTION_RETRIES
-        && matches!(&query_result, Err(e) if is_poisoned_connection_nul_error(e))
-    {
-        poison_retries += 1;
-        tracing::warn!(
-            plugin_id = %plugin_id,
-            attempt = poison_retries,
-            "submission query hit a poisoned-connection 0x00 error on clean params; retrying on a fresh connection"
-        );
-        query_result = tokio::runtime::Handle::current()
-            .block_on(async { db.query_one_raw(stmt.clone()).await });
-    }
-
-    if matches!(&query_result, Err(e) if is_poisoned_connection_nul_error(e)) {
-        tracing::warn!(
-            plugin_id = %plugin_id,
-            "submission query exhausted pool retries on poisoned-connection 0x00; falling back to a fresh connection"
-        );
-        query_result = query_on_fresh_connection(stmt, FallbackRole::Privileged);
-    }
+    let query_result = tokio::runtime::Handle::current().block_on(db.query_one_raw(stmt));
 
     match query_result {
         Ok(Some(res)) => {
@@ -1380,7 +936,7 @@ pub(super) fn query_on_pool(
         }
         Ok(None) => HostDbResponse::ok(serde_json::json!([])).to_json_string(),
         Err(e) => {
-            error!("Submission DB query error: {}", e);
+            error!(plugin_id, "Submission DB query error: {}", e);
             HostDbResponse::err(e.to_string()).to_json_string()
         }
     }
@@ -1572,214 +1128,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn detects_poisoned_connection_nul_error() {
-        let poisoned = sea_orm::DbErr::Custom(
-            "error returned from database: invalid byte sequence for encoding \"UTF8\": 0x00"
-                .to_string(),
-        );
-        assert!(is_poisoned_connection_nul_error(&poisoned));
-
-        let unrelated = sea_orm::DbErr::Custom("duplicate key value violates unique".to_string());
-        assert!(!is_poisoned_connection_nul_error(&unrelated));
-    }
-
-    #[test]
-    fn strip_nul_from_sea_values_cleans_string_and_json_and_counts() {
-        let mut values = vec![
-            sea_orm::Value::String(Some("ok\0bad".to_string())),
-            sea_orm::Value::BigInt(Some(42)),
-            sea_orm::Value::Json(Some(Box::new(serde_json::json!({"k": "a\u{0000}b"})))),
-            sea_orm::Value::String(Some("clean".to_string())),
-            sea_orm::Value::String(None),
-        ];
-
-        let stripped = strip_nul_from_sea_values(&mut values, "test-plugin", "INSERT ...");
-        assert_eq!(stripped, 2, "two values carried NUL");
-
-        match &values[0] {
-            sea_orm::Value::String(Some(s)) => {
-                assert_eq!(s.as_str(), "ok\u{FFFD}bad");
-                assert!(!s.contains('\0'));
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-        match &values[2] {
-            sea_orm::Value::Json(Some(j)) => {
-                assert_eq!(j["k"], "a\u{FFFD}b");
-                assert!(!json_value_contains_nul(j));
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-        // Untouched value is unchanged.
-        match &values[3] {
-            sea_orm::Value::String(Some(s)) => assert_eq!(s.as_str(), "clean"),
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn strip_nul_no_op_when_clean() {
-        let mut values = vec![
-            sea_orm::Value::String(Some("hello".to_string())),
-            sea_orm::Value::Json(Some(Box::new(serde_json::json!(["a", "b"])))),
-        ];
-        assert_eq!(strip_nul_from_sea_values(&mut values, "p", "sql"), 0);
-    }
-
-    #[test]
-    fn parse_args_sanitizes_top_level_nul_string() {
-        let values = parse_args(r#"["ok\u0000bad"]"#, "test-plugin", "select $1").unwrap();
-
-        match &values[0] {
-            sea_orm::Value::String(Some(value)) => {
-                assert_eq!(value, "ok\u{FFFD}bad");
-                assert!(!value.contains('\0'));
-            }
-            other => panic!("unexpected value: {other:?}"),
-        }
-    }
-
-    /// The read-side fresh-connection fallback must actually open a brand-new
-    /// connection, run the json_agg-wrapped query, and return the rows in the
-    /// same shape `db_query` produces. This is the deterministic recovery that
-    /// keeps a poisoned `db_query` from surfacing a `SystemError` to the plugin.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn query_on_fresh_connection_runs_query_on_a_new_connection() {
-        use testcontainers::ImageExt;
-        use testcontainers::runners::AsyncRunner;
-        use testcontainers_modules::postgres::Postgres;
-
-        let container = Postgres::default()
-            .with_tag("17-alpine")
-            .start()
-            .await
-            .expect("start postgres container");
-        let port = container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("postgres host port");
-        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-
-        // Mirrors the json_agg wrapping `db_query` applies, so this exercises the
-        // exact result shape the fallback must return.
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT COALESCE(json_agg(t), '[]'::json) AS json_data FROM (SELECT 7 AS n) AS t",
-            Vec::<sea_orm::Value>::new(),
-        );
-
-        // The helper uses `Handle::current().block_on`, exactly as the `db_query`
-        // host function does in production, where it runs on a `spawn_blocking`
-        // thread (not a runtime worker). Replicate that here so `block_on` is
-        // legal - calling it directly on the test's runtime thread would panic.
-        let row = tokio::task::spawn_blocking(move || {
-            query_on_fresh_connection_url(&url, stmt, FallbackRole::Privileged, None)
-        })
-        .await
-        .expect("blocking task joins")
-        .expect("fresh-connection query should succeed")
-        .expect("a row is returned");
-        let json: serde_json::Value = row
-            .try_get("", "json_data")
-            .expect("json_data column present");
-        assert_eq!(json, serde_json::json!([{ "n": 7 }]));
-    }
-
-    /// Security regression: the raw `sql` path opens its 0x00 fallback with
-    /// [`FallbackRole::Restricted`], which must run AS `broccoli_plugin`, not the
-    /// app role - the fallback must not become a privilege-escalation hatch. To
-    /// probe that, this test gives a stand-in `broccoli_plugin` role SELECT but no
-    /// INSERT on a table (a deliberately minimal grant, NOT the production migrated
-    /// role, which now has full DML) and asserts the fallback's INSERT is denied:
-    /// that can only happen if the fallback downshifted rather than staying app.
-    /// The structured path's [`FallbackRole::Privileged`] keeps the app role so
-    /// its server-owned core writes still land.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn restricted_fallback_denies_writes_the_plugin_role_lacks() {
-        use testcontainers::ImageExt;
-        use testcontainers::runners::AsyncRunner;
-        use testcontainers_modules::postgres::Postgres;
-
-        let container = Postgres::default()
-            .with_tag("17-alpine")
-            .start()
-            .await
-            .expect("start postgres container");
-        let port = container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("postgres host port");
-        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-
-        // A deliberately minimal stand-in role: NOLOGIN, app-role is a member,
-        // SELECT-only on the table under test (no INSERT). This is NOT the
-        // production role (which has full DML); the missing INSERT is the probe
-        // that proves the fallback runs AS this role, not the app role.
-        let admin = Database::connect(url.clone())
-            .await
-            .expect("connect as app role");
-        for ddl in [
-            "CREATE ROLE broccoli_plugin NOLOGIN",
-            "GRANT broccoli_plugin TO CURRENT_USER",
-            "CREATE TABLE core_t (id int)",
-            "GRANT SELECT ON core_t TO broccoli_plugin",
-        ] {
-            admin
-                .execute_raw(Statement::from_string(DbBackend::Postgres, ddl))
-                .await
-                .unwrap_or_else(|e| panic!("setup `{ddl}` failed: {e}"));
-        }
-
-        // Restricted fallback: the INSERT the role lacks must be denied.
-        let insert = Statement::from_string(DbBackend::Postgres, "INSERT INTO core_t VALUES (1)");
-        let denied_url = url.clone();
-        let denied = tokio::task::spawn_blocking(move || {
-            execute_on_fresh_connection_url(&denied_url, insert, FallbackRole::Restricted, None)
-        })
-        .await
-        .expect("blocking task joins");
-        assert!(
-            denied.is_err(),
-            "a restricted fallback must not perform a write the plugin role lacks"
-        );
-
-        // Restricted fallback read: SELECT is granted, so it must still succeed.
-        let read = Statement::from_string(
-            DbBackend::Postgres,
-            "SELECT COALESCE(json_agg(t), '[]'::json) AS json_data FROM (SELECT id FROM core_t) AS t",
-        );
-        let read_url = url.clone();
-        let read_ok = tokio::task::spawn_blocking(move || {
-            query_on_fresh_connection_url(&read_url, read, FallbackRole::Restricted, None)
-        })
-        .await
-        .expect("blocking task joins");
-        assert!(
-            read_ok.is_ok(),
-            "a restricted fallback must still perform a granted read"
-        );
-
-        // Privileged fallback: the same INSERT runs as the app role and lands.
-        let privileged_insert =
-            Statement::from_string(DbBackend::Postgres, "INSERT INTO core_t VALUES (2)");
-        let priv_url = url.clone();
-        let allowed = tokio::task::spawn_blocking(move || {
-            execute_on_fresh_connection_url(
-                &priv_url,
-                privileged_insert,
-                FallbackRole::Privileged,
-                None,
-            )
-        })
-        .await
-        .expect("blocking task joins");
-        assert!(
-            allowed.is_ok(),
-            "a privileged fallback keeps the app role so server-owned writes land"
-        );
-    }
-
     /// A transaction orphaned by a trapped guest (never committed or rolled
     /// back) must be rolled back by the reaper and its pooled connection
     /// returned. The pool is sized at ONE connection, so the second `begin`
@@ -1806,7 +1154,7 @@ mod tests {
         opt.max_connections(1)
             .min_connections(1)
             .sqlx_logging(false);
-        let db = Database::connect(opt).await.expect("connect");
+        let db: DatabaseConnection = Database::connect(opt).await.expect("connect").into();
 
         let txn = db.begin().await.expect("begin orphan txn");
         let txn_map: TransactionMap = Arc::new(StdMutex::new(HashMap::new()));
@@ -1854,7 +1202,7 @@ mod tests {
             .await
             .expect("postgres host port");
         let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-        let db = Database::connect(url).await.expect("connect");
+        let db: DatabaseConnection = Database::connect(url).await.expect("connect").into();
 
         let txn = db.begin().await.expect("begin");
         let mut map: HashMap<String, Arc<PluginTransaction>> = HashMap::new();
@@ -1903,7 +1251,7 @@ mod tests {
             .await
             .expect("postgres host port");
         let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-        let db = Database::connect(url).await.expect("connect");
+        let db: DatabaseConnection = Database::connect(url).await.expect("connect").into();
 
         let txn_map: TransactionMap = Arc::new(StdMutex::new(HashMap::new()));
         for (id, owner) in [("slow", "plugin-a"), ("fast", "plugin-b")] {
@@ -1946,22 +1294,69 @@ mod tests {
         slow.await.expect("slow statement task");
     }
 
-    #[test]
-    fn parse_args_sanitizes_nested_json_nul_strings() {
-        let values = parse_args(
-            r#"[{"std\u0000out":"ok\u0000bad","nested":["x\u0000y"]}]"#,
-            "test-plugin",
-            "select $1",
-        )
-        .unwrap();
+    /// One plugin statement bound with values of every JSON type in turn, on
+    /// one connection: each execution binds its own types, whatever an earlier
+    /// execution of the same SQL on that connection bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_statement_binds_each_json_type_on_one_connection() {
+        use testcontainers::ImageExt;
+        use testcontainers::runners::AsyncRunner;
+        use testcontainers_modules::postgres::Postgres;
 
-        match &values[0] {
-            sea_orm::Value::Json(Some(value)) => {
-                assert_eq!(value["std\u{FFFD}out"], "ok\u{FFFD}bad");
-                assert_eq!(value["nested"][0], "x\u{FFFD}y");
-                assert!(!value.to_string().contains('\0'));
-            }
-            other => panic!("unexpected value: {other:?}"),
+        let container = Postgres::default()
+            .with_tag("17-alpine")
+            .start()
+            .await
+            .expect("start postgres container");
+        let port = container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("postgres host port");
+        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut opt = ConnectOptions::new(url);
+        opt.max_connections(1)
+            .min_connections(1)
+            .sqlx_logging(false);
+        let db: DatabaseConnection = Database::connect(opt).await.expect("connect").into();
+        db.execute_unprepared("CREATE TABLE kv (v text)")
+            .await
+            .expect("create");
+
+        let sql = "INSERT INTO kv (v) VALUES ($1)";
+        for args in [
+            r#"["a"]"#,
+            "[42]",
+            "[false]",
+            "[1.5]",
+            r#"[{"k":1}]"#,
+            "[null]",
+        ] {
+            let values = parse_args(args).unwrap();
+            db.execute_raw(plugin_statement(sql, values))
+                .await
+                .unwrap_or_else(|e| panic!("binding {args} after an earlier type: {e}"));
         }
+        let stored: Vec<Option<String>> = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT v FROM kv ORDER BY ctid",
+            ))
+            .await
+            .expect("select")
+            .iter()
+            .map(|row| row.try_get("", "v").unwrap())
+            .collect();
+        assert_eq!(
+            stored,
+            [
+                Some("a"),
+                Some("42"),
+                Some("false"),
+                Some("1.5"),
+                Some(r#"{"k": 1}"#),
+                None
+            ]
+            .map(|v| v.map(str::to_string))
+        );
     }
 }

@@ -1,6 +1,7 @@
 //! Transaction-scoped Postgres advisory locks keyed by a string.
 
-use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, DbErr, Statement};
+use common::db::DatabaseTransaction;
+use sea_orm::{ConnectionTrait, DbBackend, DbErr, Statement};
 
 /// Blocks until this transaction holds the advisory lock for `key`. The key
 /// is hashed with `hashtextextended`, so any string names a lock; prefix it

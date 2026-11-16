@@ -1,3 +1,4 @@
+use common::db::DatabaseConnection;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,8 +9,8 @@ use common::worker::{Executor, TaskReply, TaskResult};
 use plugin_core::config::PluginConfig;
 use reqwest::Client;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait,
-    QueryFilter, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectOptions, Database, EntityTrait, QueryFilter, Set,
+    TransactionTrait,
 };
 use serde_json::Value;
 use tokio::sync::{RwLock, watch};
@@ -197,9 +198,11 @@ impl E2eTestApp {
         opts.max_connections(3)
             .min_connections(0)
             .idle_timeout(Duration::from_secs(5));
-        let db = Database::connect(opts)
-            .await
-            .expect("Failed to connect to Docker database");
+        let db = DatabaseConnection::from(
+            Database::connect(opts)
+                .await
+                .expect("Failed to connect to Docker database"),
+        );
 
         let base_url = server_url.trim_end_matches('/').to_string();
 
@@ -251,9 +254,11 @@ impl E2eTestApp {
         opts.max_connections(db_max_connections)
             .min_connections(0)
             .idle_timeout(Duration::from_secs(3));
-        let db = Database::connect(opts)
-            .await
-            .expect("Failed to connect to test database");
+        let db = DatabaseConnection::from(
+            Database::connect(opts)
+                .await
+                .expect("Failed to connect to test database"),
+        );
 
         let redis_url = format!("redis://127.0.0.1:{redis_port}");
 

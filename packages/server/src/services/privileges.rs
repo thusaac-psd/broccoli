@@ -26,7 +26,8 @@
 //! check reads or waits for this transaction.
 
 use broccoli_server_sdk::permissions as perm;
-use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, Statement, Value};
+use common::db::DatabaseTransaction;
+use sea_orm::{ConnectionTrait, DbBackend, Statement, Value};
 
 use crate::error::AppError;
 use crate::extractors::auth::AuthUser;

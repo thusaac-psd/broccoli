@@ -128,7 +128,7 @@ async fn a_deleted_row_stops_being_served() {
     assert_eq!(cached_value(&b).await, None);
 }
 
-async fn epoch(db: &sea_orm::DatabaseConnection) -> i64 {
+async fn epoch(db: &common::db::DatabaseConnection) -> i64 {
     use sea_orm::{DbBackend, Statement};
     db.query_one_raw(Statement::from_string(
         DbBackend::Postgres,

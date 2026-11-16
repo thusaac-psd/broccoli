@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use common::db::DatabaseConnection;
 use common::storage::BlobStore;
 use plugin_core::traits::PluginManager;
-use sea_orm::DatabaseConnection;
 
 use crate::config::AppConfig;
 use crate::hooks::SharedHookRegistry;

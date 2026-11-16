@@ -6,6 +6,7 @@
 //! aggregates per-worker progress against the live heartbeat registry so an admin
 //! can watch the warm complete before the contest opens.
 
+use common::db::DatabaseConnection;
 use std::collections::HashMap;
 
 use axum::Json;
@@ -13,7 +14,7 @@ use axum::extract::{Query, State};
 use broccoli_server_sdk::permissions as perm;
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
-use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
+use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use serde::Deserialize;
 use tracing::{info, instrument};
 use utoipa::IntoParams;

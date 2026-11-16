@@ -1,12 +1,12 @@
 use crate::entity::plugin_config;
+use common::db::DatabaseConnection;
 use extism::{Function, UserData, Val, ValType};
 use plugin_core::registry::PluginRegistry;
-use sea_orm::{DatabaseConnection, EntityTrait, Set, sea_query::OnConflict};
+use sea_orm::{EntityTrait, Set, sea_query::OnConflict};
 use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::services::plugin_config_cache::PluginConfigCache;
-use crate::utils::text::sanitize_db_json;
 
 type ConfigGetUserData = (
     String,
@@ -201,7 +201,7 @@ fn config_set_fn(
                 scope: Set(input.scope),
                 ref_id: Set(ref_id),
                 namespace: Set(namespace),
-                config: Set(sanitize_db_json(input.config)),
+                config: Set(input.config),
                 enabled: Set(None),
                 position: Set(0),
                 updated_at: sea_orm::NotSet,

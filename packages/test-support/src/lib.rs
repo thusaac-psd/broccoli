@@ -8,12 +8,11 @@
 //! advance ([`DbClock`]), pool teardown, and the HTTP response wrapper. Each tree keeps its own app fixture (`TestApp`,
 //! `E2eTestApp`) and re-exports what it needs from here.
 
+use common::db::DatabaseConnection;
 use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
-use sea_orm::{
-    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
-};
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DbBackend, Statement};
 use serde_json::Value;
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, ImageExt};
@@ -173,7 +172,7 @@ async fn clone_template(port: u16, db_name: &str) {
                 let conn = Database::connect(admin_opts)
                     .await
                     .expect("Failed to initialize shared admin database pool");
-                let _ = SHARED_ADMIN_CONN.set(conn);
+                let _ = SHARED_ADMIN_CONN.set(conn.into());
             }
 
             let admin = SHARED_ADMIN_CONN
@@ -232,7 +231,7 @@ pub fn close_database_pool(db: DatabaseConnection) {
             else {
                 return;
             };
-            let _ = runtime.block_on(db.close_by_ref());
+            let _ = runtime.block_on(db.close());
         });
 }
 

@@ -6,10 +6,11 @@
 //! age is measured on the database clock. See
 //! [`crate::services::judging::reclaim_abandoned`].
 
+use common::db::DatabaseConnection;
 use std::time::Duration;
 
 use common::DlqConfig;
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use tracing::{error, info, warn};
 
 use crate::services::judging::{self, Abandoned, RetryBudget, Unit};

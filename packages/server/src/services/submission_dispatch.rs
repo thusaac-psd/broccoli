@@ -4,6 +4,7 @@ use broccoli_server_sdk::types::{
     SourceFile, TestCaseBodyRef, TestCaseRow,
 };
 use common::SubmissionDlqErrorCode;
+use common::db::DatabaseConnection;
 use sea_orm::prelude::Expr;
 use sea_orm::*;
 use tracing::{Instrument, error, info, instrument, warn};

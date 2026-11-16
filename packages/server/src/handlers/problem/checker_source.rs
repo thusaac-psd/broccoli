@@ -11,7 +11,6 @@ use crate::extractors::path::AppPath;
 use crate::models::problem::*;
 use crate::state::AppState;
 use crate::utils::problem::find_problem;
-use crate::utils::text::sanitize_db_json;
 
 #[utoipa::path(
     put,
@@ -43,10 +42,8 @@ pub async fn upload_checker_source(
     // Existence check: 404 for a missing problem, as before.
     find_problem(&state.db, id).await?;
 
-    let files_value = sanitize_db_json(
-        serde_json::to_value(&files)
-            .map_err(|e| AppError::Internal(format!("Failed to serialize checker source: {e}")))?,
-    );
+    let files_value = serde_json::to_value(&files)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize checker source: {e}")))?;
     let response_files = serde_json::from_value(files_value.clone())
         .map_err(|e| AppError::Internal(format!("Failed to deserialize checker source: {e}")))?;
 

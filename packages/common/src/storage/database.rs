@@ -1,10 +1,9 @@
+use crate::db::DatabaseConnection;
 use std::io::Cursor;
 
 use async_trait::async_trait;
 use sea_orm::entity::prelude::*;
-use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, QuerySelect, Schema, Statement,
-};
+use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, QuerySelect, Schema, Statement};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 

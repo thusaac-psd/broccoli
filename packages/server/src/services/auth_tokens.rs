@@ -8,9 +8,9 @@
 //! `FreshAuthUser` rejects (revoked role, reset password, deleted account)
 //! into one it accepts.
 
+use common::db::DatabaseConnection;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, QueryFilter,
-    Statement, TransactionTrait,
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Statement, TransactionTrait,
 };
 
 use crate::entity::refresh_token;

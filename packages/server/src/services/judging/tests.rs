@@ -1,10 +1,11 @@
 //! Real-Postgres tests of the judging transitions.
 
 use chrono::Utc;
+use common::db::DatabaseConnection;
 use common::{DlqMessageType, SubmissionStatus, Verdict};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait,
-    PaginatorTrait, QueryFilter, Set, Statement, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait,
+    QueryFilter, Set, Statement, TransactionTrait,
 };
 
 use super::unit::Reclaimed;
@@ -695,7 +696,7 @@ async fn a_rejudge_serializes_with_another_rejudge_and_a_claim() {
     let (_pg, db) = crate::test_support::postgres().await;
     let (s, _) = new_submission(&db).await;
     let sid = s.id;
-    let rejudge_in = move |txn: sea_orm::DatabaseTransaction| async move {
+    let rejudge_in = move |txn: common::db::DatabaseTransaction| async move {
         open_judgement(
             &txn,
             sid,

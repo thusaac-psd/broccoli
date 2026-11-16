@@ -337,9 +337,10 @@ async fn end_to_end_concurrent_compile_runs_once() {
         tokio::join!(redis_url(), pg_url());
 
     // Shared DB -> `DatabaseTaskCacheStore::ensure_table` creates the schema.
-    let db = Database::connect(&pg_url_str)
+    let db: common::db::DatabaseConnection = Database::connect(&pg_url_str)
         .await
-        .expect("connect Postgres");
+        .expect("connect Postgres")
+        .into();
     DatabaseTaskCacheStore::ensure_table(&db)
         .await
         .expect("ensure task_cache table");

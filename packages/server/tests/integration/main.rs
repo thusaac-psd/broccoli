@@ -26,6 +26,7 @@ mod health;
 mod hook_enablement;
 mod idempotency;
 mod meta;
+mod nul_text;
 mod permission_fixture;
 mod platform_clock;
 mod plugin;

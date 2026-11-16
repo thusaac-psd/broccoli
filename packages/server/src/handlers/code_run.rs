@@ -4,6 +4,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
 use common::SubmissionStatus;
+use common::db::DatabaseConnection;
 use sea_orm::*;
 use tracing::instrument;
 
@@ -31,7 +32,6 @@ use crate::utils::contest::{
 use crate::utils::judging::{files_from_json, files_to_json, validate_run_language};
 use crate::utils::problem::find_problem;
 use crate::utils::rate_limit::check_rate_limit;
-use crate::utils::text::sanitize_db_json;
 use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 async fn build_code_run_response(
@@ -207,9 +207,8 @@ pub async fn run_code(
     validate_run_language(&payload.language, &known_languages)?;
 
     let contest_type = problem.default_contest_type.clone();
-    let custom_tcs_json = sanitize_db_json(
-        serde_json::to_value(&payload.custom_test_cases).unwrap_or(serde_json::Value::Null),
-    );
+    let custom_tcs_json =
+        serde_json::to_value(&payload.custom_test_cases).unwrap_or(serde_json::Value::Null);
 
     let now = state.clock.now();
     let language = payload.language.trim().to_string();
@@ -300,9 +299,8 @@ pub async fn run_contest_code(
     let known_languages = state.registries.known_language_ids().await;
     validate_run_language(&payload.language, &known_languages)?;
 
-    let custom_tcs_json = sanitize_db_json(
-        serde_json::to_value(&payload.custom_test_cases).unwrap_or(serde_json::Value::Null),
-    );
+    let custom_tcs_json =
+        serde_json::to_value(&payload.custom_test_cases).unwrap_or(serde_json::Value::Null);
 
     let language = payload.language.trim().to_string();
     let contest_type = required_contest_type(&contest_model)?;

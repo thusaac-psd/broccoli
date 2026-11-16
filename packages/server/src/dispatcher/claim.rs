@@ -211,6 +211,8 @@ async fn listen_session(
     wake: &Notify,
     saturated: &AtomicBool,
 ) -> Result<Infallible, sea_orm::sqlx::Error> {
+    // Outside `common::db::DatabaseConnection`: the listener only LISTENs
+    // and binds no values.
     let mut listener = PgListener::connect(url).await?;
     listener.listen(judging::CLAIM_CHANNEL).await?;
     // Config changes may have gone unannounced while nobody listened.
