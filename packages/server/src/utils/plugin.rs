@@ -13,22 +13,22 @@ pub async fn purge_plugin_registrations(registries: &RegistryState, plugin_id: &
         .contest_type_registry
         .write()
         .await
-        .retain(|_, h| h.plugin_id != plugin_id);
+        .release(plugin_id);
     registries
         .evaluator_registry
         .write()
         .await
-        .retain(|_, h| h.plugin_id != plugin_id);
+        .release(plugin_id);
     registries
         .checker_stage_registry
         .write()
         .await
-        .retain(|_, h| h.plugin_id != plugin_id);
+        .release(plugin_id);
     registries
         .language_resolver_registry
         .write()
         .await
-        .retain(|_, h| h.plugin_id != plugin_id);
+        .release(plugin_id);
     registries
         .hook_registry
         .write()
@@ -193,61 +193,55 @@ pub(crate) struct Registrations {
 
 impl Registrations {
     pub(crate) async fn capture(registries: &RegistryState, plugin_id: &str) -> Self {
-        fn owned<T: Clone>(
-            map: &std::collections::HashMap<String, T>,
-            plugin_id: &str,
-            owner: impl Fn(&T) -> &str,
-        ) -> Vec<(String, T)> {
-            map.iter()
-                .filter(|(_, v)| owner(v) == plugin_id)
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        }
         Self {
-            contest_types: owned(
-                &*registries.contest_type_registry.read().await,
-                plugin_id,
-                |h| &h.plugin_id,
-            ),
-            evaluators: owned(
-                &*registries.evaluator_registry.read().await,
-                plugin_id,
-                |h| &h.plugin_id,
-            ),
-            checker_stages: owned(
-                &*registries.checker_stage_registry.read().await,
-                plugin_id,
-                |h| &h.plugin_id,
-            ),
-            language_resolvers: owned(
-                &*registries.language_resolver_registry.read().await,
-                plugin_id,
-                |h| &h.plugin_id,
-            ),
+            contest_types: registries
+                .contest_type_registry
+                .read()
+                .await
+                .registered_by(plugin_id),
+            evaluators: registries
+                .evaluator_registry
+                .read()
+                .await
+                .registered_by(plugin_id),
+            checker_stages: registries
+                .checker_stage_registry
+                .read()
+                .await
+                .registered_by(plugin_id),
+            language_resolvers: registries
+                .language_resolver_registry
+                .read()
+                .await
+                .registered_by(plugin_id),
         }
     }
 
     async fn restore(self, registries: &RegistryState) {
-        registries
-            .contest_type_registry
-            .write()
-            .await
-            .extend(self.contest_types);
-        registries
-            .evaluator_registry
-            .write()
-            .await
-            .extend(self.evaluators);
-        registries
-            .checker_stage_registry
-            .write()
-            .await
-            .extend(self.checker_stages);
-        registries
-            .language_resolver_registry
-            .write()
-            .await
-            .extend(self.language_resolvers);
+        fn put_back<H: crate::registry::Provided>(
+            providers: &mut crate::registry::Providers<H>,
+            registered: Vec<(String, H)>,
+        ) {
+            for (key, handler) in registered {
+                providers.insert(key, handler);
+            }
+        }
+        put_back(
+            &mut *registries.contest_type_registry.write().await,
+            self.contest_types,
+        );
+        put_back(
+            &mut *registries.evaluator_registry.write().await,
+            self.evaluators,
+        );
+        put_back(
+            &mut *registries.checker_stage_registry.write().await,
+            self.checker_stages,
+        );
+        put_back(
+            &mut *registries.language_resolver_registry.write().await,
+            self.language_resolvers,
+        );
     }
 }
 
@@ -438,15 +432,13 @@ async fn register_plugin_hooks(
 mod tests {
     use super::*;
     use crate::registry::CheckerStageHandlers;
-    use std::collections::HashMap;
-    use tokio::sync::RwLock;
 
     fn empty_registries() -> RegistryState {
         RegistryState {
-            contest_type_registry: Arc::new(RwLock::new(HashMap::new())),
-            evaluator_registry: Arc::new(RwLock::new(HashMap::new())),
-            checker_stage_registry: Arc::new(RwLock::new(HashMap::new())),
-            language_resolver_registry: Arc::new(RwLock::new(HashMap::new())),
+            contest_type_registry: Default::default(),
+            evaluator_registry: Default::default(),
+            checker_stage_registry: Default::default(),
+            language_resolver_registry: Default::default(),
             operation_batches: Default::default(),
             operation_waiters: Arc::new(dashmap::DashMap::new()),
             evaluate_batches: Default::default(),

@@ -67,33 +67,22 @@ fn resolve_cascade(
 #[cfg(target_arch = "wasm32")]
 impl Config {
     pub fn get(&self, scope: &str, ref_id: &str, ns: &str) -> Result<ConfigResult, SdkError> {
-        let input = serde_json::json!({
-            "scope": scope,
-            "ref_id": ref_id,
-            "namespace": ns,
-        });
+        let input = crate::types::host_io::ConfigGetInput {
+            scope: scope.to_string(),
+            ref_id: ref_id.to_string(),
+            namespace: ns.to_string(),
+        };
         let result_json = unsafe { crate::host::raw::config_get(serde_json::to_string(&input)?)? };
-        let result: Value = serde_json::from_str(&result_json)?;
-        Ok(ConfigResult {
-            config: result
-                .get("config")
-                .cloned()
-                .unwrap_or(Value::Object(serde_json::Map::new())),
-            is_default: result
-                .get("is_default")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            enabled: result.get("enabled").and_then(|v| v.as_bool()),
-        })
+        Ok(serde_json::from_str(&result_json)?)
     }
 
     pub fn set(&self, scope: &str, ref_id: &str, ns: &str, value: &Value) -> Result<(), SdkError> {
-        let input = serde_json::json!({
-            "scope": scope,
-            "ref_id": ref_id,
-            "namespace": ns,
-            "config": value,
-        });
+        let input = crate::types::host_io::ConfigSetInput {
+            scope: scope.to_string(),
+            ref_id: ref_id.to_string(),
+            namespace: ns.to_string(),
+            config: value.clone(),
+        };
         unsafe { crate::host::raw::config_set(serde_json::to_string(&input)?)? };
         Ok(())
     }

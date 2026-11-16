@@ -587,33 +587,6 @@ pub trait PluginManager: PluginInvoker {
         self.get_i18n_registry().replace(merged);
     }
 
-    fn reload_plugin(&self, plugin_id: &str) -> Result<(), PluginError> {
-        let root_dir = {
-            let registry = self.get_registry().read().map_err(|_| {
-                PluginError::Internal("Failed to acquire registry read lock".into())
-            })?;
-            let entry = registry
-                .get(plugin_id)
-                .ok_or_else(|| PluginError::NotFound(plugin_id.to_string()))?;
-            entry.root_dir.clone()
-        };
-
-        // Built in full before it replaces the old entry, so a call made
-        // during the reload finds the old version or the new one, never an
-        // unloaded plugin.
-        let mut new_entry = PluginEntry::from_dir(&root_dir)?;
-        new_entry.runtime = self.build_runtime(plugin_id, &new_entry)?;
-        new_entry.status = PluginStatus::Loaded;
-        info!("Plugin {} reloaded", new_entry.manifest);
-
-        let mut registry = self
-            .get_registry()
-            .write()
-            .map_err(|_| PluginError::Internal("Failed to acquire registry write lock".into()))?;
-        registry.insert(plugin_id.to_string(), new_entry);
-        Ok(())
-    }
-
     fn rediscover_plugins(&self) -> Result<Vec<String>, PluginError> {
         let plugins_dir = &self.get_config().plugins_dir;
 

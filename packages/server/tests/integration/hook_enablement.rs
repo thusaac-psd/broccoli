@@ -7,14 +7,13 @@ use sea_orm::{ActiveModelTrait, Set};
 use server::entity::{contest, plugin_config};
 use server::hooks::resource_enablements;
 use server::registry::{ContestTypeHandlers, ContestTypeRegistry};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 const PROBLEM: i32 = 41;
 
 fn registry_owning(contest_type: &str, plugin_id: &str) -> ContestTypeRegistry {
-    let mut map = HashMap::new();
+    let mut map = server::registry::Providers::default();
     map.insert(
         contest_type.to_string(),
         ContestTypeHandlers {

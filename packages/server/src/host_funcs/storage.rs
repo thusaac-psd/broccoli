@@ -2,13 +2,16 @@ use common::db::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use broccoli_server_sdk::types::host_io::{
+    StoreCasInput, StoreCasOutput, StoreDeleteInput, StoreGetInput, StoreGetOutput, StoreScanInput,
+    StoreSetInput,
+};
 use extism::host_fn;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Set, Statement,
     TransactionTrait,
 };
-use serde::Deserialize;
 use serde_json::Value;
 use tracing::error;
 
@@ -16,11 +19,6 @@ use crate::entity::plugin_storage;
 use crate::utils::text::plugin_storage_text as extract_str;
 
 const DEFAULT_COLLECTION: &str = "default";
-
-#[derive(Deserialize)]
-struct StoreGetInput {
-    keys: Vec<String>,
-}
 
 host_fn!(pub store_get(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
     let call = super::HostCall::enter(&user_data, "store_get")?;
@@ -30,7 +28,7 @@ host_fn!(pub store_get(user_data: Arc<(String, DatabaseConnection)>; input: Stri
         .map_err(|e| extism::Error::msg(format!("Invalid store_get input: {e}")))?;
 
     if parsed.keys.is_empty() {
-        return Ok(serde_json::json!({ "values": {} }).to_string());
+        return Ok(serde_json::to_string(&StoreGetOutput::default())?);
     }
 
     let results = tokio::runtime::Handle::current()
@@ -47,25 +45,12 @@ host_fn!(pub store_get(user_data: Arc<(String, DatabaseConnection)>; input: Stri
             extism::Error::msg("Database error")
         })?;
 
-    let values: HashMap<&str, String> = results
-        .iter()
-        .map(|r| (r.key.as_str(), extract_str(&r.data)))
-        .collect();
-
-    let versions: HashMap<&str, i64> = results.iter().map(|r| (r.key.as_str(), r.revision)).collect();
-    Ok(serde_json::json!({ "values": values, "versions": versions }).to_string())
+    let output = StoreGetOutput {
+        values: results.iter().map(|r| (r.key.clone(), extract_str(&r.data))).collect(),
+        versions: results.iter().map(|r| (r.key.clone(), r.revision)).collect(),
+    };
+    Ok(serde_json::to_string(&output)?)
 });
-
-#[derive(Deserialize)]
-struct StoreSetEntry {
-    key: String,
-    value: String,
-}
-
-#[derive(Deserialize)]
-struct StoreSetInput {
-    entries: Vec<StoreSetEntry>,
-}
 
 host_fn!(pub store_set(user_data: Arc<(String, DatabaseConnection)>; input: String) -> () {
     let call = super::HostCall::enter(&user_data, "store_set")?;
@@ -118,11 +103,6 @@ host_fn!(pub store_set(user_data: Arc<(String, DatabaseConnection)>; input: Stri
     Ok(())
 });
 
-#[derive(Deserialize)]
-struct StoreDeleteInput {
-    keys: Vec<String>,
-}
-
 host_fn!(pub store_delete(user_data: Arc<(String, DatabaseConnection)>; input: String) -> () {
     let call = super::HostCall::enter(&user_data, "store_delete")?;
     let (plugin_id, db) = &*call;
@@ -151,14 +131,6 @@ host_fn!(pub store_delete(user_data: Arc<(String, DatabaseConnection)>; input: S
     Ok(())
 });
 
-#[derive(Deserialize)]
-struct StoreCasInput {
-    key: String,
-    expected: Option<String>,
-    new: String,
-    expected_revision: Option<i64>,
-}
-
 host_fn!(pub store_compare_and_set(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
     let call = super::HostCall::enter(&user_data, "store_compare_and_set")?;
     let (plugin_id, db) = &*call;
@@ -176,14 +148,8 @@ host_fn!(pub store_compare_and_set(user_data: Arc<(String, DatabaseConnection)>;
             extism::Error::msg("Database error")
         })?;
 
-    Ok(serde_json::json!({ "swapped": swapped }).to_string())
+    Ok(serde_json::to_string(&StoreCasOutput { swapped })?)
 });
-
-#[derive(Deserialize)]
-struct StoreScanInput {
-    prefix: String,
-    after: Option<String>,
-}
 
 host_fn!(pub store_scan(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
     let call = super::HostCall::enter(&user_data, "store_scan")?;

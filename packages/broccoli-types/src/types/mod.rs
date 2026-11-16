@@ -5,6 +5,7 @@ mod contest;
 mod evaluate;
 mod hook;
 pub mod hook_events;
+pub mod host_io;
 mod http;
 mod lifecycle;
 mod operation;

@@ -66,39 +66,38 @@ pub fn resolve_schema_includes(
             e
         ))
     })?;
+    resolve_schema_includes_with(manifest, |schema_path| {
+        let full_path = root_dir.join(schema_path);
+        let canonical_path = full_path
+            .canonicalize()
+            .map_err(|e| format!("Failed to resolve '{}': {e}", full_path.display()))?;
+        if !canonical_path.starts_with(&canonical_root) {
+            return Err(format!("'{schema_path}' escapes plugin directory"));
+        }
+        std::fs::read_to_string(&canonical_path)
+            .map_err(|e| format!("Failed to read '{}': {e}", full_path.display()))
+    })
+}
 
+/// [`resolve_schema_includes`] with the schema files read through `read`
+/// (given each `schema` path as the manifest names it), so a plugin that is
+/// not on disk yet (an uploaded archive) resolves its includes exactly as
+/// loading it will.
+pub fn resolve_schema_includes_with(
+    manifest: &mut PluginManifest,
+    mut read: impl FnMut(&str) -> Result<String, String>,
+) -> Result<(), PluginError> {
     for (ns_name, ns) in &mut manifest.config {
         if let Some(ref schema_path) = ns.schema {
-            let full_path = root_dir.join(schema_path);
-            let canonical_path = full_path.canonicalize().map_err(|e| {
+            let content = read(schema_path).map_err(|e| {
                 PluginError::LoadFailed(format!(
-                    "Failed to resolve schema file '{}' for config namespace '{}': {}",
-                    full_path.display(),
-                    ns_name,
-                    e
-                ))
-            })?;
-            if !canonical_path.starts_with(&canonical_root) {
-                return Err(PluginError::LoadFailed(format!(
-                    "Schema path '{}' for config namespace '{}' escapes plugin directory",
-                    schema_path, ns_name
-                )));
-            }
-            let content = std::fs::read_to_string(&canonical_path).map_err(|e| {
-                PluginError::LoadFailed(format!(
-                    "Failed to read schema file '{}' for config namespace '{}': {}",
-                    full_path.display(),
-                    ns_name,
-                    e
+                    "Schema file for config namespace '{ns_name}': {e}"
                 ))
             })?;
             let properties: HashMap<String, SchemaProperty> =
                 toml::from_str(&content).map_err(|e| {
                     PluginError::LoadFailed(format!(
-                        "Invalid schema file '{}' for config namespace '{}': {}",
-                        full_path.display(),
-                        ns_name,
-                        e
+                        "Invalid schema file '{schema_path}' for config namespace '{ns_name}': {e}"
                     ))
                 })?;
             ns.properties = properties;
@@ -106,6 +105,7 @@ pub fn resolve_schema_includes(
     }
     Ok(())
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

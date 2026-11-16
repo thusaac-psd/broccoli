@@ -68,9 +68,8 @@ pub struct PluginLifecycle {
     /// The desired `is_enabled` per plugin as of the last apply. Read on hot
     /// paths (visibility, health), so it is a plain lock over a small map.
     desired: RwLock<HashMap<String, bool>>,
-    /// This replica's latest report (also read by [`not_ready`]), and when it
-    /// was last written to the `plugin_replica` row, so an unchanged report
-    /// is only re-touched every [`plugin_fleet::TOUCH_INTERVAL`].
+    /// This replica's latest report (also read by [`not_ready`]), and
+    /// whether it reached the `plugin_replica` row.
     reported: std::sync::Mutex<Option<Reported>>,
     /// The recorded [`Governs`] per plugin, as of the last reconcile.
     governs: RwLock<HashMap<String, Governs>>,
@@ -81,8 +80,8 @@ pub struct PluginLifecycle {
 struct Reported {
     report: ReplicaReport,
     contest_types: Vec<String>,
-    /// `None` until a write of an equal report succeeds.
-    written_at: Option<Instant>,
+    /// Whether a write of an equal report succeeded.
+    written: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -286,6 +285,12 @@ impl PluginLifecycle {
         }
     }
 
+    fn set_governs(&self, plugin_id: &str, governs: Governs) {
+        if let Ok(mut map) = self.governs.write() {
+            map.insert(plugin_id.to_string(), governs);
+        }
+    }
+
     /// Drop everything recorded about a plugin the fleet no longer has.
     fn forget(&self, plugin_id: &str) {
         if let Ok(mut d) = self.desired.write() {
@@ -486,14 +491,13 @@ fn build_report(
         .collect()
 }
 
-/// Record the report in memory, and write it if it changed or touch it if
-/// the last write is getting old. Best-effort: a failed write only makes the
-/// admin view stale.
+/// Record the report in memory, and write it if it changed. Best-effort: a
+/// failed write only makes the admin view stale, and is retried on the next
+/// pass. The row's heartbeat is [`heartbeat`]'s.
 async fn write_report(state: &AppState, applied: &HashMap<String, Applied>) {
-    let now = Instant::now();
-    let report = build_report(state, applied, now);
+    let report = build_report(state, applied, Instant::now());
     let contest_types = crate::dispatcher::local_contest_types(state).await;
-    if !record_report(state, &report, &contest_types, now) {
+    if !record_report(state, &report, &contest_types) {
         return;
     }
     match plugin_fleet::report(&state.db, &state.config.server.id, &report, &contest_types).await {
@@ -502,7 +506,7 @@ async fn write_report(state: &AppState, applied: &HashMap<String, Applied>) {
                 && let Some(last) = reported.as_mut()
                 && same_report(&last.report, &report)
             {
-                last.written_at = Some(now);
+                last.written = true;
             }
         }
         Err(e) => tracing::warn!(error = %e, "Failed to write this replica's plugin report"),
@@ -510,27 +514,21 @@ async fn write_report(state: &AppState, applied: &HashMap<String, Applied>) {
 }
 
 /// Keep `report` as this replica's latest, and say whether it is due to be
-/// written: it changed, its last write is getting old, or no write of it has
-/// succeeded yet. Never due once [`stop`] ran.
-fn record_report(
-    state: &AppState,
-    report: &ReplicaReport,
-    contest_types: &[String],
-    now: Instant,
-) -> bool {
+/// written: it changed, or no write of it has succeeded yet. Never due once
+/// [`stop`] ran.
+fn record_report(state: &AppState, report: &ReplicaReport, contest_types: &[String]) -> bool {
     let Ok(mut reported) = state.plugin_lifecycle.reported.lock() else {
         return false;
     };
-    let unchanged_at = reported
-        .as_ref()
-        .filter(|last| same_report(&last.report, report) && last.contest_types == contest_types)
-        .and_then(|last| last.written_at);
+    let written = reported.as_ref().is_some_and(|last| {
+        last.written && same_report(&last.report, report) && last.contest_types == contest_types
+    });
     *reported = Some(Reported {
         report: report.clone(),
         contest_types: contest_types.to_vec(),
-        written_at: unchanged_at,
+        written,
     });
-    unchanged_at.is_none_or(|at| now.duration_since(at) >= plugin_fleet::TOUCH_INTERVAL)
+    !written
         && !state
             .plugin_lifecycle
             .stopped
@@ -563,6 +561,28 @@ pub async fn stop(state: &AppState) {
     // Every write happens under this lock (`with_applied`): taking it waits
     // out one already under way.
     drop(state.plugin_lifecycle.applied.lock().await);
+}
+
+/// This replica's heartbeat loop: touches its `plugin_replica` row every
+/// [`plugin_fleet::HEARTBEAT_INTERVAL`] until [`stop`]. It never takes the
+/// lifecycle's lock, so a long load or reload here does not make peers
+/// treat this replica as dead and take the contest types it judges.
+pub async fn heartbeat(state: AppState) {
+    let mut interval = tokio::time::interval(plugin_fleet::HEARTBEAT_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        if state
+            .plugin_lifecycle
+            .stopped
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        if let Err(e) = plugin_fleet::heartbeat(&state.db, &state.config.server.id).await {
+            tracing::warn!(error = %e, "Failed to touch this replica's heartbeat");
+        }
+    }
 }
 
 /// The per-replica reconcile loop. Runs until [`stop`].
@@ -621,9 +641,8 @@ async fn reconcile_locked(
             .governs
             .clone()
             .and_then(|g| serde_json::from_value::<Governs>(g).ok())
-            && let Ok(mut map) = state.plugin_lifecycle.governs.write()
         {
-            map.insert(row.id.clone(), governs);
+            state.plugin_lifecycle.set_governs(&row.id, governs);
         }
         let desired = Desired::of(&row);
         // Record the desired state BEFORE applying it: while an enabled
@@ -799,8 +818,8 @@ async fn apply(
             (local, differs, result)
         }
     };
-    if result.is_ok() {
-        record_governs(state, plugin_id).await;
+    if result.is_ok() && differs.is_none() {
+        record_governs(state, plugin_id, desired.generation).await;
     }
     let entry = match &result {
         Ok(()) => Applied {
@@ -901,10 +920,8 @@ async fn register_new_dirs(state: &AppState) -> Result<bool, DbErr> {
     Ok(!new_ids.is_empty())
 }
 
-/// Record what a plugin that just loaded here governs, if that changed.
-/// Best-effort: a stale record only makes a peer that cannot load the plugin
-/// fail closed for a slightly different scope.
-async fn record_governs(state: &AppState, plugin_id: &str) {
+/// What the plugin loaded here governs.
+async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
     let visibility = state
         .plugins
         .get_registry()
@@ -917,15 +934,26 @@ async fn record_governs(state: &AppState, plugin_id: &str) {
         .contest_type_registry
         .read()
         .await
-        .iter()
-        .filter(|(_, h)| h.plugin_id == plugin_id)
-        .map(|(t, _)| t.clone())
+        .registered_by(plugin_id)
+        .into_iter()
+        .map(|(t, _)| t)
         .collect();
     contest_types.sort();
-    let governs = Governs {
+    Governs {
         visibility,
         contest_types,
-    };
+    }
+}
+
+/// Record what the published version of a plugin, just loaded here at
+/// `generation`, governs, if that changed: the first load of a bundled
+/// plugin, which no change published, records it this way. Fenced on the
+/// generation, so a replica applying an older generation never overwrites
+/// what a newer change published with it ([`publish`]). Best-effort: a
+/// stale record only makes a peer that cannot load the plugin fail closed
+/// for a slightly different scope.
+async fn record_governs(state: &AppState, plugin_id: &str, generation: i64) {
+    let governs = loaded_governs(state, plugin_id).await;
     if state.plugin_lifecycle.governs(plugin_id).as_ref() == Some(&governs) {
         return;
     }
@@ -936,16 +964,16 @@ async fn record_governs(state: &AppState, plugin_id: &str) {
         .db
         .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE plugin SET governs = $2 WHERE id = $1 AND governs IS DISTINCT FROM $2",
-            [plugin_id.into(), value.into()],
+            "UPDATE plugin SET governs = $2 \
+              WHERE id = $1 AND generation = $3 AND governs IS DISTINCT FROM $2",
+            [plugin_id.into(), value.into(), generation.into()],
         ))
         .await;
     match result {
-        Ok(_) => {
-            if let Ok(mut map) = state.plugin_lifecycle.governs.write() {
-                map.insert(plugin_id.to_string(), governs);
-            }
+        Ok(done) if done.rows_affected() > 0 => {
+            state.plugin_lifecycle.set_governs(plugin_id, governs)
         }
+        Ok(_) => {}
         Err(e) => tracing::warn!(plugin_id, error = %e, "Failed to record what a plugin governs"),
     }
 }
@@ -987,30 +1015,34 @@ enum Change<'a> {
 /// re-applies it. Returns the new generation, or `None` when the change was
 /// refused (see [`Change`]).
 ///
-/// `fingerprint` is what the serving replica loaded from `source`; it
-/// becomes the version every other replica checks its own copy against.
-/// `None` (a disable) keeps the recorded one.
+/// `loaded` is what the serving replica loaded from `source`: its
+/// fingerprint becomes the version every other replica checks its own copy
+/// against, and what it governs is recorded in the same statement, so the
+/// record only ever describes a published version. `None` (a disable, or
+/// publishing a source that is not loaded) keeps the recorded ones.
 async fn publish(
     state: &AppState,
     plugin_id: &str,
     change: Change<'_>,
-    fingerprint: Option<&Fingerprint>,
+    loaded: Loaded<'_>,
     source: &PluginSource,
 ) -> Result<Option<i64>, DbErr> {
-    let version = fingerprint.map(|f| f.version.clone());
-    let hash = fingerprint.map(|f| f.hash.clone());
+    let version = loaded.fingerprint.map(|f| f.version.clone());
+    let hash = loaded.fingerprint.map(|f| f.hash.clone());
+    let governs = loaded.governs.and_then(|g| serde_json::to_value(g).ok());
     let archive = source.archive_hash().map(str::to_string);
     let statement = match change {
         Change::Enable => Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash)
-               VALUES ($1, TRUE, 1, NOW(), $2, $3, $4)
+            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash, governs)
+               VALUES ($1, TRUE, 1, NOW(), $2, $3, $4, $5)
                ON CONFLICT (id) DO UPDATE
                  SET is_enabled = TRUE,
                      generation = plugin.generation + 1,
                      updated_at = NOW(),
                      version = COALESCE(EXCLUDED.version, plugin.version),
-                     content_hash = COALESCE(EXCLUDED.content_hash, plugin.content_hash)
+                     content_hash = COALESCE(EXCLUDED.content_hash, plugin.content_hash),
+                     governs = COALESCE(EXCLUDED.governs, plugin.governs)
                  WHERE plugin.archive_hash IS NOT DISTINCT FROM EXCLUDED.archive_hash
                RETURNING generation"#,
             [
@@ -1018,6 +1050,7 @@ async fn publish(
                 version.into(),
                 hash.into(),
                 archive.into(),
+                governs.into(),
             ],
         ),
         Change::Disable => Statement::from_sql_and_values(
@@ -1034,8 +1067,8 @@ async fn publish(
         // clause decides; without either, nothing is written.
         Change::Upload(replaces) => Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash)
-               SELECT $1, TRUE, 1, NOW(), $2, $3, $4
+            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash, governs)
+               SELECT $1, TRUE, 1, NOW(), $2, $3, $4, $7
                 WHERE $5 OR EXISTS (SELECT 1 FROM plugin WHERE id = $1)
                ON CONFLICT (id) DO UPDATE
                  SET is_enabled = TRUE,
@@ -1043,7 +1076,8 @@ async fn publish(
                      updated_at = NOW(),
                      version = COALESCE(EXCLUDED.version, plugin.version),
                      content_hash = COALESCE(EXCLUDED.content_hash, plugin.content_hash),
-                     archive_hash = EXCLUDED.archive_hash
+                     archive_hash = EXCLUDED.archive_hash,
+                     governs = COALESCE(EXCLUDED.governs, plugin.governs)
                  WHERE NOT $5 AND plugin.archive_hash IS NOT DISTINCT FROM $6
                RETURNING generation"#,
             [
@@ -1056,6 +1090,7 @@ async fn publish(
                     .and_then(PluginSource::archive_hash)
                     .map(str::to_string)
                     .into(),
+                governs.into(),
             ],
         ),
         Change::Reload => Statement::from_sql_and_values(
@@ -1063,7 +1098,8 @@ async fn publish(
             r#"UPDATE plugin
                   SET generation = generation + 1, updated_at = NOW(),
                       version = COALESCE($2, version),
-                      content_hash = COALESCE($3, content_hash)
+                      content_hash = COALESCE($3, content_hash),
+                      governs = COALESCE($5, governs)
                WHERE id = $1 AND is_enabled AND archive_hash IS NOT DISTINCT FROM $4
                RETURNING generation"#,
             [
@@ -1071,6 +1107,7 @@ async fn publish(
                 version.into(),
                 hash.into(),
                 archive.into(),
+                governs.into(),
             ],
         ),
         Change::RemoveUpload(removed) => Statement::from_sql_and_values(
@@ -1078,7 +1115,8 @@ async fn publish(
             r#"UPDATE plugin
                   SET generation = generation + 1, updated_at = NOW(), archive_hash = NULL,
                       version = COALESCE($2, version),
-                      content_hash = COALESCE($3, content_hash)
+                      content_hash = COALESCE($3, content_hash),
+                      governs = COALESCE($5, governs)
                WHERE id = $1 AND archive_hash = $4
                RETURNING generation"#,
             [
@@ -1086,6 +1124,7 @@ async fn publish(
                 version.into(),
                 hash.into(),
                 removed.into(),
+                governs.into(),
             ],
         ),
     };
@@ -1093,6 +1132,13 @@ async fn publish(
         Some(row) => Ok(Some(row.try_get("", "generation")?)),
         None => Ok(None),
     }
+}
+
+/// What the serving replica loaded for a change it publishes.
+#[derive(Debug, Clone, Copy, Default)]
+struct Loaded<'a> {
+    fingerprint: Option<&'a Fingerprint>,
+    governs: Option<&'a Governs>,
 }
 
 /// Why a lifecycle change did not go through.
@@ -1179,8 +1225,12 @@ async fn load_then_publish(
         }
     };
     let fingerprint = plugin_utils::fingerprint(&root).await;
-    record_governs(state, plugin_id).await;
-    let published = match publish(state, plugin_id, change, fingerprint.as_ref(), source).await {
+    let governs = loaded_governs(state, plugin_id).await;
+    let loaded = Loaded {
+        fingerprint: fingerprint.as_ref(),
+        governs: Some(&governs),
+    };
+    let published = match publish(state, plugin_id, change, loaded, source).await {
         Ok(Some(generation)) => Ok(generation),
         Ok(None) => Err(refused(state, plugin_id, change).await),
         Err(e) => Err(ChangeError::Db(e)),
@@ -1202,6 +1252,7 @@ async fn load_then_publish(
             return Err(e);
         }
     };
+    state.plugin_lifecycle.set_governs(plugin_id, governs);
     applied.insert(
         plugin_id.to_string(),
         Applied {
@@ -1347,7 +1398,14 @@ pub async fn disable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
     let plugin_id = id.as_str();
     let result = with_applied(state, async |applied| {
         let source = published_source(state, id).await?;
-        let Some(generation) = publish(state, plugin_id, Change::Disable, None, &source).await?
+        let Some(generation) = publish(
+            state,
+            plugin_id,
+            Change::Disable,
+            Loaded::default(),
+            &source,
+        )
+        .await?
         else {
             return Err(AppError::Conflict(format!(
                 "Plugin '{plugin_id}' is not currently enabled"
@@ -1523,13 +1581,11 @@ pub async fn remove_upload(
             }
             Some(root) => {
                 let fingerprint = plugin_utils::fingerprint(&root).await;
-                let generation = publish(
-                    state,
-                    plugin_id,
-                    change,
-                    fingerprint.as_ref(),
-                    &PluginSource::Bundle,
-                )
+                let loaded = Loaded {
+                    fingerprint: fingerprint.as_ref(),
+                    governs: None,
+                };
+                let generation = publish(state, plugin_id, change, loaded, &PluginSource::Bundle)
                 .await?
                 .ok_or_else(stale)?;
                 let desired = Desired {

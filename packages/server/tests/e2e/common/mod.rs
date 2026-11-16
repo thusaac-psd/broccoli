@@ -1,5 +1,4 @@
 use common::db::DatabaseConnection;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -13,7 +12,7 @@ use sea_orm::{
     TransactionTrait,
 };
 use serde_json::Value;
-use tokio::sync::{RwLock, watch};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use worker::consumer::Settlement;
 use worker::models::operation::OperationTaskExecutor;
@@ -594,11 +593,10 @@ impl E2eTestApp {
             unknown_keys: Vec::new(),
         };
 
-        let contest_type_registry: ContestTypeRegistry = Arc::new(RwLock::new(HashMap::new()));
-        let evaluator_registry: EvaluatorRegistry = Arc::new(RwLock::new(HashMap::new()));
-        let checker_stage_registry: CheckerStageRegistry = Arc::new(RwLock::new(HashMap::new()));
-        let language_resolver_registry: LanguageResolverRegistry =
-            Arc::new(RwLock::new(HashMap::new()));
+        let contest_type_registry: ContestTypeRegistry = Default::default();
+        let evaluator_registry: EvaluatorRegistry = Default::default();
+        let checker_stage_registry: CheckerStageRegistry = Default::default();
+        let language_resolver_registry: LanguageResolverRegistry = Default::default();
         let operation_batches = OperationBatches::default();
         let operation_waiters: OperationWaiters = Arc::new(dashmap::DashMap::new());
         let evaluate_batches = EvaluateBatches::default();

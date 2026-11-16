@@ -2,7 +2,10 @@
 //!
 //! Every replica keeps one `plugin_replica` row: a JSON map of its per-plugin
 //! [`ReplicaPluginState`], written by [`crate::plugin_lifecycle`] whenever it
-//! changes and touched periodically otherwise. Both timestamps are written
+//! changes, and a heartbeat its own task touches every
+//! [`HEARTBEAT_INTERVAL`] ([`heartbeat`]), apart from the lifecycle's lock,
+//! so a lifecycle operation that runs long never makes a live replica look
+//! dead to its peers. Both timestamps are written
 //! with the database clock, and liveness is decided in SQL against the same
 //! clock, so no two servers' clocks are ever compared. A replica that dies
 //! simply stops touching its row and drops out of [`read`]; a replica that
@@ -25,12 +28,12 @@ use crate::entity::plugin_replica;
 use crate::plugin_distribution::{PluginSource, PluginSourceKind};
 
 /// A replica's row counts as live while it was touched within this window.
-/// Replicas touch at least every [`TOUCH_INTERVAL`], so a live one is never
+/// Replicas touch it every [`HEARTBEAT_INTERVAL`], so a live one is never
 /// missed and a dead one disappears within a minute.
 pub const LIVE_WINDOW_SECS: i64 = 60;
 
-/// How often a replica re-touches an unchanged row.
-pub const TOUCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+/// How often a replica touches its row's heartbeat.
+pub const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// One plugin's state on one replica.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -111,6 +114,19 @@ pub async fn report(
                  contest_types = EXCLUDED.contest_types,
                  heartbeat_at = NOW()"#,
         [server_id.into(), plugins.into(), contest_types.into()],
+    ))
+    .await?;
+    Ok(())
+}
+
+/// Touch this replica's heartbeat, leaving its report as it is. Only an
+/// existing row is touched: the first [`report`] creates it, and a row
+/// [`retire`] removed stays removed.
+pub async fn heartbeat(db: &DatabaseConnection, server_id: &str) -> Result<(), DbErr> {
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE plugin_replica SET heartbeat_at = NOW() WHERE server_id = $1",
+        [server_id.into()],
     ))
     .await?;
     Ok(())

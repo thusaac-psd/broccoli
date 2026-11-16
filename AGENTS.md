@@ -341,9 +341,11 @@ on host and guest and nothing notices. Rules:
   builds the worker's platform tools (`broccoli-compare`) into
   `target/e2e-tools` itself, so `E2E_SANDBOX_BACKEND=mock` is all a mock run
   needs. A submission reads `Judged` before its after-judging hooks run, so an
-  e2e test that counts or inspects what judging did waits for
-  `E2eTestApp::judging_idle`; `pause_worker` holds operations queued, and
-  `reconcile_plugins` applies a change another replica published.
+  e2e test that counts or inspects what judging did, its hooks' effects
+  included, waits for `E2eTestApp::judging_idle`, which completes once every
+  judging session and contest submission call on the server has finalized and
+  run its hooks; `pause_worker` holds operations queued, and `reconcile_plugins`
+  applies a change another replica published.
 - Release shell tests (`release/test`, `release/*/test`) put `release/test/bin`
   first on `PATH`: its `docker` answers an image's `--node-id` question and
   passes everything else to the real engine.

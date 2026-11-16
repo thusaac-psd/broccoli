@@ -4,6 +4,11 @@ use serde::de::DeserializeOwned;
 
 use crate::error::SdkError;
 use crate::types::StorageSnapshot;
+#[cfg(target_arch = "wasm32")]
+use crate::types::host_io::{
+    StoreCasInput, StoreCasOutput, StoreDeleteInput, StoreGetInput, StoreGetOutput, StoreScanInput,
+    StoreSetEntry, StoreSetInput,
+};
 
 pub struct Storage {
     #[cfg(not(target_arch = "wasm32"))]
@@ -16,19 +21,15 @@ impl Storage {
         if keys.is_empty() {
             return Ok(HashMap::new());
         }
-        let input = serde_json::json!({ "keys": keys });
+        Ok(self.get_with_revisions(keys)?.values)
+    }
+
+    fn get_with_revisions(&self, keys: &[&str]) -> Result<StoreGetOutput, SdkError> {
+        let input = StoreGetInput {
+            keys: keys.iter().map(|k| k.to_string()).collect(),
+        };
         let result_json = unsafe { crate::host::raw::store_get(serde_json::to_string(&input)?)? };
-        let result: serde_json::Value = serde_json::from_str(&result_json)?;
-        let values = result
-            .get("values")
-            .and_then(|v| v.as_object())
-            .map(|obj| {
-                obj.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(values)
+        Ok(serde_json::from_str(&result_json)?)
     }
 
     pub fn get_one(&self, key: &str) -> Result<Option<String>, SdkError> {
@@ -40,11 +41,15 @@ impl Storage {
         if entries.is_empty() {
             return Ok(());
         }
-        let entries_json: Vec<serde_json::Value> = entries
-            .iter()
-            .map(|(k, v)| serde_json::json!({ "key": k, "value": v }))
-            .collect();
-        let input = serde_json::json!({ "entries": entries_json });
+        let input = StoreSetInput {
+            entries: entries
+                .iter()
+                .map(|(key, value)| StoreSetEntry {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                })
+                .collect(),
+        };
         unsafe { crate::host::raw::store_set(serde_json::to_string(&input)?)? };
         Ok(())
     }
@@ -53,7 +58,9 @@ impl Storage {
         if keys.is_empty() {
             return Ok(());
         }
-        let input = serde_json::json!({ "keys": keys });
+        let input = StoreDeleteInput {
+            keys: keys.iter().map(|k| k.to_string()).collect(),
+        };
         unsafe { crate::host::raw::store_delete(serde_json::to_string(&input)?)? };
         Ok(())
     }
@@ -64,15 +71,19 @@ impl Storage {
         expected: Option<&str>,
         new: &str,
     ) -> Result<bool, SdkError> {
-        let input = serde_json::json!({
-            "key": key,
-            "expected": expected,
-            "new": new,
-        });
+        self.compare_and_set_input(StoreCasInput {
+            key: key.to_string(),
+            expected: expected.map(str::to_string),
+            new: new.to_string(),
+            expected_revision: None,
+        })
+    }
+
+    fn compare_and_set_input(&self, input: StoreCasInput) -> Result<bool, SdkError> {
         let result_json =
             unsafe { crate::host::raw::store_compare_and_set(serde_json::to_string(&input)?)? };
-        let result: serde_json::Value = serde_json::from_str(&result_json)?;
-        Ok(result["swapped"].as_bool().unwrap_or(false))
+        let output: StoreCasOutput = serde_json::from_str(&result_json)?;
+        Ok(output.swapped)
     }
 }
 
@@ -199,19 +210,15 @@ impl Storage {
 #[cfg(target_arch = "wasm32")]
 impl Storage {
     pub fn snapshot(&self, key: &str) -> Result<Option<StorageSnapshot>, SdkError> {
-        let input = serde_json::json!({"keys":[key]});
-        let json = unsafe { crate::host::raw::store_get(input.to_string())? };
-        let response: serde_json::Value = serde_json::from_str(&json)?;
-        let Some(value) = response["values"][key].as_str() else {
+        let mut found = self.get_with_revisions(&[key])?;
+        let Some(value) = found.values.remove(key) else {
             return Ok(None);
         };
-        let revision = response["versions"][key]
-            .as_i64()
+        let revision = found
+            .versions
+            .remove(key)
             .ok_or_else(|| SdkError::Other("Host did not return a storage revision".into()))?;
-        Ok(Some(StorageSnapshot {
-            value: value.to_owned(),
-            revision,
-        }))
+        Ok(Some(StorageSnapshot { value, revision }))
     }
     pub fn compare_and_set_snapshot(
         &self,
@@ -219,11 +226,12 @@ impl Storage {
         expected: Option<&StorageSnapshot>,
         new: &str,
     ) -> Result<bool, SdkError> {
-        let input = serde_json::json!({"key":key,"expected":expected.map(|s| &s.value),
-            "expected_revision":expected.map(|s|s.revision),"new":new});
-        let json = unsafe { crate::host::raw::store_compare_and_set(input.to_string())? };
-        let response: serde_json::Value = serde_json::from_str(&json)?;
-        Ok(response["swapped"].as_bool().unwrap_or(false))
+        self.compare_and_set_input(StoreCasInput {
+            key: key.to_string(),
+            expected: expected.map(|s| s.value.clone()),
+            new: new.to_string(),
+            expected_revision: expected.map(|s| s.revision),
+        })
     }
     /// Bounded, lexicographically ordered scan of the caller's storage namespace.
     pub fn scan(
@@ -231,8 +239,11 @@ impl Storage {
         prefix: &str,
         after: Option<&str>,
     ) -> Result<HashMap<String, String>, SdkError> {
-        let input = serde_json::json!({"prefix":prefix,"after":after});
-        let json = unsafe { crate::host::raw::store_scan(input.to_string())? };
+        let input = StoreScanInput {
+            prefix: prefix.to_string(),
+            after: after.map(str::to_string),
+        };
+        let json = unsafe { crate::host::raw::store_scan(serde_json::to_string(&input)?)? };
         Ok(serde_json::from_str(&json)?)
     }
 }

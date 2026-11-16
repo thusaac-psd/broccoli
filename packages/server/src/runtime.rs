@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,7 +5,6 @@ use std::time::Duration;
 use anyhow::Context;
 use common::storage::config::create_blob_store;
 use dashmap::DashMap;
-use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::build_router;
@@ -185,10 +183,10 @@ impl ServerRuntime {
         // built) so it can re-dispatch stuck rows via the same dispatcher
         // entry as the lease/steal scanner.
 
-        let contest_type_registry = Arc::new(RwLock::new(HashMap::new()));
-        let evaluator_registry = Arc::new(RwLock::new(HashMap::new()));
-        let checker_stage_registry = Arc::new(RwLock::new(HashMap::new()));
-        let language_resolver_registry = Arc::new(RwLock::new(HashMap::new()));
+        let contest_type_registry = crate::registry::ContestTypeRegistry::default();
+        let evaluator_registry = crate::registry::EvaluatorRegistry::default();
+        let checker_stage_registry = crate::registry::CheckerStageRegistry::default();
+        let language_resolver_registry = crate::registry::LanguageResolverRegistry::default();
         let operation_batches = crate::registry::OperationBatches::new(Some(metrics.clone()));
         let evaluate_batches = crate::registry::EvaluateBatches::new(Some(metrics.clone()));
 
@@ -357,6 +355,7 @@ impl ServerRuntime {
         // Converge onto plugin lifecycle changes made through any replica,
         // and retry plugins that failed to load here.
         tokio::spawn(crate::plugin_lifecycle::run(state.clone()));
+        tokio::spawn(crate::plugin_lifecycle::heartbeat(state.clone()));
 
         // Boot-time orphan recovery: a restart leaves this server's in-flight
         // submissions/judgements/code-runs tagged with our own `server_id`,

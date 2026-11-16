@@ -394,6 +394,29 @@ pub fn dispatch_hooks_background(
     hook_registry: SharedHookRegistry,
     event_id: Option<String>,
 ) {
+    tokio::spawn(async move {
+        dispatch_hooks_once(
+            &topic,
+            event_payload,
+            enabled_plugins.as_ref(),
+            &hook_registry,
+            event_id,
+        )
+        .await;
+    });
+}
+
+/// Dispatch an event whose response no one waits for, once per `event_id`
+/// (an event already dispatched under the same id is skipped), as
+/// [`CallClass::Background`] calls. Completes when every hook has run, so a
+/// caller that awaits it can count the hooks as part of its own work.
+pub async fn dispatch_hooks_once(
+    topic: &str,
+    event_payload: serde_json::Value,
+    enabled_plugins: Option<&ResourceEnablements>,
+    hook_registry: &SharedHookRegistry,
+    event_id: Option<String>,
+) {
     if let Some(ref id) = event_id {
         let mut cache = DISPATCHED_EVENTS.lock().unwrap_or_else(|e| e.into_inner());
         if cache.get(id).is_some() {
@@ -403,38 +426,36 @@ pub fn dispatch_hooks_background(
         cache.put(id.clone(), ());
     }
 
-    tokio::spawn(async move {
-        match dispatch_hooks(
-            &topic,
-            event_payload,
-            enabled_plugins.as_ref(),
-            &hook_registry,
-            CallClass::Background,
-        )
-        .await
-        {
-            Ok(outcome) => match outcome {
-                HookOutcome::Allowed(_) => {}
-                HookOutcome::Rejected { code, message, .. } => {
-                    tracing::warn!(
-                        topic,
-                        code,
-                        message,
-                        "Background hook returned Reject (no effect — response already sent)",
-                    );
-                }
-                HookOutcome::Stopped => {
-                    tracing::warn!(
-                        topic,
-                        "Background hook returned Stop (no effect — response already sent)",
-                    );
-                }
-            },
-            Err(e) => {
-                tracing::warn!(topic, "Background hook dispatch failed: {e:?}");
+    match dispatch_hooks(
+        topic,
+        event_payload,
+        enabled_plugins,
+        hook_registry,
+        CallClass::Background,
+    )
+    .await
+    {
+        Ok(outcome) => match outcome {
+            HookOutcome::Allowed(_) => {}
+            HookOutcome::Rejected { code, message, .. } => {
+                tracing::warn!(
+                    topic,
+                    code,
+                    message,
+                    "Background hook returned Reject (no effect — response already sent)",
+                );
             }
+            HookOutcome::Stopped => {
+                tracing::warn!(
+                    topic,
+                    "Background hook returned Stop (no effect — response already sent)",
+                );
+            }
+        },
+        Err(e) => {
+            tracing::warn!(topic, "Background hook dispatch failed: {e:?}");
         }
-    });
+    }
 }
 
 pub fn dispatch_hooks_background_typed<E: HookEvent + Send + 'static>(
@@ -770,6 +791,41 @@ mod tests {
         payload: serde_json::Value,
     ) -> Result<HookOutcome, AppError> {
         dispatch_hooks(topic, payload, None, registry, CallClass::Background).await
+    }
+
+    #[tokio::test]
+    async fn an_event_dispatched_once_has_run_its_hooks_when_it_returns() {
+        let hook = Arc::new(MockHook::new(
+            "observer",
+            "after_judging",
+            GenericHookAction::Pass,
+        ));
+        let registry = new_shared_registry();
+        register_direct(
+            &mut *registry.write().await,
+            hook.clone(),
+            HookScope::Global,
+            HookMode::Notify,
+        );
+        let id = || Some("once-test:1".to_string());
+        dispatch_hooks_once(
+            "after_judging",
+            serde_json::json!({}),
+            None,
+            &registry,
+            id(),
+        )
+        .await;
+        assert_eq!(hook.calls(), 1, "the hook ran before the dispatch returned");
+        dispatch_hooks_once(
+            "after_judging",
+            serde_json::json!({}),
+            None,
+            &registry,
+            id(),
+        )
+        .await;
+        assert_eq!(hook.calls(), 1, "the same event is dispatched once");
     }
 
     #[tokio::test]

@@ -118,8 +118,9 @@ handler = "get_cooldown_status_standalone"
   `scope = "global"` it runs for every submission on the server.
 - A `before_submission` hook that reserves something for an attempt, such as
   a slot in a quota, releases it on `submission_attempt_abandoned`. The host
-  sends that event, before it answers the request, for an attempt that ends
-  without a submission because a later hook rejected it or its insert failed.
+  sends that event in the background, as it answers the request, for an
+  attempt that ends without a submission because a later hook rejected it, its
+  insert failed or the request was dropped.
 - A route maps an HTTP method and path to an exported function. `problem`
   names the path parameter that addresses a problem: the server checks the
   caller may read that problem before the handler runs and hands the handler

@@ -310,6 +310,60 @@ async fn an_upload_is_refused_when_what_it_replaces_changed_meanwhile() {
     assert_eq!(res.status, 400, "replaces is required: {}", res.text);
 }
 
+/// [`archive`] without the fixture's visibility query.
+fn archive_without_visibility(id: &str, version: &str) -> Vec<u8> {
+    let manifest = std::fs::read_to_string(fixture(BUNDLED).join("plugin.toml"))
+        .unwrap()
+        .replace("version = \"0.1.0\"", &format!("version = \"{version}\""));
+    let query = "[[server.queries]]\ntopic = \"visibility\"\nfunction = \"decide_visibility\"\n";
+    assert!(manifest.contains(query));
+    let manifest = manifest.replace(query, "");
+    let wasm = std::fs::read(fixture(BUNDLED).join("server_plugin.wasm")).unwrap();
+    tar_gz(&[
+        (&format!("{id}/plugin.toml"), manifest.as_bytes()),
+        (&format!("{id}/server_plugin.wasm"), &wasm),
+    ])
+}
+
+/// What a plugin governs is recorded only for a version the fleet published:
+/// a version that loads here but is refused at publish leaves the record of
+/// the published one, in the table and on this replica.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_upload_leaves_what_the_published_version_governs() {
+    let a = TestApp::spawn_with_plugins().await;
+    let b = a.spawn_replica(SpawnOptions::default()).await;
+    let token = admin(&a).await;
+    let seen = replaces(&a, &token, archive_without_visibility(BUNDLED, "0.3.0")).await;
+    upload(&b, &token, archive(BUNDLED, "0.2.0")).await;
+    plugin_lifecycle::reconcile(&a.state).await.unwrap();
+    let governs = || async {
+        let recorded = row(&a, BUNDLED).await.unwrap().governs.expect("recorded");
+        recorded["visibility"].as_bool().unwrap()
+    };
+    assert!(governs().await, "0.2.0 declares a visibility query");
+
+    let res = a
+        .post_plugin_archive(
+            routes::ADMIN_PLUGIN_UPLOAD,
+            archive_without_visibility(BUNDLED, "0.3.0"),
+            &[("replaces", &seen)],
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 409, "{}", res.text);
+    assert!(
+        governs().await,
+        "the published 0.2.0 still governs visibility"
+    );
+    assert!(
+        a.state
+            .plugin_lifecycle
+            .governs(BUNDLED)
+            .is_some_and(|g| g.visibility),
+        "and this replica still records it so"
+    );
+}
+
 /// An upload that expects a new plugin, for an id that already exists, says
 /// so: nothing changed meanwhile, the plugin was simply there already.
 #[tokio::test(flavor = "multi_thread")]

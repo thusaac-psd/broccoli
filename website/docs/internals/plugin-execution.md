@@ -142,6 +142,15 @@ a connection as long as the call timeout; `PoolSizes` in
 a pool of its own, within that shared budget; see
 [Plugin database access](./plugin-database.md).
 
+## Registered keys
+
+Several loaded plugins may register the same key (a contest type, a problem
+type, a checker format, a language): every registration is kept
+(`registry::Providers`), and the key resolves to the provider whose plugin id
+sorts first. The rule depends only on which plugins are loaded, never on load
+order, so servers that load the same plugins agree, and unloading the
+resolved provider hands the key to the next one instead of dropping it.
+
 ## Nested calls
 
 `checker:resolve`, `checker:interpret` and `language:resolve`

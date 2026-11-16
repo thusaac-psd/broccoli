@@ -34,15 +34,40 @@ have no worker section for the same reason.
    directories only, one top-level directory named after a valid plugin id,
    no path component other than a plain name, no duplicate files, a
    `plugin.toml` that parses with valid routes and timers, every manifest path
-   inside the plugin root, and the server entry point present.
+   inside the plugin root, and the server entry point present. The manifest's
+   config schemas, with every included `schema` file read from the archive,
+   pass the same `PluginEntry::new` check loading runs, so an archive that
+   uploads also loads.
 2. The bytes go to the blob store. `put` is content addressed, so the key is
    the hash `parse` computed.
 3. Under the lifecycle lock, the archive is unpacked into this server's cache
    and loaded through the same `load_then_publish` path enable and reload use.
 4. Only if that load succeeds does one upsert set `archive_hash`, `is_enabled`,
-   the published `version` and `content_hash` fingerprint, and bump
-   `generation`. A failed load publishes nothing and answers
-   `422 PLUGIN_LOAD_FAILED`; the previous version keeps serving here.
+   the published `version` and `content_hash` fingerprint, what the loaded
+   version governs, and bump `generation`. A failed load publishes nothing and
+   answers `422 PLUGIN_LOAD_FAILED`; the previous version keeps serving here.
+
+## What a plugin governs
+
+The row's `governs` column records what the published version governs: whether
+it declares a visibility query, and every contest type its `init()` registered.
+A server that cannot load the plugin reads it to fail closed for exactly that,
+and `contest_type_open` reads it to tell which plugins provide a type. Every
+change that loads a version (enable, reload, upload, removing an upload) writes
+it in the same statement that publishes the version, so a change refused at
+publish (`409 CONFLICT`, or a database error) leaves the record of the version
+the fleet still runs, in the table and in memory. The first load of a bundled
+plugin, which no change published, records it from the reconcile loop, fenced
+on the generation it loaded so it never overwrites a newer publish.
+
+## Replica liveness
+
+Each server's `plugin_replica` row carries its report (per-plugin state and the
+contest types it can judge, rewritten when it changes) and a heartbeat. A task
+of its own touches the heartbeat every `HEARTBEAT_INTERVAL` (15 s), outside the
+lifecycle lock, so a long reload never lets the row age past the 60 s live
+window and make peers take the contest types this server judges. The heartbeat
+only updates an existing row, so a row shutdown retired stays retired.
 
 Every other server picks up the new generation on its next reconcile tick
 (`RECONCILE_INTERVAL`, 5 s). There is no queue traffic: convergence is the

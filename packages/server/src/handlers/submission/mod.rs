@@ -223,7 +223,7 @@ pub async fn create_submission(
         txn.commit().await?;
         Ok(model)
     };
-    let model = attempt.settle(inserted.await).await?;
+    let model = attempt.settle(inserted.await)?;
 
     fire_after_submission_hooks(
         &state,
@@ -833,7 +833,7 @@ pub async fn create_contest_submission(
             }
         })
     };
-    let model = attempt.settle(inserted.await).await?;
+    let model = attempt.settle(inserted.await)?;
 
     fire_after_submission_hooks(
         &state,

@@ -176,9 +176,12 @@ impl Blind {
 ///   this replica's disk declares a visibility query comes from the same
 ///   record, since there is no manifest here to read.
 /// - It is disabled (or reloading) but last loaded as the visibility
-///   plugin of some contest types: their contests still depend on it.
-///   Blind to those contest types only; a disabled plugin that governed no
-///   contest type, or never loaded, governs nothing.
+///   plugin of some contest types that no enabled plugin provides (the
+///   types [`crate::plugin_lifecycle::PluginLifecycle::disabled_provider`]
+///   keeps closed, the rule submissions and the claim follow too): their
+///   contests still depend on it. Blind to those contest types only; a
+///   disabled plugin that governed no closed contest type, or never loaded,
+///   governs nothing.
 ///
 /// Only the governed resources are blind: standalone problems and other
 /// contest types stay readable, so one missing plugin cannot take every
@@ -234,10 +237,20 @@ fn visibility_queriers(state: &AppState) -> Result<(Vec<VisibilityQuerier>, Blin
                 _ => None,
             }
         } else {
-            match recorded {
-                Some(g) if g.visibility && !g.contest_types.is_empty() => Some(g.contest_types),
+            // Only the types it keeps closed: a type another enabled plugin
+            // provides is served, and that provider governs it now.
+            let closed: Vec<String> = match recorded {
+                Some(g) if g.visibility => g
+                    .contest_types
+                    .into_iter()
+                    .filter(|t| state.plugin_lifecycle.disabled_provider(t).is_some())
+                    .collect(),
                 _ => continue,
+            };
+            if closed.is_empty() {
+                continue;
             }
+            Some(closed)
         };
         tracing::warn!(
             plugin_id = %id,
@@ -1166,14 +1179,10 @@ mod tests {
         let operation_batches = OperationBatches::default();
         let operation_waiters: OperationWaiters = Arc::new(dashmap::DashMap::new());
         let evaluate_batches = EvaluateBatches::default();
-        let contest_type_registry: ContestTypeRegistry =
-            Arc::new(tokio::sync::RwLock::new(HashMap::new()));
-        let evaluator_registry: EvaluatorRegistry =
-            Arc::new(tokio::sync::RwLock::new(HashMap::new()));
-        let checker_stage_registry: CheckerStageRegistry =
-            Arc::new(tokio::sync::RwLock::new(HashMap::new()));
-        let language_resolver_registry: LanguageResolverRegistry =
-            Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let contest_type_registry: ContestTypeRegistry = Default::default();
+        let evaluator_registry: EvaluatorRegistry = Default::default();
+        let checker_stage_registry: CheckerStageRegistry = Default::default();
+        let language_resolver_registry: LanguageResolverRegistry = Default::default();
 
         AppState {
             plugins,

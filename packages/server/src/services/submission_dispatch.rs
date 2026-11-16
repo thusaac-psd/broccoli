@@ -1,7 +1,7 @@
 use crate::registry::ContestTypeRegistry;
 use broccoli_server_sdk::types::{
-    AfterJudgingEvent, DetachedSubmissionCompletion, OnSubmissionInput, OnSubmissionOutput,
-    SourceFile, TestCaseBodyRef, TestCaseRow,
+    AfterJudgingEvent, DetachedSubmissionCompletion, HookEvent, OnSubmissionInput,
+    OnSubmissionOutput, SourceFile, TestCaseBodyRef, TestCaseRow,
 };
 use common::db::DatabaseConnection;
 use sea_orm::prelude::Expr;
@@ -160,19 +160,31 @@ async fn dispatch_after_judging_hooks(
             }
         };
 
-    hooks::dispatch_hooks_background_typed(
-        AfterJudgingEvent {
-            submission_id: sub.id,
-            user_id,
-            problem_id,
-            contest_id,
-            verdict,
-            score: sub.score,
-        },
-        enabled_plugins,
-        hook_registry,
+    let event = AfterJudgingEvent {
+        submission_id: sub.id,
+        user_id,
+        problem_id,
+        contest_id,
+        verdict,
+        score: sub.score,
+    };
+    let payload = match serde_json::to_value(&event) {
+        Ok(payload) => payload,
+        Err(e) => {
+            warn!(error = %e, "Failed to serialize the after_judging event");
+            return;
+        }
+    };
+    // Awaited, not spawned: the hooks are part of the judging work that
+    // calls this (see `judging_sessions`).
+    hooks::dispatch_hooks_once(
+        AfterJudgingEvent::TOPIC,
+        payload,
+        enabled_plugins.as_ref(),
+        &hook_registry,
         Some(format!("after_judging:{}:{}", sub.id, sub.judge_epoch)),
-    );
+    )
+    .await;
 }
 
 /// Ends a dispatch that produced no verdict with `failure`, or, when its
@@ -577,7 +589,9 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
         plugin_id = %plugin_id,
         function_name = %function_name,
     );
+    let judging = state.registries.judging_sessions.track();
     tokio::spawn(async move {
+        let _judging = judging;
         async move {
             // The contest call waits in host functions for the whole
             // judgement, holding no CPU token while it does.
