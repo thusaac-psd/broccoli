@@ -49,8 +49,8 @@ grep -q 'for set in postgres redis; do' "$native/build-native-bundle.sh" \
 
 inst="$native/install-native.sh"
 # Run the installer's own functions against stubbed dpkg, apt, Redis and PostgreSQL.
-fns="$(awk '/^ubuntu_version\(\)\{/,/\}$/; /^die_unstaged\(\)\{/,/^\}/; /^install_bundled_set\(\)\{/,/^\}/; /^redis_major\(\)\{/,/\}$/; /^ensure_redis7\(\)\{/,/^\}/; /^ensure_postgres\(\)\{/,/^\}/' "$inst")"
-for f in ubuntu_version die_unstaged install_bundled_set ensure_redis7 ensure_postgres; do
+fns="$(awk '/^ubuntu_version\(\)\{/,/\}$/; /^first_match\(\)\{/,/^\}/; /^die_unstaged\(\)\{/,/^\}/; /^install_bundled_set\(\)\{/,/^\}/; /^redis_major\(\)\{/,/\}$/; /^ensure_redis7\(\)\{/,/^\}/; /^ensure_postgres\(\)\{/,/^\}/; /^ensure_toolchain\(\)\{/,/^\}/' "$inst")"
+for f in ubuntu_version first_match die_unstaged install_bundled_set ensure_redis7 ensure_postgres ensure_toolchain; do
   printf '%s\n' "$fns" | grep -q "^$f(){" || fail "$f not found"
 done
 
@@ -67,9 +67,12 @@ run() {
   (
     for kv in "$@"; do printf '%s\n' "$kv"; done
   ) > "$dir/knobs"
+  # The installer's own shell options: a step that fails silently under
+  # them stops the install without saying why. The scenario runs as a job of
+  # its own, since `set -e` is off in a subshell an `||` tests.
   # shellcheck disable=SC2016
   (
-    set +e
+    set -euo pipefail
     knob() { sed -n "s/^$1=//p" "$dir/knobs"; }
     BUNDLE="$dir/bundle"
     if [ "$(knob bundle)" = 1 ]; then
@@ -85,6 +88,7 @@ run() {
     redis-server() { local v; v="$(cat "$dir/version")"; [ -n "$v" ] && echo "Redis server v=$v.0.0 sha=0"; }
     dpkg() {
       calls "dpkg $*"
+      if [ "$1" = -s ]; then [ "$(knob toolchain_installed)" = 1 ]; return; fi
       if [ "$(knob dpkg_fails)" = 1 ]; then
         echo "dpkg: dependency problems prevent configuration of redis-server" >&2
         return 1
@@ -104,7 +108,8 @@ run() {
     die() { echo "DIE: $*"; exit 3; }
     eval "$fns"
     "${ENSURE:-ensure_redis7}"
-  ) > "$dir/out" 2>&1 || status=$?
+  ) > "$dir/out" 2>&1 &
+  wait $! || status=$?
   echo "$status" > "$dir/rc"
   touch "$dir/calls"
 }
@@ -135,7 +140,7 @@ run stale installed=6 bundle=1 bundle_gives=6 dpkg_status='install ok installed'
 # Without a bundled set, an old Redis stops the install with the staging
 # command; nothing reaches for apt or packages.redis.io.
 run airgap installed=6
-[ "$(rc airgap)" = 3 ] || fail "a box without a bundle and with Redis 6 did not stop"
+[ "$(rc airgap)" = 3 ] || fail "a box without a bundle and with Redis 6 did not stop with a reason: rc $(rc airgap), $(cat "$T/airgap/out")"
 grep -q 'stage-redis.sh' "$T/airgap/out" || fail "the failure does not name the staging command: $(cat "$T/airgap/out")"
 ! called airgap 'apt-get\|curl' || fail "a box without a bundle reached for the network: $(cat "$T/airgap/calls")"
 
@@ -153,8 +158,15 @@ ENSURE=ensure_postgres run pg_present pg_installed=postgresql-14 pg_bundle=1
 ! called pg_present '^dpkg -i\|apt-get' || fail "an installed PostgreSQL server was reinstalled"
 
 ENSURE=ensure_postgres run pg_unstaged
-[ "$(rc pg_unstaged)" = 3 ] || fail "a box without PostgreSQL or a bundled set did not stop"
+[ "$(rc pg_unstaged)" = 3 ] || fail "a box without PostgreSQL or a bundled set did not stop with a reason: rc $(rc pg_unstaged), $(cat "$T/pg_unstaged/out")"
 grep -q 'stage-postgres.sh' "$T/pg_unstaged/out" || fail "the failure does not name the staging command"
 ! called pg_unstaged 'apt-get\|curl' || fail "a box without a bundled PostgreSQL set reached for the network"
 
-echo "PASS: native PostgreSQL and Redis 7 install from the bundle or the box, never the network"
+# Every role without its bundled set stops with the staging command, under
+# the installer's own `set -euo pipefail`.
+ENSURE=ensure_toolchain run tc_unstaged
+[ "$(rc tc_unstaged)" = 3 ] || fail "a box without a toolchain or a bundled set did not stop with a reason: rc $(rc tc_unstaged), $(cat "$T/tc_unstaged/out")"
+grep -q 'stage-toolchain.sh' "$T/tc_unstaged/out" || fail "the toolchain failure does not name the staging command"
+! called tc_unstaged 'apt-get\|curl' || fail "a box without a bundled toolchain reached for the network"
+
+echo "PASS: native PostgreSQL, Redis 7 and the toolchain install from the bundle or the box, never the network"

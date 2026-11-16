@@ -89,6 +89,18 @@ require_ubuntu(){
 # The Ubuntu version whose bundled .deb sets this box installs.
 ubuntu_version(){ (. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}"); }
 
+# first_match PATH...: print the first of PATH (globs the caller expanded)
+# that exists, or nothing. Globbing and no pipeline, so a missing file is an
+# empty answer the caller reports, never a failure `set -euo pipefail` stops
+# the install on without saying why.
+first_match(){
+  local path
+  for path in "$@"; do
+    [ -e "$path" ] && { printf '%s\n' "$path"; return 0; }
+  done
+  return 0
+}
+
 # install_bundled_set NAME PACKAGE: install the bundle's NAME/<VERSION_ID>/*.deb
 # set (stage-NAME.sh) with dpkg, offline. Returns 1 when the bundle has no set
 # for this Ubuntu version. A set that does not install, or leaves PACKAGE
@@ -97,7 +109,7 @@ install_bundled_set(){
   local name="$1" package="$2" ver debs log status
   ver="$(ubuntu_version)"
   debs="$BUNDLE/$name/$ver"
-  ls "$debs"/*.deb >/dev/null 2>&1 || return 1
+  [ -n "$(first_match "$debs"/*.deb)" ] || return 1
   echo ">> installing the bundled $name set for Ubuntu $ver ($debs)"
   log="$(mktemp)"
   if ! dpkg -i --skip-same-version "$debs"/*.deb >"$log" 2>&1; then
@@ -140,7 +152,7 @@ ensure_postgres(){
   local set major
   dpkg-query -W -f='${Package} ${Status}\n' 'postgresql-[0-9]*' 2>/dev/null \
     | grep -q '^postgresql-[0-9]* install ok installed$' && return 0
-  set="$(ls "$BUNDLE/postgres/$(ubuntu_version)"/postgresql-[0-9]*_*.deb 2>/dev/null | head -n 1)"
+  set="$(first_match "$BUNDLE/postgres/$(ubuntu_version)"/postgresql-[0-9]*_*.deb)"
   [ -n "$set" ] || die_unstaged postgres "a PostgreSQL server"
   major="$(basename "$set" | sed -n 's/^postgresql-\([0-9]*\)_.*/\1/p')"
   install_bundled_set postgres "postgresql-$major"
@@ -235,7 +247,8 @@ install_infra_server(){
   sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 \
     || sudo -u postgres createdb -O "$DB_USER" "$DB_NAME"
   local pgconf pghba subnet
-  pgconf="$(ls /etc/postgresql/*/main/postgresql.conf | head -1)"
+  pgconf="$(first_match /etc/postgresql/*/main/postgresql.conf)"
+  [ -n "$pgconf" ] || die "no /etc/postgresql/<major>/main/postgresql.conf: the PostgreSQL server package did not create its cluster"
   pghba="$(dirname "$pgconf")/pg_hba.conf"
   subnet="${BROCCOLI_LAN_CIDR:-${host%.*}.0/24}"
   grep -q "^listen_addresses *= *'\*'" "$pgconf" || sed -i "s/^#\?listen_addresses.*/listen_addresses = '*'/" "$pgconf"
@@ -275,7 +288,7 @@ install_infra_server(){
   # contestant on the LAN every testcase without credentials).
   echo ">> configuring seaweedfs"
   local proxyd
-  proxyd="$(ls /usr/lib/systemd/systemd-socket-proxyd /lib/systemd/systemd-socket-proxyd 2>/dev/null | head -n 1)" || true
+  proxyd="$(first_match /usr/lib/systemd/systemd-socket-proxyd /lib/systemd/systemd-socket-proxyd)"
   [ -n "$proxyd" ] || die "systemd-socket-proxyd not found (it ships with systemd); needed to expose only S3 on the LAN"
   install -d -o "$SVC_USER" -g "$SVC_USER" "$SEAWEED_DATA"
   sed -e "s/@ACCESS_KEY@/$s3_ak/; s/@SECRET_KEY@/$s3_sk/" \
