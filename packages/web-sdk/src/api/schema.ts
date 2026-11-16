@@ -3795,9 +3795,9 @@ export interface components {
     /** @description What depends on a plugin right now. */
     PluginDependentsResponse: {
       /**
-       * @description Contests running now (started, not ended) whose contest type this
-       *     plugin provides on the serving replica. Disabling the plugin stops
-       *     their submissions from being accepted and judged.
+       * @description Contests in their running phase now whose contest type this plugin
+       *     recorded when it last loaded. Disabling the plugin stops their
+       *     submissions from being accepted and judged.
        */
       running_contests: components['schemas']['RunningContestRef'][];
     };
