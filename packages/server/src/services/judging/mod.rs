@@ -105,7 +105,7 @@ mod unit;
 mod tests;
 
 pub(crate) use budget::RetryBudget;
-pub(crate) use fault::DispatchFailure;
+pub(crate) use fault::{CallEnd, DispatchFailure};
 pub use fault::{DispatchFault, DispatchFaults};
 pub use notify::CLAIM_CHANNEL;
 pub(crate) use notify::ClaimWake;

@@ -21,49 +21,112 @@ pub(crate) fn plugin_error_code(plugin_id: &str, code: &str) -> String {
     format!("{plugin_id}.{code}")
 }
 
-fn attributed(plugin_id: &str, code: Option<Option<String>>) -> Option<Option<String>> {
-    code.map(|code| code.map(|code| plugin_error_code(plugin_id, &code)))
+/// A plugin's write to the unit it was dispatched with: the parts of it
+/// [`as_recorded`] rules on, alike for a judgement and a code run.
+pub(crate) trait PluginWrite {
+    /// The write ends its unit.
+    fn finalizes(&self) -> bool;
+    /// The write ends its unit as a system error.
+    fn ends_in_system_error(&self) -> bool;
+    fn error_code(&mut self) -> &mut Option<Option<String>>;
+    fn error_message(&mut self) -> &mut Option<Option<String>>;
+    /// Records whether a system error the write ends its unit with stands. A
+    /// code run's always does: it is never retried.
+    fn set_stands(&mut self, stands: bool);
+    /// The plugin's word that its system error stands.
+    fn stands(&self) -> bool;
+}
+
+/// `status` and `verdict` end a unit as a system error. A plugin writes no
+/// `SystemError` status, so its system error is a terminal write with a
+/// `SystemError` verdict.
+fn ends_in_system_error(
+    status: Option<SubmissionStatus>,
+    verdict: &Option<Option<Verdict>>,
+) -> bool {
+    status.is_some_and(|s| s.is_terminal()) && matches!(verdict, Some(Some(Verdict::SystemError)))
+}
+
+impl PluginWrite for SubmissionUpdate {
+    fn finalizes(&self) -> bool {
+        self.status.is_some_and(|s| s.is_terminal())
+    }
+    fn ends_in_system_error(&self) -> bool {
+        ends_in_system_error(self.status, &self.verdict)
+    }
+    fn error_code(&mut self) -> &mut Option<Option<String>> {
+        &mut self.error_code
+    }
+    fn error_message(&mut self) -> &mut Option<Option<String>> {
+        &mut self.error_message
+    }
+    fn set_stands(&mut self, stands: bool) {
+        self.stands = stands;
+    }
+    fn stands(&self) -> bool {
+        self.stands
+    }
+}
+
+impl PluginWrite for CodeRunUpdate {
+    fn finalizes(&self) -> bool {
+        self.status.is_some_and(|s| s.is_terminal())
+    }
+    fn ends_in_system_error(&self) -> bool {
+        ends_in_system_error(self.status, &self.verdict)
+    }
+    fn error_code(&mut self) -> &mut Option<Option<String>> {
+        &mut self.error_code
+    }
+    fn error_message(&mut self) -> &mut Option<Option<String>> {
+        &mut self.error_message
+    }
+    fn set_stands(&mut self, _: bool) {}
+    fn stands(&self) -> bool {
+        true
+    }
 }
 
 /// `update` from `plugin_id` as the host records it, the one rule for every
-/// error code a judgement write carries:
+/// error code a judgement or code run write carries:
 ///
 /// - the plugin's own code is recorded under its id ([`plugin_error_code`]);
 /// - the plugin's word that its system error stands
 ///   ([`SubmissionUpdate::stands`]) counts only on the update that ends the
-///   judgement in one;
+///   unit in one;
 /// - an update that would finalize an attempt the platform lost (a fault of
 ///   the hand-back class, see [`super::DispatchFaults::lost`]) is `None`, a
 ///   write fenced out as a stale dispatch's is, whatever verdict the plugin
-///   computed from the lost operations: the dispatch hands the judgement back
+///   computed from the lost operations: the dispatch hands the unit back
 ///   when it ends;
-/// - under any other fault, an update that ends the judgement as a system
-///   error carries the fault's bare host code and description, and stands as
-///   the fault's class says, whatever the plugin reported, so the
-///   system-error retry treats it by its cause.
+/// - under any other fault, an update that ends the unit as a system error
+///   carries the fault's bare host code and description, and stands as the
+///   fault's class says, whatever the plugin reported, so the system-error
+///   retry treats it by its cause.
 ///
 /// Any other update is unchanged.
-pub(crate) fn as_recorded(
+pub(crate) fn as_recorded<W: PluginWrite>(
     plugin_id: &str,
-    mut update: SubmissionUpdate,
+    mut update: W,
     fault: Option<Recorded>,
-) -> Option<SubmissionUpdate> {
-    update.error_code = attributed(plugin_id, update.error_code);
-    let finalizes = update.status.is_some_and(|s| s.is_terminal());
-    let ends_in_system_error =
-        finalizes && matches!(update.verdict, Some(Some(Verdict::SystemError)));
-    update.stands &= ends_in_system_error;
+) -> Option<W> {
+    let code = update.error_code();
+    *code = code
+        .take()
+        .map(|code| code.map(|code| plugin_error_code(plugin_id, &code)));
+    let ends_in_system_error = update.ends_in_system_error();
+    update.set_stands(update.stands() && ends_in_system_error);
     let Some(fault) = fault else {
         return Some(update);
     };
     let class = SystemErrorClass::of_fault(fault.fault);
     if class == SystemErrorClass::HandBack {
-        return (!finalizes).then_some(update);
+        return (!update.finalizes()).then_some(update);
     }
     if ends_in_system_error {
-        update.error_code = Some(Some(fault.fault.code().to_string()));
-        update.error_message = Some(Some(fault.message));
-        update.stands = class == SystemErrorClass::Stands;
+        *update.error_code() = Some(Some(fault.fault.code().to_string()));
+        *update.error_message() = Some(Some(fault.message));
+        update.set_stands(class == SystemErrorClass::Stands);
     }
     Some(update)
 }
@@ -149,16 +212,11 @@ pub(crate) fn code_run_write_fence(alias: &str, code_run: &str, epoch: &str) -> 
     )
 }
 
-/// The statement for `plugin_id`'s code-run progress or result update, behind
-/// [`code_run_write_fence`], its error code the plugin's
-/// ([`plugin_error_code`]); a terminal status stamps `judged_at`. Its row
-/// count is the number of runs written. `None` when the update sets nothing.
-pub(crate) fn code_run_write<P: SqlBindSink>(
-    p: &mut P,
-    plugin_id: &str,
-    mut update: CodeRunUpdate,
-) -> Option<String> {
-    update.error_code = attributed(plugin_id, update.error_code);
+/// The statement for a plugin's code-run progress or result update, as the
+/// host records it ([`as_recorded`]), behind [`code_run_write_fence`]; a
+/// terminal status stamps `judged_at`. Its row count is the number of runs
+/// written. `None` when the update sets nothing.
+pub(crate) fn code_run_write<P: SqlBindSink>(p: &mut P, update: &CodeRunUpdate) -> Option<String> {
     let mut sets = Vec::new();
     push_judge_sets(
         p,
@@ -401,9 +459,31 @@ mod tests {
             error_code: Some(Some("NO_TEST_CASES".into())),
             ..Default::default()
         };
-        let mut p = RecordingSink { args: Vec::new() };
-        code_run_write(&mut p, "judge", run).expect("sets");
-        assert_eq!(p.args[0], serde_json::json!("judge.NO_TEST_CASES"));
+        assert_eq!(
+            as_recorded("judge", run, None).unwrap().error_code,
+            Some(Some("judge.NO_TEST_CASES".into()))
+        );
+    }
+
+    /// A code run's write follows the judgement's rule: a lost attempt's
+    /// result is fenced out, and a system error under a fault carries the
+    /// fault's code.
+    #[test]
+    fn a_code_run_write_follows_the_same_fault_rule() {
+        let run = |verdict| CodeRunUpdate {
+            status: Some(SubmissionStatus::Judged),
+            verdict: Some(Some(verdict)),
+            error_code: Some(Some("PLUGIN_SAYS".into())),
+            ..Default::default()
+        };
+        assert!(as_recorded("judge", run(Verdict::Accepted), lost()).is_none());
+        let recorded = as_recorded("judge", run(Verdict::SystemError), checker_failed()).unwrap();
+        assert_eq!(recorded.error_code, Some(Some("CHECKER_FAILED".into())));
+        let progress = CodeRunUpdate {
+            status: Some(SubmissionStatus::Running),
+            ..Default::default()
+        };
+        assert!(as_recorded("judge", progress, lost()).is_some());
     }
 
     /// Records bound values and hands back sequential `$N` placeholders, so a

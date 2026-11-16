@@ -1417,6 +1417,70 @@ async fn no_system_error_retry_is_spent_while_its_type_is_parked() {
     }
 }
 
+/// A code run ends by the judgement's rule: an attempt the platform lost
+/// goes back to the queue with no retry spent, so does one whose type is
+/// parked, and anything else is finalized as a system error.
+#[tokio::test]
+async fn a_failed_code_run_is_handed_back_or_finalized_by_the_judgements_rule() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    provider(&db, true).await;
+    let claim = |db: DatabaseConnection| async move {
+        let mut runs = claim_code_runs(&db, "srv", 10, NO_TYPES)
+            .await
+            .unwrap()
+            .units;
+        assert_eq!(runs.len(), 1, "exactly one code run is claimable");
+        runs.remove(0)
+    };
+    let run = new_code_run(&db).await;
+    let lost = DispatchFailure::from(super::fault::Recorded {
+        fault: OperationFault::OperationLost.into(),
+        message: "lost".into(),
+    });
+    let judging = DispatchFailure::judging("PLUGIN_ERROR", "boom");
+    let find = |db: DatabaseConnection, id| async move {
+        code_run::Entity::find_by_id(id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+
+    let claimed = claim(db.clone()).await;
+    let outcome = fail_dispatch(&db, Unit::CodeRun, run.id, claimed.judge_epoch, &lost)
+        .await
+        .unwrap();
+    assert_eq!(outcome, DispatchFailed::HandedBack);
+    let after = find(db.clone(), run.id).await;
+    assert_eq!(after.status, SubmissionStatus::Queued);
+    assert_eq!(after.dispatch_retries, 0);
+    assert!(
+        after.judge_epoch > claimed.judge_epoch,
+        "the lost dispatch is fenced"
+    );
+
+    let claimed = claim(db.clone()).await;
+    provider(&db, false).await;
+    let outcome = fail_dispatch(&db, Unit::CodeRun, run.id, claimed.judge_epoch, &judging)
+        .await
+        .unwrap();
+    assert_eq!(outcome, DispatchFailed::HandedBack, "parked");
+    assert_eq!(
+        find(db.clone(), run.id).await.status,
+        SubmissionStatus::Queued
+    );
+
+    provider(&db, true).await;
+    let claimed = claim(db.clone()).await;
+    let outcome = fail_dispatch(&db, Unit::CodeRun, run.id, claimed.judge_epoch, &judging)
+        .await
+        .unwrap();
+    assert_eq!(outcome, DispatchFailed::SystemError);
+    let after = find(db.clone(), run.id).await;
+    assert_eq!(after.status, SubmissionStatus::SystemError);
+    assert_eq!(after.error_code.as_deref(), Some("PLUGIN_ERROR"));
+}
+
 /// In-flight work of a parked type whose owner was lost goes back without
 /// spending a dispatch retry, even with the budget spent.
 #[tokio::test]

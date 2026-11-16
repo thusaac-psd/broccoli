@@ -188,6 +188,104 @@ impl DispatchFailure {
     }
 }
 
+/// How the plugin call of a dispatch (a judgement's or a code run's) ended,
+/// the one rule both dispatchers read it by.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CallEnd {
+    /// The plugin handled the unit; what it wrote stands.
+    Handled,
+    /// The unit ends with this failure (see [`super::fail_dispatch`]).
+    Failed(DispatchFailure),
+    /// This server is shutting down and refused the call. Not a failure of
+    /// the work: the unit stays in flight, and shutdown releases it to a
+    /// peer.
+    ShuttingDown,
+}
+
+/// The output of a dispatch's plugin call.
+pub(crate) trait DispatchOutput: serde::de::DeserializeOwned {
+    /// The failure the plugin reported, if it reported one.
+    fn failure(self) -> Option<DispatchFailure>;
+}
+
+impl DispatchOutput for broccoli_server_sdk::types::OnSubmissionOutput {
+    fn failure(self) -> Option<DispatchFailure> {
+        (!self.success).then(|| {
+            let message = self
+                .error_message
+                .unwrap_or_else(|| "Unknown plugin error".to_string());
+            if self.retryable {
+                DispatchFailure::judging("PLUGIN_ERROR", message)
+            } else {
+                DispatchFailure::refused(message)
+            }
+        })
+    }
+}
+
+impl DispatchOutput for broccoli_server_sdk::types::OnCodeRunOutput {
+    fn failure(self) -> Option<DispatchFailure> {
+        (!self.success).then(|| {
+            DispatchFailure::judging(
+                "PLUGIN_ERROR",
+                self.error_message
+                    .unwrap_or_else(|| "Unknown plugin error".to_string()),
+            )
+        })
+    }
+}
+
+impl CallEnd {
+    /// How a dispatch's plugin call that returned `result` ended, read as
+    /// output `O`. A call that could not finish because the host could not
+    /// serve it (its deadline, admission, the plugin between loads, an
+    /// instance it could not build; see `PluginError::is_unavailable`) says
+    /// nothing about the work and ends as `PLUGIN_UNAVAILABLE`; any other
+    /// error as `PLUGIN_EXECUTION_ERROR`. Both are judging failures, retried
+    /// within the budget, so a unit that always outlasts its deadline still
+    /// ends. A call that succeeded while the platform lost its attempt
+    /// ([`DispatchFaults::lost`]) fails, so the fault hands it back.
+    pub(crate) fn of<O: DispatchOutput>(
+        result: Result<Vec<u8>, plugin_core::error::PluginError>,
+        faults: &DispatchFaults,
+    ) -> Self {
+        let bytes = match result {
+            Ok(bytes) => bytes,
+            Err(plugin_core::error::PluginError::ShuttingDown) => return Self::ShuttingDown,
+            Err(e) if e.is_unavailable() => {
+                return Self::Failed(DispatchFailure::judging(
+                    "PLUGIN_UNAVAILABLE",
+                    e.to_string(),
+                ));
+            }
+            Err(e) => {
+                return Self::Failed(DispatchFailure::judging(
+                    "PLUGIN_EXECUTION_ERROR",
+                    e.to_string(),
+                ));
+            }
+        };
+        let output = match serde_json::from_slice::<O>(&bytes) {
+            Ok(output) => output,
+            Err(e) => {
+                return Self::Failed(DispatchFailure::judging(
+                    "PLUGIN_INVALID_OUTPUT",
+                    format!("Plugin returned invalid output: {e}"),
+                ));
+            }
+        };
+        match output.failure() {
+            Some(failure) => Self::Failed(failure),
+            // The plugin's verdict, if it wrote one, was fenced out.
+            None if faults.lost().is_some() => Self::Failed(DispatchFailure::judging(
+                "PLUGIN_ERROR",
+                "The platform lost the attempt",
+            )),
+            None => Self::Handled,
+        }
+    }
+}
+
 impl From<Recorded> for DispatchFailure {
     fn from(recorded: Recorded) -> Self {
         Self {
@@ -212,6 +310,67 @@ mod tests {
         assert_eq!(failure.code, "CHECKER_FAILED");
         assert_eq!(failure.message, "signal 6");
         assert_eq!(failure.class, SystemErrorClass::Stands);
+    }
+
+    fn end(result: Result<Vec<u8>, plugin_core::error::PluginError>) -> CallEnd {
+        CallEnd::of::<broccoli_server_sdk::types::OnSubmissionOutput>(
+            result,
+            &DispatchFaults::default(),
+        )
+    }
+
+    fn code(end: CallEnd) -> &'static str {
+        match end {
+            CallEnd::Failed(failure) => failure.code,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Every way a plugin call fails maps to one outcome, the same for a
+    /// judgement and a code run: a call the host could not serve is
+    /// unavailable, whatever made it so.
+    #[test]
+    fn a_plugin_call_error_maps_to_one_dispatch_outcome() {
+        use plugin_core::error::PluginError;
+        let unavailable = [
+            PluginError::Unavailable {
+                plugin_id: "p".into(),
+                func_name: "f".into(),
+            },
+            PluginError::NotLoaded("p".into()),
+            PluginError::InstanceBuild {
+                plugin_id: "p".into(),
+                message: "oom".into(),
+            },
+        ];
+        for e in unavailable {
+            assert_eq!(code(end(Err(e))), "PLUGIN_UNAVAILABLE");
+        }
+        let failed = PluginError::ExecutionFailed {
+            plugin_id: "p".into(),
+            func_name: "f".into(),
+            depth: 1,
+            message: "trap".into(),
+        };
+        assert_eq!(code(end(Err(failed))), "PLUGIN_EXECUTION_ERROR");
+        assert_eq!(end(Err(PluginError::ShuttingDown)), CallEnd::ShuttingDown);
+        assert_eq!(code(end(Ok(b"nope".to_vec()))), "PLUGIN_INVALID_OUTPUT");
+        let refused = br#"{"success":false,"error_message":"no","retryable":false}"#;
+        let CallEnd::Failed(refusal) = end(Ok(refused.to_vec())) else {
+            panic!("refused");
+        };
+        assert_eq!(refusal.class, SystemErrorClass::Stands);
+        let ok = br#"{"success":true,"error_message":null}"#;
+        assert_eq!(end(Ok(ok.to_vec())), CallEnd::Handled);
+        let lost = DispatchFaults::default();
+        lost.record(OperationFault::OperationLost, "lost");
+        let run =
+            CallEnd::of::<broccoli_server_sdk::types::OnCodeRunOutput>(Ok(ok.to_vec()), &lost);
+        assert_eq!(
+            code(run),
+            "PLUGIN_ERROR",
+            "a lost attempt fails, to be handed back"
+        );
     }
 
     #[test]
