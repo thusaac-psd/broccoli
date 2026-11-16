@@ -7,60 +7,82 @@ pub struct Config {
     pub(super) inner: ConfigMock,
 }
 
+/// The effective config of a namespace at one problem: the most specific
+/// scope that stores it wins (contest problem, contest, problem, then the
+/// plugin-wide row), and a switched-off override leaves what it overrode. The
+/// plugin scope is read only when no narrower scope decides alone.
 fn resolve_cascade(
     cp: Option<ConfigResult>,
     c: Option<ConfigResult>,
     p: ConfigResult,
-) -> EffectiveConfig {
-    let levels = CascadeLevels {
-        contest_problem: cp.as_ref().map(CascadeLevel::from),
-        contest: c.as_ref().map(CascadeLevel::from),
-        problem: CascadeLevel::from(&p),
-    };
-
-    let ordered: [(Option<&ConfigResult>, ConfigSource); 3] = [
+    plugin: impl FnOnce() -> Result<ConfigResult, SdkError>,
+) -> Result<EffectiveConfig, SdkError> {
+    let narrower: [(Option<&ConfigResult>, ConfigSource); 3] = [
         (cp.as_ref(), ConfigSource::ContestProblem),
         (c.as_ref(), ConfigSource::Contest),
         (Some(&p), ConfigSource::Problem),
     ];
-
-    let first_explicit = ordered
+    let explicit = |r: &Option<&ConfigResult>| r.is_some_and(|r| !r.is_default);
+    let first_explicit = narrower
         .iter()
-        .find(|(r, _)| r.is_some_and(|r| !r.is_default));
+        .find(|(r, _)| explicit(r))
+        .map(|(r, source)| (r.expect("explicit levels are present"), source.clone()));
+    let resolved_enabled = narrower
+        .iter()
+        .filter(|(r, _)| explicit(r))
+        .find_map(|(r, _)| r.and_then(|r| r.enabled));
 
-    let Some((Some(most_specific), source)) = first_explicit else {
-        return EffectiveConfig {
-            config: p.config,
-            source: ConfigSource::Default,
-            is_enabled: false,
-            levels,
-        };
+    let mut levels = CascadeLevels {
+        contest_problem: cp.as_ref().map(CascadeLevel::from),
+        contest: c.as_ref().map(CascadeLevel::from),
+        problem: CascadeLevel::from(&p),
+        plugin: None,
     };
+    let (config, source, is_enabled) = match (first_explicit, resolved_enabled) {
+        (Some((most_specific, source)), Some(true)) => (most_specific.config.clone(), source, true),
+        (Some((most_specific, source)), None) => (most_specific.config.clone(), source, false),
+        (Some(_), Some(false)) => {
+            let base = plugin()?;
+            levels.plugin = Some(CascadeLevel::from(&base));
+            (base.config, ConfigSource::Disabled, false)
+        }
+        (None, _) => {
+            let base = plugin()?;
+            levels.plugin = Some(CascadeLevel::from(&base));
+            let (source, is_enabled) = if base.is_default {
+                (ConfigSource::Default, false)
+            } else {
+                (ConfigSource::Plugin, base.enabled == Some(true))
+            };
+            (base.config, source, is_enabled)
+        }
+    };
+    Ok(EffectiveConfig {
+        config,
+        source,
+        is_enabled,
+        levels,
+    })
+}
 
-    let resolved_enabled = ordered
-        .iter()
-        .filter_map(|(r, _)| r.and_then(|r| if !r.is_default { r.enabled } else { None }))
-        .next();
-
-    match resolved_enabled {
-        Some(true) => EffectiveConfig {
-            config: most_specific.config.clone(),
-            source: source.clone(),
-            is_enabled: true,
-            levels,
-        },
-        Some(false) => EffectiveConfig {
-            config: most_specific.config.clone(),
-            source: ConfigSource::Disabled,
-            is_enabled: false,
-            levels,
-        },
-        None => EffectiveConfig {
-            config: most_specific.config.clone(),
-            source: source.clone(),
-            is_enabled: false,
-            levels,
-        },
+impl Config {
+    /// The config `ns` has at `problem_id`, in `contest_id` when given; see
+    /// [`ConfigSource`] for where it comes from.
+    pub fn get_effective(
+        &self,
+        ns: &str,
+        problem_id: i32,
+        contest_id: Option<i32>,
+    ) -> Result<EffectiveConfig, SdkError> {
+        let (cp, c) = match contest_id {
+            Some(cid) => (
+                Some(self.get_contest_problem(cid, problem_id, ns)?),
+                Some(self.get_contest(cid, ns)?),
+            ),
+            None => (None, None),
+        };
+        let p = self.get_problem(problem_id, ns)?;
+        resolve_cascade(cp, c, p, || self.get_global(ns))
     }
 }
 
@@ -133,23 +155,6 @@ impl Config {
             ns,
             value,
         )
-    }
-
-    pub fn get_effective(
-        &self,
-        ns: &str,
-        problem_id: i32,
-        contest_id: Option<i32>,
-    ) -> Result<EffectiveConfig, SdkError> {
-        let (cp, c) = match contest_id {
-            Some(cid) => (
-                Some(self.get_contest_problem(cid, problem_id, ns)?),
-                Some(self.get_contest(cid, ns)?),
-            ),
-            None => (None, None),
-        };
-        let p = self.get_problem(problem_id, ns)?;
-        Ok(resolve_cascade(cp, c, p))
     }
 }
 
@@ -274,23 +279,6 @@ impl Config {
             ns,
             value,
         )
-    }
-
-    pub fn get_effective(
-        &self,
-        ns: &str,
-        problem_id: i32,
-        contest_id: Option<i32>,
-    ) -> Result<EffectiveConfig, SdkError> {
-        let (cp, c) = match contest_id {
-            Some(cid) => (
-                Some(self.get_contest_problem(cid, problem_id, ns)?),
-                Some(self.get_contest(cid, ns)?),
-            ),
-            None => (None, None),
-        };
-        let p = self.get_problem(problem_id, ns)?;
-        Ok(resolve_cascade(cp, c, p))
     }
 
     pub fn seed(&self, scope: &str, ref_id: &str, ns: &str, value: Value) {
@@ -466,6 +454,42 @@ mod tests {
     }
 
     #[test]
+    fn the_plugin_scope_decides_when_no_narrower_scope_sets_the_namespace() {
+        let host = make_host();
+        host.config.seed("plugin", "", "ns", json!({"v": 99}));
+
+        let eff = host.config.get_effective("ns", 1, Some(10)).unwrap();
+        assert_eq!(eff.config["v"], 99);
+        assert_eq!(eff.source, ConfigSource::Plugin);
+        let eff = host.config.get_effective("ns", 1, None).unwrap();
+        assert_eq!(eff.config["v"], 99);
+    }
+
+    #[test]
+    fn a_narrower_scope_overrides_the_plugin_scope() {
+        let host = make_host();
+        host.config.seed("plugin", "", "ns", json!({"v": 99}));
+        host.config.seed("problem", "1", "ns", json!({"v": 10}));
+
+        let eff = host.config.get_effective("ns", 1, Some(10)).unwrap();
+        assert_eq!(eff.config["v"], 10);
+    }
+
+    #[test]
+    fn a_disabled_override_leaves_the_config_it_overrode() {
+        let host = make_host();
+        host.config
+            .seed_with_enabled("problem", "1", "ns", json!({"v": 10}), Some(false));
+        let eff = host.config.get_effective("ns", 1, None).unwrap();
+        assert_eq!(eff.config, json!({}));
+
+        host.config.seed("plugin", "", "ns", json!({"v": 99}));
+        let eff = host.config.get_effective("ns", 1, None).unwrap();
+        assert_eq!(eff.config["v"], 99);
+        assert!(!eff.is_enabled);
+    }
+
+    #[test]
     fn none_enabled_at_cp_with_disabled_contest() {
         let host = make_host();
         host.config
@@ -474,7 +498,7 @@ mod tests {
             .seed_with_enabled("contest_problem", "10:1", "ns", json!({"v": 30}), None);
 
         let eff = host.config.get_effective("ns", 1, Some(10)).unwrap();
-        assert_eq!(eff.config["v"], 30);
+        assert_eq!(eff.config, json!({}));
         assert!(!eff.is_enabled);
         assert_eq!(eff.source, ConfigSource::Disabled);
     }

@@ -139,6 +139,10 @@ let config: ContestConfig = host.config.get_contest(contest_id, "contest")?.pars
 `EffectiveConfig::parse_config` 对级联读取 `host.config.get_effective` 的结果做同样的事。这样，
 与 schema 不再一致的类型会在读取处明确报错。
 
+`host.config.get_effective(namespace, problem_id, contest_id)` 读取某个命名空间在一道题目上的配置：
+保存了该配置的最具体作用域胜出，依次为竞赛题目、竞赛、题目，最后是插件全局的值；任何作用域都没有保存时，
+取 schema 的默认值。被关闭的覆盖项保留它所覆盖的配置。结果的 `source` 指明配置的来源。
+
 ## 保存题目的检查器源代码
 
 若检查器插件的格式要编译题目自带的检查器（例如 testlib），插件应声明一个题目作用域、带

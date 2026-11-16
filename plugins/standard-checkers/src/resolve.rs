@@ -5,6 +5,7 @@
 //! `#[plugin_fn]` entry points (bottom) wire them to the host (config load,
 //! language resolve for testlib).
 
+use broccoli_server_sdk::evaluator::CompileOutcome;
 use broccoli_server_sdk::types::*;
 
 #[cfg(target_arch = "wasm32")]
@@ -274,7 +275,7 @@ pub fn build_testlib_checker_stage(
         // solution's `exec` step when it splices the stage (which also satisfies
         // the StepOutput mount's from_step requirement).
         depends_on: if compiled {
-            vec!["compile_checker".to_string()]
+            vec![crate::checkers::testlib::COMPILE_CHECKER_STEP_ID.to_string()]
         } else {
             vec![]
         },
@@ -333,35 +334,43 @@ pub fn interpret_checker(format: &str, result: &CheckerRunOutcome) -> CheckerVer
 /// 64 usage/IO error) = SystemError. No exit code = the checker step itself
 /// failed in the sandbox.
 fn interpret_builtin(result: &CheckerRunOutcome) -> CheckerVerdict {
-    match result.exit_code {
+    let stderr = &result.sandbox.stderr;
+    match result.sandbox.exit_code {
+        _ if result.step_id != CHECK_STEP_ID => sandbox_failure_verdict("Comparator", result),
         Some(0) => CheckerVerdict {
             checker_failure: None,
             verdict: Verdict::Accepted,
             score: 1.0,
-            message: message_from(&result.stderr),
+            message: message_from(stderr),
         },
         Some(1) => CheckerVerdict {
             checker_failure: None,
             verdict: Verdict::WrongAnswer,
             score: 0.0,
-            message: message_from(&result.stderr),
+            message: message_from(stderr),
         },
         Some(2) => CheckerVerdict {
             checker_failure: None,
             verdict: Verdict::WrongAnswer,
             score: 0.0,
-            message: message_from(&result.stderr).or_else(|| Some("Presentation error".into())),
+            message: message_from(stderr).or_else(|| Some("Presentation error".into())),
         },
         Some(other) => system_error(format!("Comparator exited with unexpected code {other}")),
         None => sandbox_failure_verdict("Comparator", result),
     }
 }
 
-/// testlib reuses the existing exit-code mapping verbatim (0/1/2/3/4/7/8/other);
-/// only the sandbox-failure path differs, working off the reduced small result.
+/// testlib's exit-code mapping (0/1/2/3/4/7/8/other) for a check that ran;
+/// a checker that did not compile or did not exit is told apart by how its
+/// step ended.
 fn interpret_testlib(result: &CheckerRunOutcome) -> CheckerVerdict {
-    match result.exit_code {
-        Some(code) => crate::checkers::testlib::interpret_testlib_exit_code(code, &result.stderr),
+    if result.step_id == crate::checkers::testlib::COMPILE_CHECKER_STEP_ID {
+        return interpret_testlib_compile(result);
+    }
+    match result.sandbox.exit_code {
+        Some(code) => {
+            crate::checkers::testlib::interpret_testlib_exit_code(code, &result.sandbox.stderr)
+        }
         None => match testlib_crash(result) {
             Some(failure) => CheckerVerdict {
                 checker_failure: Some(failure.clone()),
@@ -374,24 +383,50 @@ fn interpret_testlib(result: &CheckerRunOutcome) -> CheckerVerdict {
     }
 }
 
+/// The problem's testlib checker failed to compile, so its check never ran.
+/// A compiler that rejected the checker's source fails every attempt alike:
+/// the checker failure stands, with the compiler's diagnostics for staff. A
+/// compile the platform broke is judged again.
+fn interpret_testlib_compile(result: &CheckerRunOutcome) -> CheckerVerdict {
+    match CompileOutcome::classify(result.success, &result.sandbox) {
+        CompileOutcome::Rejected { diagnostics } => CheckerVerdict {
+            checker_failure: Some(crate::util::truncate(
+                &format!("The checker does not compile: {}", diagnostics.trim()),
+                4096,
+            )),
+            verdict: Verdict::SystemError,
+            score: 0.0,
+            message: Some("The checker does not compile".into()),
+        },
+        CompileOutcome::Fault { reason } => system_error(crate::util::truncate(
+            &format!("Checker compilation failed: {reason}"),
+            1024,
+        )),
+        CompileOutcome::Compiled => system_error("Checker step did not run"),
+    }
+}
+
 /// How the problem's testlib checker crashed, when the sandbox says it did:
 /// it was killed by a signal (an `abort()`, a segfault), or failed at run
 /// time without an exit code (it could not even start). Every attempt
 /// repeats that, so it is the problem's failure. A timeout, a step that never
 /// ran or a sandbox that failed is the platform's, and is judged again.
 fn testlib_crash(result: &CheckerRunOutcome) -> Option<String> {
-    let how = match result.sandbox_status.as_deref() {
-        Some("SG") => match result.signal {
+    let how = match result.sandbox.sandbox_status {
+        SandboxStatus::Signaled => match result.sandbox.signal {
             Some(n) => match signal_name(n) {
                 Some(name) => format!("Checker was terminated by signal {n} ({name})"),
                 None => format!("Checker was terminated by signal {n}"),
             },
             None => "Checker was terminated by a signal".to_string(),
         },
-        Some("RE") => "Checker failed at run time without an exit code".to_string(),
-        _ => return None,
+        SandboxStatus::NonZeroExit => "Checker failed at run time without an exit code".to_string(),
+        SandboxStatus::Ok
+        | SandboxStatus::TimedOut
+        | SandboxStatus::InternalError
+        | SandboxStatus::Unknown => return None,
     };
-    let detail = result.stderr.trim();
+    let detail = result.sandbox.stderr.trim();
     let failure = if detail.is_empty() {
         how
     } else {
@@ -415,22 +450,26 @@ fn signal_name(n: i32) -> Option<&'static str> {
     })
 }
 
-/// Map a sandbox failure (no exit code) to a SystemError verdict, over the
-/// `CheckerRunOutcome` returned by the fused checker stage (which carries only
-/// the status string + stderr, not the full ExecutionResult).
+/// Map a sandbox failure (no exit code) of the stage step `result` names to
+/// a SystemError verdict.
 fn sandbox_failure_verdict(label: &str, result: &CheckerRunOutcome) -> CheckerVerdict {
-    let status = result.sandbox_status.as_deref().unwrap_or("");
-    let detail = result.stderr.trim();
-    let message = match status {
-        "TO" => format!("{label} timed out"),
-        "SG" => format!("{label} was terminated by a signal"),
-        "UNKNOWN" => format!("{label} step did not run; dependency may have failed"),
-        s if !s.is_empty() && detail.is_empty() => {
-            format!("{label} failed with sandbox status {s}")
+    let step = &result.step_id;
+    let detail = result.sandbox.stderr.trim();
+    let how = match result.sandbox.sandbox_status {
+        SandboxStatus::TimedOut => format!("{label} step '{step}' timed out"),
+        SandboxStatus::Signaled => format!("{label} step '{step}' was terminated by a signal"),
+        SandboxStatus::Unknown => format!("{label} step '{step}' did not run"),
+        SandboxStatus::Ok | SandboxStatus::NonZeroExit | SandboxStatus::InternalError => {
+            format!(
+                "{label} step '{step}' failed with sandbox status {}",
+                result.sandbox.status
+            )
         }
-        s if !s.is_empty() => format!("{label} failed with sandbox status {s}: {detail}"),
-        _ if detail.is_empty() => format!("{label} failed without an exit code"),
-        _ => format!("{label} failed without an exit code: {detail}"),
+    };
+    let message = if detail.is_empty() {
+        how
+    } else {
+        format!("{how}: {detail}")
     };
     system_error(crate::util::truncate(&message, 1024))
 }
@@ -731,12 +770,68 @@ mod tests {
         assert!(resolve_builtin("tokens", &input, None).is_err());
     }
 
+    /// The check step's outcome: `status` is the sandbox's isolate status
+    /// code, or `None` for a plain exit.
     fn small(exit_code: Option<i32>, stderr: &str, status: Option<&str>) -> CheckerRunOutcome {
+        let status = status
+            .map(str::to_string)
+            .unwrap_or_else(|| match exit_code {
+                Some(0) => "OK".to_string(),
+                _ => "RE".to_string(),
+            });
         CheckerRunOutcome {
-            exit_code,
-            stderr: stderr.to_string(),
-            sandbox_status: status.map(|s| s.to_string()),
-            signal: None,
+            step_id: CHECK_STEP_ID.to_string(),
+            success: exit_code == Some(0),
+            sandbox: ExecutionResult {
+                exit_code,
+                sandbox_status: SandboxStatus::from_isolate(&status),
+                status,
+                stderr: stderr.to_string(),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn checker_compile(exit_code: Option<i32>, stderr: &str, status: &str) -> CheckerRunOutcome {
+        CheckerRunOutcome {
+            step_id: crate::checkers::testlib::COMPILE_CHECKER_STEP_ID.to_string(),
+            ..small(exit_code, stderr, Some(status))
+        }
+    }
+
+    #[test]
+    fn a_testlib_checker_that_does_not_compile_is_a_checker_failure() {
+        let v = interpret_checker(
+            "testlib",
+            &checker_compile(
+                Some(1),
+                "checker.cpp:3:5: error: 'ouf' was not declared",
+                "RE",
+            ),
+        );
+        assert_eq!(v.verdict, Verdict::SystemError);
+        let failure = v.checker_failure.expect("the checker's own failure stands");
+        assert!(failure.contains("'ouf' was not declared"), "{failure}");
+        // The compiler's output is for staff: the verdict's message names the
+        // failure only.
+        assert!(!v.message.unwrap().contains("ouf"));
+    }
+
+    #[test]
+    fn a_checker_compile_the_platform_broke_is_judged_again() {
+        for outcome in [
+            checker_compile(Some(1), "", "RE"),
+            checker_compile(
+                Some(1),
+                "g++: fatal error: cannot execute 'cc1': Resource temporarily unavailable",
+                "RE",
+            ),
+            checker_compile(None, "", "TO"),
+            checker_compile(Some(1), "error: x", "XX"),
+        ] {
+            let v = interpret_checker("testlib", &outcome);
+            assert_eq!(v.verdict, Verdict::SystemError);
+            assert_eq!(v.checker_failure, None, "{outcome:?}");
         }
     }
 
@@ -795,7 +890,7 @@ mod tests {
     #[test]
     fn a_crashing_testlib_checker_is_a_checker_failure_naming_how_it_crashed() {
         let mut aborted = small(None, "checker.cpp:9: main: Assertion failed", Some("SG"));
-        aborted.signal = Some(6);
+        aborted.sandbox.signal = Some(6);
         let v = interpret_checker("testlib", &aborted);
         assert_eq!(v.verdict, Verdict::SystemError);
         assert_eq!(
@@ -823,7 +918,7 @@ mod tests {
             assert_eq!(v.checker_failure, None, "{outcome:?}");
         }
         let mut builtin = small(None, "", Some("SG"));
-        builtin.signal = Some(11);
+        builtin.sandbox.signal = Some(11);
         assert_eq!(interpret_checker("tokens", &builtin).checker_failure, None);
     }
 

@@ -1,9 +1,9 @@
 # Dedup backlog
 
-Known copy pairs that stay in place because extracting them is not worth it
-yet. Each entry names both copies and what would make extraction worthwhile.
-When you touch one of these areas, extract instead of adding a third copy. When
-you leave a cross-file copy in place, add it here (see the duplication rules in
+Known copy pairs that stay in place because extracting them is not worth it yet.
+Each entry names both copies and what would make extraction worthwhile. When you
+touch one of these areas, extract instead of adding a third copy. When you leave
+a cross-file copy in place, add it here (see the duplication rules in
 `AGENTS.md`).
 
 ## Server test fixtures
@@ -26,12 +26,23 @@ fixtures delegate.
 
 Both Rust clients read and write the wire types from `packages/api-types`
 (`broccoli-api-types`), so no request or response shape is duplicated. The "on
-401, re-authenticate once and resend" loop is parallel:
-`Client::authorized` in `packages/cli-core/src/client.rs` (sync, ureq) and
-`send_request_with_retry` in `packages/stress-test/src/client.rs` (async,
-reqwest). The re-authentication differs: cli-core asks its `Session`
-(`packages/cli-core/src/session.rs`) to rotate a refresh token through
-`/auth/cli-refresh` under a cross-process file lock, while stress-test logs in
-again with a username and password. Sharing the loop across a sync and an async
-HTTP stack needs a trait heavier than the ten lines it replaces. Extract it if
-both clients move to one HTTP stack or one auth flow.
+401, re-authenticate once and resend" loop is parallel: `Client::authorized` in
+`packages/cli-core/src/client.rs` (sync, ureq) and `send_request_with_retry` in
+`packages/stress-test/src/client.rs` (async, reqwest). The re-authentication
+differs: cli-core asks its `Session` (`packages/cli-core/src/session.rs`) to
+rotate a refresh token through `/auth/cli-refresh` under a cross-process file
+lock, while stress-test logs in again with a username and password. Sharing the
+loop across a sync and an async HTTP stack needs a trait heavier than the ten
+lines it replaces. Extract it if both clients move to one HTTP stack or one auth
+flow.
+
+## The `sandbox` config namespace schema
+
+`broccoli_server_sdk::evaluator::SandboxConfig` reads the plugin-scope `sandbox`
+namespace and owns every rule built on it (compile and run limits, the compile
+step, the result timeout). The namespace's schema, its defaults and bounds, is
+declared twice: in `plugins/batch-evaluator/plugin.toml` and in
+`plugins/communication-evaluator/plugin.toml`, because a manifest declares only
+its own plugin's namespaces. The two differ on purpose only in their defaults
+(the interactive evaluator's wall-time multiplier is larger). Extract it if
+manifests gain a way to declare a namespace from a shared schema.

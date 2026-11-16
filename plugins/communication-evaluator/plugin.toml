@@ -129,6 +129,15 @@ min = 1024
 step = 1024
 unit = "KB"
 
+[config.sandbox.properties.compile_stack_limit_kb]
+type = "integer"
+title = "Compile Stack Limit"
+description = "Maximum compilation stack size in KB. Set to 0 to leave isolate's default stack limit unchanged."
+default = 0
+min = 0
+step = 1024
+unit = "KB"
+
 [config.sandbox.properties.compile_process_limit]
 type = "integer"
 title = "Compile Process Limit"
@@ -169,6 +178,15 @@ default = 5.0
 min = 1.0
 step = 0.5
 precision = 1
+
+[config.sandbox.properties.exec_stack_limit_kb]
+type = "integer"
+title = "Exec Stack Limit"
+description = "Maximum contestant and manager stack size in KB. Set to 0 to leave isolate's default stack limit unchanged."
+default = 0
+min = 0
+step = 1024
+unit = "KB"
 
 [config.sandbox.properties.exec_process_limit]
 type = "integer"

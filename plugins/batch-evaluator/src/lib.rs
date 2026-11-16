@@ -11,11 +11,6 @@ use extism_pdk::{FnResult, plugin_fn};
 pub mod batch;
 
 #[cfg(target_arch = "wasm32")]
-fn load_sandbox_config(host: &Host) -> Result<batch::SandboxConfig, SdkError> {
-    host.config.get_global("sandbox")?.parse()
-}
-
-#[cfg(target_arch = "wasm32")]
 #[plugin_fn]
 pub fn init() -> FnResult<String> {
     let host = Host::new();
@@ -60,7 +55,7 @@ fn prepare_case(
     host: &Host,
     req: &BuildEvalOpsInput,
 ) -> Result<PreparedEvaluateCase, extism_pdk::Error> {
-    let sandbox_config = load_sandbox_config(host)?;
+    let sandbox_config = evaluator::SandboxConfig::load(host)?;
 
     let additional_filenames: std::collections::HashSet<&str> = req
         .additional_file_refs
@@ -113,7 +108,8 @@ fn prepare_case(
     // sequential (File-mode) checker - e.g. a cold testlib compile - doesn't trip
     // the result-wait timeout.
     let result_timeout_ms = sandbox_config
-        .result_timeout_ms_for(req.time_limit_ms, u32::from(resolved.compile.is_some()))
+        .timeout_budget(req.time_limit_ms, u32::from(resolved.compile.is_some()))
+        .timeout_ms()
         + checker_stage
             .as_ref()
             .map(batch::checker_stage_timeout_ms)

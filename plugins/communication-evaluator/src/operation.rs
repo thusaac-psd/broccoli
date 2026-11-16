@@ -1,9 +1,10 @@
+use broccoli_server_sdk::evaluator::SandboxConfig;
 use broccoli_server_sdk::types::{
-    BuildEvalOpsInput, Channel, Environment, IOConfig, IOTarget, OperationTask, OutputSpec,
-    ResolveLanguageOutput, RunOptions, SessionFile, Step, StepCacheConfig, StepKind,
+    BuildEvalOpsInput, Channel, Environment, IOConfig, IOTarget, OperationTask,
+    ResolveLanguageOutput, RunOptions, SessionFile, Step, StepKind,
 };
 
-use crate::config::{CommConfig, CommunicationMode, ManagerSourceEntry, SandboxConfig};
+use crate::config::{CommConfig, CommunicationMode, ManagerSourceEntry, manager_limits};
 
 /// Build the communication operation for one test case.
 pub fn build_operation(
@@ -111,90 +112,15 @@ pub fn build_operation(
     let mut steps = Vec::new();
 
     if let Some(compile) = &manager_lang.compile {
-        let cache_outputs: Vec<String> = compile
-            .outputs
-            .iter()
-            .map(|o| match o {
-                OutputSpec::File(f) => f.clone(),
-                OutputSpec::Glob(g) => g.clone(),
-            })
-            .collect();
-        let mut collect = cache_outputs.clone();
-        collect.push("compile_stderr.txt".to_string());
-
-        steps.push(Step {
-            id: "compile_manager".to_string(),
-            kind: StepKind::Compile,
-            env_ref: "manager_env".to_string(),
-            argv: compile.command.clone(),
-            conf: RunOptions {
-                resource_limits: compile
-                    .resource_limits
-                    .clone()
-                    .unwrap_or_else(|| sandbox_config.compile_limits()),
-                wait: true,
-                env_rules: vec![],
-                ..Default::default()
-            },
-            io: IOConfig {
-                stdin: IOTarget::Null,
-                stdout: IOTarget::Null,
-                stderr: IOTarget::File {
-                    path: "compile_stderr.txt".to_string(),
-                },
-            },
-            collect,
-            depends_on: vec![],
-            mounts: Vec::new(),
-            cache: Some(StepCacheConfig {
-                key_inputs: compile.cache_inputs.clone(),
-                outputs: cache_outputs,
-            }),
-        });
+        steps.push(sandbox_config.compile_step("compile_manager", "manager_env", compile));
     }
-
-    for i in 0..n {
-        if let Some(compile) = &contestant_lang.compile {
-            let cache_outputs: Vec<String> = compile
-                .outputs
-                .iter()
-                .map(|o| match o {
-                    OutputSpec::File(f) => f.clone(),
-                    OutputSpec::Glob(g) => g.clone(),
-                })
-                .collect();
-            let mut collect = cache_outputs.clone();
-            collect.push("compile_stderr.txt".to_string());
-
-            steps.push(Step {
-                id: format!("compile_contestant_{i}"),
-                kind: StepKind::Compile,
-                env_ref: format!("contestant_{i}"),
-                argv: compile.command.clone(),
-                conf: RunOptions {
-                    resource_limits: compile
-                        .resource_limits
-                        .clone()
-                        .unwrap_or_else(|| sandbox_config.compile_limits()),
-                    wait: true,
-                    env_rules: vec![],
-                    ..Default::default()
-                },
-                io: IOConfig {
-                    stdin: IOTarget::Null,
-                    stdout: IOTarget::Null,
-                    stderr: IOTarget::File {
-                        path: "compile_stderr.txt".to_string(),
-                    },
-                },
-                collect,
-                depends_on: vec![],
-                mounts: Vec::new(),
-                cache: Some(StepCacheConfig {
-                    key_inputs: compile.cache_inputs.clone(),
-                    outputs: cache_outputs,
-                }),
-            });
+    if let Some(compile) = &contestant_lang.compile {
+        for i in 0..n {
+            steps.push(sandbox_config.compile_step(
+                format!("compile_contestant_{i}"),
+                format!("contestant_{i}"),
+                compile,
+            ));
         }
     }
 
@@ -224,11 +150,7 @@ pub fn build_operation(
         env_ref: "manager_env".to_string(),
         argv: manager_argv,
         conf: RunOptions {
-            resource_limits: sandbox_config.manager_limits(
-                comm_config.manager_time_limit_s,
-                comm_config.manager_memory_limit_kb,
-                comm_config.num_processes,
-            ),
+            resource_limits: manager_limits(sandbox_config, &manager_lang.run, comm_config),
             wait: true,
             env_rules: vec![],
             ..Default::default()
@@ -282,7 +204,11 @@ pub fn build_operation(
             env_ref: format!("contestant_{i}"),
             argv,
             conf: RunOptions {
-                resource_limits: sandbox_config.exec_limits(time_limit_s, memory_limit_kb),
+                resource_limits: sandbox_config.run_limits(
+                    &contestant_lang.run,
+                    time_limit_s,
+                    memory_limit_kb,
+                ),
                 wait: true,
                 env_rules: vec![],
                 ..Default::default()
@@ -312,7 +238,7 @@ pub fn build_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use broccoli_server_sdk::types::{CompileSpec, JudgeFile, RunSpec, SourceFile};
+    use broccoli_server_sdk::types::{CompileSpec, JudgeFile, OutputSpec, RunSpec, SourceFile};
 
     fn make_req() -> BuildEvalOpsInput {
         BuildEvalOpsInput {
@@ -419,6 +345,35 @@ mod tests {
 
         let run_contestant = tasks.iter().find(|s| s.id == "run_contestant_0").unwrap();
         assert_eq!(run_contestant.kind, StepKind::Testcase);
+    }
+
+    /// A threaded runtime (the JVM, Go) cannot start under the default
+    /// single-process cap, so every contestant runs under its language's
+    /// process floor.
+    #[test]
+    fn contestants_run_under_their_languages_process_floor() {
+        let mut lang = compiled_lang();
+        lang.run.min_process_limit = Some(64);
+        let ops = build_operation(
+            &make_req(),
+            &lang,
+            &manager_lang(),
+            &mgr_files(),
+            &CommConfig {
+                num_processes: 2,
+                ..default_comm()
+            },
+            &default_sandbox(),
+        )
+        .unwrap();
+        for i in 0..2 {
+            let run = ops[0]
+                .tasks
+                .iter()
+                .find(|s| s.id == format!("run_contestant_{i}"))
+                .unwrap();
+            assert_eq!(run.conf.resource_limits.process_limit, Some(64));
+        }
     }
 
     #[test]

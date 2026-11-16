@@ -10,11 +10,6 @@ pub mod interpret;
 pub mod operation;
 
 #[cfg(target_arch = "wasm32")]
-fn load_sandbox_config(host: &Host) -> Result<config::SandboxConfig, SdkError> {
-    host.config.get_global("sandbox")?.parse()
-}
-
-#[cfg(target_arch = "wasm32")]
 fn load_comm_config(host: &Host, problem_id: i32) -> Result<config::CommConfig, SdkError> {
     host.config
         .get_problem(problem_id, "communication")?
@@ -50,7 +45,7 @@ pub fn evaluate_communication(input: String) -> FnResult<String> {
     let tc_id = req.test_case_id;
     let problem_id = req.problem_id;
 
-    let sandbox_config = load_sandbox_config(&host)?;
+    let sandbox_config = evaluator::SandboxConfig::load(&host)?;
     let comm_config = load_comm_config(&host, problem_id)?;
 
     let additional_filenames: std::collections::HashSet<&str> = req
@@ -117,7 +112,8 @@ pub fn evaluate_communication(input: String) -> FnResult<String> {
         } else {
             0
         };
-    let result_timeout_ms = sandbox_config.result_timeout_ms_for(
+    let result_timeout_ms = config::result_timeout_ms(
+        &sandbox_config,
         req.time_limit_ms,
         compile_units,
         comm_config.manager_time_limit_s,
@@ -137,13 +133,7 @@ pub fn evaluate_communication(input: String) -> FnResult<String> {
     }
     let result = results.remove(0);
 
-    let memory_limit_kb = u32::try_from(req.memory_limit_kb).unwrap_or(u32::MAX);
-    let verdict = interpret::interpret_result(
-        tc_id,
-        &result,
-        comm_config.num_processes as usize,
-        memory_limit_kb,
-    );
+    let verdict = interpret::interpret_result(tc_id, &result, comm_config.num_processes as usize);
 
     Ok(serde_json::to_string(&verdict)?)
 }

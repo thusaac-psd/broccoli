@@ -209,6 +209,9 @@ pub fn interpret_testlib_exit_code(exit_code: i32, stderr: &str) -> CheckerVerdi
     }
 }
 
+/// The id of the step that compiles a testlib checker.
+pub(crate) const COMPILE_CHECKER_STEP_ID: &str = "compile_checker";
+
 /// Build the cached `compile_checker` step for a testlib checker, or `None` when
 /// the language needs no compile. Used by the fused stage builder; `env_id` is
 /// the environment the step runs in.
@@ -232,7 +235,7 @@ pub(crate) fn build_compile_checker_step(
     collect.push("checker_compile_err.log".to_string());
 
     Some(Step {
-        id: "compile_checker".to_string(),
+        id: COMPILE_CHECKER_STEP_ID.to_string(),
         kind: StepKind::CheckerCompile,
         env_ref: env_id.to_string(),
         argv: compile.command.clone(),

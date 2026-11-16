@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::evaluate::JudgeFile;
-use super::operation::{Environment, Step};
+use super::operation::{Environment, ExecutionResult, Step};
 use super::verdict::Verdict;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,14 +47,18 @@ pub struct ResolveCheckerInput {
     pub output_binding: OutputMode,
 }
 
+/// How a checker stage's run ended, as its checker plugin interprets it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckerRunOutcome {
-    pub exit_code: Option<i32>,
-    pub stderr: String,
-    pub sandbox_status: Option<String>,
-    /// The signal that terminated the checker, if one did.
-    #[serde(default)]
-    pub signal: Option<i32>,
+    /// The stage step this is the outcome of: the stage's result step, or,
+    /// when that never ran, the stage step that failed before it (a checker
+    /// that did not compile).
+    pub step_id: String,
+    /// Whether the worker counted the step as passed.
+    pub success: bool,
+    /// How the step ended. The result step's `stdout`, the display preview of
+    /// the solution's output, stays with the evaluator and is empty here.
+    pub sandbox: ExecutionResult,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,38 +172,30 @@ mod tests {
     }
 
     #[test]
-    fn checker_run_outcome_round_trips() {
-        let result = CheckerRunOutcome {
-            exit_code: Some(0),
-            stderr: "ok".to_string(),
-            sandbox_status: Some("OK".to_string()),
-            signal: None,
-        };
-
-        let json = serde_json::to_value(&result).unwrap();
-        let back: CheckerRunOutcome = serde_json::from_value(json).unwrap();
-        assert_eq!(back.exit_code, Some(0));
-        assert_eq!(back.stderr, "ok");
-        assert_eq!(back.sandbox_status.as_deref(), Some("OK"));
-    }
-
-    #[test]
     fn interpret_checker_input_round_trips() {
         let input = InterpretCheckerInput {
             format: "testlib".to_string(),
             result: CheckerRunOutcome {
-                exit_code: Some(1),
-                stderr: "wrong answer".to_string(),
-                sandbox_status: None,
-                signal: None,
+                step_id: "check".to_string(),
+                success: false,
+                sandbox: ExecutionResult {
+                    exit_code: Some(1),
+                    sandbox_status: crate::types::SandboxStatus::NonZeroExit,
+                    stderr: "wrong answer".to_string(),
+                    ..Default::default()
+                },
             },
         };
 
         let json = serde_json::to_value(&input).unwrap();
         let back: InterpretCheckerInput = serde_json::from_value(json).unwrap();
         assert_eq!(back.format, "testlib");
-        assert_eq!(back.result.exit_code, Some(1));
-        assert_eq!(back.result.stderr, "wrong answer");
-        assert_eq!(back.result.sandbox_status, None);
+        assert_eq!(back.result.step_id, "check");
+        assert_eq!(back.result.sandbox.exit_code, Some(1));
+        assert_eq!(back.result.sandbox.stderr, "wrong answer");
+        assert_eq!(
+            back.result.sandbox.sandbox_status,
+            crate::types::SandboxStatus::NonZeroExit
+        );
     }
 }

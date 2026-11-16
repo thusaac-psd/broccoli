@@ -171,6 +171,13 @@ let config: ContestConfig = host.config.get_contest(contest_id, "contest")?.pars
 `host.config.get_effective`. A type that no longer matches its schema then
 fails loudly where it is read.
 
+`host.config.get_effective(namespace, problem_id, contest_id)` reads the
+config a namespace has at one problem: the most specific scope that stores it
+wins, in the order contest problem, contest, problem, then the plugin-wide
+value, and with nothing stored anywhere it is the schema's defaults. An
+override switched off leaves the config it overrode. `source` on the result
+names where the config came from.
+
 ## Hold a problem's checker source
 
 A checker plugin whose formats compile a problem's own checker (testlib, for
