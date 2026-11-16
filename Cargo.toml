@@ -145,3 +145,8 @@ strip = "none"
 inherits = "release"
 debug = "full"
 strip = "none"
+
+# A patched extism; third_party/extism/README.md says what changes and when
+# the patch goes.
+[patch.crates-io]
+extism = { path = "third_party/extism" }

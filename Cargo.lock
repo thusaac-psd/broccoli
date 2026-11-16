@@ -2136,8 +2136,6 @@ dependencies = [
 [[package]]
 name = "extism"
 version = "1.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "860090381aac0f75f2085e66fe85d1653210dde426daa194b6b1373f1b5926b3"
 dependencies = [
  "anyhow",
  "cbindgen",
