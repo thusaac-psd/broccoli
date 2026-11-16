@@ -67,7 +67,7 @@ read = ["submission.files"]
 
 应用角色需要 `LOGIN` 和 `CREATEROLE`，拥有数据库，且不是超级用户；运维配置参考中写明了这一点，每个安装程序也都这样创建它。缺少 `CREATEROLE` 时，m0001 会跳过组角色并记录警告。开通随之失败：插件中执行 SQL 的调用以“暂不可用”失败，调用方以 503 应答；失败只以 error 级别记录一次，下一次尝试要等待 30 秒（`PROVISION_BACKOFF`）。
 
-从集群移除的插件，其角色被设为 `NOLOGIN`，其会话被终止（`schema::retire`）。它的模式和数据保留：插件 id 就是插件的身份，因此日后以同一 id 安装的就是同一个插件，开通会让其角色再次登录。每个副本在卸载插件时丢弃该插件的连接池，因此下一次加载会再次开通。仍在已卸载实例上运行的调用永远不会再次开通该角色：实例失效后，它的租用在开通所持有的锁之下被拒绝（见[插件执行](plugin-execution.md#unloaded-instances)）。
+从集群移除的插件，其角色被设为 `NOLOGIN`，其会话被终止（`schema::retire`）。它的模式和数据保留：插件 id 就是插件的身份，因此日后以同一 id 安装的就是同一个插件，开通会让其角色再次登录。每个副本在卸载插件时丢弃该插件的连接池，因此下一次加载会再次开通。仍在已卸载实例上运行的调用永远不会再次开通该角色：实例失效后，它的租用在开通所持有的锁之下被拒绝（见[插件执行](plugin-execution.md#已卸载的实例)）。
 
 ## 连接池
 
@@ -83,16 +83,16 @@ read = ["submission.files"]
 
 `host.db.*` 以外的宿主函数在宿主函数连接池（`packages/server/src/database.rs` 中的 `connect_host_fn_pool`）上以应用角色运行，执行宿主构建的语句。插件编写的 SQL 从不在那里运行。
 
-## 截止时间 {#deadlines}
+## 截止时间
 
 插件的 SQL 在执行它的调用的截止时间内运行（`executor::current_deadline`，由 `plugin_db::SqlCall` 携带）：
 
 - 租用等待许可的时间不超过截止时间与连接池获取超时中较早者，之后使调用以不可用失败；
 - 每条语句，无论是否在事务中，都在截止时间被截断。事务在开始时记录其后端的 pid；事务中在截止时间被截断的语句会在后端被取消（`pg_cancel_backend`，通过持有每个插件角色的应用角色执行），事务随之回滚，归还其连接和许可；
 - 事务的存活时间不超过打开它的调用树：调用树结束时仍未结束的事务（客体陷入 trap、被取消或未提交就返回）此时从调用树的 `CallLocals` 中回滚；
-- 每条语句的后端仍受宿主强制的 `statement_timeout` 约束，而任何插件语句都无法修改它（见 [SQL 防护](#the-sql-guard)），因此事务之外被截断的语句也在那里结束。
+- 每条语句的后端仍受宿主强制的 `statement_timeout` 约束，而任何插件语句都无法修改它（见 [SQL 防护](#sql-防护)），因此事务之外被截断的语句也在那里结束。
 
-## SQL 防护 {#the-sql-guard}
+## SQL 防护
 
 `host_funcs/sql.rs` 中的 `reject_session_escape` 拒绝角色变更、`set_config`、`ALTER ROLE` 与 `ALTER USER`、`DISCARD`、`DO`、例程定义、对 `pg_settings` 的 `UPDATE`（它像 `set_config` 一样应用设置），以及对宿主强制设置的任何 `SET`，包括 `SET LOCAL`。角色变更由引擎约束；该防护阻止插件修改自身角色的密码或默认设置，并防止插件为其连接或事务解除 `statement_timeout` 的限制。
 
