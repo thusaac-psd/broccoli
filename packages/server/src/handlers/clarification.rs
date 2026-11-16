@@ -308,7 +308,7 @@ pub async fn create_clarification(
         is_admin && payload.is_public.unwrap_or(false)
     };
 
-    let now = chrono::Utc::now();
+    let now = state.clock.now();
     let new = clarification::ActiveModel {
         contest_id: Set(contest_id),
         author_id: Set(auth_user.user_id),
@@ -414,7 +414,7 @@ pub async fn reply_clarification(
         return Err(AppError::PermissionDenied);
     }
 
-    let now = chrono::Utc::now();
+    let now = state.clock.now();
     let txn = state.db.begin().await?;
 
     // Only admins may publish a reply to ALL participants - the same gate the
@@ -643,7 +643,7 @@ pub async fn resolve_clarification(
         return Err(AppError::PermissionDenied);
     }
 
-    let now = chrono::Utc::now();
+    let now = state.clock.now();
     let mut active: clarification::ActiveModel = existing.clone().into();
     active.resolved = Set(payload.resolved);
     active.resolved_at = Set(if payload.resolved { Some(now) } else { None });

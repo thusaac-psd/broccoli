@@ -27,6 +27,7 @@ pub struct Model {
     #[sea_orm(has_many, via = "contest_user")]
     pub contests: HasMany<super::contest::Entity>,
 
+    #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeUtc,
     pub deleted_at: Option<DateTimeUtc>,
 

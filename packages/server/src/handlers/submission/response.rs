@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use broccoli_server_sdk::permissions as perm;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use common::SubmissionStatus;
 use common::storage::BlobStore;
 use sea_orm::prelude::Expr;
@@ -118,15 +118,13 @@ struct ResultRow {
     stderr: Option<String>,
     checker_output: Option<String>,
     is_sample: Option<bool>,
-}
-
-#[derive(FromQueryResult)]
-struct TestCaseIoData {
-    id: i32,
-    input: String,
-    expected_output: String,
+    /// The testcase's input and answer previews, only where they are shown.
+    input: Option<String>,
+    expected_output: Option<String>,
     input_blob_hash: Option<String>,
     expected_output_blob_hash: Option<String>,
+    /// Rows matching the filter across all pages (`COUNT(*) OVER ()`).
+    total: i64,
 }
 
 fn output_preview(text: String, full: bool) -> String {
@@ -232,11 +230,10 @@ async fn load_result_page(
     if let Some(id) = query.and_then(|q| q.result_id) {
         select = select.filter(test_case_result::Column::Id.eq(id));
     }
-    let total = select.clone().count(db).await?;
-    let pagination = window.pagination(total);
     // Version history loads summaries only, without reading any testcase text.
     let Some(query) = query else {
-        return Ok((vec![], pagination));
+        let total = select.count(db).await?;
+        return Ok((vec![], window.pagination(total)));
     };
     let full = query.full_output;
     let cap = if full {
@@ -244,7 +241,10 @@ async fn load_result_page(
     } else {
         RESULT_PREVIEW_CHARS
     };
-    let mut select = select
+    // Rows, their testcase previews and the total in one statement.
+    let shown = format!("{show_test_details} OR COALESCE(test_case.is_sample, false)");
+    let mut page = select
+        .clone()
         .join(
             JoinType::LeftJoin,
             test_case_result::Relation::TestCase.def(),
@@ -258,18 +258,32 @@ async fn load_result_page(
             test_case_result::Column::TimeUsed,
             test_case_result::Column::MemoryUsed,
         ])
-        .column_as(test_case::Column::IsSample, "is_sample");
+        .column_as(test_case::Column::IsSample, "is_sample")
+        .column_as(Expr::cust("COUNT(*) OVER ()"), "total");
     for (column, alias) in [
-        ("stdout", "stdout"),
-        ("stderr", "stderr"),
-        ("checker_output", "checker_output"),
+        ("test_case_result.stdout", "stdout"),
+        ("test_case_result.stderr", "stderr"),
+        ("test_case_result.checker_output", "checker_output"),
+        ("test_case.input", "input"),
+        ("test_case.expected_output", "expected_output"),
     ] {
-        select = select.column_as(
-            Expr::cust(format!("CASE WHEN {show_test_details} OR COALESCE(test_case.is_sample, false) THEN LEFT(test_case_result.{column}, {}) ELSE NULL END", cap + 1)),
+        page = page.column_as(
+            Expr::cust(format!(
+                "CASE WHEN {shown} THEN LEFT({column}, {}) ELSE NULL END",
+                cap + 1
+            )),
             alias,
         );
     }
-    let rows = select
+    for column in ["input_blob_hash", "expected_output_blob_hash"] {
+        page = page.column_as(
+            Expr::cust(format!(
+                "CASE WHEN {shown} THEN test_case.{column} ELSE NULL END"
+            )),
+            column,
+        );
+    }
+    let rows = page
         .order_by_asc(test_case::Column::Position)
         .order_by_asc(test_case_result::Column::Id)
         .offset(window.offset())
@@ -277,47 +291,36 @@ async fn load_result_page(
         .into_model::<ResultRow>()
         .all(db)
         .await?;
-    let io_ids: Vec<_> = rows
-        .iter()
-        .filter(|r| show_test_details || r.is_sample == Some(true))
-        .filter_map(|r| r.test_case_id)
-        .collect();
-    let io_rows = if io_ids.is_empty() {
-        vec![]
-    } else {
-        test_case::Entity::find()
-            .filter(test_case::Column::Id.is_in(io_ids))
-            .select_only()
-            .column(test_case::Column::Id)
-            .column_as(Expr::cust(format!("LEFT(input, {})", cap + 1)), "input")
-            .column_as(
-                Expr::cust(format!("LEFT(expected_output, {})", cap + 1)),
-                "expected_output",
-            )
-            .column(test_case::Column::InputBlobHash)
-            .column(test_case::Column::ExpectedOutputBlobHash)
-            .into_model::<TestCaseIoData>()
-            .all(db)
-            .await?
+    let total = match rows.first() {
+        Some(row) => u64::try_from(row.total).unwrap_or(0),
+        // Past the last page the window counts nothing; count separately.
+        None if window.offset() > 0 => select.count(db).await?,
+        None => 0,
     };
+    let pagination = window.pagination(total);
     let mut io = HashMap::new();
-    for row in io_rows {
+    for row in &rows {
+        let (Some(id), Some(input), Some(expected)) =
+            (row.test_case_id, &row.input, &row.expected_output)
+        else {
+            continue;
+        };
         let input = read_test_case_body_preview_with_limit(
-            &row.input,
+            input,
             row.input_blob_hash.as_deref(),
             blob_store,
             cap,
         )
         .await?;
         let expected = read_test_case_body_preview_with_limit(
-            &row.expected_output,
+            expected,
             row.expected_output_blob_hash.as_deref(),
             blob_store,
             cap,
         )
         .await?;
         io.insert(
-            row.id,
+            id,
             (output_preview(input, full), output_preview(expected, full)),
         );
     }
@@ -360,15 +363,67 @@ async fn load_result_page(
     Ok((results, pagination))
 }
 
+/// What a submission's detail response shows besides the submission row:
+/// its author, problem, contest and current judgement, in one statement.
+struct SubmissionContext {
+    username: String,
+    problem_title: String,
+    show_test_details: bool,
+    contest: Option<contest::Model>,
+    current_judgement_id: Option<i32>,
+}
+
+impl SubmissionContext {
+    async fn load(db: &DatabaseConnection, sub: &submission::Model) -> Result<Self, AppError> {
+        let row = db
+            .query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                r#"SELECT u.username, p.title, p.show_test_details,
+                          CASE WHEN c.id IS NULL THEN NULL ELSE to_jsonb(c) END AS contest,
+                          (SELECT j.id FROM submission_judgement j
+                           WHERE j.submission_id = $3 AND j.is_current) AS current_judgement_id
+                   FROM "user" u
+                   JOIN problem p ON p.id = $2
+                   LEFT JOIN contest c ON c.id = $4
+                   WHERE u.id = $1"#,
+                [
+                    sub.user_id.into(),
+                    sub.problem_id.into(),
+                    sub.id.into(),
+                    sub.contest_id.into(),
+                ],
+            ))
+            .await?
+            .ok_or_else(|| AppError::Internal("Submission user or problem not found".into()))?;
+        let contest: Option<serde_json::Value> = row.try_get("", "contest")?;
+        let contest = contest
+            .map(serde_json::from_value::<contest::Model>)
+            .transpose()
+            .map_err(|e| AppError::Internal(format!("malformed contest row: {e}")))?;
+        if sub.contest_id.is_some() && contest.is_none() {
+            return Err(AppError::Internal("Contest not found".into()));
+        }
+        Ok(Self {
+            username: row.try_get("", "username")?,
+            problem_title: row.try_get("", "title")?,
+            show_test_details: row.try_get("", "show_test_details")?,
+            contest,
+            current_judgement_id: row.try_get("", "current_judgement_id")?,
+        })
+    }
+}
+
 pub(super) async fn build_submission_response(
     db: &DatabaseConnection,
     blob_store: &dyn BlobStore,
+    now: DateTime<Utc>,
     sub: submission::Model,
     visibility: Option<VisibilityContext>,
 ) -> Result<SubmissionResponse, AppError> {
     build_submission_response_with_cases(
         db,
         blob_store,
+        now,
         sub,
         visibility,
         &SubmissionResultQuery::default(),
@@ -379,30 +434,13 @@ pub(super) async fn build_submission_response(
 pub(super) async fn build_submission_response_with_cases(
     db: &DatabaseConnection,
     blob_store: &dyn BlobStore,
+    now: DateTime<Utc>,
     sub: submission::Model,
     visibility: Option<VisibilityContext>,
     query: &SubmissionResultQuery,
 ) -> Result<SubmissionResponse, AppError> {
-    let user_model = user::Entity::find_by_id(sub.user_id)
-        .one(db)
-        .await?
-        .ok_or_else(|| AppError::Internal("Submission user not found".into()))?;
-
-    let problem_model = problem::Entity::find_by_id(sub.problem_id)
-        .one(db)
-        .await?
-        .ok_or_else(|| AppError::Internal("Submission problem not found".into()))?;
-
-    let contest_model = if let Some(contest_id) = sub.contest_id {
-        Some(
-            contest::Entity::find_by_id(contest_id)
-                .one(db)
-                .await?
-                .ok_or_else(|| AppError::Internal("Contest not found".into()))?,
-        )
-    } else {
-        None
-    };
+    let context = SubmissionContext::load(db, &sub).await?;
+    let contest_model = context.contest;
 
     let is_owner = visibility
         .as_ref()
@@ -411,24 +449,19 @@ pub(super) async fn build_submission_response_with_cases(
     let show_source_code = has_view_all || is_owner;
 
     let show_compile_output =
-        has_view_all || is_owner || compile_output_public(contest_model.as_ref(), Utc::now());
+        has_view_all || is_owner || compile_output_public(contest_model.as_ref(), now);
 
     let is_running = sub.status == SubmissionStatus::Running;
     let show_results = sub.status.is_terminal() || is_running;
 
     let result_response = if show_results {
-        let current_judgement_id = submission_judgement::Entity::find()
-            .filter(submission_judgement::Column::SubmissionId.eq(sub.id))
-            .filter(submission_judgement::Column::IsCurrent.eq(true))
-            .one(db)
-            .await?
-            .map(|j| j.id);
+        let current_judgement_id = context.current_judgement_id;
         let (test_case_results, pagination) = load_result_page(
             db,
             blob_store,
             sub.id,
             current_judgement_id,
-            has_view_all || problem_model.show_test_details,
+            has_view_all || context.show_test_details,
             Some(query),
         )
         .await?;
@@ -484,9 +517,9 @@ pub(super) async fn build_submission_response_with_cases(
         language: sub.language,
         status: sub.status,
         user_id: sub.user_id,
-        username: user_model.username,
+        username: context.username,
         problem_id: sub.problem_id,
-        problem_title: problem_model.title,
+        problem_title: context.problem_title,
         contest_id: sub.contest_id,
         contest_type: sub.contest_type.clone(),
         judge_epoch: sub.judge_epoch,

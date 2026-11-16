@@ -108,11 +108,22 @@ docker compose up -d
 Current `docker-compose.yaml` services:
 
 - Postgres 17 on `127.0.0.1:5433`
-- Redis 7 on `6379`
-- SeaweedFS on `9333` and `8333`
+- Redis 7 on `127.0.0.1:6379`
+- SeaweedFS on `127.0.0.1:9333` and `127.0.0.1:8333`
 
-The checked-in Docker Postgres credentials are:
-`postgres://postgres:broccoli_pg_secret@localhost:5433/broccoli`
+It needs no setup. The credentials default to the ones
+`config/config.example.toml` uses, and `POSTGRES_USER`, `POSTGRES_PASSWORD`,
+`POSTGRES_DB` and `REDIS_PASSWORD` override them:
+`postgres://postgres:broccoli_pg_secret@localhost:5433/broccoli` and
+`redis://:broccoli_redis_secret@localhost:6379`.
+
+### Configuration
+
+Settings are required (URLs, secrets), derived (pool sizes, the claim loop,
+cookie security, log format) or advanced overrides with defaults, listed in
+`release/docs/configuration-reference.md`. Do not add a key whose value can be
+derived from the machine or the request; a removed key needs no shim, since the
+binaries warn about every key they do not read.
 
 ## Architecture Notes From The Current Tree
 
@@ -160,6 +171,10 @@ The checked-in Docker Postgres credentials are:
   API contracts.
 - Prefer permission helpers instead of checking roles directly.
 - Think about transaction boundaries before editing write paths.
+- The server only boots on an empty database or one this build created:
+  `build.rs` stamps the schema sources (entities, migrations, boot-time trigger
+  DDL) and boot refuses any other stamp. Keep schema DDL in those files so the
+  stamp covers it.
 - When changing plugin execution behavior, check both manifest-level permissions
   and host-side registration/resolution.
 

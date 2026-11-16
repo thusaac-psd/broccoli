@@ -4,7 +4,6 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
 use broccoli_server_sdk::types::BeforeSubmissionEvent;
-use chrono::Utc;
 use sea_orm::*;
 use tracing::instrument;
 
@@ -103,6 +102,7 @@ pub async fn create_submission(
     )?;
     check_rate_limit(
         &state.db,
+        state.clock.now(),
         auth_user.user_id,
         state.config.submission.rate_limit_per_minute,
     )
@@ -226,8 +226,14 @@ pub async fn create_submission(
     );
 
     let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
-    let response =
-        build_submission_response(&state.db, &*state.blob_store, model, visibility).await?;
+    let response = build_submission_response(
+        &state.db,
+        &*state.blob_store,
+        state.clock.now(),
+        model,
+        visibility,
+    )
+    .await?;
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -411,22 +417,23 @@ pub async fn get_submission(
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
     let resource = Resource::Submission(id);
 
-    // Fail fast, before building the full detail response (user/problem/
-    // contest/judgement/test-case-result reads below), on a submission the
-    // kernel already knows is unreachable. This single decision folds in
-    // what `require_submission_visible` used to check by hand - owner
-    // bypass, the contest activation window, participation, and
-    // `submissions_visible` - see `visibility::host_rules::decide_submission`,
-    // a byte-for-byte port of that old logic.
+    // The kernel decides on the row read here instead of reading it again.
+    // A missing and an unreachable submission answer the same 404.
+    let sub = find_submission(&state.db, id).await?;
+    kernel.know_submission(sub.clone());
+    // Fail fast, before building the full detail response, on a submission
+    // the kernel finds unreachable: the owner bypass, the contest activation
+    // window, participation and `submissions_visible` (see
+    // `visibility::host_rules::decide_submission`).
     if kernel.decide(Action::Read, resource).await?.is_denied() {
         return Err(AppError::NotFound("Submission not found".into()));
     }
 
-    let sub = find_submission(&state.db, id).await?;
     let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
     let response = build_submission_response_with_cases(
         &state.db,
         &*state.blob_store,
+        state.clock.now(),
         sub,
         visibility,
         &query,
@@ -538,7 +545,7 @@ async fn build_visible_judgement(
     let is_owner = visibility.viewer_id == sub.user_id;
     let show_compile_output = visibility.has_view_all
         || is_owner
-        || compile_output_public(contest_model.as_ref(), Utc::now());
+        || compile_output_public(contest_model.as_ref(), state.clock.now());
     let show_test_details = visibility.has_view_all || problem_model.show_test_details;
 
     let mut response = build_judgement_response(
@@ -684,6 +691,7 @@ pub async fn create_contest_submission(
     )?;
     check_rate_limit(
         &state.db,
+        state.clock.now(),
         auth_user.user_id,
         state.config.submission.rate_limit_per_minute,
     )
@@ -732,7 +740,7 @@ pub async fn create_contest_submission(
         ));
     }
 
-    let now = Utc::now();
+    let now = state.clock.now();
     require_contest_running(&auth_user, &contest_model, now)?;
     require_contest_participant(&state.db, &auth_user, &contest_model).await?;
     let known_languages: std::collections::HashSet<String> = state
@@ -841,8 +849,14 @@ pub async fn create_contest_submission(
     );
 
     let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
-    let response =
-        build_submission_response(&state.db, &*state.blob_store, model, visibility).await?;
+    let response = build_submission_response(
+        &state.db,
+        &*state.blob_store,
+        state.clock.now(),
+        model,
+        visibility,
+    )
+    .await?;
 
     let response = apply_filter_to_response(&kernel, response).await?;
     Ok((StatusCode::CREATED, Json(response)))

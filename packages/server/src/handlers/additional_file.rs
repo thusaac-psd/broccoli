@@ -3,7 +3,6 @@ use axum::extract::{DefaultBodyLimit, Multipart, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use broccoli_server_sdk::permissions as perm;
-use chrono::Utc;
 use common::storage::ContentHash;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait};
@@ -138,7 +137,7 @@ pub async fn upload_additional_file(
         .map(|m| m.to_string());
 
     let ref_id = Uuid::now_v7();
-    let now = Utc::now();
+    let now = state.clock.now();
 
     let txn = state.db.begin().await?;
 

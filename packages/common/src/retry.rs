@@ -17,11 +17,12 @@ pub struct RetryAttempt {
 }
 
 impl RetryAttempt {
-    pub fn new(attempt: u8, error: impl Into<String>) -> Self {
+    /// Attempt `attempt` failed with `error` at platform time `at`.
+    pub fn new(attempt: u8, error: impl Into<String>, at: DateTime<Utc>) -> Self {
         Self {
             attempt,
             error: error.into(),
-            timestamp: Utc::now(),
+            timestamp: at,
         }
     }
 }
@@ -68,7 +69,8 @@ impl RetryTracker {
         }
     }
 
-    pub fn record_failure(&mut self, id: &str, error: &str) -> RetryDecision {
+    /// Record that `id` failed with `error` at platform time `at`.
+    pub fn record_failure(&mut self, id: &str, error: &str, at: DateTime<Utc>) -> RetryDecision {
         let retry_state = self
             .state
             .entry(id.to_string())
@@ -78,7 +80,7 @@ impl RetryTracker {
         retry_state.last_updated = Instant::now();
         retry_state
             .history
-            .push(RetryAttempt::new(retry_state.attempt, error));
+            .push(RetryAttempt::new(retry_state.attempt, error, at));
 
         if retry_state.attempt <= self.max_retries {
             RetryDecision::Retry {
@@ -192,6 +194,10 @@ pub fn spawn_cleanup_task(
 mod tests {
     use super::*;
 
+    fn at() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_700_000_000, 0).unwrap()
+    }
+
     #[test]
     fn backoff_attempt_1_is_base_delay() {
         let d = calculate_backoff(1, 1000, 60000);
@@ -225,22 +231,22 @@ mod tests {
     fn retry_tracker_exhaustion() {
         let mut tracker = RetryTracker::new(3);
 
-        match tracker.record_failure("msg1", "error 1") {
+        match tracker.record_failure("msg1", "error 1", at()) {
             RetryDecision::Retry { attempt, .. } => assert_eq!(attempt, 1),
             _ => panic!("expected Retry"),
         }
 
-        match tracker.record_failure("msg1", "error 2") {
+        match tracker.record_failure("msg1", "error 2", at()) {
             RetryDecision::Retry { attempt, .. } => assert_eq!(attempt, 2),
             _ => panic!("expected Retry"),
         }
 
-        match tracker.record_failure("msg1", "error 3") {
+        match tracker.record_failure("msg1", "error 3", at()) {
             RetryDecision::Retry { attempt, .. } => assert_eq!(attempt, 3),
             _ => panic!("expected Retry on attempt 3 with max_retries=3"),
         }
 
-        match tracker.record_failure("msg1", "error 4") {
+        match tracker.record_failure("msg1", "error 4", at()) {
             RetryDecision::Exhausted { history } => {
                 assert_eq!(history.len(), 4);
                 assert_eq!(history[0].attempt, 1);
@@ -256,7 +262,7 @@ mod tests {
     fn retry_tracker_cleared_after_success() {
         let mut tracker = RetryTracker::new(3);
 
-        tracker.record_failure("msg1", "error");
+        tracker.record_failure("msg1", "error", at());
         assert_eq!(tracker.get_attempt("msg1"), 1);
 
         tracker.clear("msg1");
@@ -267,13 +273,13 @@ mod tests {
     fn retry_tracker_tracks_messages_independently() {
         let mut tracker = RetryTracker::new(3);
 
-        tracker.record_failure("msg1", "error");
-        tracker.record_failure("msg2", "error");
+        tracker.record_failure("msg1", "error", at());
+        tracker.record_failure("msg2", "error", at());
 
         assert_eq!(tracker.get_attempt("msg1"), 1);
         assert_eq!(tracker.get_attempt("msg2"), 1);
 
-        tracker.record_failure("msg1", "error");
+        tracker.record_failure("msg1", "error", at());
         assert_eq!(tracker.get_attempt("msg1"), 2);
         assert_eq!(tracker.get_attempt("msg2"), 1);
     }
@@ -282,8 +288,8 @@ mod tests {
     fn cleanup_stale_removes_old_entries() {
         let mut tracker = RetryTracker::new(3);
 
-        tracker.record_failure("msg1", "error");
-        tracker.record_failure("msg2", "error");
+        tracker.record_failure("msg1", "error", at());
+        tracker.record_failure("msg2", "error", at());
         assert_eq!(tracker.len(), 2);
 
         tracker.cleanup_stale(Duration::ZERO);
@@ -294,7 +300,7 @@ mod tests {
     fn cleanup_stale_preserves_recent_entries() {
         let mut tracker = RetryTracker::new(3);
 
-        tracker.record_failure("msg1", "error");
+        tracker.record_failure("msg1", "error", at());
 
         tracker.cleanup_stale(Duration::from_secs(3600));
         assert_eq!(tracker.len(), 1);
@@ -307,7 +313,7 @@ mod tests {
         assert!(tracker.is_empty());
         assert_eq!(tracker.len(), 0);
 
-        tracker.record_failure("msg1", "error");
+        tracker.record_failure("msg1", "error", at());
         assert!(!tracker.is_empty());
         assert_eq!(tracker.len(), 1);
 

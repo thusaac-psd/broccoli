@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use axum::Json;
 use axum::extract::{Query, State};
 use broccoli_server_sdk::permissions as perm;
-use chrono::Utc;
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
@@ -80,7 +79,7 @@ pub async fn prewarm_contest(
 
     let hashes = enumerate_contest_blob_hashes(&state.db, id).await?;
     let total_blobs = hashes.len() as u32;
-    let job = publish_warm_job(client, id, hashes).await?;
+    let job = publish_warm_job(client, id, hashes, state.clock.now()).await?;
 
     let live_workers = read_workers(&state).await.len() as u32;
 
@@ -287,12 +286,13 @@ async fn publish_warm_job(
     client: &redis::Client,
     contest_id: i32,
     hashes: Vec<String>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<WarmJob, AppError> {
     let job = WarmJob {
         job_id: uuid::Uuid::new_v4().to_string(),
         contest_id,
         hashes,
-        created_at_unix_ms: Utc::now().timestamp_millis(),
+        created_at_unix_ms: now.timestamp_millis(),
     };
     let body = serde_json::to_string(&job)
         .map_err(|e| AppError::Internal(format!("Failed to serialize warm job: {e}")))?;

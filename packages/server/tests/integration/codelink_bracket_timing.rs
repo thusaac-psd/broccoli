@@ -750,12 +750,7 @@ async fn a_game_cut_off_by_the_contest_end_goes_to_staff() {
         ))
         .await
         .expect("move the contest end");
-    // The plugin reads the contest end in SQL, and nothing below goes through a
-    // handler's own contest-time check.
-    fx.app
-        .clock()
-        .advance_across_contest_boundary(Duration::from_millis(1_500))
-        .await;
+    fx.app.clock().advance(Duration::from_millis(1_500)).await;
 
     // Anything that looks at the match after the end (a verdict landing, a
     // timer, this nudge) must see that the game can no longer be played.

@@ -81,7 +81,7 @@ pub async fn add_participant(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".into()))?;
 
-    let now = chrono::Utc::now();
+    let now = state.clock.now();
     let new_cu = contest_user::ActiveModel {
         contest_id: Set(contest_id),
         user_id: Set(payload.user_id),
@@ -235,7 +235,7 @@ pub async fn register_for_contest(
     State(state): State<AppState>,
     AppPath(contest_id): AppPath<i32>,
 ) -> Result<impl IntoResponse, AppError> {
-    let now = chrono::Utc::now();
+    let now = state.clock.now();
     let txn = state.db.begin().await?;
     let contest_model = find_contest_for_update(&txn, contest_id).await?;
     if ensure_self_service_contest(&contest_model, now)? == ContestPhase::Ended {
@@ -280,7 +280,7 @@ pub async fn unregister_from_contest(
     State(state): State<AppState>,
     AppPath(contest_id): AppPath<i32>,
 ) -> Result<impl IntoResponse, AppError> {
-    let now = chrono::Utc::now();
+    let now = state.clock.now();
     let txn = state.db.begin().await?;
     let contest_model = find_contest_for_update(&txn, contest_id).await?;
     // Standings are built from `contest_user`, so leaving a contest that has
@@ -444,7 +444,7 @@ pub async fn bulk_add_participants(
         std::collections::HashSet::new()
     };
 
-    let now = chrono::Utc::now();
+    let now = state.clock.now();
     let created_user_ids: std::collections::HashSet<i32> =
         created_response.iter().map(|c| c.user_id).collect();
 

@@ -1,3 +1,6 @@
+// A load generator reports and names its runs by this host's time.
+#![allow(clippy::disallowed_methods)]
+
 pub mod bootstrap;
 pub mod cleanup;
 pub mod cli;

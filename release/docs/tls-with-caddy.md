@@ -43,8 +43,8 @@ BROCCOLI_GATEWAY_HOSTS='10.0.0.5' ./install.sh server
 ```
 
 which writes `BROCCOLI__SERVER__TRUSTED_PROXIES='["10.0.0.5/32"]'` into
-`.env.server`. With HTTPS at the gateway, also set
-`BROCCOLI__AUTH__SECURE_COOKIES=true` there.
+`.env.server`. The server then marks its session cookie `Secure` on requests
+the gateway forwards as HTTPS.
 
 ## Troubleshooting
 

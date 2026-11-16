@@ -31,6 +31,7 @@ pub struct Model {
     /// it still knows what to fail closed for. `None` until first loaded.
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub governs: Option<Json>,
+    #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub updated_at: DateTimeUtc,
 }
 

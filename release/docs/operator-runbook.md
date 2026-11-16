@@ -140,7 +140,7 @@ resets it to the configured password, and restores the `admin` role and its
 built-in permissions, only in two cases:
 
 - no active user holds `system:admin`; this happens automatically;
-- `BROCCOLI_BOOTSTRAP_ADMIN_RESET=true` is set; use this when admin accounts
+- `BROCCOLI__BOOTSTRAP__RESET_ADMIN=true` is set; use this when admin accounts
   still exist but nobody can sign in to one.
 
 To recover, edit the server node `.env.server` and restart the server:
@@ -148,12 +148,12 @@ To recover, edit the server node `.env.server` and restart the server:
 ```bash
 BROCCOLI_BOOTSTRAP_ADMIN_USERNAME=admin
 BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD=replace-this-password
-BROCCOLI_BOOTSTRAP_ADMIN_RESET=true
+BROCCOLI__BOOTSTRAP__RESET_ADMIN=true
 docker compose --env-file .env.server -f docker-compose.server.yaml up -d --no-deps server
 ```
 
 The reset also signs the account out everywhere. After signing in, remove
-`BROCCOLI_BOOTSTRAP_ADMIN_RESET` (otherwise every restart resets the password
+`BROCCOLI__BOOTSTRAP__RESET_ADMIN` (otherwise every restart resets the password
 again) and rotate the bootstrap password.
 
 ## Built-in Role Permissions
@@ -205,125 +205,62 @@ server-secrets.env   # copy only to servers
 
 Workers do not need `server-secrets.env`.
 
-## Time Sync on an Offline LAN
+## Time on an Offline LAN
 
-Every server and worker must agree on the time to within about a second. The
-message queue orders messages by the publisher's clock, so a server running
-ahead of a worker by some delta hides its work from that worker for that delta
-(and the other way round for results); a few seconds of skew add seconds to
-every test case, and hours of skew lose results. Worker liveness (10 s),
-refresh-token reuse and lease checks also compare clocks across machines. An
-offline venue has no internet NTP, so make the infra node the LAN's time server
-with chrony and point every other node at it. Containers use their host's clock,
-so this is host configuration.
+No node needs NTP. Servers keep wall time by the database clock, so every
+replica agrees on when a contest starts and ends, when a token expires and what
+the `Date` header says, whatever their own clocks read. Contestant browsers
+derive their countdowns from that `Date` header. The queue times its leases on
+the Redis clock, and workers compare no wall clocks.
 
-On the infra node, set the clock once (for example from a phone:
-`sudo date -s '2026-11-10 09:00:00'`), then in `/etc/chrony/chrony.conf`
-(`/etc/chrony.conf` on RHEL-family hosts):
-
-```
-# Serve this machine's clock to the LAN even without an upstream source.
-local stratum 8
-allow 10.0.0.0/24        # the venue LAN
-```
-
-On every server and worker node, replace the `pool`/`server` lines with:
-
-```
-server 10.0.0.10 iburst  # the infra node
-makestep 1 -1            # step the clock whenever it is more than 1 s off
-```
-
-Restart chrony (`sudo systemctl restart chrony`, or `chronyd`) everywhere, then
-check each node: `chronyc tracking` names the infra node as its reference and
-shows a system time offset well under a second, and `chronyc sources` marks it
-with `*`. Pointing contestant PCs at the same server also keeps contest
-countdowns and certificate validity honest.
-
-`install.sh` reports the platform time-sync status and, when online, compares
-the clock against an HTTPS `Date` header. Both checks only warn, and offline the
-HTTPS check gives up after three seconds, so leave it on for real events.
-`BROCCOLI_SKIP_TIME_CHECK=1` skips it entirely and exists for scripted test
-runs.
+Only log timestamps follow each node's own clock. A server more than a second
+off the database logs a warning at boot. Set the infra node's clock once if it
+is far off (for example from a phone: `sudo date -s '2026-11-10 09:00:00'`), so
+times shown in the UI read right.
 
 ## Capacity Planning
 
-Broccoli's per-machine throughput is bounded by the worker's intra-process
-concurrency (`worker.max_concurrency`, default 1). Total fleet drain time for a
-contest:
+Each worker judges one test at a time (`worker.max_concurrency` is 1).
+Concurrent runs on one machine share its L2/L3 cache, memory bandwidth and SMT
+siblings, and `time_used` (kernel CPU accounting) inflates under that
+contention even with CPU pinning, so borderline time limits flip. Scale judging
+by adding worker machines. Several worker processes on one machine share those
+caches too, so they are no way around it. Total fleet drain time for a contest:
 
 ```
 drain_seconds = (n_submissions * n_testcases * avg_op_time_seconds)
-              / (n_machines * worker.max_concurrency)
+              / n_worker_machines
 ```
 
-For 100 submissions × 50 testcases × 5 s on 7 machines × 4 slots ≈ 30 minutes.
+For 100 submissions × 50 testcases × 0.5 s on 20 machines ≈ 2 minutes.
 
 Each server sizes its plugin execution from its own cores and memory (see the
 plugin execution section below); nothing in this formula needs a server setting.
 
-**Deployment topology**
+**Database connections**
 
-The official deployment model is **one worker process per physical machine**,
-with the worker's own `max_concurrency` knob (default 1) controlling how many
-sandbox slots run in parallel inside that single daemon.
+Pools size themselves. A server wants at most 66 connections: 16 to 40 for
+handlers (4 per CPU), up to 24 for plugin host functions (from the evaluator
+admission), and 2 of its own (the claim listener and the clock). A worker
+holds its slots plus 2, so 3 at the default `max_concurrency` of 1.
 
-Scale the fleet by adding machines, not by running multiple worker daemons on
-the same box. Multiple processes per box would contend for CPU cache, memory
-bandwidth, and SMT siblings, and the verdict signal Broccoli currently uses
-(`time_used`, which is kernel CPU accounting) inflates under that contention, so
-borderline TLE outcomes can flip. The single-daemon model gives the operator one
-number to reason about and one place to apply core-pinning / cgroup
-configuration.
+At boot a server reads `max_connections`, keeps a tenth of it (at least 10)
+for operators and booting nodes, subtracts what the live workers hold, and
+splits the rest evenly with the other live servers. Its pools shrink to that
+share when they want more, never below 13 connections in all, and the server
+logs a warning naming the numbers. A server fits the fleet live when it
+boots: after adding nodes against a database with no room to spare, restart
+the servers so they fit again.
 
-Raising `max_concurrency` above 1 within a single daemon has the same fairness
-trade-off. Use the procedure below before changing it.
-
-**Raising max_concurrency safely**
-
-Default worker concurrency is `max_concurrency=1`. Leave it there unless the
-worker host has been prepared for CPU isolation.
-
-On the Linux worker host, from the bundle directory, run:
-
-```bash
-sudo ./setup-fairness.sh --max-concurrency 4 --cpus 0-3
-cat fairness.env >> .env.worker
-docker compose --env-file .env.worker -f docker-compose.worker.yaml up -d --no-deps worker
-```
-
-The script refuses to run when SMT/hyperthreading is enabled unless
-`--allow-smt` is passed. It sets CPU governors to `performance` when the host
-exposes writable governor controls, configures isolate per-box CPU assignments
-so each sandbox `box_id` writes a fixed `cpuset.cpus`, and writes the worker env
-snippet:
-
-```bash
-BROCCOLI__WORKER__MAX_CONCURRENCY=4
-BROCCOLI__WORKER__FAIRNESS_UNSAFE_ALLOW=false
-```
-
-WSL and macOS are not supported production fairness targets. Use WSL only for
-local isolate smoke tests and keep `BROCCOLI__WORKER__MAX_CONCURRENCY=1`; macOS
-cannot run the Linux cgroup setup and should also stay clamped to 1.
-
-Phase 1 only makes multi-slot judging an explicit operator opt-in. It does not
-prove verdict fairness: instruction-count instrumentation with `perf_event_open`
-is Phase 5. Treat any higher concurrency as an operational risk for borderline
-time-limit cases until Phase 5 data exists.
-
-**Sizing the database connection pool**
-
-Postgres `max_connections` must accommodate every server replica's pool, every
-worker's pool, plus heartbeat/DLQ/admin overhead. The tuned infra template
-defaults to `max_connections=400`, which fits:
+The infra template's `max_connections=500` fits 5 servers and 30 workers at
+full size:
 
 ```
-3 servers × 50 + 7 workers × 5 + heartbeat refreshers + DLQ + admin
-≈ 215 client demand
+500 - 3 superuser slots - 49 reserve = 448 ≥ 5 servers × 66 + 30 workers × 3 = 420
 ```
 
-Override via `POSTGRES_MAX_CONNECTIONS` in `.env.infra` if your fleet grows.
+Raise `POSTGRES_MAX_CONNECTIONS` in `.env.infra` for a larger fleet. The
+native installer sets 500 too, and the development `docker-compose.yaml` 200.
 
 **Sizing Redis memory**
 
@@ -437,8 +374,8 @@ each replica's env file before starting.
 
 ## Recovering In-Flight Submissions After a Server Restart or Crash
 
-Every server re-dispatches its own unfinished work automatically, whatever
-`BROCCOLI__SERVER__DISPATCHER_LEASE_STEAL_ENABLED` is set to:
+Every server re-dispatches its own unfinished work automatically, and the
+others take over the work of one that stops:
 
 - **Graceful stop** (`docker compose stop`, a rolling restart, a redeploy): the
   server releases the submissions, rejudges and code runs it was judging as it
@@ -448,12 +385,10 @@ Every server re-dispatches its own unfinished work automatically, whatever
   `BROCCOLI__SERVER__ID` releases and re-dispatches the work its previous
   instance left behind as it boots. That work no longer counts against its
   in-flight limit.
-- **Crash without a restart**: with lease/steal enabled, the other servers steal
-  the dead server's work once its lease expires (`lease_ttl_secs`). With it
-  disabled (the release default) nothing can tell a dead server from a live one,
-  so the work waits until that server ID boots again, or until the stuck-job
-  detector fails it after `max_inflight_secs` (default 1 hour) so it can be
-  rejudged.
+- **Crash without a restart**: the other servers steal the dead server's work
+  once its lease expires (`lease_ttl_secs`, default 60 s). On a single server the
+  work waits until it boots again, or until the stuck-job detector fails it after
+  `max_inflight_secs` (default 1 hour) so it can be rejudged.
 
 When a crashed server will not come back:
 

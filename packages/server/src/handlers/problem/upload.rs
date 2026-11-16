@@ -111,7 +111,7 @@ pub async fn upload_test_cases(
     let mut created_count = 0;
     let mut updated_count = 0;
 
-    let now = chrono::Utc::now();
+    let now = state.clock.now();
 
     for entry in entries {
         let score = auto_score_for_uploaded_entry(&entry, &auto_scores);

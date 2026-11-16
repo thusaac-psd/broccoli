@@ -1,13 +1,17 @@
-use std::cmp;
-
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use sea_orm::*;
 
-use crate::entity::{code_run, submission};
 use crate::error::AppError;
 
+/// The window `rate_limit_per_minute` counts over.
+const WINDOW: Duration = Duration::minutes(1);
+
+/// Refuse with `RATE_LIMITED` when `user_id` created `limit_per_minute` or
+/// more submissions and code runs together in the minute before `now`, the
+/// platform clock (which also stamped their `created_at`). One statement.
 pub async fn check_rate_limit(
     db: &DatabaseConnection,
+    now: DateTime<Utc>,
     user_id: i32,
     limit_per_minute: u32,
 ) -> Result<(), AppError> {
@@ -15,54 +19,26 @@ pub async fn check_rate_limit(
         return Ok(());
     }
 
-    let one_minute_ago = Utc::now() - Duration::minutes(1);
+    let since = now - WINDOW;
+    let row = db
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"SELECT count(*) AS n, min(created_at) AS oldest FROM (
+                   SELECT created_at FROM submission WHERE user_id = $1 AND created_at > $2
+                   UNION ALL
+                   SELECT created_at FROM code_run WHERE user_id = $1 AND created_at > $2
+               ) recent"#,
+            [user_id.into(), since.into()],
+        ))
+        .await?
+        .ok_or_else(|| AppError::Internal("rate limit query returned no row".into()))?;
+    let count: i64 = row.try_get("", "n")?;
+    let oldest: Option<DateTime<Utc>> = row.try_get("", "oldest")?;
 
-    let sub_count = submission::Entity::find()
-        .filter(submission::Column::UserId.eq(user_id))
-        .filter(submission::Column::CreatedAt.gt(one_minute_ago))
-        .count(db)
-        .await?;
-
-    let run_count = code_run::Entity::find()
-        .filter(code_run::Column::UserId.eq(user_id))
-        .filter(code_run::Column::CreatedAt.gt(one_minute_ago))
-        .count(db)
-        .await?;
-
-    let count = sub_count + run_count;
-
-    if count >= limit_per_minute as u64 {
-        let oldest_submission = submission::Entity::find()
-            .filter(submission::Column::UserId.eq(user_id))
-            .filter(submission::Column::CreatedAt.gt(one_minute_ago))
-            .order_by_asc(submission::Column::CreatedAt)
-            .one(db)
-            .await?;
-
-        let oldest_code_run = code_run::Entity::find()
-            .filter(code_run::Column::UserId.eq(user_id))
-            .filter(code_run::Column::CreatedAt.gt(one_minute_ago))
-            .order_by_asc(code_run::Column::CreatedAt)
-            .one(db)
-            .await?;
-
-        let oldest_created_at = match (
-            oldest_submission.map(|s| s.created_at),
-            oldest_code_run.map(|r| r.created_at),
-        ) {
-            (Some(a), Some(b)) => Some(cmp::min(a, b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        };
-
-        let retry_after = oldest_created_at
-            .map(|t| {
-                let expires = t + Duration::minutes(1);
-                cmp::max((expires - Utc::now()).num_seconds(), 1) as u64
-            })
+    if count >= i64::from(limit_per_minute) {
+        let retry_after = oldest
+            .map(|t| std::cmp::max((t + WINDOW - now).num_seconds(), 1) as u64)
             .unwrap_or(60);
-
         return Err(AppError::RateLimited { retry_after });
     }
 

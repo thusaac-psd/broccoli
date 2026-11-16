@@ -441,14 +441,11 @@ async fn resolve_inputs(
         .ok_or_else(|| anyhow!("Problem {} not found", problem_id))?;
 
     let checker_ns = format!("{}:checker", caller_plugin_id);
-    let checker_config_model = plugin_config::Entity::find_by_id((
-        "problem".to_string(),
-        problem_id.to_string(),
-        checker_ns,
-    ))
-    .one(&deps.db)
-    .await
-    .with_context(|| "Failed to query checker config")?;
+    let checker_config_model = deps
+        .plugin_config_cache
+        .get(&deps.db, "problem", &problem_id.to_string(), &checker_ns)
+        .await
+        .with_context(|| "Failed to query checker config")?;
 
     let af_models = additional_file::Entity::find()
         .filter(additional_file::Column::ProblemId.eq(problem_id))
@@ -471,7 +468,8 @@ async fn resolve_inputs(
     // The checker source is no longer inlined by the host: checker plugins read it
     // from their own per-problem config (e.g. `standard-checkers:checker_source`).
 
-    let checker_config_value: Option<serde_json::Value> = checker_config_model.map(|pc| pc.config);
+    let checker_config_value: Option<serde_json::Value> =
+        checker_config_model.map(|pc| pc.config.clone());
 
     let test_cases = input.test_cases;
     let db_needed_ids: Vec<i32> = test_cases

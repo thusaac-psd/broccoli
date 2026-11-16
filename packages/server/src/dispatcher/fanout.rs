@@ -114,16 +114,9 @@ pub fn local_floor_slots() -> u64 {
 /// Keep the executor's judging and work caps at this server's in-flight cap
 /// and fan-out bound as the fleet changes (see
 /// [`plugin_core::admission::Admission::set_background_caps`]).
-pub fn spawn_admission_sizing(
-    slots: WorkerSlots,
-    admission: plugin_core::admission::Admission,
-    configured_in_flight: u32,
-) {
+pub fn spawn_admission_sizing(slots: WorkerSlots, admission: plugin_core::admission::Admission) {
     let size = move |slots: &WorkerSlots| {
-        let in_flight = match crate::dispatcher::claim::in_flight_cap(configured_in_flight, slots) {
-            0 => plugin_core::admission::DEFAULT_JUDGING_CAP,
-            cap => cap as usize,
-        };
+        let in_flight = crate::dispatcher::claim::in_flight_cap(slots) as usize;
         let fan_out = fan_out_limit(slots, local_floor_slots()) as usize;
         admission.set_background_caps(in_flight, fan_out);
     };

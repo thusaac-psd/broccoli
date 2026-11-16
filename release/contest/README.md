@@ -1,15 +1,15 @@
 # Contest hand-off: export problems → bring up the contest cluster (offline LAN)
 
-This directory is for handing a finished problem set from the **authoring/staging
-server** to a **contest cluster** that runs on an isolated LAN (e.g. lab machines
-in mainland China with **no internet**). It contains:
+This directory is for handing a finished problem set from the
+**authoring/staging server** to a **contest cluster** that runs on an isolated
+LAN (e.g. lab machines in mainland China with **no internet**). It contains:
 
-| File | Role |
-|------|------|
+| File                 | Role                                                                                                          |
+| -------------------- | ------------------------------------------------------------------------------------------------------------- |
 | `export-problems.sh` | Dump all non-deleted problems (DB rows + referenced blobs) from a running server into one portable `.tar.gz`. |
-| `import-problems.sh`  | Restore that archive into a fresh contest server. |
-| `s3copy.py`           | Dependency-free (stdlib-only) SeaweedFS/S3 copy used by both. No `aws`/`pip`/internet needed. |
-| `bring-up-worker.sh`  | Thin non-interactive wrapper around `../install.sh worker`. |
+| `import-problems.sh` | Restore that archive into a fresh contest server.                                                             |
+| `s3copy.py`          | Dependency-free (stdlib-only) SeaweedFS/S3 copy used by both. No `aws`/`pip`/internet needed.                 |
+| `bring-up-worker.sh` | Thin non-interactive wrapper around `../install.sh worker`.                                                   |
 
 The infra/server/worker bring-up itself is done by the bundle's role installer
 `../install.sh` (Postgres + Redis + **SeaweedFS** + server, then workers). This
@@ -31,11 +31,10 @@ runbook sequences the whole hand-off around it.
 ```
 
 China LAN reality baked in: **nothing is fetched at deploy time.** Docker images
-are `docker load`-ed from the bundle (never pulled), the S3 copy is pure Python
-stdlib (no `aws-cli`), and the clock check only warns. Before the contest, make the
-infra box the LAN's time server and point every other box at it
-([../docs/operator-runbook.md](../docs/operator-runbook.md#time-sync-on-an-offline-lan)):
-servers and workers that disagree on the time delay or lose judging results.
+are `docker load`-ed from the bundle (never pulled), and the S3 copy is pure
+Python stdlib (no `aws-cli`). No NTP is needed: servers keep time by the
+database clock
+([../docs/operator-runbook.md](../docs/operator-runbook.md#time-on-an-offline-lan)).
 
 ---
 
@@ -132,10 +131,10 @@ the problem list, and submit one solution to confirm a worker picks it up.
 
 ## Whole-contest bundle
 
-Beyond a plain problem-set archive, `export-problems.sh`/`import-problems.sh` can
-also carry a **contest** end-to-end: the contest row itself, its roster, and the
-roster's accounts/roles — for standing up a duplicate/rehearsal contest, or for
-disaster recovery of a single contest without a full-database restore.
+Beyond a plain problem-set archive, `export-problems.sh`/`import-problems.sh`
+can also carry a **contest** end-to-end: the contest row itself, its roster, and
+the roster's accounts/roles — for standing up a duplicate/rehearsal contest, or
+for disaster recovery of a single contest without a full-database restore.
 
 ```bash
 # on the source server
@@ -168,19 +167,19 @@ disaster recovery of a single contest without a full-database restore.
   gets whatever password column the bundle happened to carry (real hash if
   exported `--with-secrets`, blank otherwise). Whether real secrets are in the
   bundle is decided once, at export time.
-- The target's schema must already exist — i.e. **the target server has
-  booted at least once** (entity `sync()` + `Migrator::up` create it on boot).
-  These scripts only read/write rows; they never create tables.
+- The target's schema must already exist — i.e. **the target server has booted
+  at least once** (entity `sync()` + `Migrator::up` create it on boot). These
+  scripts only read/write rows; they never create tables.
 - `--dry-run` on either script touches nothing: `export-problems.sh --dry-run`
   never opens a DB connection or reads `--config` at all (it just prints the
   `\copy` statements it would run), and `import-problems.sh --dry-run` prints
-  the `restore.sql` it would run and, for a tarball argument, peeks the
-  manifest with a read-only `tar` extract of just `manifest.json` — no
-  extraction of the rest of the archive, no config read, no DB, no S3.
+  the `restore.sql` it would run and, for a tarball argument, peeks the manifest
+  with a read-only `tar` extract of just `manifest.json` — no extraction of the
+  rest of the archive, no config read, no DB, no S3.
 
 ## Notes / gotchas
 
-- **SeaweedFS volume capacity.** Blobs live in a per-bucket *collection*; the
+- **SeaweedFS volume capacity.** Blobs live in a per-bucket _collection_; the
   first write needs a volume. `import-problems.sh` retries transient 5xx while
   SeaweedFS auto-grows one. If imports fail with "not enough volumes", the
   seaweedfs `volumeSizeLimitMB` / max-volumes is too low for the dataset — raise
@@ -197,6 +196,7 @@ disaster recovery of a single contest without a full-database restore.
   problems on a connected machine.
 
 ## Open items before this is contest-final
+
 - Build the bundle images from the **rebased contest branch** (master's
   contestant-CLI + printing-plugin merged in), then re-run the judge test
   battery.

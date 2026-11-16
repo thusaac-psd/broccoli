@@ -165,10 +165,8 @@ impl OperationHandler {
                 "broccoli-channels-{}-{}-{}",
                 std::process::id(),
                 next_channel_seq(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0),
+                // Unique across restarts that reuse the pid.
+                rand::random::<u64>(),
             ));
             tokio::fs::create_dir_all(&dir)
                 .await

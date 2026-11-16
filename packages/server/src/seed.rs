@@ -170,7 +170,6 @@ pub async fn ensure_bootstrap_admin(
                 username: Set(username.to_string()),
                 display_name: Set(username.to_string()),
                 password: Set(hash_configured_password().await?),
-                created_at: Set(chrono::Utc::now()),
                 ..Default::default()
             }
             .insert(&txn)

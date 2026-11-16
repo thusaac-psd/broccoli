@@ -12,6 +12,9 @@ object-storage = ["dep:rust-s3", "dep:tokio-util", "dep:futures"]
 testing = ["object-storage", "dep:testcontainers"]
 # A real Redis for tests (`common::test_util`).
 test-util = ["dep:testcontainers", "dep:testcontainers-modules"]
+# Clock hooks only tests call (`PlatformClock::sync`, a clock with no
+# database). Never enabled by a release build.
+test-hooks = ["sea-orm"]
 
 [dependencies]
 libc = "0.2"
@@ -27,6 +30,7 @@ sea-orm = { workspace = true, optional = true, features = ["runtime-tokio-rustls
 tokio-util = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 serde.workspace = true
+serde_ignored.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

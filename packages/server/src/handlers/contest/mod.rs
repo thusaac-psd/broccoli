@@ -107,7 +107,7 @@ pub async fn create_contest(
     )
     .await?;
 
-    let now = chrono::Utc::now();
+    let now = state.clock.now();
     let new_contest = contest::ActiveModel {
         title: Set(sanitize_db_text(payload.title.trim())),
         description: Set(sanitize_db_text(payload.description)),
@@ -156,7 +156,7 @@ pub async fn list_contests(
     let mut select = contest::Entity::find_active();
 
     if !auth_user.has_permission(perm::CONTEST_MANAGE) {
-        let now = chrono::Utc::now();
+        let now = state.clock.now();
         select = select.filter(contest_active_condition(now)).filter(
             Condition::any()
                 .add(contest::Column::IsPublic.eq(true))
@@ -408,7 +408,7 @@ pub async fn update_contest(
     if let Some(contest_type) = payload.contest_type {
         active.contest_type = Set(Some(contest_type));
     }
-    active.updated_at = Set(chrono::Utc::now());
+    active.updated_at = Set(state.clock.now());
 
     let model = active.update(&txn).await?;
     txn.commit().await?;
@@ -443,7 +443,7 @@ pub async fn delete_contest(
     let contest = find_contest_for_update(&txn, id).await?;
 
     let mut active: contest::ActiveModel = contest.into();
-    active.deleted_at = Set(Some(chrono::Utc::now()));
+    active.deleted_at = Set(Some(state.clock.now()));
     active.update(&txn).await?;
 
     delete_config_by_target(&txn, &ConfigTarget::contest(id)).await?;

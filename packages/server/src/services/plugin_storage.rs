@@ -22,7 +22,7 @@ pub async fn compare_and_set(
             key: Set(key.into()),
             data: Set(Value::String(new.into())),
             revision: Set(0),
-            created_at: Set(chrono::Utc::now()),
+            created_at: sea_orm::NotSet,
         })
         .on_conflict(
             OnConflict::columns([

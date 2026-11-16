@@ -1,15 +1,13 @@
 use config::{Config, ConfigError, Environment, File};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub use common::config::MqAppConfig;
 use common::storage::config::DEFAULT_MAX_BLOB_SIZE_BYTES;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DatabaseConfig {
     #[serde(default = "default_database_url")]
     pub url: String,
-    #[serde(default = "default_database_max_connections")]
-    pub max_connections: u32,
     /// Server-side `statement_timeout` for every worker connection, in seconds
     /// (`0` disables it). See `common::db`.
     #[serde(default = "common::db::default_statement_timeout_secs")]
@@ -35,15 +33,11 @@ impl DatabaseConfig {
 fn default_database_url() -> String {
     "postgres://localhost/broccoli".into()
 }
-fn default_database_max_connections() -> u32 {
-    3
-}
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
             url: default_database_url(),
-            max_connections: default_database_max_connections(),
             statement_timeout_secs: common::db::default_statement_timeout_secs(),
             tcp_keepalives: common::db::default_tcp_keepalives(),
         }
@@ -53,13 +47,13 @@ impl Default for DatabaseConfig {
 /// Worker-local platform tools (e.g. the `broccoli-compare` static binary).
 /// `[worker.tools] dir = "/opt/broccoli/tools"` lets a `MountSource::PlatformTool`
 /// resolve a tool by logical name to `<dir>/<name>`, mounted read-only.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct ToolsConfig {
     #[serde(default)]
     pub dir: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WorkerConfig {
     #[serde(default = "default_worker_id")]
     pub id: String,
@@ -186,7 +180,7 @@ impl Default for WorkerConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct StorageConfig {
     #[serde(flatten)]
     pub blob_store: common::storage::config::BlobStoreConfig,
@@ -218,7 +212,7 @@ impl Default for StorageConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WorkerAppConfig {
     #[serde(default)]
     pub worker: WorkerConfig,
@@ -230,12 +224,30 @@ pub struct WorkerAppConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub observability: common::config::ObservabilityConfig,
-    /// Boot-time clock skew bounds against Postgres and Redis.
-    #[serde(default)]
-    pub clock: common::clock::ClockConfig,
+    /// Settings the environment or config file supplied that this binary does
+    /// not read, warned about once logging is up.
+    #[serde(skip)]
+    pub unknown_keys: Vec<String>,
 }
 
+/// What the server reads from a config file it shares with the worker: not
+/// unknown here.
+const SERVER_SETTINGS: &[&str] = &[
+    "server",
+    "auth",
+    "bootstrap",
+    "submission",
+    "plugin",
+    "batch_max_age_secs",
+    "database.plugin_url",
+];
+
 impl WorkerAppConfig {
+    /// Connections the worker's database pool may hold.
+    pub fn database_pool_size(&self) -> u32 {
+        common::worker::database_connections(self.worker.max_concurrency)
+    }
+
     pub fn load() -> Result<Self, ConfigError> {
         let config_path =
             std::env::var("BROCCOLI_CONFIG").unwrap_or_else(|_| "config/config".to_string());
@@ -260,11 +272,10 @@ impl WorkerAppConfig {
                 "mq.operation_queue_name",
                 common::config::default_operation_queue_name(),
             )?
-            .set_default("observability.log_format", "pretty")?
+            .set_default("observability.log_format", "auto")?
             .set_default("observability.log_filter", "info")?
             .set_default("observability.otlp.service_name", "broccoli-worker")?
             .set_default("database.url", "postgres://localhost/broccoli")?
-            .set_default("database.max_connections", 3_i64)?
             .set_default("storage.backend", "database")?
             .set_default("storage.data_dir", "./data")?
             .set_default("storage.max_blob_size", DEFAULT_MAX_BLOB_SIZE_BYTES as i64)?
@@ -281,7 +292,9 @@ impl WorkerAppConfig {
             )
             .build()?;
 
-        let mut config: Self = s.try_deserialize()?;
+        let (mut config, unknown_keys): (Self, _) =
+            common::config::deserialize_noting_ignored(s, SERVER_SETTINGS)?;
+        config.unknown_keys = unknown_keys;
         config.worker.id = common::node_identity::resolve_node_id(
             common::liveness::NodeRole::Worker,
             &config.worker.id,
@@ -295,6 +308,32 @@ impl WorkerAppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_setting_the_server_reads_is_not_unknown_here() {
+        let built = Config::builder()
+            .set_override("worker.max_concurrency", 2)
+            .unwrap()
+            .set_override("storage.backend", "database")
+            .unwrap()
+            .set_override("storage.cache_dir", "/var/cache/broccoli")
+            .unwrap()
+            .set_override("server.port", 3000)
+            .unwrap()
+            .set_override("plugin.pool_max_instances", 64)
+            .unwrap()
+            .set_override("database.plugin_url", "postgres://plugin@db/broccoli")
+            .unwrap()
+            .set_override("worker.max_concurency", 4)
+            .unwrap()
+            .build()
+            .unwrap();
+        let (config, unknown): (WorkerAppConfig, _) =
+            common::config::deserialize_noting_ignored(built, SERVER_SETTINGS).unwrap();
+        assert_eq!(config.worker.max_concurrency, 2);
+        assert_eq!(config.storage.cache_dir, "/var/cache/broccoli");
+        assert_eq!(unknown, vec!["worker.max_concurency".to_string()]);
+    }
 
     #[test]
     fn worker_config_defaults_to_single_safe_slot() {

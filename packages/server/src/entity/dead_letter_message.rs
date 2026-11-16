@@ -34,8 +34,10 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub retry_history: serde_json::Value,
 
+    #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub first_failed_at: DateTimeUtc,
 
+    #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeUtc,
 
     /// When the message was last dead-lettered (a recurrence reopens it),

@@ -96,7 +96,7 @@ pub async fn create_test_case(
         is_sample: Set(payload.is_sample),
         position: Set(position),
         problem_id: Set(problem_id),
-        created_at: Set(chrono::Utc::now()),
+        created_at: Set(state.clock.now()),
         ..Default::default()
     };
 

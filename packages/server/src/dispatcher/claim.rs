@@ -22,6 +22,8 @@ use chrono::{DateTime, Utc};
 use common::SubmissionStatus;
 use opentelemetry::KeyValue;
 use sea_orm::sqlx::postgres::PgListener;
+
+use crate::services::plugin_config_cache::PluginConfigCache;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tokio::sync::{Notify, watch};
 use tracing::{error, info, warn};
@@ -74,33 +76,39 @@ const LISTEN_RETRY_MAX: Duration = Duration::from_secs(30);
 /// repeat while each fills its batch and room is left, so a backlog drains at
 /// claim speed rather than one batch per tick. Replicas all wake on the same
 /// notification; `SKIP LOCKED` in the claim splits the work between them.
-pub async fn run(
+pub async fn run(state: AppState, server_id: String, cancel: watch::Receiver<bool>) {
+    claim_loop(state, server_id, FALLBACK_TICK, cancel).await
+}
+
+/// [`run`] with another fallback tick, so a test can show that notifications
+/// alone drive claims.
+#[cfg(any(test, feature = "test-hooks"))]
+pub async fn run_with_fallback_tick(
     state: AppState,
     server_id: String,
-    interval_ms: u64,
-    batch_size: u32,
-    max_in_flight: u32,
+    fallback_tick: Duration,
+    cancel: watch::Receiver<bool>,
+) {
+    claim_loop(state, server_id, fallback_tick, cancel).await
+}
+
+async fn claim_loop(
+    state: AppState,
+    server_id: String,
+    fallback_tick: Duration,
     mut cancel: watch::Receiver<bool>,
 ) {
-    // The poll interval clamps to a 50ms floor so a misconfigured
-    // `claim_poll_interval_ms=0` doesn't busy-spin against Postgres.
-    let interval_dur = Duration::from_millis(std::cmp::max(interval_ms, 50));
-    let mut interval = tokio::time::interval(interval_dur);
+    let mut interval = tokio::time::interval(fallback_tick);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    info!(
-        server_id = %server_id,
-        interval_ms = interval_dur.as_millis() as u64,
-        batch_size,
-        max_in_flight,
-        "Claim fiber started"
-    );
+    info!(server_id = %server_id, "Claim fiber started");
 
     let wake = Arc::new(Notify::new());
     let saturated = Arc::new(AtomicBool::new(false));
     tokio::spawn(listen(
         state.config.database.url.clone(),
         server_id.clone(),
+        state.plugin_config_cache.clone(),
         wake.clone(),
         saturated.clone(),
         cancel.clone(),
@@ -129,10 +137,10 @@ pub async fn run(
             common::deadline::BACKGROUND_STEP,
             async {
                 // Sized from the live worker slots so the cap scales with
-                // the cluster; see [`effective_cap`].
-                let cap = in_flight_cap(max_in_flight, &state.worker_slots);
+                // the cluster; see [`in_flight_cap`].
+                let cap = in_flight_cap(&state.worker_slots);
                 loop {
-                    match claim_once(&state, &server_id, batch_size, cap).await {
+                    match claim_once(&state, &server_id, CLAIM_BATCH, cap).await {
                         Ok(pass) => {
                             saturated.store(pass.waits_for_room(), Ordering::Relaxed);
                             if !pass.more_may_wait() || pass.held_back {
@@ -154,13 +162,14 @@ pub async fn run(
 }
 
 /// Turns claim notifications into wakes of the claim fiber until `cancel`
-/// fires. A `Queued` notification always wakes it; a freed one only when it
+/// fires, and passes plugin config changes to `config_cache`. A `Queued` notification always wakes it; a freed one only when it
 /// is for this server and the last pass was held back for room. Notifications
 /// sent while this is not listening are lost, so every (re)connect wakes the
 /// fiber too.
 async fn listen(
     url: String,
     server_id: String,
+    config_cache: PluginConfigCache,
     wake: Arc<Notify>,
     saturated: Arc<AtomicBool>,
     mut cancel: watch::Receiver<bool>,
@@ -170,7 +179,7 @@ async fn listen(
     loop {
         let started = Instant::now();
         tokio::select! {
-            result = listen_session(&url, &server_id, &wake, &saturated) => {
+            result = listen_session(&url, &server_id, &config_cache, &wake, &saturated) => {
                 let Err(error) = result;
                 warn!(
                     server_id = %server_id,
@@ -198,18 +207,25 @@ async fn listen(
 async fn listen_session(
     url: &str,
     server_id: &str,
+    config_cache: &PluginConfigCache,
     wake: &Notify,
     saturated: &AtomicBool,
 ) -> Result<Infallible, sea_orm::sqlx::Error> {
     let mut listener = PgListener::connect(url).await?;
     listener.listen(judging::CLAIM_CHANNEL).await?;
+    // Config changes may have gone unannounced while nobody listened.
+    config_cache.clear();
     wake.notify_one();
     loop {
         let Some(notification) = listener.try_recv().await? else {
             // Reconnected after a lost connection.
+            config_cache.clear();
             wake.notify_one();
             continue;
         };
+        if config_cache.observe_notification(notification.payload()) {
+            continue;
+        }
         let wanted = match judging::ClaimWake::parse(notification.payload()) {
             Some(judging::ClaimWake::Queued) => true,
             Some(judging::ClaimWake::Freed { server_id: owner }) => {
@@ -296,8 +312,14 @@ pub async fn claim_once(
     if !slots.is_empty() {
         let claimed =
             judging::claim_judgements(&state.db, server_id, judgement_room, &contest_types).await?;
+        // Before any claimed unit is judged: config committed before its
+        // submission is then visible (see `services::plugin_config_cache`).
+        if let Some(epoch) = claimed.plugin_config_epoch {
+            state.plugin_config_cache.observe_epoch(epoch);
+        }
+        let claimed = claimed.units;
         claimed_judgements = claimed.len() as u32;
-        record_judgement_claim_transitions(state, &claimed, Utc::now()).await;
+        record_judgement_claim_transitions(state, &claimed, state.clock.now()).await;
         if !claimed.is_empty() {
             info!(
                 server_id,
@@ -325,8 +347,12 @@ pub async fn claim_once(
     if !slots.is_empty() {
         let claimed =
             judging::claim_code_runs(&state.db, server_id, code_run_room, &contest_types).await?;
+        if let Some(epoch) = claimed.plugin_config_epoch {
+            state.plugin_config_cache.observe_epoch(epoch);
+        }
+        let claimed = claimed.units;
         claimed_code_runs = claimed.len() as u32;
-        record_code_run_claim_transitions(state, &claimed, Utc::now()).await;
+        record_code_run_claim_transitions(state, &claimed, state.clock.now()).await;
         if !claimed.is_empty() {
             info!(
                 server_id,
@@ -376,26 +402,33 @@ fn reserve_slots(state: &AppState, n: u32) -> Vec<DispatcherReservation> {
 /// cap can never become the bottleneck before the workers do.
 const IN_FLIGHT_PER_WORKER_SLOT: u64 = 8;
 
-/// The in-flight cap in force on this server: the configured value is a
-/// per-server floor that scales up with this server's share of the fleet's
-/// live worker slots, so a large deployment is never throttled by a default
-/// nobody tuned, and N replicas together take no more than the fleet's
-/// workers can serve. `configured == 0` disables the cap.
-pub(crate) fn in_flight_cap(
-    configured: u32,
-    slots: &crate::dispatcher::fanout::WorkerSlots,
-) -> u32 {
-    effective_cap(configured, slots.get(), slots.servers())
+/// The in-flight cap before any worker heartbeat is seen, and the least it
+/// ever is on one server.
+const IN_FLIGHT_FLOOR: u64 = 256;
+
+/// The claim fiber's fallback tick. Claims are driven by notifications; this
+/// only covers ones lost while the listening connection was down.
+const FALLBACK_TICK: Duration = Duration::from_secs(1);
+
+/// Rows one claim statement takes per table. Passes repeat while each fills
+/// its batch and room is left, so this bounds a statement, not how fast a
+/// backlog drains.
+const CLAIM_BATCH: u32 = 32;
+
+/// How many judgements and code runs this server judges at once (claimed,
+/// not finished): its share of 8 per live worker slot across the fleet, at
+/// least [`IN_FLIGHT_FLOOR`]. N replicas together take no more than the
+/// fleet's workers can serve, and a burst past the cap stays `Queued` in the
+/// database, claimable by any server.
+pub(crate) fn in_flight_cap(slots: &crate::dispatcher::fanout::WorkerSlots) -> u32 {
+    effective_cap(slots.get(), slots.servers())
 }
 
-fn effective_cap(configured: u32, live_worker_slots: u64, live_servers: u64) -> u32 {
-    if configured == 0 {
-        return 0;
-    }
+fn effective_cap(live_worker_slots: u64, live_servers: u64) -> u32 {
     let scaled = live_worker_slots
         .saturating_mul(IN_FLIGHT_PER_WORKER_SLOT)
         .div_ceil(live_servers.max(1));
-    u32::try_from(std::cmp::max(scaled, u64::from(configured))).unwrap_or(u32::MAX)
+    u32::try_from(std::cmp::max(scaled, IN_FLIGHT_FLOOR)).unwrap_or(u32::MAX)
 }
 
 /// Rows to claim this tick: the batch size, but never past the server's
@@ -485,6 +518,7 @@ async fn record_judgement_claim_transitions(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // Fixtures are stamped with real time.
 mod tests {
     use super::*;
 
@@ -525,23 +559,20 @@ mod tests {
 
     #[test]
     fn the_cap_grows_with_live_worker_capacity_and_never_below_the_floor() {
-        // Small cluster (4 workers x 1 slot): the configured floor applies.
-        assert_eq!(effective_cap(256, 4, 1), 256);
+        // Small cluster (4 workers x 1 slot): the floor applies.
+        assert_eq!(effective_cap(4, 1), 256);
         // No heartbeat data: still the floor.
-        assert_eq!(effective_cap(256, 0, 1), 256);
-        // Large cluster (100 workers x 8 slots): scales past the floor, so an
-        // untuned default cannot throttle it.
-        assert_eq!(effective_cap(256, 800, 1), 6_400);
-        // Disabled stays disabled.
-        assert_eq!(effective_cap(0, 800, 1), 0);
+        assert_eq!(effective_cap(0, 1), 256);
+        // Large cluster (800 slots): scales past the floor.
+        assert_eq!(effective_cap(800, 1), 6_400);
     }
 
     #[test]
     fn replicas_split_the_fleet_in_flight_cap() {
         // Four servers share 800 slots: 1600 each, not 6400 each.
-        assert_eq!(effective_cap(256, 800, 4), 1_600);
+        assert_eq!(effective_cap(800, 4), 1_600);
         // The floor is per server.
-        assert_eq!(effective_cap(256, 40, 4), 256);
+        assert_eq!(effective_cap(40, 4), 256);
     }
 
     #[test]

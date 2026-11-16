@@ -1,5 +1,6 @@
 mod code_run;
 mod lifecycle;
+mod statement_counts;
 mod submission;
 mod testlib_checker;
 mod verdicts;

@@ -93,7 +93,7 @@ host_fn!(pub store_set(user_data: Arc<(String, DatabaseConnection)>; input: Stri
                     key: Set(entry.key),
                     data: Set(Value::String(entry.value)),
                     revision: Set(0),
-                    created_at: Set(chrono::Utc::now()),
+                    created_at: sea_orm::NotSet,
                 };
 
                 plugin_storage::Entity::insert(model)

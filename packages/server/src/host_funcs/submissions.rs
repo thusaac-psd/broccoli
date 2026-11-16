@@ -368,6 +368,7 @@ host_fn!(pub code_run_insert_results(user_data: Arc<(String, DatabaseConnection)
 });
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // Fixtures are stamped with real time.
 mod tests {
     use super::*;
     use crate::entity::{submission, submission_judgement, test_case_result};

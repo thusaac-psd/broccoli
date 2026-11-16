@@ -482,8 +482,8 @@ load_connection_env_if_present() {
 
 # The shared settings that must follow the infra node on a re-run: where its
 # database, MQ and object storage are and how to log in to them, and what
-# every server must agree on. Anything else in the shared files, such as
-# BROCCOLI__AUTH__SECURE_COOKIES, is a per-node choice a re-run never reverts.
+# every server must agree on. Anything else in an env file is a per-node
+# choice a re-run never reverts.
 SHARED_FOLLOW_KEYS=(
   BROCCOLI__DATABASE__URL BROCCOLI__MQ__URL
   BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET
@@ -592,68 +592,6 @@ review_env_file_interactive() {
       *) echo "enter Y to continue, e to edit, or q to abort" >&2 ;;
     esac
   done
-}
-
-check_clock_sync() {
-  local sync remote_date offset_abs offset
-  case "${BROCCOLI_SKIP_TIME_CHECK:-false}" in
-    1|true|yes) return 0 ;;
-  esac
-
-  echo "checking system clock (local UTC: $(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date))"
-
-  if command -v timedatectl >/dev/null 2>&1; then
-    sync="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
-    case "$sync" in
-      yes) echo "time sync: timedatectl reports synchronized" ;;
-      no) echo "warning: timedatectl reports NTP is not synchronized" >&2 ;;
-      *) echo "time sync: timedatectl is present but did not report NTP status" >&2 ;;
-    esac
-  elif command -v chronyc >/dev/null 2>&1; then
-    if chronyc tracking >/dev/null 2>&1; then
-      echo "time sync: chrony is responding"
-    else
-      echo "warning: chrony is installed but not reporting healthy tracking" >&2
-    fi
-  elif command -v systemsetup >/dev/null 2>&1; then
-    sync="$(systemsetup -getusingnetworktime 2>/dev/null || true)"
-    case "$sync" in
-      *On*) echo "time sync: macOS network time is enabled" ;;
-      *Off*) echo "warning: macOS network time is disabled" >&2 ;;
-      *) echo "time sync: macOS network time status was unavailable" >&2 ;;
-    esac
-  else
-    echo "time sync: no timedatectl/chrony check available; continuing" >&2
-  fi
-  echo "time sync: every server and worker must agree within about a second; offline, serve time from the infra node (docs/operator-runbook.md, Time Sync on an Offline LAN)"
-
-  if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
-    echo "warning: WSL detected. Make sure the Windows host clock is synchronized before judging." >&2
-  fi
-
-  if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
-    remote_date="$(curl -fsSI --http1.1 --max-time 3 https://www.cloudflare.com 2>/dev/null | awk 'tolower($1)=="date:" {sub(/^Date:[[:space:]]*/,""); print; exit}' || true)"
-    if [ -n "$remote_date" ]; then
-      offset="$(REMOTE_HTTP_DATE="$remote_date" python3 - <<'PY' 2>/dev/null || true
-import datetime, email.utils, os, time
-dt = email.utils.parsedate_to_datetime(os.environ["REMOTE_HTTP_DATE"])
-if dt.tzinfo is None:
-    dt = dt.replace(tzinfo=datetime.timezone.utc)
-print(int(time.time() - dt.timestamp()))
-PY
-)"
-      if [ -n "$offset" ]; then
-        offset_abs="${offset#-}"
-        if [ "$offset_abs" -gt 5 ]; then
-          echo "warning: local clock differs from HTTPS Date header by about ${offset}s" >&2
-        else
-          echo "time sync: HTTPS Date offset is about ${offset}s"
-        fi
-      fi
-    else
-      echo "time sync: HTTPS Date check unavailable" >&2
-    fi
-  fi
 }
 
 # health_url BIND: the /healthz URL of a port published on BIND, reached from
@@ -790,7 +728,6 @@ write_connection_env_file() {
     env_line BROCCOLI__MQ__URL "$BROCCOLI__MQ__URL"
     env_line BROCCOLI__STORAGE__BACKEND "$(storage_backend)"
     env_line BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET "${BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET:-broccoli-blobs}"
-    env_line BROCCOLI__STORAGE__OBJECT_STORAGE__REGION "${BROCCOLI__STORAGE__OBJECT_STORAGE__REGION:-us-east-1}"
     env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "${BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT:-}"
     env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY:-}"
     env_line BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY:-}"
@@ -810,7 +747,6 @@ write_server_secrets_env_file() {
     echo "# Copy this file only into server bundle directories before running"
     echo "# ./install.sh server."
     env_line BROCCOLI__AUTH__JWT_SECRET "${BROCCOLI__AUTH__JWT_SECRET:-}"
-    env_line BROCCOLI__AUTH__SECURE_COOKIES "${BROCCOLI__AUTH__SECURE_COOKIES:-false}"
     env_line BROCCOLI_BOOTSTRAP_ADMIN_USERNAME "${BROCCOLI_BOOTSTRAP_ADMIN_USERNAME:-${BROCCOLI_ADMIN_USERNAME:-admin}}"
     env_line BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD "${BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD:-}"
   } > "$file.tmp"
@@ -872,6 +808,7 @@ write_env_file() {
       {
         env_line BROCCOLI_ROLE "$ROLE"
         env_line COMPOSE_PROJECT_NAME "broccoli-$ROLE"
+        env_line BROCCOLI_ENV_FILE "$ENV_FILE"
         env_line BROCCOLI_VERSION "$version"
         env_line BROCCOLI_SERVER_IMAGE "$server_image"
         env_line BROCCOLI_WORKER_IMAGE "$worker_image"
@@ -893,26 +830,18 @@ write_env_file() {
         env_line BROCCOLI__MQ__URL "$(redis_url "$redis_password" "$infra_host" "$redis_port")"
         env_line BROCCOLI__STORAGE__BACKEND "$(storage_backend)"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET "$s3_bucket"
-        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__REGION "${BROCCOLI__STORAGE__OBJECT_STORAGE__REGION:-us-east-1}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "$s3_endpoint"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "$s3_access"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "$s3_secret"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE "${BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE:-true}"
         echo
         env_line BROCCOLI__AUTH__JWT_SECRET "$jwt_secret"
-        env_line BROCCOLI__AUTH__SECURE_COOKIES "${BROCCOLI__AUTH__SECURE_COOKIES:-false}"
         env_line BROCCOLI_BOOTSTRAP_ADMIN_USERNAME "$admin_user"
         env_line BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD "$admin_pass"
         env_line BROCCOLI_HTTP_BIND "${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}"
         env_line BROCCOLI__SERVER__ID "${BROCCOLI__SERVER__ID:-server-1}"
         env_line BROCCOLI__WORKER__ID "${BROCCOLI__WORKER__ID:-worker-1}"
         env_line BROCCOLI__SERVER__TRUSTED_PROXIES "${BROCCOLI__SERVER__TRUSTED_PROXIES:-[]}"
-        env_line BROCCOLI__SERVER__RATE_LIMIT_AUTH "${BROCCOLI__SERVER__RATE_LIMIT_AUTH:-true}"
-        env_line BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE "${BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE:-10000}"
-        env_line BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS "${BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS:-40}"
-        env_line BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS "${BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS:-5}"
-        env_line BROCCOLI__OBSERVABILITY__LOG_FORMAT "${BROCCOLI__OBSERVABILITY__LOG_FORMAT:-json}"
-        env_line BROCCOLI__OBSERVABILITY__LOG_FILTER "${BROCCOLI__OBSERVABILITY__LOG_FILTER:-info}"
       } > "$ENV_FILE.tmp"
       mv "$ENV_FILE.tmp" "$ENV_FILE"
       ;;
@@ -937,29 +866,23 @@ write_env_file() {
       {
         env_line BROCCOLI_ROLE server
         env_line COMPOSE_PROJECT_NAME broccoli-server
+        env_line BROCCOLI_ENV_FILE "$ENV_FILE"
         env_line BROCCOLI_VERSION "$version"
         env_line BROCCOLI_SERVER_IMAGE "$server_image"
         env_line BROCCOLI_HTTP_BIND "${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}"
         env_line BROCCOLI__SERVER__ID "${BROCCOLI__SERVER__ID:-$(node_id server)}"
         env_line BROCCOLI__SERVER__TRUSTED_PROXIES "${BROCCOLI__SERVER__TRUSTED_PROXIES:-[]}"
-        env_line BROCCOLI__SERVER__RATE_LIMIT_AUTH "${BROCCOLI__SERVER__RATE_LIMIT_AUTH:-true}"
-        env_line BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS "${BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS:-40}"
         env_line BROCCOLI__DATABASE__URL "$BROCCOLI__DATABASE__URL"
         env_line BROCCOLI__MQ__URL "$BROCCOLI__MQ__URL"
         env_line BROCCOLI__AUTH__JWT_SECRET "$BROCCOLI__AUTH__JWT_SECRET"
-        env_line BROCCOLI__AUTH__SECURE_COOKIES "${BROCCOLI__AUTH__SECURE_COOKIES:-false}"
         env_line BROCCOLI_BOOTSTRAP_ADMIN_USERNAME "${BROCCOLI_BOOTSTRAP_ADMIN_USERNAME:-${BROCCOLI_ADMIN_USERNAME:-admin}}"
         env_line BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD "$BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD"
-        env_line BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE "${BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE:-10000}"
         env_line BROCCOLI__STORAGE__BACKEND "$(storage_backend)"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET "${BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET:-broccoli-blobs}"
-        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__REGION "${BROCCOLI__STORAGE__OBJECT_STORAGE__REGION:-us-east-1}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "${BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT:-}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY:-}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY:-}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE "${BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE:-true}"
-        env_line BROCCOLI__OBSERVABILITY__LOG_FORMAT "${BROCCOLI__OBSERVABILITY__LOG_FORMAT:-json}"
-        env_line BROCCOLI__OBSERVABILITY__LOG_FILTER "${BROCCOLI__OBSERVABILITY__LOG_FILTER:-info}"
       } > "$ENV_FILE.tmp"
       mv "$ENV_FILE.tmp" "$ENV_FILE"
       ;;
@@ -979,21 +902,18 @@ write_env_file() {
       {
         env_line BROCCOLI_ROLE worker
         env_line COMPOSE_PROJECT_NAME broccoli-worker
+        env_line BROCCOLI_ENV_FILE "$ENV_FILE"
         env_line BROCCOLI_VERSION "$version"
         env_line BROCCOLI_WORKER_IMAGE "$worker_image"
         env_line BROCCOLI__WORKER__ID "${BROCCOLI__WORKER__ID:-$(node_id worker)}"
-        env_line BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS "${BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS:-5}"
         env_line BROCCOLI__DATABASE__URL "$BROCCOLI__DATABASE__URL"
         env_line BROCCOLI__MQ__URL "$BROCCOLI__MQ__URL"
         env_line BROCCOLI__STORAGE__BACKEND "$(storage_backend)"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET "${BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET:-broccoli-blobs}"
-        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__REGION "${BROCCOLI__STORAGE__OBJECT_STORAGE__REGION:-us-east-1}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "${BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT:-}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY:-}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY:-}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE "${BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE:-true}"
-        env_line BROCCOLI__OBSERVABILITY__LOG_FORMAT "${BROCCOLI__OBSERVABILITY__LOG_FORMAT:-json}"
-        env_line BROCCOLI__OBSERVABILITY__LOG_FILTER "${BROCCOLI__OBSERVABILITY__LOG_FILTER:-info}"
       } > "$ENV_FILE.tmp"
       mv "$ENV_FILE.tmp" "$ENV_FILE"
       ;;
@@ -1004,6 +924,7 @@ write_env_file() {
       {
         env_line BROCCOLI_ROLE gateway
         env_line COMPOSE_PROJECT_NAME broccoli-gateway
+        env_line BROCCOLI_ENV_FILE "$ENV_FILE"
         env_line CADDY_IMAGE "$caddy_image"
         env_line BROCCOLI_GATEWAY_HTTP_BIND "${BROCCOLI_GATEWAY_HTTP_BIND:-0.0.0.0:80}"
         env_line BROCCOLI_UPSTREAMS "$BROCCOLI_UPSTREAMS"
@@ -1160,7 +1081,6 @@ case "$ROLE" in
   server|worker|single-host) enable_requested_plugins "$ROOT" ;;
 esac
 
-check_clock_sync
 
 if [ "$ROLE" = "gateway" ]; then
   print_gateway_trust_hint

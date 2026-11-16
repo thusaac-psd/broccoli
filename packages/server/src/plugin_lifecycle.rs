@@ -738,7 +738,6 @@ async fn register_rows(state: &AppState, ids: &[String]) -> Result<(), DbErr> {
         id: Set(id.clone()),
         is_enabled: Set(true),
         generation: Set(0),
-        updated_at: Set(chrono::Utc::now()),
         ..Default::default()
     }))
     .on_conflict_do_nothing_on([plugin_entity::Column::Id])

@@ -1,3 +1,7 @@
+// Tests are clients: they read the wall clock the way a contestant's machine
+// does. The server itself keeps time by the platform clock.
+#![allow(clippy::disallowed_methods)]
+
 mod additional_file;
 mod attachment;
 mod auth;
@@ -23,8 +27,10 @@ mod hook_enablement;
 mod idempotency;
 mod meta;
 mod permission_fixture;
+mod platform_clock;
 mod plugin;
 mod plugin_config;
+mod plugin_config_cache;
 mod plugin_fleet;
 mod plugin_flood;
 mod plugin_timer;

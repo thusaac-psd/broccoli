@@ -72,7 +72,10 @@ async fn exec(db: &DatabaseConnection, sql: &str) {
 }
 
 async fn claim_one(db: &DatabaseConnection, server: &str) -> ClaimedJudgement {
-    let mut claimed = claim_judgements(db, server, 10, NO_TYPES).await.unwrap();
+    let mut claimed = claim_judgements(db, server, 10, NO_TYPES)
+        .await
+        .unwrap()
+        .units;
     assert_eq!(claimed.len(), 1, "exactly one judgement is claimable");
     claimed.remove(0)
 }
@@ -163,6 +166,7 @@ async fn claiming_puts_the_judgement_in_flight_and_the_submission_follows() {
         claim_judgements(&db, "srv-b", 10, NO_TYPES)
             .await
             .unwrap()
+            .units
             .is_empty(),
         "a claimed judgement is not claimed again"
     );
@@ -580,7 +584,10 @@ async fn new_code_run(db: &DatabaseConnection) -> code_run::Model {
 async fn a_code_run_follows_the_same_claim_and_requeue_rules() {
     let (_pg, db) = crate::test_support::postgres().await;
     let run = new_code_run(&db).await;
-    let claimed = claim_code_runs(&db, "dead", 10, NO_TYPES).await.unwrap();
+    let claimed = claim_code_runs(&db, "dead", 10, NO_TYPES)
+        .await
+        .unwrap()
+        .units;
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].status, SubmissionStatus::Pending);
     assert_eq!(claimed[0].owner_server_id.as_deref(), Some("dead"));
@@ -709,6 +716,7 @@ async fn a_rejudge_serializes_with_another_rejudge_and_a_claim() {
         claim_judgements(&db, "srv", 10, NO_TYPES)
             .await
             .unwrap()
+            .units
             .is_empty()
     );
     // A second rejudge blocks on the row lock until the first commits.
@@ -810,6 +818,7 @@ async fn the_in_flight_cap_counts_judgements_and_code_runs() {
         claim_code_runs(&db, "srv", 10, NO_TYPES)
             .await
             .unwrap()
+            .units
             .len(),
         1
     );

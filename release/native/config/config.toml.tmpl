@@ -3,20 +3,15 @@ id = "@SERVER_ID@"
 host = "@HTTP_HOST@"
 port = @HTTP_PORT@
 frontend_dist = "@DATA_DIR@/packages/web/build/client"
-dispatcher_lease_steal_enabled = true
-max_queued_submissions = 200000
-dispatcher_admission_queue_max = 1000
 
 [server.cors]
 allow_origins = ["http://@INFRA_HOST@", "http://@INFRA_HOST@:3000"]
-max_age = 3600
 
 [worker]
 id = "@WORKER_ID@"
 sandbox_backend = "isolate"
 isolate_bin = "isolate"
 enable_cgroups = true
-max_concurrency = @MAX_CONCURRENCY@
 
 [worker.tools]
 dir = "@DATA_DIR@/tools"
@@ -30,34 +25,22 @@ url = "@MQ_URL@"
 
 [auth]
 jwt_secret = "@JWT_SECRET@"
-secure_cookies = @SECURE_COOKIES@
 
 [bootstrap]
 admin_username = "admin"
 admin_password = "@ADMIN_PASSWORD@"
 
-[submission]
-max_size = 2097152
-rate_limit_per_minute = 100000
-
 [storage]
 backend = "object_storage"
 data_dir = "@DATA_DIR@-data"
-max_blob_size = 2147483648
 
 [storage.object_storage]
 bucket = "broccoli-blobs"
-region = "us-east-1"
 endpoint = "@S3_ENDPOINT@"
 access_key = "@S3_ACCESS_KEY@"
 secret_key = "@S3_SECRET_KEY@"
 path_style = true
-temp_dir = ""
 
 [plugin]
 plugins_dir = "@DATA_DIR@/plugins"
 enable_wasi = true
-
-[observability]
-log_format = "pretty"
-log_filter = "info,server=info"
