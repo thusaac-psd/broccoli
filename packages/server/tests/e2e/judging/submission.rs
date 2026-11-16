@@ -567,3 +567,50 @@ async fn a_judgement_whose_last_capable_worker_loses_a_tool_mid_run_shows_only_i
         assert!(seen.contains(&"Queued"), "{table}: {seen:?}");
     }
 }
+
+/// A problem with nothing to judge refuses every submission at once, inside a
+/// contest and outside: its contest plugin ends it as a system error that
+/// stands, under the plugin's own code, so it is judged once and never reads
+/// as Accepted, whatever the source.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_problem_without_test_cases_refuses_its_submissions_at_once() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("no_tests_admin", "pass1234", "admin")
+        .await;
+    let broken = "int main( {";
+
+    let practice = app.create_public_problem(&admin, "No tests").await;
+    let mut cases = vec![(
+        app.create_submission(practice, &admin, "cpp", broken).await,
+        "icpc.NO_TEST_CASES",
+    )];
+    for contest_type in ["icpc", "ioi"] {
+        let problem = app.create_problem(&admin, "No tests").await;
+        let contest = app
+            .create_typed_contest(&admin, "No tests", contest_type, true, true)
+            .await;
+        app.add_problem_to_contest(contest, problem, &admin).await;
+        let id = app
+            .create_contest_submission(contest, problem, &admin, "cpp", broken)
+            .await;
+        cases.push((
+            id,
+            if contest_type == "icpc" {
+                "icpc.NO_TEST_CASES"
+            } else {
+                "ioi.NO_TEST_CASES"
+            },
+        ));
+    }
+
+    for (id, code) in cases {
+        let res = app.wait_for_submission_terminal(id, &admin, 60).await;
+        assert_eq!(res.body["status"], "Judged", "{}", res.text);
+        assert_eq!(res.body["result"]["verdict"], "SystemError", "{}", res.text);
+        let row = stored(&app, id).await;
+        assert_eq!(row.error_code.as_deref(), Some(code));
+        assert_eq!(row.system_error_retries, 0, "{code}: never re-judged");
+        assert_eq!(row.judge_epoch, 0, "{code}: judged once");
+    }
+}
