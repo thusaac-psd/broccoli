@@ -21,6 +21,7 @@ use crate::fairness::{WorkerCapacity, effective_worker_capacity};
 use crate::heartbeat::{HeartbeatConfig, HeartbeatHandle, InFlightCounter};
 use crate::metrics::spawn_metrics_server;
 use crate::models::operation::OperationTaskExecutor;
+use crate::models::operation::executor::PlatformTools;
 use crate::models::worker::Worker;
 use crate::system_info::{SystemInfo, is_wsl};
 
@@ -39,6 +40,7 @@ pub struct WorkerRuntime {
     _warm_handle: tokio::task::JoinHandle<()>,
     /// The operation executor, for removing its last sandboxes at shutdown.
     operation: Arc<OperationTaskExecutor>,
+    tools: PlatformTools,
 }
 
 impl WorkerRuntime {
@@ -154,15 +156,14 @@ impl WorkerRuntime {
             .context("Failed to read the database clock")?;
         let in_flight = InFlightCounter::new();
         let started_at = clock.now();
+        let tools = PlatformTools::from_config(&config);
         let heartbeat_config = HeartbeatConfig {
             worker_id: config.worker.id.clone(),
             sandbox_backend: config.worker.sandbox_backend.clone(),
             max_concurrency: Some(capacity.max_concurrency as u32),
             fairness_mode: capacity.fairness_mode.as_str().into(),
             system_info,
-            missing_platform_tools: crate::models::operation::executor::missing_platform_tools(
-                crate::models::operation::executor::tools_dir_from_config(&config).as_deref(),
-            ),
+            tools: tools.clone(),
             clock: clock.clone(),
         };
         let claim = NodeClaim::claim_at_boot(
@@ -228,6 +229,7 @@ impl WorkerRuntime {
             _cleanup_handle: cleanup_handle,
             _warm_handle: warm_handle,
             operation,
+            tools,
         })
     }
 
@@ -249,6 +251,7 @@ impl WorkerRuntime {
             self.mq.clone(),
             tasks,
             self.capacity.max_concurrency,
+            self.tools.clone(),
             self.in_flight.clone(),
             shutdown.clone(),
             drain_timeout,
@@ -309,7 +312,12 @@ impl Drop for HeldGuard {
 }
 
 /// The worker's consume loop, extracted from [`WorkerRuntime::run`] so it can
-/// be driven directly in tests.
+/// be driven directly in tests and by the server's end-to-end harness.
+///
+/// While `tools` lacks a platform tool it reads nothing, not even its own
+/// pinned tasks: a worker that cannot judge leaves the work queued for one
+/// that can. It looks again every [`mq::REFRESH_INTERVAL`] and takes work
+/// once the tools are in place.
 ///
 /// It starts by taking back the entries it held before a restart, and does
 /// so again after a failed read, whose reply may have delivered entries that
@@ -322,10 +330,12 @@ impl Drop for HeldGuard {
 ///
 /// Once `shutdown` is set it reads nothing more, gives buffered tasks back to
 /// their stream, and waits up to `drain_timeout` for running ones.
-async fn run_consume_loop<F, Fut>(
+#[allow(clippy::too_many_arguments)]
+pub async fn run_consume_loop<F, Fut>(
     mq: Mq,
     tasks: GroupConsumer<Task>,
     max_concurrency: usize,
+    tools: PlatformTools,
     in_flight: InFlightCounter,
     shutdown: Arc<AtomicBool>,
     drain_timeout: Duration,
@@ -344,6 +354,7 @@ async fn run_consume_loop<F, Fut>(
     let mut buffer: VecDeque<Delivery<Task>> = VecDeque::new();
     let mut next_reclaim = Instant::now();
     let mut adopt = true;
+    let mut refusing = false;
 
     while !shutdown.load(Ordering::Relaxed) {
         let permit = tokio::select! {
@@ -356,6 +367,26 @@ async fn run_consume_loop<F, Fut>(
         };
 
         if buffer.is_empty() {
+            let missing = tools.missing();
+            if !missing.is_empty() {
+                if !refusing {
+                    error!(
+                        missing_platform_tools = ?missing,
+                        "This worker lacks platform tools and takes no judging work until \
+                         BROCCOLI__WORKER__TOOLS__DIR names a directory holding them"
+                    );
+                    refusing = true;
+                }
+                drop(permit);
+                tokio::select! {
+                    _ = tokio::time::sleep(mq::REFRESH_INTERVAL) => {}
+                    _ = wait_for_shutdown(&shutdown) => break,
+                }
+                continue;
+            }
+            if std::mem::take(&mut refusing) {
+                info!("The platform tools are in place; taking judging work");
+            }
             // Room for the permit just taken plus every other free one.
             let room = permits.available_permits() + 1;
             let fetched = if adopt {
@@ -538,6 +569,19 @@ mod tests {
         }
     }
 
+    /// Platform tools that are all in place.
+    fn equipped() -> PlatformTools {
+        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let dir = DIR.get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            for tool in broccoli_types::types::PLATFORM_TOOLS {
+                std::fs::write(dir.path().join(tool), "").unwrap();
+            }
+            dir
+        });
+        PlatformTools::new(Some(dir.path().into()))
+    }
+
     async fn redis_mq() -> (Mq, testcontainers::ContainerAsync<Redis>) {
         let container = common::test_util::redis_image()
             .start()
@@ -568,6 +612,7 @@ mod tests {
             mq.clone(),
             mq.task_consumer("w"),
             4,
+            equipped(),
             InFlightCounter::new(),
             Arc::new(AtomicBool::new(true)),
             Duration::from_secs(1),
@@ -607,6 +652,7 @@ mod tests {
                     mq.clone(),
                     mq.task_consumer("w"),
                     2,
+                    equipped(),
                     InFlightCounter::new(),
                     shutdown,
                     Duration::from_secs(5),
@@ -660,6 +706,7 @@ mod tests {
                     mq.clone(),
                     mq.task_consumer("w"),
                     1,
+                    equipped(),
                     InFlightCounter::new(),
                     shutdown,
                     Duration::from_secs(5),
@@ -683,6 +730,70 @@ mod tests {
         assert_eq!((depths[0].unread, depths[0].pending), (0, 0));
     }
 
+    /// A worker without its platform tools reads no task, so it can neither
+    /// fail nor hold one; once the tools are in place it takes them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_worker_without_platform_tools_takes_work_only_once_they_are_in_place() {
+        let (mq, _container) = redis_mq().await;
+        for i in 0..3 {
+            mq.publish_task(&task(&format!("t{i}")), None)
+                .await
+                .unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let tools = PlatformTools::new(Some(dir.path().into()));
+        let ran_without_tools = Arc::new(AtomicUsize::new(0));
+        let ran = Arc::new(AtomicUsize::new(0));
+        let all_done = Arc::new(tokio::sync::Notify::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let join = tokio::spawn({
+            let (tools, shutdown, mq) = (tools.clone(), shutdown.clone(), mq.clone());
+            let (ran, ran_without_tools, all_done) =
+                (ran.clone(), ran_without_tools.clone(), all_done.clone());
+            async move {
+                run_consume_loop(
+                    mq.clone(),
+                    mq.task_consumer("w"),
+                    1,
+                    tools.clone(),
+                    InFlightCounter::new(),
+                    shutdown,
+                    Duration::from_secs(5),
+                    move |_d| {
+                        let (tools, ran, ran_without_tools, all_done) = (
+                            tools.clone(),
+                            ran.clone(),
+                            ran_without_tools.clone(),
+                            all_done.clone(),
+                        );
+                        async move {
+                            if !tools.missing().is_empty() {
+                                ran_without_tools.fetch_add(1, Ordering::SeqCst);
+                            }
+                            if ran.fetch_add(1, Ordering::SeqCst) + 1 == 3 {
+                                all_done.notify_one();
+                            }
+                            Settlement::Ack
+                        }
+                    },
+                )
+                .await;
+            }
+        });
+        let depths = mq.depths(&[mq.topology().shared()]).await.unwrap();
+        assert_eq!((depths[0].unread, depths[0].pending), (3, 0));
+
+        for tool in broccoli_types::types::PLATFORM_TOOLS {
+            std::fs::write(dir.path().join(tool), "").unwrap();
+        }
+        all_done.notified().await;
+        assert_eq!(ran_without_tools.load(Ordering::SeqCst), 0);
+        shutdown.store(true, Ordering::Relaxed);
+        join.await.unwrap();
+        let depths = mq.depths(&[mq.topology().shared()]).await.unwrap();
+        assert_eq!((depths[0].unread, depths[0].pending), (0, 0));
+    }
+
     /// An abandoned task stays pending under this worker, to be reclaimed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_abandoned_task_stays_pending() {
@@ -699,6 +810,7 @@ mod tests {
                     mq.clone(),
                     mq.task_consumer("w"),
                     1,
+                    equipped(),
                     InFlightCounter::new(),
                     shutdown,
                     Duration::from_secs(5),
@@ -740,6 +852,7 @@ mod tests {
                     mq.clone(),
                     mq.task_consumer("w"),
                     1,
+                    equipped(),
                     in_flight,
                     shutdown,
                     Duration::from_secs(5),

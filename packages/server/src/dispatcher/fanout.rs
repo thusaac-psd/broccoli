@@ -1,8 +1,10 @@
 //! Live worker capacity, and the judging fan-out bounded by it.
 //!
 //! [`WorkerSlots`] is the one record of the fleet's live capacity: the task
-//! slots of the live workers (the sum of `max_concurrency` over their
-//! heartbeats, see [`common::liveness`]) and how many servers share them,
+//! slots of the live workers that take work (the sum of `max_concurrency`
+//! over their heartbeats, see [`common::liveness`]), how many live workers
+//! take none ([`common::worker::HeartbeatPayload::accepts_work`]) and how
+//! many servers share them,
 //! refreshed by one task every [`SLOTS_REFRESH`] so no request or judging
 //! path ever reads Redis for it. Each server takes its share of the fleet
 //! figures ([`WorkerSlots::share`]): the claim fiber's in-flight cap and
@@ -17,6 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use common::worker::HeartbeatPayload;
 use opentelemetry::KeyValue;
 use std::sync::Mutex;
 use tokio::sync::Notify;
@@ -31,13 +34,15 @@ pub const TEST_CASES_PER_WORKER_SLOT: u64 = 2;
 #[derive(Default)]
 struct SlotsInner {
     slots: AtomicU64,
+    refusing: AtomicU64,
     servers: AtomicU64,
     changed: Notify,
 }
 
-/// Task slots of the live workers and the number of live servers, as last
-/// read from their heartbeats. No slots and one server until the first
-/// read, and whenever Redis is unreachable.
+/// Task slots of the live workers that take work, the number of live workers
+/// that take none, and the number of live servers, as last read from their
+/// heartbeats. No workers and one server until the first read, and whenever
+/// Redis is unreachable.
 #[derive(Clone, Default)]
 pub struct WorkerSlots(Arc<SlotsInner>);
 
@@ -51,12 +56,44 @@ impl WorkerSlots {
         self.0.servers.load(Ordering::Relaxed).max(1)
     }
 
-    pub fn set(&self, slots: u64, servers: u64) {
+    /// Live workers are known and none of them takes work: whatever is
+    /// claimed now would only wait at the queue.
+    pub fn none_accepting(&self) -> bool {
+        self.get() == 0 && self.0.refusing.load(Ordering::Relaxed) > 0
+    }
+
+    /// Record the fleet from the live workers' heartbeats and the number of
+    /// live servers.
+    pub fn observe<'a>(
+        &self,
+        workers: impl IntoIterator<Item = &'a HeartbeatPayload>,
+        servers: u64,
+    ) {
+        let (mut slots, mut refusing) = (0, 0);
+        for worker in workers {
+            if worker.accepts_work() {
+                slots += u64::from(worker.max_concurrency.unwrap_or(1));
+            } else {
+                refusing += 1;
+            }
+        }
+        self.0.refusing.store(refusing, Ordering::Relaxed);
+        self.set(slots, servers);
+    }
+
+    fn set(&self, slots: u64, servers: u64) {
         let slots_changed = self.0.slots.swap(slots, Ordering::Relaxed) != slots;
         let servers_changed = self.0.servers.swap(servers, Ordering::Relaxed) != servers;
         if slots_changed || servers_changed {
             self.0.changed.notify_waiters();
         }
+    }
+
+    /// Read the live workers' heartbeats from `client` once.
+    pub async fn refresh(&self, client: &redis::Client, namespace: &str) {
+        let (workers, servers) =
+            crate::handlers::system::read_worker_payloads_and_server_count(client, namespace).await;
+        self.observe(workers.iter().map(|(_, p)| p), servers as u64);
     }
 
     /// This server's share of a fleet-wide figure: an even split across the
@@ -78,16 +115,7 @@ impl WorkerSlots {
             let mut interval = tokio::time::interval(SLOTS_REFRESH);
             loop {
                 interval.tick().await;
-                let (workers, servers) =
-                    crate::handlers::system::read_worker_payloads_and_server_count(
-                        &client, &namespace,
-                    )
-                    .await;
-                let total = workers
-                    .iter()
-                    .map(|(_, p)| u64::from(p.max_concurrency.unwrap_or(1)))
-                    .sum();
-                slots.set(total, servers as u64);
+                slots.refresh(&client, &namespace).await;
             }
         });
     }
@@ -241,6 +269,46 @@ mod tests {
             tokio::task::yield_now().await;
         }
         task
+    }
+
+    fn heartbeat(max_concurrency: u32, missing_platform_tools: &[&str]) -> HeartbeatPayload {
+        HeartbeatPayload {
+            id: "w".into(),
+            started_at: chrono::DateTime::UNIX_EPOCH,
+            last_seen: chrono::DateTime::UNIX_EPOCH,
+            in_flight: 0,
+            max_concurrency: Some(max_concurrency),
+            fairness_mode: "unknown".into(),
+            sandbox_backend: "mock".into(),
+            version: "test".into(),
+            hostname: None,
+            ip_addresses: Vec::new(),
+            os: None,
+            arch: None,
+            cpu_count: None,
+            pid: None,
+            missing_platform_tools: missing_platform_tools
+                .iter()
+                .map(|t| t.to_string())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn only_workers_that_take_work_are_capacity() {
+        let slots = WorkerSlots::default();
+        assert!(!slots.none_accepting(), "no worker known yet");
+        slots.observe(&[heartbeat(4, &["broccoli-compare"])], 1);
+        assert_eq!(slots.get(), 0);
+        assert!(slots.none_accepting());
+        slots.observe(&[heartbeat(4, &["broccoli-compare"]), heartbeat(2, &[])], 1);
+        assert_eq!(slots.get(), 2);
+        assert!(!slots.none_accepting());
+        slots.observe(&[], 1);
+        assert!(
+            !slots.none_accepting(),
+            "no live worker is not a refusing one"
+        );
     }
 
     #[test]

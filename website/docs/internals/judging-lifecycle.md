@@ -182,11 +182,17 @@ refused (`QUEUE_UNREACHABLE`), an operation the queue lost
 (`OPERATION_LOST`), a worker without a platform tool
 (`PLATFORM_TOOL_MISSING`). A system error the dispatch then ends with
 carries that code, whatever the plugin reported, and the reaper treats it by
-its class (`SystemErrorClass`): a hand-back (the queue codes, and
-`PLUGIN_DISABLED`) is requeued
-spending nothing, a deterministic fault (a missing platform tool) stands after
-one attempt and is dead-lettered, and any other code is retried within the
-budget.
+its class (`SystemErrorClass`): a hand-back (the three fault codes, and
+`PLUGIN_DISABLED`) is requeued spending nothing, and any other code is retried
+within the budget.
+
+A missing platform tool is the worker's fault, never the submission's. A worker
+that lacks one reads no task at all: it stays live, and its heartbeat lists the
+missing tools, so the System page shows it as not taking work. A task reaches
+it only if a tool goes missing while the worker holds it; the attempt is handed
+back for a worker that has the tool. While live workers exist and none of them
+takes work, the claim fiber claims nothing, so submissions wait `Queued`
+instead of failing.
 
 ## Dead letters
 

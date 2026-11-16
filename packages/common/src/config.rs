@@ -271,17 +271,61 @@ fn env_name(key: &str) -> String {
     format!("{ENV_PREFIX}__{}", key.replace('.', "__").to_uppercase())
 }
 
+/// Where a setting came from: the environment overrides the config file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingSource {
+    /// This environment variable.
+    Env(String),
+    /// The config file (see [`config_file`]), which is the only other source.
+    File,
+}
+
+/// The source of setting `key` among the environment variables `env_names`:
+/// the variable that names it (setting `a.b` is `BROCCOLI__A__B`, in any
+/// case), else the config file.
+pub fn setting_source(key: &str, env_names: impl IntoIterator<Item = String>) -> SettingSource {
+    let wanted = env_name(key);
+    env_names
+        .into_iter()
+        .find(|name| name.eq_ignore_ascii_case(&wanted))
+        .map_or(SettingSource::File, SettingSource::Env)
+}
+
+/// The config file this process reads, as [`config_file`] resolves it, for
+/// messages: the file [`CONFIG_FILE_ENV`] names, else [`DEFAULT_CONFIG_FILE`],
+/// with the extension of the file found there.
+fn config_file_shown() -> String {
+    let stem = std::env::var(CONFIG_FILE_ENV)
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_CONFIG_FILE.to_string());
+    ["toml", "json", "yaml", "yml", "ini", "ron", "json5"]
+        .iter()
+        .map(|ext| format!("{stem}.{ext}"))
+        .find(|path| std::path::Path::new(path).is_file())
+        .unwrap_or(stem)
+}
+
 /// Logs one warning per setting the binary does not read (see
-/// [`deserialize_noting_ignored`]): a removed key, or a typo. Setting `a.b` comes from
-/// `a.b` in the config file or `BROCCOLI__A__B` in the environment.
+/// [`deserialize_noting_ignored`]): a removed key, or a typo, named with the
+/// source it came from (see [`setting_source`]).
 pub fn warn_unknown_keys(keys: &[String]) {
+    let env_names: Vec<String> = std::env::vars_os()
+        .filter_map(|(name, _)| name.into_string().ok())
+        .collect();
     for key in keys {
-        let env = env_name(key);
-        tracing::warn!(
-            key,
-            env,
-            "Ignoring an unknown configuration key; it may have been removed or misspelled"
-        );
+        match setting_source(key, env_names.iter().cloned()) {
+            SettingSource::Env(env) => tracing::warn!(
+                key,
+                env,
+                "Ignoring an unknown configuration key; it may have been removed or misspelled"
+            ),
+            SettingSource::File => tracing::warn!(
+                key,
+                config_file = %config_file_shown(),
+                "Ignoring an unknown configuration key; it may have been removed or misspelled"
+            ),
+        }
     }
 }
 
@@ -339,6 +383,20 @@ mod unknown_key_tests {
         assert_eq!(
             misnamed_env_settings(names),
             ["BROCCOLI_WORKER__TOOLS__DIR"]
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_names_the_source_it_came_from() {
+        let env = || ["PATH", "broccoli__server__port"].map(String::from);
+        assert_eq!(
+            setting_source("server.prot", env()),
+            SettingSource::File,
+            "a key no variable names came from the config file"
+        );
+        assert_eq!(
+            setting_source("server.port", env()),
+            SettingSource::Env("broccoli__server__port".into())
         );
     }
 

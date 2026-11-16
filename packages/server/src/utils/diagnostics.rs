@@ -38,6 +38,16 @@ impl Diagnostics {
         }
     }
 
+    /// `value`, a detail the platform decided (the worker a submission is
+    /// pinned to), when the viewer operates the platform; whatever the
+    /// outcome, no one else sees it.
+    pub fn platform<T>(self, value: Option<T>) -> Option<T> {
+        match self {
+            Self::Shown => value,
+            Self::Hidden => None,
+        }
+    }
+
     /// SQL: the output columns of the result row `table` may be shown.
     pub fn sql_result_shown(self, table: &str) -> String {
         match self {

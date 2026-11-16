@@ -336,7 +336,7 @@ export interface paths {
     };
     /**
      * List active workers
-     * @description Returns the live workers: those whose liveness key in Redis has not expired (it lives 15 seconds without renewal). Requires `system:view` permission.
+     * @description Returns the live workers: those whose liveness key in Redis has not expired (it lives 15 seconds without renewal). While the message queue is unreachable, `queue_state` is `unreachable` and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.
      */
     get: operations['listSystemWorkers'];
     put?: never;
@@ -4032,6 +4032,7 @@ export interface components {
        * @example 262144
        */
       memory_limit: number;
+      plugin_outage?: components['schemas']['PluginOutage'] | null;
       /** @example batch */
       problem_type: string;
       samples: components['schemas']['SampleTestCaseMeta'][];
@@ -4377,7 +4378,11 @@ export interface components {
        * @example 1
        */
       submission_id: number;
-      /** @example worker-1 */
+      /**
+       * @description The worker this judgement is pinned to. Shown only to callers with
+       *     `system:view`.
+       * @example worker-1
+       */
       target_worker_id?: string | null;
       test_case_pagination?: components['schemas']['Pagination'] | null;
       test_case_results: components['schemas']['TestCaseResultResponse'][];
@@ -4427,6 +4432,7 @@ export interface components {
        * @example 1024
        */
       memory_used?: number | null;
+      plugin_outage?: components['schemas']['PluginOutage'] | null;
       /**
        * Format: int32
        * @example 1
@@ -4488,6 +4494,7 @@ export interface components {
       judge_epoch: number;
       /** @example cpp */
       language: string;
+      plugin_outage?: components['schemas']['PluginOutage'] | null;
       /**
        * Format: int32
        * @example 1
@@ -4571,7 +4578,8 @@ export interface components {
       status?: components['schemas']['SubmissionStatus'] | null;
       /**
        * @description When set, the submission has been pinned to this worker by an admin
-       *     and every operation it produces will run there.
+       *     and every operation it produces will run there. Shown only to callers
+       *     with `system:view`.
        * @example worker-1
        */
       target_worker_id?: string | null;
@@ -5059,6 +5067,13 @@ export interface components {
         };
     WorkerInfo: {
       /**
+       * @description Whether the worker takes judging work. A worker that lacks a platform
+       *     tool (`missing_platform_tools`) takes none until the tool is in place;
+       *     while no live worker takes work, submissions wait `Queued`.
+       * @example true
+       */
+      accepting_work: boolean;
+      /**
        * @description CPU architecture (e.g. `x86_64`, `aarch64`).
        * @example x86_64
        */
@@ -5095,8 +5110,8 @@ export interface components {
       /** Format: int32 */
       max_concurrency?: number | null;
       /**
-       * @description Platform tools the worker found missing at boot: every job that needs
-       *     one fails on it with `PLATFORM_TOOL_MISSING`. Empty on a healthy worker.
+       * @description Platform tools the worker lacks as of its last heartbeat. Empty on a
+       *     healthy worker.
        * @example []
        */
       missing_platform_tools: string[];
@@ -5156,7 +5171,15 @@ export interface components {
       worker_id: string;
     };
     WorkersResponse: {
+      /** @description Whether the worker list below was read just now. */
+      queue_state: components['schemas']['QueueState'];
+      /**
+       * @description The live workers. While the queue is unreachable: the list this server
+       *     last read, and `workers_stale` is true.
+       */
       workers: components['schemas']['WorkerInfo'][];
+      /** @description `workers` is the last list read before the queue became unreachable. */
+      workers_stale: boolean;
     };
   };
   responses: never;
@@ -8543,7 +8566,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE) */
+      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, no Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -11383,7 +11406,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE) */
+      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, no Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -11764,7 +11787,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE) */
+      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, no Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE) */
       503: {
         headers: {
           [name: string]: unknown;

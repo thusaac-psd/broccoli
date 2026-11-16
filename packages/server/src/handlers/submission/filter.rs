@@ -143,6 +143,7 @@ pub(super) async fn apply_filter_to_judgement_response(
         created_at: sub.created_at,
         result: result_response,
         withheld: None,
+        plugin_outage: None,
     };
 
     let filtered_value = apply_filter_to_response(kernel, synthetic_submission).await?;

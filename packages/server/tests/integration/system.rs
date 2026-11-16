@@ -79,6 +79,8 @@ mod system_view_permission {
         let workers_res = app.get_with_token(routes::SYSTEM_WORKERS, &admin).await;
         assert_eq!(workers_res.status, 200);
         assert!(workers_res.body["workers"].is_array());
+        assert_eq!(workers_res.body["queue_state"], "reachable");
+        assert_eq!(workers_res.body["workers_stale"], false);
 
         let queues_res = app.get_with_token(routes::SYSTEM_QUEUES, &admin).await;
         assert_eq!(queues_res.status, 200);
@@ -163,6 +165,7 @@ mod worker_liveness {
                 .unwrap_or_else(|| panic!("worker {id} listed: {}", res.text))
         };
         assert!(by_id("fresh")["seconds_since_last_seen"].as_u64().unwrap() <= 2);
+        assert_eq!(by_id("fresh")["accepting_work"], true, "{}", res.text);
         assert!(by_id("old")["seconds_since_last_seen"].as_u64().unwrap() >= 11);
     }
 
@@ -206,5 +209,12 @@ mod worker_liveness {
             res.text
         );
         assert_eq!(res.body["queues"], serde_json::json!([]), "{}", res.text);
+
+        // The worker list says the same: what it read last, marked stale.
+        let res = app.get_with_token(routes::SYSTEM_WORKERS, &admin).await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        assert_eq!(res.body["queue_state"], "unreachable", "{}", res.text);
+        assert_eq!(res.body["workers_stale"], true, "{}", res.text);
+        assert_eq!(res.body["workers"][0]["id"], "w1", "{}", res.text);
     }
 }

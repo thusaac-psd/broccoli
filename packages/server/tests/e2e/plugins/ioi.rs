@@ -1003,9 +1003,11 @@ async fn ioi_scoreboard_uses_time_taken_as_score_tiebreaker() {
 /// Disabling the contest-type plugin while one of its submissions is being
 /// judged hands that judgement back instead of failing it: it waits queued,
 /// spending neither retry budget, while the contestant sees its outcome
-/// withheld for the disabled plugin. A new submission to the contest is
-/// refused with `CONTEST_TYPE_DISABLED`, which is not a retry-later answer.
-/// Enabling the plugin again judges the parked submission to its verdict.
+/// withheld for the disabled plugin, and the operator sees why it waits. A new
+/// submission or code run of the type, to the contest or as practice, is
+/// refused with `CONTEST_TYPE_DISABLED`, which is not a retry-later answer,
+/// and the problem names the outage. Enabling the plugin again judges the
+/// parked submission to its verdict.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_submission_cut_by_disabling_its_contest_plugin_waits_and_is_judged_once_enabled() {
     let app = E2eTestApp::spawn().await;
@@ -1026,6 +1028,15 @@ async fn a_submission_cut_by_disabling_its_contest_plugin_waits_and_is_judged_on
     app.add_problem_to_contest(contest_id, problem_id, &admin)
         .await;
     app.register_for_contest(contest_id, &contestant).await;
+    // Practice submissions of the problem are IOI submissions too.
+    let res = app
+        .patch_with_token(
+            &format!("/api/v1/problems/{problem_id}"),
+            &json!({"default_contest_type": "ioi"}),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
 
     // Hold every operation in the queue, so the judging session is started
     // and waiting for its first result when the plugin goes away.
@@ -1085,6 +1096,15 @@ async fn a_submission_cut_by_disabling_its_contest_plugin_waits_and_is_judged_on
     assert_eq!(res.status, 200, "{}", res.text);
     assert!(res.body["withheld"].is_null(), "{}", res.text);
     assert_eq!(res.body["status"], "Queued", "{}", res.text);
+    let outage = json!({"state": "disabled", "plugin_id": "ioi"});
+    assert_eq!(res.body["plugin_outage"], outage, "{}", res.text);
+    let res = app
+        .get_with_token(
+            &format!("/api/v1/contests/{contest_id}/submissions"),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.body["data"][0]["plugin_outage"], outage, "{}", res.text);
     let res = app
         .get_with_token(&format!("/api/v1/submissions/{sub_id}"), &contestant)
         .await;
@@ -1113,6 +1133,36 @@ async fn a_submission_cut_by_disabling_its_contest_plugin_waits_and_is_judged_on
         !res.headers.contains_key("retry-after"),
         "a disabled contest type is not a retry-later answer"
     );
+    let practice = json!({
+        "files": [{"filename": "main.cpp", "content": CPP_SUM}],
+        "language": "cpp",
+    });
+    let res = app
+        .post_with_token(
+            &format!("/api/v1/problems/{problem_id}/submissions"),
+            &practice,
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 503, "{}", res.text);
+    assert_eq!(res.body["code"], "CONTEST_TYPE_DISABLED", "{}", res.text);
+    let res = app
+        .post_with_token(
+            &format!("/api/v1/problems/{problem_id}/code-runs"),
+            &json!({
+                "files": [{"filename": "main.cpp", "content": CPP_SUM}],
+                "language": "cpp",
+                "custom_test_cases": [{"input": "1\n1"}],
+            }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 503, "{}", res.text);
+    assert_eq!(res.body["code"], "CONTEST_TYPE_DISABLED", "{}", res.text);
+    let res = app
+        .get_with_token(&format!("/api/v1/problems/{problem_id}"), &admin)
+        .await;
+    assert_eq!(res.body["plugin_outage"], outage, "{}", res.text);
 
     let res = app
         .post_with_token("/api/v1/admin/plugins/ioi/enable", &json!({}), &admin)

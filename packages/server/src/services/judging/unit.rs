@@ -865,8 +865,7 @@ pub(crate) struct SystemErrorPass {
     /// Judgements requeued for another attempt, each spending one of its
     /// submission's system-error retries.
     pub requeued: u64,
-    /// Submissions whose system error stands: a platform misconfiguration,
-    /// or their budget is spent.
+    /// Submissions whose system error stands: their budget is spent.
     pub confirmed: Vec<ConfirmedSystemError>,
 }
 
@@ -879,7 +878,6 @@ pub(crate) struct SystemErrorPass {
 /// - `HandBack`: requeued, spending nothing;
 /// - `Judging`: requeued while its submission has system-error retries left,
 ///   spending one, and confirmed once they are spent;
-/// - `Deterministic`: confirmed at once and dead-lettered;
 /// - `Refused`: never awaits a decision; the submission shows it at once.
 ///
 /// A confirmed error is what the submission shows from then on.
@@ -920,9 +918,8 @@ pub(crate) async fn retry_system_errors(
     let mut b = Binds::default();
     let filter = format!(
         "u.is_current AND {undecided} \
-         AND ({deterministic} OR ({judging} AND s.system_error_retries >= {max})) \
+         AND {judging} AND s.system_error_retries >= {max} \
          AND (s.judge_epoch IS DISTINCT FROM u.judge_epoch OR s.status IS DISTINCT FROM u.status)",
-        deterministic = class(SystemErrorClass::Deterministic),
         judging = class(SystemErrorClass::Judging),
         max = b.bind(budget.max()),
     );
@@ -939,34 +936,13 @@ pub(crate) async fn retry_system_errors(
                 format!(
                     "UPDATE submission s SET {MIRROR_SETS} FROM submission_judgement j \
                      WHERE j.id = ANY($1) AND s.id = j.submission_id \
-                     RETURNING s.id, s.user_id, s.problem_id, s.contest_id, j.id AS judgement_id, \
-                               {deterministic} AS deterministic, j.error_code, j.error_message",
-                    deterministic = SystemErrorClass::Deterministic.sql_matches("j.error_code"),
+                     RETURNING s.id, s.user_id, s.problem_id, s.contest_id"
                 ),
                 [ids.into()],
             ))
             .await?;
         for r in rows {
             let submission_id: i32 = r.try_get("", "id")?;
-            if r.try_get::<bool>("", "deterministic")? {
-                let error_code: Option<String> = r.try_get("", "error_code")?;
-                let message: Option<String> = r.try_get("", "error_message")?;
-                let payload = serde_json::json!({
-                    "unit": Unit::Judgement.table(),
-                    "id": r.try_get::<i32>("", "judgement_id")?,
-                    "submission_id": submission_id,
-                    "error_code": error_code,
-                });
-                DlqService::new(&txn)
-                    .dead_letter(
-                        DlqSubject::Submission(submission_id),
-                        Some(submission_id),
-                        payload,
-                        DlqErrorCode::PlatformMisconfigured,
-                        message.as_deref().unwrap_or_default(),
-                    )
-                    .await?;
-            }
             confirmed.push(ConfirmedSystemError {
                 submission_id,
                 user_id: r.try_get("", "user_id")?,

@@ -28,6 +28,7 @@ mod m0004_platform_setting;
 mod m0005_no_plugin_column_defaults;
 mod m0006_auth_session;
 mod m0007_user_password_optional;
+mod m0008_user_password_not_blank;
 
 pub use m0001_baseline::{PLUGIN_READABLE, PLUGIN_READABLE_COLUMNS};
 
@@ -166,6 +167,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0005_no_plugin_column_defaults::Migration),
             Box::new(m0006_auth_session::Migration),
             Box::new(m0007_user_password_optional::Migration),
+            Box::new(m0008_user_password_not_blank::Migration),
         ]
     }
 }

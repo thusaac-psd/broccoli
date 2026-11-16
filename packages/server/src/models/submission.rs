@@ -117,7 +117,8 @@ pub struct SubmissionResponseAfterMutation {
     #[schema(example = 0)]
     pub judge_epoch: Option<i32>,
     /// When set, the submission has been pinned to this worker by an admin
-    /// and every operation it produces will run there.
+    /// and every operation it produces will run there. Shown only to callers
+    /// with `system:view`.
     #[schema(example = "worker-1")]
     pub target_worker_id: Option<String>,
     #[schema(example = "2025-10-01T14:30:00Z")]
@@ -154,6 +155,8 @@ pub struct SubmissionJudgementResponse {
     pub error_message: Option<String>,
     #[schema(example = 1)]
     pub judge_epoch: i32,
+    /// The worker this judgement is pinned to. Shown only to callers with
+    /// `system:view`.
     #[schema(example = "worker-1")]
     pub target_worker_id: Option<String>,
     #[schema(example = "2025-10-01T14:30:00Z")]

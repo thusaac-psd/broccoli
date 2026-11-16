@@ -32,7 +32,7 @@ use crate::state::AppState;
     tag = "System",
     operation_id = "listSystemWorkers",
     summary = "List active workers",
-    description = "Returns the live workers: those whose liveness key in Redis has not expired (it lives 15 seconds without renewal). Requires `system:view` permission.",
+    description = "Returns the live workers: those whose liveness key in Redis has not expired (it lives 15 seconds without renewal). While the message queue is unreachable, `queue_state` is `unreachable` and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.",
     responses(
         (status = 200, description = "List of workers", body = WorkersResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
@@ -47,8 +47,31 @@ pub async fn list_workers(
 ) -> Result<Json<WorkersResponse>, AppError> {
     auth_user.require_permission(perm::SYSTEM_VIEW)?;
 
-    let workers = read_workers(&state).await;
-    Ok(Json(WorkersResponse { workers }))
+    Ok(Json(worker_list(&state).await))
+}
+
+/// The live workers as this server can tell them: read just now, or, while
+/// the queue is unreachable, the list it last read, marked stale. The one
+/// builder of every worker list the System page shows.
+async fn worker_list(state: &AppState) -> WorkersResponse {
+    match try_read_workers(state).await {
+        Ok(workers) => {
+            state.last_workers.remember(&workers);
+            WorkersResponse {
+                queue_state: QueueState::Reachable,
+                workers,
+                workers_stale: false,
+            }
+        }
+        Err(error) => {
+            warn!(%error, "The message queue is unreachable; showing the last worker list");
+            WorkersResponse {
+                queue_state: QueueState::Unreachable,
+                workers: state.last_workers.get(),
+                workers_stale: true,
+            }
+        }
+    }
 }
 
 #[utoipa::path(
@@ -97,25 +120,24 @@ pub async fn system_overview(
 ) -> Result<Json<SystemOverviewResponse>, AppError> {
     auth_user.require_permission(perm::SYSTEM_VIEW)?;
 
-    let (queue_state, workers, workers_stale, queues) = match (
-        try_read_workers(&state).await,
-        try_read_queues(&state).await,
-    ) {
-        (Ok(workers), Ok(queues)) => {
-            state.last_workers.remember(&workers);
-            (QueueState::Reachable, workers, false, queues)
-        }
-        (workers, queues) => {
-            let error = workers.err().or(queues.err()).unwrap_or_default();
-            warn!(%error, "The message queue is unreachable; showing the last worker list");
-            (
-                QueueState::Unreachable,
-                state.last_workers.get(),
-                true,
-                Vec::new(),
-            )
-        }
+    let mut workers = worker_list(&state).await;
+    let queues = match workers.queue_state {
+        QueueState::Reachable => match try_read_queues(&state).await {
+            Ok(queues) => queues,
+            Err(error) => {
+                warn!(%error, "The message queue is unreachable; showing the last worker list");
+                workers.queue_state = QueueState::Unreachable;
+                workers.workers_stale = true;
+                Vec::new()
+            }
+        },
+        QueueState::Unreachable => Vec::new(),
     };
+    let WorkersResponse {
+        queue_state,
+        workers,
+        workers_stale,
+    } = workers;
 
     let submissions_in_progress = submission::Entity::find()
         .filter(submission::Column::Status.is_in(vec![
@@ -564,6 +586,7 @@ async fn try_read_workers(state: &AppState) -> Result<Vec<WorkerInfo>, String> {
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|(node, p)| WorkerInfo {
+                accepting_work: p.accepts_work(),
                 id: node.id,
                 started_at: p.started_at,
                 last_seen: p.last_seen,

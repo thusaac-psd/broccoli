@@ -6,9 +6,11 @@ import type { WorkerInfo } from '@/features/system/types';
 
 interface Props {
   workers: WorkerInfo[];
+  /** The list is the last one read before the message queue became unreachable. */
+  stale: boolean;
 }
 
-export function WorkersGrid({ workers }: Props) {
+export function WorkersGrid({ workers, stale }: Props) {
   const { t } = useTranslation();
 
   if (workers.length === 0) {
@@ -26,7 +28,7 @@ export function WorkersGrid({ workers }: Props) {
   return (
     <div className="grid gap-3 sm:grid-cols-2">
       {workers.map((w) => (
-        <WorkerCard key={w.id} worker={w} />
+        <WorkerCard key={w.id} worker={w} stale={stale} />
       ))}
     </div>
   );

@@ -27,21 +27,21 @@ pub fn get_dummy_hash() -> &'static str {
     })
 }
 
-/// Whether `password` matches `password_hash`. No hash (an unknown user, or
-/// an account without a password) never matches, but costs the same check
-/// against a dummy hash, so the time an answer takes does not tell the cases
-/// apart.
-pub fn verify_password(password: &str, password_hash: Option<&str>) -> Result<bool> {
-    let hash_to_verify = match password_hash {
+/// Whether `password` matches `password_hash`. No usable hash (an unknown
+/// user, an account without a password, or a stored value that is not a
+/// password hash) never matches, but costs the same check against a dummy
+/// hash, so the time an answer takes does not tell the cases apart.
+pub fn verify_password(password: &str, password_hash: Option<&str>) -> bool {
+    let stored = password_hash.and_then(|hash| PasswordHash::new(hash).ok());
+    let usable = stored.is_some();
+    let hash = match stored {
         Some(hash) => hash,
-        None => get_dummy_hash(),
+        None => PasswordHash::new(get_dummy_hash()).expect("the dummy hash parses"),
     };
-    let parsed_hash =
-        PasswordHash::new(hash_to_verify).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let matches = Argon2::default()
-        .verify_password(password.as_bytes(), &parsed_hash)
+        .verify_password(password.as_bytes(), &hash)
         .is_ok();
-    Ok(matches && password_hash.is_some())
+    matches && usable
 }
 
 pub fn generate_random_string() -> String {
@@ -110,7 +110,7 @@ pub async fn verify_password_off_thread(
     password: String,
     password_hash: Option<String>,
 ) -> Result<bool> {
-    on_password_pool(move || verify_password(&password, password_hash.as_deref())).await?
+    on_password_pool(move || verify_password(&password, password_hash.as_deref())).await
 }
 
 /// [`hash_password`] on the password pool.
@@ -191,10 +191,17 @@ mod tests {
 
     #[test]
     fn no_hash_never_matches_not_even_the_dummy_password() {
-        assert!(!verify_password("__broccoli_dummy__", None).unwrap());
+        assert!(!verify_password("__broccoli_dummy__", None));
         let hash = hash_password("secret").unwrap();
-        assert!(verify_password("secret", Some(&hash)).unwrap());
-        assert!(!verify_password("wrong", Some(&hash)).unwrap());
+        assert!(verify_password("secret", Some(&hash)));
+        assert!(!verify_password("wrong", Some(&hash)));
+    }
+
+    #[test]
+    fn a_stored_hash_that_does_not_parse_never_matches() {
+        for stored in ["", "not-an-argon2-hash"] {
+            assert!(!verify_password("", Some(stored)), "{stored:?}");
+        }
     }
 
     #[tokio::test]
@@ -203,7 +210,7 @@ mod tests {
         let hashes = hash_passwords_off_thread(passwords.clone()).await.unwrap();
         assert_eq!(hashes.len(), passwords.len());
         for (password, hash) in passwords.iter().zip(&hashes) {
-            assert!(verify_password(password, Some(hash)).unwrap(), "{password}");
+            assert!(verify_password(password, Some(hash)), "{password}");
         }
     }
 }
