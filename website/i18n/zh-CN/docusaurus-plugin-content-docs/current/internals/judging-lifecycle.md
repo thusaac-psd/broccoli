@@ -99,7 +99,7 @@ sidebar_position: 2
 
 只有评测该提交本身的失败才会消耗系统错误预算。为同一次分发工作的一切（插件调用、它们的操作、评测批次和分离会话）共享一个 `DispatchFaults`，遇到平台故障的一方把故障记在那里：队列拒绝了发布（`QUEUE_UNREACHABLE`）、队列丢失了操作（`OPERATION_LOST`）、评测机缺少平台工具（`PLATFORM_TOOL_MISSING`）、集群中没有接收任务的在线评测机（`NO_CAPABLE_WORKER`）。这些故障都属于交还类（`SystemErrorClass::HandBack`）：平台丢失了这次尝试，它从不成为判定。评测会话在下一个结果到达插件之前以 `Lost` 结束；插件试图定稿该评测记录的写入像过期分发的写入一样被栅栏拒绝；分发经由 `fail_dispatch` 结束，评测记录以新的纪元回到 `Queued`，不消耗任何预算。提交在同一事务中随之变化，因此任何客户端和评测后钩子都不会看到随后被收回的 `SystemError`。
 
-每次尝试都会重复的失败直接成立（`SystemErrorClass::Stands`）：竞赛插件的拒绝（`PLUGIN_REFUSED`），或本题检查器自身出错（`CHECKER_FAILED`）。后者由检查器插件在其判定上报告（`CheckerVerdict::checker_failure`；标准 testlib 检查器在检查器被信号终止、无法启动或以 testlib 未定义的退出码退出时设置）；宿主将其记为该分发的故障，因此系统错误带上该错误码以及检查器如何出错（与所有系统错误诊断一样，仅工作人员可见）。其他系统错误在预算内重试。
+每次尝试都会重复的失败直接成立（`SystemErrorClass::Stands`）：竞赛插件的拒绝（`PLUGIN_REFUSED`），或本题检查器自身出错（`CHECKER_FAILED`）。后者由检查器插件在其判定上报告（`CheckerVerdict::checker_failure`；标准 testlib 检查器在检查器无法编译、被信号终止、无法启动或以 testlib 未定义的退出码退出时设置）；宿主将其记为该分发的故障，因此系统错误带上该错误码以及检查器如何出错（与所有系统错误诊断一样，仅工作人员可见）。其他系统错误在预算内重试。
 
 这些类别只认宿主自己的错误码。插件的每次写入都经过同一条规则（`judging::as_recorded`）：插件自己的错误码记为 `<plugin_id>.<CODE>`，而分发遇到的故障决定系统错误的错误码，以不带前缀的形式记录。交还类与直接成立类的错误码都不带前缀，因此插件写入的任何错误码，无论内容如何，都只会被归为评测失败（由 `fault::no_code_a_plugin_writes_classes_as_a_host_code` 固定）。界面只从该插件的语言包翻译插件的错误码。
 

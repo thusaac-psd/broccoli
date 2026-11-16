@@ -79,10 +79,9 @@ mod tests {
     #[test]
     fn interpret_mock_returns_err_off_wasm() {
         let result = CheckerRunOutcome {
-            exit_code: Some(0),
-            stderr: String::new(),
-            sandbox_status: Some("OK".to_string()),
-            signal: None,
+            step_id: "check".to_string(),
+            success: true,
+            sandbox: Default::default(),
         };
         assert!(checker().interpret("tokens", &result).is_err());
     }

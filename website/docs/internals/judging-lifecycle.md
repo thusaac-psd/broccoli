@@ -210,8 +210,8 @@ A failure every attempt repeats stands at once (`SystemErrorClass::Stands`): a
 contest plugin's refusal (`PLUGIN_REFUSED`), or the problem's checker failing
 (`CHECKER_FAILED`). A checker plugin reports the latter on its verdict
 (`CheckerVerdict::checker_failure`, set by the standard testlib checker when
-the checker was killed by a signal, failed to start, or exited with a code
-testlib gives no meaning); the host records it as the dispatch's fault, so the
+the checker does not compile, was killed by a signal, failed to start, or
+exited with a code testlib gives no meaning); the host records it as the dispatch's fault, so the
 system error carries the code and how the checker failed (staff only, like
 every system-error diagnostic). Any other system error is retried within the
 budget.

@@ -41,7 +41,7 @@ pub fn interpret_fused_result(
     let memory_used_kb = extract_memory_used(result);
     let exec_result = result
         .task_results
-        .get("exec")
+        .get(EXEC_STEP_ID)
         .expect("precheck guarantees a clean exec result");
     let exec_stdout = opt_nonempty(&exec_result.sandbox_result.stdout);
     let exec_stderr = opt_nonempty(&exec_result.sandbox_result.stderr);
@@ -65,61 +65,49 @@ pub fn interpret_fused_result(
         });
     }
 
-    // At this point precheck confirmed a clean solution run, so the check step
-    // MUST have produced a result. Treat a missing check step -- or one that is
-    // present but never actually ran (not successful and with no sandbox status,
-    // e.g. the platform comparator tool failed to launch) -- as an infrastructure
-    // failure, never a contestant verdict.
-    let check_result = match result.task_results.get(check_step_id) {
-        Some(c) if c.success || !c.sandbox_result.status.is_empty() => c,
-        _ => {
-            return Ok(TestCaseVerdict {
-                test_case_id,
-                verdict: Verdict::SystemError,
-                score: 0.0,
-                time_used_ms,
-                memory_used_kb,
-                message: Some(format!(
-                    "checker step '{check_step_id}' produced no result (infrastructure failure)"
-                )),
-                stdout: exec_stdout,
-                stderr: exec_stderr,
-            });
-        }
-    };
-
-    let sandbox = &check_result.sandbox_result;
-    // A checker step whose own sandbox failed internally (isolate `XX`, or a
-    // redirect file lost after a clean exit under load) is an infrastructure
-    // fault, not a contestant verdict: surface it as a retryable SystemError
-    // rather than feeding the missing comparator output to the checker.
-    if sandbox.sandbox_status == SandboxStatus::InternalError {
+    // precheck confirmed a clean solution run, so the checker stage must have
+    // produced an outcome; none at all is the platform's failure.
+    let Some(outcome) = checker_outcome(result, check_step_id) else {
         return Ok(TestCaseVerdict {
             test_case_id,
             verdict: Verdict::SystemError,
             score: 0.0,
             time_used_ms,
             memory_used_kb,
-            message: Some(
-                "checker step hit a sandbox internal error (infrastructure failure)".into(),
-            ),
+            message: Some(format!(
+                "checker step '{check_step_id}' produced no result (infrastructure failure)"
+            )),
             stdout: exec_stdout,
             stderr: exec_stderr,
         });
-    }
-    // Both checkers write their verdict message to stderr (broccoli-compare's
-    // stdout carries the display preview, testlib's stderr carries quitf output).
-    let message = sandbox.stderr.clone();
+    };
     // Display preview: the run output preview (exec stdout, File mode) or the
     // comparator's stdout preview (Stream mode, where exec stdout is a FIFO and
     // thus empty). 64 KiB cap applied worker-side.
-    let display_stdout = exec_stdout.or_else(|| opt_nonempty(&sandbox.stdout));
-    let outcome = CheckerRunOutcome {
-        exit_code: sandbox.exit_code,
-        stderr: message,
-        sandbox_status: Some(sandbox.status.clone()),
-        signal: sandbox.signal,
-    };
+    let display_stdout = exec_stdout.or_else(|| {
+        result
+            .task_results
+            .get(check_step_id)
+            .and_then(|check| opt_nonempty(&check.sandbox_result.stdout))
+    });
+    // A checker step whose sandbox failed internally (isolate `XX`, or a
+    // redirect file lost after a clean exit under load) says nothing about the
+    // checker or the solution: the platform's fault, judged again.
+    if outcome.sandbox.sandbox_status == SandboxStatus::InternalError {
+        return Ok(TestCaseVerdict {
+            test_case_id,
+            verdict: Verdict::SystemError,
+            score: 0.0,
+            time_used_ms,
+            memory_used_kb,
+            message: Some(format!(
+                "checker step '{}' hit a sandbox internal error (infrastructure failure)",
+                outcome.step_id
+            )),
+            stdout: display_stdout,
+            stderr: exec_stderr,
+        });
+    }
 
     match checker.interpret(checker_format, &outcome) {
         Ok(v) => Ok(TestCaseVerdict {
@@ -143,6 +131,47 @@ pub fn interpret_fused_result(
             stderr: exec_stderr,
         }),
     }
+}
+
+/// The solution's compile and run steps in a fused operation. Every other
+/// step is the checker stage's.
+const COMPILE_STEP_ID: &str = "compile";
+const EXEC_STEP_ID: &str = "exec";
+
+/// What the checker stage's checker interprets: its result step, when that
+/// ran, else the stage step that failed before it so it never ran (a checker
+/// that did not compile). `None` when the stage left no outcome at all.
+fn checker_outcome(result: &OperationResult, check_step_id: &str) -> Option<CheckerRunOutcome> {
+    let ran = |step: &TaskExecutionResult| {
+        step.success || step.sandbox_result.sandbox_status != SandboxStatus::Unknown
+    };
+    if let Some(check) = result.task_results.get(check_step_id)
+        && ran(check)
+    {
+        return Some(CheckerRunOutcome {
+            step_id: check_step_id.to_string(),
+            success: check.success,
+            sandbox: ExecutionResult {
+                stdout: String::new(),
+                ..check.sandbox_result.clone()
+            },
+        });
+    }
+    result
+        .task_results
+        .iter()
+        .filter(|(id, step)| {
+            id.as_str() != check_step_id
+                && ![COMPILE_STEP_ID, EXEC_STEP_ID].contains(&id.as_str())
+                && !step.success
+                && ran(step)
+        })
+        .min_by_key(|(id, _)| id.as_str())
+        .map(|(id, step)| CheckerRunOutcome {
+            step_id: id.clone(),
+            success: step.success,
+            sandbox: step.sandbox_result.clone(),
+        })
 }
 
 /// Determine the verdict that applies BEFORE consulting the checker: host
@@ -186,7 +215,7 @@ pub(crate) fn precheck_verdict(
         });
     }
 
-    if let Some(compile) = result.task_results.get("compile") {
+    if let Some(compile) = result.task_results.get(COMPILE_STEP_ID) {
         match CompileOutcome::of(compile) {
             CompileOutcome::Compiled => {}
             CompileOutcome::Rejected { diagnostics } => {
@@ -204,7 +233,7 @@ pub(crate) fn precheck_verdict(
         }
     }
 
-    let Some(exec) = result.task_results.get("exec") else {
+    let Some(exec) = result.task_results.get(EXEC_STEP_ID) else {
         return Some(TestCaseVerdict {
             message: Some("No exec result found".into()),
             ..without_run(test_case_id, Verdict::SystemError)
@@ -271,20 +300,23 @@ fn without_run(test_case_id: i32, verdict: Verdict) -> TestCaseVerdict {
 }
 
 fn extract_time_used(result: &OperationResult) -> Option<i64> {
-    result.task_results.get("exec").and_then(|exec_result| {
-        let t = exec_result.sandbox_result.time_used;
-        if t > 0.0 && t.is_finite() && t < (i64::MAX as f64 / 1000.0) {
-            Some((t * 1000.0) as i64)
-        } else {
-            None
-        }
-    })
+    result
+        .task_results
+        .get(EXEC_STEP_ID)
+        .and_then(|exec_result| {
+            let t = exec_result.sandbox_result.time_used;
+            if t > 0.0 && t.is_finite() && t < (i64::MAX as f64 / 1000.0) {
+                Some((t * 1000.0) as i64)
+            } else {
+                None
+            }
+        })
 }
 
 fn extract_memory_used(result: &OperationResult) -> Option<i64> {
     result
         .task_results
-        .get("exec")
+        .get(EXEC_STEP_ID)
         .and_then(|exec_result| exec_result.sandbox_result.memory_used.map(|m| m as i64))
 }
 
@@ -739,6 +771,62 @@ mod tests {
         // Stream-mode preview fallback: exec stdout is empty (FIFO), so the
         // display preview comes from the check step's stdout.
         assert_eq!(v.stdout.as_deref(), Some("solution-output-preview"));
+    }
+
+    #[test]
+    fn a_checker_that_did_not_compile_is_the_stage_outcome() {
+        let failed_compile = task(
+            false,
+            ExecutionResult {
+                exit_code: Some(1),
+                status: "RE".into(),
+                sandbox_status: SandboxStatus::NonZeroExit,
+                stderr: "checker.cpp:3: error: 'x' was not declared".into(),
+                ..Default::default()
+            },
+        );
+        let result = op(vec![
+            ("compile", compile_ok()),
+            ("exec", exec_ok()),
+            ("compile_checker", failed_compile),
+            ("check", task(false, ExecutionResult::default())),
+        ]);
+        let outcome = checker_outcome(&result, "check").expect("the failed compile decides");
+        assert_eq!(outcome.step_id, "compile_checker");
+        assert!(!outcome.success);
+        assert_eq!(outcome.sandbox.exit_code, Some(1));
+        assert!(outcome.sandbox.stderr.contains("not declared"));
+    }
+
+    #[test]
+    fn a_check_that_ran_is_the_stage_outcome_without_the_output_preview() {
+        let check = task(
+            false,
+            ExecutionResult {
+                exit_code: Some(1),
+                status: "RE".into(),
+                sandbox_status: SandboxStatus::NonZeroExit,
+                stdout: "solution-output-preview".into(),
+                stderr: "wrong answer".into(),
+                ..Default::default()
+            },
+        );
+        let result = op(vec![
+            ("compile", compile_ok()),
+            ("exec", exec_ok()),
+            ("compile_checker", task(true, ExecutionResult::default())),
+            ("check", check),
+        ]);
+        let outcome = checker_outcome(&result, "check").unwrap();
+        assert_eq!(outcome.step_id, "check");
+        assert_eq!(outcome.sandbox.stderr, "wrong answer");
+        assert_eq!(outcome.sandbox.stdout, "");
+        let none_ran = op(vec![
+            ("compile", compile_ok()),
+            ("exec", exec_ok()),
+            ("check", task(false, ExecutionResult::default())),
+        ]);
+        assert!(checker_outcome(&none_ran, "check").is_none());
     }
 
     // ----- interpret_fused_result: 'none' (no comparison, no check step) -----
