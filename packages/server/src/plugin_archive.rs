@@ -10,7 +10,7 @@
 //! Parsing and unpacking walk the archive through the same function, so the
 //! two can never disagree about which entries are allowed.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
@@ -18,7 +18,7 @@ use axum::body::Bytes;
 use common::storage::ContentHash;
 
 use crate::plugin_id::PluginId;
-use plugin_core::manifest::{PluginManifest, parse_manifest};
+use plugin_core::manifest::{PluginManifest, parse_manifest, resolve_schema_includes_with};
 use plugin_core::registry::PluginEntry;
 
 const MIB: usize = 1024 * 1024;
@@ -99,8 +99,21 @@ impl PluginArchive {
         })?;
         let manifest_source =
             manifest_source.ok_or_else(|| reject(format!("Archive has no {id}/plugin.toml")))?;
-        let manifest = parse_manifest(&manifest_source).map_err(|e| reject(e.to_string()))?;
-        // Route and timer declarations are checked without touching disk.
+        let mut manifest = parse_manifest(&manifest_source).map_err(|e| reject(e.to_string()))?;
+        let schemas = schema_files(&bytes, &manifest)?;
+        resolve_schema_includes_with(&mut manifest, |schema_path| {
+            let path = Path::new(schema_path);
+            if !stays_inside(path) {
+                return Err(format!("'{schema_path}' escapes plugin directory"));
+            }
+            schemas
+                .get(&normalized(path))
+                .cloned()
+                .ok_or_else(|| format!("'{schema_path}' is not in the archive"))
+        })
+        .map_err(|e| reject(e.to_string()))?;
+        // The checks loading runs on the manifest (its config schemas, with
+        // their includes, its routes and timers), without touching disk.
         PluginEntry::new(id.to_string(), PathBuf::new(), manifest.clone())
             .map_err(|e| reject(e.to_string()))?;
         for path in manifest.loaded_paths() {
@@ -168,6 +181,48 @@ impl PluginArchive {
 }
 
 /// Whether a manifest-relative path stays inside the plugin directory.
+/// The text of every config schema file `manifest` includes, keyed by its
+/// [`normalized`] path inside the plugin root.
+fn schema_files(
+    bytes: &[u8],
+    manifest: &PluginManifest,
+) -> Result<HashMap<PathBuf, String>, ArchiveError> {
+    let wanted: BTreeSet<PathBuf> = manifest
+        .config
+        .values()
+        .filter_map(|ns| ns.schema.as_deref())
+        .map(|path| normalized(Path::new(path)))
+        .collect();
+    let mut found = HashMap::new();
+    if wanted.is_empty() {
+        return Ok(found);
+    }
+    walk(bytes, |path, file| {
+        if let Some(reader) = file
+            && wanted.contains(path)
+        {
+            let mut source = String::new();
+            reader.read_to_string(&mut source).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::InvalidData {
+                    reject(format!("{} is not valid UTF-8 text", path.display()))
+                } else {
+                    unreadable(e)
+                }
+            })?;
+            found.insert(path.to_path_buf(), source);
+        }
+        Ok(())
+    })?;
+    Ok(found)
+}
+
+/// `path` without `.` components, as [`walk`] names archive entries.
+fn normalized(path: &Path) -> PathBuf {
+    path.components()
+        .filter(|c| matches!(c, Component::Normal(_)))
+        .collect()
+}
+
 fn stays_inside(path: &Path) -> bool {
     path.components()
         .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
@@ -541,6 +596,39 @@ permissions = ["storage"]
         let manifest = MANIFEST.replace("demo.wasm", "../demo.wasm");
         let bytes = archive(&[Item::File("demo/plugin.toml", manifest.as_bytes())]);
         assert!(error(bytes).contains("outside the plugin directory"));
+    }
+
+    /// An archive's included config schema is checked as loading checks it,
+    /// so one loading would refuse is refused at upload.
+    #[test]
+    fn checks_included_config_schemas_as_loading_does() {
+        let manifest = format!(
+            "{MANIFEST}\n[config.settings]\nscopes = [\"plugin\"]\nschema = \"./config/settings.toml\"\n"
+        );
+        let with_schema = |schema: &str| {
+            archive(&[
+                Item::File("demo/plugin.toml", manifest.as_bytes()),
+                Item::File("demo/demo.wasm", b"\0asm"),
+                Item::File("demo/config/settings.toml", schema.as_bytes()),
+            ])
+        };
+        let invalid = "[limit]\ntype = \"integer\"\nmin = 5\ndefault = 1\n";
+        let message = error(with_schema(invalid));
+        assert!(message.contains("must be at least 5"), "{message}");
+        let dir = tempfile::tempdir().unwrap();
+        let root =
+            PluginArchive::parse(with_schema(&invalid.replace("default = 1", "default = 7")))
+                .expect("a valid included schema uploads")
+                .unpack(&dir.path().join("x"))
+                .unwrap();
+        let loaded = PluginEntry::from_dir(&root).unwrap();
+        assert_eq!(loaded.manifest.config["settings"].properties.len(), 1);
+
+        let bytes = archive(&[
+            Item::File("demo/plugin.toml", manifest.as_bytes()),
+            Item::File("demo/demo.wasm", b"\0asm"),
+        ]);
+        assert!(error(bytes).contains("is not in the archive"));
     }
 
     #[test]
