@@ -27,6 +27,23 @@ const ZH_CN = readToml('plugins/broccoli-zh-cn/locales/zh-CN.toml') as Record<
   string
 >;
 
+/**
+ * The headers the server sets on every `/api` response
+ * (`API_CONTENT_SECURITY_POLICY` in `packages/server/src/lib.rs`), read from
+ * the server's source so the app is checked under exactly what it serves.
+ */
+export const API_HEADERS: Record<string, string> = (() => {
+  const source = readFileSync(join(REPO, 'packages/server/src/lib.rs'), 'utf8');
+  const csp = /pub const API_CONTENT_SECURITY_POLICY: &str =\s*"([^"]+)";/.exec(
+    source,
+  )?.[1];
+  if (!csp) throw new Error('API_CONTENT_SECURITY_POLICY not found');
+  return {
+    'content-security-policy': csp,
+    'x-content-type-options': 'nosniff',
+  };
+})();
+
 interface PluginWeb {
   root: string;
   entry: string;
@@ -646,7 +663,7 @@ export async function mockApi(
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname.replace(/^\/api\/v1/, '');
-    const headers = { date: new Date(NOW).toUTCString() };
+    const headers = { ...API_HEADERS, date: new Date(NOW).toUTCString() };
     if (request.method() === 'POST' && path === '/auth/refresh') {
       if (viewer === 'guest') {
         return route.fulfill({

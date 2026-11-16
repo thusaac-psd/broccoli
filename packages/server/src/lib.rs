@@ -400,6 +400,15 @@ pub fn openapi_json() -> String {
         .expect("the OpenAPI document serializes to JSON")
 }
 
+/// The `Content-Security-Policy` of every `/api` response: an API response
+/// is data, never a page, so a browser that opens one runs nothing in it,
+/// loads nothing from it and frames it nowhere. What the web app loads from
+/// `/api` is fetched (downloads become `blob:` URLs under the page's own
+/// policy); scripts, workers and plugin bundles come from `/assets`. The
+/// browser suite's mock server (`packages/web/e2e/api.ts`) reads this
+/// constant, so the web app is checked under it.
+pub const API_CONTENT_SECURITY_POLICY: &str = "default-src 'none'; frame-ancestors 'none'; sandbox";
+
 /// The whole HTTP app. Fails on a CORS origin that is not a header value.
 pub fn build_router(state: AppState) -> anyhow::Result<axum::Router> {
     let trusted_proxies =
@@ -438,7 +447,7 @@ pub fn build_router(state: AppState) -> anyhow::Result<axum::Router> {
         ))
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'; sandbox"),
+            HeaderValue::from_static(API_CONTENT_SECURITY_POLICY),
         ));
 
     #[cfg(feature = "bundled-stress-test")]
