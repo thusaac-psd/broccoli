@@ -73,7 +73,7 @@ broccoli login --server https://judge.example.com -u alice -p secret
 
 登录失败时，提示会说明原因：该地址没有任何服务应答、该地址有应答但不是 Broccoli 服务器，或者用户名或密码错误。
 
-在共用的机器上，用完后请退出登录。这会删除当前服务器（或你用 `--server` 指定的服务器）保存在本机的登录信息。
+在共用的机器上，用完后请退出登录。这会结束你在当前服务器（或你用 `--server` 指定的服务器）上的会话，使保存的登录信息的副本也随之失效，并删除本机保存的登录信息。若无法连接服务器，本机的登录信息仍会被删除，命令会提醒你该会话在服务器上可能一直有效，直到过期。
 
 ```bash
 broccoli logout
@@ -92,6 +92,8 @@ broccoli contest list
 ```bash
 broccoli contest info "Spring Round"
 ```
+
+比赛开始之前，它会显示开始和结束时间、距离开始还有多久，以及你是否已报名。比赛开始后才会列出题目。所有状态和倒计时都以服务器的时钟为准，因此即使你电脑上的时钟不准，它们也是正确的。
 
 如果某场比赛需要报名，请在提交之前先报名。退出比赛的方式相同，使用 `broccoli contest unregister`。
 
@@ -187,7 +189,7 @@ broccoli status --recent
 broccoli watch "Spring Round"
 ```
 
-它会自动刷新，包含三个标签页，分别是你的提交、题目和疑问，并带有结束倒计时。打开任意一行查看详情，在分页器中阅读题目，并且无需离开界面即可提出疑问。
+它会自动刷新，包含三个标签页，分别是你的提交、题目和疑问，并带有倒计时，先倒数到开始，再倒数到结束。在比赛开始前打开时，比赛一开始就会列出题目。打开任意一行查看详情，在分页器中阅读题目，并且无需离开界面即可提出疑问。
 
 | 按键               | 作用                       |
 | ------------------ | -------------------------- |
@@ -207,6 +209,8 @@ broccoli watch "Spring Round"
 ```bash
 broccoli clarifications ask "Is the input always sorted?" -c "Spring Round"
 ```
+
+如果问题内容恰好只是你能看到的某场比赛的名称或编号，它不会被发送，因为这多半是在指定比赛。请用 `-c` 指定比赛。
 
 用列表查看回答以及任何公告。
 
@@ -261,7 +265,7 @@ Broccoli 根据你的文件扩展名，按照比赛服务器支持的语言及�
 | ----------------------------- | --------- | -------------------------- |
 | `broccoli login`              | `li`      | 登录到比赛服务器           |
 | `broccoli whoami`             | `me`      | 显示你当前的登录身份       |
-| `broccoli logout`             |           | 删除保存的登录信息         |
+| `broccoli logout`             |           | 结束会话并删除登录信息     |
 | `broccoli contest list`       | `c ls`    | 列出比赛                   |
 | `broccoli contest info`       | `c i`     | 比赛详情与你的状态         |
 | `broccoli contest register`   | `c reg`   | 报名一场比赛               |

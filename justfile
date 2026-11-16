@@ -19,10 +19,12 @@ build-profiling-crate crate *args:
 # This excludes root plugins (they are intentionally not workspace members) and
 # the stress-test harness. Use test-plugins/test-stress for those opt-in suites.
 test: build-plugins
+    cargo fetch --locked
     cargo test --workspace --exclude stress-test
 
 # Run every Rust workspace test, including the stress-test harness
 test-workspace-all: build-plugins
+    cargo fetch --locked
     cargo test --workspace
 
 # Test a single crate (e.g., just test-crate plugin-core)

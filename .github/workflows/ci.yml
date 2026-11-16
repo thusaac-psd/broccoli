@@ -86,6 +86,11 @@ jobs:
           node packages/web-sdk/scripts/generate-api.mjs "$RUNNER_TEMP/openapi.json"
           git diff --exit-code -- packages/web-sdk/src/api/schema.ts
 
+      # Every crate of the lockfile, for all targets: the scaffold test
+      # stages a bundle SDK, vendoring a plugin's crates offline.
+      - name: Fetch crates
+        run: cargo fetch --locked
+
       - name: Test
         timeout-minutes: 45
         env:

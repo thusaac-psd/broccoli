@@ -94,8 +94,11 @@ When a login fails, the message says why: nothing answered at the address, the
 address answers but is not a Broccoli server, or the username or password is
 wrong.
 
-On a shared machine, log out when you are done. This removes the saved login for
-the current server, or for the one you name with `--server`.
+On a shared machine, log out when you are done. This ends your session on the
+current server, or on the one you name with `--server`, so a copy of the saved
+login stops working too, and removes the login from this machine. When the
+server cannot be reached the login is still removed here, and the command warns
+that the session may stay valid on the server until it expires.
 
 ```bash
 broccoli logout
@@ -116,6 +119,11 @@ you are registered.
 ```bash
 broccoli contest info "Spring Round"
 ```
+
+Before the contest starts, it shows the start and end times, how long until the
+start, and whether you are registered. The problems appear once it starts.
+Every status and countdown follows the server's clock, so they stay right even
+when the clock on your computer is wrong.
 
 If a contest needs registration, register before you submit. You can leave one
 with `broccoli contest unregister` until it starts. After that your registration
@@ -235,7 +243,8 @@ broccoli watch "Spring Round"
 ```
 
 It refreshes on its own and has three tabs, your submissions, the problems, and
-clarifications, with a countdown to the end. Open any row for details, read a
+clarifications, with a countdown to the start and then to the end. Opened
+before the start, it lists the problems as soon as the contest starts. Open any row for details, read a
 problem in a pager, and ask a clarification without leaving the screen.
 
 | Key                | What it does                                  |
@@ -257,6 +266,9 @@ interactively.
 ```bash
 broccoli clarifications ask "Is the input always sorted?" -c "Spring Round"
 ```
+
+A question that is only the name or number of a contest you can see is not
+sent, since it most likely names the contest. Pass the contest with `-c`.
 
 Read the answers, and any announcements, with the list.
 
@@ -331,7 +343,7 @@ command also has a short alias.
 | ----------------------------- | --------- | ------------------------------------- |
 | `broccoli login`              | `li`      | Log in to a contest server            |
 | `broccoli whoami`             | `me`      | Show who you are logged in as         |
-| `broccoli logout`             |           | Forget the saved login                |
+| `broccoli logout`             |           | End the session and forget the login  |
 | `broccoli contest list`       | `c ls`    | List contests                         |
 | `broccoli contest info`       | `c i`     | Contest details and your status       |
 | `broccoli contest register`   | `c reg`   | Register for a contest                |
