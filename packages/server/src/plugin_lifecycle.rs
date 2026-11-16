@@ -263,7 +263,7 @@ impl PluginLifecycle {
     /// What keeps a submission of `contest_type` on a problem of
     /// `problem_type`, in `status`, parked, if anything: one not yet
     /// finished that cannot run now ([`Self::closed_by`]) waits queued until
-    /// a provider is enabled (see [`work_runnable`]).
+    /// a provider is enabled (see `work_runnable`).
     pub fn parked_by(
         &self,
         contest_type: &str,
