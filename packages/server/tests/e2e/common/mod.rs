@@ -543,7 +543,6 @@ impl E2eTestApp {
                 public_base_url: None,
                 frontend_dist: PathBuf::from("/srv/dist"),
                 trusted_proxies: vec![],
-                rate_limit_auth: false,
                 id: server_id.clone(),
                 dispatcher_lease_steal_enabled: false,
                 dispatcher_semaphore_enabled: false,

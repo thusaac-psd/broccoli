@@ -21,36 +21,78 @@ use crate::utils::{hash, jwt, refresh};
 /// refresh token and is older than this can mint nothing more.
 const ACCESS_TOKEN_TTL_SECS: i32 = jwt::ACCESS_TOKEN_TTL.num_seconds() as i32;
 
-/// Open a session for the active user `$1`, purging the user's sessions that
-/// can mint nothing more on the way (older than an access token and without an
-/// unexpired refresh token). No row comes back for a missing or deleted user.
+/// The credential check a new sign-in session rests on. Opening the session
+/// checks it again, in the statement that inserts the row, so a credential
+/// change that commits after the caller's check is never outrun.
+#[derive(Debug, Clone, Copy)]
+pub enum SignIn<'a> {
+    /// The user presented the password whose stored hash is `hash`.
+    Password { user_id: i32, hash: &'a str },
+    /// The user's open session `approver` approved a device code.
+    DeviceApproval { user_id: i32, approver: i64 },
+}
+
+/// Open a session for the active user `$1` if the credential check still holds:
+/// the stored password hash is `$3`, or the approving session `$4` is open.
+/// The user's sessions that can mint nothing more (older than an access token
+/// and without an unexpired refresh token) are purged on the way. No row
+/// comes back when the check no longer holds.
+///
+/// The user row is read `FOR SHARE`, which conflicts with the owner lock
+/// (`refresh_token::LOCK_OWNER_SQL`) and the row update every credential
+/// change takes. A change that holds the row first is waited for, and the row
+/// is checked again as it committed it; one that comes after waits for this
+/// sign-in to commit and then ends the new session with the others. The lock
+/// is taken before any session row, the order a credential change takes them.
 const OPEN_SESSION_SQL: &str = r#"
-WITH purged AS (
-    DELETE FROM auth_session s
-    WHERE s.user_id = $1
+WITH owner AS (
+    SELECT u.id FROM "user" u
+    WHERE u.id = $1 AND u.deleted_at IS NULL
+      AND ($3::varchar IS NULL OR u.password = $3)
+      AND ($4::bigint IS NULL
+           OR EXISTS (SELECT 1 FROM auth_session a WHERE a.id = $4 AND a.user_id = u.id))
+    FOR SHARE OF u
+),
+purged AS (
+    DELETE FROM auth_session s USING owner
+    WHERE s.user_id = owner.id
       AND s.created_at < now() - make_interval(secs => $2::int)
       AND NOT EXISTS (
           SELECT 1 FROM refresh_tokens r WHERE r.session_id = s.id AND r.expires_at > now()
       )
 )
 INSERT INTO auth_session (user_id, created_at)
-SELECT id, now() FROM "user" WHERE id = $1 AND deleted_at IS NULL
+SELECT id, now() FROM owner
 RETURNING id
 "#;
 
-/// Open a sign-in session for `user_id` (a login or a device approval).
+/// Open a sign-in session on the strength of `sign_in`.
 ///
-/// Returns `TokenInvalid` when the user is missing or soft-deleted.
-pub async fn open_session<C: ConnectionTrait>(db: &C, user_id: i32) -> Result<i64, AppError> {
+/// Returns `None` when the check no longer holds: the password changed, the
+/// approving session ended, or the user is missing or soft-deleted.
+pub async fn open_session<C: ConnectionTrait>(
+    db: &C,
+    sign_in: SignIn<'_>,
+) -> Result<Option<i64>, AppError> {
+    let (user_id, hash, approver) = match sign_in {
+        SignIn::Password { user_id, hash } => (user_id, Some(hash.to_owned()), None),
+        SignIn::DeviceApproval { user_id, approver } => (user_id, None, Some(approver)),
+    };
     let row = db
         .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             OPEN_SESSION_SQL,
-            [user_id.into(), ACCESS_TOKEN_TTL_SECS.into()],
+            [
+                user_id.into(),
+                ACCESS_TOKEN_TTL_SECS.into(),
+                hash.into(),
+                approver.into(),
+            ],
         ))
-        .await?
-        .ok_or(AppError::TokenInvalid)?;
-    Ok(row.try_get("", "id")?)
+        .await?;
+    row.map(|row| row.try_get("", "id"))
+        .transpose()
+        .map_err(Into::into)
 }
 
 /// End the sessions `ids` names: their refresh tokens go with them and their
@@ -255,7 +297,7 @@ pub async fn mint_refresh_token<C: ConnectionTrait>(
 struct PresentedToken {
     selector: String,
     user_id: i32,
-    session_id: Option<i64>,
+    session_id: i64,
     state: TokenState,
 }
 
@@ -268,8 +310,7 @@ enum TokenState {
 
 /// How a replay of a rotated token is answered.
 enum Replay {
-    /// Inside the grace window, with exactly one unused successor (or none
-    /// recorded, for rows rotated before successors were linked): issue one
+    /// Inside the grace window, with exactly one unused successor: issue one
     /// sibling.
     Sibling,
     /// Inside the grace window, but a sibling was already issued: refuse
@@ -331,7 +372,7 @@ async fn find_presented<C: ConnectionTrait>(
         let live_children: i64 = row.try_get("", "live_children")?;
         TokenState::Rotated(if !in_grace || live_children < children {
             Replay::Reuse
-        } else if children <= 1 {
+        } else if children == 1 {
             Replay::Sibling
         } else {
             Replay::AlreadyAnswered
@@ -350,21 +391,14 @@ async fn find_presented<C: ConnectionTrait>(
 }
 
 /// The session a presented refresh token belongs to, if the token is genuine
-/// (its validator matches), whatever its state. A token outside any session
-/// is deleted on the way, since it can never be used.
+/// (its validator matches), whatever its state.
 pub async fn session_of_presented(
     db: &DatabaseConnection,
     presented: &str,
 ) -> Result<Option<i64>, AppError> {
-    let Some(token) = find_presented(db, presented, false).await? else {
-        return Ok(None);
-    };
-    if token.session_id.is_none() {
-        refresh_token::Entity::delete_by_id(token.selector)
-            .exec(db)
-            .await?;
-    }
-    Ok(token.session_id)
+    Ok(find_presented(db, presented, false)
+        .await?
+        .map(|token| token.session_id))
 }
 
 /// [`refresh_token::LOCK_OWNER_SQL`], addressed by the presented selector,
@@ -404,13 +438,7 @@ pub async fn rotate_refresh_token(
     let token = find_presented(&txn, presented, true)
         .await?
         .ok_or(AppError::TokenInvalid)?;
-    let Some(session_id) = token.session_id else {
-        refresh_token::Entity::delete_by_id(token.selector)
-            .exec(&txn)
-            .await?;
-        txn.commit().await?;
-        return Err(AppError::TokenInvalid);
-    };
+    let session_id = token.session_id;
 
     match token.state {
         TokenState::Live => {}
@@ -475,6 +503,126 @@ mod tests {
     use sea_orm::TransactionTrait;
 
     use super::*;
+    use crate::entity::user;
+    use sea_orm::{ColumnTrait, QueryFilter};
+
+    /// The stored hash `test_support::seed_user_and_problem` gives its user.
+    const SEEDED_HASH: &str = "x";
+
+    fn password(user_id: i32) -> SignIn<'static> {
+        SignIn::Password {
+            user_id,
+            hash: SEEDED_HASH,
+        }
+    }
+
+    /// What a password reset does to the user row and sessions
+    /// (`handlers::user::update_user`).
+    async fn reset_password<C: ConnectionTrait>(db: &C, user_id: i32) {
+        db.execute_unprepared(&format!(
+            r#"SELECT 1 FROM "user" WHERE id = {user_id} FOR UPDATE;
+               UPDATE "user" SET password = 'new' WHERE id = {user_id}"#
+        ))
+        .await
+        .unwrap();
+        refresh_token::Entity::revoke_all_for_user(db, user_id)
+            .await
+            .unwrap();
+        user::Entity::touch_credentials_changed(db, user_id)
+            .await
+            .unwrap();
+    }
+
+    async fn session_count(db: &DatabaseConnection, user_id: i32) -> usize {
+        auth_session::Entity::find()
+            .filter(auth_session::Column::UserId.eq(user_id))
+            .all(db)
+            .await
+            .unwrap()
+            .len()
+    }
+
+    /// A password checked before a reset committed opens no session after it.
+    #[tokio::test]
+    async fn a_sign_in_checked_against_a_replaced_password_opens_no_session() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let (user_id, _) = crate::test_support::seed_user_and_problem(&db).await;
+        reset_password(&db, user_id).await;
+
+        assert_eq!(open_session(&db, password(user_id)).await.unwrap(), None);
+        assert_eq!(session_count(&db, user_id).await, 0);
+    }
+
+    /// A reset that holds the user row when the sign-in arrives: the sign-in
+    /// waits for it and finds the password replaced.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sign_in_racing_a_reset_that_holds_the_user_opens_no_session() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let (user_id, _) = crate::test_support::seed_user_and_problem(&db).await;
+
+        let reset = db.begin().await.unwrap();
+        reset_password(&reset, user_id).await;
+        let sign_in = tokio::spawn({
+            let db = db.clone();
+            async move { open_session(&db, password(user_id)).await }
+        });
+        crate::test_support::wait_until_blocked_on_a_lock(&db).await;
+        reset.commit().await.unwrap();
+
+        assert_eq!(sign_in.await.unwrap().unwrap(), None);
+        assert_eq!(session_count(&db, user_id).await, 0);
+    }
+
+    /// A sign-in that holds the user row when a reset arrives: the reset
+    /// waits for it and ends the new session with the others.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_racing_a_sign_in_that_holds_the_user_ends_its_session() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let (user_id, _) = crate::test_support::seed_user_and_problem(&db).await;
+
+        let sign_in = db.begin().await.unwrap();
+        let session = open_session(&sign_in, password(user_id))
+            .await
+            .unwrap()
+            .expect("the password still holds");
+        mint_refresh_token(&sign_in, user_id, session)
+            .await
+            .unwrap();
+        let reset = tokio::spawn({
+            let db = db.clone();
+            async move {
+                let txn = db.begin().await.unwrap();
+                reset_password(&txn, user_id).await;
+                txn.commit().await.unwrap();
+            }
+        });
+        crate::test_support::wait_until_blocked_on_a_lock(&db).await;
+        sign_in.commit().await.unwrap();
+        reset.await.unwrap();
+
+        assert_eq!(session_count(&db, user_id).await, 0);
+        assert!(
+            refresh_token::Entity::find()
+                .all(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A device approval opens a session only while the session that approved
+    /// it is open.
+    #[tokio::test]
+    async fn a_device_approval_opens_a_session_only_while_its_approver_is_open() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let (user_id, _) = crate::test_support::seed_user_and_problem(&db).await;
+        let approver = open_session(&db, password(user_id)).await.unwrap().unwrap();
+        let approval = SignIn::DeviceApproval { user_id, approver };
+
+        assert!(open_session(&db, approval).await.unwrap().is_some());
+        end_sessions(&db, &[approver]).await.unwrap();
+        assert_eq!(open_session(&db, approval).await.unwrap(), None);
+    }
 
     /// A logout that holds the session row when a token mint for it arrives:
     /// the mint waits for it and, once the logout commits, answers
@@ -483,7 +631,7 @@ mod tests {
     async fn a_mint_racing_the_sessions_logout_is_an_invalid_token() {
         let (_pg, db) = crate::test_support::postgres().await;
         let (user_id, _) = crate::test_support::seed_user_and_problem(&db).await;
-        let session = open_session(&db, user_id).await.unwrap();
+        let session = open_session(&db, password(user_id)).await.unwrap().unwrap();
 
         let logout = db.begin().await.unwrap();
         end_sessions(&logout, &[session]).await.unwrap();

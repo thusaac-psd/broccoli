@@ -398,7 +398,7 @@ export interface paths {
     put?: never;
     /**
      * Authorize a device code
-     * @description Authorizes a pending device code by entering the user code. Requires the user to be logged in via JWT. The CLI will receive a fresh JWT on its next poll.
+     * @description Authorizes a pending device code by entering the user code. Requires the user to be logged in via JWT. The approval belongs to the caller's sign-in session: if that session ends before the CLI collects the code (a logout, a password reset, a role change, the account's deletion), the approval ends with it. Otherwise the CLI receives a fresh JWT on its next poll.
      */
     post: operations['authorizeDevice'];
     delete?: never;
@@ -438,7 +438,7 @@ export interface paths {
     put?: never;
     /**
      * Poll for device authorization token
-     * @description Polling endpoint for the device code flow. Returns a JWT minted from the approving user's current roles once the device is authorized, consuming the code. Otherwise returns 400 with `error` set to 'authorization_pending' (waiting), 'slow_down' (polled faster than the interval), 'expired_token' (unknown, expired or already collected) or 'access_denied' (the approving user was deleted).
+     * @description Polling endpoint for the device code flow. Returns a JWT minted from the approving user's current roles once the device is authorized, consuming the code. Otherwise returns 400 with `error` set to 'authorization_pending' (waiting), 'slow_down' (polled faster than the interval), 'expired_token' (unknown, expired, already collected, or the sign-in session that approved it has ended) or 'access_denied' (the approval no longer holds when the code is collected).
      */
     post: operations['pollDeviceToken'];
     delete?: never;
@@ -458,7 +458,7 @@ export interface paths {
     put?: never;
     /**
      * Log in and obtain a JWT token
-     * @description Authenticates the user and returns a short-lived JWT access token. Sets a long-lived HttpOnly cookie containing a refresh token. Returns 401 INVALID_CREDENTIALS on wrong username or password.
+     * @description Authenticates the user and returns a short-lived JWT access token. Sets a long-lived HttpOnly cookie containing a refresh token. Returns 401 INVALID_CREDENTIALS on wrong username or password, including a password that was replaced while the sign-in was being checked.
      */
     post: operations['loginUser'];
     delete?: never;
@@ -518,7 +518,7 @@ export interface paths {
     put?: never;
     /**
      * Refresh access token
-     * @description Exchanges a valid HttpOnly refresh token cookie for a new short-lived access token and rotates the cookie. Fails if the user is banned or the token is expired/revoked. A token presented again within 30 seconds of its rotation (a concurrent refresh, or a retry after a lost response) is answered once with a new token pair, provided the token that replaced it has not been used yet (a further replay gets TOKEN_INVALID); presented later, or after its replacement was used, it revokes every refresh token of the user.
+     * @description Exchanges a valid HttpOnly refresh token cookie for a new short-lived access token and rotates the cookie. Fails if the user is banned or the token is expired/revoked. A token presented again within 30 seconds of its rotation (a concurrent refresh, or a retry after a lost response) is answered once with a new token pair, provided the token that replaced it has not been used yet (a further replay gets TOKEN_INVALID); presented later, or after its replacement was used, it is taken as stolen and ends the sign-in session it belongs to: every refresh token of that session is deleted and its access tokens are refused from then on. The user's other sessions stay signed in.
      */
     post: operations['refreshToken'];
     delete?: never;
@@ -6442,7 +6442,7 @@ export interface operations {
           'application/json': components['schemas']['DeviceCodeResponse'];
         };
       };
-      /** @description Too many device codes requested from this address (30 a minute) or pending (RATE_LIMITED). Includes Retry-After. */
+      /** @description Too many device codes requested from this address (30 a minute) or pending for it (RATE_LIMITED). Includes Retry-After. */
       429: {
         headers: {
           [name: string]: unknown;
@@ -6526,7 +6526,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Rate limited (RATE_LIMITED): too many sign-ins from this address (10 a minute, with `server.rate_limit_auth`) or failed ones for this account. Includes Retry-After. */
+      /** @description Rate limited (RATE_LIMITED): too many failed sign-ins from this address (100 a minute, counted across every server) or for this account from this address. A successful sign-in counts toward neither. Includes Retry-After. */
       429: {
         headers: {
           [name: string]: unknown;

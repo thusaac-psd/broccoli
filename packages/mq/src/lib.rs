@@ -189,6 +189,29 @@ impl Mq {
         Ok((count, std::time::Duration::from_millis(left_ms)))
     }
 
+    /// How many events fixed window `window` holds now and how long until it
+    /// closes, without counting one (see [`Self::count_in_window`]). A window
+    /// that is not open holds none. One round trip.
+    pub async fn window_count(&self, window: &str) -> Result<(u64, std::time::Duration), MqError> {
+        let key = self.topology.window_counter(window);
+        let (count, left_ms): (Option<u64>, i64) = self
+            .conn
+            .run(|mut c| async move {
+                redis::pipe()
+                    .cmd("GET")
+                    .arg(&key)
+                    .cmd("PTTL")
+                    .arg(&key)
+                    .query_async(&mut c)
+                    .await
+            })
+            .await?;
+        Ok((
+            count.unwrap_or(0),
+            std::time::Duration::from_millis(left_ms.max(0) as u64),
+        ))
+    }
+
     /// Send a `PING`, for health checks.
     pub async fn ping(&self) -> Result<(), MqError> {
         self.conn

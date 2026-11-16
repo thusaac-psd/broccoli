@@ -1200,7 +1200,6 @@ mod tests {
                     public_base_url: None,
                     frontend_dist: PathBuf::from("/srv/dist"),
                     trusted_proxies: vec![],
-                    rate_limit_auth: false,
                     id: String::new(),
                     dispatcher_lease_steal_enabled: true,
                     dispatcher_semaphore_enabled: true,

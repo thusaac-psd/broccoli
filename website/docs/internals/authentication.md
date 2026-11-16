@@ -28,9 +28,34 @@ A session ends when:
 | A rotated refresh token is replayed past its grace window | That token's session |
 | An admin resets the password, grants or revokes one of the user's roles, or deletes the account | Every session of the user |
 
-Ending a session deletes all its refresh tokens with it. The user's other
-sessions, in other browsers or the CLI, stay signed in. A client without a
-cookie, like the CLI, logs out by sending its access token.
+Ending a session deletes all its refresh tokens with it, and every device code
+it approved that the CLI has not collected yet. The user's other sessions, in
+other browsers or the CLI, stay signed in. A client without a cookie, like the
+CLI, logs out by sending its access token.
+
+## Opening a session
+
+A session rests on a check: the password a login verified, or the open session
+that approved a device code (`device_authorization.approved_by`). The check
+runs before the session exists, so a password reset, a role change or the
+account's deletion can commit in between. `services::auth_tokens::open_session`,
+the one way to open a session, takes what was checked (`SignIn`) and checks it
+again in the statement that inserts the row, under a share lock on the user
+row:
+
+| Credential change | Result |
+| --- | --- |
+| Holds the user row when the sign-in arrives | The sign-in waits, finds the password replaced or the approving session ended, and opens nothing: the login is `401 INVALID_CREDENTIALS`, the device poll `expired_token` |
+| Arrives while the sign-in holds the user row | The change waits for the sign-in to commit, then ends the new session with the user's others |
+
+Every credential change takes the user row first (the owner lock,
+`refresh_token::LOCK_OWNER_SQL`) and then the session rows, and a sign-in takes
+them in the same order, so the two never deadlock. A device poll takes the
+approving user's row before the code's own row for the same reason.
+
+A device code's approval belongs to the session that approved it: the
+`approved_by` foreign key deletes the approval with the session, so an approval
+never outlives the browser sign-in that gave it.
 
 ## Freshness
 

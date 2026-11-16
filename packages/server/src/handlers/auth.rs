@@ -36,8 +36,8 @@ use crate::models::auth::{
     validate_register_request,
 };
 use crate::services::auth_tokens::{
-    end_sessions, issue_access_token, mint_refresh_token, open_session, rotate_refresh_token,
-    session_of_presented,
+    SignIn, end_sessions, issue_access_token, mint_refresh_token, open_session,
+    rotate_refresh_token, session_of_presented,
 };
 use crate::services::device_auth::{self, PollOutcome};
 use crate::state::AppState;
@@ -116,13 +116,13 @@ pub async fn register(
     tag = "Auth",
     operation_id = "loginUser",
     summary = "Log in and obtain a JWT token",
-    description = "Authenticates the user and returns a short-lived JWT access token. Sets a long-lived HttpOnly cookie containing a refresh token. Returns 401 INVALID_CREDENTIALS on wrong username or password.",
+    description = "Authenticates the user and returns a short-lived JWT access token. Sets a long-lived HttpOnly cookie containing a refresh token. Returns 401 INVALID_CREDENTIALS on wrong username or password, including a password that was replaced while the sign-in was being checked.",
     request_body = LoginRequest,
     responses(
         (status = 200, description = "Login successful", body = LoginResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Invalid credentials (INVALID_CREDENTIALS)", body = ErrorBody),
-        (status = 429, description = "Rate limited (RATE_LIMITED): too many sign-ins from this address (10 a minute, with `server.rate_limit_auth`) or failed ones for this account. Includes Retry-After.", body = ErrorBody),
+        (status = 429, description = "Rate limited (RATE_LIMITED): too many failed sign-ins from this address (100 a minute, counted across every server) or for this account from this address. A successful sign-in counts toward neither. Includes Retry-After.", body = ErrorBody),
     ),
 )]
 #[instrument(skip(state, payload, jar), fields(username = %payload.username))]
@@ -133,9 +133,7 @@ pub async fn login(
     jar: CookieJar,
     AppJson(payload): AppJson<LoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    if state.config.server.rate_limit_auth {
-        ip_quota::LOGIN.admit(&state.mq, client_ip).await?;
-    }
+    ip_quota::FAILED_LOGIN.check(&state.mq, client_ip).await?;
     validate_login_request(&payload)?;
 
     let username = payload.username.trim();
@@ -166,14 +164,16 @@ pub async fn login(
     .await
     .map_err(|e| AppError::Internal(format!("Password verify error: {e}")))?;
 
-    let user = match maybe_user {
-        Some(u) if is_valid => u,
-        _ => {
-            if let Some(ip) = client_ip {
-                state.login_throttle.record_failure(&throttle_key, ip);
-            }
-            return Err(AppError::InvalidCredentials);
+    // The hash that verified is what the new session is opened against.
+    let Some((user, hash)) = maybe_user
+        .filter(|_| is_valid)
+        .and_then(|u| u.password.clone().map(|hash| (u, hash)))
+    else {
+        if let Some(ip) = client_ip {
+            state.login_throttle.record_failure(&throttle_key, ip);
         }
+        ip_quota::FAILED_LOGIN.record(&state.mq, client_ip).await;
+        return Err(AppError::InvalidCredentials);
     };
 
     // Successful auth: clear any accumulated failures for this pair.
@@ -182,7 +182,17 @@ pub async fn login(
     }
 
     let txn = state.db.begin().await?;
-    let session_id = open_session(&txn, user.id).await?;
+    // A credential change that committed after the check above leaves the
+    // password unverified: refuse it as a wrong one.
+    let session_id = open_session(
+        &txn,
+        SignIn::Password {
+            user_id: user.id,
+            hash: &hash,
+        },
+    )
+    .await?
+    .ok_or(AppError::InvalidCredentials)?;
     let grant =
         issue_access_token(&txn, &state.config.auth.jwt_secret, user.id, session_id).await?;
     let refresh_token = mint_refresh_token(&txn, user.id, session_id).await?;
@@ -198,7 +208,7 @@ pub async fn login(
     tag = "Auth",
     operation_id = "refreshToken",
     summary = "Refresh access token",
-    description = "Exchanges a valid HttpOnly refresh token cookie for a new short-lived access token and rotates the cookie. Fails if the user is banned or the token is expired/revoked. A token presented again within 30 seconds of its rotation (a concurrent refresh, or a retry after a lost response) is answered once with a new token pair, provided the token that replaced it has not been used yet (a further replay gets TOKEN_INVALID); presented later, or after its replacement was used, it revokes every refresh token of the user.",
+    description = "Exchanges a valid HttpOnly refresh token cookie for a new short-lived access token and rotates the cookie. Fails if the user is banned or the token is expired/revoked. A token presented again within 30 seconds of its rotation (a concurrent refresh, or a retry after a lost response) is answered once with a new token pair, provided the token that replaced it has not been used yet (a further replay gets TOKEN_INVALID); presented later, or after its replacement was used, it is taken as stolen and ends the sign-in session it belongs to: every refresh token of that session is deleted and its access tokens are refused from then on. The user's other sessions stay signed in.",
     responses(
         (status = 200, description = "Token refreshed", body = LoginResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
@@ -280,7 +290,6 @@ pub async fn me(auth_user: FreshAuthUser) -> Json<MeResponse> {
 
 const USER_CODE_CHARSET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 const USER_CODE_LEN: usize = 8;
-const DEVICE_CODE_EXPIRY_SECS: u64 = 900;
 const POLL_INTERVAL_SECS: u64 = 5;
 
 fn generate_device_code() -> String {
@@ -411,7 +420,7 @@ fn host_header(headers: &HeaderMap) -> Option<String> {
     request_body = DeviceCodeRequest,
     responses(
         (status = 200, description = "Device code generated", body = DeviceCodeResponse),
-        (status = 429, description = "Too many device codes requested from this address (30 a minute) or pending (RATE_LIMITED). Includes Retry-After.", body = ErrorBody),
+        (status = 429, description = "Too many device codes requested from this address (30 a minute) or pending for it (RATE_LIMITED). Includes Retry-After.", body = ErrorBody),
     ),
 )]
 #[instrument(skip(state, headers, forwarded))]
@@ -425,7 +434,7 @@ pub async fn request_device_code(
     ip_quota::DEVICE_CODE.admit(&state.mq, client_ip).await?;
     let (device_code, user_code) = device_auth::create(
         &state.db,
-        DEVICE_CODE_EXPIRY_SECS,
+        client_ip,
         || (generate_device_code(), generate_user_code()),
         normalize_user_code,
     )
@@ -441,7 +450,7 @@ pub async fn request_device_code(
         device_code,
         user_code,
         verification_url: format!("{}/auth/device", origin),
-        expires_in: DEVICE_CODE_EXPIRY_SECS,
+        expires_in: device_auth::CODE_TTL_SECS,
         interval: POLL_INTERVAL_SECS,
     }))
 }
@@ -452,7 +461,7 @@ pub async fn request_device_code(
     tag = "Auth",
     operation_id = "authorizeDevice",
     summary = "Authorize a device code",
-    description = "Authorizes a pending device code by entering the user code. Requires the user to be logged in via JWT. The CLI will receive a fresh JWT on its next poll.",
+    description = "Authorizes a pending device code by entering the user code. Requires the user to be logged in via JWT. The approval belongs to the caller's sign-in session: if that session ends before the CLI collects the code (a logout, a password reset, a role change, the account's deletion), the approval ends with it. Otherwise the CLI receives a fresh JWT on its next poll.",
     request_body = DeviceAuthorizeRequest,
     responses(
         (status = 200, description = "Device authorized", body = serde_json::Value),
@@ -469,12 +478,12 @@ pub async fn authorize_device(
     AppJson(payload): AppJson<DeviceAuthorizeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     // `AuthUser` refused a stale or deleted caller. Only the approving
-    // user is recorded; the CLI's token is minted from that user's current
-    // grants when it collects it.
+    // session is recorded, and the approval ends with it; the CLI's token is
+    // minted from the user's current grants when it collects it.
     device_auth::authorize(
         &state.db,
         &normalize_user_code(&payload.user_code),
-        auth_user.user_id,
+        auth_user.session_id,
     )
     .await?;
 
@@ -489,7 +498,7 @@ pub async fn authorize_device(
     tag = "Auth",
     operation_id = "pollDeviceToken",
     summary = "Poll for device authorization token",
-    description = "Polling endpoint for the device code flow. Returns a JWT minted from the approving user's current roles once the device is authorized, consuming the code. Otherwise returns 400 with `error` set to 'authorization_pending' (waiting), 'slow_down' (polled faster than the interval), 'expired_token' (unknown, expired or already collected) or 'access_denied' (the approving user was deleted).",
+    description = "Polling endpoint for the device code flow. Returns a JWT minted from the approving user's current roles once the device is authorized, consuming the code. Otherwise returns 400 with `error` set to 'authorization_pending' (waiting), 'slow_down' (polled faster than the interval), 'expired_token' (unknown, expired, already collected, or the sign-in session that approved it has ended) or 'access_denied' (the approval no longer holds when the code is collected).",
     request_body = DeviceTokenRequest,
     responses(
         (status = 200, description = "Token granted", body = serde_json::Value),

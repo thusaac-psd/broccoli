@@ -27,10 +27,9 @@ pub struct Model {
     pub rotated_from: Option<String>,
 
     /// The sign-in this token belongs to. Deleting the session deletes its
-    /// tokens. A row without one is not a credential: presenting it is
-    /// `TOKEN_INVALID`.
-    #[sea_orm(nullable, indexed)]
-    pub session_id: Option<i64>,
+    /// tokens.
+    #[sea_orm(indexed)]
+    pub session_id: i64,
 
     #[sea_orm(belongs_to, from = "user_id", to = "id")]
     pub user: HasOne<super::user::Entity>,
@@ -49,12 +48,8 @@ impl ActiveModelBehavior for ActiveModel {}
 /// block inserts into tables that reference the user.
 pub const LOCK_OWNER_SQL: &str = r#"SELECT 1 FROM "user" WHERE id = $1 FOR NO KEY UPDATE"#;
 
-/// Delete a user's sessions (their refresh tokens cascade) and any refresh
-/// token of the user outside a session.
-const END_USER_SESSIONS_SQL: &str = r#"
-WITH sessions AS (DELETE FROM auth_session WHERE user_id = $1)
-DELETE FROM refresh_tokens WHERE user_id = $1 AND session_id IS NULL
-"#;
+/// Delete a user's sessions; their refresh tokens cascade.
+const END_USER_SESSIONS_SQL: &str = "DELETE FROM auth_session WHERE user_id = $1";
 
 impl Entity {
     /// End every session of `user_id`, with all its refresh tokens, after

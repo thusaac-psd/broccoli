@@ -169,6 +169,55 @@ API or UI persists across restarts. A permission that a later release adds to a
 built-in role is granted once on the first boot of that release. The recovery
 above re-grants the `admin` role's built-in permissions.
 
+## Moving Problems and Contests Between Servers
+
+`broccoli-server bundle export` writes a server's problems, or a whole contest,
+as one `.tar.gz`, and `broccoli-server bundle import` restores it onto another
+server. Both run with the server's own configuration, so they reach the database
+and blob storage exactly as the server does. Progress and the summary go to
+stderr; the archive goes to stdout or comes from stdin unless a file is named,
+so the commands run through `docker compose exec -T` with no shared directory:
+
+```bash
+docker compose --env-file .env.server -f docker-compose.server.yaml \
+  exec -T server broccoli-server bundle export --contest 3 > contest-3.tar.gz
+docker compose --env-file .env.server -f docker-compose.server.yaml \
+  exec -T server broccoli-server bundle import < contest-3.tar.gz
+```
+
+Export takes one selection:
+
+| Flag                                | The bundle carries                                                                       |
+| ----------------------------------- | ---------------------------------------------------------------------------------------- |
+| none                                | Every problem that is not deleted                                                        |
+| `--problems 1,2,5`                  | Those problems                                                                           |
+| `--contest <id>`                    | The contest, its problems, its roster, and the roster's active accounts with their roles |
+| `--with-secrets` (with `--contest`) | The accounts' password hashes too. Without it the archive holds no credentials           |
+| `--out <file>`                      | Writes the archive to the file instead of stdout                                         |
+
+Import restores every row in one transaction, committed after every blob is
+stored, so a failed import changes nothing. It refuses:
+
+- a bundle from a schema this build does not know: import it with a build at
+  least as new as the source;
+- a database this build has not migrated yet: start this build's server once
+  first;
+- a database that already has problems, unless `--replace-problems`; and, with
+  `--replace-problems`, problems that submissions, code runs or contests still
+  reference, unless `--wipe-dependents` deletes those too.
+
+Accounts merge by username, ignoring case:
+
+- An account the target already has, active, stays as it is: its id, password,
+  display name and roles are unchanged, whatever the bundle says. It joins the
+  imported contest's roster. A bundle never changes what an existing account may
+  do.
+- An account the target lacks is created with a new id, the bundle's display
+  name and the bundle's roles. Without `--with-secrets` it has no password and
+  cannot sign in until an admin sets one.
+- A role the target lacks is created with the bundle's permissions. A role the
+  target has keeps its own permissions.
+
 ## Logs
 
 ```bash
