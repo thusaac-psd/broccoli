@@ -7,7 +7,16 @@ use sea_orm_migration::prelude::*;
 /// `plugin_group_role`, see m0001) may read the new column as it reads every
 /// other column that is not content.
 ///
-/// Rolling-safe: a defaulted column older replicas never read or write.
+/// Every system error decided before the column existed stands: one that
+/// is not current (no retry takes it), and one its submission already shows
+/// as its final result (a terminal status at the judgement's epoch). A
+/// current one whose submission still shows the attempt in flight awaits the
+/// system-error retry's decision and keeps `false`.
+///
+/// Rolling-safe: a defaulted column older replicas never read or write. A
+/// system error an older replica writes meanwhile is mirrored onto its
+/// submission at once, which the retry reads as decided
+/// (`judging::unit::awaits_retry_decision`).
 pub struct Migration;
 
 impl MigrationName for Migration {
@@ -18,6 +27,14 @@ impl MigrationName for Migration {
 
 const UP: &str = r#"
 ALTER TABLE public.submission_judgement ADD COLUMN error_stands boolean NOT NULL DEFAULT false;
+UPDATE public.submission_judgement j SET error_stands = true
+  FROM public.submission s
+ WHERE s.id = j.submission_id AND j.is_finalized
+   AND (j.status = 'SystemError'
+        OR (j.status IN ('Judged', 'CompilationError') AND j.verdict = 'SystemError'))
+   AND (NOT j.is_current
+        OR (s.status IN ('Judged', 'CompilationError', 'SystemError')
+            AND s.judge_epoch = j.judge_epoch));
 DO $$
 DECLARE
   plugin_group name;

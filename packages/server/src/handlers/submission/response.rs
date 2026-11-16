@@ -616,7 +616,8 @@ pub(super) async fn build_judgement_response(
 
 /// `judgement` as the submission it belongs to shows it. A current judgement
 /// that finished as a system error the system-error retry may still re-judge
-/// (one that does not stand) is not mirrored onto its submission until the
+/// (one that does not stand, and that its submission does not already show
+/// as its final result) is not mirrored onto its submission until the
 /// retry decides (`judging::unit::awaits_retry_decision`): the submission
 /// keeps showing the attempt in flight. The judgement history shows that
 /// judgement the same way, from the submission's projection, so neither shows
@@ -629,7 +630,8 @@ pub(super) fn as_its_submission_shows(
     let awaits_decision = judgement.is_current
         && judgement.is_finalized
         && is_system_error(&judgement.status, judgement.verdict.as_ref())
-        && !judgement.error_stands;
+        && !judgement.error_stands
+        && !(sub.status.is_terminal() && sub.judge_epoch == judgement.judge_epoch);
     if awaits_decision {
         judgement.status = sub.status;
         judgement.verdict = sub.verdict.clone();
@@ -802,5 +804,12 @@ mod judgement_history_tests {
             let shown = as_its_submission_shows(judgement.clone(), &sub);
             assert_eq!(shown, judgement);
         }
+        // Its submission already shows it as the final result: decided.
+        let judgement = system_error(true, false);
+        let shown = as_its_submission_shows(
+            judgement.clone(),
+            &submission_row(SubmissionStatus::SystemError),
+        );
+        assert_eq!(shown, judgement);
     }
 }

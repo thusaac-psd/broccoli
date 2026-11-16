@@ -158,7 +158,7 @@ impl Unit {
                      SET resolved = TRUE, resolved_at = NOW(), resolved_by = NULL \
                      FROM moved j WHERE NOT d.resolved AND j.is_current AND {recovered} \
                        AND {settled})",
-                undecided = awaits_retry_decision("j"),
+                undecided = awaits_retry_decision("j", "s"),
                 recovered = recovered("j"),
                 settled = settled_by_submission("d", "j"),
             ),
@@ -181,15 +181,20 @@ fn system_error(alias: &str) -> String {
     )
 }
 
-/// SQL: the judgement `alias` finished as a system error that the
-/// system-error retry may still re-judge (anything but one that stands).
-/// The submission keeps showing the attempt in flight instead of a terminal
-/// status that the retry would take back: [`retry_system_errors`], which owns
-/// the retry budget, either requeues the judgement or confirms the error.
-fn awaits_retry_decision(alias: &str) -> String {
+/// SQL: the judgement `j` of submission `s` finished as a system error that
+/// the system-error retry may still re-judge: one that does not stand and
+/// that its submission does not already show as its final result (a terminal
+/// status at the judgement's epoch, which a build that never recorded
+/// `error_stands` mirrored at once). The submission keeps showing the attempt
+/// in flight instead of a terminal status that the retry would take back:
+/// [`retry_system_errors`], which owns the retry budget, either requeues the
+/// judgement or confirms the error.
+fn awaits_retry_decision(j: &str, s: &str) -> String {
     format!(
-        "({alias}.is_finalized AND {system_error} AND NOT {alias}.error_stands)",
-        system_error = system_error(alias),
+        "({j}.is_finalized AND {system_error} AND NOT {j}.error_stands \
+          AND NOT ({s}.status IN {terminal} AND {s}.judge_epoch = {j}.judge_epoch))",
+        system_error = system_error(j),
+        terminal = StatusPhase::Terminal.sql_list(),
     )
 }
 
@@ -1102,7 +1107,7 @@ pub(crate) async fn retry_system_errors(
     let filter = format!(
         "u.is_current AND {undecided} \
          AND ({handled} OR ({open} AND s.system_error_retries >= {max}))",
-        undecided = awaits_retry_decision("u"),
+        undecided = awaits_retry_decision("u", "s"),
         handled = prefer_local_handler("s.contest_type", &local),
         open = contest_type_open("s.contest_type"),
     );

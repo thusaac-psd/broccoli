@@ -783,6 +783,45 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
     assert!(pass.confirmed.is_empty(), "confirmed once");
 }
 
+/// A system error its submission already shows as its final result (written
+/// before `error_stands` existed, or by a build that never set it) was
+/// decided: the retry never reopens it.
+#[tokio::test]
+async fn a_system_error_its_submission_already_shows_is_never_reopened() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (s, _) = new_submission(&db).await;
+    let claimed = claim_one(&db, "srv").await;
+    exec(
+        &db,
+        &format!(
+            "UPDATE submission_judgement SET status = 'SystemError', verdict = 'SystemError', \
+             error_code = 'PLUGIN_ERROR', is_finalized = TRUE, finalized_at = NOW(), \
+             error_stands = FALSE WHERE id = {}",
+            claimed.judgement.id,
+        ),
+    )
+    .await;
+    exec(
+        &db,
+        &format!(
+            "UPDATE submission SET status = 'SystemError', verdict = 'SystemError', \
+             error_code = 'PLUGIN_ERROR' WHERE id = {}",
+            s.id
+        ),
+    )
+    .await;
+
+    let pass = retry_system_errors(&db, RetryBudget::new(5), 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(pass, SystemErrorPass::default());
+    assert_eq!(sub(&db, s.id).await.status, SubmissionStatus::SystemError);
+    assert_eq!(
+        judgement(&db, claimed.judgement.id).await.status,
+        SubmissionStatus::SystemError
+    );
+}
+
 /// A contestant's verdict is never retried, and neither is a failure every
 /// attempt repeats: a plugin's refusal or the problem's checker failing
 /// shows at once.

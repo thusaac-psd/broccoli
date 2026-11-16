@@ -163,7 +163,9 @@ submission together.
 
 One projection waits: a current judgement that finalized as a system error
 that does not stand yet (`error_stands` is false), which the system-error
-retry may still re-judge.
+retry may still re-judge. A system error its submission already shows as its
+final result (a terminal status at the judgement's epoch) is decided, stands
+or not, and no retry reopens it (`awaits_retry_decision`).
 The submission keeps showing the attempt in flight until the reaper decides
 it within one scan (5 s): it requeues the judgement while the submission has
 retries left, so the submission goes on to `Queued` and the next attempt; or
