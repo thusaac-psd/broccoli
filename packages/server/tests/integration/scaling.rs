@@ -187,7 +187,7 @@ async fn operation_result_burst_has_no_missing_waiters() {
         metrics: Some(metrics.clone()),
         evaluate_batches,
         judgement: None,
-        faults: None,
+        dispatch: None,
         worker_slots: Default::default(),
     };
 

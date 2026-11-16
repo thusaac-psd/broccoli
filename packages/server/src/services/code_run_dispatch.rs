@@ -207,7 +207,20 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
     );
     tokio::spawn(async move {
         async move {
-            let options = plugins.get_config().judging_call();
+            // The run goes to its contest type's plugin, which alone may
+            // write it.
+            let dispatch = crate::services::judging::Dispatch::new(
+                &plugin_id,
+                crate::services::judging::DispatchedUnit::CodeRun {
+                    code_run_id,
+                    judge_epoch,
+                },
+                Default::default(),
+            );
+            let options = plugins
+                .get_config()
+                .judging_call()
+                .with_locals(dispatch.call_locals());
             let result = plugins
                 .call_raw(&plugin_id, &function_name, input_bytes, options)
                 .await;

@@ -42,6 +42,8 @@ extern "ExtismHost" {
     fn db_query(sql: String, args: String) -> String;
     fn timer_schedule(input: String) -> String;
     fn timer_cancel(input: String) -> String;
+    fn submission_update(input: String) -> String;
+    fn code_run_update(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -547,5 +549,23 @@ pub fn sql_parameterized(input: String) -> FnResult<String> {
     Ok(serde_json::to_string(&PluginHttpResponse {
         status: 200,
         body: Some(serde_json::json!({ "found": rows.len() })),
+    })?)
+}
+
+/// Hands the request body to the judgement or code-run write host function
+/// the path names and answers with its envelope, outside any dispatch.
+#[plugin_fn]
+pub fn judgement_write(input: String) -> FnResult<String> {
+    let req: PluginHttpRequest = serde_json::from_str(&input)?;
+    let body = serde_json::to_string(&req.body.unwrap_or_default())?;
+    let out = match req.params.get("host_fn").map(String::as_str) {
+        Some("submission_update") => unsafe { submission_update(body)? },
+        Some("code_run_update") => unsafe { code_run_update(body)? },
+        other => return Err(extism_pdk::Error::msg(format!("unknown write {other:?}")).into()),
+    };
+    let envelope: serde_json::Value = serde_json::from_str(&out)?;
+    Ok(serde_json::to_string(&PluginHttpResponse {
+        status: 200,
+        body: Some(envelope),
     })?)
 }

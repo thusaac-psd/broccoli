@@ -4,7 +4,7 @@ description = "Minimal test fixture server plugin"
 
 [server]
 entry = "server_plugin.wasm"
-permissions = ["storage", "sql", "timer"]
+permissions = ["storage", "sql", "timer", "submission"]
 
 [[server.timers]]
 function = "on_timer"
@@ -32,6 +32,12 @@ path = "/kv/{key}"
 method = "GET"
 access = "public"
 handler = "kv_read"
+
+[[server.routes]]
+path = "/write/{host_fn}"
+method = "POST"
+access = "public"
+handler = "judgement_write"
 
 [[server.routes]]
 path = "/sql/params"

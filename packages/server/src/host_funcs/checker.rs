@@ -159,10 +159,10 @@ fn interpret_checker_fn(
     // system error stands under `CHECKER_FAILED`, with how it failed for
     // staff, instead of being judged again.
     if let Some(failure) = verdict.checker_failure
-        && let Some(faults) = crate::services::judging::DispatchFaults::of_current_call()
+        && let Some(dispatch) = crate::services::judging::Dispatch::of_current_call()
     {
         tracing::warn!(checker_format = %input.format, failure = %failure, "The problem's checker failed");
-        faults.record(
+        dispatch.faults().record(
             crate::services::judging::DispatchFault::CheckerFailed,
             failure,
         );

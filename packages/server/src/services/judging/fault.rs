@@ -15,7 +15,6 @@ use std::sync::{Arc, Mutex};
 
 use common::SubmissionDlqErrorCode;
 use common::worker::OperationFault;
-use plugin_core::executor::CallLocals;
 
 /// A fault one dispatch met that decides its system error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,10 +63,6 @@ pub struct Recorded {
     pub message: String,
 }
 
-/// The [`DispatchFaults`] a call tree's [`CallLocals`] hold.
-#[derive(Default)]
-struct CallFaults(DispatchFaults);
-
 impl DispatchFaults {
     /// Record `fault`. The first one recorded stays, except that a lost
     /// attempt replaces any other: nothing the attempt found stands once the
@@ -99,23 +94,6 @@ impl DispatchFaults {
     /// hands the judgement back (`fail_dispatch`).
     pub fn lost(&self) -> Option<Recorded> {
         self.get().filter(|r| loses(r.fault))
-    }
-
-    /// The faults of the plugin call tree running on this thread, if any.
-    pub fn of_current_call() -> Option<Self> {
-        plugin_core::executor::call_locals().map(|locals| Self::of(&locals))
-    }
-
-    fn of(locals: &CallLocals) -> Self {
-        locals.with(|f: &mut CallFaults| f.0.clone())
-    }
-
-    /// Fresh call locals for a plugin call made for this dispatch: the call's
-    /// host functions record into, and read, these faults.
-    pub fn call_locals(&self) -> Arc<CallLocals> {
-        let locals: Arc<CallLocals> = Arc::default();
-        locals.with(|f: &mut CallFaults| f.0 = self.clone());
-        locals
     }
 }
 
@@ -279,17 +257,6 @@ mod tests {
         assert_eq!(
             faults.lost().map(|r| r.fault),
             Some(OperationFault::NoCapableWorker.into())
-        );
-    }
-
-    #[test]
-    fn a_seeded_call_shares_the_dispatchs_faults() {
-        let faults = DispatchFaults::default();
-        let locals = faults.call_locals();
-        DispatchFaults::of(&locals).record(OperationFault::OperationLost, "lost");
-        assert_eq!(
-            faults.get().map(|r| r.fault),
-            Some(OperationFault::OperationLost.into())
         );
     }
 }

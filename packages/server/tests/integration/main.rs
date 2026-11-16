@@ -40,6 +40,7 @@ mod plugin_fleet;
 mod plugin_flood;
 mod plugin_timer;
 mod plugin_upload;
+mod plugin_writes;
 mod privilege_ceiling;
 mod problem;
 mod queue_outage;

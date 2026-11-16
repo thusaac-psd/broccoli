@@ -9,6 +9,26 @@ pub fn start_detached_windowed_evaluate(
     if input.callback_fn.trim().is_empty() {
         return Err(anyhow!("Detached evaluate callback_fn cannot be empty"));
     }
+    // A session finishes the judgement it names when it ends, so it may name
+    // only the judgement its caller was dispatched with.
+    if let Some(completion) = &input.submission_completion {
+        let unit = crate::services::judging::DispatchedUnit::Judgement {
+            submission_id: completion.submission_id,
+            judgement_id: completion.judgement_id,
+            judge_epoch: completion.judge_epoch,
+        };
+        let dispatch = deps
+            .operation_deps
+            .dispatch
+            .clone()
+            .ok_or(crate::services::judging::NotOwned::NoDispatch)
+            .and_then(|d| d.admits(&caller_plugin_id, unit));
+        if let Err(refused) = dispatch {
+            return Err(anyhow!(
+                "Detached evaluate cannot finish that judgement: {refused}"
+            ));
+        }
+    }
 
     let session_id = Uuid::new_v4().to_string();
     let session = DetachedEvaluateSession {
@@ -210,8 +230,7 @@ impl WindowedSession for EvaluateDriver {
             && self
                 .deps
                 .operation_deps
-                .faults
-                .as_ref()
+                .faults()
                 .is_some_and(|faults| faults.lost().is_some())
     }
 
@@ -318,11 +337,7 @@ async fn finish_judgement(
     error_code: &str,
     error_message: &str,
 ) {
-    let fault = deps
-        .operation_deps
-        .faults
-        .as_ref()
-        .and_then(|faults| faults.get());
+    let fault = deps.operation_deps.faults().and_then(|faults| faults.get());
     let (error_code, error_message) = match &fault {
         Some(fault) => (fault.fault.code(), fault.message.as_str()),
         None => (error_code, error_message),

@@ -88,7 +88,8 @@ sidebar_position: 2
 - 重新入队总会取得新纪元，因此被替换的那次分发迟到的写入会被拒绝。
 - 评测记录的 `test_case_result` 行携带该评测记录自己的纪元。插件以纪元把结果关联到评测记录（IOI 的 `sj.judge_epoch = tcr.judge_epoch`）。`apply_judgement` 为被应用的评测记录分配新纪元，并把其保留的结果迁移到该纪元。
 - 仍在进行中却不再是当前评测记录的评测记录，会以 `SystemError`（`SUPERSEDED`）定稿。
-- 插件写入隔离（`write_fence`）只允许写入指定提交的指定评测记录，且纪元为分发时的纪元、尚未定稿。
+- 插件只能写入它自己的调用所分发的单元。分发（`judging::Dispatch`：分发给哪个插件、哪条评测记录或代码运行及其纪元、以及它的故障记录）随分发调用、嵌套在其中的调用和它启动的分离回调的调用局部状态传递；每个 `host.submission.*` 和 `host.code_run.*` 写入，以及指定要定稿某条评测记录的分离会话，都只有在调用方拥有该分发且指名的正是它的单元时才被接受。来自路由、定时器、检查器或同一调用树中评测器的写入在到达数据库之前就被拒绝。
+- 数据库隔离（`write_fence`）随后只在该评测记录在分发时的纪元下尚未定稿时接受写入。
 
 ## 重试预算
 
@@ -97,7 +98,7 @@ sidebar_position: 2
 - `submission_judgement.dispatch_retries` 与 `code_run.dispatch_retries` 统计分发被放弃后的重新入队次数，预算为 `server.max_dispatch_retries`。租约窃取与卡死任务检测器共享该预算。
 - `submission.system_error_retries` 统计自上次重新评测以来的系统错误重试次数，预算为 `server.max_system_error_retries`。每次这类重试都让评测记录获得全新的分发预算。重新评测会将其清零。
 
-只有评测该提交本身的失败才会消耗系统错误预算。为同一次分发工作的一切（插件调用、它们的操作、评测批次和分离会话）共享一个 `DispatchFaults`，遇到平台故障的一方把故障记在那里：队列拒绝了发布（`QUEUE_UNREACHABLE`）、队列丢失了操作（`OPERATION_LOST`）、评测机缺少平台工具（`PLATFORM_TOOL_MISSING`）、集群中没有接收任务的在线评测机（`NO_CAPABLE_WORKER`）。这些故障都属于交还类（`SystemErrorClass::HandBack`）：平台丢失了这次尝试，它从不成为判定。评测会话在下一个结果到达插件之前以 `Lost` 结束；插件试图定稿该评测记录的写入像过期分发的写入一样被栅栏拒绝；分发经由 `fail_dispatch` 结束，评测记录以新的纪元回到 `Queued`，不消耗任何预算。提交在同一事务中随之变化，因此任何客户端和评测后钩子都不会看到随后被收回的 `SystemError`。
+只有评测该提交本身的失败才会消耗系统错误预算。为同一次分发工作的一切（插件调用、它们的操作、评测批次和分离会话）共享其 `Dispatch` 的 `DispatchFaults`，遇到平台故障的一方把故障记在那里：队列拒绝了发布（`QUEUE_UNREACHABLE`）、队列丢失了操作（`OPERATION_LOST`）、评测机缺少平台工具（`PLATFORM_TOOL_MISSING`）、集群中没有接收任务的在线评测机（`NO_CAPABLE_WORKER`）。这些故障都属于交还类（`SystemErrorClass::HandBack`）：平台丢失了这次尝试，它从不成为判定。评测会话在下一个结果到达插件之前以 `Lost` 结束；插件试图定稿该评测记录的写入像过期分发的写入一样被栅栏拒绝；分发经由 `fail_dispatch` 结束，评测记录以新的纪元回到 `Queued`，不消耗任何预算。提交在同一事务中随之变化，因此任何客户端和评测后钩子都不会看到随后被收回的 `SystemError`。
 
 每次尝试都会重复的失败直接成立（`SystemErrorClass::Stands`）：竞赛插件的拒绝（`PLUGIN_REFUSED`），或本题检查器自身出错（`CHECKER_FAILED`）。后者由检查器插件在其判定上报告（`CheckerVerdict::checker_failure`；标准 testlib 检查器在检查器被信号终止、无法启动或以 testlib 未定义的退出码退出时设置）；宿主将其记为该分发的故障，因此系统错误带上该错误码以及检查器如何出错（与所有系统错误诊断一样，仅工作人员可见）。其他系统错误在预算内重试。
 

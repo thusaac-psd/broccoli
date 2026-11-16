@@ -1,8 +1,10 @@
 //! Structured, capability-gated host functions through which a plugin
 //! writes the judgement or code run it was dispatched with
-//! (`host.submission.*` and `host.code_run.*`). The guest sends structured
-//! input; the host builds every statement (see `services::judging`), fenced on
-//! the unit and its epoch. The statements run on the host function pool, through
+//! (`host.submission.*` and `host.code_run.*`). Every write names its unit
+//! and is refused unless that unit is the one the calling plugin's own call
+//! was dispatched with (`judging::Dispatch::owned`). The guest sends
+//! structured input; the host builds every statement (see
+//! `services::judging`), fenced in the database on the unit and its epoch. The statements run on the host function pool, through
 //! the same argument parsing and statement typing as raw plugin SQL
 //! (`sql::execute_on_pool`).
 
@@ -61,6 +63,50 @@ fn ok_affected(n: u64) -> Result<String, extism::Error> {
     Ok(json!({ "data": n }).to_string())
 }
 
+/// Whether `plugin_id` may write `units` (each row of one write names its
+/// unit): every one must be the unit the running call was dispatched with to
+/// `plugin_id`. `Err` is the envelope the guest gets for a refused write.
+fn owned_write(
+    plugin_id: &str,
+    host_fn: &str,
+    units: impl IntoIterator<Item = judging::DispatchedUnit>,
+) -> Result<Option<judging::Dispatch>, Result<String, extism::Error>> {
+    let mut owned: Option<judging::Dispatch> = None;
+    for unit in units {
+        let checked = match owned.take() {
+            Some(dispatch) => dispatch.admits(plugin_id, unit),
+            None => judging::Dispatch::owned(plugin_id, unit),
+        };
+        match checked {
+            Ok(dispatch) => owned = Some(dispatch),
+            Err(refused) => {
+                tracing::warn!(plugin_id, host_fn, ?unit, %refused, "Refused a plugin write outside its dispatch");
+                return Err(super::sql::HostDbResponse::err(refused.to_string()).to_json_string());
+            }
+        }
+    }
+    Ok(owned)
+}
+
+fn judgement_unit(
+    submission_id: i32,
+    judgement_id: i32,
+    judge_epoch: i32,
+) -> judging::DispatchedUnit {
+    judging::DispatchedUnit::Judgement {
+        submission_id,
+        judgement_id,
+        judge_epoch,
+    }
+}
+
+fn code_run_unit(code_run_id: i32, judge_epoch: i32) -> judging::DispatchedUnit {
+    judging::DispatchedUnit::CodeRun {
+        code_run_id,
+        judge_epoch,
+    }
+}
+
 /// The statement behind a `submission_update` as the host records it
 /// (`judging::as_recorded`), with its bound arguments. `None` when the update
 /// sets nothing.
@@ -76,14 +122,15 @@ host_fn!(pub submission_update(user_data: Arc<(String, DatabaseConnection)>; inp
 
     let update: SubmissionUpdate = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid submission_update input: {e}")))?;
+    let unit = judgement_unit(update.submission_id, update.judgement_id, update.judge_epoch);
+    let dispatch = match owned_write(plugin_id, "submission_update", [unit]) {
+        Ok(dispatch) => dispatch.expect("one unit was checked"),
+        Err(refused) => return refused,
+    };
     // The update as the host records it: the plugin's error code under its
     // id, and a write that would finalize an attempt the platform lost fenced
     // out, as a stale dispatch's is: 0 judgements written.
-    let Some(update) = judging::as_recorded(
-        plugin_id,
-        update,
-        judging::DispatchFaults::of_current_call().and_then(|faults| faults.get()),
-    ) else {
+    let Some(update) = judging::as_recorded(plugin_id, update, dispatch.faults().get()) else {
         return ok_affected(0);
     };
 
@@ -254,6 +301,10 @@ host_fn!(pub submission_insert_results(user_data: Arc<(String, DatabaseConnectio
 
     let results: Vec<TestCaseResultRow> = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid submission_insert_results input: {e}")))?;
+    let units = results.iter().map(|r| judgement_unit(r.submission_id, r.judgement_id, r.judge_epoch));
+    if let Err(refused) = owned_write(plugin_id, "submission_insert_results", units) {
+        return refused;
+    }
     execute_results(db, plugin_id, submission_results_statement(&results))
 });
 
@@ -284,6 +335,10 @@ host_fn!(pub submission_delete_results(user_data: Arc<(String, DatabaseConnectio
 
     let (submission_id, judgement_id, judge_epoch): (i32, i32, i32) = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid submission_delete_results input: {e}")))?;
+    let unit = judgement_unit(submission_id, judgement_id, judge_epoch);
+    if let Err(refused) = owned_write(plugin_id, "submission_delete_results", [unit]) {
+        return refused;
+    }
 
     let (sql, args) = delete_results_statement(submission_id, judgement_id, judge_epoch);
     let args = serde_json::to_string(&args)?;
@@ -326,6 +381,10 @@ host_fn!(pub code_run_update(user_data: Arc<(String, DatabaseConnection)>; input
 
     let update: CodeRunUpdate = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid code_run_update input: {e}")))?;
+    let unit = code_run_unit(update.code_run_id, update.judge_epoch);
+    if let Err(refused) = owned_write(plugin_id, "code_run_update", [unit]) {
+        return refused;
+    }
     // An update that sets nothing is not a fenced-out write.
     let Some((sql, args)) = code_run_update_statement(plugin_id, update) else {
         return ok_affected(1);
@@ -372,6 +431,10 @@ host_fn!(pub code_run_insert_results(user_data: Arc<(String, DatabaseConnection)
 
     let results: Vec<CodeRunResultRow> = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid code_run_insert_results input: {e}")))?;
+    let units = results.iter().map(|r| code_run_unit(r.code_run_id, r.judge_epoch));
+    if let Err(refused) = owned_write(plugin_id, "code_run_insert_results", units) {
+        return refused;
+    }
     execute_results(db, plugin_id, code_run_results_statement(&results))
 });
 
