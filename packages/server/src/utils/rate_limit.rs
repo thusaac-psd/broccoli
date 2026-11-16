@@ -15,7 +15,7 @@ use crate::services::window_quota;
 /// The window every per-user quota counts over.
 const WINDOW: Duration = Duration::from_secs(60);
 
-/// Clarifications one user may post per minute.
+/// Clarifications and replies one participant may post per minute, together.
 pub const CLARIFICATIONS_PER_MINUTE: u64 = 10;
 
 /// Admit one submission or code run of `user_id`, or refuse it with
@@ -34,7 +34,7 @@ pub async fn admit_work(mq: &mq::Mq, user_id: i32, limit_per_minute: u32) -> Res
     .await
 }
 
-/// Admit one clarification posted by `user_id`, or refuse it with
+/// Admit one clarification or reply posted by `user_id`, or refuse it with
 /// `RATE_LIMITED` past [`CLARIFICATIONS_PER_MINUTE`].
 pub async fn admit_clarification(mq: &mq::Mq, user_id: i32) -> Result<(), AppError> {
     window_quota::admit(

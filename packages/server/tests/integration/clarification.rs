@@ -621,6 +621,61 @@ mod clarification_admission {
         assert_eq!(res.body["code"], "RATE_LIMITED");
     }
 
+    /// Replies on a participant's own thread share the per-user window with
+    /// their questions; staff replies are not counted.
+    #[tokio::test]
+    async fn a_participants_replies_share_the_question_quota() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("admin1", "pass1234", "admin")
+            .await;
+        let user = app
+            .create_user_with_role("user1", "pass1234", "contestant")
+            .await;
+        let cid = app.create_contest(&admin, "C1", true, false).await;
+        app.register_for_contest(cid, &user).await;
+
+        let clar_id = app
+            .post_with_token(
+                &routes::contest_clarifications(cid),
+                &question("Question"),
+                &user,
+            )
+            .await
+            .id();
+        let reply = json!({ "content": "More detail", "is_public": false });
+        for i in 0..9 {
+            let res = app
+                .post_with_token(
+                    &routes::contest_clarification_reply(cid, clar_id),
+                    &reply,
+                    &user,
+                )
+                .await;
+            assert_eq!(res.status, 200, "reply {i}: {}", res.text);
+        }
+        let res = app
+            .post_with_token(
+                &routes::contest_clarification_reply(cid, clar_id),
+                &reply,
+                &user,
+            )
+            .await;
+        assert_eq!(res.status, 429, "{}", res.text);
+        assert_eq!(res.body["code"], "RATE_LIMITED");
+
+        for i in 0..11 {
+            let res = app
+                .post_with_token(
+                    &routes::contest_clarification_reply(cid, clar_id),
+                    &reply,
+                    &admin,
+                )
+                .await;
+            assert_eq!(res.status, 200, "staff reply {i}: {}", res.text);
+        }
+    }
+
     /// A direct message goes to an active participant of the contest, never
     /// to a deleted account or a user outside it.
     #[tokio::test]

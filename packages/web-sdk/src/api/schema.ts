@@ -674,7 +674,7 @@ export interface paths {
     put?: never;
     /**
      * Create a clarification
-     * @description Participants can ask questions, at most 10 a minute each. Users with `contest:manage` permission can also create announcements and direct messages to specific participants.
+     * @description Participants can ask questions, at most 10 questions and replies a minute each. Users with `contest:manage` permission can also create announcements and direct messages to specific participants.
      */
     post: operations['createClarification'];
     delete?: never;
@@ -714,7 +714,7 @@ export interface paths {
     put?: never;
     /**
      * Reply to a clarification
-     * @description Users with `contest:manage` permission, the question author, or the DM recipient can reply. Multiple replies are allowed. When an admin sets `is_public`, the reply and its question become visible to every participant; `is_public` from anyone else is ignored.
+     * @description Users with `contest:manage` permission, the question author, or the DM recipient can reply. Multiple replies are allowed; a participant's replies count toward the same 10 a minute as their questions. When an admin sets `is_public`, the reply and its question become visible to every participant; `is_public` from anyone else is ignored.
      */
     post: operations['replyClarification'];
     delete?: never;
@@ -7187,7 +7187,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Too many clarifications from this user in the last minute (RATE_LIMITED); carries Retry-After */
+      /** @description Too many clarifications and replies from this user in the last minute (RATE_LIMITED); carries Retry-After */
       429: {
         headers: {
           [name: string]: unknown;
@@ -7317,6 +7317,15 @@ export interface operations {
       };
       /** @description Clarification not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Too many clarifications and replies from this user in the last minute (RATE_LIMITED); carries Retry-After. Staff replies are not counted. */
+      429: {
         headers: {
           [name: string]: unknown;
         };
