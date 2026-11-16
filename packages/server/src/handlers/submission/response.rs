@@ -719,6 +719,10 @@ mod result_page_tests {
 mod judgement_history_tests {
     use super::*;
 
+    fn at() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap()
+    }
+
     fn submission_row(status: SubmissionStatus) -> submission::Model {
         submission::Model {
             id: 1,
@@ -741,13 +745,13 @@ mod judgement_history_tests {
             max_judge_epoch: 2,
             target_worker_id: None,
             system_error_retries: 0,
-            created_at: chrono::Utc::now(),
+            created_at: at(),
             judged_at: None,
         }
     }
 
     fn system_error(is_current: bool, error_stands: bool) -> submission_judgement::Model {
-        let now = chrono::Utc::now();
+        let now = at();
         submission_judgement::Model {
             id: 1,
             submission_id: 1,
