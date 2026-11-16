@@ -209,7 +209,7 @@ pub async fn login(
     tag = "Auth",
     operation_id = "refreshToken",
     summary = "Refresh access token",
-    description = "Exchanges a valid HttpOnly refresh token cookie for a new short-lived access token and rotates the cookie. Fails if the user is banned or the token is expired/revoked. A token presented again within 30 seconds of its rotation (a concurrent refresh, or a retry after a lost response) is answered once with a new token pair, provided the token that replaced it has not been used yet (a further replay gets TOKEN_INVALID); presented later, or after its replacement was used, it revokes every refresh token of the user.",
+    description = "Exchanges a valid HttpOnly refresh token cookie for a new short-lived access token and rotates the cookie. Fails if the user is banned or the token is expired/revoked. A token presented again within 30 seconds of its rotation (a concurrent refresh, or a retry after a lost response) is answered once with a new token pair, provided the token that replaced it has not been used yet (a further replay gets TOKEN_INVALID); presented later, or after its replacement was used, it is taken as stolen and ends the sign-in session it belongs to: every refresh token of that session is deleted and its access tokens are refused from then on. The user's other sessions stay signed in.",
     responses(
         (status = 200, description = "Token refreshed", body = LoginResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
