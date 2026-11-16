@@ -239,15 +239,8 @@ mod tests {
     /// just on the fresh database every other test here gets.
     ///
     /// `timer_schedule` relies on `INSERT ... ON CONFLICT (plugin_id, key)`,
-    /// which needs a unique index on those columns. SeaORM's schema `sync()`
-    /// runs on every boot and DROPS any existing unique index whose column set
-    /// the entity does not declare. So an index created only by a migration
-    /// (which runs once) survived the first boot and vanished on the second:
-    /// every subsequent `timer_schedule` failed with "there is no unique or
-    /// exclusion constraint matching the ON CONFLICT specification", and every
-    /// codelink-bracket `/start` returned 500. Found on a real stack under
-    /// load, after its server had been restarted - no fresh-database test
-    /// could ever see it. The second `init_db` below is the restart.
+    /// which needs the unique index on those columns to survive every boot.
+    /// The second `init_db` below is the restart.
     #[tokio::test]
     async fn reschedule_still_upserts_after_a_server_restart() {
         let db = test_db().await;

@@ -6,6 +6,7 @@ mod additional_file;
 mod attachment;
 mod auth;
 mod bootstrap_admin;
+mod bundle;
 mod claim_in_flight;
 mod claim_wake;
 mod clarification;

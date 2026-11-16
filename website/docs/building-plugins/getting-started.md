@@ -200,6 +200,26 @@ Because the manifest has a `[server]` section, the CLI runs
 an optimized module. If the manifest has a `[web]` section, the CLI also runs the
 frontend build.
 
+## Build without internet access
+
+A release bundle carries the SDKs in `sdk/`: `server-sdk/`, `broccoli-types/`
+and a built `web-sdk/`, laid out like a checkout's `packages/`, plus `vendor/`,
+every crates.io crate a scaffolded backend needs. Point the scaffold at it,
+then tell cargo to read crates from `vendor/`:
+
+```bash
+broccoli-dev plugin new my-plugin --sdk <bundle>/sdk
+mkdir -p my-plugin/.cargo
+sed 's|^directory = "vendor"|directory = "<bundle>/sdk/vendor"|' \
+  <bundle>/sdk/.cargo/config.toml > my-plugin/.cargo/config.toml
+CARGO_NET_OFFLINE=true broccoli-dev plugin build my-plugin --install
+```
+
+Write `<bundle>` as an absolute path. The `wasm32-wasip1` target must already
+be installed for the toolchain. A frontend's build tools (`tsdown`,
+`tailwindcss`, `typescript`) still come from npm, so build a frontend where a
+registry or a LAN mirror is reachable.
+
 ## Iterate against a running server
 
 Sign in once, then watch the directory. The CLI rebuilds on every change and

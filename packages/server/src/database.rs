@@ -297,7 +297,7 @@ pub async fn connect_main_pool(
 }
 
 /// Session-level advisory lock key that serializes boot-time schema work
-/// (schema sync, migrations, seeding) across every
+/// (migrations, seeding) across every
 /// server booting against the same database. The value is arbitrary but fixed
 /// ("broccoli" in ASCII); it only has to be unique among this database's
 /// advisory locks.
@@ -306,8 +306,8 @@ pub const BOOT_LOCK_KEY: i64 = 0x6272_6f63_636f_6c69;
 /// One dedicated database session holding [`BOOT_LOCK_KEY`] for the duration
 /// of boot-time schema work.
 ///
-/// Servers booting together on a fresh database therefore run schema sync,
-/// migrations and check-then-insert seeding one at a time, instead of racing
+/// Servers booting together therefore run migrations and check-then-insert
+/// seeding one at a time, instead of racing
 /// each other's DDL and inserting duplicate seed rows.
 ///
 /// The session is a single never-recycled connection (so the session-level
@@ -369,21 +369,18 @@ impl BootSession {
         &self.db
     }
 
-    /// Schema sync, versioned migrations, the claim notification trigger and
-    /// the plugin config version stamp.
+    /// Apply this build's pending migrations. Every booting server takes the
+    /// boot lock first, so one applies them while the others wait, then find
+    /// nothing pending.
     pub async fn migrate(&self) -> Result<(), DbErr> {
-        let db = &self.db;
-        crate::migration::refuse_foreign_schema(db).await?;
-        // Create the core tables from the entity definitions, then apply the
-        // schema they cannot express (see `crate::migration`).
-        let schema = db.as_sea_orm();
-        schema
-            .get_schema_registry("server::entity::*")
-            .sync(schema)
-            .await?;
-        Migrator::up(schema, None).await?;
-        crate::services::judging::install_claim_notify(db).await?;
-        crate::services::plugin_config_cache::install_plugin_config_epoch(db).await
+        self.migrate_with::<Migrator>().await
+    }
+
+    /// [`Self::migrate`] with the migrations `M` defines: a test runs a build
+    /// with more (or fewer) migrations than this one.
+    pub(crate) async fn migrate_with<M: MigratorTrait>(&self) -> Result<(), DbErr> {
+        crate::migration::check_applied_versions::<M>(&self.db).await?;
+        M::up(self.db.as_sea_orm(), None).await
     }
 
     /// Release the lock and close the session. Dropping a `BootSession`
@@ -701,80 +698,128 @@ mod tests {
         assert!(row.try_get::<bool>("", "idx").unwrap());
     }
 
-    /// A database that records a migration this build does not define is
-    /// refused before schema sync touches it.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn boot_refuses_a_database_from_another_build_untouched() {
+    async fn relation_count(db: &DatabaseConnection) -> i64 {
+        db.query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Postgres,
+            "SELECT COUNT(*)::bigint AS n FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = 'public' AND c.relkind IN ('r', 'S')",
+        ))
+        .await
+        .expect("count relations")
+        .expect("row")
+        .try_get::<i64>("", "n")
+        .unwrap()
+    }
+
+    /// A build one migration ahead of this one: the baseline plus a migration
+    /// that records each time it runs.
+    struct NewerBuild;
+
+    struct AddProbe;
+
+    impl sea_orm_migration::MigrationName for AddProbe {
+        fn name(&self) -> &str {
+            "m0002_upgrade_probe"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl sea_orm_migration::MigrationTrait for AddProbe {
+        async fn up(&self, manager: &sea_orm_migration::SchemaManager) -> Result<(), DbErr> {
+            manager
+                .get_connection()
+                .execute_unprepared(
+                    "CREATE TABLE IF NOT EXISTS upgrade_probe (applied_at timestamptz); \
+                     INSERT INTO upgrade_probe VALUES (now())",
+                )
+                .await
+                .map(|_| ())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigratorTrait for NewerBuild {
+        fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
+            let mut migrations = Migrator::migrations();
+            migrations.push(Box::new(AddProbe));
+            migrations
+        }
+    }
+
+    /// Servers of a newer build booting together on a database an older build
+    /// migrated: exactly one applies the new migration, under the boot lock,
+    /// and every boot succeeds. The older build then refuses the database,
+    /// naming the version it does not know and its own.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_newer_build_applies_its_pending_migrations_once_across_replicas() {
         let (_c, url) = fresh_postgres().await;
+        boot_like_the_server(&url)
+            .await
+            .expect("the older build boots");
+
+        let boots: Vec<_> = (0..4)
+            .map(|_| {
+                let url = url.clone();
+                tokio::spawn(async move {
+                    let boot = BootSession::acquire(&url).await?;
+                    boot.migrate_with::<NewerBuild>().await?;
+                    boot.release().await
+                })
+            })
+            .collect();
+        for b in boots {
+            b.await.expect("join").expect("every newer boot succeeds");
+        }
         let boot = BootSession::acquire(&url).await.expect("acquire");
-        boot.conn()
-            .execute_unprepared(
-                "CREATE TABLE seaql_migrations (version varchar PRIMARY KEY, applied_at bigint NOT NULL); \
-                 INSERT INTO seaql_migrations VALUES ('m0099_from_another_build', 0)",
-            )
-            .await
-            .expect("record a foreign migration");
-        let err = boot
-            .migrate()
-            .await
-            .expect_err("a foreign migration must refuse boot");
-        let msg = err.to_string();
-        assert!(msg.contains("m0099_from_another_build"), "{msg}");
-        assert!(msg.contains("empty database"), "{msg}");
-        let tables = boot
+        let probe = boot
             .conn()
             .query_one_raw(sea_orm::Statement::from_string(
                 sea_orm::DatabaseBackend::Postgres,
-                "SELECT COUNT(*)::bigint AS n FROM pg_tables WHERE schemaname = 'public'",
+                "SELECT (SELECT COUNT(*) FROM upgrade_probe)::bigint AS runs, \
+                 (SELECT COUNT(*) FROM seaql_migrations)::bigint AS applied",
             ))
             .await
-            .expect("count tables")
-            .expect("row")
-            .try_get::<i64>("", "n")
-            .unwrap();
-        assert_eq!(tables, 1, "only seaql_migrations exists; sync never ran");
+            .expect("query")
+            .expect("row");
+        assert_eq!(probe.try_get::<i64>("", "runs").unwrap(), 1);
+        assert_eq!(probe.try_get::<i64>("", "applied").unwrap(), 2);
+
+        let relations = relation_count(boot.conn()).await;
+        let msg = boot
+            .migrate()
+            .await
+            .expect_err("the older build refuses a database a newer one migrated")
+            .to_string();
+        assert!(msg.contains("m0002_upgrade_probe"), "{msg}");
+        assert!(msg.contains("m0001_baseline"), "{msg}");
+        assert!(!msg.contains("drop"), "{msg}");
+        assert_eq!(relation_count(boot.conn()).await, relations);
         boot.release().await.expect("release");
     }
 
-    /// A database migrated by this build's migration names but a different
-    /// schema (a column default sync cannot add, say) is refused before
-    /// anything changes, as is one from before schemas were stamped.
+    /// A database holding tables but no migration record is not a Broccoli
+    /// database (or predates migrations): boot refuses it untouched.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn boot_refuses_a_database_whose_schema_stamp_differs() {
+    async fn boot_refuses_a_foreign_database_untouched() {
         let (_c, url) = fresh_postgres().await;
         let boot = BootSession::acquire(&url).await.expect("acquire");
-        boot.migrate().await.expect("first boot");
-        let stamp_table = crate::migration::STAMP_TABLE;
         boot.conn()
-            .execute_unprepared(&format!(
-                "UPDATE {stamp_table} SET stamp = 'from-another-build'"
-            ))
+            .execute_unprepared("CREATE TABLE someone_elses (id int)")
             .await
-            .expect("restamp");
+            .expect("foreign table");
         let msg = boot
             .migrate()
             .await
-            .expect_err("a foreign stamp must refuse boot")
+            .expect_err("a foreign database must refuse boot")
             .to_string();
-        assert!(msg.contains("from-another-build"), "{msg}");
-        assert!(msg.contains("empty database"), "{msg}");
-
-        boot.conn()
-            .execute_unprepared(&format!("DROP TABLE {stamp_table}"))
-            .await
-            .expect("unstamp");
-        let msg = boot
-            .migrate()
-            .await
-            .expect_err("no stamp must refuse boot")
-            .to_string();
-        assert!(msg.contains("no schema stamp"), "{msg}");
+        assert!(msg.contains("no Broccoli migration record"), "{msg}");
+        assert_eq!(relation_count(boot.conn()).await, 1, "nothing was created");
         boot.release().await.expect("release");
     }
 
-    /// A reboot leaves every index exactly as the first boot built it: schema
-    /// sync neither drops the migration's partial unique indexes nor rebuilds
-    /// anything, so the invariants they enforce never lapse.
+    /// A reboot leaves every index exactly as the first boot built it, the
+    /// baseline's partial unique indexes included, so the invariants they
+    /// enforce never lapse.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reboot_keeps_every_index() {
         let (_c, url) = fresh_postgres().await;

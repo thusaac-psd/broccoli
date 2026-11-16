@@ -22,12 +22,6 @@ pub struct ResolveClarificationRequest {
 
 #[derive(Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
-pub struct ToggleReplyPublicQuery {
-    pub include_question: Option<bool>,
-}
-
-#[derive(Deserialize, utoipa::IntoParams)]
-#[into_params(parameter_in = Query)]
 pub struct ClarificationListQuery {
     #[param(example = "question")]
     pub r#type: Option<String>,

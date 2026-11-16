@@ -162,3 +162,6 @@ upstream is on its own machine.
   CPU governor (see `docs/operator-runbook.md`).
 - `contest/`: offline contest helpers: problem export/import and worker bring-up
   (see `contest/README.md`).
+- `sdk/`: the plugin SDKs and the crates.io crates a plugin backend needs, for
+  `broccoli-dev plugin new --sdk sdk` with no internet (see the plugin
+  getting-started guide, "Build without internet access").

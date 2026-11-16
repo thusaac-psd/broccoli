@@ -220,10 +220,16 @@ binaries warn about every key they do not read.
   API contracts.
 - Prefer permission helpers instead of checking roles directly.
 - Think about transaction boundaries before editing write paths.
-- The server only boots on an empty database or one this build created:
-  `build.rs` stamps the schema sources (entities, migrations, boot-time trigger
-  DDL) and boot refuses any other stamp. Keep schema DDL in those files so the
-  stamp covers it.
+- The schema changes only through versioned forward migrations in
+  `packages/server/src/migration`: a schema change is a new `mNNNN_<what>`
+  migration appended to `Migrator::migrations`, never an edit to a shipped one.
+  Boot applies pending migrations under the boot lock and refuses a database a
+  newer build migrated. The test
+  `migration::tests::the_migrations_create_the_schema_the_code_expects` fails
+  when the entities or the code-owned trigger DDL disagree with the migrated
+  schema. Migrations that old replicas can run against (adding a table, a
+  nullable or defaulted column, an index) ship in one release; anything else
+  follows expand/contract (see `release/docs/upgrade.md`).
 - When changing plugin execution behavior, check both manifest-level permissions
   and host-side registration/resolution.
 

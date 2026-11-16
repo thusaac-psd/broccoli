@@ -255,29 +255,40 @@ cp compose/.env.infra.example compose/.env.infra
 cp compose/.env.server.example compose/.env.server
 ```
 
-Then edit both files and fill in real values, at minimum:
+Then edit both files and replace every `change-me` value:
 
 - Postgres and Redis passwords (`POSTGRES_PASSWORD`, the app role's
   `BROCCOLI_DB_PASSWORD` and `REDIS_PASSWORD` in `.env.infra`, the last two
   mirrored into `BROCCOLI__DATABASE__URL` / `BROCCOLI__MQ__URL` in
   `.env.server`).
-- `BROCCOLI__AUTH__JWT_SECRET` (at least 32 characters).
+- The hosts in `.env.server`. The server runs in the same Compose project as the
+  infra services, so it reaches them by their service names:
+  `postgres://broccoli:<BROCCOLI_DB_PASSWORD>@db:5432/broccoli`,
+  `redis://:<REDIS_PASSWORD>@redis:6379` and `http://seaweedfs:8333` for
+  `BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT` (in both files). Percent-encode
+  a password that holds `@`, `:`, `/`, `?`, `#` or `%`. Only a server that joins
+  another node's infra uses that node's LAN address (see "Multi-server
+  topology").
+- `BROCCOLI__AUTH__JWT_SECRET` (at least 32 characters, the same in both files).
 - SeaweedFS/S3 credentials (`BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY` /
-  `..._SECRET_KEY`, and the endpoint if it differs from the compose default).
+  `..._SECRET_KEY`, the same in both files).
 - `BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD` for the initial admin account.
-- `BROCCOLI_SERVER_IMAGE`, pointed at the image tag that was baked and loaded
-  into this bundle.
+
+`BROCCOLI_SERVER_IMAGE` already names the image tag baked into this bundle.
+`setup.sh` (§4) writes all of this for you.
 
 The server also needs the server-only sidecar delivered to it: place
 `broccoli-airgap-<V>.server-secret/` (the CA + leaf private keys minted at
 assembly) next to the bundle directory as its sibling, or point at it explicitly
 with `--server-secret DIR`.
 
-`install.sh --role server` checks for `compose/.env.infra` and
-`compose/.env.server` **before** doing any other work (loading images, issuing
-the TLS leaf), and also fails fast if the server-secret directory is missing —
-it will not silently bring up containers with empty or placeholder config. Once
-the env files and the sidecar are in place, from the same bundle directory:
+`install.sh --role server` checks `compose/.env.infra` and `compose/.env.server`
+**before** doing any other work (loading images, issuing the TLS leaf): it
+refuses a missing file, a required secret that is empty or still a `change-me`
+placeholder, and a database, Redis or S3 URL that is not well-formed, and lists
+every such setting. It also fails fast if the server-secret directory is
+missing. The worker role checks `.env.worker` the same way. Once the env files
+and the sidecar are in place, from the same bundle directory:
 
 ```bash
 ./install.sh --role server --bundle . --lan-host <host-or-ip>
@@ -563,13 +574,25 @@ guaranteed, since no private key is ever part of the bundle tree they receive.
 A new bundle version (a fresh `build-bundle.sh --version <V+1>` on the staging
 box) rolls out **in place** — the postgres, redis, and SeaweedFS data live in
 named Docker volumes that an image swap never touches, so every contest,
-problem, submission, and uploaded file survives the upgrade.
+problem, submission, and uploaded file survives the upgrade. The new server
+applies the bundle's database migrations when it starts, under a lock, so
+servers starting together apply them once ([upgrade.md](upgrade.md), "How the
+Database Schema Upgrades").
 
 On the **server** host:
 
-1. Transfer and unpack the new bundle beside the old one (step 3). Loading its
+1. Back up the database first: a migration has no undo, and the dump is the way
+   back ([upgrade.md](upgrade.md), "Back Up Before Upgrading"). From the old
+   bundle's `compose/`:
+
+   ```bash
+   docker compose -p compose --env-file .env.infra -f docker-compose.infra.yaml.template \
+     exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" -Fc "$POSTGRES_DB"' > broccoli-before-<V+1>.dump
+   ```
+
+2. Transfer and unpack the new bundle beside the old one (step 3). Loading its
    images does not disturb the running stack.
-2. Carry your **existing** on-host config into the new bundle so secrets are
+3. Carry your **existing** on-host config into the new bundle so secrets are
    never regenerated: copy `compose/.env.infra` and `compose/.env.server` from
    the old bundle into the new bundle's `compose/`, and deliver the same
    `broccoli-airgap-<oldV>.server-secret/` sidecar as the new bundle's
@@ -578,14 +601,20 @@ On the **server** host:
    tags, but your carried-over `.env.server` still names the old one, so set
    `BROCCOLI_SERVER_IMAGE` (and, on workers, `BROCCOLI_WORKER_IMAGE`) to the new
    version — it must match `bundle.json`'s `version`.
-3. Re-run `./install.sh --role server --lan-host <host-or-ip> --bundle .` from
+4. Re-run `./install.sh --role server --lan-host <host-or-ip> --bundle .` from
    the new bundle. It `docker load`s the new images, reuses your secrets and
    leaf (no re-issue), and recreates only the containers whose image changed;
    the data volumes are reattached untouched.
 
 Repeat on each **worker** host with `--role worker` (step 6). Server and worker
 may run mixed versions briefly during a rolling upgrade — a new server judges
-correctly against an as-yet-un-upgraded worker.
+correctly against an as-yet-un-upgraded worker. With several servers, upgrade
+them one at a time; once one runs the new version, do not restart a server still
+on the old one, which refuses a database a newer build migrated
+([upgrade.md](upgrade.md), "Which Upgrades Can Roll").
+
+To roll back a server after its migrations ran, stop the stack, restore the dump
+and re-run the old bundle's `install.sh` ([upgrade.md](upgrade.md), "Rollback").
 
 Confirm the swap took effect. The image carries its version, source commit and
 build time in OCI labels — the only offline provenance signal, since there is no

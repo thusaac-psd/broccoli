@@ -58,6 +58,12 @@ fn main() -> anyhow::Result<()> {
         .build()
         .context("Failed to build tokio runtime")?;
 
+    // `bundle export|import`: see `server::bundle::cli`.
+    if args.get(1).map(String::as_str) == Some("bundle") {
+        let code = tokio_runtime.block_on(server::bundle::cli::run(&app_config, &args[2..]));
+        std::process::exit(code);
+    }
+
     if std::env::args().any(|a| a == "--healthcheck") {
         let exit_code = tokio_runtime.block_on(run_healthcheck(&app_config));
         std::process::exit(exit_code);

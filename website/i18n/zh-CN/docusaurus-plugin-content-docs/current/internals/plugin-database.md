@@ -20,7 +20,7 @@ sidebar_position: 6
 | 宿主序列、模式 `public` | 无；`public` 上的 `CREATE` 也已从 `PUBLIC` 收回 |
 | 其他插件的模式 | 无 |
 
-可读关系是不含机密的比赛数据：比赛、题目、测试点、提交、评测、结果、代码运行、答疑和题目文件。不可读的有：密码哈希与凭据时间戳、刷新令牌、设备码、幂等键及其响应体、插件登录密钥、blob 存储、角色与权限、插件注册表、每个插件由宿主保管的状态（`plugin_config`、`plugin_storage`、`plugin_timer`、`plugin_replica`、`submission_feedback`）、死信队列，以及模式戳和迁移记录。
+可读关系是不含机密的比赛数据：比赛、题目、测试点、提交、评测、结果、代码运行、答疑和题目文件。不可读的有：密码哈希与凭据时间戳、刷新令牌、设备码、幂等键及其响应体、插件登录密钥、blob 存储、角色与权限、插件注册表、每个插件由宿主保管的状态（`plugin_config`、`plugin_storage`、`plugin_timer`、`plugin_replica`、`submission_feedback`）、死信队列，以及迁移记录。
 
 对宿主状态的写入经由宿主函数完成：评测与结果用 `host.submission.*` 和 `host.code_run.*`，此外还有 `host.storage.*`、`config:read`/`config:write`、`host.timer.*` 以及提交反馈函数。随仓库发布的插件都不直接写宿主表。
 
@@ -63,7 +63,7 @@ read = ["submission.files"]
 5. 设置该角色的 `search_path`；
 6. 收回所有内容列，再授予所声明的列。
 
-行锁使开通同一插件的多个副本串行执行，且任何插件都无法获取它：`plugin_login_secret` 不向插件授予任何权限。每个副本读回首个写入者的密码，因此它们都以同一密码连接。这些 DDL 属于模式戳的输入（`packages/server/build.rs` 中的 `SCHEMA_SOURCES`）。
+行锁使开通同一插件的多个副本串行执行，且任何插件都无法获取它：`plugin_login_secret` 不向插件授予任何权限。每个副本读回首个写入者的密码，因此它们都以同一密码连接。这些 DDL 只创建插件自己的角色和 schema，从不创建宿主对象，因此无需迁移；宿主数据库结构只通过 `packages/server/src/migration` 中的迁移改变。
 
 应用角色需要 `LOGIN` 和 `CREATEROLE`，拥有数据库，且不是超级用户；运维配置参考中写明了这一点，每个安装程序也都这样创建它。缺少 `CREATEROLE` 时，m0001 会跳过组角色并记录警告。开通随之失败：插件中执行 SQL 的调用以“暂不可用”失败，调用方以 503 应答；失败只以 error 级别记录一次，下一次尝试要等待 30 秒（`PROVISION_BACKOFF`）。
 

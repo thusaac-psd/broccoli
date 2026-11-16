@@ -99,7 +99,7 @@ impl PgSession {
     }
 
     /// A session that sends no statement timeout, for known long statements
-    /// such as schema sync, migrations and boot backfills. Callers that must
+    /// such as migrations and boot backfills. Callers that must
     /// also override a role-level default run `SET statement_timeout = 0`
     /// themselves (see the server's boot session).
     pub fn unbounded(application_name: &'static str) -> Self {

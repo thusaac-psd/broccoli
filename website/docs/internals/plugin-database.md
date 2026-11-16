@@ -33,7 +33,7 @@ credential timestamp, refresh tokens, device codes, idempotency keys and
 bodies, the plugin login secrets, the blob store, roles and permissions, the
 plugin registry, every plugin's host-held state (`plugin_config`,
 `plugin_storage`, `plugin_timer`, `plugin_replica`, `submission_feedback`), the
-DLQ, and the schema stamp and migration record.
+DLQ, and the migration record.
 
 Writes to host state go through host functions: `host.submission.*` and
 `host.code_run.*` for judgements and results, `host.storage.*`,
@@ -115,8 +115,9 @@ host function pool, as the app role, in one transaction:
 The row lock serializes replicas provisioning the same plugin, and no plugin
 can take it: `plugin_login_secret` grants nothing to plugins. Every replica
 reads back the first writer's password, so all of them connect with the same
-one. The DDL is part of the schema stamp (`SCHEMA_SOURCES` in
-`packages/server/build.rs`).
+one. The DDL creates only the plugin's own role and schema, never a host
+object, so it ships without a migration; the host schema changes only through
+the migrations in `packages/server/src/migration`.
 
 The app role needs `LOGIN` and `CREATEROLE`, owns the database, and is not a
 superuser; the operator configuration reference states this once, and every

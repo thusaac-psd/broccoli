@@ -5781,6 +5781,7 @@ dependencies = [
  "broccoli-api-types",
  "broccoli-server-sdk",
  "chrono",
+ "clap",
  "common",
  "config",
  "crossbeam",

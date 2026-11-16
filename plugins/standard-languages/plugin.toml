@@ -1,6 +1,6 @@
 name = "standard-languages"
 version = "0.1.0"
-description = "Language resolution for standard competitive programming languages (C, C++, Python, Java)"
+description = "Language resolution for the toolchains the worker images ship: C, C++, Python 3, Java, Kotlin, Rust, Go, Pascal and JavaScript"
 
 [server]
 entry = "standard_languages.wasm"
@@ -85,6 +85,80 @@ title = "Compile Flags"
 default = []
 items = { type = "string" }
 
+[config.compilation.properties.kotlin]
+type = "object"
+title = "Kotlin"
+
+[config.compilation.properties.kotlin.properties.compiler]
+type = "string"
+title = "Compiler Path"
+default = "/usr/local/bin/kotlinc"
+
+[config.compilation.properties.kotlin.properties.runner]
+type = "string"
+title = "Runtime Path"
+default = "/usr/bin/java"
+
+[config.compilation.properties.kotlin.properties.flags]
+type = "array"
+title = "Compile Flags"
+default = []
+items = { type = "string" }
+
+[config.compilation.properties.rust]
+type = "object"
+title = "Rust"
+
+[config.compilation.properties.rust.properties.compiler]
+type = "string"
+title = "Compiler Path"
+default = "/usr/bin/rustc"
+
+[config.compilation.properties.rust.properties.flags]
+type = "array"
+title = "Compile Flags"
+default = ["-O"]
+items = { type = "string" }
+
+[config.compilation.properties.go]
+type = "object"
+title = "Go"
+
+[config.compilation.properties.go.properties.compiler]
+type = "string"
+title = "Compiler Path"
+default = "/usr/bin/go"
+
+[config.compilation.properties.go.properties.flags]
+type = "array"
+title = "Build Flags"
+default = []
+items = { type = "string" }
+
+[config.compilation.properties.pascal]
+type = "object"
+title = "Pascal"
+
+[config.compilation.properties.pascal.properties.compiler]
+type = "string"
+title = "Compiler Path"
+default = "/usr/bin/fpc"
+
+[config.compilation.properties.pascal.properties.flags]
+type = "array"
+title = "Compile Flags"
+default = ["-O2"]
+items = { type = "string" }
+
+[config.compilation.properties.javascript]
+type = "object"
+title = "JavaScript (Node.js)"
+
+[config.compilation.properties.javascript.properties.interpreter]
+type = "string"
+title = "Interpreter Path"
+default = "/usr/bin/node"
+
 [config.entry-points]
 description = "Per-language entry point and extra compile flag overrides"
 scopes = ["problem"]
@@ -145,3 +219,76 @@ title = "Extra Compile Flags"
 description = "Additional flags appended to the compile command."
 default = []
 items = { type = "string" }
+
+[config.entry-points.properties.kotlin]
+type = "object"
+title = "Kotlin"
+
+[config.entry-points.properties.kotlin.properties.entry_point]
+type = "string"
+title = "Entry Point"
+description = "File containing the program entry. Leave empty to use the default."
+
+[config.entry-points.properties.kotlin.properties.extra_compile_flags]
+type = "array"
+title = "Extra Compile Flags"
+description = "Additional flags appended to the compile command."
+default = []
+items = { type = "string" }
+
+[config.entry-points.properties.rust]
+type = "object"
+title = "Rust"
+
+[config.entry-points.properties.rust.properties.entry_point]
+type = "string"
+title = "Entry Point"
+description = "File containing the program entry. Leave empty to use the default."
+
+[config.entry-points.properties.rust.properties.extra_compile_flags]
+type = "array"
+title = "Extra Compile Flags"
+description = "Additional flags appended to the compile command."
+default = []
+items = { type = "string" }
+
+[config.entry-points.properties.go]
+type = "object"
+title = "Go"
+
+[config.entry-points.properties.go.properties.entry_point]
+type = "string"
+title = "Entry Point"
+description = "File containing the program entry. Leave empty to use the default."
+
+[config.entry-points.properties.go.properties.extra_compile_flags]
+type = "array"
+title = "Extra Compile Flags"
+description = "Additional flags appended to the compile command."
+default = []
+items = { type = "string" }
+
+[config.entry-points.properties.pascal]
+type = "object"
+title = "Pascal"
+
+[config.entry-points.properties.pascal.properties.entry_point]
+type = "string"
+title = "Entry Point"
+description = "File containing the program entry. Leave empty to use the default."
+
+[config.entry-points.properties.pascal.properties.extra_compile_flags]
+type = "array"
+title = "Extra Compile Flags"
+description = "Additional flags appended to the compile command."
+default = []
+items = { type = "string" }
+
+[config.entry-points.properties.javascript]
+type = "object"
+title = "JavaScript (Node.js)"
+
+[config.entry-points.properties.javascript.properties.entry_point]
+type = "string"
+title = "Entry Point"
+description = "File to run. Leave empty to use the default."

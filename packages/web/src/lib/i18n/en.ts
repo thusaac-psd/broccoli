@@ -1067,7 +1067,6 @@ export const en: Record<string, string> = {
     'This message will only be visible to the selected participant.',
   'clarification.makePublic': 'Make public',
   'clarification.makePrivate': 'Make private',
-  'clarification.publishReplyOnly': 'Publish reply only',
   'clarification.publishWithQuestion': 'Publish with question',
   'clarification.madePublic': 'Reply is now visible to all.',
   'clarification.madePrivate': 'Reply is now private.',

@@ -10,9 +10,10 @@ grep -q 'mint-ca.sh'      "$bb" || { echo "FAIL: does not mint CA"; exit 1; }
 grep -q 'manifest_generate' "$bb" || { echo "FAIL: does not generate manifest"; exit 1; }
 grep -q 'bundle.json'     "$bb" || { echo "FAIL: does not write bundle.json"; exit 1; }
 
-# --skip-images assembles a tree with no docker (CI-safe)
+# --skip-images --skip-sdk assembles a tree with no docker or network (CI-safe)
+grep -q 'stage-sdk.sh" "$B"' "$bb" || { echo "FAIL: does not stage the plugin SDKs"; exit 1; }
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
-bash "$bb" --version testv --output "$T" --skip-images >/dev/null
+bash "$bb" --version testv --output "$T" --skip-images --skip-sdk >/dev/null
 b="$T/broccoli-airgap-testv"
 for p in bundle.json manifest.sha256 ca/root.crt caddy/Caddyfile.airgap \
          compose/docker-compose.gateway-airgap.yaml.template compose/docker-compose.server-airgap.yaml.template \

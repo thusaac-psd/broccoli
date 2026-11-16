@@ -108,11 +108,7 @@ pub async fn create_blob_store(
         "object_storage" => return Err(StorageError::Backend(
             "storage.backend is 'object_storage' but the binary was compiled without the 'object-storage' feature".into(),
         )),
-        "database" => {
-            DatabaseBlobStore::ensure_table(&db).await?;
-            let store = DatabaseBlobStore::new(db, config.max_blob_size);
-            Arc::new(store)
-        }
+        "database" => Arc::new(DatabaseBlobStore::new(db, config.max_blob_size)),
         other => return Err(StorageError::Backend(format!(
             "Unknown storage backend '{other}'. Valid values: database, filesystem, object_storage"
         )))

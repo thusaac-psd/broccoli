@@ -1,0 +1,4 @@
+# Offline .deb sets the stage-*.sh scripts write; build-native-bundle.sh ships them.
+/toolchain/
+/postgres/
+/redis/

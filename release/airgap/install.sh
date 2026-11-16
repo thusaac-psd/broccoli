@@ -113,6 +113,26 @@ dry_run_plan() {
   exit 0
 }
 
+# require_role_env FILE... -- ROLE...: refuse to deploy unless the env files
+# under compose/ give every ROLE the secrets and URLs it needs (see
+# env_require_role), so an unchanged .env.*.example never reaches a container.
+require_role_env() {
+  local files=() role
+  while [ "$1" != -- ]; do files+=("$1"); shift; done
+  shift
+  (
+    set -a
+    for f in "${files[@]}"; do
+      # shellcheck disable=SC1090
+      . "$BUNDLE/compose/$f"
+    done
+    set +a
+    ok=0
+    for role in "$@"; do env_require_role "$role" || ok=1; done
+    exit "$ok"
+  ) || { echo "fix ${files[*]} in $BUNDLE/compose (setup.sh writes them; see release/docs/airgap-deployment.md)" >&2; exit 2; }
+}
+
 case "$ROLE" in
   server)
     # Secrets are operator-supplied: the bundle ships .env.*.example only.
@@ -131,6 +151,7 @@ case "$ROLE" in
     for f in "${env_files[@]}"; do
       [ -f "$BUNDLE/compose/$f" ] || { echo "missing $BUNDLE/compose/$f — run setup.sh --role server, or copy $f.example to $f and fill in secrets (see release/docs/airgap-deployment.md)" >&2; exit 2; }
     done
+    require_role_env "${env_files[@]}" -- $([ -n "$INFRA_HOST" ] || echo infra) server
     # The server stack keeps the project name it has always had (Compose's
     # default for this directory), so existing installs keep their volumes.
     # Pinned rather than defaulted so a COMPOSE_PROJECT_NAME in .env.infra or
@@ -237,6 +258,11 @@ EOF
     )
     ;;
   worker)
+    # Bring the worker up against the server's LAN infra. .env.worker is
+    # rendered by setup.sh (secrets from the cluster-secret sidecar).
+    worker_env="$BUNDLE/compose/.env.worker"
+    [ -f "$worker_env" ] || { echo "missing $worker_env — run setup.sh --role worker (or copy compose/.env.worker.example and fill in secrets)" >&2; exit 2; }
+    require_role_env .env.worker -- worker
     bash "$here/load-bundle.sh" --bundle "$BUNDLE"
     # build-bundle.sh stages the preflight into the bundle at native/.
     # --host-only: isolate and the compilers live in the worker image, so only
@@ -249,10 +275,6 @@ EOF
     fi
     # No CA trust step: a worker talks plain Postgres, Redis and S3 to the
     # server host and never makes a TLS connection to the gateway.
-    # Bring the worker up against the server's LAN infra. .env.worker is
-    # rendered by setup.sh (secrets from the cluster-secret sidecar).
-    worker_env="$BUNDLE/compose/.env.worker"
-    [ -f "$worker_env" ] || { echo "missing $worker_env — run setup.sh --role worker (or copy compose/.env.worker.example and fill in secrets)" >&2; exit 2; }
     [ -n "$COMPOSE" ] || { echo "no working docker/podman compose provider found" >&2; exit 2; }
     # No plugin step: workers run no plugin code (evaluators, checkers and
     # contest types all run on the servers), so nothing is mounted for them.

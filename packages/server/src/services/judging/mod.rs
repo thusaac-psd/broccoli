@@ -93,7 +93,9 @@ mod tests;
 
 pub(crate) use budget::RetryBudget;
 pub use notify::CLAIM_CHANNEL;
-pub(crate) use notify::{ClaimWake, install_claim_notify};
+pub(crate) use notify::ClaimWake;
+#[cfg(test)]
+pub(crate) use notify::expected::install as install_claim_notify;
 pub use open::create_submission;
 pub(crate) use open::{
     ApplyJudgement, DiscardJudgement, OpenJudgement, apply_judgement, discard_judgement,
