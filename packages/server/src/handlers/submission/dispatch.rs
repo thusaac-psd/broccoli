@@ -26,10 +26,10 @@ pub(super) const ATTEMPT_TIMEOUT: std::time::Duration = crate::REQUEST_TIMEOUT;
 /// submission commits. An attempt that ends without one announces
 /// `submission_attempt_abandoned` to the hooks enabled for the resource, so
 /// whatever an earlier hook reserved for it is released at once rather than
-/// when the attempt times out. [`PendingAttempt::settle`] announces it before
-/// the error response leaves, so the release is in place when the client
-/// sees the rejection; a request dropped before settling (its timeout)
-/// announces it from `Drop`, in the background.
+/// when the attempt times out. The announcement is always dispatched in the
+/// background, from `Drop`: the rejection is answered without waiting
+/// behind plugin calls, and a request dropped at any point (its timeout)
+/// still announces it.
 pub(super) struct PendingAttempt {
     abandoned: Option<SubmissionAttemptAbandonedEvent>,
     enabled_plugins: Option<hooks::ResourceEnablements>,
@@ -55,26 +55,11 @@ impl PendingAttempt {
     }
 
     /// Ends the attempt with the outcome of admitting and inserting it: an
-    /// `Err` means no submission committed, and is returned once the hooks
-    /// have been told.
-    pub(super) async fn settle<T>(mut self, outcome: Result<T, AppError>) -> Result<T, AppError> {
-        let Some(event) = self.abandoned.take() else {
-            return outcome;
-        };
-        if outcome.is_err() {
-            let payload = serde_json::to_value(&event)
-                .map_err(|e| AppError::Internal(format!("Failed to serialize hook event: {e}")))?;
-            if let Err(e) = hooks::dispatch_hooks(
-                SubmissionAttemptAbandonedEvent::TOPIC,
-                payload,
-                self.enabled_plugins.as_ref(),
-                &self.hook_registry,
-                plugin_core::admission::CallClass::Background,
-            )
-            .await
-            {
-                tracing::warn!(attempt_id = %event.attempt_id, "Abandoned-attempt hooks failed: {e:?}");
-            }
+    /// `Err` means no submission committed, so the attempt is announced as
+    /// abandoned as it drops.
+    pub(super) fn settle<T>(mut self, outcome: Result<T, AppError>) -> Result<T, AppError> {
+        if outcome.is_ok() {
+            self.abandoned = None;
         }
         outcome
     }
