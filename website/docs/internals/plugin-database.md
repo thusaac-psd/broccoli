@@ -46,8 +46,10 @@ functions. None of the shipped plugins writes a host table directly.
 content columns, as `table.column`: contestant source (`submission.files`,
 `code_run.files`), compiler and program output, test data
 (`test_case.input`, `expected_output`, their previews and blob hashes),
-checker output, custom tests, problem statements and clarification bodies. No
-plugin reads them by default. Evaluators get test data through
+checker output, custom tests, problem statements, clarification bodies and
+the `error_message` diagnostics of a failed submission, judgement or code run,
+which the host shows only to staff with `system:view`. No plugin reads them by
+default. Evaluators get test data through
 `host.submission.query_test_cases`, which runs on the host function pool.
 
 A plugin that needs one declares it:

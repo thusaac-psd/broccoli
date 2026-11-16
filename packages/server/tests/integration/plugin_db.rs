@@ -527,6 +527,29 @@ mod grants {
         }
     }
 
+    /// The diagnostics of a failed submission, judgement or code run are
+    /// shown to staff only, so a plugin reads them only by declaring them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_plugin_reads_failure_diagnostics_only_when_it_declares_them() {
+        let f = Fixture::new().await;
+        let pools = f.pools(1);
+        for relation in ["submission", "submission_judgement", "code_run"] {
+            let sql = format!("SELECT error_message FROM public.\"{relation}\"");
+            denied(&pools, "icpc", &sql).await;
+            let scope =
+                plugin_core::manifest::SqlReadScope::parse(&format!("{relation}.error_message"))
+                    .expect("a grantable scope");
+            pools
+                .lease("print", &[scope], &SqlCall::default())
+                .await
+                .expect("lease")
+                .db
+                .execute_unprepared(&sql)
+                .await
+                .unwrap_or_else(|e| panic!("a declared scope is readable: {e}"));
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_plugin_reads_contest_data_but_no_secret() {
         let f = Fixture::new().await;

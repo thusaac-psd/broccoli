@@ -26,7 +26,7 @@ sidebar_position: 6
 
 ## 内容列与读取范围
 
-`packages/broccoli-types/src/manifest.rs` 中的 `SQL_READ_SCOPES` 以 `table.column` 形式列出宿主的内容列：选手源代码（`submission.files`、`code_run.files`）、编译器与程序输出、测试数据（`test_case.input`、`expected_output` 及其预览和 blob 哈希）、检查器输出、自定义测试、题面和答疑正文。默认情况下没有插件能读取它们。评测器通过在宿主函数连接池上运行的 `host.submission.query_test_cases` 获取测试数据。
+`packages/broccoli-types/src/manifest.rs` 中的 `SQL_READ_SCOPES` 以 `table.column` 形式列出宿主的内容列：选手源代码（`submission.files`、`code_run.files`）、编译器与程序输出、测试数据（`test_case.input`、`expected_output` 及其预览和 blob 哈希）、检查器输出、自定义测试、题面、答疑正文，以及失败的提交、评测记录或代码运行的 `error_message` 诊断信息（宿主只向拥有 `system:view` 的工作人员展示）。默认情况下没有插件能读取它们。评测器通过在宿主函数连接池上运行的 `host.submission.query_test_cases` 获取测试数据。
 
 需要读取某一列的插件需要声明它：
 
