@@ -10,6 +10,32 @@ zh-CN = "i18n/zh-CN.toml"
 entry = "standard_checkers.wasm"
 permissions = ["logger", "plugin:register", "operations:dispatch", "config:read", "language:resolve"]
 
+# The problem's testlib checker sources, set on the problem's checker source
+# page. The host stores them here for every problem whose checker format this
+# plugin provides.
+[config.checker_source]
+description = "Checker source files of the problem: one .c or .cpp file, plus headers such as testlib.h."
+scopes = ["problem"]
+checker_source = true
+
+[config.checker_source.properties.files]
+type = "array"
+title = "Checker source files"
+default = []
+
+[config.checker_source.properties.files.items]
+type = "object"
+required = ["filename", "content"]
+
+[config.checker_source.properties.files.items.properties.filename]
+type = "string"
+title = "File name"
+min_length = 1
+
+[config.checker_source.properties.files.items.properties.content]
+type = "string"
+title = "Content"
+
 [config.testlib]
 description = "Testlib checker compiler and resource limit settings."
 scopes = ["plugin"]

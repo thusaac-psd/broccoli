@@ -66,6 +66,11 @@ Members of the root `Cargo.toml` workspace:
 - `packages/stress-test` and `packages/broccoli-compare`: members but not
   `default-members`, so build them with `-p <name>`.
 
+`third_party/extism` is extism 1.41.0 vendored as a `[patch.crates-io]`, with
+fixes to how a call's deadline, cancel and store reset interact;
+`third_party/extism/README.md` lists the changes. Edit it there, never in the
+cargo registry.
+
 Path dependencies outside the members list, published to crates.io:
 
 - `packages/broccoli-types`: the types the guest SDK and the host share.
@@ -239,6 +244,14 @@ binaries warn about every key they do not read.
   follows expand/contract (see `release/docs/upgrade.md`).
 - When changing plugin execution behavior, check both manifest-level permissions
   and host-side registration/resolution.
+- A plugin route declares its access in `plugin.toml` (`access`, `permission`,
+  `contest`, `problem`); the proxy resolves the route's contest or problem
+  through the visibility kernel and checks the token's freshness before the
+  plugin runs, so a handler reads `req.contest()` / `req.problem_id()` instead
+  of checking access itself.
+- The host owns no plugin's records: what it stores or serves for plugins it
+  finds through a manifest declaration (for example the problem-scoped config
+  namespace a checker plugin marks `checker_source`), never through a plugin id.
 
 ### Frontend changes
 

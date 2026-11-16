@@ -1,11 +1,11 @@
-//! End-to-end proof that testlib (special-judge) judging still works after the
-//! checker source moved off `problem.checker_source` onto the checker plugin's
-//! problem-scoped config (`standard-checkers:checker_source`).
+//! End-to-end proof that testlib (special-judge) judging works with the
+//! checker source in the checker plugin's problem-scoped config: the
+//! namespace the plugin providing the `testlib` format declares
+//! `checker_source` in its manifest.
 //!
 //! The chain under test:
-//!   1. `PUT /problems/{id}/checker-source` writes plugin_config(scope=problem,
-//!      ns="standard-checkers:checker_source") -- the ONLY place the source now
-//!      lives.
+//!   1. `PUT /problems/{id}/checker-source` writes plugin_config(scope=problem)
+//!      in that namespace -- the ONLY place the source lives.
 //!   2. At judge time, standard-checkers `resolve_standard_checker` reads it back
 //!      via `host.config.get_problem(id, "checker_source")`, compiles the testlib
 //!      checker in the sandbox, runs it, and maps its exit code to a verdict.
@@ -114,9 +114,77 @@ async fn upload_checker_source(app: &E2eTestApp, problem_id: i32, token: &str) {
     );
 }
 
+/// The host stores a checker source in the namespace the checker format's
+/// plugin declares `checker_source`, as `{ "files": [...] }`, serves it back,
+/// keeps it out of the plugin's config schemas, and clears it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_checker_source_lives_in_the_namespace_its_checker_plugin_declares() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("v_checker_source_admin", "pass1234", "admin")
+        .await;
+    let problem_id = app
+        .create_problem_with_checker_format(&admin, "Checker Source Home", "testlib")
+        .await;
+    upload_checker_source(&app, problem_id, &admin).await;
+
+    let row = app
+        .db
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            format!(
+                "SELECT namespace, config FROM plugin_config \
+                 WHERE scope = 'problem' AND ref_id = '{problem_id}'"
+            ),
+        ))
+        .await
+        .unwrap()
+        .expect("the checker source is stored");
+    let namespace: String = row.try_get("", "namespace").unwrap();
+    let config: serde_json::Value = row.try_get("", "config").unwrap();
+    let (plugin_id, raw) = namespace.split_once(':').expect("plugin:namespace");
+    assert_eq!(raw, "checker_source", "{namespace}");
+    assert_eq!(
+        config["files"].as_array().map(Vec::len),
+        Some(2),
+        "{config}"
+    );
+
+    let plugins = app.get_with_token("/api/v1/admin/plugins", &admin).await;
+    assert_eq!(plugins.status, 200, "{}", plugins.text);
+    let owner = plugins
+        .body
+        .as_array()
+        .and_then(|list| list.iter().find(|p| p["id"] == plugin_id))
+        .expect("the owning plugin is listed");
+    let schemas = owner["config_schemas"].as_array().expect("config schemas");
+    assert!(
+        schemas.iter().all(|s| s["namespace"] != "checker_source"),
+        "the checker source is not offered as a config: {owner}"
+    );
+
+    let cleared = app
+        .delete_with_token(
+            &format!("/api/v1/problems/{problem_id}/checker-source"),
+            &admin,
+        )
+        .await;
+    assert_eq!(cleared.status, 204, "{}", cleared.text);
+    let got = app
+        .get_with_token(
+            &format!("/api/v1/problems/{problem_id}/checker-source"),
+            &admin,
+        )
+        .await;
+    assert_eq!(got.status, 200, "{}", got.text);
+    assert!(got.body["files"].is_null(), "{}", got.text);
+}
+
 /// One problem with a real testlib checker judges both an accepting and a
-/// rejecting solution correctly, end to end, entirely through the new
-/// problem-scoped `standard-checkers:checker_source` config path.
+/// rejecting solution correctly, end to end, entirely through the checker
+/// plugin's problem-scoped config.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
 async fn testlib_checker_judges_via_problem_config() {
@@ -132,8 +200,8 @@ async fn testlib_checker_judges_via_problem_config() {
         .create_problem_with_checker_format(&admin, "Testlib Sum", "testlib")
         .await;
 
-    // Write the checker source into standard-checkers:checker_source (problem
-    // scope). This is the write half of the path under test.
+    // Write the checker source into the checker plugin's checker_source
+    // namespace (problem scope). This is the write half of the path under test.
     upload_checker_source(&app, problem_id, &admin).await;
 
     // Sanity: the upload actually persisted the config the resolver will read.

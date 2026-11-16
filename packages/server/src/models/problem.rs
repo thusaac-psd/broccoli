@@ -555,8 +555,8 @@ mod test_case_description_tests {
 }
 
 // The checker source is not on the problem model: it is problem-scoped config
-// owned by the checker plugin (`standard-checkers:checker_source`), served only
-// through the `problem:edit`-gated checker-source endpoints.
+// in the namespace the checker format's plugin declares `checker_source`,
+// served only through the `problem:edit`-gated checker-source endpoints.
 
 #[cfg(test)]
 mod checker_format_tests {
@@ -572,7 +572,7 @@ mod checker_format_tests {
             map.insert(
                 f.to_string(),
                 CheckerStageHandlers {
-                    plugin_id: "standard-checkers".into(),
+                    plugin_id: "checker-plugin".into(),
                     resolve_fn: "resolve_standard_checker".into(),
                     interpret_fn: "interpret_standard_checker_result".into(),
                 },

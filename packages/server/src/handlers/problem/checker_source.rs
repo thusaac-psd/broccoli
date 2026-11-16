@@ -9,6 +9,7 @@ use crate::extractors::auth::{AuthUser, Authorized, FreshAuthUser, ProblemEdit};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::problem::*;
+use crate::services::plugin_config::{ConfigTarget, delete_config, get_config, store_config};
 use crate::state::AppState;
 use crate::utils::problem::find_problem;
 
@@ -28,6 +29,7 @@ use crate::utils::problem::find_problem;
         (status = 401, description = "Unauthorized", body = ErrorBody),
         (status = 403, description = "Forbidden", body = ErrorBody),
         (status = 404, description = "Problem not found", body = ErrorBody),
+        (status = 409, description = "The plugin providing the problem's checker format declares no checker source (CHECKER_SOURCE_UNSUPPORTED)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -39,39 +41,77 @@ pub async fn upload_checker_source(
     AppJson(payload): AppJson<UploadCheckerSourceRequest>,
 ) -> Result<Json<CheckerSourceResponse>, AppError> {
     let files = parse_checker_source(payload)?;
+    let owner = CheckerSourceOwner::of_problem(&state, id)
+        .await?
+        .ok_or(AppError::CheckerSourceUnsupported(id))?;
 
-    // Existence check: 404 for a missing problem, as before.
-    find_problem(&state.db, id).await?;
-
-    let files_value = serde_json::to_value(&files)
-        .map_err(|e| AppError::Internal(format!("Failed to serialize checker source: {e}")))?;
-    let response_files = serde_json::from_value(files_value.clone())
-        .map_err(|e| AppError::Internal(format!("Failed to deserialize checker source: {e}")))?;
-
-    // The checker source is owned by the checker plugin's problem-scoped config,
-    // not the core problem model. standard-checkers reads it at judge time via
-    // `host.config.get_problem(id, "checker_source")`.
-    let _ = crate::services::plugin_config::store_config(
+    let config = serde_json::json!({ "files": files });
+    plugin_core::config_schema::validate(&owner.schema, &config)
+        .map_err(AppError::InvalidConfig)?;
+    let _ = store_config(
         &state.db,
-        &crate::services::plugin_config::ConfigTarget::problem(id),
-        CHECKER_SOURCE_PLUGIN_ID,
-        CHECKER_SOURCE_NAMESPACE,
-        files_value,
+        &ConfigTarget::problem(id),
+        &owner.plugin_id,
+        &owner.namespace,
+        config,
         None,
         0,
     )
     .await?;
 
-    Ok(Json(CheckerSourceResponse {
-        files: Some(response_files),
-    }))
+    Ok(Json(CheckerSourceResponse { files: Some(files) }))
 }
 
-/// The checker plugin whose problem-scoped config owns the testlib checker
-/// source. The dedicated checker-source endpoints proxy to this plugin's config
-/// (namespace resolves to `standard-checkers:checker_source`).
-const CHECKER_SOURCE_PLUGIN_ID: &str = "standard-checkers";
-const CHECKER_SOURCE_NAMESPACE: &str = "checker_source";
+/// Where a problem's checker source lives: the config namespace that the
+/// plugin providing the problem's checker format declares `checker_source`
+/// in its manifest. The host knows the record only through that declaration.
+struct CheckerSourceOwner {
+    plugin_id: String,
+    namespace: String,
+    schema: plugin_core::manifest::ConfigNamespace,
+}
+
+impl CheckerSourceOwner {
+    /// The owner for problem `id`, or `None` when its checker format's plugin
+    /// declares no checker source (or is not loaded here). 404 for a missing
+    /// problem.
+    async fn of_problem(state: &AppState, id: i32) -> Result<Option<Self>, AppError> {
+        let problem = find_problem(&state.db, id).await?;
+        let Some(plugin_id) = state
+            .registries
+            .checker_stage_registry
+            .read()
+            .await
+            .get(&problem.checker_format)
+            .map(|handlers| handlers.plugin_id.clone())
+        else {
+            return Ok(None);
+        };
+        let registry = state
+            .plugins
+            .get_registry()
+            .read()
+            .map_err(|_| AppError::Internal("plugin registry lock poisoned".into()))?;
+        Ok(registry.get(&plugin_id).and_then(|entry| {
+            entry
+                .manifest
+                .config
+                .iter()
+                .find(|(_, ns)| ns.checker_source)
+                .map(|(namespace, schema)| Self {
+                    plugin_id: plugin_id.clone(),
+                    namespace: namespace.clone(),
+                    schema: schema.clone(),
+                })
+        }))
+    }
+}
+
+/// The files of a stored checker source config (`{ "files": [...] }`).
+#[derive(serde::Deserialize)]
+struct StoredCheckerSource {
+    files: Vec<CheckerSourceFile>,
+}
 
 #[utoipa::path(
     get,
@@ -97,16 +137,20 @@ pub async fn get_checker_source(
 ) -> Result<Json<CheckerSourceResponse>, AppError> {
     auth_user.require_permission(perm::PROBLEM_EDIT)?;
 
-    find_problem(&state.db, id).await?;
-    let files: Option<Vec<CheckerSourceFile>> = match crate::services::plugin_config::get_config(
+    let Some(owner) = CheckerSourceOwner::of_problem(&state, id).await? else {
+        return Ok(Json(CheckerSourceResponse { files: None }));
+    };
+    let files = match get_config(
         &state.db,
-        &crate::services::plugin_config::ConfigTarget::problem(id),
-        CHECKER_SOURCE_PLUGIN_ID,
-        CHECKER_SOURCE_NAMESPACE,
+        &ConfigTarget::problem(id),
+        &owner.plugin_id,
+        &owner.namespace,
     )
     .await
     {
-        Ok(resp) => serde_json::from_value(resp.0.config).ok(),
+        Ok(resp) => serde_json::from_value::<StoredCheckerSource>(resp.0.config)
+            .ok()
+            .map(|stored| stored.files),
         Err(AppError::NotFound(_)) => None,
         Err(e) => return Err(e),
     };
@@ -138,13 +182,16 @@ pub async fn delete_checker_source(
 ) -> Result<StatusCode, AppError> {
     auth_user.require_permission(perm::PROBLEM_EDIT)?;
 
-    find_problem(&state.db, id).await?;
-    // Idempotent: absent config is a no-op (404 from the service is fine here).
-    match crate::services::plugin_config::delete_config(
+    // Idempotent: nothing stored, or no checker source for this problem's
+    // checker format, is a no-op.
+    let Some(owner) = CheckerSourceOwner::of_problem(&state, id).await? else {
+        return Ok(StatusCode::NO_CONTENT);
+    };
+    match delete_config(
         &state.db,
-        &crate::services::plugin_config::ConfigTarget::problem(id),
-        CHECKER_SOURCE_PLUGIN_ID,
-        CHECKER_SOURCE_NAMESPACE,
+        &ConfigTarget::problem(id),
+        &owner.plugin_id,
+        &owner.namespace,
     )
     .await
     {

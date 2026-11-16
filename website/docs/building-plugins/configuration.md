@@ -83,6 +83,29 @@ let config: ContestConfig = host.config.get_contest(contest_id, "contest")?.pars
 `host.config.get_effective`. A type that no longer matches its schema then
 fails loudly where it is read.
 
+## Hold a problem's checker source
+
+A checker plugin whose formats compile a problem's own checker (testlib, for
+example) declares one problem-scoped namespace with `checker_source = true`.
+The host's checker source endpoints store the files an admin uploads there, as
+`{ "files": [{ "filename", "content" }] }`, for every problem whose checker
+format the plugin provides, and the problem editor's checker source page shows
+them. The namespace is not offered as a setting anywhere else.
+
+```toml
+[config.checker_source]
+scopes = ["problem"]
+checker_source = true
+
+[config.checker_source.properties.files]
+type = "array"
+default = []
+```
+
+The plugin reads it like any other problem config:
+`host.config.get_problem(problem_id, "checker_source")`. A manifest may mark at
+most one namespace, and only with `scopes = ["problem"]`.
+
 ## Test it
 
 `Host::mock()` reads the `plugin.toml` of the crate under test, so a native

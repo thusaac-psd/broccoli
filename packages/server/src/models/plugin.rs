@@ -261,6 +261,9 @@ impl PluginDetailResponse {
             .manifest
             .config
             .iter()
+            // A checker source is edited on the problem's checker source
+            // page, not as a config.
+            .filter(|(_, entry)| !entry.checker_source)
             .map(|(ns, entry)| ConfigSchemaResponse {
                 namespace: ns.clone(),
                 description: entry.description.clone(),
@@ -334,6 +337,9 @@ impl PluginFullDetailResponse {
             .manifest
             .config
             .iter()
+            // A checker source is edited on the problem's checker source
+            // page, not as a config.
+            .filter(|(_, entry)| !entry.checker_source)
             .map(|(ns, entry)| ConfigSchemaResponse {
                 namespace: ns.clone(),
                 description: entry.description.clone(),

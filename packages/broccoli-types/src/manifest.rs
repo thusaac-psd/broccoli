@@ -496,6 +496,13 @@ pub struct ConfigNamespace {
     pub schema: Option<String>,
     #[serde(default)]
     pub properties: HashMap<String, SchemaProperty>,
+    /// Whether this namespace holds a problem's checker source files: a
+    /// problem-scoped namespace with a `files` array of `{ filename, content }`
+    /// objects. The host stores and serves it through its checker-source
+    /// endpoints for every problem whose checker format this plugin provides,
+    /// and nowhere else; a plugin declares at most one.
+    #[serde(default)]
+    pub checker_source: bool,
 }
 
 impl ConfigNamespace {
