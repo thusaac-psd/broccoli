@@ -15,14 +15,6 @@ topic = "before_submission"
 function = "check_limit"
 scope = "resource"
 
-# Confirms the reservation made by `check_limit` once the submission has durably
-# committed. Fires only on success, so a submission rejected by a later hook or a
-# failed insert leaves its reservation unconfirmed to be reclaimed.
-[[server.hooks]]
-topic = "after_submission"
-function = "on_submission_created"
-scope = "resource"
-
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/submission-limit/contests/{contest_id}/problems/{problem_id}/status"

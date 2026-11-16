@@ -52,8 +52,11 @@ public standings off already sees only their own row, which never freezes.
 
 :::note[Reveal after the freeze]
 
-Once the freeze window opens, an organizer can reveal the board from the
-standings page. Revealing plays every frozen submission back to its real
-verdict and cannot be undone.
+Once the contest has ended, an organizer can reveal the board from the
+standings page; before the end the server refuses with 409. Revealing plays
+every frozen submission back to its real verdict. A reveal covers the freeze
+window that was in effect when it was made: if you later change the contest's
+start or end time or `freeze_minutes`, the board freezes again until you reveal
+it once more.
 
 :::

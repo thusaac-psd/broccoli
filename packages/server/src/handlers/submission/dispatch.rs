@@ -13,6 +13,14 @@ use crate::error::AppError;
 use crate::hooks::{self, HookOutcome};
 use crate::state::AppState;
 
+/// How long a submission attempt can stay unresolved after its
+/// `before_submission` dispatch, published to hooks as
+/// [`BeforeSubmissionEvent::attempt_timeout_ms`]. It is the request timeout:
+/// the dispatch runs inside the request, and the request's `TimeoutLayer`
+/// drops the handler once that elapses, so no insert for the attempt starts
+/// later.
+pub(super) const ATTEMPT_TIMEOUT: std::time::Duration = crate::REQUEST_TIMEOUT;
+
 pub(super) async fn dispatch_before_submission_hooks(
     state: &AppState,
     event: &BeforeSubmissionEvent,

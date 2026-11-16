@@ -5,6 +5,7 @@ pub mod auth;
 pub mod config;
 pub mod handlers;
 pub mod jobs;
+pub mod lifecycle;
 pub mod models;
 pub mod schema;
 pub mod stations;

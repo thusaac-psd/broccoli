@@ -8,6 +8,11 @@ pub struct Db {
     pub(super) inner: DbMock,
 }
 
+/// Serializes [`Db::ensure_schema`] across every replica and plugin. The
+/// two-key advisory lock form never conflicts with the host's single-key locks.
+const SCHEMA_LOCK_SQL: &str =
+    "SELECT pg_advisory_xact_lock(hashtext('broccoli-plugin-schema'), hashtext($1))";
+
 #[cfg(target_arch = "wasm32")]
 mod wasm_impl {
     use super::*;
@@ -79,6 +84,21 @@ mod wasm_impl {
                 id: begin.txn_id,
                 finished: Cell::new(false),
             })
+        }
+
+        /// Run a plugin's idempotent schema statements (`CREATE TABLE IF NOT
+        /// EXISTS ...`) in one transaction that first takes an advisory lock
+        /// keyed by `name`. Postgres does not serialize concurrent `IF NOT
+        /// EXISTS` DDL, so replicas loading the plugin at once would otherwise
+        /// race on the catalog and one `init` would fail. The lock makes later
+        /// callers wait for the first and then find every object present.
+        pub fn ensure_schema(&self, name: &str, statements: &[&str]) -> Result<(), SdkError> {
+            let txn = self.begin()?;
+            txn.execute_with_args(SCHEMA_LOCK_SQL, &[name])?;
+            for statement in statements {
+                txn.execute(statement)?;
+            }
+            txn.commit()
         }
     }
 
@@ -326,6 +346,15 @@ impl Db {
         Ok(Transaction {
             _id: "mock-txn".to_string(),
         })
+    }
+
+    /// Records the advisory lock and each statement as executions, in order.
+    pub fn ensure_schema(&self, name: &str, statements: &[&str]) -> Result<(), SdkError> {
+        self.execute_with_args(SCHEMA_LOCK_SQL, &[name])?;
+        for statement in statements {
+            self.execute(statement)?;
+        }
+        Ok(())
     }
 
     pub fn queue_query_result(&self, rows: JsonValue) {

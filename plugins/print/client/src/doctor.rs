@@ -35,7 +35,7 @@ pub fn run_doctor(cfg: &Config) -> Result<()> {
         print!("    Checking {} ... ", server.url);
         io::stdout().flush().ok();
         let client = ServerClient::new(server);
-        let result = client.heartbeat(&cfg.station, &printer_names, cfg.location.as_deref(), 0);
+        let result = client.heartbeat(&printer_names, cfg.location.as_deref(), 0);
         // Wipe the loading line before printing the result.
         print!("\r\x1b[K");
         match result {

@@ -20,7 +20,7 @@ use crate::feedback::{
     can_view_privileged_submission_feedback, viewer_has_token_feedback_for_submission,
 };
 #[cfg(target_arch = "wasm32")]
-use crate::score::{TcMaxScore, score_submission_subtask_details};
+use crate::score::score_submission_subtask_details;
 #[cfg(target_arch = "wasm32")]
 use crate::score::{compute_official_task_score, load_current_submission_test_case_results};
 #[cfg(target_arch = "wasm32")]
@@ -72,10 +72,11 @@ pub(crate) fn handle_use_token(
         user_id: i32,
         problem_id: i32,
         contest_id: Option<i32>,
+        status: SubmissionStatus,
     }
     let mut p = Params::new();
     let sql = format!(
-        "SELECT user_id, problem_id, contest_id FROM submission WHERE id = {}",
+        "SELECT user_id, problem_id, contest_id, status FROM submission WHERE id = {}",
         p.bind(submission_id)
     );
     let sub_info = host
@@ -92,6 +93,14 @@ pub(crate) fn handle_use_token(
         return Ok(PluginHttpResponse::error(
             400,
             "Submission does not belong to this contest",
+        ));
+    }
+    // A token reveals a judged result; spent on anything else it would buy
+    // nothing.
+    if sub_info.status != SubmissionStatus::Judged {
+        return Ok(PluginHttpResponse::error(
+            409,
+            "Tokens can only be used on a judged submission",
         ));
     }
     let problem_id = sub_info.problem_id;
@@ -141,7 +150,6 @@ pub(crate) fn handle_use_token(
         if state.tokened_submission_ids.contains(&submission_id) {
             return Err(SdkError::Other("ALREADY_TOKENED".into()));
         }
-        state.used += 1;
         state.tokened_submission_ids.push(submission_id);
         Ok(())
     });
@@ -412,7 +420,7 @@ pub(crate) fn handle_token_status(
     // Derive total from avail + used to guarantee available <= total
     let total = match contest_config.tokens.mode {
         crate::config::TokenMode::None => 0,
-        _ => avail + token_state.used,
+        _ => avail + token_state.used(),
     };
     let next_regen_at = match next_regen_elapsed_min(&contest_config.tokens, elapsed_min) {
         Some(next_elapsed_min) => {
@@ -437,7 +445,7 @@ pub(crate) fn handle_token_status(
         body: Some(serde_json::json!({
             "mode": contest_config.tokens.mode,
             "available": if contest_config.tokens.mode == crate::config::TokenMode::None { 0 } else { avail },
-            "used": token_state.used,
+            "used": token_state.used(),
             "total": total,
             "next_regen_at": next_regen_at,
             "tokened_submission_ids": token_state.tokened_submission_ids,
@@ -481,12 +489,17 @@ pub(crate) fn handle_scoreboard(
         let max: f64 = if task_config.subtasks.is_empty() {
             let mut p = Params::new();
             let sql = format!(
-                "SELECT id as test_case_id, score as max_score \
+                "SELECT COALESCE(SUM(score), 0)::float8 AS max_score \
                  FROM test_case WHERE problem_id = {}",
                 p.bind(pid)
             );
-            let tc_rows: Vec<TcMaxScore> = host.db.query_with_args(&sql, &p.into_args())?;
-            tc_rows.iter().map(|t| t.max_score).sum()
+            #[derive(Deserialize)]
+            struct ProblemMax {
+                max_score: f64,
+            }
+            host.db
+                .query_one_with_args::<ProblemMax>(&sql, &p.into_args())?
+                .map_or(0.0, |r| r.max_score)
         } else {
             task_config.subtasks.iter().map(|s| s.max_score).sum()
         };
@@ -639,10 +652,8 @@ pub(crate) enum SubtaskScoresAccess {
     Allowed { can_view_subtask_scores: bool },
 }
 
-/// Pure access-control core of `handle_submission_subtask_scores`, extracted
-/// out from behind `#[cfg(target_arch = "wasm32")]` so it is reachable by
-/// `cargo test` (this file previously had zero `#[cfg(test)]` coverage
-/// because every function in it only compiled for the wasm32 target).
+/// Pure access-control core of `handle_submission_subtask_scores`, kept out
+/// from behind `#[cfg(target_arch = "wasm32")]` so `cargo test` reaches it.
 ///
 /// Per `feedback.rs`'s `mask_for_level` doc comment, the
 /// `can_view_subtask_scores` computation below is the ONLY place
@@ -794,8 +805,6 @@ mod subtask_scores_access_tests {
 
     // The owner, mid-contest, with no token spent: the ONLY inputs varying
     // across these two calls are the feedback levels being distinguished.
-    // This is the direct pin for finding C2a -- previously nothing in
-    // `cargo test` could reach this branch at all.
     #[test]
     fn subtask_scores_are_visible_at_subtask_scores_level_but_not_total_only() {
         let subtask_scores = subtask_scores_access_decision(

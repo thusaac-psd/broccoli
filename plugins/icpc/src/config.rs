@@ -55,6 +55,39 @@ pub fn freeze_window_start_ms(freeze_minutes: i32, duration_ms: i64) -> i64 {
     }
 }
 
+/// A freeze window in epoch milliseconds: from its opening to the contest end.
+/// The reveal record stores the window an organizer revealed, and the board
+/// counts as revealed only while the contest's current window is that same
+/// one. Moving the start or end time, or changing `freeze_minutes`, after a
+/// reveal therefore freezes the board again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreezeWindow {
+    pub from_ms: i64,
+    pub until_ms: i64,
+}
+
+impl FreezeWindow {
+    /// The contest's current window, `None` when no freeze is configured.
+    pub fn current(freeze_minutes: i32, start_epoch_ms: i64, duration_ms: i64) -> Option<Self> {
+        (freeze_minutes > 0).then(|| Self {
+            from_ms: start_epoch_ms + freeze_window_start_ms(freeze_minutes, duration_ms),
+            until_ms: start_epoch_ms + duration_ms,
+        })
+    }
+}
+
+/// Storage key of a contest's reveal record.
+pub fn reveal_key(contest_id: i32) -> String {
+    format!("reveal:{contest_id}")
+}
+
+/// Whether the stored reveal record reveals the contest's current window. A
+/// missing or unreadable record reveals nothing.
+pub fn is_revealed(record: Option<&str>, current: Option<FreezeWindow>) -> bool {
+    let revealed = record.and_then(|r| serde_json::from_str::<FreezeWindow>(r).ok());
+    revealed.is_some() && revealed == current
+}
+
 /// Whether the freeze window is currently OPEN: freeze configured, in the
 /// 'during'/'after' phase, past the window start, and not yet revealed.
 pub fn freeze_window_open(
@@ -73,10 +106,9 @@ pub fn freeze_window_open(
 
 /// Decide the freeze view. Freeze holds for a CONTESTANT (`!can_view_all`) once
 /// the window opens and until an organizer reveals, spanning the 'during' and
-/// 'after' phases. Organizers are never frozen but may reveal ONLY while the
-/// board is actually frozen (window open) - an early click cannot silently
-/// disable the freeze. No freeze before the contest, when `freeze_minutes == 0`,
-/// or once revealed.
+/// 'after' phases. Organizers are never frozen and may reveal once the contest
+/// has ended with the board still frozen. No freeze before the contest, when
+/// `freeze_minutes == 0`, or once revealed.
 pub fn freeze_view(
     freeze_minutes: i32,
     phase: &str,
@@ -96,7 +128,7 @@ pub fn freeze_view(
             i64::MAX
         },
         frozen: window_open && !can_view_all,
-        can_reveal: window_open && can_view_all,
+        can_reveal: window_open && can_view_all && phase == "after",
     }
 }
 
@@ -172,8 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn organizer_reveal_only_while_window_open() {
-        // Footgun guard: an organizer CANNOT reveal before the freeze window opens.
+    fn organizer_reveals_only_after_the_contest_ends() {
         let before_window = freeze_view(60, "during", true, false, DUR, 100 * 60_000);
         assert!(!before_window.frozen, "organizer never frozen");
         assert!(
@@ -185,8 +216,8 @@ mod tests {
             i64::MAX,
             "organizer never split"
         );
-        // once the window is open (and after end), reveal is offered until revealed.
-        assert!(freeze_view(60, "during", true, false, DUR, 250 * 60_000).can_reveal);
+        // Mid-contest, even inside the window, the board stays frozen.
+        assert!(!freeze_view(60, "during", true, false, DUR, 250 * 60_000).can_reveal);
         assert!(freeze_view(60, "after", true, false, DUR, 400 * 60_000).can_reveal);
         assert!(!freeze_view(60, "after", true, true, DUR, 400 * 60_000).can_reveal);
     }
@@ -199,6 +230,27 @@ mod tests {
         assert!(freeze_window_open(60, "after", false, DUR, 400 * 60_000)); // after
         assert!(!freeze_window_open(60, "after", true, DUR, 400 * 60_000)); // revealed
         assert!(!freeze_window_open(0, "during", false, DUR, 290 * 60_000)); // disabled
+    }
+
+    #[test]
+    fn a_reveal_lasts_only_while_the_revealed_window_is_current() {
+        const START: i64 = 1_700_000_000_000;
+        let revealed = FreezeWindow::current(60, START, DUR);
+        let record = serde_json::to_string(&revealed.unwrap()).unwrap();
+        assert!(is_revealed(Some(&record), revealed));
+
+        let longer_freeze = FreezeWindow::current(90, START, DUR);
+        let extended_end = FreezeWindow::current(60, START, DUR + 30 * 60_000);
+        let moved_start = FreezeWindow::current(60, START + 60_000, DUR);
+        for changed in [longer_freeze, extended_end, moved_start] {
+            assert!(!is_revealed(Some(&record), changed), "{changed:?}");
+        }
+        assert!(!is_revealed(
+            Some(&record),
+            FreezeWindow::current(0, START, DUR)
+        ));
+        assert!(!is_revealed(None, revealed));
+        assert!(!is_revealed(Some("garbage"), revealed));
     }
 
     #[test]

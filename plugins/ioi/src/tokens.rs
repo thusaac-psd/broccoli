@@ -2,12 +2,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{TokenConfig, TokenMode};
 
+/// A contestant's spent tokens: one per tokened submission.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenState {
     #[serde(default)]
-    pub used: u32,
-    #[serde(default)]
     pub tokened_submission_ids: Vec<i32>,
+}
+
+impl TokenState {
+    pub fn used(&self) -> u32 {
+        self.tokened_submission_ids.len() as u32
+    }
 }
 
 /// Compute the number of tokens currently available.
@@ -18,12 +23,12 @@ pub struct TokenState {
 pub fn available_tokens(config: &TokenConfig, state: &TokenState, elapsed_minutes: u64) -> u32 {
     match config.mode {
         TokenMode::None => u32::MAX,
-        TokenMode::FixedBudget => config.initial.saturating_sub(state.used),
+        TokenMode::FixedBudget => config.initial.saturating_sub(state.used()),
         TokenMode::Regenerating => {
             let regen_interval = config.regen_interval_min.max(1) as u64;
             let regenerated = elapsed_minutes / regen_interval;
             let total = (config.initial as u64 + regenerated).min(config.max as u64) as u32;
-            total.saturating_sub(state.used)
+            total.saturating_sub(state.used())
         }
     }
 }
@@ -58,6 +63,12 @@ mod tests {
         }
     }
 
+    fn spent(n: i32) -> TokenState {
+        TokenState {
+            tokened_submission_ids: (1..=n).collect(),
+        }
+    }
+
     fn regen_config(initial: u32, max: u32, interval: u32) -> TokenConfig {
         TokenConfig {
             mode: TokenMode::Regenerating,
@@ -80,20 +91,14 @@ mod tests {
     #[test]
     fn fixed_initial() {
         let config = fixed_config(5);
-        let state = TokenState {
-            used: 2,
-            ..Default::default()
-        };
+        let state = spent(2);
         assert_eq!(available_tokens(&config, &state, 0), 3);
     }
 
     #[test]
     fn fixed_exhausted() {
         let config = fixed_config(3);
-        let state = TokenState {
-            used: 3,
-            ..Default::default()
-        };
+        let state = spent(3);
         assert_eq!(available_tokens(&config, &state, 0), 0);
     }
 
@@ -123,10 +128,7 @@ mod tests {
     #[test]
     fn regen_with_used() {
         let config = regen_config(2, 10, 30);
-        let state = TokenState {
-            used: 3,
-            ..Default::default()
-        };
+        let state = spent(3);
         // After 60 min: min(2 + 2, 10) - 3 = 1
         assert_eq!(available_tokens(&config, &state, 60), 1);
     }

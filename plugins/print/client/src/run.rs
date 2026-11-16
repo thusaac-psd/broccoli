@@ -79,13 +79,25 @@ fn process_job(client: &ServerClient, cfg: &Config, printer: &PrinterCfg, job: &
         "  ▶ job #{} ({}, {}) → printer '{}'",
         job.id, job.username, job.filename, printer.name
     );
-    let _ = client.report(job.id, "printing", None, None);
+    // A refused `printing` report means the job is no longer this station's
+    // (canceled, or claimed by another station after the lease), so printing it
+    // would print it twice or print a canceled job.
+    if let Err(e) = client.report(job.id, "printing", None, None) {
+        eprintln!("    ✗ not printing #{}: {e}", job.id);
+        return;
+    }
 
     let rendered = match render_job(cfg, job) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("    ✗ render failed: {e}");
-            let _ = client.report(job.id, "failed", None, Some(&format!("render error: {e}")));
+            report(
+                client,
+                job.id,
+                "failed",
+                None,
+                Some(&format!("render error: {e}")),
+            );
             return;
         }
     };
@@ -93,25 +105,32 @@ fn process_job(client: &ServerClient, cfg: &Config, printer: &PrinterCfg, job: &
     if rendered.pages as u32 > cfg.max_pages {
         let msg = format!("{} pages exceeds limit {}", rendered.pages, cfg.max_pages);
         eprintln!("    ✗ {msg}");
-        let _ = client.report(job.id, "failed", Some(rendered.pages as u32), Some(&msg));
+        report(
+            client,
+            job.id,
+            "failed",
+            Some(rendered.pages as u32),
+            Some(&msg),
+        );
         return;
     }
 
     let path = temp_pdf_path(job);
     if let Err(e) = std::fs::write(&path, &rendered.bytes) {
         eprintln!("    ✗ could not write temp PDF: {e}");
-        let _ = client.report(job.id, "failed", None, Some("temp file error"));
+        report(client, job.id, "failed", None, Some("temp file error"));
         return;
     }
 
     match crate::print::print_pdf(printer, &path) {
         Ok(()) => {
             println!("    ✓ printed ({} page(s))", rendered.pages);
-            let _ = client.report(job.id, "done", Some(rendered.pages as u32), None);
+            report(client, job.id, "done", Some(rendered.pages as u32), None);
         }
         Err(e) => {
             eprintln!("    ✗ print failed: {e}");
-            let _ = client.report(
+            report(
+                client,
                 job.id,
                 "failed",
                 Some(rendered.pages as u32),
@@ -122,8 +141,16 @@ fn process_job(client: &ServerClient, cfg: &Config, printer: &PrinterCfg, job: &
     let _ = std::fs::remove_file(&path);
 }
 
+/// Report a finished job, logging a refusal: the server keeps the job's
+/// state, so a lost report needs an operator's attention.
+fn report(client: &ServerClient, id: i64, status: &str, pages: Option<u32>, error: Option<&str>) {
+    if let Err(e) = client.report(id, status, pages, error) {
+        eprintln!("    ! report '{status}' for #{id} was not accepted: {e}");
+    }
+}
+
 fn tick_server(client: &ServerClient, cfg: &Config, printer_names: &[String]) {
-    if let Err(e) = client.heartbeat(&cfg.station, printer_names, cfg.location.as_deref(), 0) {
+    if let Err(e) = client.heartbeat(printer_names, cfg.location.as_deref(), 0) {
         eprintln!("  ! heartbeat to {} failed: {e}", client.label);
     }
 
@@ -147,7 +174,7 @@ fn tick_server(client: &ServerClient, cfg: &Config, printer_names: &[String]) {
             if handled.contains(&job.id) || !printer_matches(printer, job) {
                 continue;
             }
-            match client.claim(job.id, &cfg.station, &printer.name) {
+            match client.claim(job.id, &printer.name) {
                 Ok(ClaimOutcome::Claimed) => {
                     handled.insert(job.id);
                     claims.push((printer.clone(), job.clone()));
@@ -252,14 +279,12 @@ mod tests {
     fn job(target: Option<&str>) -> Job {
         Job {
             id: 1,
-            contest_id: None,
             username: "u".into(),
             display_name: None,
             problem_label: None,
             language: "text".into(),
             filename: "a.txt".into(),
             source: "x".into(),
-            location: None,
             target_printer: target.map(String::from),
             created_at: None,
         }

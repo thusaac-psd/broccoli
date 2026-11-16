@@ -4,21 +4,13 @@ use broccoli_server_sdk::Host;
 use broccoli_server_sdk::error::SdkError;
 use broccoli_server_sdk::prelude::Params;
 
+use crate::lifecycle::bind_opt;
 use crate::models::{HeartbeatRequest, StationRow};
-use serde_json::Value;
-
-/// `None` emits a literal NULL rather than a bound parameter.
-fn bind_opt<T: Into<Value>>(p: &mut Params, v: Option<T>) -> String {
-    match v {
-        Some(v) => p.bind(v),
-        None => "NULL".to_string(),
-    }
-}
 
 /// A station counts as online if it checked in within this window.
 const ONLINE_WINDOW_SECS: i64 = 45;
 
-pub fn heartbeat(host: &Host, req: &HeartbeatRequest) -> Result<(), SdkError> {
+pub fn heartbeat(host: &Host, station: &str, req: &HeartbeatRequest) -> Result<(), SdkError> {
     let printers_json = serde_json::to_string(&req.printers).unwrap_or_else(|_| "[]".to_string());
     let mut p = Params::new();
     let sql = format!(
@@ -30,7 +22,7 @@ pub fn heartbeat(host: &Host, req: &HeartbeatRequest) -> Result<(), SdkError> {
             version = EXCLUDED.version, \
             queue_seen = EXCLUDED.queue_seen, \
             last_seen = NOW()",
-        p.bind(req.station.clone()),
+        p.bind(station.to_string()),
         bind_opt(&mut p, req.location.clone()),
         p.bind(printers_json),
         bind_opt(&mut p, req.version.clone()),
@@ -60,13 +52,12 @@ mod tests {
         let host = Host::mock();
         host.db.queue_execute_result(1);
         let req = HeartbeatRequest {
-            station: "room-a".into(),
             printers: vec!["main".into(), "overflow".into()],
             location: Some("Room A".into()),
             version: Some("0.1.0".into()),
             queue_seen: Some(3),
         };
-        heartbeat(&host, &req).unwrap();
+        heartbeat(&host, "room-a", &req).unwrap();
         let sql = &host.db.executions()[0].sql;
         assert!(sql.contains("INSERT INTO print_station"));
         assert!(sql.contains("ON CONFLICT (name) DO UPDATE"));

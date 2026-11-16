@@ -9,6 +9,25 @@ use crate::types::PluginHttpResponse;
 #[cfg(feature = "guest")]
 use broccoli_types::permissions as perm;
 
+/// SQL yielding a contest's phase, `'before'`, `'during'` or `'after'`, for the
+/// contest row aliased `table` (empty for an unaliased `contest`). A contest
+/// runs from `start_time` up to but excluding `end_time`, the host's boundary,
+/// on the database clock.
+pub fn phase_sql(table: &str) -> String {
+    let col = |name: &str| {
+        if table.is_empty() {
+            name.to_string()
+        } else {
+            format!("{table}.{name}")
+        }
+    };
+    format!(
+        "CASE WHEN NOW() < {} THEN 'before' WHEN NOW() >= {} THEN 'after' ELSE 'during' END",
+        col("start_time"),
+        col("end_time")
+    )
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ContestInfo {
     pub contest_type: Option<String>,
@@ -34,12 +53,9 @@ pub fn load_info(host: &crate::sdk::Host, contest_id: i32) -> Result<ContestInfo
         "SELECT contest_type, is_public, \
             ((activate_time IS NULL OR activate_time <= NOW()) AND \
              (deactivate_time IS NULL OR deactivate_time > NOW())) AS is_active, \
-            CASE \
-                WHEN NOW() < start_time THEN 'before' \
-                WHEN NOW() > end_time THEN 'after' \
-                ELSE 'during' \
-            END AS phase \
+            {} AS phase \
          FROM contest WHERE id = {}",
+        phase_sql(""),
         p.bind(contest_id)
     );
     host.db
