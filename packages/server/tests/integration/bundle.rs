@@ -385,3 +385,77 @@ async fn an_account_imported_without_its_password_signs_in_once_one_is_set() {
         .await;
     assert_eq!(login.status, 200, "{}", login.text);
 }
+
+/// One problem with a problem-scope config, on a server that also has a
+/// plugin-wide setting `{"who": "<who>"}`. Returns the problem's id.
+async fn seed_problem_with_configs(app: &TestApp, who: &str) -> i32 {
+    let admin = app
+        .create_user_with_role("bundle_config_admin", "pass1234", "admin")
+        .await;
+    let problem = app.create_problem(&admin, "Configured").await;
+    exec(
+        app,
+        &format!(
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) VALUES \
+             ('problem', '{problem}', 'someplugin:task', '{{\"from\": \"{who}\"}}', 0, now()), \
+             ('plugin', 'someplugin', 'settings', '{{\"who\": \"{who}\"}}', 0, now())"
+        ),
+    )
+    .await;
+    problem
+}
+
+async fn plugin_settings(app: &TestApp) -> String {
+    text(
+        app,
+        "SELECT coalesce((SELECT config::text FROM plugin_config \
+         WHERE scope = 'plugin' AND ref_id = 'someplugin'), 'none') AS v",
+    )
+    .await
+}
+
+/// A bundle carries the configs of what it exports, never a plugin's
+/// fleet-wide settings: importing a problem leaves the target's own settings
+/// as they were, and brings none to a target that has none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bundle_carries_no_plugin_wide_config() {
+    let source = TestApp::spawn().await;
+    let problem = seed_problem_with_configs(&source, "source").await;
+    let archive = export(
+        &source,
+        ExportOptions {
+            selection: Selection::Problems(vec![problem]),
+            with_secrets: false,
+        },
+    )
+    .await
+    .expect("export");
+
+    let target = TestApp::spawn().await;
+    exec(
+        &target,
+        "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+         VALUES ('plugin', 'someplugin', 'settings', '{\"who\": \"target\"}', 0, now())",
+    )
+    .await;
+    import(&target, &archive, ImportOptions::default())
+        .await
+        .expect("import");
+    assert_eq!(plugin_settings(&target).await, r#"{"who": "target"}"#);
+    assert_eq!(
+        text(
+            &target,
+            "SELECT string_agg(scope || '/' || ref_id || '/' || namespace, ',') AS v \
+             FROM plugin_config WHERE scope <> 'plugin'"
+        )
+        .await,
+        format!("problem/{problem}/someplugin:task"),
+        "the problem's own config comes along"
+    );
+
+    let empty = TestApp::spawn().await;
+    import(&empty, &archive, ImportOptions::default())
+        .await
+        .expect("import");
+    assert_eq!(plugin_settings(&empty).await, "none");
+}

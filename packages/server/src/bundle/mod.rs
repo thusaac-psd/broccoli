@@ -236,14 +236,15 @@ const TABLES: &[Table] = &[
         rows: |s| Some(format!("problem_id IN ({})", s.problems)),
         restore: Restore::Insert,
     },
-    // Plugin-wide config, and the config of the bundle's problems, contest
-    // and contest problems (`models::plugin_config::config_key` names them).
+    // The configs of the bundle's problems, contest and contest problems
+    // (`models::plugin_config::config_key` names them), never a plugin-scope
+    // config: those are each server's own settings, which an import leaves
+    // as they are.
     Table {
         name: "plugin_config",
         rows: |s| {
             let mut rows = format!(
-                "scope = 'plugin' OR (scope = 'problem' AND ref_id IN \
-                 (SELECT id::text FROM ({}) p))",
+                "(scope = 'problem' AND ref_id IN (SELECT id::text FROM ({}) p))",
                 s.problems
             );
             if let Some(c) = s.contest {
