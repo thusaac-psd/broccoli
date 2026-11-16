@@ -156,7 +156,7 @@ export interface paths {
     };
     /**
      * List what depends on a plugin right now
-     * @description Returns the contests running now (started, not yet ended, not deleted) whose contest type the plugin registered when it last loaded, so an admin can see what disabling it would stop. The answer is the same whether the plugin is enabled or disabled. Requires `plugin:manage` permission.
+     * @description Returns the contests running now (in their running phase and not deleted) whose contest type the plugin registered when it last loaded, so an admin can see what disabling it would stop. The answer is the same whether the plugin is enabled or disabled. Requires `plugin:manage` permission.
      */
     get: operations['getPluginDependents'];
     put?: never;
