@@ -1,9 +1,7 @@
 import { readdir, readFile, writeFile } from 'node:fs/promises';
-import { extname, join, resolve } from 'node:path';
+import { extname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { brotliCompress, constants, gzip } from 'node:zlib';
-
-import type { Plugin, ResolvedConfig } from 'vite';
 
 const brotli = promisify(brotliCompress);
 const gz = promisify(gzip);
@@ -53,26 +51,12 @@ export async function compressedVariants(
 }
 
 /**
- * Writes brotli and gzip copies of the client build's content-hashed assets,
- * which the server sends instead of the file to a browser that accepts them:
- * smaller than compressing per request, and no CPU spent on it during a
- * contest. Only `assets/` is covered: `index.html` is written after this
- * build and is small, so the server compresses it per request.
+ * Writes brotli and gzip copies of every compressible file in `dir`, which the
+ * server sends instead of the file to a browser that accepts them: smaller
+ * than compressing per request, and no CPU spent on it during a contest.
  */
-export function precompressPlugin(): Plugin {
-  let config: ResolvedConfig;
-  return {
-    name: 'broccoli:precompress',
-    apply: 'build',
-    configResolved(resolved) {
-      config = resolved;
-    },
-    async closeBundle() {
-      if (config.build.ssr) return;
-      const assets = resolve(config.root, config.build.outDir, 'assets');
-      for (const [path, bytes] of await compressedVariants(assets)) {
-        await writeFile(path, bytes);
-      }
-    },
-  };
+export async function precompressDir(dir: string): Promise<void> {
+  for (const [path, bytes] of await compressedVariants(dir)) {
+    await writeFile(path, bytes);
+  }
 }
