@@ -174,18 +174,21 @@ A plugin's SQL runs within the deadline of the call that runs it
 
 - a lease waits for a permit no longer than the earlier of the deadline and
   the pool's acquire timeout, then fails the call as unavailable;
-- every statement, in a transaction or not, is cut at the deadline. A
-  transaction records its backend's pid when it begins; a statement of it cut
-  at the deadline is cancelled on the backend (`pg_cancel_backend`, through
-  the app role, which holds every plugin role) and the transaction is rolled
-  back, returning its connection and permit;
+- every statement, in a transaction or not, is cut at the deadline and
+  cancelled on its backend (`pg_cancel_backend`, through the app role, which
+  holds every plugin role), so a cut write never applies after its call was
+  answered "unavailable". A statement outside a transaction runs on a
+  connection the host leased for it and whose backend pid it read first; a
+  transaction records its backend's pid when it begins, and a statement of it
+  that is cut also rolls the transaction back, returning its connection and
+  permit. The cancel is sent while the connection (or the transaction's lock)
+  is still held, so it never lands on a later statement;
 - a transaction lives no longer than the call tree that opened it: one still
   open when the tree ends (the guest trapped, was cancelled or returned
   without committing) is rolled back then, from the tree's `CallLocals`;
-- the backend of every statement stays bounded by the host-enforced
-  `statement_timeout`, which no plugin statement can change (see
-  [the SQL guard](#the-sql-guard)), so a statement cut outside a transaction
-  ends there.
+- the host-enforced `statement_timeout`, which no plugin statement can
+  change (see [the SQL guard](#the-sql-guard)), bounds a backend whose host
+  process is gone; the deadline does not depend on it.
 
 ## The SQL guard
 

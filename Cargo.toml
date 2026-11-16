@@ -73,6 +73,7 @@ plugin-core = { path = "packages/plugin-core" }
 rand = "0.9"
 serde = { version = "1.0.228", features = ["derive"] }
 sea-orm = "2.0.4"
+sea-query-sqlx = { version = "0.9.1", default-features = false, features = ["sqlx-postgres"] }
 sea-orm-migration = { version = "2.0.4", default-features = false, features = [
   "runtime-tokio-rustls",
   "sqlx-postgres",
