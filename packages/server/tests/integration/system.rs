@@ -1,7 +1,7 @@
 use crate::common::{TestApp, routes};
 
 /// `system:view` is the sole gate on `handlers/system.rs`'s three endpoints -
-/// this pins that gate (previously untested) for the guard test's
+/// this pins that gate for the guard test's
 /// `visibility-bypass-audited` comment above that file's entity import.
 mod system_view_permission {
     use super::*;

@@ -24,33 +24,44 @@ sandbox, so they run on Linux only.
 ```
 broccoli/
 ├── packages/
-│   ├── server/         # HTTP/API server (Axum, SeaORM, Extism plugin host)
-│   ├── worker/         # Judge worker: compile, run, check (Linux only)
-│   ├── web/            # Web frontend (React 19, React Router 7, Monaco)
-│   ├── web-sdk/        # Frontend SDK: UI kit, plugin slots, i18n, theming
-│   ├── server-sdk/     # Rust SDK for writing backend WASM plugins
-│   ├── plugin-core/    # Plugin runtime, registry, manifest parsing
-│   ├── common/         # Shared Rust types (verdicts, statuses, hooks, storage)
-│   ├── mq/             # Redis message-queue abstraction
-│   ├── cli-core/       # Shared CLI library (API client, config, TUI, TLS)
-│   ├── contestant-cli/ # broccoli CLI: submit, test, watch contests
-│   ├── dev-cli/        # broccoli-dev CLI: scaffold, build, watch plugins
-│   └── stress-test/    # Pre-contest load and correctness harness
+│   ├── server/           # HTTP/API server (Axum, SeaORM, Extism plugin host)
+│   ├── worker/           # Judge worker: compile, run, check (Linux only)
+│   ├── web/              # Web frontend (React 19, React Router 7, Monaco)
+│   ├── web-sdk/          # Frontend SDK: UI kit, plugin slots, i18n, theming
+│   ├── server-sdk/       # Rust SDK for writing backend WASM plugins
+│   ├── broccoli-types/   # Types the plugin SDK and the host share
+│   ├── api-types/        # REST request and response types
+│   ├── plugin-core/      # Plugin runtime, registry, manifest parsing
+│   ├── common/           # Shared host types (verdicts, statuses, storage, clock)
+│   ├── mq/               # Redis Streams message queue
+│   ├── cli-core/         # Shared CLI library (API client, session, TUI, TLS)
+│   ├── contestant-cli/   # broccoli CLI: submit, test, watch contests
+│   ├── dev-cli/          # broccoli-dev CLI: scaffold, build, watch plugins
+│   ├── broccoli-compare/ # Output comparator the worker runs in the sandbox
+│   ├── stress-test/      # Pre-contest load and correctness harness
+│   └── test-support/     # Test harness shared by the server's test trees
 ├── plugins/
 │   ├── batch-evaluator/         # Standard compile, run, check pipeline
+│   ├── communication-evaluator/ # Interactive problems (manager and contestant)
+│   ├── standard-checkers/       # Output comparison (exact, whitespace, testlib)
+│   ├── standard-languages/      # Default language definitions
 │   ├── ioi/                     # IOI contest format
 │   ├── icpc/                    # ICPC contest format
-│   ├── standard-checkers/       # Output comparison (exact, whitespace, etc.)
-│   ├── standard-languages/      # Default language definitions
-│   ├── communication-evaluator/ # Interactive problems (manager and contestant)
+│   ├── codelink-qualifier/      # Codelink qualifier contest format
+│   ├── codelink-bracket/        # Codelink knockout bracket contest format
 │   ├── cooldown/                # Minimum delay between submissions
 │   ├── submission-limit/        # Maximum submissions per problem
 │   ├── print/                   # On-demand code printing for contests
+│   ├── config-ui-test/          # Kitchen-sink config schema for the config UI
 │   └── broccoli-zh-cn/          # Chinese translation pack
-├── website/                     # Documentation site (Docusaurus)
-├── config/                      # Configuration (config.example.toml)
-├── docker-compose.yaml          # PostgreSQL, Redis, SeaweedFS
-└── Justfile                     # Task runner recipes
+├── website/              # Documentation site (Docusaurus, English and zh-CN)
+├── release/              # Release bundles, installers and operator docs
+├── docs/                 # Build, release and authoring notes
+├── scripts/              # Plugin build, test and lint scripts
+├── examples/             # Example plugin
+├── config/               # Configuration (config.example.toml)
+├── docker-compose.yaml   # PostgreSQL, Redis, SeaweedFS for development
+└── justfile              # Task runner recipes
 ```
 
 ## Prerequisites
@@ -65,8 +76,9 @@ broccoli/
 ## Quick start
 
 ```bash
-# 1. Start PostgreSQL, Redis, and SeaweedFS.
-just up
+# 1. Start PostgreSQL, Redis, and SeaweedFS. No setup needed: the
+#    credentials default to the ones config.example.toml uses.
+docker compose up -d
 
 # 2. Create your config from the example.
 cp config/config.example.toml config/config.toml
@@ -169,8 +181,9 @@ just down  # Stop services
 | Redis      | 6379                     | Message queue  |
 | SeaweedFS  | 8333 (S3), 9333 (master) | Object storage |
 
-Credentials come from a `.env` file. See `docker-compose.yaml` for the
-variables.
+The services bind to `127.0.0.1` and need no setup: the credentials default to
+the ones `config/config.example.toml` uses. Set `POSTGRES_USER`,
+`POSTGRES_PASSWORD`, `POSTGRES_DB` or `REDIS_PASSWORD` to change them.
 
 ## API documentation
 

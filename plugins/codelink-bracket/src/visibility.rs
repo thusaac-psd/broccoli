@@ -406,8 +406,8 @@ fn decide_visibility_decisions(
                         // that contest currently hide it from this viewer?
                         // Only brackets that have not ended count.
                         // A problem with no such attachment is untouched:
-                        // `Allow {}`, the identity of the host's `meet`,
-                        // exactly as before this fix. A problem attached to
+                        // `Allow {}`, the identity of the host's `meet`.
+                        // A problem attached to
                         // one or more is decided through the SAME
                         // `decide_problem_for_contest` the contest-scoped
                         // arm above uses, so the standalone answer cannot
@@ -614,8 +614,6 @@ mod tests {
 
     #[test]
     fn the_active_tiebreak_problem_is_allowed_to_both_players_during_tiebreak() {
-        // Supplementary: the plan's test list does not exercise this branch of
-        // the rule table, but the spec requires it explicitly.
         let ctx = ctx_in_tiebreak(319);
         assert_eq!(decide_problem(&ctx, 319, 10, false), WireDecision::Allow {});
         assert_eq!(decide_problem(&ctx, 319, 20, false), WireDecision::Allow {});
@@ -1008,7 +1006,7 @@ mod tests {
         };
 
         // Sanity: the CONTEST-SCOPED answer for the same viewer/problem
-        // denies it -- if this fails the fixture is wrong, not the fix.
+        // denies it -- if this fails the fixture is wrong, not the rule.
         let host = Host::mock();
         host.db.queue_query_result(serde_json::json!([
             { "contest_id": 7, "contest_type": "codelink-bracket" }
@@ -1026,7 +1024,7 @@ mod tests {
         assert!(
             matches!(contest_scoped[0], WireDecision::Deny {}),
             "sanity check failed: the contest-scoped answer should deny A's own not-yet-open \
-             problem -- if this fails the fixture itself is broken, not the fix"
+             problem -- if this fails the fixture itself is broken, not the rule"
         );
 
         // The standalone (context-free) answer for the SAME viewer/problem
@@ -1110,9 +1108,8 @@ mod tests {
     fn decide_visibility_standalone_problem_with_no_bracket_attachment_is_allowed() {
         // Negative control: contest-free problems, and problems attached
         // only to OTHER contest types, are a first-class platform feature
-        // this fix must not touch -- a problem the query resolves to NO
-        // bracket contest membership at all stays `Allow {}`, exactly as
-        // before this fix.
+        // this rule must not touch -- a problem the query resolves to NO
+        // bracket contest membership at all stays `Allow {}`.
         let host = Host::mock();
         host.db.queue_query_result(serde_json::json!([])); // no bracket-contest membership found
         let req = VisibilityQueryInput {

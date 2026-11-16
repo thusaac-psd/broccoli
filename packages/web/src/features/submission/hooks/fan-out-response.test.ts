@@ -5,19 +5,16 @@
 // `node --experimental-strip-types --test`, no bundler/DOM needed since the
 // functions under test are pure.
 //
-// This pins the fix for a REMAINING ITEM found in code review of the
-// submission:rejudge visibility fix: `use-submissions.ts` used to pair
-// `POST /admin/submissions/fan-out` responses back to their placeholder
-// entries by matching the response's own `target_worker_id` field
-// (`created.find((s) => s.target_worker_id === e.targetWorkerId)`). That
-// field is legitimately absent when the admin's own Read visibility into a
+// `use-submissions.ts` pairs `POST /admin/submissions/fan-out` responses
+// back to their placeholder entries by array index, never by the response's
+// own `target_worker_id` field. That field is legitimately absent when the admin's own Read visibility into a
 // just-created submission is denied (e.g. a plugin `Deny` beating the host's
 // owner-bypass `Allow` via `Decision::meet`) - the response degrades to the
 // bare `{ id }` shape. A field-equality match against an absent field finds
 // nothing, silently indistinguishable from "the server didn't return this
 // submission at all".
 //
-// The fix pairs by array index instead: the server returns one response per
+// Index pairing holds because the server returns one response per
 // requested `target_worker_id`, in request order, regardless of any
 // individual entry's visibility outcome - see `admin_fan_out_submission` in
 // `packages/server/src/handlers/submission/rejudge.rs`. Both directions must
@@ -125,8 +122,8 @@ test('a withheld (Deny) entry still pairs to its worker by position, flagged wit
 });
 
 test('pairing never trusts the response echo of target_worker_id, even if it lies', () => {
-  // Regression guard for the old `.find((s) => s.target_worker_id === ...)`
-  // approach: if a response's own `target_worker_id` were ever wrong or
+  // Guards against pairing by `.find((s) => s.target_worker_id === ...)`:
+  // if a response's own `target_worker_id` were ever wrong or
   // stale, field-equality matching would silently mispair. Index pairing
   // must ignore that field entirely for the *pairing* decision - the
   // pairing's `workerId` always comes from the request, not the response.

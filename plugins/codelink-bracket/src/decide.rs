@@ -38,7 +38,7 @@ fn is_in_flight(status: &SubmissionLifecycle) -> bool {
 
 /// Effective submission time (arrival + the player's accumulated penalty)
 /// in microseconds, then the smaller submission id on an exact tie.
-/// Without the id, a same-instant tie was broken by iteration order.
+/// Without the id, a same-instant tie would be broken by iteration order.
 fn arrival_order(s: &SubmissionRecord) -> (i64, i32) {
     (s.effective_at_us, s.submission_id)
 }
@@ -245,17 +245,15 @@ pub fn decide_xiaoju(
             // Before scoring this 小局 scoreless, check the same thing the
             // `Some(ac)` arm above checks: is a submission still in flight?
             //
-            // This arm used to decide scoreless immediately, which made the
-            // platform-fault policy only half-implemented. A player whose
-            // opponent had an AC was protected; a player whose submission was
-            // the ONLY one -- and was stuck -- was not, even though that
+            // Deciding scoreless here would leave a player whose submission
+            // is the ONLY one -- and is stuck -- unprotected, even though that
             // submission might yet come back Accepted and win outright. And
             // because deciding sets `decided = true`, the idempotency guard
-            // meant a later Accepted verdict could never revisit it: the 小局
-            // was lost permanently to a fault that was not the player's.
+            // means a later Accepted verdict could never revisit it: the 小局
+            // would be lost permanently to a fault that is not the player's.
             //
             // A stuck submission is a platform fault and must never cost a
-            // player the 小局 (see the spec's platform-fault section). Escalate
+            // player the 小局. Escalate
             // exactly as the sibling arm does, so staff can force a rejudge,
             // and let the escalation timer fall through to NeedsAdjudication
             // if it stays stuck.
@@ -535,12 +533,9 @@ mod tests {
         submitted_at_us: i64,
         verdict: Option<Verdict>,
     ) -> SubmissionRecord {
-        // `status` mirrors the verdict for these older tests, which predate
-        // the in-flight/terminal distinction: `Some(verdict)` implies
-        // judging finished (`Judged`), `None` implies still pending
-        // (`Pending`) -- both in-flight-vs-terminal classifications that
-        // agree with the old buggy `verdict.is_none()` check, so none of
-        // these call sites need editing.
+        // `status` mirrors the verdict: `Some(verdict)` implies judging
+        // finished (`Judged`), `None` implies still pending (`Pending`).
+        // Tests that need any other pairing call `sub_with_status`.
         let status = if verdict.is_some() {
             SubmissionLifecycle::Judged
         } else {

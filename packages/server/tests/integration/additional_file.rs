@@ -2,7 +2,7 @@ use crate::common::{TestApp, routes};
 
 /// `problem:edit` is the sole gate on every `handlers/additional_file.rs`
 /// endpoint (these are judge-private files, never contestant-facing) - this
-/// pins that gate (previously untested) for the guard test's
+/// pins that gate for the guard test's
 /// `visibility-bypass-audited` comment above that file's entity import.
 mod problem_edit_permission {
     use super::*;

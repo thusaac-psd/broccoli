@@ -342,7 +342,7 @@ struct VisibilityQueryOutputOut {
 /// hits a genuine host error - not "key never seeded", see `read_kv_single`'s
 /// doc comment - this function returns `Err` and the whole batch denies the
 /// same way it would for a trap. A plugin that cannot read its own decision
-/// inputs must never silently fall back to allowing everything (N1).
+/// inputs must never silently fall back to allowing everything.
 #[plugin_fn]
 pub fn decide_visibility(input: String) -> FnResult<String> {
     let mode = read_kv_single("visibility_mode")?.unwrap_or_default();
@@ -449,10 +449,10 @@ pub fn decide_visibility(input: String) -> FnResult<String> {
 /// its response could not be parsed as the expected shape - a GENUINE fault,
 /// not "not seeded yet".
 ///
-/// This distinction is load-bearing (N1): an earlier version of this
-/// function collapsed BOTH cases to `None`, which made `decide_visibility`'s
-/// normal path read a host error the same way it reads "no deny/redact list
-/// configured" - i.e. `Allow`. That is fail-OPEN, the opposite of this
+/// This distinction is load-bearing: collapsing BOTH cases to `None` would
+/// make `decide_visibility`'s normal path read a host error the same way it
+/// reads "no deny/redact list configured" - i.e. `Allow`. That is fail-OPEN,
+/// the opposite of this
 /// kernel's contract (`packages/server/src/visibility/plugin_query.rs`'s
 /// module doc: every plugin failure mode must collapse to `Deny`). A test
 /// fixture that fails open can hide a real fail-open regression in the

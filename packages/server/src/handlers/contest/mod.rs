@@ -14,18 +14,15 @@ use tracing::instrument;
 // asserted at handler entry and pinned by tests/integration/contest.rs's
 // `contestant_cannot_create_a_contest`, `contestant_cannot_update_contest`,
 // and `contestant_cannot_delete_a_contest`. The two single-contest reads,
-// `get_contest`/`get_contest_my_info`, now gate through
-// `kernel.decide(Action::Read, Resource::Contest(id)).is_denied()` -
-// `visibility::host_rules::decide_contest` is a verified byte-identical
-// port of the window/is_public/participant rule `check_contest_access` used
-// to apply directly here, so this is not a behavioural change; it is a
-// routing change, so a future contest-scoped plugin's `Deny` on
-// `Resource::Contest` now takes effect on these two endpoints exactly as it
-// already does on `list_contest_problems` and the clarification read paths
-// (see I1 in `.superpowers/sdd/2026-09-15-visibility-kernel/consolidated-findings.md`).
-// `find_contest` (via `find_active_by_id`) still runs BEFORE the kernel
-// gate, so a soft-deleted contest is still 404 even for a `contest:manage`
-// admin, unaffected - pinned by
+// `get_contest`/`get_contest_my_info`, gate through
+// `kernel.decide(Action::Read, Resource::Contest(id)).is_denied()`
+// (`visibility::host_rules::decide_contest` applies the
+// window/is_public/participant rule), so a contest-scoped plugin's `Deny` on
+// `Resource::Contest` takes effect on these two endpoints exactly as it does
+// on `list_contest_problems` and the clarification read paths; pinned by
+// `visibility_plugin::contest_level_gates_all_route_through_the_kernel`.
+// `find_contest` (via `find_active_by_id`) runs BEFORE the kernel gate, so a
+// soft-deleted contest is 404 even for a `contest:manage` admin - pinned by
 // `visibility_matrix::soft_delete::contest_soft_deleted_is_not_found_even_for_contest_manage_admin`.
 // `list_contests` filters the same window/is_public/participant conditions
 // at the SQL layer (necessary: pagination's COUNT/OFFSET/LIMIT must operate
@@ -35,7 +32,7 @@ use tracing::instrument;
 // `contestant_sees_only_public_and_enrolled_contests`,
 // `contestant_does_not_see_never_activating_contests`,
 // `contestant_does_not_see_not_yet_activated_contests`, and
-// `contestant_does_not_see_deactivated_contests` - then ALSO runs every
+// `contestant_does_not_see_deactivated_contests` - then also runs every
 // fetched page (bounded to `per_page`, max 100) through
 // `kernel.decide_batch(Action::Read, ..)` and drops any row the kernel
 // denies, so the same future contest-scoped plugin narrowing applies here
@@ -45,9 +42,9 @@ use tracing::instrument;
 // add a row back - the failure direction if the two predicates ever drift
 // is under-inclusion (an availability bug, visible as `data.len()` <
 // `pagination.total` for that page), never over-inclusion (a disclosure
-// bug). No plugin registers for `Resource::Contest` today, so both new
-// kernel gates are documented no-ops, not live behaviour changes - the same
-// caveat as every other `Resource::Contest` gate in this codebase (see
+// bug). No bundled plugin registers for `Resource::Contest`, so with the
+// bundled plugins these kernel gates answer exactly as the host rule does -
+// the same as every other `Resource::Contest` gate in this codebase (see
 // `handlers/clarification.rs`). `list_participants`
 // (handlers/contest/participants.rs) and `list_contest_submissions`'s top
 // gate (handlers/submission/mod.rs) are documented separately at their own

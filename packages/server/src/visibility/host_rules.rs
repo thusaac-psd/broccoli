@@ -102,7 +102,7 @@
 //!
 //! Each query is skipped entirely when its target set is empty. The
 //! `contest_user` query is NOT narrowed to only the contests where
-//! `check_contest_access` needs it (it is also fetched for public contests):
+//! `check_contest_access_decision` needs it (it is also fetched for public contests):
 //! rule 6's participation check is unconditional (independent of
 //! `is_public`), so narrowing the fetch would break peer-submission
 //! visibility on public contests.
@@ -206,7 +206,7 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     // problem, so this set collects the `problem_id` of every standalone
     // `Problem`, `Sample` and `Attachment` alike (`attachment_id` never
     // enters the host decision). Soft-delete-aware (`find_active`),
-    // mirroring `require_problem_read_access`'s `find_active_by_id`.
+    // mirroring `decide_standalone_problem_access`'s `find_active_by_id`.
     let standalone_problem_ids: HashSet<i32> = resources
         .iter()
         .filter_map(Resource::problem_scope)
@@ -337,7 +337,7 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     // Query 2: `contest_user` membership for this subject, across every
     // contest fetched above. Fetched unconditionally (whenever the subject
     // is authenticated and at least one contest was fetched) rather than
-    // only for contests where `check_contest_access` needs it - see the
+    // only for contests where `check_contest_access_decision` needs it - see the
     // module docs' "Batching" section for why narrowing this to rule 4's
     // needs alone would be wrong for rule 6.
     let member_of: HashSet<i32> = match subject.user_id {
@@ -437,7 +437,7 @@ impl BatchFacts<'_> {
         }
     }
 
-    /// Rules 1-4, as `check_contest_access` applies them.
+    /// Rules 1-4, as `check_contest_access_decision` applies them.
     /// Rule 7 (soft-deleted contest) is enforced by the caller only ever
     /// looking `contest_id` up in `contests`, which is populated via
     /// `find_active`.
@@ -472,7 +472,7 @@ impl BatchFacts<'_> {
         }
     }
 
-    /// Mirrors `get_contest`'s gate (`find_contest` + `check_contest_access`
+    /// Mirrors `get_contest`'s gate (`find_contest` + `check_contest_access_decision`
     /// only - no `require_contest_started`).
     fn decide_contest(&self, id: i32) -> Decision {
         match self.contests.get(&id) {
@@ -485,7 +485,7 @@ impl BatchFacts<'_> {
     }
 
     /// Mirrors `list_contest_problems` / `get_contest_problem_samples`, which
-    /// both call `check_contest_access` THEN `require_contest_started` on the
+    /// both call `check_contest_access_decision` THEN `require_contest_started` on the
     /// same contest before checking `find_contest_problem` /
     /// `is_problem_in_contest` (rule 5). Both gates are applied here, in that
     /// sequence. Used for every problem part (`Problem`, `Sample`,
@@ -552,7 +552,7 @@ impl BatchFacts<'_> {
         if !standalone_reachable_via_contest(action) {
             return Decision::Deny;
         }
-        // `can_access_problem_via_contest`, inlined below.
+        // Rule 9: reachability through the problem's contests.
         let no_contests: Vec<i32> = Vec::new();
         let candidate_contest_ids = self
             .problem_contest_ids
@@ -1097,7 +1097,7 @@ mod tests {
     #[tokio::test]
     async fn rule6_owner_bypasses_even_when_contest_would_be_soft_deleted() {
         // Owner bypass skips the contest lookup entirely (see
-        // `require_submission_visible`): no contest/membership stub
+        // `decide_submission`): no contest/membership stub
         // configured, and contest_id points at a contest that doesn't
         // exist in this mock at all.
         let db = MockDatabase::new(DatabaseBackend::Postgres)
@@ -1336,7 +1336,7 @@ mod tests {
 
     #[tokio::test]
     async fn rule8_public_standalone_problem_in_zero_contests_allows() {
-        // Mirrors `require_problem_read_access`'s `is_public` short-circuit,
+        // Mirrors `decide_standalone_problem_access`'s `is_public` short-circuit,
         // but `host_decide` still issues the `contest_problem` prefetch
         // unconditionally for the whole batch - see the module docs'
         // "Batching" section. It comes back empty and is never consulted.
@@ -1527,7 +1527,7 @@ mod tests {
 
     #[tokio::test]
     async fn rule9_hidden_problem_in_not_yet_started_public_contest_denies() {
-        // Extra condition `can_access_problem_via_contest` applies on top of
+        // Extra condition rule 9 applies on top of
         // the plain activation-window check: `start_time <= now`. An
         // activated-and-public-but-not-started contest must not leak the
         // problem, even though the plain window (rule 2) is open.

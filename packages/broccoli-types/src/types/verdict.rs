@@ -24,9 +24,7 @@ impl Verdict {
     /// Contract:
     /// - `Other(_)` outranks every standard failure verdict, including
     ///   `SystemError`: a plugin that emits a custom verdict means it, and
-    ///   the custom verdict must surface as the submission verdict (the
-    ///   original custom-verdict design, commit 14b8a17, ranked it 255 on
-    ///   the host for exactly this reason).
+    ///   the custom verdict must surface as the submission verdict.
     /// - `CompileError` stays above `Other(_)` because the finalize
     ///   pipeline special-cases it (status becomes `CompilationError`,
     ///   verdict column is nulled, compile output is captured); a custom

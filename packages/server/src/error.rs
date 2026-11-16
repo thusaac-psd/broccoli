@@ -343,9 +343,8 @@ mod tests {
 
     /// Durable-queue backpressure must surface as
     /// `503 Service Unavailable` with code `QUEUE_OVERLOADED` and the
-    /// `Retry-After` header populated from the variant payload. This
-    /// pins the contract so a future refactor that re-tags the
-    /// variant or drops the header branch fails loudly here.
+    /// `Retry-After` header populated from the variant payload. Re-tagging
+    /// the variant or dropping the header branch fails here.
     /// The idempotency replay refusals are API contracts the web client
     /// branches on; each has its own code (all 409).
     #[tokio::test]

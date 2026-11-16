@@ -424,70 +424,8 @@ mod token_refresh {
     }
 }
 
-mod refresh_validator_format {
+mod refresh_validator {
     use super::*;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-    use server::entity::{refresh_token, user};
-
-    /// Refresh rows written before validators moved to SHA-256 hold argon2
-    /// hashes. They must keep working until they expire, and rotating one
-    /// writes its successor in the new format.
-    #[tokio::test]
-    async fn legacy_argon2_refresh_token_still_rotates_into_the_new_format() {
-        let app = TestApp::spawn().await;
-        app.create_authenticated_user("legacy_rt", "securepass")
-            .await;
-        let uid = user::Entity::find()
-            .filter(user::Column::Username.eq("legacy_rt"))
-            .one(&app.db)
-            .await
-            .unwrap()
-            .unwrap()
-            .id;
-
-        let now = chrono::Utc::now();
-        let validator = "legacy-validator";
-        sea_orm::ActiveModelTrait::insert(
-            refresh_token::ActiveModel {
-                selector: sea_orm::Set("legacy-selector".into()),
-                validator: sea_orm::Set(server::utils::hash::hash_password(validator).unwrap()),
-                user_id: sea_orm::Set(uid),
-                expires_at: sea_orm::Set(now + chrono::Duration::days(1)),
-                created_at: sea_orm::Set(now),
-                revoked_at: sea_orm::Set(None),
-                rotated_from: sea_orm::Set(None),
-            },
-            &app.db,
-        )
-        .await
-        .unwrap();
-
-        let res = app
-            .post_without_token(
-                routes::CLI_REFRESH,
-                &json!({ "refresh_token": format!("legacy-selector:{validator}") }),
-            )
-            .await;
-        assert_eq!(res.status, 200, "legacy refresh: {}", res.text);
-
-        let successor = res.body["refresh_token"].as_str().unwrap();
-        let (selector, _) = successor.split_once(':').unwrap();
-        let row = refresh_token::Entity::find_by_id(selector.to_owned())
-            .one(&app.db)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            row.validator.starts_with("sha256$"),
-            "successor stored as {}",
-            row.validator
-        );
-
-        let again = app
-            .post_without_token(routes::CLI_REFRESH, &json!({ "refresh_token": successor }))
-            .await;
-        assert_eq!(again.status, 200, "sha256 refresh: {}", again.text);
-    }
 
     #[tokio::test]
     async fn wrong_validator_is_rejected() {

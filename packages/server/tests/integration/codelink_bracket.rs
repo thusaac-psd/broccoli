@@ -426,7 +426,7 @@ async fn codelink_bracket_end_to_end_through_the_real_host() {
     let contest_id = res.id();
 
     // Every player must be a registered participant: public-contest READS
-    // (`check_contest_access`) need no registration, but the submission-gate
+    // (`check_contest_access_decision`) need no registration, but the submission-gate
     // probes below reach `require_contest_participant` (SUBMIT, not READ)
     // once the kernel allows them through - without registration those
     // probes would 403 `PermissionDenied` instead of exercising the

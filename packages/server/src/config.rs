@@ -644,8 +644,7 @@ mod tests {
             .unwrap();
         let cfg: AppConfig = built.try_deserialize().unwrap();
 
-        // The historical builder-level set_default block pinned this to 50,
-        // silently shadowing the intended serde default of 10.
+        // The serde default applies; a builder-level default must not shadow it.
         assert_eq!(cfg.server.max_system_error_retries, 10);
 
         assert_eq!(cfg.server.host, "127.0.0.1");
@@ -727,7 +726,7 @@ mod tests {
     }
 
     /// A partially-populated table must still fill its remaining keys from
-    /// serde defaults (previously guaranteed by set_default pre-seeding).
+    /// serde defaults.
     #[test]
     fn partial_tables_fill_remaining_keys_from_serde_defaults() {
         let built = Config::builder()

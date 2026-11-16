@@ -14,7 +14,7 @@ refute()  { grep -Eq -- "$1" "$script" && { echo "PRESENT (must be gone): $1"; f
 check '^[[:space:]]*MUSL_TARGET="?x86_64-unknown-linux-musl"?'
 # The CLI is collected from the musl release-cli output, via the var.
 check 'target/\$\{?MUSL_TARGET\}?/release-cli/broccoli'
-# The old host-glibc CLI copy path must be gone.
+# The bundle never copies a host-glibc CLI build.
 refute 'target/release/broccoli"?[[:space:]]*"\$WORK/cli/broccoli'
 
 [ "$fail" -eq 0 ] && echo "PASS: bundle collects musl-static CLI" || { echo "FAIL"; exit 1; }

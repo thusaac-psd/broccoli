@@ -276,13 +276,11 @@ async fn ioi_feedback_filter_redacts_judgement_history() {
 // Mirrors `icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_
 // organizer`'s use of a `contest:manage`-only viewer to isolate the
 // `CONTEST_MANAGE` branch of `decide_visibility_decisions` from the
-// pre-existing `SUBMISSION_VIEW_ALL` one. Before this fix,
-// `decide_visibility_decisions` checked only `SUBMISSION_VIEW_ALL`, unlike
-// `can_view_privileged_submission_feedback` (used elsewhere in this plugin)
-// and `api.rs`'s scoreboard ranking, which both also honor `CONTEST_MANAGE`.
-// A viewer holding `contest:manage` without `submission:view_all` -- a
-// plausible problem-setter or judge role -- was wrongly redacted here; this
-// is the assertion that pins the fix and would fail against pre-fix code.
+// `SUBMISSION_VIEW_ALL` one. `decide_visibility_decisions` honors
+// `CONTEST_MANAGE` like `can_view_privileged_submission_feedback` (used
+// elsewhere in this plugin) and `api.rs`'s scoreboard ranking do, so a
+// viewer holding `contest:manage` without `submission:view_all` -- a
+// plausible problem-setter or judge role -- sees the judgement unredacted.
 #[tokio::test(flavor = "multi_thread")]
 async fn ioi_feedback_organiser_without_submission_view_all_sees_unredacted_judgement() {
     let app = E2eTestApp::spawn().await;
@@ -314,7 +312,7 @@ async fn ioi_feedback_organiser_without_submission_view_all_sees_unredacted_judg
     // `visibility::host_rules::decide_submission`) - `contest:manage` alone
     // does not grant it. Without this, the request 404s before the plugin's
     // decision is ever consulted, and the assertions below would not
-    // actually exercise the fix.
+    // exercise the plugin's `CONTEST_MANAGE` branch.
     app.register_for_contest(contest_id, &manage_only).await;
 
     let config_path = format!("/api/v1/contests/{contest_id}/config/ioi/contest");
@@ -422,11 +420,10 @@ async fn ioi_feedback_organiser_without_submission_view_all_sees_unredacted_judg
 // wildcard fan-out (`result.test_case_results.*.verdict`, etc.) through the
 // real HTTP + serialization pipeline, rather than a mocked-JSON unit test.
 // Unlike `none` (which blanks the whole array to `[]`), `subtask_scores`
-// keeps the array but nulls per-test-case fields -- this is exactly the
-// shape that used to be misrendered as "pending" client-side (a masked
-// `null` verdict is indistinguishable on the wire from a genuinely
-// not-yet-judged test case; see `TestCaseRow.tsx`'s `getVerdictKey`, which
-// now disambiguates using the judgement's terminal `status` instead).
+// keeps the array but nulls per-test-case fields. A masked `null` verdict is
+// indistinguishable on the wire from a genuinely not-yet-judged test case;
+// the web client's `getVerdictKey` (`verdict-key.ts`) disambiguates using
+// the judgement's terminal `status`.
 #[tokio::test(flavor = "multi_thread")]
 async fn ioi_feedback_filter_subtask_scores_redacts_per_test_case_verdict() {
     let app = E2eTestApp::spawn().await;
@@ -566,7 +563,7 @@ async fn ioi_feedback_filter_subtask_scores_redacts_per_test_case_verdict() {
             serde_json::Value::Null,
             "test_case_results[{i}] verdict should be masked to null under subtask_scores, \
              not authored as a string, and must not be misrendered client-side as still \
-             pending (see TestCaseRow.tsx's getVerdictKey): {}",
+             pending (see verdict-key.ts's getVerdictKey): {}",
             contestant_res.text
         );
     }

@@ -1,6 +1,5 @@
 //! Per-viewer reachability kernel. Every contest-scoped read and write
-//! resolves through here. See
-//! `docs/superpowers/specs/2026-09-15-visibility-kernel-design.md`.
+//! resolves through here.
 
 use std::collections::{HashMap, HashSet};
 
@@ -135,8 +134,9 @@ fn resource_contest_id(resource: &Resource, scopes: &HostScopes) -> Option<i32> 
 /// the same host decision with the same plugin answer and store the
 /// identical final `Decision`, just twice.
 ///
-/// Deliberately **not** cached beyond the kernel's own lifetime - see the
-/// design doc's "Caching" section. Construct a fresh kernel per request;
+/// Deliberately **not** cached beyond the kernel's own lifetime: a decision
+/// depends on the viewer, the clock and plugin state, so a longer-lived
+/// cache would serve stale answers. Construct a fresh kernel per request;
 /// never store one in `AppState` or anywhere longer-lived than a request.
 pub struct VisibilityKernel<'a> {
     state: &'a AppState,
@@ -303,8 +303,8 @@ impl<'a> VisibilityKernel<'a> {
 
                 let mut final_decisions = host_decisions;
                 if !plugin_targets.is_empty() {
-                    // CRITICAL fix: stamp each resource's OWN authoritative
-                    // contest_id, built in lockstep with `plugin_targets` so
+                    // Stamp each resource's OWN authoritative contest_id,
+                    // built in lockstep with `plugin_targets` so
                     // it stays positional with it - `contest_scope` below is
                     // only ever the batch-level hint, never a substitute for
                     // this.
@@ -1047,7 +1047,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // CRITICAL fix: per-resource contest_id (review round 2)
+    // Per-resource contest_id
     // -----------------------------------------------------------------
 
     #[allow(clippy::await_holding_lock)]

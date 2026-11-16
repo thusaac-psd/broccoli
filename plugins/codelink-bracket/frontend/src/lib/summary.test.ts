@@ -102,7 +102,7 @@ test('the adjudication message follows the recorded reason', () => {
   );
 });
 
-test('matches escalated before reasons existed fall back to the old inference', () => {
+test('a match with no adjudication reason infers one from the awaited submission', () => {
   const m = (id: number | null) =>
     adjudicationMessage(
       makeMatch({ state: 'needs_adjudication', awaiting_submission_id: id }),

@@ -165,8 +165,8 @@ fn float_default_rel_tol_rejects_large_relative_diff_wa() {
 
 #[test]
 fn float_custom_rel_epsilon_accepts_large_relative_diff_ac() {
-    // Same inputs, but rel_tol 1e-3 -> tol ~1.0005 -> AC. Pins the rel_tol knob
-    // that was previously unreachable from the CLI.
+    // Same inputs, but rel_tol 1e-3 -> tol ~1.0005 -> AC. Pins that the CLI
+    // reaches the rel_tol knob.
     assert_eq!(
         run_args(
             "tokens-float",
@@ -194,7 +194,7 @@ fn float_rel_epsilon_and_epsilon_combine_via_max() {
 }
 
 // ===========================================================================
-// Task 1.5 -- the first 64 KiB of stdin is tee'd to stdout (the display preview).
+// The first 64 KiB of stdin is tee'd to stdout (the display preview).
 // ===========================================================================
 
 /// Run over a binary stdin/answer; returns `(exit_code, stdout_preview)`. The
@@ -275,7 +275,7 @@ fn preview_is_full_64k_even_when_verdict_is_wa_early() {
 }
 
 // ===========================================================================
-// Task 1.6 -- stdin is drained to EOF even after an early-decided verdict, so a
+// Stdin is drained to EOF even after an early-decided verdict, so a
 // still-running producer never receives SIGPIPE / BrokenPipe.
 // ===========================================================================
 

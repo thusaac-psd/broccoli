@@ -8,8 +8,8 @@ use common::storage::BlobStore;
 use sea_orm::prelude::Expr;
 use sea_orm::*;
 
-// visibility-bypass-audited: these DTO-building helpers are the pre-kernel
-// row fetch for `handlers/submission/mod.rs`'s read handlers - every caller
+// visibility-bypass-audited: these DTO-building helpers are the row fetch
+// that feeds the kernel for `handlers/submission/mod.rs`'s read handlers - every caller
 // pairs the DTOs built here with `VisibilityKernel::decide`/`fetch_visible`/
 // `fetch_visible_batch` (see this file's own `VisibilityContext` doc comment
 // below) before anything reaches a response body. Never called standalone.
@@ -89,13 +89,10 @@ impl VisibilityContext {
     /// gating in [`build_submission_response`] / [`build_judgement_response`])
     /// straight from the caller's auth, with no DB round trip.
     ///
-    /// Before this task this only ever came out of `require_submission_visible`
-    /// as a side effect of it *also* deciding reachability by hand. That
-    /// reachability decision now belongs solely to
-    /// `VisibilityKernel::decide`/`fetch_visible` (`Resource::Submission`) -
-    /// this constructor exists so callers can still get a `VisibilityContext`
-    /// for the orthogonal field-suppression rules without resurrecting that
-    /// hand-rolled check.
+    /// Reachability belongs solely to
+    /// `VisibilityKernel::decide`/`fetch_visible` (`Resource::Submission`);
+    /// this constructor gives callers a `VisibilityContext` for the
+    /// orthogonal field-suppression rules without deciding reachability.
     pub(super) fn from_auth_user(auth_user: &AuthUser) -> Self {
         Self {
             viewer_id: auth_user.user_id,

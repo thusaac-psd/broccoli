@@ -48,13 +48,12 @@ impl AdminCreds {
 }
 
 /// Top-level subcommands. Stress mode (the default) takes no subcommand; the
-/// `fault` subcommand opts in to the fault-injection scenarios formerly
-/// provided by the standalone `fault-harness` crate.
+/// `fault` subcommand opts in to the fault-injection scenarios.
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
     /// Fault-injection scenarios (cancel-storm, kill-server-recovery, ...).
     Fault(FaultArgs),
-    /// Judging throughput and per-stage latency (see docs/internals/performance.md).
+    /// Judging throughput and per-stage latency (see website/docs/internals/performance.md).
     Perf(crate::perf::PerfArgs),
 }
 

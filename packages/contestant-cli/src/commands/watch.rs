@@ -1912,7 +1912,8 @@ mod tests {
 
     #[test]
     fn test_modals_no_panic_on_tiny_terminal() {
-        // Regression: clamp(20, width) panicked when width < 20.
+        // Modal widths must not panic on a terminal narrower than 20 columns
+        // (`clamp(20, width)` panics when width < 20).
         let sizes = [(15u16, 5u16), (5, 3), (1, 1), (3, 1)];
 
         let mut app = sample_app();
@@ -2124,7 +2125,7 @@ mod tests {
 
     #[test]
     fn test_overlay_scroll_reaches_wrapped_bottom() {
-        // Regression: the wrapped bottom was unreachable when the row estimate undercounted.
+        // The wrapped bottom must stay reachable even when the row estimate undercounts.
         let mut app = sample_app();
         let body = (0..40)
             .map(|i| {

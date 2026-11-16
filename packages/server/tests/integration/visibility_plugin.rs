@@ -746,16 +746,15 @@ async fn decide_visibility_mixed_batch_lands_on_correct_resources() {
     );
 }
 
-/// I1: every contest-level reachability gate must run through the kernel.
+/// Every contest-level reachability gate must run through the kernel.
 ///
 /// `get_contest`, `get_contest_my_info`, `list_contests`, `list_participants`
-/// and `list_contest_submissions`' top gate historically called
-/// `check_contest_access` directly instead of
-/// `kernel.decide(Action::Read, Resource::Contest(id))`. That is invisible
-/// while no plugin narrows `Resource::Contest` - `decide_contest` is a
-/// byte-identical port of `check_contest_access` - so a kernel-level unit
-/// test cannot detect it: it passes whether or not the handler ever calls
-/// the kernel.
+/// and `list_contest_submissions`' top gate must call
+/// `kernel.decide(Action::Read, Resource::Contest(id))` rather than apply the
+/// host contest rule directly. The difference is invisible while no plugin
+/// narrows `Resource::Contest` - `decide_contest` applies the same rule - so
+/// a kernel-level unit test cannot detect a bypass: it passes whether or not
+/// the handler ever calls the kernel.
 ///
 /// This test detects it at the only layer that can. The viewer is a plain
 /// contestant (NOT an admin: `admin_override` short-circuits before
@@ -841,17 +840,12 @@ async fn contest_level_gates_all_route_through_the_kernel() {
     // -- Nominate the contest for a plugin Deny ---------------------------
     seed_kv(&app, "deny_resource_keys", &format!("contest:{contest_id}")).await;
 
-    // Control: `list_contest_problems` already gated on
-    // `Resource::Contest` BEFORE I1, so it is not what this test is
-    // proving - it is here to prove the plugin Deny is actually LIVE at
-    // this moment. (N1: the fixture's `read_kv_csv`/`read_kv_single` used
-    // to swallow host errors and return an empty list [-> Allow], so under
-    // heavy DB-pool contention a seeded key could silently fail to read
-    // back and this control would pass for the wrong reason. That fixture
-    // bug is fixed - a host error now propagates as `Err` and denies the
-    // whole batch, same as a trap - but this control assertion is kept: it
-    // is still cheap insurance against ANY reason the seed might not have
-    // taken effect yet, fixture bug or not.) If THIS assertion is the one
+    // Control: `list_contest_problems` is not what this test is proving -
+    // it is here to prove the plugin Deny is actually LIVE at this moment.
+    // The fixture's `read_kv_csv`/`read_kv_single` propagate a host error as
+    // `Err`, which denies the whole batch the same as a trap, and this
+    // control is cheap insurance against ANY reason the seed might not have
+    // taken effect yet. If THIS assertion is the one
     // that fails, the fixture was not live and the run is inconclusive -
     // it is not evidence of a handler bypass. If this passes and any
     // assertion below fails, that endpoint is genuinely not consulting the

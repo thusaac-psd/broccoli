@@ -45,7 +45,7 @@ mkdir -p "$B"/{images,compose,cli,ca,caddy,trust-ca,lib,native}
 # 1. CA — private keys NEVER enter the client-distributed (manifested) tree.
 #    Only the public root.crt ships to clients. root.key (and the leaf's
 #    server.key) live in a SEPARATE, unmanifested server-only sidecar that the
-#    operator delivers to the server host ALONE. See docs/airgap-deployment.md §7.
+#    operator delivers to the server host ALONE. See docs/airgap-deployment.md §8.
 SRV="$OUTPUT/broccoli-airgap-$VERSION.server-secret"
 rm -rf "$SRV"; mkdir -p "$SRV"; chmod 700 "$SRV"
 bash "$here/ca/mint-ca.sh" --out "$SRV"
@@ -105,7 +105,7 @@ if [ "$SKIP_IMAGES" = "0" ]; then
   # (the toolchain). Both Dockerfiles already carry RUNTIME_IMAGE / USE_CN_MIRRORS
   # levers; surface them here so the documented staging entrypoint can flip them
   # WITHOUT weakening the shipped defaults — unset means distroless runtime +
-  # upstream toolchain, exactly as before. USE_CN_MIRRORS applies to both images;
+  # upstream toolchain. USE_CN_MIRRORS applies to both images;
   # RUNTIME_IMAGE is server-only (the worker bases are already mirror-agnostic).
   mirror_build_args=()
   [ -n "${BROCCOLI_USE_CN_MIRRORS:-}" ] && \

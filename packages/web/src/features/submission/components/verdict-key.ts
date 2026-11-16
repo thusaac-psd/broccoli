@@ -14,20 +14,19 @@ export type VerdictKey =
   | 'pending';
 
 /**
- * A per-test-case `verdict` of `null`/`undefined` is now ambiguous: it means
+ * A per-test-case `verdict` of `null`/`undefined` is ambiguous: it means
  * EITHER "not yet judged" (the submission/judgement hasn't reached this test
  * case yet) OR "judged, but this field was blanked by a visibility field
  * mask" (IOI's `subtask_scores`/`total_only` feedback levels -- see
  * `plugins/ioi/src/feedback.rs`'s `per_test_case_mask_fields`). A mask can
- * only blank a value, never author one, so the wire can no longer
+ * only blank a value, never author one, so the wire cannot
  * distinguish the two cases by verdict alone.
  *
  * `status` (the enclosing submission's or judgement's status, never itself
  * masked by any IOI mask) disambiguates: once a judgement reaches a
  * terminal status (`isTerminalStatus`), every test case it ran has *some*
  * verdict on the wire -- a `null` at that point can only be a redaction, so
- * it renders exactly like the existing authored `"Skipped"` value did
- * pre-refactor (equivalence is defined at the rendered level, not the wire
+ * it renders exactly like an authored `"Skipped"` value (equivalence is defined at the rendered level, not the wire
  * level: a masked test case must be visually indistinguishable from a
  * genuinely skipped one). While the status is still non-terminal, a `null`
  * verdict genuinely means "not run yet".
@@ -37,7 +36,7 @@ export type VerdictKey =
  * runner (`node --experimental-strip-types --test`) without needing a
  * JSX-capable loader -- see `verdict-key.test.ts`.
  *
- * Task 17 / Step 2z: `isTerminalStatus` alone is not enough here and must be
+ * `isTerminalStatus` alone is not enough here and must be
  * paired with an explicit `status === 'Running'` check. `test_case_results`
  * is populated exclusively from already-computed DB rows -- there is no
  * placeholder element for a test case that has not run yet -- so a `null`
@@ -46,7 +45,7 @@ export type VerdictKey =
  * finish and be masked while the judgement as a whole is still `Running`).
  * The backend encodes exactly this: its own guard is
  * `is_terminal() || status == Running` (see
- * `hidden_result_mask_covers_every_list_shape_field_hide_used_to_blank` and
+ * `hidden_result_mask_covers_every_list_shape_result_field` and
  * sibling tests in `plugins/icpc/src/lib.rs`). Without the `Running` half,
  * a masked test case under a still-`Running` judgement would render
  * "pending" instead of "skipped". `isTerminalStatus` leaves `Running` out on

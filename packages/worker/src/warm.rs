@@ -251,10 +251,10 @@ mod tests {
     use crate::models::operation::file_cacher::NoopFileCacher;
     use testcontainers::runners::AsyncRunner;
 
-    /// Regression: a subscription whose server stops answering (a half-open
-    /// socket after the Redis host dies, simulated with `CLIENT PAUSE`) used to
-    /// wait on the stream forever. The keepalive must notice and return so the
-    /// caller resubscribes.
+    /// A subscription whose server stops answering (a half-open socket after
+    /// the Redis host dies, simulated with `CLIENT PAUSE`) must not wait on
+    /// the stream forever. The keepalive must notice and return so the caller
+    /// resubscribes.
     #[tokio::test]
     async fn unresponsive_server_ends_the_subscription_so_it_is_resubscribed() {
         let redis = common::test_util::redis_image()

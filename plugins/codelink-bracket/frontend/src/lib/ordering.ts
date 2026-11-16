@@ -6,9 +6,9 @@
 // can never be one `record_order` on the server rejects.
 //
 // The backend rejects an invalid `order` with a 400 either way -- this
-// module exists so the UI can refuse to even attempt the doomed request,
-// per this task's requirement that a non-permutation be unsubmittable, not
-// merely rejected after a round trip.
+// module exists so the UI can refuse to even attempt the doomed request: a
+// non-permutation must be unsubmittable, not merely rejected after a round
+// trip.
 
 /**
  * Whether `order` contains exactly the same values as `group`, each exactly

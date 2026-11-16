@@ -124,9 +124,8 @@ Fix the cause (that node's files, or the blob storage for an upload) and select
 on every server; there is no need to restart servers or repeat the action per
 node.
 
-Upgrade all server nodes together. Servers from before this mechanism do not
-publish plugin changes to their peers, so in a mixed fleet a change made through
-an old server only reaches that server.
+Upgrade all server nodes together, so every server runs the same plugin
+lifecycle.
 
 ## Password Reset
 

@@ -300,12 +300,11 @@ pub async fn rejudge_submission(
 /// field of a submission the caller can't Read (owner, verdict, code,
 /// timestamps, ...) is ever observable through this count, only whether the
 /// row is present. That is the same disclosure class the single-submission
-/// surface already has and keeps after the submission:rejudge visibility
-/// fix - `GET /submissions/{id}` still answers 200 vs. 404 for exactly this
-/// reason, and `apply_submission_judgement`/`rejudge_submission` still
+/// surface has - `GET /submissions/{id}` answers 200 vs. 404 for exactly this
+/// reason, and `apply_submission_judgement`/`rejudge_submission`
 /// succeed-or-404 on a nonexistent id - just aggregated across up to
-/// [`MAX_BULK_REJUDGE_IDS`] ids in one round trip instead of one id per request. It is not a
-/// regression introduced by that fix. Don't close it by changing this
+/// [`MAX_BULK_REJUDGE_IDS`] ids in one round trip instead of one id per
+/// request. Don't close it by changing this
 /// endpoint's behaviour alone: the identical oracle stays reachable one id
 /// at a time via the endpoints above, so narrowing only this one would trade
 /// a fast leak for a slow one rather than closing it.

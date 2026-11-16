@@ -11,8 +11,7 @@
 //!      `Compiling`/`Running` with a non-NULL `owner_server_id`.
 //!   3. Executes `${kill_command}` via `sh -c` (e.g.
 //!      `docker compose kill server-1`).
-//!   4. Polls for up to `observe_timeout_secs` (default 75s, the §0 roadmap
-//!      acceptance) watching for recovery: either ownership transferred to
+//!   4. Polls for up to `observe_timeout_secs` (default 75s) watching for recovery: either ownership transferred to
 //!      a different server, status reset to Pending, or terminal Judged.
 //!   5. Passes if every previously-in-flight submission reached a recovery
 //!      state within the window; fails otherwise.

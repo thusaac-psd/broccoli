@@ -127,12 +127,10 @@ impl Resource {
 
     /// The resource's one authoritative wire identifier, always a lossless
     /// string (decimal for the i32-native kinds, hyphenated UUID for
-    /// `Attachment`). Deliberately `String`, not `i32`: an earlier version
-    /// of this method truncated `Attachment`'s `Uuid` into an `i32`
-    /// (`id.as_u128() as i32`), which collided across the whole
+    /// `Attachment`). Deliberately `String`, not `i32`: truncating
+    /// `Attachment`'s `Uuid` into an `i32` would collide across the whole
     /// installation's attachment table at the 32-bit birthday bound. See
-    /// `QueryResource::id`'s doc comment (`broccoli-types`) for the full
-    /// account; that truncation helper has been deleted, not corrected.
+    /// `QueryResource::id`'s doc comment (`broccoli-types`).
     pub fn wire_id(&self) -> String {
         match self {
             Resource::Contest(id) | Resource::Submission(id) | Resource::Clarification(id) => {

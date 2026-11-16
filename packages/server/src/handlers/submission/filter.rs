@@ -19,17 +19,14 @@ use super::response::{VisibilityContext, submission_score_for_status};
 /// wins on `Deny` - to an already-built `SubmissionResponse`, returning the
 /// masked wire JSON.
 ///
-/// Before this task, this file's `filter_submission_via_plugin` adopted a
-/// plugin-authored submission JSON wholesale after only a shape check -
-/// `Ok(out) => Ok(out.submission)`. A plugin registered against the
-/// submission's contest type could therefore alter a verdict, a score, or a
-/// displayed user id outright. Routing through `VisibilityKernel::fetch_visible`
-/// closes that structurally rather than by convention: `Visible::new` is
+/// A plugin must never be able to alter a verdict, a score, or a displayed
+/// user id. Routing through `VisibilityKernel::fetch_visible` guarantees
+/// that structurally rather than by convention: `Visible::new` is
 /// `pub(super)` to `crate::visibility`, so the only way anything under
 /// `handlers` can turn a DTO into a response body is `Visible::into_masked_json`,
 /// which can only ever blank fields named in a `FieldMask` - never substitute a
-/// value. `None` (the kernel's `Deny`) maps to the same 404 this submission
-/// surface has always returned for an unreachable submission; the caller (not
+/// value. `None` (the kernel's `Deny`) maps to the 404 this submission
+/// surface returns for an unreachable submission; the caller (not
 /// this function) also fails fast on that same decision before doing the
 /// (multi-table) work of building `response` in the first place - see
 /// `get_submission`.
@@ -92,9 +89,8 @@ pub(super) async fn apply_filter_to_response_after_mutation(
 /// `SubmissionJudgementResponse` is a flat shape (`verdict`, `score`, ...
 /// directly on the object), not the nested `result.verdict` shape a
 /// `FieldMask` targets (see `Decision`'s own doc examples and
-/// `apply_mask`'s tests). Exactly as before this task, a synthetic
-/// `SubmissionResponse` wrapper stands in for the judgement so the masking
-/// (now kernel-driven instead of plugin-driven) lands on the paths a caller
+/// `apply_mask`'s tests). A synthetic `SubmissionResponse` wrapper stands in
+/// for the judgement so the kernel-driven masking lands on the paths a caller
 /// actually names, and the masked fields are copied back onto the real
 /// judgement response afterwards. The kernel memoizes per `(Action,
 /// Resource)`, so this doesn't re-decide anything already decided for this
@@ -151,9 +147,7 @@ pub(super) async fn apply_filter_to_judgement_response(
     let filtered_value = apply_filter_to_response(kernel, synthetic_submission).await?;
 
     // DO NOT re-deserialize `filtered_value` into a typed `SubmissionResponse`
-    // here, even though that used to be exactly what this function did (and
-    // is still what `filter_submission_via_plugin`'s pre-task caller did). A
-    // `FieldMask` can only ever blank a value to JSON `null`, never author a
+    // here. A `FieldMask` can only ever blank a value to JSON `null`, never author a
     // replacement - so `per_test_case_mask_fields()` (used by
     // `subtask_scores`/`total_only`) nulls individual
     // `result.test_case_results[i].verdict`/`.score` leaves while leaving
@@ -162,11 +156,11 @@ pub(super) async fn apply_filter_to_judgement_response(
     // masked `null` inside a populated array fails `serde_json::from_value`
     // outright, turning a legitimate redaction into a 500
     // (`AppError::Internal`) instead of the null the client is supposed to
-    // see. The `none` level's own e2e coverage never caught this because it
-    // masks the whole array key to `[]`, not individual leaves within it -
-    // see `ioi_feedback_filter_subtask_scores_redacts_per_test_case_verdict`.
+    // see. The `none` level masks the whole array key to `[]`, not individual
+    // leaves within it, so only the leaf-masking levels exercise this - see
+    // `ioi_feedback_filter_subtask_scores_redacts_per_test_case_verdict`.
     //
-    // The fix mirrors what `apply_filter_to_response` / `get_submission` and
+    // This mirrors what `apply_filter_to_response` / `get_submission` and
     // `Visible::into_masked_json` already do: serialize-then-mask, and once
     // masked, stay in `serde_json::Value` land all the way to the wire -
     // never re-type masked JSON. Concretely: serialize the still-UNMASKED
@@ -174,7 +168,7 @@ pub(super) async fn apply_filter_to_judgement_response(
     // the already-masked `result.*` leaves from `filtered_value` onto it
     // directly as JSON, reading them with `Value` indexing rather than
     // through a struct. If you're tempted to "simplify" this back into a
-    // typed round trip, don't - that reintroduces this exact crash.
+    // typed round trip, don't - a masked leaf would crash it.
     // The `obj.insert(...)` calls below assume the eight
     // leaves named here are the WHOLE of `JudgeResultResponse` - i.e. that
     // splicing them one by one out of `masked_result` is equivalent to

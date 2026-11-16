@@ -153,7 +153,7 @@ impl OperationHandler {
                 // replaces the base and escapes), and isolate's `--stdin`/etc.
                 // must stay box-relative too. `safe_join` errors on any unsafe
                 // component; we keep the original relative path so both backends
-                // resolve it inside the box exactly as before.
+                // resolve it inside the box.
                 safe_join(working_dir, path)?;
                 Ok(Some(Path::new(path).to_path_buf()))
             }

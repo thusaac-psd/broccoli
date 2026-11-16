@@ -649,7 +649,7 @@ async fn icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organiz
     // true (see `visibility::host_rules::decide_submission`) - `contest:manage`
     // alone does not grant it. Without this, the request 404s before the
     // plugin's decision is ever consulted, and the assertions below would
-    // not actually exercise the fix.
+    // not exercise the plugin's `CONTEST_MANAGE` branch.
     app.register_for_contest(contest_id, &manage_only).await;
 
     // Non-zero freeze window, and public standings so the redaction under

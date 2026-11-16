@@ -29,7 +29,8 @@ Em dashes banned. Colons and hyphens are fine.
 - `packages/server/`, `packages/worker/`, `packages/mq/`, `packages/common/` for
   the host platform.
 - `packages/plugin-core/` for how plugins are loaded and run.
-- The Justfile and `docs/` for build and release reality.
+- `packages/api-types/` for the REST request and response types.
+- The `justfile` and `docs/` for build and release reality.
 
 ## Location and shape
 

@@ -465,7 +465,7 @@ async fn resolve_inputs(
         .collect();
 
     let checker_format = Some(problem_model.checker_format.clone());
-    // The checker source is no longer inlined by the host: checker plugins read it
+    // The host does not inline the checker source: checker plugins read it
     // from their own per-problem config (e.g. `standard-checkers:checker_source`).
 
     let checker_config_value: Option<serde_json::Value> =

@@ -594,10 +594,10 @@ mod tests {
         assert_eq!(scores[0].max_score, 100.0);
     }
 
-    /// Regression: a fully-passing GroupMin subtask whose member test cases carry
+    /// A fully-passing GroupMin subtask whose member test cases carry
     /// ZERO points must score its full max on RECOMPUTE. The persisted per-test
     /// score is `round(raw * tc.score) = round(1.0 * 0) = 0`, so re-deriving raw as
-    /// `score / tc_max` (tc_max=0 -> 0.0) wrongly failed the subtask; the verdict
+    /// `score / tc_max` (tc_max=0 -> 0.0) would fail the subtask; the verdict
     /// (Accepted) is the authoritative full-pass signal.
     #[test]
     fn zero_point_group_min_member_full_pass_scores_full_on_recompute() {

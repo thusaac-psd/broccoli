@@ -62,7 +62,7 @@ export function useRestoreSubmissionScroll(ready = true) {
   const top = getSubmissionScrollRestoration(location)?.top;
   const restoredKey = useRef<string | null>(null);
   useLayoutEffect(() => {
-    // POP uses the router's latest saved position. Reapplying the old explicit
+    // POP uses the router's latest saved position. Reapplying the stored explicit
     // return position would override subsequent scrolling on another visit.
     if (
       action !== 'REPLACE' ||

@@ -256,10 +256,10 @@ mod filter_tests {
     }
 
     #[test]
-    fn hidden_result_mask_covers_every_list_shape_field_hide_used_to_blank() {
-        // Old `hide_submission_result` list-item branch: verdict, score,
-        // time_used, memory_used, and nothing else (status was deliberately
-        // left alone so the pending '?' cell still renders).
+    fn hidden_result_mask_covers_every_list_shape_result_field() {
+        // A list item hides verdict, score, time_used and memory_used, and
+        // nothing else: status stays visible so the pending '?' cell still
+        // renders.
         let fields = hidden_result_mask_fields();
         for f in ["verdict", "score", "time_used", "memory_used"] {
             assert!(
@@ -274,10 +274,9 @@ mod filter_tests {
     }
 
     #[test]
-    fn hidden_result_mask_covers_every_detail_shape_field_hide_used_to_blank() {
-        // Old `hide_submission_result` detail branch: the same four, plus
-        // compile_output/error_message/test_case_results, all nested under
-        // `result`.
+    fn hidden_result_mask_covers_every_detail_shape_result_field() {
+        // A detail response hides the same four, plus compile_output,
+        // error_message and test_case_results, all nested under `result`.
         let fields = hidden_result_mask_fields();
         for f in [
             "result.verdict",

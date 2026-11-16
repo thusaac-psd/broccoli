@@ -2723,9 +2723,10 @@ mod bulk_add_participants {
     }
 }
 
-/// A contest must say which contest type judges it. The server used to fall
-/// back to the alphabetically first registered type, which depends on plugin
-/// names and can land on a tournament format that rejects every submission.
+/// A contest must say which contest type judges it. The server never falls
+/// back to a default type: the alphabetically first registered type depends
+/// on plugin names and can land on a tournament format that rejects every
+/// submission.
 mod contest_type_required {
     use super::*;
     use sea_orm::{ActiveModelTrait, EntityTrait, Set};

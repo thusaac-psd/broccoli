@@ -510,9 +510,9 @@ mod tests {
 
     #[test]
     fn partition_skips_header_first_bundle() {
-        // Regression: author bundled testlib.h BEFORE checker.cpp, so the resolver
-        // picked filenames[0] = testlib.h and failed with "Unsupported checker
-        // source language for 'testlib.h'" -> SystemError. The primary must be the
+        // An author may bundle testlib.h BEFORE checker.cpp. Picking
+        // filenames[0] = testlib.h would fail with "Unsupported checker source
+        // language for 'testlib.h'" -> SystemError. The primary must be the
         // .cpp; the header stays mounted (not a compile unit).
         let files = vec!["testlib.h".to_string(), "checker.cpp".to_string()];
         let (sources, others) = partition_checker_sources(&files).unwrap();
@@ -568,9 +568,10 @@ mod tests {
 
     #[test]
     fn cache_inputs_cover_headers_and_aux_files() {
-        // Regression: the compile cache key hashed only the compile units, so
-        // fixing a bug in testlib.h or a bundled data table without touching
-        // checker.cpp kept the old key and served the STALE compiled checker.
+        // The compile cache key must hash headers and aux files too: hashing
+        // only the compile units would keep the same key when an author fixes
+        // testlib.h or a bundled data table without touching checker.cpp, and
+        // serve the STALE compiled checker.
         let mut resolved = resolved_compile_with_inputs(vec!["checker.cpp".to_string()]);
         let bundle = vec![
             "checker.cpp".to_string(),

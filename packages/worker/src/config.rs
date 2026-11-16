@@ -200,9 +200,9 @@ fn default_cache_dir() -> String {
 }
 fn default_max_cache_size() -> u64 {
     // 32 GiB. A single problem's test data can be large (e.g. 30 testcases x
-    // ~40 MB input+answer ~ 1.2 GB), so the old 4 GiB default held only ~3
-    // problems and thrashed during a contest - evicting blobs the pre-warm had
-    // just fetched. 32 GiB comfortably holds a full contest's working set on a
+    // ~40 MB input+answer ~ 1.2 GB), so a 4 GiB cache holds only ~3 problems
+    // and thrashes during a contest - evicting blobs the pre-warm has just
+    // fetched. 32 GiB comfortably holds a full contest's working set on a
     // typical judge box; operators with a smaller disk should lower this.
     32 * 1024 * 1024 * 1024
 }

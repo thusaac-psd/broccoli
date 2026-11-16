@@ -43,11 +43,9 @@ use crate::utils::soft_delete::SoftDeletable;
 ///
 /// A Bearer token that is PRESENT but fails verification (expired, bad
 /// signature, malformed) is `Err(TokenInvalid)` - a 401, exactly as core
-/// routes answer. It used to yield `None`, silently turning an expired session
-/// into an anonymous caller. On routes that check permissions inside the
-/// plugin that surfaced as a 403 "requires contest:manage", which clients do
-/// not treat as "refresh your token", so staff hit a misleading permissions
-/// error on every action once their 5-minute access token lapsed.
+/// routes answer. Treating it as anonymous would turn an expired session into
+/// a 403 on routes that check permissions inside the plugin, and clients
+/// refresh their access token on 401, never on 403.
 fn resolve_optional_auth_user(
     state: &AppState,
     headers: &HeaderMap,

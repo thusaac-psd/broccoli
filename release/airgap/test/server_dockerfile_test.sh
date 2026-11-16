@@ -4,7 +4,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 df="$here/../../../Dockerfile.server"
 [ -f "$df" ] || { echo "FAIL: Dockerfile.server missing: $df"; exit 1; }
 
-# REGRESSION (server-role release blocker, silent): the runtime stage runs as the
+# The server image must give plugins a writable HOME: the runtime stage runs as the
 # distroless nonroot uid 65532, whose HOME (/home/nonroot) is NOT writable by that
 # user in the base image. wasmtime (via extism) derives its plugin compilation
 # cache from $HOME and fails plugin init() with "failed to create cache directory"
@@ -12,8 +12,8 @@ df="$here/../../../Dockerfile.server"
 # to register: the server boots "healthy" but the evaluator registry is empty, so
 # no problem can be created ("problem_type must be one of:" empty) and nothing
 # judges. The image must bake a writable, uid-owned HOME and point the process at
-# it. Assert all three legs of that fix so a base bump or refactor can't silently
-# reintroduce the empty-registry failure.
+# it. Assert all three legs so a base bump or refactor cannot silently bring
+# back the empty-registry failure.
 
 # 1. The shell-bearing builder stage creates the home dir (distroless can't mkdir).
 grep -Eq '^[[:space:]]*RUN[[:space:]]+mkdir[[:space:]]+-p[[:space:]]+/out/home/nonroot' "$df" \

@@ -4,7 +4,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 wt="$here/../../docker-compose.worker.yaml.template"
 [ -f "$wt" ] || { echo "FAIL: worker template missing: $wt"; exit 1; }
 
-# REGRESSION (worker-role release blocker): the worker image bakes isolate plus
+# The worker template must not bind-mount isolate's config: the image bakes isolate plus
 # its config, which lives at the single FILE /usr/local/etc/isolate. A host
 # bind-mount of that path makes Docker auto-create an empty DIRECTORY at the
 # missing source and mount it over the image's config file, so the container

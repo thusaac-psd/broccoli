@@ -13,8 +13,8 @@ use uuid::Uuid;
 // perm::PROBLEM_EDIT and are write-only. The viewer-facing reads (the
 // standalone and contest-scoped list and download routes) all route through
 // `VisibilityKernel` below (`Resource::Problem` and `Resource::Attachment`); `problem`/`problem_attachment`
-// here are only used for the pre-kernel row fetch and for the admin write
-// paths. Pinned by the frozen
+// here are only used for the row fetch that feeds the kernel and for the
+// admin write paths. Pinned by the frozen
 // `tests/integration/visibility_matrix.rs::problem_attachment_list` suite.
 use crate::entity::{problem, problem_attachment};
 use crate::error::{AppError, ErrorBody};
@@ -248,7 +248,7 @@ async fn list_attachments_in(
     // Per-attachment decision, distinct from the problem-level gate above: a
     // plugin can still Deny/Redact one specific attachment even when its
     // parent problem is otherwise readable - `Resource::Attachment` exists
-    // precisely for that (see the design doc's consumer-validation table).
+    // precisely for that.
     // A denied attachment is omitted from the list, never rendered as a
     // placeholder - a placeholder would confirm it exists.
     let items: Vec<(Resource, AttachmentResponse)> = refs
@@ -366,9 +366,9 @@ async fn download_attachment_in(
     let kernel = VisibilityKernel::new(state, Subject::from_auth_user(auth_user));
 
     // Fail fast, before parsing/looking up the specific attachment, on a
-    // problem the kernel already knows is unreachable - preserves the
-    // pre-kernel handler's exact order (`require_problem_read_access` ran
-    // before `Uuid::parse_str`). `Action::Download` throughout this handler:
+    // problem the kernel already knows is unreachable: an unreachable problem
+    // answers 404 before a malformed attachment id can answer 400.
+    // `Action::Download` throughout this handler:
     // the whole operation is a file-bytes read, not a metadata read.
     require_problem_part_reachable(
         &kernel,
@@ -395,8 +395,7 @@ async fn download_attachment_in(
     // Per-attachment Download decision, distinct from the problem-level
     // gate above: a plugin can still Deny/Redact ONE specific attachment
     // even when its parent problem is otherwise readable - `Resource::
-    // Attachment` exists precisely for that (see the design doc's
-    // consumer-validation table entry for Download + Attachment). The
+    // Attachment` exists precisely for that. The
     // kernel memoizes per (Action, Resource); `Action::Download` on
     // `Resource::Attachment` was never asked above (only on `Resource::
     // Problem`), so this is a genuinely new host decision, not a free

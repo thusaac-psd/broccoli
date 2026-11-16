@@ -2,9 +2,7 @@
 //!
 //! Posts N submissions in parallel (default 1000) across a user-defined mix of
 //! contest types (e.g. `icpc:70,ioi:30`), one contest + problem per type, then
-//! waits for terminal verdicts and reports per-type stats. Implements the §0
-//! roadmap item "N=1000 in-flight submissions with a configurable problem-type
-//! mix (ICPC, IOI)".
+//! waits for terminal verdicts and reports per-type stats.
 //!
 //! Plugin discovery is dynamic: requested types that aren't in
 //! `/api/v1/plugins/registries` are dropped with a warning (or hard-failed when
@@ -1114,7 +1112,7 @@ mod tests {
         }
         let icpc_frac = counts[0] as f64 / n as f64;
         let ioi_frac = counts[1] as f64 / n as f64;
-        // 5% tolerance per the spec.
+        // 5% tolerance: 10k draws keep the sampling error well inside it.
         assert!(
             (icpc_frac - 0.70).abs() < 0.05,
             "icpc fraction {icpc_frac} not within 5% of 0.70"

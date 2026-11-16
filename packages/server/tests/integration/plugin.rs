@@ -37,9 +37,9 @@ mod plugin_management {
     }
 
     /// `plugin:manage` is the sole gate on every `handlers/admin.rs` endpoint -
-    /// this pins that gate (previously untested against a non-admin
-    /// authenticated user) for the guard test's `visibility-bypass-audited`
-    /// comment above that file's entity import.
+    /// this pins that gate against a non-admin authenticated user for the
+    /// guard test's `visibility-bypass-audited` comment above that file's
+    /// entity import.
     #[tokio::test]
     async fn contestant_cannot_manage_plugins() {
         let app = TestApp::spawn().await;
@@ -324,12 +324,11 @@ mod plugin_routing {
     /// unprotected plugin route too - not silently downgraded to anonymous.
     ///
     /// Routes that check permissions inside the plugin (no manifest
-    /// `permission`) used to see an expired token as "no caller", so the plugin
-    /// answered 403 "requires contest:manage". Clients refresh their access
+    /// `permission`) would otherwise see an expired token as "no caller" and
+    /// answer 403 "requires contest:manage". Clients refresh their access
     /// token on 401, never on 403, so a staff member whose 5-minute token
-    /// lapsed hit a misleading permissions error on every codelink-bracket
-    /// staff action until they reloaded - found running a real 128-candidate
-    /// tournament. Core routes already answer 401 here; plugin routes now match.
+    /// lapsed would hit a misleading permissions error on every staff action
+    /// until they reloaded. Plugin routes answer 401 here, as core routes do.
     /// A genuinely ABSENT token is still anonymous, because some plugin routes
     /// are public.
     #[tokio::test(flavor = "multi_thread")]
