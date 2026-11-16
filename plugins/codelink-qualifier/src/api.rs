@@ -42,12 +42,8 @@ fn load_context<'r>(
     Ok((info.id, info, config))
 }
 
-pub fn handle_standings(
-    host: &Host,
-    req: &PluginHttpRequest,
-) -> Result<PluginHttpResponse, ApiError> {
-    let (contest_id, info, config) = load_context(host, req)?;
-
+/// The contest's problems in contest order, each with its configured points.
+pub fn load_problems(host: &Host, contest_id: i32) -> Result<Vec<Problem>, SdkError> {
     let mut p = Params::new();
     let sql = format!(
         "SELECT problem_id, label FROM contest_problem \
@@ -60,8 +56,7 @@ pub fn handle_standings(
         label: Option<String>,
     }
     let rows: Vec<ProblemRow> = host.db.query_with_args(&sql, &p.into_args())?;
-    let problems = rows
-        .into_iter()
+    rows.into_iter()
         .map(|row| {
             Ok(Problem {
                 points: ProblemConfig::load(host, contest_id, row.problem_id)?.points,
@@ -69,7 +64,36 @@ pub fn handle_standings(
                 label: row.label,
             })
         })
-        .collect::<Result<Vec<_>, SdkError>>()?;
+        .collect()
+}
+
+/// The `contest` namespace's validate function: refuses fewer advancement
+/// places than the contest's problems let qualify directly
+/// ([`ContestConfig::violations`]).
+pub fn validate_contest_config(
+    host: &Host,
+    input: &ConfigValidateInput,
+) -> Result<ConfigValidateOutput, SdkError> {
+    let config: ContestConfig = input.parse()?;
+    let contest_id = input
+        .contest_id
+        .ok_or_else(|| SdkError::Other("a contest config belongs to a contest".into()))?;
+    let points: Vec<usize> = load_problems(host, contest_id)?
+        .iter()
+        .map(|problem| problem.points)
+        .collect();
+    Ok(ConfigValidateOutput {
+        errors: config.violations(&points),
+    })
+}
+
+pub fn handle_standings(
+    host: &Host,
+    req: &PluginHttpRequest,
+) -> Result<PluginHttpResponse, ApiError> {
+    let (contest_id, info, config) = load_context(host, req)?;
+
+    let problems = load_problems(host, contest_id)?;
 
     let mut p = Params::new();
     let sql = format!(
@@ -85,7 +109,7 @@ pub fn handle_standings(
         .query_with_args(include_str!("submissions.sql"), &[contest_id])?;
     let submissions: Vec<Submission> = rows.into_iter().map(Submission::from).collect();
     let standings = calculate(participants, problems, submissions, &config)?;
-    let advancement = standings.advancement(info.phase.has_ended())?;
+    let advancement = standings.advancement(info.phase.has_ended());
     let mut body = serde_json::to_value(standings)?;
     body["phase"] = serde_json::json!(info.phase.stage());
     body["advancement"] = serde_json::to_value(advancement)?;

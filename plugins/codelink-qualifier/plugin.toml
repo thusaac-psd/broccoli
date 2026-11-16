@@ -27,6 +27,7 @@ handler = "api_standings"
 [config.contest]
 description = "Codelink qualification rules and scoreboard settings"
 scopes = ["contest"]
+validate = "validate_contest_config"
 
 [config.contest.properties.expected_problem_count]
 type = "integer"

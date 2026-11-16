@@ -202,7 +202,8 @@ fn final_advancement_is_available_only_after_the_contest_and_all_judging_finish(
             assert_eq!(
                 body["advancement"],
                 json!({
-                    "direct_user_ids": [1], "reserve_user_ids": [2, 3], "unfilled_slots": 13
+                    "direct_user_ids": [1], "reserve_user_ids": [2, 3], "unfilled_slots": 13,
+                    "over_capacity": 0
                 })
             );
             assert_eq!(body["qualified_count"], 1);
@@ -236,4 +237,36 @@ fn rules_endpoint_does_not_mask_bad_configuration() {
         let error = handler(&host, &request()).unwrap_err().into_response();
         assert_eq!(error.status, 500);
     }
+}
+
+/// More direct qualifiers than advancement places is a conflict for the
+/// organizers, which the standings report: the route still answers every
+/// viewer.
+#[test]
+fn standings_report_more_direct_qualifiers_than_places() {
+    let host = Host::mock();
+    host.config.seed(
+        "contest",
+        "7",
+        "contest",
+        json!({ "solves_to_qualify": 1, "advancement_slots": 1 }),
+    );
+    host.db
+        .queue_query_result(json!([{"problem_id": 1, "label": "A"}]));
+    host.db.queue_query_result(json!([
+        {"user_id": 1, "username": "one"}, {"user_id": 2, "username": "two"}
+    ]));
+    host.db.queue_query_result(json!([
+        {"submission_id": 1, "user_id": 1, "problem_id": 1, "submitted_at_us": 1000000, "status": "Judged", "verdict": "Accepted"},
+        {"submission_id": 2, "user_id": 2, "problem_id": 1, "submitted_at_us": 2000000, "status": "Judged", "verdict": "Accepted"}
+    ]));
+    let response = handle_standings(&host, &request_at("ended")).unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.body.unwrap()["advancement"],
+        json!({
+            "direct_user_ids": [1, 2], "reserve_user_ids": [], "unfilled_slots": 0,
+            "over_capacity": 1
+        })
+    );
 }

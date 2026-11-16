@@ -135,23 +135,24 @@ pub struct Advancement {
     pub reserve_user_ids: Vec<i32>,
     /// Positive when organizers must fill the remaining places, e.g. by a playoff.
     pub unfilled_slots: usize,
+    /// Positive when more contestants qualified directly than there are
+    /// places, a conflict organizers must resolve: every direct qualifier is
+    /// listed, and no reserve advances.
+    pub over_capacity: usize,
 }
 
 impl Standings {
-    pub fn advancement(&self, contest_ended: bool) -> Result<Option<Advancement>, SdkError> {
+    pub fn advancement(&self, contest_ended: bool) -> Option<Advancement> {
         if !contest_ended || self.pending_submissions != 0 {
-            return Ok(None);
+            return None;
         }
 
         let (direct, reserves): (Vec<_>, Vec<_>) = self
             .rows
             .iter()
             .partition(|row| row.score >= self.config.solves_to_qualify);
-        let Some(available) = self.config.advancement_slots.checked_sub(direct.len()) else {
-            return Err(SdkError::Other(
-                "Codelink direct qualifiers exceed the configured advancement places".into(),
-            ));
-        };
+        let places = self.config.advancement_slots;
+        let available = places.saturating_sub(direct.len());
         let mut direct_user_ids: Vec<_> = direct.iter().map(|row| row.user_id).collect();
         direct_user_ids.sort_unstable();
         let mut reserves: Vec<_> = reserves.into_iter().filter(|row| row.score > 0).collect();
@@ -161,11 +162,12 @@ impl Standings {
             .take(available)
             .map(|row| row.user_id)
             .collect();
-        Ok(Some(Advancement {
+        Some(Advancement {
             unfilled_slots: available - reserve_user_ids.len(),
+            over_capacity: direct_user_ids.len().saturating_sub(places),
             direct_user_ids,
             reserve_user_ids,
-        }))
+        })
     }
 }
 

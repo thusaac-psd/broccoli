@@ -43,6 +43,8 @@
 'codelink-qualifier.reserveCount' = "{count} reserve qualifiers"
 'codelink-qualifier.advancementCount' = "{count}/{total} advance"
 'codelink-qualifier.unfilledSlots' = "{count} places remain unfilled. Organizers need a playoff or another announced selection method."
+'codelink-qualifier.config.placesBelowDirectQualifiers' = "Up to {most} contestants can qualify directly with this contest's problems, more than the {places} advancement places. Add places, raise the points to qualify, or lower the slots per problem."
+'codelink-qualifier.overCapacity' = "{count} more contestants qualified directly than there are advancement places. Organizers need to decide who advances."
 'codelink-qualifier.table.score' = "Points"
 'codelink-qualifier.creditedProblems' = "{count} credited problems"
 'codelink-qualifier.status.reserve' = "Reserve qualifier"

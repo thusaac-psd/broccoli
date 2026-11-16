@@ -54,4 +54,11 @@ mod plugin {
     pub fn api_standings(input: String) -> FnResult<String> {
         run_api_handler(&input, crate::api::handle_standings)
     }
+
+    #[plugin_fn]
+    pub fn validate_contest_config(input: String) -> FnResult<String> {
+        let input: ConfigValidateInput = serde_json::from_str(&input)?;
+        let output = crate::api::validate_contest_config(&Host::new(), &input)?;
+        Ok(serde_json::to_string(&output)?)
+    }
 }

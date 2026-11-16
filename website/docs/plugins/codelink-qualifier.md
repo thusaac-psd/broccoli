@@ -70,6 +70,13 @@ from 1 to 1000. The expected problem count takes 0 to 1000 and only drives the
 setup notice. It does not enforce the problem count or the mix of point values.
 The refresh interval takes 0 to 3600.
 
+Every direct qualifier is promised a place, so saving the settings is refused
+when the contest's problems let more contestants qualify directly than there
+are advancement places. At most (the sum of every problem's points × the slots
+per problem) ÷ the point threshold, rounded down, can qualify directly: 16 for
+the event's 20 problems, four of them worth 2, with 2 slots and 3 points to
+qualify.
+
 Existing saved settings keep their values. When reusing an older contest, set
 the expected problem count to 20 and the point threshold to 3, and check that
 the advancement places are 16.
@@ -176,6 +183,7 @@ Read the final selection from the `advancement` field of
 | `direct_user_ids` | Contestants who reached the point threshold, listed by user id without seed rankings |
 | `reserve_user_ids` | Reserves in selection order, stopping when all places are filled |
 | `unfilled_slots` | Places still vacant because too few contestants earned points |
+| `over_capacity` | Direct qualifiers beyond the advancement places |
 
 The same response includes each contestant's total in `rows[].score` and each
 problem's value in `problems[].points`. `credited` remains the number of
@@ -184,6 +192,11 @@ credited problems, and `qualified_count` counts direct qualifiers only.
 If `unfilled_slots` is positive, volunteers must arrange a playoff or another
 announced selection method. Contestants with no points are not selected
 automatically. Applied rejudges recalculate both scores and reserves.
+
+If `over_capacity` is positive, problems or point values changed after the
+settings were saved, and more contestants qualified directly than there are
+places. Every direct qualifier is still listed and no reserve advances: the
+organizers decide who advances.
 
 The plugin does not enroll qualifiers anywhere. Enroll the selected contestants
 in the [Codelink bracket](./codelink-bracket.md) contest yourself.

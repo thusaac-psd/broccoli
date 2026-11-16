@@ -209,6 +209,13 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
           {t('codelink-qualifier.pending', { count: data.pending_submissions })}
         </p>
       )}
+      {data.advancement && data.advancement.over_capacity > 0 && (
+        <p role="status" className="rounded-md bg-amber-500/10 p-3 text-sm">
+          {t('codelink-qualifier.overCapacity', {
+            count: data.advancement.over_capacity,
+          })}
+        </p>
+      )}
       {data.advancement && data.advancement.unfilled_slots > 0 && (
         <p role="status" className="rounded-md bg-amber-500/10 p-3 text-sm">
           {t('codelink-qualifier.unfilledSlots', {
