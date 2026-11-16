@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 
 import { readEventStream } from '../lib/event-stream';
+import { liveStreamKey, setLiveStream } from '../lib/live-stream';
 import {
   type GameNotification,
   gameUpdates,
@@ -47,6 +48,11 @@ export function useGameNotifications(
       /* A missing/invalid baseline starts with the current games. */
     }
     let retryMs = 1_000;
+    const streamKey = liveStreamKey(contestId, viewerKey);
+    const connect = (on: boolean) => {
+      setConnected(on);
+      setLiveStream(streamKey, on);
+    };
 
     const run = async () => {
       while (!signal.aborted) {
@@ -66,7 +72,7 @@ export function useGameNotifications(
           ) {
             throw new Error('Notification stream unavailable');
           }
-          setConnected(true);
+          connect(true);
           await readEventStream(response.body, async (event) => {
             if (signal.aborted || event.event !== 'snapshot') return;
             const snapshot = JSON.parse(event.data) as BracketResponse;
@@ -97,7 +103,7 @@ export function useGameNotifications(
         } catch {
           if (signal.aborted) return;
         } finally {
-          if (!signal.aborted) setConnected(false);
+          if (!signal.aborted) connect(false);
         }
         await new Promise<void>((resolve) => {
           const finish = () => {
@@ -115,7 +121,10 @@ export function useGameNotifications(
       }
     };
     void run();
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      setLiveStream(streamKey, false);
+    };
   }, [api, contestId, queryClient, viewerId, viewerKey]);
 
   return connected;
