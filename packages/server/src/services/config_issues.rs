@@ -1,50 +1,506 @@
-//! A problem's `config_issues` flag (`problem::Model::config_issues`): whether
-//! any of its stored configs, at the problem scope or in a contest that uses
-//! it, is refused by its plugin as things stand ([`problem_config_issues`]).
-//! Judging copies the flag onto every judgement it claims, so it must follow
-//! whatever can change the answer:
+//! Config issues: what a plugin finds wrong, as things stand, with a config
+//! of a problem or contest ([`config_issues`]).
+//!
+//! A plugin's checks run at every target its configs are stored at, and,
+//! for each namespace that declares a `validate` function, at every problem
+//! and contest of the types the plugin provides
+//! ([`crate::registry::TypeProviders`]), with the namespace's defaults where
+//! no config is stored. A check finds refusals, what is wrong with the
+//! config itself, which no write stores, and issues, what the target's data
+//! does not meet yet (a problem with no test cases), which a write stores;
+//! both are listed.
+//!
+//! A problem's `config_issues` flag (`problem::Model::config_issues`) records
+//! whether anything is listed for it at the problem scope or in a contest
+//! that uses it. Judging copies the flag onto every judgement it claims, so
+//! it must follow whatever can change the answer:
 //!
 //! - a test-data change sets it in its own commit
 //!   ([`crate::services::test_data::TestDataEdit`]);
 //! - every write or delete of a stored config, an admin's, a plugin's or the
 //!   host's own as a problem or contest goes, returns the
-//!   `services::plugin_config::ConfigChange` that rechecks the problems it
-//!   reaches once it commits:
-//!   a problem or contest-problem config is checked before it is stored, so
-//!   its change can only clear the flag; a contest or plugin-scope config is
-//!   what other configs are checked against, so its change moves the flag
-//!   either way;
+//!   [`ConfigChange`](crate::services::plugin_config::ConfigChange) that rechecks the problems it reaches once it commits;
+//!   so does every change to which checks reach a problem: a problem made,
+//!   its types changed, a problem joining or leaving a contest, a contest's
+//!   type changed;
 //! - a change to a plugin (enabled, disabled, reloaded, upgraded, its upload
-//!   removed) changes which configs are checked and how, so it rechecks the
-//!   problems with a config of that plugin, both ways
-//!   ([`recheck_problems_of_plugins`]);
+//!   removed) changes which checks run and how, so it rechecks the problems
+//!   its checks reach and every flagged one ([`recheck_problems_of_plugins`]);
+//! - a bundle import restores configs and test data without the plugins
+//!   that check them, so it marks each problem it restores
+//!   (`problem::Model::config_recheck`), and every running server rechecks
+//!   the marked problems on its next reconcile pass ([`recheck_marked`]);
 //! - a server start loads plugins that may check configs differently than
-//!   the ones that last checked them, and finds configs no running server
-//!   checked (a restored bundle's), so it rechecks every problem that has a
-//!   config or a set flag, both ways ([`recheck_every_problem`]).
+//!   the ones that last checked them, so it rechecks every problem a check
+//!   reaches, is flagged or is marked ([`recheck_every_problem`]).
 //!
 //! The rechecks run after the change committed, on the action that made it,
 //! never on the judging path. A recheck that fails is logged and leaves the
 //! flag as it was.
+//!
+//! A contest's own configs are listed with its contest problems' on the
+//! contest's config issues, read when asked for; they set no flag, since no
+//! judgement reads them.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use common::db::{DatabaseConnection, DatabaseTransaction};
+use plugin_core::config_schema::{FieldError, FieldErrorKind};
+use plugin_core::registry::PluginStatus;
 use plugin_core::traits::PluginManager;
 use sea_orm::sea_query::{Expr, LockType};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, TransactionTrait};
+use sea_orm::{
+    ColumnTrait, Condition, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect,
+    TransactionTrait,
+};
 
-use crate::entity::problem;
+use crate::entity::{contest, contest_problem, plugin_config, problem};
 use crate::error::AppError;
-use crate::services::plugin_config::{Reads, problem_config_issues, problems_with_configs_of};
+use crate::host_funcs::config::{extract_plugin_id, strip_namespace_prefix};
+use crate::registry::TypeProviders;
+use crate::services::plugin_config::{
+    ConfigScope, ConfigTarget, Findings, IncompatibleConfig, Reads, check_config,
+};
+use crate::state::AppState;
 
 /// Which way a recheck may move the flag; `Both` covers `ClearOnly`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Recheck {
     /// Only clear a set flag: the change cannot have added an issue.
     ClearOnly,
-    /// Set or clear it to match the configs.
+    /// Set or clear it to match the checks.
     Both,
+}
+
+/// What config checks run with: the plugins that check, and which of them
+/// provides each type a problem or contest has.
+pub(crate) struct ConfigChecker<'a> {
+    pub(crate) plugins: &'a dyn PluginManager,
+    pub(crate) types: TypeProviders,
+}
+
+impl<'a> ConfigChecker<'a> {
+    pub(crate) fn of(state: &'a AppState) -> Self {
+        Self {
+            plugins: state.plugins.as_ref(),
+            types: state.registries.type_providers(),
+        }
+    }
+}
+
+/// What a config issues listing covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Subject {
+    /// A problem's configs at the problem scope and, with `in_contests`, in
+    /// every contest that uses it.
+    Problem { problem_id: i32, in_contests: bool },
+    /// A contest's own configs and those of its problems in it.
+    Contest(i32),
+}
+
+impl Subject {
+    /// What a problem's `config_issues` flag records: its configs at the
+    /// problem scope and in every contest that uses it.
+    pub(crate) fn flag_of(problem_id: i32) -> Self {
+        Self::Problem {
+            problem_id,
+            in_contests: true,
+        }
+    }
+}
+
+/// A target a listing checks, with the plugins that provide its types:
+/// their namespaces that declare a `validate` function are checked there
+/// with their defaults when no config is stored.
+struct Checked {
+    target: ConfigTarget,
+    providers: Vec<String>,
+}
+
+/// One config a listing checks: stored, or a namespace's defaults.
+struct Check {
+    target: ConfigTarget,
+    plugin_id: String,
+    namespace: String,
+    config: serde_json::Value,
+}
+
+/// A config its plugin found something wrong with, and what.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ConfigIssue {
+    plugin_id: String,
+    target: ConfigTarget,
+    namespace: String,
+    findings: Findings,
+}
+
+impl ConfigIssue {
+    fn as_listed(&self, errors: Vec<FieldError>) -> IncompatibleConfig {
+        IncompatibleConfig {
+            plugin_id: self.plugin_id.clone(),
+            scope: self.target.scope(),
+            ref_id: self.target.ref_id().to_string(),
+            namespace: self.namespace.clone(),
+            errors,
+        }
+    }
+
+    /// The issue as the API lists it: everything found.
+    pub(crate) fn listed(&self) -> IncompatibleConfig {
+        self.as_listed(self.findings.clone().into_all())
+    }
+
+    /// What a write of the config would be refused for now, if anything:
+    /// what is wrong with the config itself, never what the target's data
+    /// does not meet yet.
+    pub(crate) fn refused(&self) -> Option<IncompatibleConfig> {
+        (!self.findings.refusals.is_empty()).then(|| self.as_listed(self.findings.refusals.clone()))
+    }
+}
+
+/// Every config of `subject` its plugin finds something wrong with, as
+/// things stand, as the API lists them ([`issues_of`]).
+pub(crate) async fn config_issues<C: ConnectionTrait>(
+    db: &C,
+    checker: &ConfigChecker<'_>,
+    subject: Subject,
+    reads: Reads<'_>,
+) -> Result<Vec<IncompatibleConfig>, AppError> {
+    Ok(issues_of(db, checker, subject, reads)
+        .await?
+        .iter()
+        .map(ConfigIssue::listed)
+        .collect())
+}
+
+/// Every config of `subject` its plugin finds something wrong with, as
+/// things stand, the plugins reading as `reads` says: each stored config of
+/// a loaded plugin, and the defaults of each namespace with a `validate`
+/// function of a plugin that provides the target's types and stores none
+/// there. Ordered by scope, target, plugin and namespace.
+pub(crate) async fn issues_of<C: ConnectionTrait>(
+    db: &C,
+    checker: &ConfigChecker<'_>,
+    subject: Subject,
+    reads: Reads<'_>,
+) -> Result<Vec<ConfigIssue>, AppError> {
+    let targets = targets_of(db, &checker.types, subject).await?;
+    let mut issues = Vec::new();
+    for check in checks_at(db, checker.plugins, &targets).await? {
+        let findings = match check_config(
+            checker.plugins,
+            &check.target,
+            &check.plugin_id,
+            &check.namespace,
+            &check.config,
+            reads,
+        )
+        .await
+        {
+            Ok(findings) => findings,
+            Err(AppError::ConfigNamespaceNotFound(_)) => Findings {
+                refusals: vec![FieldError::new(
+                    "",
+                    FieldErrorKind::NamespaceUndeclared {
+                        scope: check.target.scope().as_str().into(),
+                    },
+                )],
+                issues: Vec::new(),
+            },
+            Err(other) => return Err(other),
+        };
+        if findings.refusals.is_empty() && findings.issues.is_empty() {
+            continue;
+        }
+        issues.push(ConfigIssue {
+            plugin_id: check.plugin_id,
+            target: check.target,
+            namespace: check.namespace,
+            findings,
+        });
+    }
+    issues.sort_by(|a, b| {
+        let key = |i: &ConfigIssue| {
+            (
+                i.target.scope().as_str(),
+                i.target.ref_id().to_string(),
+                i.plugin_id.clone(),
+                i.namespace.clone(),
+            )
+        };
+        key(a).cmp(&key(b))
+    });
+    Ok(issues)
+}
+
+/// The targets `subject` covers. A deleted problem or contest has none, and
+/// a contest that was deleted holds none of its problems' configs.
+async fn targets_of<C: ConnectionTrait>(
+    db: &C,
+    types: &TypeProviders,
+    subject: Subject,
+) -> Result<Vec<Checked>, AppError> {
+    let mut targets = Vec::new();
+    match subject {
+        Subject::Problem {
+            problem_id,
+            in_contests,
+        } => {
+            let Some(problem) = problem::Entity::find_by_id(problem_id)
+                .filter(problem::Column::DeletedAt.is_null())
+                .one(db)
+                .await?
+            else {
+                return Ok(targets);
+            };
+            targets.push(Checked {
+                target: ConfigTarget::problem(problem_id),
+                providers: types
+                    .of_problem(
+                        &problem.problem_type,
+                        &problem.checker_format,
+                        &problem.default_contest_type,
+                    )
+                    .await,
+            });
+            if in_contests {
+                let contests: Vec<i32> = contest_problem::Entity::find()
+                    .select_only()
+                    .column(contest_problem::Column::ContestId)
+                    .filter(contest_problem::Column::ProblemId.eq(problem_id))
+                    .into_tuple()
+                    .all(db)
+                    .await?;
+                for contest in active_contests(db, contests).await? {
+                    targets.push(Checked {
+                        target: ConfigTarget::contest_problem(contest.id, problem_id),
+                        providers: contest_type_provider(types, &contest).await,
+                    });
+                }
+            }
+        }
+        Subject::Contest(contest_id) => {
+            let Some(contest) = active_contests(db, [contest_id]).await?.pop() else {
+                return Ok(targets);
+            };
+            let providers = contest_type_provider(types, &contest).await;
+            targets.push(Checked {
+                target: ConfigTarget::contest(contest_id),
+                providers: providers.clone(),
+            });
+            let problems: Vec<i32> = contest_problem::Entity::find()
+                .select_only()
+                .column(contest_problem::Column::ProblemId)
+                .filter(contest_problem::Column::ContestId.eq(contest_id))
+                .into_tuple()
+                .all(db)
+                .await?;
+            for problem_id in problems {
+                targets.push(Checked {
+                    target: ConfigTarget::contest_problem(contest_id, problem_id),
+                    providers: providers.clone(),
+                });
+            }
+        }
+    }
+    Ok(targets)
+}
+
+async fn active_contests<C: ConnectionTrait>(
+    db: &C,
+    ids: impl IntoIterator<Item = i32>,
+) -> Result<Vec<contest::Model>, AppError> {
+    Ok(contest::Entity::find()
+        .filter(contest::Column::Id.is_in(ids))
+        .filter(contest::Column::DeletedAt.is_null())
+        .all(db)
+        .await?)
+}
+
+async fn contest_type_provider(types: &TypeProviders, contest: &contest::Model) -> Vec<String> {
+    match &contest.contest_type {
+        Some(contest_type) => types
+            .of_contest_type(contest_type)
+            .await
+            .into_iter()
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// The configs to check at `targets`: those stored there by a loaded
+/// plugin, then the defaults of each namespace with a `validate` function at
+/// the target's scope of a loaded plugin that provides the target's types,
+/// where none is stored.
+async fn checks_at<C: ConnectionTrait>(
+    db: &C,
+    plugins: &dyn PluginManager,
+    targets: &[Checked],
+) -> Result<Vec<Check>, AppError> {
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let at = targets.iter().fold(Condition::any(), |any, checked| {
+        any.add(
+            Condition::all()
+                .add(plugin_config::Column::Scope.eq(checked.target.scope().as_str()))
+                .add(plugin_config::Column::RefId.eq(checked.target.ref_id())),
+        )
+    });
+    let rows = plugin_config::Entity::find().filter(at).all(db).await?;
+
+    let registry = plugins
+        .get_registry()
+        .read()
+        .map_err(|_| AppError::Internal("plugin registry lock poisoned".into()))?;
+    let loaded = |plugin_id: &str| {
+        registry
+            .get(plugin_id)
+            .filter(|entry| entry.status == PluginStatus::Loaded)
+    };
+    let mut stored = HashSet::new();
+    let mut checks = Vec::new();
+    for row in rows {
+        let Some(checked) = targets.iter().find(|checked| {
+            checked.target.scope().as_str() == row.scope && checked.target.ref_id() == row.ref_id
+        }) else {
+            continue;
+        };
+        stored.insert((row.scope.clone(), row.ref_id.clone(), row.namespace.clone()));
+        let plugin_id = extract_plugin_id(&row.namespace);
+        if loaded(plugin_id).is_none() {
+            continue;
+        }
+        checks.push(Check {
+            target: checked.target.clone(),
+            plugin_id: plugin_id.to_string(),
+            namespace: strip_namespace_prefix(&row.namespace).to_string(),
+            config: row.config,
+        });
+    }
+    for checked in targets {
+        let scope = checked.target.scope();
+        for plugin_id in &checked.providers {
+            let Some(entry) = loaded(plugin_id) else {
+                continue;
+            };
+            for (name, ns) in &entry.manifest.config {
+                let key = (
+                    scope.as_str().to_string(),
+                    checked.target.ref_id().to_string(),
+                    checked.target.stored_namespace(plugin_id, name),
+                );
+                if ns.validate.is_none() || !ns.scopes.contains(&scope) || stored.contains(&key) {
+                    continue;
+                }
+                checks.push(Check {
+                    target: checked.target.clone(),
+                    plugin_id: plugin_id.clone(),
+                    namespace: name.clone(),
+                    config: ns.defaults(),
+                });
+            }
+        }
+    }
+    Ok(checks)
+}
+
+/// The problems the checks of `plugin_ids` (of every plugin for `None`)
+/// reach, those whose flag a change to these plugins or what they read can
+/// move: each with a stored config of one of them, at the problem scope or
+/// in a contest, and each a plugin's defaults are checked at, a problem of a
+/// type it provides or in a contest of a contest type it provides, where
+/// the plugin declares a namespace with a `validate` function at that scope.
+pub(crate) async fn problems_checked_by<C: ConnectionTrait>(
+    db: &C,
+    checker: &ConfigChecker<'_>,
+    plugin_ids: Option<&[String]>,
+) -> Result<BTreeSet<i32>, AppError> {
+    let rows: Vec<(String, String, String)> = plugin_config::Entity::find()
+        .select_only()
+        .columns([
+            plugin_config::Column::Scope,
+            plugin_config::Column::RefId,
+            plugin_config::Column::Namespace,
+        ])
+        .filter(plugin_config::Column::Scope.is_in([
+            ConfigScope::Problem.as_str(),
+            ConfigScope::ContestProblem.as_str(),
+        ]))
+        .into_tuple()
+        .all(db)
+        .await?;
+    let named = |plugin_id: &str| plugin_ids.is_none_or(|ids| ids.iter().any(|id| id == plugin_id));
+    let mut problems: BTreeSet<i32> = rows
+        .into_iter()
+        .filter(|(_, _, namespace)| named(extract_plugin_id(namespace)))
+        .filter_map(|(scope, ref_id, _)| ConfigTarget::of_row(&scope, &ref_id)?.problem_id())
+        .collect();
+
+    // The loaded plugins with a namespace that has a `validate` function at
+    // the problem scope, and at the contest-problem scope.
+    let (at_problem, at_contest_problem) = {
+        let registry = checker
+            .plugins
+            .get_registry()
+            .read()
+            .map_err(|_| AppError::Internal("plugin registry lock poisoned".into()))?;
+        let mut at_problem = Vec::new();
+        let mut at_contest_problem = Vec::new();
+        for (plugin_id, entry) in registry.iter() {
+            if entry.status != PluginStatus::Loaded || !named(plugin_id) {
+                continue;
+            }
+            let validates_at = |scope: ConfigScope| {
+                entry
+                    .manifest
+                    .config
+                    .values()
+                    .any(|ns| ns.validate.is_some() && ns.scopes.contains(&scope))
+            };
+            if validates_at(ConfigScope::Problem) {
+                at_problem.push(plugin_id.clone());
+            }
+            if validates_at(ConfigScope::ContestProblem) {
+                at_contest_problem.push(plugin_id.clone());
+            }
+        }
+        (at_problem, at_contest_problem)
+    };
+    for plugin_id in at_problem {
+        let provided = checker.types.provided_by(&plugin_id).await;
+        let of_its_types: Vec<i32> = problem::Entity::find()
+            .select_only()
+            .column(problem::Column::Id)
+            .filter(problem::Column::DeletedAt.is_null())
+            .filter(
+                Condition::any()
+                    .add(problem::Column::ProblemType.is_in(provided.problem_types))
+                    .add(problem::Column::CheckerFormat.is_in(provided.checker_formats))
+                    .add(problem::Column::DefaultContestType.is_in(provided.contest_types)),
+            )
+            .into_tuple()
+            .all(db)
+            .await?;
+        problems.extend(of_its_types);
+    }
+    for plugin_id in at_contest_problem {
+        let contest_types = checker.types.provided_by(&plugin_id).await.contest_types;
+        if contest_types.is_empty() {
+            continue;
+        }
+        let in_its_contests: Vec<i32> = contest_problem::Entity::find()
+            .select_only()
+            .column(contest_problem::Column::ProblemId)
+            .inner_join(contest::Entity)
+            .filter(contest::Column::DeletedAt.is_null())
+            .filter(contest::Column::ContestType.is_in(contest_types))
+            .into_tuple()
+            .all(db)
+            .await?;
+        problems.extend(in_its_contests);
+    }
+    Ok(problems)
 }
 
 /// Records whether problem `problem_id` has config issues, in `txn`.
@@ -61,16 +517,45 @@ pub(crate) async fn set_config_issues(
     Ok(())
 }
 
-/// Rechecks the flag of every problem with a stored config of one of
-/// `plugin_ids`, after a change to those plugins.
+/// The problems whose flag is set.
+async fn flagged(db: &DatabaseConnection) -> Result<Vec<i32>, AppError> {
+    Ok(problem::Entity::find()
+        .select_only()
+        .column(problem::Column::Id)
+        .filter(problem::Column::ConfigIssues.eq(true))
+        .into_tuple()
+        .all(db)
+        .await?)
+}
+
+/// The problems marked for a recheck.
+async fn marked(db: &DatabaseConnection) -> Result<Vec<i32>, AppError> {
+    Ok(problem::Entity::find()
+        .select_only()
+        .column(problem::Column::Id)
+        .filter(problem::Column::ConfigRecheck.eq(true))
+        .into_tuple()
+        .all(db)
+        .await?)
+}
+
+/// Rechecks the flag of every problem the checks of `plugin_ids` reach, and
+/// of every flagged problem, after a change to those plugins: a disabled
+/// plugin no longer provides the types its checks reached.
 pub(crate) async fn recheck_problems_of_plugins(
     db: &DatabaseConnection,
-    plugins: &dyn PluginManager,
+    checker: &ConfigChecker<'_>,
     plugin_ids: &[&str],
 ) {
-    match problems_with_configs_of(db, Some(plugin_ids)).await {
+    let plugin_ids: Vec<String> = plugin_ids.iter().map(|id| id.to_string()).collect();
+    let problems = async {
+        let mut problems = problems_checked_by(db, checker, Some(&plugin_ids)).await?;
+        problems.extend(flagged(db).await?);
+        Ok::<_, AppError>(problems)
+    };
+    match problems.await {
         Ok(problems) => {
-            recheck_problems(db, plugins, problems, Recheck::Both, Reads::Committed).await
+            recheck_problems(db, checker, problems, Recheck::Both, Reads::Committed).await
         }
         Err(error) => tracing::warn!(
             ?plugin_ids,
@@ -80,24 +565,18 @@ pub(crate) async fn recheck_problems_of_plugins(
     }
 }
 
-/// Rechecks the flag of every problem that has a stored config or a set
-/// flag, at a server start.
-pub(crate) async fn recheck_every_problem(db: &DatabaseConnection, plugins: &dyn PluginManager) {
+/// Rechecks the flag of every problem a check reaches, is flagged or is
+/// marked, at a server start.
+pub(crate) async fn recheck_every_problem(db: &DatabaseConnection, checker: &ConfigChecker<'_>) {
     let problems = async {
-        let mut problems = problems_with_configs_of(db, None).await?;
-        let flagged = problem::Entity::find()
-            .select_only()
-            .column(problem::Column::Id)
-            .filter(problem::Column::ConfigIssues.eq(true))
-            .into_tuple::<i32>()
-            .all(db)
-            .await?;
-        problems.extend(flagged);
+        let mut problems = problems_checked_by(db, checker, None).await?;
+        problems.extend(flagged(db).await?);
+        problems.extend(marked(db).await?);
         Ok::<_, AppError>(problems)
     };
     match problems.await {
         Ok(problems) => {
-            recheck_problems(db, plugins, problems, Recheck::Both, Reads::Committed).await
+            recheck_problems(db, checker, problems, Recheck::Both, Reads::Committed).await
         }
         Err(error) => tracing::warn!(
             ?error,
@@ -106,17 +585,40 @@ pub(crate) async fn recheck_every_problem(db: &DatabaseConnection, plugins: &dyn
     }
 }
 
+/// Rechecks the flag of every problem marked for a recheck, clearing each
+/// mark. Every running server runs it on each reconcile pass; two servers
+/// rechecking one problem agree, under the problem's row lock.
+pub async fn recheck_marked(state: &AppState) {
+    match marked(&state.db).await {
+        Ok(problems) if problems.is_empty() => {}
+        Ok(problems) => {
+            recheck_problems(
+                &state.db,
+                &ConfigChecker::of(state),
+                problems.into_iter().collect(),
+                Recheck::Both,
+                Reads::Committed,
+            )
+            .await
+        }
+        Err(error) => tracing::warn!(
+            ?error,
+            "could not find the problems marked for a config issues recheck"
+        ),
+    }
+}
+
 /// Rechecks the flag of each of `problems`, moving it as `recheck` allows,
 /// the plugins reading as `reads` says.
 pub(crate) async fn recheck_problems(
     db: &DatabaseConnection,
-    plugins: &dyn PluginManager,
+    checker: &ConfigChecker<'_>,
     problems: BTreeSet<i32>,
     recheck: Recheck,
     reads: Reads<'_>,
 ) {
     for problem_id in problems {
-        if let Err(error) = try_recheck(db, plugins, problem_id, recheck, reads).await {
+        if let Err(error) = try_recheck(db, checker, problem_id, recheck, reads).await {
             tracing::warn!(
                 problem_id,
                 ?error,
@@ -126,11 +628,12 @@ pub(crate) async fn recheck_problems(
     }
 }
 
-/// Rechecks one problem under its row lock, the lock a test-data change
-/// holds, so a recheck never races the test data it checks against.
+/// Rechecks one problem under its row lock, the lock a test-data change and
+/// a write of one of its configs hold, so a recheck never races the data it
+/// checks against. A full recheck clears the problem's recheck mark.
 async fn try_recheck(
     db: &DatabaseConnection,
-    plugins: &dyn PluginManager,
+    checker: &ConfigChecker<'_>,
     problem_id: i32,
     recheck: Recheck,
     reads: Reads<'_>,
@@ -146,15 +649,23 @@ async fn try_recheck(
     if recheck == Recheck::ClearOnly && !row.config_issues {
         return Ok(());
     }
-    let has_issues = !problem_config_issues(&txn, plugins, problem_id, true, reads)
+    let has_issues = !issues_of(&txn, checker, Subject::flag_of(problem_id), reads)
         .await?
         .is_empty();
     let moves = match recheck {
         Recheck::ClearOnly => !has_issues,
-        Recheck::Both => has_issues != row.config_issues,
+        Recheck::Both => has_issues != row.config_issues || row.config_recheck,
     };
     if moves {
-        set_config_issues(&txn, problem_id, has_issues).await?;
+        problem::Entity::update_many()
+            .col_expr(problem::Column::ConfigIssues, Expr::value(has_issues))
+            .col_expr(
+                problem::Column::ConfigRecheck,
+                Expr::value(row.config_recheck && recheck == Recheck::ClearOnly),
+            )
+            .filter(problem::Column::Id.eq(problem_id))
+            .exec(&txn)
+            .await?;
         txn.commit().await?;
     }
     Ok(())

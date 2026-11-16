@@ -136,7 +136,7 @@ export interface paths {
     get: operations['getPluginGlobalConfig'];
     /**
      * Create or update config for a namespace on a plugin
-     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one.
+     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one. The validate function refuses what is wrong with the config itself; what the target's data does not meet yet is stored and listed on the config issues.
      */
     put: operations['upsertPluginGlobalConfig'];
     post?: never;
@@ -760,6 +760,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/contests/{id}/config/issues': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List what the plugins find wrong with a contest's configs
+     * @description Checks the contest's own configs and those of its problems in it, as listProblemConfigIssues checks a problem's: every stored config, and, for the plugin that provides the contest's type, each namespace with a validate function that has no stored config, with its defaults. A contest config that the contest's problems have since outgrown, or a contest problem with no test cases yet, shows up here.
+     */
+    get: operations['listContestConfigIssues'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/contests/{id}/config/{plugin_id}/{namespace}': {
     parameters: {
       query?: never;
@@ -771,7 +791,7 @@ export interface paths {
     get: operations['getContestConfig'];
     /**
      * Create or update config for a namespace on a contest
-     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one.
+     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one. The validate function refuses what is wrong with the config itself; what the target's data does not meet yet is stored and listed on the config issues.
      */
     put: operations['upsertContestConfig'];
     post?: never;
@@ -1080,7 +1100,7 @@ export interface paths {
     get: operations['getContestProblemConfig'];
     /**
      * Create or update config for a namespace on a contest-problem
-     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one.
+     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one. The validate function refuses what is wrong with the config itself; what the target's data does not meet yet is stored and listed on the config issues.
      */
     put: operations['upsertContestProblemConfig'];
     post?: never;
@@ -1688,8 +1708,8 @@ export interface paths {
       cookie?: never;
     };
     /**
-     * List the stored configs of a problem that their plugins now refuse
-     * @description Checks every stored config of the problem again, as if an admin wrote it now: against its namespace's schema and the plugin's validate function. A config that names test cases the problem no longer has shows up here. Contest-problem configs are included when the caller may manage contests.
+     * List what the plugins find wrong with a problem's configs
+     * @description Checks every stored config of the problem again, as if an admin wrote it now: against its namespace's schema and the plugin's validate function. The plugins that provide the problem's types, and the contest types of the contests that use it, also check each namespace with a validate function that has no stored config, with its defaults. Each issue lists what the plugin refuses in the config itself, such as a test case the problem no longer has, and what the problem's data does not meet yet, such as having no test cases. Contest-problem configs are included when the caller may manage contests.
      */
     get: operations['listProblemConfigIssues'];
     put?: never;
@@ -1711,7 +1731,7 @@ export interface paths {
     get: operations['getProblemConfig'];
     /**
      * Create or update config for a namespace on a problem
-     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one.
+     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one. The validate function refuses what is wrong with the config itself; what the target's data does not meet yet is stored and listed on the config issues.
      */
     put: operations['upsertProblemConfig'];
     post?: never;
@@ -3512,12 +3532,17 @@ export interface components {
        */
       topic: string;
     };
-    /** @description A stored config that its plugin would no longer accept. */
+    /**
+     * @description A config its plugin finds something wrong with: a stored config it would
+     *     no longer accept, or the defaults a namespace's `validate` function
+     *     checks where no config is stored.
+     */
     IncompatibleConfig: {
       /**
-       * @description Why the plugin refuses it: its schema, or its namespace's validate
-       *     function. A namespace the plugin no longer declares at this scope has
-       *     one error with an empty path.
+       * @description What the plugin finds: what its schema or its namespace's validate
+       *     function refuses in the config itself, then what the target's data
+       *     does not meet yet. A namespace the plugin no longer declares at this
+       *     scope has one error with an empty path.
        */
       errors: components['schemas']['FieldError'][];
       /** @example contest */
@@ -7441,6 +7466,65 @@ export interface operations {
       };
       /** @description Contest not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  listContestConfigIssues: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Contest ID */
+        id: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The configs with issues; empty when there are none */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['IncompatibleConfig'][];
+        };
+      };
+      /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Forbidden (PERMISSION_DENIED) */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Contest not found (NOT_FOUND) */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description A plugin that checks one of the configs cannot answer right now (PLUGIN_UNAVAILABLE) */
+      503: {
         headers: {
           [name: string]: unknown;
         };
@@ -11792,7 +11876,7 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description The refused configs; empty when every config is accepted */
+      /** @description The configs with issues; empty when there are none */
       200: {
         headers: {
           [name: string]: unknown;

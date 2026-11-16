@@ -18,6 +18,7 @@ use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{Authorized, ProblemEdit};
 use crate::extractors::path::AppPath;
 use crate::models::problem::*;
+use crate::services::config_issues::ConfigChecker;
 use crate::state::AppState;
 use crate::upload_limits::{
     BULK_TEST_CASE_MAX_TOTAL_DECOMPRESSED_BYTES, BULK_TEST_CASE_MAX_TOTAL_DECOMPRESSED_MIB,
@@ -188,7 +189,7 @@ pub async fn upload_test_cases(
             .ok_or_else(|| AppError::Validation("Position overflow".into()))?;
     }
 
-    edit.commit(state.plugins.as_ref(), write.on_config_break())
+    edit.commit(&ConfigChecker::of(&state), write.on_config_break())
         .await?;
 
     let test_cases: Vec<TestCaseListItem> = affected.into_iter().map(tc_to_list_item).collect();

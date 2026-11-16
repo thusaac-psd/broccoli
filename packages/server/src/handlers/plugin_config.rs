@@ -23,9 +23,11 @@ use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::host_funcs::config::{extract_plugin_id, strip_namespace_prefix};
 use crate::models::plugin_config::{PluginConfigResponse, UpsertPluginConfigRequest};
+use crate::services::config_issues::ConfigChecker;
+use crate::services::config_issues::{Subject, config_issues};
 use crate::services::plugin_config::{
     ConfigScope, ConfigTarget, IncompatibleConfig, Reads, RowSettings, delete_config, get_config,
-    problem_config_issues, write_config,
+    write_config,
 };
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, find_contest_problem};
@@ -221,7 +223,7 @@ pub async fn get_plugin_global_config(
     tag = "Plugin Config",
     operation_id = "upsertPluginGlobalConfig",
     summary = "Create or update config for a namespace on a plugin",
-    description = "Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one.",
+    description = "Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one. The validate function refuses what is wrong with the config itself; what the target's data does not meet yet is stored and listed on the config issues.",
     params(
         ("id" = String, Path, description = "Plugin ID"),
         ("namespace" = String, Path, description = "Config namespace"),
@@ -263,7 +265,7 @@ pub async fn upsert_plugin_global_config(
     )
     .await?;
     change
-        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
         .await;
     Ok(Json(result))
 }
@@ -299,7 +301,7 @@ pub async fn delete_plugin_global_config(
     let target = ConfigTarget::plugin(&plugin_id);
     let change = delete_config(&state.db, &target, &plugin_id, &namespace).await?;
     change
-        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
         .await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -337,11 +339,11 @@ pub async fn list_problem_config(
     path = "/issues",
     tag = "Plugin Config",
     operation_id = "listProblemConfigIssues",
-    summary = "List the stored configs of a problem that their plugins now refuse",
-    description = "Checks every stored config of the problem again, as if an admin wrote it now: against its namespace's schema and the plugin's validate function. A config that names test cases the problem no longer has shows up here. Contest-problem configs are included when the caller may manage contests.",
+    summary = "List what the plugins find wrong with a problem's configs",
+    description = "Checks every stored config of the problem again, as if an admin wrote it now: against its namespace's schema and the plugin's validate function. The plugins that provide the problem's types, and the contest types of the contests that use it, also check each namespace with a validate function that has no stored config, with its defaults. Each issue lists what the plugin refuses in the config itself, such as a test case the problem no longer has, and what the problem's data does not meet yet, such as having no test cases. Contest-problem configs are included when the caller may manage contests.",
     params(("id" = i32, Path, description = "Problem ID")),
     responses(
-        (status = 200, description = "The refused configs; empty when every config is accepted", body = Vec<IncompatibleConfig>),
+        (status = 200, description = "The configs with issues; empty when there are none", body = Vec<IncompatibleConfig>),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = crate::error::ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = crate::error::ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = crate::error::ErrorBody),
@@ -357,11 +359,14 @@ pub async fn list_problem_config_issues(
 ) -> Result<Json<Vec<IncompatibleConfig>>, AppError> {
     auth_user.require_permission(perm::PROBLEM_EDIT)?;
     find_problem(&state.db, problem_id).await?;
-    let issues = problem_config_issues(
-        &state.db,
-        state.plugins.as_ref(),
+    let subject = Subject::Problem {
         problem_id,
-        auth_user.has_permission(perm::CONTEST_MANAGE),
+        in_contests: auth_user.has_permission(perm::CONTEST_MANAGE),
+    };
+    let issues = config_issues(
+        &state.db,
+        &ConfigChecker::of(&state),
+        subject,
         Reads::Committed,
     )
     .await?;
@@ -408,7 +413,7 @@ pub async fn get_problem_config(
     tag = "Plugin Config",
     operation_id = "upsertProblemConfig",
     summary = "Create or update config for a namespace on a problem",
-    description = "Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one.",
+    description = "Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one. The validate function refuses what is wrong with the config itself; what the target's data does not meet yet is stored and listed on the config issues.",
     params(
         ("id" = i32, Path, description = "Problem ID"),
         ("plugin_id" = String, Path, description = "Plugin ID"),
@@ -457,7 +462,7 @@ pub async fn upsert_problem_config(
     .await?;
     txn.commit().await?;
     change
-        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
         .await;
     Ok(Json(result))
 }
@@ -496,7 +501,7 @@ pub async fn delete_problem_config(
     let change = delete_config(&txn, &target, &plugin_id, &namespace).await?;
     txn.commit().await?;
     change
-        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
         .await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -576,7 +581,7 @@ pub async fn get_contest_problem_config(
     tag = "Plugin Config",
     operation_id = "upsertContestProblemConfig",
     summary = "Create or update config for a namespace on a contest-problem",
-    description = "Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one.",
+    description = "Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one. The validate function refuses what is wrong with the config itself; what the target's data does not meet yet is stored and listed on the config issues.",
     params(
         ("id" = i32, Path, description = "Contest ID"),
         ("problem_id" = i32, Path, description = "Problem ID"),
@@ -626,7 +631,7 @@ pub async fn upsert_contest_problem_config(
     .await?;
     txn.commit().await?;
     change
-        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
         .await;
     Ok(Json(result))
 }
@@ -669,7 +674,7 @@ pub async fn delete_contest_problem_config(
     let change = delete_config(&txn, &target, &plugin_id, &namespace).await?;
     txn.commit().await?;
     change
-        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
         .await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -700,6 +705,41 @@ pub async fn list_contest_config(
     let target = ConfigTarget::contest(contest_id);
     let schemas = collect_schemas_for_scope(&*state.plugins, ConfigScope::Contest);
     list_config_inner(&state.db, &target, &schemas).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/issues",
+    tag = "Plugin Config",
+    operation_id = "listContestConfigIssues",
+    summary = "List what the plugins find wrong with a contest's configs",
+    description = "Checks the contest's own configs and those of its problems in it, as listProblemConfigIssues checks a problem's: every stored config, and, for the plugin that provides the contest's type, each namespace with a validate function that has no stored config, with its defaults. A contest config that the contest's problems have since outgrown, or a contest problem with no test cases yet, shows up here.",
+    params(("id" = i32, Path, description = "Contest ID")),
+    responses(
+        (status = 200, description = "The configs with issues; empty when there are none", body = Vec<IncompatibleConfig>),
+        (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = crate::error::ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = crate::error::ErrorBody),
+        (status = 404, description = "Contest not found (NOT_FOUND)", body = crate::error::ErrorBody),
+        (status = 503, description = "A plugin that checks one of the configs cannot answer right now (PLUGIN_UNAVAILABLE)", body = crate::error::ErrorBody),
+    ),
+    security(("jwt" = [])),
+)]
+#[instrument(skip(state, auth_user), fields(contest_id))]
+pub async fn list_contest_config_issues(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    AppPath(contest_id): AppPath<i32>,
+) -> Result<Json<Vec<IncompatibleConfig>>, AppError> {
+    auth_user.require_permission(perm::CONTEST_MANAGE)?;
+    find_contest(&state.db, contest_id).await?;
+    let issues = config_issues(
+        &state.db,
+        &ConfigChecker::of(&state),
+        Subject::Contest(contest_id),
+        Reads::Committed,
+    )
+    .await?;
+    Ok(Json(issues))
 }
 
 #[utoipa::path(
@@ -742,7 +782,7 @@ pub async fn get_contest_config(
     tag = "Plugin Config",
     operation_id = "upsertContestConfig",
     summary = "Create or update config for a namespace on a contest",
-    description = "Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one.",
+    description = "Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one. The validate function refuses what is wrong with the config itself; what the target's data does not meet yet is stored and listed on the config issues.",
     params(
         ("id" = i32, Path, description = "Contest ID"),
         ("plugin_id" = String, Path, description = "Plugin ID"),
@@ -791,7 +831,7 @@ pub async fn upsert_contest_config(
     .await?;
     txn.commit().await?;
     change
-        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
         .await;
     Ok(Json(result))
 }
@@ -830,7 +870,7 @@ pub async fn delete_contest_config(
     let change = delete_config(&txn, &target, &plugin_id, &namespace).await?;
     txn.commit().await?;
     change
-        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
         .await;
     Ok(StatusCode::NO_CONTENT)
 }

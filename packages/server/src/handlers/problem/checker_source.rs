@@ -9,6 +9,7 @@ use crate::extractors::auth::{AuthUser, Authorized, ProblemEdit};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::problem::*;
+use crate::services::config_issues::ConfigChecker;
 use crate::services::plugin_config::{
     ConfigTarget, Reads, RowSettings, delete_config, get_config, write_config,
 };
@@ -60,7 +61,7 @@ pub async fn upload_checker_source(
     )
     .await?;
     change
-        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
         .await;
 
     Ok(Json(CheckerSourceResponse { files: Some(files) }))
@@ -199,7 +200,7 @@ pub async fn delete_checker_source(
     {
         Ok(change) => {
             change
-                .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+                .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
                 .await
         }
         Err(AppError::NotFound(_)) => {}

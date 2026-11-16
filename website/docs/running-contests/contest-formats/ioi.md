@@ -36,6 +36,12 @@ worth 0 points: it fails a `group_min` or `group_mul` subtask, and adds nothing
 to a `sum` subtask, which the subtask's other tests score as if it were not
 there. The problem's config issues list the entry until the config is fixed.
 
+A problem in an IOI contest that cannot be judged yet, because it has no test
+cases or none is judged (none is a sample, scores, or belongs to a subtask), is
+listed on its config issues and the contest's as soon as it joins the contest,
+whether or not a task config is saved. The task config still saves meanwhile,
+and the issue clears once the test data is ready.
+
 - `group_min`, the subtask scores its full max score only when every test in
   it passes, otherwise it scores zero. This is stricter than CMS GroupMin,
   which scales the subtask by its lowest test outcome, so a subtask with a

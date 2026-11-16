@@ -711,10 +711,11 @@ mod tests {
         // exactly one of them.
         assert_eq!(compute_scoring_test_case_ids(&[by_label], &cases), vec![1]);
         assert!(
-            crate::validate::task_violations(
+            crate::validate::check_task(
                 &[make_def(SubtaskScoringMethod::GroupMin, 60.0, vec!["dup"])],
                 &cases
             )
+            .errors
             .iter()
             .any(|v| v.key.as_deref() == Some("ioi.config.task.ambiguousTestCase"))
         );

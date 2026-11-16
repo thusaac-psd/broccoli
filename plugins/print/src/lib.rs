@@ -33,7 +33,10 @@ mod entry {
         let req: ConfigValidateInput = serde_json::from_str(&input)?;
         let config: crate::config::PrintConfig = req.parse()?;
         let errors = crate::config::violations(&config);
-        Ok(serde_json::to_string(&ConfigValidateOutput { errors })?)
+        Ok(serde_json::to_string(&ConfigValidateOutput {
+            errors,
+            ..Default::default()
+        })?)
     }
 
     macro_rules! http_entry {

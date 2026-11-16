@@ -176,6 +176,95 @@ impl<H: Provided> Providers<H> {
     }
 }
 
+/// Which plugin provides each type a problem or contest has: a contest's
+/// contest type, a problem's problem type, checker format and default
+/// contest type. A plugin's config checks reach every problem and contest of
+/// the types it provides, whether or not a config is stored there
+/// (`services::config_issues`).
+#[derive(Clone)]
+pub struct TypeProviders {
+    contest_types: ContestTypeRegistry,
+    evaluators: EvaluatorRegistry,
+    checker_stages: CheckerStageRegistry,
+}
+
+/// The keys of each type registry that resolve to one plugin.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ProvidedTypes {
+    pub contest_types: Vec<String>,
+    pub problem_types: Vec<String>,
+    pub checker_formats: Vec<String>,
+}
+
+impl TypeProviders {
+    pub fn new(
+        contest_types: ContestTypeRegistry,
+        evaluators: EvaluatorRegistry,
+        checker_stages: CheckerStageRegistry,
+    ) -> Self {
+        Self {
+            contest_types,
+            evaluators,
+            checker_stages,
+        }
+    }
+
+    /// The plugin contest type `key` resolves to.
+    pub async fn of_contest_type(&self, key: &str) -> Option<String> {
+        provider(&self.contest_types, key).await
+    }
+
+    /// The plugins a problem's own types resolve to: its problem type, its
+    /// checker format and its default contest type, each once.
+    pub async fn of_problem(
+        &self,
+        problem_type: &str,
+        checker_format: &str,
+        default_contest_type: &str,
+    ) -> Vec<String> {
+        let mut plugins: Vec<String> = [
+            provider(&self.evaluators, problem_type).await,
+            provider(&self.checker_stages, checker_format).await,
+            provider(&self.contest_types, default_contest_type).await,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        plugins.sort_unstable();
+        plugins.dedup();
+        plugins
+    }
+
+    /// The types that resolve to `plugin_id`.
+    pub async fn provided_by(&self, plugin_id: &str) -> ProvidedTypes {
+        ProvidedTypes {
+            contest_types: resolved_to(&self.contest_types, plugin_id).await,
+            problem_types: resolved_to(&self.evaluators, plugin_id).await,
+            checker_formats: resolved_to(&self.checker_stages, plugin_id).await,
+        }
+    }
+}
+
+async fn provider<H: Provided>(registry: &RwLock<Providers<H>>, key: &str) -> Option<String> {
+    registry
+        .read()
+        .await
+        .get(key)
+        .map(|handler| handler.plugin_id().to_string())
+}
+
+async fn resolved_to<H: Provided>(registry: &RwLock<Providers<H>>, plugin_id: &str) -> Vec<String> {
+    let mut keys: Vec<String> = registry
+        .read()
+        .await
+        .iter()
+        .filter(|(_, handler)| handler.plugin_id() == plugin_id)
+        .map(|(key, _)| key.clone())
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
 /// Live operation batches; each batch's state is its waiters' correlation
 /// ids.
 pub type OperationBatches = BatchTable<TaskResult, Vec<String>>;

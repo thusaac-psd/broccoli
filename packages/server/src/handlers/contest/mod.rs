@@ -52,7 +52,8 @@ use crate::extractors::path::AppPath;
 use crate::models::contest::*;
 use crate::models::problem::validate_contest_type;
 use crate::models::shared::{PageWindow, escape_like};
-use crate::services::plugin_config::{Reads, delete_configs_of_contest};
+use crate::services::config_issues::ConfigChecker;
+use crate::services::plugin_config::{ConfigChange, Reads, delete_configs_of_contest};
 use crate::state::AppState;
 use crate::utils::contest::find_contest;
 use crate::utils::soft_delete::SoftDeletable;
@@ -379,10 +380,11 @@ pub async fn update_contest(
 
     let txn = state.db.begin().await?;
     let existing = find_contest_for_update(&txn, id).await?;
-    if let Some(ref contest_type) = payload.contest_type
-        && existing.contest_type.as_deref() != Some(contest_type.as_str())
-        && crate::utils::contest::contest_has_submissions(&txn, id).await?
-    {
+    let type_changes = payload
+        .contest_type
+        .as_deref()
+        .is_some_and(|contest_type| existing.contest_type.as_deref() != Some(contest_type));
+    if type_changes && crate::utils::contest::contest_has_submissions(&txn, id).await? {
         return Err(AppError::ContestTypeLocked);
     }
 
@@ -431,7 +433,17 @@ pub async fn update_contest(
     active.updated_at = Set(state.clock.now());
 
     let model = active.update(&txn).await?;
+    // Another plugin's checks reach the contest's problems now.
+    let change = match type_changes {
+        true => Some(ConfigChange::of_contest(&txn, id).await?),
+        false => None,
+    };
     txn.commit().await?;
+    if let Some(change) = change {
+        change
+            .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
+            .await;
+    }
 
     Ok(Json(contest_response(&state, model).await))
 }
@@ -470,7 +482,7 @@ pub async fn delete_contest(
 
     txn.commit().await?;
     change
-        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
         .await;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -21,6 +21,7 @@ use crate::extractors::auth::{AuthUser, Authorized, ProblemEdit};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::problem::*;
+use crate::services::config_issues::ConfigChecker;
 use crate::state::AppState;
 use crate::upload_limits::LARGE_UPLOAD_LIMIT_BYTES;
 use crate::utils::problem::find_problem;
@@ -102,7 +103,7 @@ pub async fn create_test_case(
     };
 
     let model = new_tc.insert(txn).await?;
-    edit.commit(state.plugins.as_ref(), write.on_config_break())
+    edit.commit(&ConfigChecker::of(&state), write.on_config_break())
         .await?;
 
     Ok((
@@ -391,7 +392,7 @@ pub async fn update_test_case(
     }
 
     let model = active.update(txn).await?;
-    edit.commit(state.plugins.as_ref(), write.on_config_break())
+    edit.commit(&ConfigChecker::of(&state), write.on_config_break())
         .await?;
 
     Ok(Json(
@@ -432,7 +433,7 @@ pub async fn delete_test_case(
     let edit = TestDataEdit::begin(&state.db, problem_id).await?;
     let tc = find_test_case_for_problem(edit.db(), problem_id, tc_id).await?;
     delete_unjudged_test_cases(edit.db(), test_case::Column::Id.eq(tc.id)).await?;
-    edit.commit(state.plugins.as_ref(), write.on_config_break())
+    edit.commit(&ConfigChecker::of(&state), write.on_config_break())
         .await?;
 
     Ok(StatusCode::NO_CONTENT)
@@ -502,7 +503,7 @@ pub async fn reorder_test_cases(
             .await?;
     }
 
-    edit.commit(state.plugins.as_ref(), write.on_config_break())
+    edit.commit(&ConfigChecker::of(&state), write.on_config_break())
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -564,7 +565,7 @@ pub async fn bulk_delete_test_cases(
     let deleted =
         delete_unjudged_test_cases(txn, test_case::Column::Id.is_in(payload.test_case_ids)).await?;
 
-    edit.commit(state.plugins.as_ref(), write.on_config_break())
+    edit.commit(&ConfigChecker::of(&state), write.on_config_break())
         .await?;
 
     tracing::info!(

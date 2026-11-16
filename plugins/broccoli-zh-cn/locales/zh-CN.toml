@@ -291,7 +291,7 @@
 'submissionDetail.rejudgeQueued' = "已加入重测队列。"
 'submissionDetail.rejudgeError' = "加入重测队列失败。"
 'submissionDetail.judgementApplied' = "版本已应用。"
-'submissionDetail.configIssues.judged' = "评测时本题保存的设置存在问题：其分数可能来自插件现已拒绝的设置。"
+'submissionDetail.configIssues.judged' = "评测时本题的设置存在问题：其分数可能不正确。"
 'submissionDetail.configIssues.current' = "本题当前存在问题的设置："
 'submissionDetail.configIssues.fixed' = "本题的设置现已没有问题。重新评测即可按这些设置计分。"
 'submissionDetail.configIssues.badge' = "设置曾有问题"
@@ -729,8 +729,11 @@
 
 # Test Cases (admin)
 'admin.manageTestCases' = "管理测试点"
-'admin.configIssues.title' = "部分设置与本题的测试点不再一致。请修正，否则提交会被错误计分。"
+'admin.configIssues.title' = "本题的部分设置存在问题。请修正这些设置或本题的测试数据，否则提交会被错误评测。"
+'admin.configIssues.contestTitle' = "本比赛或其题目的部分设置存在问题。请修正这些设置或题目的测试数据，否则比赛会被错误评测。"
 'admin.configIssues.onProblem' = "本题的 {config}"
+'admin.configIssues.onContest' = "本比赛的 {config}"
+'admin.configIssues.forProblem' = "题目 {problemId} 的 {config}"
 'admin.configIssues.inContest' = "比赛 {contestId} 中的 {config}"
 'admin.configIssues.breakTitle' = "仍要保存此修改吗？"
 'admin.configIssues.breakDescription' = "以下设置将与本题的测试点不再一致，在修正之前，提交会按这些设置计分。"

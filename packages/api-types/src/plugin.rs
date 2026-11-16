@@ -302,7 +302,9 @@ impl std::fmt::Display for FieldErrorKind {
     }
 }
 
-/// A stored config that its plugin would no longer accept.
+/// A config its plugin finds something wrong with: a stored config it would
+/// no longer accept, or the defaults a namespace's `validate` function
+/// checks where no config is stored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct IncompatibleConfig {
     #[schema(example = "my-plugin")]
@@ -314,9 +316,10 @@ pub struct IncompatibleConfig {
     pub ref_id: String,
     #[schema(example = "contest")]
     pub namespace: String,
-    /// Why the plugin refuses it: its schema, or its namespace's validate
-    /// function. A namespace the plugin no longer declares at this scope has
-    /// one error with an empty path.
+    /// What the plugin finds: what its schema or its namespace's validate
+    /// function refuses in the config itself, then what the target's data
+    /// does not meet yet. A namespace the plugin no longer declares at this
+    /// scope has one error with an empty path.
     pub errors: Vec<FieldError>,
 }
 

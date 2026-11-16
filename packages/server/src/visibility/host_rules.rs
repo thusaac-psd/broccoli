@@ -1333,6 +1333,7 @@ mod tests {
             is_public,
             submission_format: None,
             config_issues: false,
+            config_recheck: false,
             created_at: now,
             updated_at: now,
             deleted_at: None,

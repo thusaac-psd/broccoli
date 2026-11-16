@@ -155,6 +155,9 @@ async fn a_contest_bundle_restores_every_row_and_blob_onto_another_server() {
     import(&target, &archive, ImportOptions::default())
         .await
         .expect("import");
+    // The import marks what it restores for a config issues recheck, which
+    // finds nothing here and clears the marks.
+    server::services::recheck_marked(&target.state).await;
 
     for (table, order) in [
         ("problem", "id"),
@@ -295,6 +298,7 @@ async fn a_contest_bundle_restores_every_row_and_blob_onto_another_server() {
     )
     .await
     .expect("replace");
+    server::services::recheck_marked(&target.state).await;
     assert_eq!(
         rows(&target, "problem", "id").await,
         rows(&source, "problem", "id").await
@@ -629,7 +633,7 @@ async fn replacing_problems_removes_the_configs_of_the_replaced_ones() {
 
 /// Whether a problem's configs have issues is a fact about the target's
 /// plugins, so a bundle does not carry the flag: an imported problem starts
-/// clear and the server's next start checks its configs.
+/// clear, marked for the recheck the target's servers make.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_imported_problem_does_not_carry_the_config_issues_flag() {
     let source = TestApp::spawn().await;
@@ -664,4 +668,144 @@ async fn an_imported_problem_does_not_carry_the_config_issues_flag() {
         .await,
         "false"
     );
+}
+
+async fn flags(app: &TestApp, problem: i32) -> String {
+    text(
+        app,
+        &format!(
+            "SELECT config_issues::text || '/' || config_recheck::text AS v \
+             FROM problem WHERE id = {problem}"
+        ),
+    )
+    .await
+}
+
+/// A problem with a stored config its plugin refuses, as a database can hold
+/// one no running server checked, exported on its own.
+async fn bundle_with_a_refused_config(source: &TestApp) -> (i32, Vec<u8>) {
+    let problem = source.insert_public_problem("Refused").await;
+    exec(
+        source,
+        &format!(
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+             VALUES ('problem', '{problem}', 'server-plugin:checked', '{{\"refuse\": true}}', 0, now())"
+        ),
+    )
+    .await;
+    let archive = export(
+        source,
+        ExportOptions {
+            selection: Selection::Problems(vec![problem]),
+            with_secrets: false,
+        },
+    )
+    .await
+    .expect("export");
+    (problem, archive)
+}
+
+/// An import runs no plugin, so it marks every problem it restores, and a
+/// running server rechecks the marked problems on its next reconcile pass,
+/// without a restart: the restored config its plugin refuses sets the flag,
+/// and the mark clears.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_server_rechecks_the_problems_an_import_restores() {
+    let source = TestApp::spawn_with_plugins().await;
+    let (problem, archive) = bundle_with_a_refused_config(&source).await;
+
+    let target = TestApp::spawn_with_plugins().await;
+    import(&target, &archive, ImportOptions::default())
+        .await
+        .expect("import");
+    assert_eq!(flags(&target, problem).await, "false/true");
+
+    server::services::recheck_marked(&target.state).await;
+    assert_eq!(flags(&target, problem).await, "true/false");
+}
+
+/// The columns a target works out for itself are never restored, whatever a
+/// bundle carries: a bundle that holds a problem's flag and mark restores
+/// neither.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_import_restores_no_derived_column_a_bundle_carries() {
+    let source = TestApp::spawn().await;
+    let admin = source
+        .create_user_with_role("bundle_derived_admin", "pass1234", "admin")
+        .await;
+    let problem = source.create_problem(&admin, "Derived").await;
+    let archive = export(
+        &source,
+        ExportOptions {
+            selection: Selection::Problems(vec![problem]),
+            with_secrets: false,
+        },
+    )
+    .await
+    .expect("export");
+    let archive =
+        with_problem_columns(&archive, &[("config_issues", "t"), ("config_recheck", "f")]);
+
+    let target = TestApp::spawn().await;
+    import(&target, &archive, ImportOptions::default())
+        .await
+        .expect("import");
+    assert_eq!(flags(&target, problem).await, "false/true");
+}
+
+/// `archive` with `columns` added to every row of its `problem` table, each
+/// holding its value, as a bundle that carried them would.
+fn with_problem_columns(archive: &[u8], columns: &[(&str, &str)]) -> Vec<u8> {
+    use std::io::{Read, Write};
+
+    let mut entries = Vec::new();
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive));
+    for entry in tar.entries().expect("entries") {
+        let mut entry = entry.expect("entry");
+        let path = entry.path().expect("path").to_string_lossy().into_owned();
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).expect("read");
+        entries.push((path, data));
+    }
+    for (path, data) in &mut entries {
+        if path == "manifest.json" {
+            let mut manifest: server::bundle::Manifest =
+                serde_json::from_slice(data).expect("manifest");
+            let problem = manifest
+                .tables
+                .iter_mut()
+                .find(|t| t.name == "problem")
+                .expect("the problem table");
+            problem
+                .columns
+                .extend(columns.iter().map(|(name, _)| name.to_string()));
+            *data = serde_json::to_vec(&manifest).expect("manifest");
+        } else if path == "db/problem.copy" {
+            let values: String = columns
+                .iter()
+                .map(|(_, value)| format!("\t{value}"))
+                .collect();
+            let rows = String::from_utf8(std::mem::take(data)).expect("text rows");
+            *data = rows
+                .lines()
+                .map(|row| format!("{row}{values}\n"))
+                .collect::<String>()
+                .into_bytes();
+        }
+    }
+    let mut out = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::fast(),
+    ));
+    for (path, data) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        out.append_data(&mut header, path, data.as_slice())
+            .expect("append");
+    }
+    let mut gz = out.into_inner().expect("finish tar");
+    gz.flush().expect("flush");
+    gz.finish().expect("finish gzip")
 }

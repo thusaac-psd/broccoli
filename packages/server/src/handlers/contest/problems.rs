@@ -24,7 +24,8 @@ use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::contest::*;
-use crate::services::plugin_config::{Reads, delete_configs_of_contest_problems};
+use crate::services::config_issues::ConfigChecker;
+use crate::services::plugin_config::{ConfigChange, Reads, delete_configs_of_contest_problems};
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, find_contest_problem, require_contest_started};
 use crate::utils::soft_delete::SoftDeletable;
@@ -106,6 +107,10 @@ pub async fn add_contest_problem(
 
     let model = new_cp.insert(&txn).await?;
     txn.commit().await?;
+    // The contest type's checks now reach the problem.
+    ConfigChange::of_problem(payload.problem_id)
+        .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
+        .await;
 
     Ok((
         StatusCode::CREATED,
@@ -336,7 +341,7 @@ pub async fn remove_contest_problem(
 
     txn.commit().await?;
     change
-        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
         .await;
 
     Ok(StatusCode::NO_CONTENT)
@@ -472,7 +477,7 @@ pub async fn bulk_delete_contest_problems(
 
     txn.commit().await?;
     change
-        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
         .await;
 
     tracing::info!(

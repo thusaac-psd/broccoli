@@ -34,7 +34,10 @@ pub fn validate_communication_config(input: String) -> FnResult<String> {
     let req: ConfigValidateInput = serde_json::from_str(&input)?;
     let config: config::CommConfig = req.parse()?;
     let errors = config.violations();
-    Ok(serde_json::to_string(&ConfigValidateOutput { errors })?)
+    Ok(serde_json::to_string(&ConfigValidateOutput {
+        errors,
+        ..Default::default()
+    })?)
 }
 
 #[cfg(target_arch = "wasm32")]

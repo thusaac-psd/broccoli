@@ -83,7 +83,7 @@ The function receives a `ConfigValidateInput`: the namespace, the scope, the
 `contest_id` and `problem_id` the config belongs to, and the proposed value
 with its defaults filled in. Read whatever else you need through your usual
 host functions, and answer with a `ConfigValidateOutput` listing one
-`ConfigViolation` per problem. An empty list accepts the value:
+`ConfigViolation` per problem. Empty lists accept the value:
 
 ```rust
 #[plugin_fn]
@@ -110,9 +110,24 @@ pub fn validate_task_config(input: String) -> FnResult<String> {
             .param("testCase", label.as_str())
         })
         .collect();
-    Ok(serde_json::to_string(&ConfigValidateOutput { errors })?)
+    Ok(serde_json::to_string(&ConfigValidateOutput {
+        errors,
+        ..Default::default()
+    })?)
 }
 ```
+
+The answer has two lists, and which one a violation goes in decides whether
+the host stores the value:
+
+- `errors` is what is wrong with the config itself, such as a subtask naming
+  a test case the problem does not have. The host refuses the write.
+- `issues` is what the target's data does not meet yet, whatever the config
+  says, such as a problem with no test cases. The host stores the value and
+  lists each issue on the target's config issues until the data changes.
+
+Put a condition in `issues` when no value of the config could fix it, so
+staff can save their settings before the test data is ready.
 
 The host answers each violation as a field of the `VALIDATION_ERROR`, so the
 settings form shows it next to the field its `path` names and lists it with
@@ -134,26 +149,48 @@ change to a problem's test cases (create, edit, delete, reorder, bulk delete
 and ZIP upload) therefore runs every config stored for the problem, at the
 problem scope and in each contest that uses it, through the same checks
 before it commits, with `host.submission.query_test_cases` answering with the
-test cases as the change leaves them. A change that gives a config an issue
-is refused with 409 `CONFIG_WOULD_BREAK`, its `details.issues` in the
-`incompatible_configs` shape, unless the request carries `force=true`. Your
+test cases as the change leaves them. A change that gives a config an error
+it did not have is refused with 409 `CONFIG_WOULD_BREAK`, its `details.issues`
+in the `incompatible_configs` shape, unless the request carries `force=true`.
+An entry of `issues` never refuses a change: the data is what it describes, so
+the change goes through and the config issues list it. Your
 own SQL (`host.db.*`) reads committed data during that check, so read test
 cases through `host.submission.query_test_cases` in a validator.
 
-`GET /api/v1/problems/{id}/config/issues` lists the configs refused now. The
-problem's test case dialog shows them, and a judgement dispatched while there
-are any says so to staff (`config_issues` on the submission's judgements, and
-a warning on the submission page).
+`GET /api/v1/problems/{id}/config/issues` lists what your plugin finds now,
+errors and issues alike, for each config of the problem, at the problem scope
+and in each contest that uses it. `GET /api/v1/contests/{id}/config/issues`
+lists the same for a contest's own configs and those of its problems in it. The
+problem's test case dialog and the contest's problem dialog show them, and a
+judgement dispatched while the problem has any says so to staff
+(`config_issues` on the submission's judgements, and a warning on the
+submission page).
+
+Your validator runs on every stored config of your plugin, and also where no
+config is stored: for each namespace that declares `validate`, the host checks
+its defaults at every target of the types your plugin provides (the contest
+types, problem types and checker formats it registers) that stores none. A
+contest-scope or contest-problem namespace is checked in every contest of your
+contest type; a problem-scope namespace on every problem whose problem type,
+checker format or default contest type you provide. So a problem your contest
+type cannot judge shows up before anyone submits, even though nobody saved a
+config for it.
 
 Whether a problem has any is rechecked whenever the answer can change: on a
 test data change; on every write or delete of one of its configs, at the
 problem scope or in a contest, whoever makes it (an admin, your plugin's
-`host.config.set*`, a checker source upload, removing the problem from a
-contest, deleting the contest); and, for every problem it reaches, when your
+`host.config.set*`, a checker source upload); when the problem is created, its
+types change, it joins or leaves a contest, or a contest it is in changes its
+contest type or is deleted; and, for every problem your checks reach, when your
 plugin is enabled, disabled, reloaded or upgraded, when its plugin-scope config
-is written or deleted, when a contest's own config is written or deleted, and
-when the server starts. While your plugin is disabled its configs are not checked, so they
-count as having no issues until it is enabled again.
+is written or deleted, when a contest's own config is written or deleted, after
+a bundle import, and when the server starts. A contest's config issues are
+checked whenever they are read. While your plugin is disabled its configs are
+not checked, so they count as having no issues until it is enabled again.
+
+A write to a problem's config holds the same lock a test data change does,
+from its check until it commits, so a config is never stored against test data
+that a concurrent change has just replaced.
 
 ## Move it with a bundle
 
@@ -167,8 +204,9 @@ problem stays to configure the imported problem that takes its id.
 
 An import runs no plugin, so it checks none of the configs it restores, and
 the problems' `config_issues` flags do not travel: they describe the source's
-plugins. The server's next start checks every restored config and sets each
-problem's flag.
+plugins. The import marks every problem it restores instead, and each running
+server rechecks the marked problems on its next plugin reconcile pass, within
+a few seconds, so their flags are set without a restart.
 
 ## Read it
 

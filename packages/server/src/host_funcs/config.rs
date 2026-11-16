@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use super::context::ManagerRef;
 use crate::error::AppError;
+use crate::registry::TypeProviders;
+use crate::services::config_issues::ConfigChecker;
 use crate::services::plugin_config::{ConfigTarget, Reads, RowSettings, write_config};
 use crate::services::plugin_config_cache::PluginConfigCache;
 use plugin_core::config_schema;
@@ -17,7 +19,13 @@ type ConfigGetUserData = (
     PluginRegistry,
     PluginConfigCache,
 );
-type ConfigSetUserData = (String, DatabaseConnection, ManagerRef, PluginConfigCache);
+type ConfigSetUserData = (
+    String,
+    DatabaseConnection,
+    ManagerRef,
+    TypeProviders,
+    PluginConfigCache,
+);
 
 const VALID_SCOPES: &[&str] = &["problem", "contest_problem", "contest", "plugin"];
 
@@ -103,13 +111,14 @@ pub fn create_config_set_function(
     plugin_id: String,
     db: DatabaseConnection,
     manager: ManagerRef,
+    types: TypeProviders,
     cache: PluginConfigCache,
 ) -> Function {
     super::host_function(
         "config_set",
         [ValType::I64],
         [],
-        super::host_data((plugin_id, db, manager, cache)),
+        super::host_data((plugin_id, db, manager, types, cache)),
         super::Waits::Blocks,
         config_set_fn,
     )
@@ -171,7 +180,7 @@ fn config_set_fn(
 ) -> Result<(), extism::Error> {
     let input: ConfigSetInput = super::read_json(plugin, inputs, "config_set input")?;
     let call = super::HostCall::enter(&user_data, "config_set")?;
-    let (plugin_id, db, manager, cache) = &*call;
+    let (plugin_id, db, manager, types, cache) = &*call;
 
     let ref_id = if input.scope == "plugin" {
         plugin_id.clone()
@@ -210,7 +219,11 @@ fn config_set_fn(
             // The plugin may read its write back before the change
             // notification.
             cache.forget(&input.scope, &ref_id, &namespace);
-            change.recheck(db, manager.as_ref(), Reads::InCall).await;
+            let checker = ConfigChecker {
+                plugins: manager.as_ref(),
+                types: types.clone(),
+            };
+            change.recheck(db, &checker, Reads::InCall).await;
             Ok::<_, AppError>(())
         })
         .map_err(|e| {

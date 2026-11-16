@@ -68,7 +68,10 @@ pub fn load_problems(host: &Host, contest_id: i32) -> Result<Vec<Problem>, SdkEr
 
 /// The `contest` namespace's validate function: refuses fewer advancement
 /// places than the contest's problems let qualify directly
-/// ([`ContestConfig::violations`]).
+/// ([`ContestConfig::violations`]). The host runs it on every qualifier
+/// contest, its defaults where none is stored, whenever it lists the
+/// contest's config issues, so a problem added later that leaves too few
+/// places shows there.
 pub fn validate_contest_config(
     host: &Host,
     input: &ConfigValidateInput,
@@ -83,6 +86,7 @@ pub fn validate_contest_config(
         .collect();
     Ok(ConfigValidateOutput {
         errors: config.violations(&points),
+        ..Default::default()
     })
 }
 

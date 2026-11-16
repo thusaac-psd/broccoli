@@ -1934,3 +1934,197 @@ async fn a_server_start_rechecks_the_config_issues_of_every_configured_problem()
     assert!(app.config_issues_flag(broken).await);
     assert!(!app.config_issues_flag(clean).await);
 }
+
+/// The keys of every error the issues list for `ioi/task` of
+/// `contest_id:problem_id`, in order; empty when it lists none.
+fn task_issue_keys(issues: &serde_json::Value, contest_id: i32, problem_id: i32) -> Vec<String> {
+    issues
+        .as_array()
+        .expect("an array")
+        .iter()
+        .filter(|issue| {
+            issue["plugin_id"] == "ioi"
+                && issue["namespace"] == "task"
+                && issue["ref_id"] == format!("{contest_id}:{problem_id}")
+        })
+        .flat_map(|issue| issue["errors"].as_array().expect("errors").clone())
+        .map(|error| error["key"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// A problem IOI judging would refuse is a config issue as soon as an IOI
+/// contest uses it, whether or not a task config is stored: the plugin that
+/// provides the contest's type checks its defaults there. The condition is
+/// the data's, not the config's, so a task config is stored meanwhile, and
+/// the issue clears once the data is ready.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ioi_problem_with_nothing_to_judge_is_a_config_issue_with_no_config_stored() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_unready_admin", "password", "admin")
+        .await;
+    let problem_id = app.create_problem(&admin, "IOI Unready").await;
+    let contest_id = app
+        .create_typed_contest(&admin, "IOI Unready Contest", "icpc", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    let problem_issues = format!("/api/v1/problems/{problem_id}/config/issues");
+    let contest_issues = format!("/api/v1/contests/{contest_id}/config/issues");
+    let keys = |path: &str| {
+        let (app, admin, path) = (&app, admin.clone(), path.to_string());
+        async move {
+            let res = app.get_with_token(&path, &admin).await;
+            assert_eq!(res.status, 200, "{}", res.text);
+            task_issue_keys(&res.body, contest_id, problem_id)
+        }
+    };
+    assert!(keys(&problem_issues).await.is_empty());
+    assert!(!app.config_issues_flag(problem_id).await);
+
+    let res = app
+        .patch_with_token(
+            &format!("/api/v1/contests/{contest_id}"),
+            &json!({ "contest_type": "ioi" }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let no_test_cases = vec!["ioi.config.task.problemHasNoTestCases".to_string()];
+    assert_eq!(keys(&problem_issues).await, no_test_cases);
+    assert_eq!(keys(&contest_issues).await, no_test_cases);
+    assert!(
+        app.config_issues_flag(problem_id).await,
+        "the contest's new type checks the problem"
+    );
+
+    let task = format!("/api/v1/contests/{contest_id}/problems/{problem_id}/config/ioi/task");
+    let res = app
+        .put_with_token(&task, &json!({ "config": { "subtasks": [] } }), &admin)
+        .await;
+    assert_eq!(
+        res.status, 200,
+        "data that is not ready refuses no config: {}",
+        res.text
+    );
+    assert_eq!(keys(&problem_issues).await, no_test_cases);
+    assert!(app.config_issues_flag(problem_id).await);
+
+    let res = app
+        .post_with_token(
+            &format!("/api/v1/problems/{problem_id}/test-cases"),
+            &json!({
+                "input": "1 2",
+                "expected_output": "3",
+                "score": 0,
+                "is_sample": false,
+            }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 201, "{}", res.text);
+    let weightless = res.id();
+    assert_eq!(
+        keys(&problem_issues).await,
+        vec!["ioi.config.task.nothingToScore".to_string()]
+    );
+    assert!(app.config_issues_flag(problem_id).await);
+
+    let res = app
+        .patch_with_token(
+            &format!("/api/v1/problems/{problem_id}/test-cases/{weightless}"),
+            &json!({ "score": 10 }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(keys(&problem_issues).await.is_empty());
+    assert!(keys(&contest_issues).await.is_empty());
+    assert!(!app.config_issues_flag(problem_id).await);
+
+    let res = app.delete_with_token(&task, &admin).await;
+    assert_eq!(res.status, 204, "{}", res.text);
+    let other = app.create_problem(&admin, "IOI Unready Too").await;
+    app.add_problem_to_contest_with_label(contest_id, other, "B", &admin)
+        .await;
+    assert!(
+        app.config_issues_flag(other).await,
+        "joining an IOI contest checks the problem"
+    );
+    assert!(!app.config_issues_flag(problem_id).await);
+}
+
+/// A config write holds the problem's row lock, the lock a test-data change
+/// holds, from its check until it commits: a rename that commits while the
+/// write waits is what the write is checked against, so a config naming the
+/// old label is refused instead of stored unflagged.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_config_write_is_checked_against_test_data_a_concurrent_change_commits() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
+
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_locked_write_admin", "password", "admin")
+        .await;
+    let problem_id = app.create_problem(&admin, "IOI Locked Write").await;
+    create_labelled_test_case(&app, problem_id, "t1", &admin).await;
+    let t2 = create_labelled_test_case(&app, problem_id, "t2", &admin).await;
+    let contest_id = app
+        .create_typed_contest(&admin, "IOI Locked Write Contest", "ioi", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+
+    // A test-data change in flight: it holds the problem's row lock and has
+    // renamed `t2`, uncommitted.
+    let edit = app.db.begin().await.expect("begin");
+    edit.execute_unprepared(&format!(
+        "SELECT id FROM problem WHERE id = {problem_id} FOR UPDATE"
+    ))
+    .await
+    .expect("lock the problem");
+    edit.execute_unprepared(&format!(
+        "UPDATE test_case SET label = 't9' WHERE id = {t2}"
+    ))
+    .await
+    .expect("rename t2");
+
+    let path = format!("/api/v1/contests/{contest_id}/problems/{problem_id}/config/ioi/task");
+    let body = json!({ "config": { "subtasks": [{ "name": "S", "test_cases": ["t2"] }] } });
+    let write = app.put_with_token(&path, &body, &admin);
+    tokio::pin!(write);
+    let waits_on_a_lock = || async {
+        app.db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT count(*) AS n FROM pg_stat_activity \
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'",
+            ))
+            .await
+            .expect("pg_stat_activity")
+            .expect("a row")
+            .try_get::<i64>("", "n")
+            .expect("n")
+            > 0
+    };
+    loop {
+        tokio::select! {
+            res = &mut write => panic!(
+                "the write finished while a test-data change held the problem's lock: {}",
+                res.text
+            ),
+            waiting = waits_on_a_lock() => if waiting { break },
+        }
+    }
+    edit.commit().await.expect("commit the rename");
+
+    let res = write.await;
+    assert_eq!(res.status, 400, "{}", res.text);
+    assert_eq!(
+        res.body["details"]["fields"][0]["key"], "ioi.config.task.unknownTestCase",
+        "{}",
+        res.text
+    );
+    let stored = app.get_with_token(&path, &admin).await;
+    assert_eq!(stored.status, 404, "{}", stored.text);
+}

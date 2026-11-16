@@ -26,7 +26,8 @@ use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::problem::*;
 use crate::models::shared::PageWindow;
-use crate::services::plugin_config::{Reads, delete_configs_of_problem};
+use crate::services::config_issues::ConfigChecker;
+use crate::services::plugin_config::{ConfigChange, Reads, delete_configs_of_problem};
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, require_contest_started};
 use crate::utils::problem::find_problem;
@@ -118,6 +119,10 @@ pub async fn create_problem(
     };
 
     let model = new_problem.insert(&state.db).await?;
+    // The checks of the plugins that provide its types reach it.
+    ConfigChange::of_problem(model.id)
+        .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
+        .await;
 
     Ok((
         StatusCode::CREATED,
@@ -402,6 +407,10 @@ pub async fn update_problem(
         return Ok(Json(existing));
     }
 
+    // Other plugins' checks may reach the problem under its new types.
+    let types_change = payload.problem_type.is_some()
+        || payload.checker_format.is_some()
+        || payload.default_contest_type.is_some();
     let txn = state.db.begin().await?;
 
     let existing = find_problem(&txn, id).await?;
@@ -449,6 +458,11 @@ pub async fn update_problem(
 
     let model = active.update(&txn).await?;
     txn.commit().await?;
+    if types_change {
+        ConfigChange::of_problem(id)
+            .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
+            .await;
+    }
 
     let mut response = problem_response(&state, model).await;
     response.samples = load_sample_test_cases(&state.db, id).await?;
@@ -512,7 +526,7 @@ pub async fn delete_problem(
 
     txn.commit().await?;
     change
-        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .recheck(&state.db, &ConfigChecker::of(&state), Reads::Committed)
         .await;
     Ok(StatusCode::NO_CONTENT)
 }

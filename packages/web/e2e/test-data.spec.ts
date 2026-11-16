@@ -81,3 +81,50 @@ test('deleting a test case a config names lists the configs it breaks and delete
   await expect(page.getByText('Test case deleted')).toBeVisible();
   expect(deletes).toEqual(['?force=false', '?force=true']);
 });
+
+// A contest's problems dialog lists what the plugins find wrong with the
+// contest's configs and its problems' configs in it.
+test("the contest's problems dialog shows the contest's config issues", async ({
+  page,
+}) => {
+  await mockApi(page, 'admin');
+  await page.route('**/api/v1/contests/1/problems', (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await page.route('**/api/v1/contests/1/config/issues', (route) =>
+    route.fulfill({
+      json: [
+        {
+          plugin_id: 'codelink-qualifier',
+          scope: 'contest',
+          ref_id: '1',
+          namespace: 'contest',
+          errors: [
+            {
+              path: 'advancement_slots',
+              message:
+                'up to 4 contestants can qualify directly, more than the 2 advancement places',
+              kind: 'plugin',
+              key: null,
+              params: {},
+            },
+          ],
+        },
+        { ...ISSUE, errors: [{ ...ISSUE.errors[0], path: 'subtasks' }] },
+      ],
+    }),
+  );
+  await page.goto('/contests');
+  await page
+    .getByRole('row', { name: /Spring Training Contest 2026/ })
+    .getByRole('button', { name: 'Actions' })
+    .click();
+  await page.getByRole('menuitem', { name: 'Contest Problems' }).click();
+
+  const alert = page.getByRole('dialog').getByRole('alert');
+  await expect(alert).toContainText(
+    'codelink-qualifier/contest on this contest',
+  );
+  await expect(alert).toContainText('advancement_slots');
+  await expect(alert).toContainText('ioi/task for problem 1');
+});
