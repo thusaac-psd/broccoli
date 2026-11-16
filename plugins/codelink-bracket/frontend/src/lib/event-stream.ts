@@ -43,17 +43,43 @@ export class EventStreamParser {
   }
 }
 
-/** Consume an authenticated fetch response without buffering the whole stream. */
+/**
+ * How long a stream may stay silent before it counts as dead. The server
+ * sends a keep-alive comment every 15 seconds, so a stream that sends nothing
+ * for longer is half-open, however connected it still looks.
+ */
+export const STREAM_IDLE_MS = 20_000;
+
+/** The stream sent nothing, not even a keep-alive, for `STREAM_IDLE_MS`. */
+export class StreamIdleError extends Error {
+  constructor(idleMs: number) {
+    super(`The event stream sent nothing for ${idleMs} ms`);
+    this.name = 'StreamIdleError';
+  }
+}
+
+/**
+ * Consume an authenticated fetch response without buffering the whole
+ * stream. It throws `StreamIdleError` once the stream sends nothing for
+ * `idleMs`, so the caller reconnects instead of trusting a dead stream.
+ */
 export async function readEventStream(
   body: ReadableStream<Uint8Array>,
   onEvent: (event: ServerEvent) => void | Promise<void>,
+  idleMs: number = STREAM_IDLE_MS,
 ): Promise<void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   const parser = new EventStreamParser();
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const idle = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new StreamIdleError(idleMs)), idleMs);
+      });
+      const { done, value } = await Promise.race([reader.read(), idle]).finally(
+        () => clearTimeout(timer),
+      );
       if (done) return;
       for (const event of parser.push(
         decoder.decode(value, { stream: true }),

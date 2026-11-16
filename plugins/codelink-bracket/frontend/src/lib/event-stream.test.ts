@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 
-import { EventStreamParser, readEventStream } from './event-stream.ts';
+import {
+  EventStreamParser,
+  readEventStream,
+  StreamIdleError,
+} from './event-stream.ts';
 
 test('SSE handles one-byte chunks, CRLF, multiline data and keepalives', () => {
   const parser = new EventStreamParser();
@@ -43,4 +47,33 @@ test('stream reader preserves split UTF-8 and waits for processing before advanc
     received.push(event.data);
   });
   assert.deepEqual(received, ['小局结束']);
+});
+
+test('a stream that sends nothing, keep-alives included, for the idle time is dead', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let push!: (chunk: string) => void;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        push = (chunk) => controller.enqueue(new TextEncoder().encode(chunk));
+      },
+    });
+    let settled = false;
+    const reading = readEventStream(body, () => {}, 20_000).finally(() => {
+      settled = true;
+    });
+    const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+    mock.timers.tick(15_000);
+    push(': keep-alive\n\n');
+    await flush();
+    mock.timers.tick(19_999);
+    await flush();
+    assert.equal(settled, false, 'the keep-alive restarted the idle time');
+
+    mock.timers.tick(1);
+    await assert.rejects(reading, StreamIdleError);
+  } finally {
+    mock.timers.reset();
+  }
 });
