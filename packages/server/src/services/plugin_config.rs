@@ -1,7 +1,6 @@
-use axum::{Json, http::StatusCode};
+use axum::Json;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set,
-    sea_query::OnConflict,
+    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect, Set, sea_query::OnConflict,
 };
 
 use broccoli_server_sdk::types::{ConfigValidateInput, ConfigValidateOutput};
@@ -11,15 +10,17 @@ use plugin_core::manifest::{ConfigNamespace, PluginManifest};
 use plugin_core::registry::{PluginRegistry, PluginStatus};
 use plugin_core::traits::PluginManager;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use common::db::DatabaseTransaction;
+use common::db::{DatabaseConnection, DatabaseTransaction};
 
-use crate::entity::plugin_config;
+use crate::entity::{contest_problem, plugin_config};
 use crate::error::AppError;
 use crate::host_funcs::config::{extract_plugin_id, resolve_namespace, strip_namespace_prefix};
 use crate::host_funcs::sql::ReadThrough;
 use crate::models::plugin_config::{PluginConfigResponse, config_key};
+use crate::services::config_issues::{Recheck, recheck_problems};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConfigTarget {
@@ -68,7 +69,7 @@ impl ConfigTarget {
 
     /// The target of a stored row, `None` for a scope or reference the host
     /// never writes.
-    fn of_row(scope: &str, ref_id: &str) -> Option<Self> {
+    pub(crate) fn of_row(scope: &str, ref_id: &str) -> Option<Self> {
         let id = |raw: &str| raw.parse::<i32>().ok();
         match ConfigScope::parse(scope)? {
             ConfigScope::Plugin => Some(Self::plugin(ref_id)),
@@ -99,20 +100,20 @@ impl ConfigTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ConfigTargetPattern {
+struct ConfigTargetPattern {
     scope: ConfigScope,
     ref_id_pattern: String,
 }
 
 impl ConfigTargetPattern {
-    pub(crate) fn contest_problem_by_problem(problem_id: i32) -> Self {
+    fn contest_problem_by_problem(problem_id: i32) -> Self {
         Self {
             scope: ConfigScope::ContestProblem,
             ref_id_pattern: config_key::contest_problem_by_problem_like(problem_id),
         }
     }
 
-    pub(crate) fn contest_problem_by_contest(contest_id: i32) -> Self {
+    fn contest_problem_by_contest(contest_id: i32) -> Self {
         Self {
             scope: ConfigScope::ContestProblem,
             ref_id_pattern: config_key::contest_problem_by_contest_like(contest_id),
@@ -168,10 +169,8 @@ pub(crate) async fn get_config<C: ConnectionTrait>(
 
 /// Checks a config against its schema: `plugin_id` must declare
 /// `namespace` for `scope`, and `config` must satisfy that namespace's
-/// schema. Every config write passes this; a plugin's writes to its own
-/// namespaces pass only this, since the plugin owns those values. Returns
-/// the namespace's declaration.
-pub(crate) fn check_schema(
+/// schema. Returns the namespace's declaration.
+fn check_schema(
     registry: &PluginRegistry,
     scope: ConfigScope,
     plugin_id: &str,
@@ -210,6 +209,9 @@ pub(crate) enum Reads<'a> {
     /// (`host.submission.query_test_cases`) see the change; a plugin's own
     /// SQL reads committed data.
     Through(&'a Arc<DatabaseTransaction>),
+    /// What the plugin call a host function serves reads: the check runs as
+    /// a call nested under it.
+    InCall,
 }
 
 impl Reads<'_> {
@@ -217,33 +219,15 @@ impl Reads<'_> {
         match self {
             Reads::Committed => crate::interactive_call(),
             Reads::Through(txn) => crate::interactive_call().with_locals(ReadThrough::locals(txn)),
+            Reads::InCall => plugin_core::executor::CallOptions::nested(),
         }
     }
 }
 
-/// Checks an admin's config before it is stored: its schema
-/// ([`check_schema`]), then the namespace's `validate` function, if it
-/// declares one, for what only the plugin knows about the target. Either
+/// Checks a config before it is stored: its schema ([`check_schema`]), then
+/// the namespace's `validate` function, if it declares one, for what only the
+/// plugin knows about the target, the plugin reading as `reads` says. Either
 /// refusal is [`AppError::InvalidConfig`] with the offending fields.
-pub(crate) async fn validate_config(
-    plugins: &dyn PluginManager,
-    target: &ConfigTarget,
-    plugin_id: &str,
-    namespace: &str,
-    config: &serde_json::Value,
-) -> Result<(), AppError> {
-    check_config(
-        plugins,
-        target,
-        plugin_id,
-        namespace,
-        config,
-        Reads::Committed,
-    )
-    .await
-}
-
-/// [`validate_config`], with the plugin reading as `reads` says.
 async fn check_config(
     plugins: &dyn PluginManager,
     target: &ConfigTarget,
@@ -326,107 +310,244 @@ fn plugin_field_errors(plugin_id: &str, output: ConfigValidateOutput) -> Vec<Fie
         .collect()
 }
 
-/// Validates and stores an admin's config (see [`validate_config`]).
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn upsert_config<C: ConnectionTrait>(
-    db: &C,
-    plugins: &dyn PluginManager,
-    target: &ConfigTarget,
-    plugin_id: &str,
-    namespace: &str,
-    config: serde_json::Value,
-    enabled: Option<bool>,
-    position: i32,
-) -> Result<Json<PluginConfigResponse>, AppError> {
-    validate_config(plugins, target, plugin_id, namespace, &config).await?;
-    store_config(db, target, plugin_id, namespace, config, enabled, position).await
+/// What a config write sets on its row besides the config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowSettings {
+    /// An admin's write: the row's `enabled` toggle and its position.
+    Set {
+        enabled: Option<bool>,
+        position: i32,
+    },
+    /// A write that leaves a stored row's toggle and position as they are,
+    /// and gives a new row none and position 0.
+    Kept,
 }
 
-/// Stores a config row as given. Only for records the host itself owns and
-/// shapes; anything an admin or a plugin writes goes through
-/// [`upsert_config`].
-pub(crate) async fn store_config<C: ConnectionTrait>(
+/// The stored configs a write or delete changed, as the problems whose
+/// `config_issues` flag the change can move and which way it can move them
+/// (see [`crate::services::config_issues`]). Only the writes and deletes of
+/// this module make one, and [`ConfigChange::recheck`] spends it once the
+/// change commits.
+#[must_use = "recheck the config issues a config change reaches once it commits"]
+#[derive(Debug)]
+pub(crate) struct ConfigChange {
+    problems: BTreeSet<i32>,
+    recheck: Recheck,
+}
+
+impl ConfigChange {
+    /// The change of a write to, or a delete of, a config of `target`. A
+    /// problem or contest-problem config is checked before it is stored and
+    /// a deleted one is checked no more, so the change can only resolve that
+    /// problem's issues. A contest or plugin-scope config is what its
+    /// problems' configs may be checked against, so the change can move
+    /// their flags either way.
+    async fn of<C: ConnectionTrait>(db: &C, target: &ConfigTarget) -> Result<Self, AppError> {
+        Ok(match target.scope {
+            ConfigScope::Problem | ConfigScope::ContestProblem => Self {
+                problems: target.problem_id.into_iter().collect(),
+                recheck: Recheck::ClearOnly,
+            },
+            ConfigScope::Contest => Self {
+                problems: problems_of_contest(db, target.contest_id).await?,
+                recheck: Recheck::Both,
+            },
+            ConfigScope::Plugin => Self {
+                problems: problems_with_configs_of(db, Some(&[target.ref_id()])).await?,
+                recheck: Recheck::Both,
+            },
+        })
+    }
+
+    fn and(mut self, other: Self) -> Self {
+        self.problems.extend(other.problems);
+        self.recheck = self.recheck.max(other.recheck);
+        self
+    }
+
+    /// Rechecks the flags the change reaches, the plugins reading as `reads`
+    /// says. Runs after the change commits, never on the judging path; a
+    /// recheck that fails is logged and leaves the flag as it was.
+    pub(crate) async fn recheck(
+        self,
+        db: &DatabaseConnection,
+        plugins: &dyn PluginManager,
+        reads: Reads<'_>,
+    ) {
+        recheck_problems(db, plugins, self.problems, self.recheck, reads).await;
+    }
+}
+
+/// The problems of contest `contest_id`; none for no contest.
+async fn problems_of_contest<C: ConnectionTrait>(
     db: &C,
+    contest_id: Option<i32>,
+) -> Result<BTreeSet<i32>, AppError> {
+    let Some(contest_id) = contest_id else {
+        return Ok(BTreeSet::new());
+    };
+    let problems = contest_problem::Entity::find()
+        .select_only()
+        .column(contest_problem::Column::ProblemId)
+        .filter(contest_problem::Column::ContestId.eq(contest_id))
+        .into_tuple::<i32>()
+        .all(db)
+        .await?;
+    Ok(problems.into_iter().collect())
+}
+
+/// Checks a config ([`check_config`], its plugin reading as `reads` says) and
+/// stores it at `target`. Every config write, an admin's or a plugin's,
+/// goes through here, so no config is stored unchecked; the returned change
+/// rechecks the flags the write reaches once it commits.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn write_config<C: ConnectionTrait>(
+    db: &C,
+    plugins: &dyn PluginManager,
+    reads: Reads<'_>,
     target: &ConfigTarget,
     plugin_id: &str,
     namespace: &str,
     config: serde_json::Value,
-    enabled: Option<bool>,
-    position: i32,
-) -> Result<Json<PluginConfigResponse>, AppError> {
-    let namespace_str = target.stored_namespace(plugin_id, namespace);
-
-    let active = plugin_config::ActiveModel {
+    settings: RowSettings,
+) -> Result<(PluginConfigResponse, ConfigChange), AppError> {
+    check_config(plugins, target, plugin_id, namespace, &config, reads).await?;
+    let (enabled, position, kept) = match settings {
+        RowSettings::Set { enabled, position } => (enabled, position, false),
+        RowSettings::Kept => (None, 0, true),
+    };
+    let mut updated = vec![
+        plugin_config::Column::Config,
+        plugin_config::Column::UpdatedAt,
+    ];
+    if !kept {
+        updated.extend([
+            plugin_config::Column::Enabled,
+            plugin_config::Column::Position,
+        ]);
+    }
+    let row = plugin_config::Entity::insert(plugin_config::ActiveModel {
         scope: Set(target.scope().as_str().to_string()),
         ref_id: Set(target.ref_id().to_string()),
-        namespace: Set(namespace_str.clone()),
-        config: Set(config.clone()),
+        namespace: Set(target.stored_namespace(plugin_id, namespace)),
+        config: Set(config),
         enabled: Set(enabled),
         position: Set(position),
         updated_at: sea_orm::NotSet,
-    };
-
-    let row = plugin_config::Entity::insert(active)
-        .on_conflict(
-            OnConflict::columns([
-                plugin_config::Column::Scope,
-                plugin_config::Column::RefId,
-                plugin_config::Column::Namespace,
-            ])
-            .update_columns([
-                plugin_config::Column::Config,
-                plugin_config::Column::Enabled,
-                plugin_config::Column::Position,
-                plugin_config::Column::UpdatedAt,
-            ])
-            .to_owned(),
-        )
-        .exec_with_returning(db)
-        .await?;
-
-    Ok(Json(PluginConfigResponse {
-        plugin_id: plugin_id.to_string(),
-        namespace: strip_namespace_prefix(&namespace_str).to_string(),
-        config,
-        enabled,
-        position,
-        updated_at: Some(row.updated_at),
-        json_schema: None,
-        description: None,
-    }))
+    })
+    .on_conflict(
+        OnConflict::columns([
+            plugin_config::Column::Scope,
+            plugin_config::Column::RefId,
+            plugin_config::Column::Namespace,
+        ])
+        .update_columns(updated)
+        .to_owned(),
+    )
+    .exec_with_returning(db)
+    .await?;
+    let change = ConfigChange::of(db, target).await?;
+    Ok((
+        PluginConfigResponse {
+            plugin_id: plugin_id.to_string(),
+            namespace: strip_namespace_prefix(&row.namespace).to_string(),
+            config: row.config,
+            enabled: row.enabled,
+            position: row.position,
+            updated_at: Some(row.updated_at),
+            json_schema: None,
+            description: None,
+        },
+        change,
+    ))
 }
 
+/// Deletes one stored config; [`AppError::NotFound`] when there is none.
 pub(crate) async fn delete_config<C: ConnectionTrait>(
     db: &C,
     target: &ConfigTarget,
     plugin_id: &str,
     namespace: &str,
-) -> Result<StatusCode, AppError> {
+) -> Result<ConfigChange, AppError> {
     let stored_namespace = target.stored_namespace(plugin_id, namespace);
-    let row = plugin_config::Entity::find_by_id((
-        target.scope().as_str().to_string(),
-        target.ref_id().to_string(),
-        stored_namespace.clone(),
-    ))
-    .one(db)
-    .await?;
-
-    match row {
-        Some(r) => {
-            let active: plugin_config::ActiveModel = r.into();
-            active.delete(db).await?;
-            Ok(StatusCode::NO_CONTENT)
-        }
-        None => {
-            let display_ns = strip_namespace_prefix(&stored_namespace);
-            Err(AppError::NotFound(format!(
-                "Config '{display_ns}' not found"
-            )))
-        }
+    let deleted = plugin_config::Entity::delete_many()
+        .filter(plugin_config::Column::Scope.eq(target.scope().as_str()))
+        .filter(plugin_config::Column::RefId.eq(target.ref_id()))
+        .filter(plugin_config::Column::Namespace.eq(&stored_namespace))
+        .exec(db)
+        .await?;
+    if deleted.rows_affected == 0 {
+        let display_ns = strip_namespace_prefix(&stored_namespace);
+        return Err(AppError::NotFound(format!(
+            "Config '{display_ns}' not found"
+        )));
     }
+    ConfigChange::of(db, target).await
 }
 
-pub(crate) async fn delete_config_by_target<C: ConnectionTrait>(
+/// Deletes every config of problem `problem_id`, at the problem scope and in
+/// each contest, as the problem goes.
+pub(crate) async fn delete_configs_of_problem<C: ConnectionTrait>(
+    db: &C,
+    problem_id: i32,
+) -> Result<ConfigChange, AppError> {
+    let target = ConfigTarget::problem(problem_id);
+    delete_configs_at(db, &target).await?;
+    delete_configs_like(
+        db,
+        &ConfigTargetPattern::contest_problem_by_problem(problem_id),
+    )
+    .await?;
+    ConfigChange::of(db, &target).await
+}
+
+/// Deletes every config of contest `contest_id`, its own and those of its
+/// problems in it, as the contest goes.
+pub(crate) async fn delete_configs_of_contest<C: ConnectionTrait>(
+    db: &C,
+    contest_id: i32,
+) -> Result<ConfigChange, AppError> {
+    let target = ConfigTarget::contest(contest_id);
+    let change = ConfigChange::of(db, &target).await?;
+    delete_configs_at(db, &target).await?;
+    delete_configs_like(
+        db,
+        &ConfigTargetPattern::contest_problem_by_contest(contest_id),
+    )
+    .await?;
+    Ok(change)
+}
+
+/// Deletes the configs of problems `problem_ids` in contest `contest_id`, as
+/// they leave it.
+pub(crate) async fn delete_configs_of_contest_problems<C: ConnectionTrait>(
+    db: &C,
+    contest_id: i32,
+    problem_ids: &[i32],
+) -> Result<ConfigChange, AppError> {
+    let mut change = ConfigChange {
+        problems: BTreeSet::new(),
+        recheck: Recheck::ClearOnly,
+    };
+    let targets: Vec<ConfigTarget> = problem_ids
+        .iter()
+        .map(|&problem_id| ConfigTarget::contest_problem(contest_id, problem_id))
+        .collect();
+    if targets.is_empty() {
+        return Ok(change);
+    }
+    plugin_config::Entity::delete_many()
+        .filter(plugin_config::Column::Scope.eq(ConfigScope::ContestProblem.as_str()))
+        .filter(plugin_config::Column::RefId.is_in(targets.iter().map(ConfigTarget::ref_id)))
+        .exec(db)
+        .await?;
+    for target in &targets {
+        change = change.and(ConfigChange::of(db, target).await?);
+    }
+    Ok(change)
+}
+
+async fn delete_configs_at<C: ConnectionTrait>(
     db: &C,
     target: &ConfigTarget,
 ) -> Result<(), AppError> {
@@ -438,7 +559,7 @@ pub(crate) async fn delete_config_by_target<C: ConnectionTrait>(
     Ok(())
 }
 
-pub(crate) async fn delete_config_by_target_pattern<C: ConnectionTrait>(
+async fn delete_configs_like<C: ConnectionTrait>(
     db: &C,
     target_pattern: &ConfigTargetPattern,
 ) -> Result<(), AppError> {
@@ -526,12 +647,12 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
 }
 
 /// The problems that have a stored config, at the problem scope or in a
-/// contest, of any plugin in `plugin_ids`: those whose config issues a change
-/// to one of these plugins can change.
+/// contest, of any plugin in `plugin_ids` (of any plugin at all for `None`):
+/// those whose config issues a change to one of these plugins can change.
 pub(crate) async fn problems_with_configs_of<C: ConnectionTrait>(
     db: &C,
-    plugin_ids: &[&str],
-) -> Result<std::collections::BTreeSet<i32>, AppError> {
+    plugin_ids: Option<&[&str]>,
+) -> Result<BTreeSet<i32>, AppError> {
     let rows = plugin_config::Entity::find()
         .filter(plugin_config::Column::Scope.is_in([
             ConfigScope::Problem.as_str(),
@@ -541,7 +662,7 @@ pub(crate) async fn problems_with_configs_of<C: ConnectionTrait>(
         .await?;
     Ok(rows
         .into_iter()
-        .filter(|row| plugin_ids.contains(&extract_plugin_id(&row.namespace)))
+        .filter(|row| plugin_ids.is_none_or(|ids| ids.contains(&extract_plugin_id(&row.namespace))))
         .filter_map(|row| ConfigTarget::of_row(&row.scope, &row.ref_id)?.problem_id)
         .collect())
 }

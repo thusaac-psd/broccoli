@@ -42,6 +42,7 @@ extern "ExtismHost" {
     fn db_query(sql: String, args: String) -> String;
     fn timer_schedule(input: String) -> String;
     fn timer_cancel(input: String) -> String;
+    fn config_set(input: String);
 }
 
 #[plugin_fn]
@@ -548,4 +549,35 @@ pub fn sql_parameterized(input: String) -> FnResult<String> {
         status: 200,
         body: Some(serde_json::json!({ "found": rows.len() })),
     })?)
+}
+
+/// Writes the body as the problem's `checked` config through `config_set`.
+/// A write the host refuses fails the call.
+#[plugin_fn]
+pub fn config_write(input: String) -> FnResult<String> {
+    let req: PluginHttpRequest = serde_json::from_str(&input)?;
+    let problem_id = req.params.get("problem_id").cloned().unwrap_or_default();
+    let write = serde_json::json!({
+        "scope": "problem",
+        "ref_id": problem_id,
+        "namespace": "checked",
+        "config": req.body.unwrap_or(serde_json::Value::Null),
+    });
+    unsafe { config_set(serde_json::to_string(&write)?)? };
+    Ok(serde_json::to_string(&PluginHttpResponse {
+        status: 200,
+        body: None,
+    })?)
+}
+
+/// The `checked` namespace's validate function: refuses `refuse = true`.
+#[plugin_fn]
+pub fn validate_checked(input: String) -> FnResult<String> {
+    let input: serde_json::Value = serde_json::from_str(&input)?;
+    let errors = if input["config"]["refuse"] == serde_json::Value::Bool(true) {
+        vec![serde_json::json!({ "path": "refuse", "message": "refused by the plugin" })]
+    } else {
+        Vec::new()
+    };
+    Ok(serde_json::json!({ "errors": errors }).to_string())
 }

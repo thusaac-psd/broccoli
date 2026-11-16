@@ -11253,7 +11253,7 @@ export interface operations {
           'application/json': components['schemas']['CheckerSourceResponse'];
         };
       };
-      /** @description Validation error */
+      /** @description Validation error (VALIDATION_ERROR): the files break the checker source namespace's schema, or its plugin's validate function refuses them; `details.fields` lists each broken field */
       400: {
         headers: {
           [name: string]: unknown;
@@ -11300,6 +11300,15 @@ export interface operations {
       };
       /** @description Request body over the endpoint's limit (PAYLOAD_TOO_LARGE) */
       413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin that checks the checker source cannot answer right now (PLUGIN_UNAVAILABLE) */
+      503: {
         headers: {
           [name: string]: unknown;
         };

@@ -682,6 +682,71 @@ fn handlers_do_not_import_entities_directly() {
     );
 }
 
+/// Every write or delete of a stored plugin config goes through
+/// `services::plugin_config`, which checks a config before it stores it and
+/// returns the change that rechecks the `config_issues` flags it reaches once
+/// it commits. A bundle restores the table in bulk, and the server's next
+/// start checks what it restored. No other module writes the `plugin_config`
+/// table, through its entity or in SQL.
+#[test]
+fn only_the_config_service_writes_stored_configs() {
+    const OWNERS: &[&str] = &[
+        "services/plugin_config.rs",
+        "bundle/mod.rs",
+        "entity/plugin_config.rs",
+    ];
+    const ENTITY_WRITES: &[&str] = &[
+        "plugin_config::Entity::insert",
+        "plugin_config::Entity::delete",
+        "plugin_config::Entity::update",
+        "plugin_config::ActiveModel",
+    ];
+    const SQL_WRITES: &[&str] = &[
+        "insert into plugin_config",
+        "delete from plugin_config",
+        "update plugin_config",
+        "truncate plugin_config",
+    ];
+    let root = server_src_root();
+    let mut files = Vec::new();
+    collect_rs_files(&root, &mut files);
+    assert!(OWNERS.iter().all(|owner| root.join(owner).is_file()));
+
+    let mut offenders = Vec::new();
+    for file in &files {
+        let relative = file
+            .strip_prefix(&root)
+            .expect("under src")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if OWNERS.contains(&relative.as_str()) || relative.starts_with("migration/") {
+            continue;
+        }
+        let src =
+            fs::read_to_string(file).unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
+        for (i, line) in src.lines().enumerate() {
+            if line_is_comment(line) {
+                continue;
+            }
+            let code = effective_code(line);
+            let sql = line.to_lowercase();
+            if ENTITY_WRITES.iter().any(|w| code.contains(w))
+                || SQL_WRITES.iter().any(|w| sql.contains(w))
+            {
+                offenders.push(Offender {
+                    path: file.clone(),
+                    line_no: i + 1,
+                    line: line.trim().to_string(),
+                });
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "stored configs written outside services::plugin_config: {offenders:#?}"
+    );
+}
+
 /// Every re-export of `crate::entity` outside the entity module carries a
 /// `visibility-bypass-audited:` marker. This narrows the facade gap
 /// described on `find_unaudited_entity_accesses`:

@@ -4,7 +4,7 @@ description = "Minimal test fixture server plugin"
 
 [server]
 entry = "server_plugin.wasm"
-permissions = ["storage", "sql", "timer"]
+permissions = ["storage", "sql", "timer", "config:write"]
 
 [[server.timers]]
 function = "on_timer"
@@ -107,7 +107,24 @@ method = "GET"
 access = "public"
 handler = "fail"
 
+# Writes its own `checked` config of a problem through `config_set`.
+[[server.routes]]
+path = "/config/problems/{problem_id}"
+method = "PUT"
+access = "public"
+handler = "config_write"
+
 [[server.queries]]
 topic = "visibility"
 function = "decide_visibility"
 
+
+# A problem config whose validate function refuses `refuse = true`.
+[config.checked]
+description = "Fixture config checked by the plugin"
+scopes = ["problem"]
+validate = "validate_checked"
+
+[config.checked.properties.refuse]
+type = "boolean"
+default = false

@@ -1,4 +1,4 @@
-use axum::{Json, extract::State, response::IntoResponse};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use broccoli_server_sdk::permissions as perm;
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, TransactionTrait};
 use tracing::instrument;
@@ -23,12 +23,9 @@ use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::host_funcs::config::{extract_plugin_id, strip_namespace_prefix};
 use crate::models::plugin_config::{PluginConfigResponse, UpsertPluginConfigRequest};
-use crate::services::config_issues::{
-    clear_resolved_config_issues, recheck_problems_of_contest, recheck_problems_of_plugins,
-};
 use crate::services::plugin_config::{
-    ConfigScope, ConfigTarget, IncompatibleConfig, Reads, delete_config, get_config,
-    problem_config_issues, upsert_config,
+    ConfigScope, ConfigTarget, IncompatibleConfig, Reads, RowSettings, delete_config, get_config,
+    problem_config_issues, write_config,
 };
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, find_contest_problem};
@@ -251,19 +248,24 @@ pub async fn upsert_plugin_global_config(
     validate_plugin_id(&plugin_id)?;
     validate_namespace(&namespace)?;
     let target = ConfigTarget::plugin(&plugin_id);
-    let result = upsert_config(
+    let (result, change) = write_config(
         &state.db,
         state.plugins.as_ref(),
+        Reads::Committed,
         &target,
         &plugin_id,
         &namespace,
         payload.config,
-        payload.enabled,
-        payload.position,
+        RowSettings::Set {
+            enabled: payload.enabled,
+            position: payload.position,
+        },
     )
     .await?;
-    recheck_problems_of_plugins(&state.db, state.plugins.as_ref(), &[&plugin_id]).await;
-    Ok(result)
+    change
+        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .await;
+    Ok(Json(result))
 }
 
 #[utoipa::path(
@@ -295,9 +297,11 @@ pub async fn delete_plugin_global_config(
     validate_plugin_id(&plugin_id)?;
     validate_namespace(&namespace)?;
     let target = ConfigTarget::plugin(&plugin_id);
-    let result = delete_config(&state.db, &target, &plugin_id, &namespace).await?;
-    recheck_problems_of_plugins(&state.db, state.plugins.as_ref(), &[&plugin_id]).await;
-    Ok(result)
+    let change = delete_config(&state.db, &target, &plugin_id, &namespace).await?;
+    change
+        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(
@@ -437,20 +441,25 @@ pub async fn upsert_problem_config(
     let txn = state.db.begin().await?;
     find_problem(&txn, problem_id).await?;
     let target = ConfigTarget::problem(problem_id);
-    let result = upsert_config(
+    let (result, change) = write_config(
         &txn,
         state.plugins.as_ref(),
+        Reads::Committed,
         &target,
         &plugin_id,
         &namespace,
         payload.config,
-        payload.enabled,
-        payload.position,
+        RowSettings::Set {
+            enabled: payload.enabled,
+            position: payload.position,
+        },
     )
     .await?;
     txn.commit().await?;
-    clear_resolved_config_issues(&state.db, state.plugins.as_ref(), problem_id).await;
-    Ok(result)
+    change
+        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .await;
+    Ok(Json(result))
 }
 
 #[utoipa::path(
@@ -484,10 +493,12 @@ pub async fn delete_problem_config(
     let txn = state.db.begin().await?;
     find_problem(&txn, problem_id).await?;
     let target = ConfigTarget::problem(problem_id);
-    let result = delete_config(&txn, &target, &plugin_id, &namespace).await?;
+    let change = delete_config(&txn, &target, &plugin_id, &namespace).await?;
     txn.commit().await?;
-    clear_resolved_config_issues(&state.db, state.plugins.as_ref(), problem_id).await;
-    Ok(result)
+    change
+        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(
@@ -599,20 +610,25 @@ pub async fn upsert_contest_problem_config(
     let txn = state.db.begin().await?;
     find_contest_problem(&txn, contest_id, problem_id).await?;
     let target = ConfigTarget::contest_problem(contest_id, problem_id);
-    let result = upsert_config(
+    let (result, change) = write_config(
         &txn,
         state.plugins.as_ref(),
+        Reads::Committed,
         &target,
         &plugin_id,
         &namespace,
         payload.config,
-        payload.enabled,
-        payload.position,
+        RowSettings::Set {
+            enabled: payload.enabled,
+            position: payload.position,
+        },
     )
     .await?;
     txn.commit().await?;
-    clear_resolved_config_issues(&state.db, state.plugins.as_ref(), problem_id).await;
-    Ok(result)
+    change
+        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .await;
+    Ok(Json(result))
 }
 
 #[utoipa::path(
@@ -650,10 +666,12 @@ pub async fn delete_contest_problem_config(
     let txn = state.db.begin().await?;
     find_contest_problem(&txn, contest_id, problem_id).await?;
     let target = ConfigTarget::contest_problem(contest_id, problem_id);
-    let result = delete_config(&txn, &target, &plugin_id, &namespace).await?;
+    let change = delete_config(&txn, &target, &plugin_id, &namespace).await?;
     txn.commit().await?;
-    clear_resolved_config_issues(&state.db, state.plugins.as_ref(), problem_id).await;
-    Ok(result)
+    change
+        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(
@@ -757,20 +775,25 @@ pub async fn upsert_contest_config(
     let txn = state.db.begin().await?;
     find_contest(&txn, contest_id).await?;
     let target = ConfigTarget::contest(contest_id);
-    let result = upsert_config(
+    let (result, change) = write_config(
         &txn,
         state.plugins.as_ref(),
+        Reads::Committed,
         &target,
         &plugin_id,
         &namespace,
         payload.config,
-        payload.enabled,
-        payload.position,
+        RowSettings::Set {
+            enabled: payload.enabled,
+            position: payload.position,
+        },
     )
     .await?;
     txn.commit().await?;
-    recheck_problems_of_contest(&state.db, state.plugins.as_ref(), contest_id).await;
-    Ok(result)
+    change
+        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .await;
+    Ok(Json(result))
 }
 
 #[utoipa::path(
@@ -804,8 +827,10 @@ pub async fn delete_contest_config(
     let txn = state.db.begin().await?;
     find_contest(&txn, contest_id).await?;
     let target = ConfigTarget::contest(contest_id);
-    let result = delete_config(&txn, &target, &plugin_id, &namespace).await?;
+    let change = delete_config(&txn, &target, &plugin_id, &namespace).await?;
     txn.commit().await?;
-    recheck_problems_of_contest(&state.db, state.plugins.as_ref(), contest_id).await;
-    Ok(result)
+    change
+        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .await;
+    Ok(StatusCode::NO_CONTENT)
 }

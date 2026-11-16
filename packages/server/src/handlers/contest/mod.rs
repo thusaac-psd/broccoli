@@ -52,9 +52,7 @@ use crate::extractors::path::AppPath;
 use crate::models::contest::*;
 use crate::models::problem::validate_contest_type;
 use crate::models::shared::{PageWindow, escape_like};
-use crate::services::plugin_config::{
-    ConfigTarget, ConfigTargetPattern, delete_config_by_target, delete_config_by_target_pattern,
-};
+use crate::services::plugin_config::{Reads, delete_configs_of_contest};
 use crate::state::AppState;
 use crate::utils::contest::find_contest;
 use crate::utils::soft_delete::SoftDeletable;
@@ -468,11 +466,12 @@ pub async fn delete_contest(
     active.deleted_at = Set(Some(state.clock.now()));
     active.update(&txn).await?;
 
-    delete_config_by_target(&txn, &ConfigTarget::contest(id)).await?;
-    delete_config_by_target_pattern(&txn, &ConfigTargetPattern::contest_problem_by_contest(id))
-        .await?;
+    let change = delete_configs_of_contest(&txn, id).await?;
 
     txn.commit().await?;
+    change
+        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 pub(super) async fn find_contest_for_update(

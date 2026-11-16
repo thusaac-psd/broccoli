@@ -561,7 +561,8 @@ fn register_evaluation_functions(hr: &mut HostFunctionRegistry, deps: &HostFunct
 /// plugin-scoped: the row key's namespace is always prefixed with the
 /// caller's `plugin_id`, and `validate_raw_namespace` forbids `:` so the
 /// prefix cannot be forged, so a plugin can only read its OWN config.
-/// `config:write` mutates the core `plugin_config` table.
+/// `config:write` writes the caller's own configs through
+/// `services::plugin_config`, checked as an admin's write is.
 fn register_config_functions(
     hr: &mut HostFunctionRegistry,
     deps: &HostFunctionDeps,
@@ -585,18 +586,13 @@ fn register_config_functions(
     });
 
     let db = host_db.clone();
-    let registry = deps
-        .plugin_manager
-        .get()
-        .expect("the manager registers its host functions while it is alive")
-        .get_registry()
-        .clone();
+    let manager = deps.plugin_manager.clone();
     let cache = deps.system.plugin_config_cache.clone();
     hr.register("config:write", move |plugin_id| {
         config::create_config_set_function(
             plugin_id.to_string(),
             db.clone(),
-            registry.clone(),
+            manager.clone(),
             cache.clone(),
         )
     });

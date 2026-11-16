@@ -24,7 +24,7 @@ use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::contest::*;
-use crate::services::plugin_config::{ConfigTarget, delete_config_by_target};
+use crate::services::plugin_config::{Reads, delete_configs_of_contest_problems};
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, find_contest_problem, require_contest_started};
 use crate::utils::soft_delete::SoftDeletable;
@@ -332,9 +332,12 @@ pub async fn remove_contest_problem(
     let active: contest_problem::ActiveModel = cp.into();
     active.delete(&txn).await?;
 
-    delete_config_by_target(&txn, &ConfigTarget::contest_problem(contest_id, problem_id)).await?;
+    let change = delete_configs_of_contest_problems(&txn, contest_id, &[problem_id]).await?;
 
     txn.commit().await?;
+    change
+        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -456,18 +459,10 @@ pub async fn bulk_delete_contest_problems(
         )));
     }
 
-    // Mirror remove_contest_problem's per-association config cleanup. Every other
-    // path that destroys a contest_problem link deletes the link's
-    // per-contest-problem plugin config too: single remove_contest_problem here,
-    // delete_contest via the contest_problem_by_contest pattern, and delete_problem
-    // via contest_problem_by_problem. Bulk delete skipped it, orphaning that config
-    // - and because config is keyed by (contest_id, problem_id), re-adding the same
-    // problem to the contest would silently resurrect the stale, admin-removed
-    // config. Every id here is already validated to be in the contest above.
-    for &problem_id in &payload.problem_ids {
-        delete_config_by_target(&txn, &ConfigTarget::contest_problem(contest_id, problem_id))
-            .await?;
-    }
+    // A contest problem's configs go with its link, so re-adding the problem
+    // starts from none. Every id here is already validated to be in the
+    // contest above.
+    let change = delete_configs_of_contest_problems(&txn, contest_id, &payload.problem_ids).await?;
 
     let result = contest_problem::Entity::delete_many()
         .filter(contest_problem::Column::ContestId.eq(contest_id))
@@ -476,6 +471,9 @@ pub async fn bulk_delete_contest_problems(
         .await?;
 
     txn.commit().await?;
+    change
+        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .await;
 
     tracing::info!(
         contest_id,
