@@ -56,7 +56,10 @@ In the contest's admin config, open **Printing**:
 A **plugin-scoped** (global) station serves every contest on the deployment; a
 **contest-scoped** station is limited to that contest. The queue shows a station
 qualified by where it is configured, `global/<name>` or `contest-<id>/<name>`,
-so a contest's station can never act as a global one of the same name.
+so a contest's station can never act as a global one of the same name. A
+contest-scoped station's `[[server]]` entry sets `contest = <id>`, and the
+client sends it as `?contest_id=` on every station request so the server checks
+the token against that contest's list.
 
 ## Run a print station
 
@@ -73,8 +76,6 @@ print-client run       # poll, claim, render, print
 one load-balanced URL) and **multiple printers** driven by one station:
 
 ```toml
-station  = "room-a-desk-1"
-location = "Room A"
 poll_interval_secs = 3
 max_pages = 10
 paper = "A4"
@@ -84,6 +85,7 @@ banner = "Regionals 2026"
 [[server]]
 url   = "http://judge.local:3000"
 token = "PRINTSTATION-xxxxxxxx"
+# contest = 12                    # for a token listed in contest 12's Printing section
 
 [[printer]]
 name  = "main"
@@ -139,11 +141,14 @@ emoji) print as a missing-glyph box rather than vanishing.
 | done     | the station holding it | `claimed`, `printing`                   | `done`     |
 | failed   | the station holding it | `claimed`, `printing`                   | `failed`   |
 
-A move from any other state answers 409. Concurrent stations are serialized by
-an atomic SQL claim, so a job is never printed twice. A station that crashes
-while holding a job loses it after the 10-minute claim lease: another station
-may then claim it, after which the first station's reports are refused. Until
-that happens, the holding station may still report however late. The client
-reports `printing` before it prints and does not print a job whose `printing`
-report is refused. Requeueing and claiming clear the previous run's claim, page
-count and error.
+A job pinned to a printer prints only on that printer: a station's job listing
+offers only unpinned jobs and jobs pinned to a printer its last heartbeat
+listed, filtered before the listing's limit, and a claim onto any other printer
+answers 409. A move from any other state answers 409 too. Concurrent stations
+are serialized by an atomic SQL claim, so a job is never printed twice. A
+station that crashes while holding a job loses it after the 10-minute claim
+lease: another station may then claim it, after which the first station's
+reports are refused. Until that happens, the holding station may still report
+however late. The client reports `printing` before it prints and does not print
+a job whose `printing` report is refused. Requeueing and claiming clear the
+previous run's claim, page count and error.

@@ -12,11 +12,12 @@ use crate::api::{ClaimOutcome, Job, ServerClient};
 use crate::config::{Config, PrinterCfg};
 use crate::render::{self, DocMeta, RenderConfig};
 
+/// Whether `printer` may take `job`: the server pins a job to a printer by the
+/// name a station's heartbeat lists, and claims it onto that printer only.
 fn printer_matches(printer: &PrinterCfg, job: &Job) -> bool {
-    match job.target_printer.as_deref() {
-        None | Some("") => true,
-        Some(target) => target == printer.name || printer.os_id.as_deref() == Some(target),
-    }
+    job.target_printer
+        .as_deref()
+        .is_none_or(|target| target == printer.name)
 }
 
 fn format_when(epoch: Option<f64>) -> String {
@@ -150,12 +151,12 @@ fn report(client: &ServerClient, id: i64, status: &str, pages: Option<u32>, erro
 }
 
 fn tick_server(client: &ServerClient, cfg: &Config, printer_names: &[String]) {
-    if let Err(e) = client.heartbeat(printer_names, cfg.location.as_deref(), 0) {
+    if let Err(e) = client.heartbeat(printer_names, 0).map(drop) {
         eprintln!("  ! heartbeat to {} failed: {e}", client.label);
     }
 
     let limit = (cfg.printers.len() * 3).max(4);
-    let jobs = match client.fetch_jobs(cfg.location.as_deref(), limit) {
+    let jobs = match client.fetch_jobs(limit) {
         Ok(j) => j,
         Err(e) => {
             eprintln!("  ! fetch from {} failed: {e}", client.label);
@@ -250,8 +251,7 @@ pub fn run(cfg: &Config, once: bool) -> Result<()> {
     let printer_names = cfg.printer_names();
 
     println!(
-        "print-client: station '{}' serving {} printer(s) across {} server(s){}",
-        cfg.station,
+        "print-client: serving {} printer(s) across {} server(s){}",
         cfg.printers.len(),
         clients.len(),
         if once { " (single pass)" } else { "" }
@@ -301,23 +301,14 @@ mod tests {
     #[test]
     fn untargeted_jobs_match_any_printer() {
         assert!(printer_matches(&printer("main", None), &job(None)));
-        assert!(printer_matches(&printer("main", None), &job(Some(""))));
     }
 
     #[test]
-    fn targeted_jobs_match_by_name_or_os_id() {
-        assert!(printer_matches(
-            &printer("main", Some("HP_1")),
-            &job(Some("main"))
-        ));
-        assert!(printer_matches(
-            &printer("main", Some("HP_1")),
-            &job(Some("HP_1"))
-        ));
-        assert!(!printer_matches(
-            &printer("main", Some("HP_1")),
-            &job(Some("other"))
-        ));
+    fn a_pinned_job_matches_only_the_printer_of_its_name() {
+        let main = printer("main", Some("HP_1"));
+        assert!(printer_matches(&main, &job(Some("main"))));
+        assert!(!printer_matches(&main, &job(Some("HP_1"))));
+        assert!(!printer_matches(&main, &job(Some("other"))));
     }
 
     #[test]

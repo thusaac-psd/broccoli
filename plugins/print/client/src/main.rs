@@ -6,6 +6,8 @@
 
 mod api;
 mod config;
+#[cfg(test)]
+mod contract_tests;
 mod doctor;
 mod print;
 mod render;
@@ -95,7 +97,7 @@ fn test_print(
         &DocMeta {
             banner: cfg.banner.clone(),
             problem_label: None,
-            who: cfg.station.clone(),
+            who: String::new(),
             filename,
             when: chrono::Local::now().format("%m-%d %H:%M").to_string(),
             job_id: 0,

@@ -14,16 +14,14 @@ pub fn heartbeat(host: &Host, station: &str, req: &HeartbeatRequest) -> Result<(
     let printers_json = serde_json::to_string(&req.printers).unwrap_or_else(|_| "[]".to_string());
     let mut p = Params::new();
     let sql = format!(
-        "INSERT INTO print_station (name, location, printers, version, queue_seen, last_seen) \
-         VALUES ({}, {}, {}::jsonb, {}, {}, NOW()) \
+        "INSERT INTO print_station (name, printers, version, queue_seen, last_seen) \
+         VALUES ({}, {}::jsonb, {}, {}, NOW()) \
          ON CONFLICT (name) DO UPDATE SET \
-            location = EXCLUDED.location, \
             printers = EXCLUDED.printers, \
             version = EXCLUDED.version, \
             queue_seen = EXCLUDED.queue_seen, \
             last_seen = NOW()",
         p.bind(station.to_string()),
-        bind_opt(&mut p, req.location.clone()),
         p.bind(printers_json),
         bind_opt(&mut p, req.version.clone()),
         bind_opt(&mut p, req.queue_seen),
@@ -34,7 +32,7 @@ pub fn heartbeat(host: &Host, station: &str, req: &HeartbeatRequest) -> Result<(
 
 pub fn list_stations(host: &Host) -> Result<Vec<StationRow>, SdkError> {
     let sql = format!(
-        "SELECT name, location, printers, version, queue_seen, \
+        "SELECT name, printers, version, queue_seen, \
             EXTRACT(EPOCH FROM last_seen) AS last_seen, \
             (NOW() - last_seen) < INTERVAL '{ONLINE_WINDOW_SECS} seconds' AS online \
          FROM print_station ORDER BY last_seen DESC"
@@ -53,7 +51,6 @@ mod tests {
         host.db.queue_execute_result(1);
         let req = HeartbeatRequest {
             printers: vec!["main".into(), "overflow".into()],
-            location: Some("Room A".into()),
             version: Some("0.1.0".into()),
             queue_seen: Some(3),
         };

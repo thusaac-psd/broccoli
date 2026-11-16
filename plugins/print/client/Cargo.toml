@@ -31,6 +31,11 @@ toml = "0.8"
 unicode-width = "0.2"
 ureq = { version = "2", features = ["json"] }
 
+# The station contract tests run this client against the plugin's own handlers.
+[dev-dependencies]
+broccoli-server-sdk = { path = "../../../packages/server-sdk", features = ["guest"] }
+print-plugin = { path = ".." }
+
 [profile.release]
 opt-level = "z"
 lto = true

@@ -8,14 +8,6 @@ use dialoguer::{Confirm, Input, Select};
 use crate::config::{Config, PrinterCfg, ServerCfg};
 use crate::print;
 
-fn default_station() -> String {
-    std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "station-1".to_string())
-}
-
 pub fn run_setup(config_path: &Path) -> Result<()> {
     println!("\n  broccoli print-client setup\n  ───────────────────────────\n");
 
@@ -23,26 +15,6 @@ pub fn run_setup(config_path: &Path) -> Result<()> {
         Config::load(config_path).unwrap_or_default()
     } else {
         Config::default()
-    };
-
-    cfg.station = Input::new()
-        .with_prompt("Station name")
-        .with_initial_text(if cfg.station.is_empty() {
-            default_station()
-        } else {
-            cfg.station.clone()
-        })
-        .interact_text()?;
-
-    let location: String = Input::new()
-        .with_prompt("Location / room (optional)")
-        .allow_empty(true)
-        .with_initial_text(cfg.location.clone().unwrap_or_default())
-        .interact_text()?;
-    cfg.location = if location.trim().is_empty() {
-        None
-    } else {
-        Some(location)
     };
 
     cfg.servers = collect_servers()?;
@@ -74,9 +46,21 @@ fn collect_servers() -> Result<Vec<ServerCfg>> {
         let token: String = Input::new()
             .with_prompt("  Station token")
             .interact_text()?;
+        let contest: String = Input::new()
+            .with_prompt("  Contest id, if a contest's Printing section lists the token (blank for a deployment-wide station)")
+            .allow_empty(true)
+            .validate_with(|s: &String| -> Result<(), &str> {
+                match s.trim() {
+                    "" => Ok(()),
+                    id if id.parse::<i32>().is_ok() => Ok(()),
+                    _ => Err("a contest id is a number"),
+                }
+            })
+            .interact_text()?;
         servers.push(ServerCfg {
             url: url.trim().trim_end_matches('/').to_string(),
             token: token.trim().to_string(),
+            contest: contest.trim().parse().ok(),
         });
         if !Confirm::new()
             .with_prompt("  Add another server?")

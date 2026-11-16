@@ -84,7 +84,6 @@
 'print.stations.online' = '在线'
 'print.stations.offline' = '离线'
 'print.stations.col.name' = '站名'
-'print.stations.col.location' = '位置'
 'print.stations.col.printers' = '打印机'
 'print.stations.col.queue' = '已处理'
 'print.stations.col.version' = '版本'

@@ -100,12 +100,14 @@ fn move_job(
                 "A {} job cannot be {}",
                 status.as_str(),
                 match change {
-                    Change::Approve => "approved",
-                    Change::Cancel => "canceled",
-                    Change::Reprint => "reprinted",
-                    Change::Pin { .. } => "pinned",
-                    Change::Claim { .. } => "claimed",
-                    Change::Report { .. } => "reported on by a station that does not hold it",
+                    Change::Approve => "approved".to_string(),
+                    Change::Cancel => "canceled".to_string(),
+                    Change::Reprint => "reprinted".to_string(),
+                    Change::Pin { .. } => "pinned".to_string(),
+                    Change::Claim { printer, .. } => format!("claimed onto printer '{printer}'"),
+                    Change::Report { .. } => {
+                        "reported on by a station that does not hold it".to_string()
+                    }
                 }
             ),
         )
@@ -451,7 +453,7 @@ pub fn handle_station_heartbeat(
     let station = auth::authenticate_station(host, req)?;
     let body: HeartbeatRequest = parse_body(req)?;
     stations::heartbeat(host, &station.name, &body)?;
-    ok(serde_json::json!({ "ok": true }))
+    ok(serde_json::json!({ "station": station.name }))
 }
 
 pub fn handle_station_jobs(
@@ -459,13 +461,12 @@ pub fn handle_station_jobs(
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
     let auth = auth::authenticate_station(host, req)?;
-    let location = req.query.get("location").map(|s| s.as_str());
     let limit = req
         .query
         .get("limit")
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(20);
-    let jobs = jobs::list_station_jobs(host, auth.contest_filter, location, limit)?;
+    let jobs = jobs::list_station_jobs(host, &auth.name, auth.contest_filter, limit)?;
     ok(serde_json::json!({ "data": jobs }))
 }
 
@@ -478,7 +479,7 @@ pub fn handle_station_claim(
     let body: ClaimRequest = parse_body(req)?;
     let change = Change::Claim {
         station: &station.name,
-        printer: body.printer.as_deref(),
+        printer: &body.printer,
     };
     move_job(host, id, change, station.contest_filter)
 }
@@ -694,8 +695,15 @@ mod tests {
             .insert("authorization".into(), "PrintStation G".into());
         req.params.insert("id".into(), "5".into());
         req.body = Some(json!({ "printer": "main" }));
-        let err = handle_station_claim(&host, &req).unwrap_err();
-        assert_eq!(err.into_response().status, 409);
+        let err = handle_station_claim(&host, &req)
+            .unwrap_err()
+            .into_response();
+        assert_eq!(err.status, 409);
+        let message = err.body.unwrap()["message"].as_str().unwrap().to_string();
+        assert_eq!(
+            message,
+            "A claimed job cannot be claimed onto printer 'main'"
+        );
     }
 
     fn station_request(id: i64, body: serde_json::Value) -> (Host, PluginHttpRequest) {

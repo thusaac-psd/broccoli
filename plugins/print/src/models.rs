@@ -63,18 +63,16 @@ pub struct HeartbeatRequest {
     #[serde(default)]
     pub printers: Vec<String>,
     #[serde(default)]
-    pub location: Option<String>,
-    #[serde(default)]
     pub version: Option<String>,
     #[serde(default)]
     pub queue_seen: Option<i32>,
 }
 
-/// The claiming station comes from its credential.
+/// The printer the job prints on. The claiming station comes from its
+/// credential.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ClaimRequest {
-    #[serde(default)]
-    pub printer: Option<String>,
+    pub printer: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -100,7 +98,6 @@ pub struct JobRow {
     pub filename: String,
     pub pages_est: Option<i32>,
     pub pages: Option<i32>,
-    pub location: Option<String>,
     pub target_printer: Option<String>,
     pub status: JobStatus,
     pub claimed_by: Option<String>,
@@ -122,7 +119,6 @@ pub struct StationJob {
     pub language: String,
     pub filename: String,
     pub source: String,
-    pub location: Option<String>,
     pub target_printer: Option<String>,
     pub created_at: Option<f64>,
 }
@@ -130,7 +126,6 @@ pub struct StationJob {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StationRow {
     pub name: String,
-    pub location: Option<String>,
     #[serde(default)]
     pub printers: serde_json::Value,
     pub version: Option<String>,

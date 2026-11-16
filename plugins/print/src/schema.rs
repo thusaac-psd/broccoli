@@ -18,7 +18,6 @@ const STATEMENTS: &[&str] = &[
         filename        TEXT    NOT NULL,
         source          TEXT    NOT NULL,
         pages_est       INTEGER,
-        location        TEXT,
         target_printer  TEXT,
         status          TEXT    NOT NULL DEFAULT 'pending',
         claimed_by      TEXT,
@@ -43,7 +42,6 @@ const STATEMENTS: &[&str] = &[
     r#"
     CREATE TABLE IF NOT EXISTS print_station (
         name        TEXT PRIMARY KEY,
-        location    TEXT,
         printers    JSONB NOT NULL DEFAULT '[]'::jsonb,
         version     TEXT,
         queue_seen  INTEGER,
