@@ -35,3 +35,14 @@ reqwest). The re-authentication differs: cli-core asks its `Session`
 again with a username and password. Sharing the loop across a sync and an async
 HTTP stack needs a trait heavier than the ten lines it replaces. Extract it if
 both clients move to one HTTP stack or one auth flow.
+
+## The `sandbox` config namespace schema
+
+`broccoli_server_sdk::evaluator::SandboxConfig` reads the plugin-scope
+`sandbox` namespace and owns every rule built on it (compile and run limits,
+the compile step, the result timeout). The namespace's schema, its defaults and
+bounds, is declared twice: in `plugins/batch-evaluator/plugin.toml` and in
+`plugins/communication-evaluator/plugin.toml`, because a manifest declares only
+its own plugin's namespaces. The two differ on purpose only in their defaults
+(the interactive evaluator's wall-time multiplier is larger). Extract it if
+manifests gain a way to declare a namespace from a shared schema.

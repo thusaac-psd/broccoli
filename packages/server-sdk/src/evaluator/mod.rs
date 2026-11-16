@@ -1,6 +1,7 @@
 mod detached;
 mod interpret;
 mod run;
+mod sandbox;
 
 pub use detached::{
     BATCH_START_FAILED, CaseOutcome, ContestJudge, DetachedEval, EVALUATION_PERSIST_FAILED,
@@ -9,3 +10,4 @@ pub use detached::{
 };
 pub use interpret::{DEFAULT_CHECK_STEP_ID, compile_output_is_infra_fault, interpret_fused_result};
 pub use run::{evaluate_run, handle_code_run};
+pub use sandbox::{COMPILE_STDERR_FILE, SandboxConfig};

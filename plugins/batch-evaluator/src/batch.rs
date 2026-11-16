@@ -1,97 +1,9 @@
+use broccoli_server_sdk::evaluator::SandboxConfig;
 use broccoli_server_sdk::types::{
-    BuildEvalOpsInput, Channel, CheckerStage, Environment, EvaluationTimeoutBudget, IOConfig,
-    IOTarget, OperationTask, OutputMode, OutputSpec, ResolveLanguageOutput, ResourceLimits,
-    RunOptions, SessionFile, Step, StepCacheConfig, StepKind, seconds_from_ms,
+    BuildEvalOpsInput, Channel, CheckerStage, Environment, IOConfig, IOTarget, OperationTask,
+    OutputMode, ResolveLanguageOutput, RunOptions, SessionFile, Step, StepKind,
 };
-use serde::Deserialize;
 use std::collections::HashSet;
-
-/// Admin-configurable sandbox resource limits: the global `sandbox` config
-/// namespace. Its defaults and bounds live in the namespace's schema in
-/// `plugin.toml`, which the host fills in, so zero-config deployments work
-/// and every field is present here.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SandboxConfig {
-    pub compile_time_limit_s: f64,
-    pub compile_wall_time_multiplier: f64,
-    pub compile_extra_time_s: f64,
-    pub compile_memory_limit_kb: u32,
-    pub compile_stack_limit_kb: u32,
-    pub compile_process_limit: u32,
-    pub compile_open_files_limit: u32,
-    pub compile_file_size_limit_kb: u32,
-    pub exec_extra_time_s: f64,
-    pub exec_stack_limit_kb: u32,
-    pub exec_process_limit: u32,
-    pub exec_open_files_limit: u32,
-    pub exec_file_size_limit_kb: u32,
-    pub exec_wall_time_multiplier: f64,
-    pub result_timeout_ms: u64,
-}
-
-impl SandboxConfig {
-    /// Build ResourceLimits for the compilation step.
-    pub fn compile_limits(&self) -> ResourceLimits {
-        ResourceLimits {
-            time_limit: Some(self.compile_time_limit_s),
-            wall_time_limit: Some(self.compile_time_limit_s * self.compile_wall_time_multiplier),
-            extra_time: if self.compile_extra_time_s > 0.0 {
-                Some(self.compile_extra_time_s)
-            } else {
-                None
-            },
-            memory_limit: Some(self.compile_memory_limit_kb),
-            stack_limit: limit_if_positive(self.compile_stack_limit_kb),
-            process_limit: Some(self.compile_process_limit),
-            open_files_limit: Some(self.compile_open_files_limit),
-            file_size_limit: Some(self.compile_file_size_limit_kb),
-        }
-    }
-
-    /// Build ResourceLimits for the execution step.
-    pub fn exec_limits(&self, time_limit_s: f64, memory_limit_kb: u32) -> ResourceLimits {
-        ResourceLimits {
-            time_limit: Some(time_limit_s),
-            wall_time_limit: Some(time_limit_s * self.exec_wall_time_multiplier),
-            extra_time: if self.exec_extra_time_s > 0.0 {
-                Some(self.exec_extra_time_s)
-            } else {
-                None
-            },
-            memory_limit: Some(memory_limit_kb),
-            stack_limit: limit_if_positive(self.exec_stack_limit_kb),
-            process_limit: Some(self.exec_process_limit),
-            open_files_limit: Some(self.exec_open_files_limit),
-            file_size_limit: Some(self.exec_file_size_limit_kb),
-        }
-    }
-
-    pub fn result_timeout_ms_for(&self, time_limit_ms: i32, compile_units: u32) -> u64 {
-        EvaluationTimeoutBudget {
-            compile_units,
-            compile_time_limit_s: self.compile_time_limit_s,
-            compile_wall_time_multiplier: self.compile_wall_time_multiplier,
-            compile_extra_time_s: self.compile_extra_time_s,
-            exec_time_limit_s: seconds_from_ms(time_limit_ms),
-            exec_wall_time_multiplier: self.exec_wall_time_multiplier,
-            exec_extra_time_s: self.exec_extra_time_s,
-            minimum_timeout_ms: self.result_timeout_ms.max(
-                EvaluationTimeoutBudget::default_for_time_limit_ms(time_limit_ms)
-                    .minimum_timeout_ms,
-            ),
-            maximum_timeout_ms: self.result_timeout_ms.max(
-                EvaluationTimeoutBudget::default_for_time_limit_ms(time_limit_ms)
-                    .maximum_timeout_ms,
-            ),
-            ..EvaluationTimeoutBudget::default_for_time_limit_ms(time_limit_ms)
-        }
-        .timeout_ms()
-    }
-}
-
-fn limit_if_positive(value: u32) -> Option<u32> {
-    if value > 0 { Some(value) } else { None }
-}
 
 /// Build a sandbox OperationTask from enriched evaluator input.
 ///
@@ -146,68 +58,15 @@ pub fn build_operation(
 
     let mut steps = Vec::new();
 
-    // Compile step (only for compiled languages)
     if let Some(compile) = &lang.compile {
-        let cache_outputs: Vec<String> = compile
-            .outputs
-            .iter()
-            .map(|o| match o {
-                OutputSpec::File(f) => f.clone(),
-                OutputSpec::Glob(g) => g.clone(),
-            })
-            .collect();
-
-        let mut collect = cache_outputs.clone();
-        collect.push("compile_stderr.txt".to_string());
-
-        let compile_step = Step {
-            id: "compile".to_string(),
-            kind: StepKind::Compile,
-            env_ref: "sandbox".to_string(),
-            argv: compile.command.clone(),
-            conf: RunOptions {
-                resource_limits: compile
-                    .resource_limits
-                    .clone()
-                    .unwrap_or_else(|| config.compile_limits()),
-                wait: true,
-                env_rules: vec![],
-                ..Default::default()
-            },
-            io: IOConfig {
-                stdin: IOTarget::Null,
-                stdout: IOTarget::Null,
-                stderr: IOTarget::File {
-                    path: "compile_stderr.txt".to_string(),
-                },
-            },
-            collect,
-            depends_on: vec![],
-            cache: Some(StepCacheConfig {
-                key_inputs: compile.cache_inputs.clone(),
-                outputs: cache_outputs,
-            }),
-            mounts: vec![],
-        };
-        steps.push(compile_step);
+        steps.push(config.compile_step("compile", "sandbox", compile));
     }
 
-    // Exec step
     let exec_depends = if lang.compile.is_some() {
         vec!["compile".to_string()]
     } else {
         vec![]
     };
-
-    // Raise the exec process limit to the runtime's floor when it needs more than
-    // the (tight, single-process) admin default - e.g. the JVM, which aborts at
-    // init if it cannot spawn its GC/JIT/VM helper threads. Admin authority over
-    // memory/time/stack is untouched; only the process cap moves, and only upward.
-    let mut exec_limits = config.exec_limits(time_limit_s, memory_limit_kb);
-    if let Some(floor) = lang.run.min_process_limit {
-        let effective = exec_limits.process_limit.unwrap_or(0).max(floor);
-        exec_limits.process_limit = Some(effective);
-    }
 
     let exec_step = Step {
         id: "exec".to_string(),
@@ -215,7 +74,7 @@ pub fn build_operation(
         env_ref: "sandbox".to_string(),
         argv: lang.run.command.clone(),
         conf: RunOptions {
-            resource_limits: exec_limits,
+            resource_limits: config.run_limits(&lang.run, time_limit_s, memory_limit_kb),
             wait: true,
             env_rules: vec![],
             ..Default::default()
@@ -352,7 +211,8 @@ fn splice_checker_stage(
 mod tests {
     use super::*;
     use broccoli_server_sdk::types::{
-        CompileSpec, FileRef, JudgeFile, MountSource, MountSpec, RunSpec, SourceFile, StepKind,
+        CompileSpec, FileRef, JudgeFile, MountSource, MountSpec, OutputSpec, ResourceLimits,
+        RunSpec, SourceFile, StepKind,
     };
 
     fn make_req() -> BuildEvalOpsInput {
@@ -411,11 +271,7 @@ mod tests {
 
     /// The sandbox config with nothing stored: the schema's defaults.
     fn default_config() -> SandboxConfig {
-        broccoli_server_sdk::Host::mock()
-            .config
-            .get_global("sandbox")
-            .and_then(|c| c.parse())
-            .unwrap()
+        SandboxConfig::load(&broccoli_server_sdk::Host::mock()).unwrap()
     }
 
     #[test]
@@ -687,16 +543,6 @@ mod tests {
         assert_eq!(exec.conf.resource_limits.extra_time, Some(2.5));
     }
 
-    #[test]
-    fn result_timeout_uses_configured_value_as_floor() {
-        let config = SandboxConfig {
-            result_timeout_ms: 1_200_000,
-            ..default_config()
-        };
-
-        assert_eq!(config.result_timeout_ms_for(1000, 1), 1_200_000);
-    }
-
     // ----- Checker fusion -----
 
     fn stream_stage() -> CheckerStage {
@@ -964,6 +810,6 @@ mod tests {
             ..default_config()
         };
 
-        assert!(config.result_timeout_ms_for(300_000, 1) > config.result_timeout_ms);
+        assert!(config.timeout_budget(300_000, 1).timeout_ms() > config.result_timeout_ms);
     }
 }
