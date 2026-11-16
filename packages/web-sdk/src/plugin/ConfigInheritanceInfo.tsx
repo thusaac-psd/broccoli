@@ -6,29 +6,25 @@
  * displays the full cascade hierarchy.
  */
 import { useTranslation } from '@/i18n';
-import type { InheritedConfig } from '@/slot/config-field-slot-props';
+import type { ConfigFormSlotProps } from '@/slot/config-field-slot-props';
 import { resolveInheritedValue } from '@/slot/config-field-slot-props';
 import { cn } from '@/utils';
 
-type ConfigScope =
-  | { scope: 'plugin'; pluginId: string }
-  | { scope: 'contest'; contestId: number }
-  | { scope: 'problem'; problemId: number }
-  | { scope: 'contest_problem'; contestId: number; problemId: number };
-
-export interface ConfigInheritanceInfoProps {
-  scope?: ConfigScope;
-  pluginId?: string;
-  namespace?: string;
-  schema?: { properties?: Record<string, { default?: unknown }> };
-  hasExplicitValue?: (path: string | string[]) => boolean;
-  /**
-   * Whether the current scope stores no explicit values at all. The cascade
-   * is wholesale: storing ANY field at this scope makes the whole local
-   * config effective, so no field inherits from parent scopes.
-   */
-  isUsingDefaultsOnly?: boolean;
-  inherited?: InheritedConfig;
+/**
+ * The `config.form.*` slot's props, which a wrapper passes through as they
+ * come, and the one field the display is about.
+ */
+export interface ConfigInheritanceInfoProps
+  extends Partial<
+    Pick<
+      ConfigFormSlotProps,
+      | 'scope'
+      | 'schema'
+      | 'hasExplicitValue'
+      | 'isUsingDefaultsOnly'
+      | 'inherited'
+    >
+  > {
   fieldKey: string;
   formatValue: (value: unknown) => string;
   labels: {
@@ -91,7 +87,10 @@ export function ConfigInheritanceInfo({
     isUsingDefaultsOnly === undefined ? hasLocalOverride : !isUsingDefaultsOnly;
   const activeInherited = localConfigWins ? null : effective;
 
-  const schemaDefault = schema?.properties?.[fieldKey]?.default;
+  const properties = schema?.properties as
+    | Record<string, { default?: unknown }>
+    | undefined;
+  const schemaDefault = properties?.[fieldKey]?.default;
   const defaultLabel =
     schemaDefault !== undefined ? formatValue(schemaDefault) : null;
 
