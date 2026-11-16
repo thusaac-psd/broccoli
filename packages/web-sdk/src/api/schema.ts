@@ -3403,6 +3403,14 @@ export interface components {
           /** @enum {string} */
           kind: 'namespace_undeclared';
           scope: string;
+        }
+      | {
+          key?: string | null;
+          /** @enum {string} */
+          kind: 'plugin';
+          params?: {
+            [key: string]: unknown;
+          };
         };
     /**
      * @description Fleet-wide state of one plugin.

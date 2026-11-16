@@ -58,7 +58,7 @@ satisfies its schema. An admin's write must also pass the namespace's
 | Response | Code | When |
 | --- | --- | --- |
 | 404 | `CONFIG_NAMESPACE_NOT_FOUND` | the plugin is not installed, declares no such namespace, or not for this scope |
-| 400 | `VALIDATION_ERROR` | the value breaks the schema, or the namespace's `validate` function refuses it; `details.fields` lists each `{path, message}` |
+| 400 | `VALIDATION_ERROR` | the value breaks the schema, or the namespace's `validate` function refuses it; `details.fields` lists each `{path, message, kind}` (`kind: "plugin"` with an optional `key` and `params` for a `validate` refusal) |
 | 503 | `PLUGIN_UNAVAILABLE` | the namespace has a `validate` function and the plugin cannot answer right now |
 
 A stored value may leave fields out: they read as their defaults. When an
@@ -106,6 +106,8 @@ pub fn validate_task_config(input: String) -> FnResult<String> {
                 format!("subtasks[{i}].test_cases[{j}]"),
                 format!("this problem has no test case '{label}'"),
             )
+            .key("my-plugin.config.task.unknownTestCase")
+            .param("testCase", label.as_str())
         })
         .collect();
     Ok(serde_json::to_string(&ConfigValidateOutput { errors })?)
@@ -114,7 +116,11 @@ pub fn validate_task_config(input: String) -> FnResult<String> {
 
 The host answers each violation as a field of the `VALIDATION_ERROR`, so the
 settings form shows it next to the field its `path` names and lists it with
-the save error. A function that
+the save error. A violation with a `key` reads in the user's language: the
+form looks the key up in your plugin's translation pack and fills in its
+`params`, and shows your `message` when the pack has no translation. The key
+must start with your plugin's id (`my-plugin.`); the host drops any other key,
+so a plugin cannot show the host's strings or another plugin's. A function that
 fails or returns something unreadable refuses the write too: the host never
 stores a value its validator did not accept.
 

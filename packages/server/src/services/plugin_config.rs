@@ -5,7 +5,7 @@ use sea_orm::{
 };
 
 use broccoli_server_sdk::types::{ConfigValidateInput, ConfigValidateOutput};
-use plugin_core::config_schema::{self, FieldError};
+use plugin_core::config_schema::{self, FieldError, FieldErrorKind};
 pub(crate) use plugin_core::manifest::ConfigScope;
 use plugin_core::manifest::{ConfigNamespace, PluginManifest};
 use plugin_core::registry::PluginRegistry;
@@ -257,14 +257,26 @@ async fn plugin_verdict(
             "plugin '{plugin_id}' gave an unreadable answer from '{function}'"
         ))
     })?;
-    Ok(output
+    Ok(plugin_field_errors(plugin_id, output))
+}
+
+/// A `validate` function's refusals as field errors. A key outside the
+/// plugin's own id would show a host string, or another plugin's, in place of
+/// the plugin's words, so it is dropped and the message shows.
+fn plugin_field_errors(plugin_id: &str, output: ConfigValidateOutput) -> Vec<FieldError> {
+    let own = format!("{plugin_id}.");
+    output
         .errors
         .into_iter()
         .map(|v| FieldError {
             path: v.path,
             message: v.message,
+            kind: FieldErrorKind::Plugin {
+                key: v.key.filter(|key| key.starts_with(&own)),
+                params: v.params,
+            },
         })
-        .collect())
+        .collect()
 }
 
 /// Validates and stores an admin's config (see [`validate_config`]).
@@ -517,10 +529,12 @@ pub(crate) async fn problem_config_issues<C: ConnectionTrait>(
             match validate_config(plugins, &target, plugin_id, namespace, &row.config).await {
                 Ok(()) => continue,
                 Err(AppError::InvalidConfig(errors)) => errors,
-                Err(AppError::ConfigNamespaceNotFound(why)) => vec![FieldError {
-                    path: String::new(),
-                    message: why,
-                }],
+                Err(AppError::ConfigNamespaceNotFound(_)) => vec![FieldError::new(
+                    "",
+                    FieldErrorKind::NamespaceUndeclared {
+                        scope: target.scope().as_str().into(),
+                    },
+                )],
                 Err(other) => return Err(other),
             };
         issues.push(IncompatibleConfig {
@@ -540,4 +554,48 @@ pub(crate) async fn problem_config_issues<C: ConnectionTrait>(
         ))
     });
     Ok(issues)
+}
+
+#[cfg(test)]
+mod tests {
+    use broccoli_server_sdk::types::ConfigViolation;
+
+    use super::*;
+
+    #[test]
+    fn a_refusal_keeps_only_a_key_of_the_plugins_own_pack() {
+        let output = ConfigValidateOutput {
+            errors: vec![
+                ConfigViolation::new("subtasks[0].name", "taken")
+                    .key("ioi.config.task.nameTaken")
+                    .param("name", "a"),
+                ConfigViolation::new("", "spoofed").key("apiError.NOT_FOUND"),
+                ConfigViolation::new("", "other plugin").key("ioix.config.x"),
+                ConfigViolation::new("", "no key"),
+            ],
+        };
+        let kinds: Vec<_> = plugin_field_errors("ioi", output)
+            .into_iter()
+            .map(|e| (e.message, e.kind))
+            .collect();
+        let plugin = |key: Option<&str>, params: &[(&str, &str)]| FieldErrorKind::Plugin {
+            key: key.map(Into::into),
+            params: params
+                .iter()
+                .map(|(k, v)| ((*k).into(), serde_json::Value::from(*v)))
+                .collect(),
+        };
+        assert_eq!(
+            kinds,
+            vec![
+                (
+                    "taken".into(),
+                    plugin(Some("ioi.config.task.nameTaken"), &[("name", "a")])
+                ),
+                ("spoofed".into(), plugin(None, &[])),
+                ("other plugin".into(), plugin(None, &[])),
+                ("no key".into(), plugin(None, &[])),
+            ]
+        );
+    }
 }

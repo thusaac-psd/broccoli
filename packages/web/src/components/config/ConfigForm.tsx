@@ -19,6 +19,7 @@ import type {
   InheritedConfig,
   JsonSchema,
 } from './types';
+import { useFieldProblemText } from './use-field-problem-text';
 import {
   deepMerge,
   extractDefaults,
@@ -84,6 +85,7 @@ function ConfigFormFields({
 }: ConfigFormProps & { initialStored: Record<string, unknown> }) {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
+  const problemText = useFieldProblemText();
   const pluginText = usePluginText();
   const jsonSchema = schema.json_schema as JsonSchema;
   const schemaDefaults = useMemo(
@@ -319,7 +321,7 @@ function ConfigFormFields({
                     <code className="font-mono text-xs">{path}</code>
                   ) : null}
                   {path ? ': ' : null}
-                  {t(problem.key, problem.params)}
+                  {problemText(problem)}
                 </li>
               ))}
             </ul>

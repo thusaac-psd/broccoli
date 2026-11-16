@@ -1,5 +1,7 @@
 //! Plugin registry listings.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -262,6 +264,15 @@ pub enum FieldErrorKind {
     Pattern { pattern: String },
     /// The plugin no longer declares the config's namespace at its scope.
     NamespaceUndeclared { scope: String },
+    /// The plugin's own `validate` function refuses the value. `key`, when
+    /// present, is a key of that plugin's language pack and `params` the
+    /// values its message names; without it, `message` is all there is.
+    Plugin {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        params: BTreeMap<String, serde_json::Value>,
+    },
 }
 
 impl std::fmt::Display for FieldErrorKind {
@@ -283,6 +294,10 @@ impl std::fmt::Display for FieldErrorKind {
                 f,
                 "the plugin no longer declares this namespace at the {scope} scope"
             ),
+            Self::Plugin { key, .. } => match key {
+                Some(key) => write!(f, "refused by the plugin ({key})"),
+                None => f.write_str("refused by the plugin"),
+            },
         }
     }
 }

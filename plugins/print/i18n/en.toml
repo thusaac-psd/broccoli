@@ -92,3 +92,7 @@
 'print.stations.version' = 'v{version}'
 'plugin.print.name' = 'Printing'
 'plugin.print.description' = 'On-demand code printing for contests: a print queue and print stations.'
+
+# Print config refusals (validate)
+'print.config.stationNameTaken' = 'Another station is already named “{name}”.'
+'print.config.stationTokenTaken' = 'Another station already uses this token.'

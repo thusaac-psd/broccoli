@@ -227,3 +227,11 @@
 'plugin.ioi.name' = 'IOI'
 'plugin.ioi.description' = 'IOI-style contests: subtask scoring, submission modes and tokens.'
 'ioi.scoreboard.table' = 'Standings'
+
+# Task config refusals (validate)
+'ioi.config.task.nameTaken' = 'Another subtask is already named “{name}”.'
+'ioi.config.task.noTestCases' = 'A subtask needs at least one test case.'
+'ioi.config.task.unknownTestCase' = 'This problem has no test case “{testCase}”.'
+'ioi.config.task.duplicateTestCase' = 'Test case “{testCase}” is already in this subtask.'
+'ioi.config.task.ambiguousTestCase' = '“{testCase}” names {count} test cases; refer to one by its id.'
+'ioi.config.task.zeroWeight' = 'Every test case of this sum subtask has score 0, so it can never score.'

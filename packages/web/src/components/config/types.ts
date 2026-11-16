@@ -37,8 +37,16 @@ export type {
   ParentScopeConfig,
 } from '@broccoli/web-sdk/slot';
 
-/** A field's validation problem: an i18n key and its parameters. */
-export interface FieldProblem {
-  key: MessageKey;
-  params?: Record<string, string | number>;
-}
+/**
+ * A field's validation problem: a host i18n key and its parameters, or what a
+ * plugin's own `validate` function said: a key of the plugin's pack (when it
+ * gave one) and its parameters, with the plugin's words for when the pack has
+ * no translation.
+ */
+export type FieldProblem =
+  | { key: MessageKey; params?: Record<string, string | number> }
+  | {
+      pluginKey: string | null;
+      params?: Record<string, string | number>;
+      message: string;
+    };

@@ -147,3 +147,29 @@ test('serverFieldErrors says each server field error in the UI language, keyed l
   assert.deepEqual(serverFieldErrors({ code: 'NOT_FOUND' }), {});
   assert.deepEqual(serverFieldErrors(null), {});
 });
+test("a plugin's refusal keeps its pack key, its parameters and its words", () => {
+  const errors = serverFieldErrors({
+    details: {
+      fields: [
+        {
+          path: 'subtasks[0].name',
+          message: "another subtask is already named 'a'",
+          kind: 'plugin',
+          key: 'ioi.config.task.nameTaken',
+          params: { name: 'a', nested: { dropped: true } },
+        },
+        { path: 'stations[1].token', message: 'taken', kind: 'plugin' },
+      ],
+    },
+  });
+  assert.deepEqual(errors['subtasks.0.name'], {
+    pluginKey: 'ioi.config.task.nameTaken',
+    params: { name: 'a' },
+    message: "another subtask is already named 'a'",
+  });
+  assert.deepEqual(errors['stations.1.token'], {
+    pluginKey: null,
+    params: {},
+    message: 'taken',
+  });
+});

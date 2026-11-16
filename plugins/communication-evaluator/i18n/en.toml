@@ -1,2 +1,5 @@
 'plugin.communication-evaluator.name' = 'Communication evaluator'
 'plugin.communication-evaluator.description' = 'Judges communication problems: a manager and contestant processes talking through pipes, as in CMS.'
+
+# Communication config refusals (validate)
+'communication-evaluator.config.managerFilenameTaken' = 'Another manager source is already named “{filename}”.'

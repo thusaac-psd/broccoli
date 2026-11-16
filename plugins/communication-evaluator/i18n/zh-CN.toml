@@ -1,2 +1,5 @@
 'plugin.communication-evaluator.name' = '交互题评测'
 'plugin.communication-evaluator.description' = '评测通信题：管理程序与选手进程通过管道交互（与 CMS 相同）。'
+
+# Communication config refusals (validate)
+'communication-evaluator.config.managerFilenameTaken' = '已有名为“{filename}”的交互器源文件。'
