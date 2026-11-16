@@ -6441,7 +6441,7 @@ export interface operations {
           'application/json': components['schemas']['DeviceCodeResponse'];
         };
       };
-      /** @description Too many device codes requested from this address (30 a minute) or pending for it (RATE_LIMITED). Includes Retry-After. */
+      /** @description Too many device codes pending for this address (RATE_LIMITED). Includes Retry-After. */
       429: {
         headers: {
           [name: string]: unknown;
@@ -7941,6 +7941,13 @@ export interface operations {
         };
         content?: never;
       };
+      /** @description Message queue unavailable (QUEUE_UNAVAILABLE) */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
     };
   };
   getPrewarmStatus: {
@@ -7983,6 +7990,13 @@ export interface operations {
       };
       /** @description Contest not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Message queue unavailable (QUEUE_UNAVAILABLE) */
+      503: {
         headers: {
           [name: string]: unknown;
         };
