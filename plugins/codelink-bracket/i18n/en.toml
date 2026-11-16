@@ -279,7 +279,7 @@
 'plugin.codelink-bracket.description' = 'Codelink afternoon knockout: single elimination with problem sets ordered by the opponents.'
 'identifier.contestType.codelink-bracket' = 'Codelink bracket'
 
-'apiError.NOT_IN_MATCH' = 'You are not a player in this match.'
+'codelink-bracket.apiError.NOT_IN_MATCH' = 'You are not a player in this match.'
 
 # Judge error codes (a judgement records them as `codelink-bracket.<CODE>`)
 'codelink-bracket.apiError.NO_TEST_CASES' = 'This problem has no test cases, so it cannot be judged. Ask the contest staff to add them.'

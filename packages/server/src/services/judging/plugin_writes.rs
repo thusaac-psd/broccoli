@@ -9,26 +9,16 @@ use common::StatusPhase;
 
 use super::fault::{Recorded, SystemErrorClass};
 use super::unit::{Unit, cascade};
-
-/// A plugin's error code as the host records it on a judgement or code run:
-/// `<plugin_id>.<code>`. A plugin id holds no `.`, so the UI reads the raising
-/// plugin off the code and looks its translation up in that plugin's pack
-/// (`<plugin_id>.apiError.<code>`), and two plugins' codes never collide. A
-/// recorded code without a plugin id is the host's own: a plugin never writes
-/// one, so it cannot pass for a platform fault or a code that stands (see
-/// [`super::fault`]).
-pub(crate) fn plugin_error_code(plugin_id: &str, code: &str) -> String {
-    format!("{plugin_id}.{code}")
-}
+use crate::services::plugin_output::plugin_code;
 
 fn attributed(plugin_id: &str, code: Option<Option<String>>) -> Option<Option<String>> {
-    code.map(|code| code.map(|code| plugin_error_code(plugin_id, &code)))
+    code.map(|code| code.map(|code| plugin_code(plugin_id, &code)))
 }
 
 /// `update` from `plugin_id` as the host records it, the one rule for every
 /// error code a judgement write carries:
 ///
-/// - the plugin's own code is recorded under its id ([`plugin_error_code`]);
+/// - the plugin's own code is recorded under its id ([`plugin_code`]);
 /// - an update that would finalize an attempt the platform lost (a fault of
 ///   the hand-back class, see [`super::DispatchFaults::lost`]) is `None`, a
 ///   write fenced out as a stale dispatch's is, whatever verdict the plugin
@@ -143,7 +133,7 @@ pub(crate) fn code_run_write_fence(alias: &str, code_run: &str, epoch: &str) -> 
 
 /// The statement for `plugin_id`'s code-run progress or result update, behind
 /// [`code_run_write_fence`], its error code the plugin's
-/// ([`plugin_error_code`]); a terminal status stamps `judged_at`. Its row
+/// ([`plugin_code`]); a terminal status stamps `judged_at`. Its row
 /// count is the number of runs written. `None` when the update sets nothing.
 pub(crate) fn code_run_write<P: SqlBindSink>(
     p: &mut P,

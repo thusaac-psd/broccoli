@@ -1388,42 +1388,42 @@ export interface paths {
     };
     /**
      * GET proxy to plugin route
-     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.
+     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. The plugin answers only a status and a JSON body; the host writes every header. Errors use the host error shape: a plugin's client error carries the plugin's code as `<plugin_id>.<CODE>` with status 400, 403, 404, 409, 413 or 429, and a plugin failure is a 500 INTERNAL_ERROR without detail.
      */
     get: operations['getPluginRequest'];
     /**
      * PUT proxy to plugin route
-     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.
+     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. The plugin answers only a status and a JSON body; the host writes every header. Errors use the host error shape: a plugin's client error carries the plugin's code as `<plugin_id>.<CODE>` with status 400, 403, 404, 409, 413 or 429, and a plugin failure is a 500 INTERNAL_ERROR without detail.
      */
     put: operations['putPluginRequest'];
     /**
      * POST proxy to plugin route
-     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.
+     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. The plugin answers only a status and a JSON body; the host writes every header. Errors use the host error shape: a plugin's client error carries the plugin's code as `<plugin_id>.<CODE>` with status 400, 403, 404, 409, 413 or 429, and a plugin failure is a 500 INTERNAL_ERROR without detail.
      */
     post: operations['postPluginRequest'];
     /**
      * DELETE proxy to plugin route
-     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.
+     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. The plugin answers only a status and a JSON body; the host writes every header. Errors use the host error shape: a plugin's client error carries the plugin's code as `<plugin_id>.<CODE>` with status 400, 403, 404, 409, 413 or 429, and a plugin failure is a 500 INTERNAL_ERROR without detail.
      */
     delete: operations['deletePluginRequest'];
     /**
      * OPTIONS proxy to plugin route
-     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.
+     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. The plugin answers only a status and a JSON body; the host writes every header. Errors use the host error shape: a plugin's client error carries the plugin's code as `<plugin_id>.<CODE>` with status 400, 403, 404, 409, 413 or 429, and a plugin failure is a 500 INTERNAL_ERROR without detail.
      */
     options: operations['optionsPluginRequest'];
     /**
      * HEAD proxy to plugin route
-     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.
+     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. The plugin answers only a status and a JSON body; the host writes every header. Errors use the host error shape: a plugin's client error carries the plugin's code as `<plugin_id>.<CODE>` with status 400, 403, 404, 409, 413 or 429, and a plugin failure is a 500 INTERNAL_ERROR without detail.
      */
     head: operations['headPluginRequest'];
     /**
      * PATCH proxy to plugin route
-     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.
+     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. The plugin answers only a status and a JSON body; the host writes every header. Errors use the host error shape: a plugin's client error carries the plugin's code as `<plugin_id>.<CODE>` with status 400, 403, 404, 409, 413 or 429, and a plugin failure is a 500 INTERNAL_ERROR without detail.
      */
     patch: operations['patchPluginRequest'];
     /**
      * TRACE proxy to plugin route
-     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.
+     * @description Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. The plugin answers only a status and a JSON body; the host writes every header. Errors use the host error shape: a plugin's client error carries the plugin's code as `<plugin_id>.<CODE>` with status 400, 403, 404, 409, 413 or 429, and a plugin failure is a 500 INTERNAL_ERROR without detail.
      */
     trace: operations['tracePluginRequest'];
   };
@@ -3297,7 +3297,10 @@ export interface components {
      *     API, the same whatever `Accept-Language` says. A client shows the user its
      *     own text for `code` (the web app's `apiError.<code>` keys) and, for a
      *     refused config, for each `details.fields[]` entry (its `kind` and
-     *     parameters, or the plugin's translation `key`).
+     *     parameters, or the plugin's translation `key`). A code a plugin sent (a
+     *     plugin route's client error, a hook's rejection) is `<plugin id>.<CODE>`,
+     *     translated only by `<plugin id>.apiError.<CODE>` in that plugin's pack; a
+     *     code without a plugin id is the server's own.
      */
     ErrorBody: {
       /**
@@ -9034,6 +9037,15 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
+      /** @description What the contest's plugin admitted the submission against changed before it was stored (SUBMISSION_IN_FLIGHT, SUBMISSION_STATE_CHANGED, SUBMISSION_TOO_LATE) */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
       /** @description Request body over the endpoint's limit (PAYLOAD_TOO_LARGE) */
       413: {
         headers: {
@@ -9043,7 +9055,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Per-user rate limit or plugin rejection (RATE_LIMITED, PLUGIN_REJECTED) */
+      /** @description Per-user rate limit (RATE_LIMITED), or a submission hook refused the submission (`<plugin_id>.<CODE>`; a hook may also refuse with 400, 403, 404, 409 or 413) */
       429: {
         headers: {
           [name: string]: unknown;
@@ -9729,7 +9741,7 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request */
+      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin refused the request (`<plugin_id>.<CODE>`) */
       400: {
         headers: {
           [name: string]: unknown;
@@ -9747,7 +9759,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden */
+      /** @description The caller lacks the route's permission (PERMISSION_DENIED), is not registered for its contest (CONTEST_NOT_REGISTERED), or the plugin refused the request (`<plugin_id>.<CODE>`) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -9756,7 +9768,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND) */
+      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND), or the plugin found nothing (`<plugin_id>.<CODE>`) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -9767,6 +9779,33 @@ export interface operations {
       };
       /** @description Method Not Allowed */
       405: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      429: {
         headers: {
           [name: string]: unknown;
         };
@@ -9821,7 +9860,7 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request */
+      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin refused the request (`<plugin_id>.<CODE>`) */
       400: {
         headers: {
           [name: string]: unknown;
@@ -9839,7 +9878,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden */
+      /** @description The caller lacks the route's permission (PERMISSION_DENIED), is not registered for its contest (CONTEST_NOT_REGISTERED), or the plugin refused the request (`<plugin_id>.<CODE>`) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -9848,7 +9887,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND) */
+      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND), or the plugin found nothing (`<plugin_id>.<CODE>`) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -9859,6 +9898,33 @@ export interface operations {
       };
       /** @description Method Not Allowed */
       405: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      429: {
         headers: {
           [name: string]: unknown;
         };
@@ -9913,7 +9979,7 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request */
+      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin refused the request (`<plugin_id>.<CODE>`) */
       400: {
         headers: {
           [name: string]: unknown;
@@ -9931,7 +9997,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden */
+      /** @description The caller lacks the route's permission (PERMISSION_DENIED), is not registered for its contest (CONTEST_NOT_REGISTERED), or the plugin refused the request (`<plugin_id>.<CODE>`) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -9940,7 +10006,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND) */
+      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND), or the plugin found nothing (`<plugin_id>.<CODE>`) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -9951,6 +10017,33 @@ export interface operations {
       };
       /** @description Method Not Allowed */
       405: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      429: {
         headers: {
           [name: string]: unknown;
         };
@@ -10005,7 +10098,7 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request */
+      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin refused the request (`<plugin_id>.<CODE>`) */
       400: {
         headers: {
           [name: string]: unknown;
@@ -10023,7 +10116,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden */
+      /** @description The caller lacks the route's permission (PERMISSION_DENIED), is not registered for its contest (CONTEST_NOT_REGISTERED), or the plugin refused the request (`<plugin_id>.<CODE>`) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -10032,7 +10125,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND) */
+      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND), or the plugin found nothing (`<plugin_id>.<CODE>`) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -10043,6 +10136,33 @@ export interface operations {
       };
       /** @description Method Not Allowed */
       405: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      429: {
         headers: {
           [name: string]: unknown;
         };
@@ -10093,7 +10213,7 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request */
+      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin refused the request (`<plugin_id>.<CODE>`) */
       400: {
         headers: {
           [name: string]: unknown;
@@ -10111,7 +10231,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden */
+      /** @description The caller lacks the route's permission (PERMISSION_DENIED), is not registered for its contest (CONTEST_NOT_REGISTERED), or the plugin refused the request (`<plugin_id>.<CODE>`) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -10120,7 +10240,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND) */
+      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND), or the plugin found nothing (`<plugin_id>.<CODE>`) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -10131,6 +10251,33 @@ export interface operations {
       };
       /** @description Method Not Allowed */
       405: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      429: {
         headers: {
           [name: string]: unknown;
         };
@@ -10181,7 +10328,7 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request */
+      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin refused the request (`<plugin_id>.<CODE>`) */
       400: {
         headers: {
           [name: string]: unknown;
@@ -10199,7 +10346,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden */
+      /** @description The caller lacks the route's permission (PERMISSION_DENIED), is not registered for its contest (CONTEST_NOT_REGISTERED), or the plugin refused the request (`<plugin_id>.<CODE>`) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -10208,7 +10355,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND) */
+      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND), or the plugin found nothing (`<plugin_id>.<CODE>`) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -10219,6 +10366,33 @@ export interface operations {
       };
       /** @description Method Not Allowed */
       405: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      429: {
         headers: {
           [name: string]: unknown;
         };
@@ -10273,7 +10447,7 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request */
+      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin refused the request (`<plugin_id>.<CODE>`) */
       400: {
         headers: {
           [name: string]: unknown;
@@ -10291,7 +10465,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden */
+      /** @description The caller lacks the route's permission (PERMISSION_DENIED), is not registered for its contest (CONTEST_NOT_REGISTERED), or the plugin refused the request (`<plugin_id>.<CODE>`) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -10300,7 +10474,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND) */
+      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND), or the plugin found nothing (`<plugin_id>.<CODE>`) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -10311,6 +10485,33 @@ export interface operations {
       };
       /** @description Method Not Allowed */
       405: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      429: {
         headers: {
           [name: string]: unknown;
         };
@@ -10361,7 +10562,7 @@ export interface operations {
           'application/json': unknown;
         };
       };
-      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request */
+      /** @description A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin refused the request (`<plugin_id>.<CODE>`) */
       400: {
         headers: {
           [name: string]: unknown;
@@ -10379,7 +10580,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden */
+      /** @description The caller lacks the route's permission (PERMISSION_DENIED), is not registered for its contest (CONTEST_NOT_REGISTERED), or the plugin refused the request (`<plugin_id>.<CODE>`) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -10388,7 +10589,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND) */
+      /** @description Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND), or the plugin found nothing (`<plugin_id>.<CODE>`) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -10399,6 +10600,33 @@ export interface operations {
       };
       /** @description Method Not Allowed */
       405: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin refused the request (`<plugin_id>.<CODE>`) */
+      429: {
         headers: {
           [name: string]: unknown;
         };
@@ -11808,7 +12036,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Per-user rate limit or plugin rejection (RATE_LIMITED, PLUGIN_REJECTED) */
+      /** @description Per-user rate limit (RATE_LIMITED), or a submission hook refused the submission (`<plugin_id>.<CODE>`; a hook may also refuse with 400, 403, 404, 409 or 413) */
       429: {
         headers: {
           [name: string]: unknown;

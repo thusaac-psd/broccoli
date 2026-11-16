@@ -35,7 +35,7 @@ zh-CN = "i18n/zh-CN.toml"
 
 ```toml
 # plugins/cooldown/i18n/en.toml
-'apiError.COOLDOWN_ACTIVE' = '{remaining_seconds, plural, one {Wait # more second before submitting again.} other {Wait # more seconds before submitting again.}}'
+'cooldown.apiError.COOLDOWN_ACTIVE' = '{remaining_seconds, plural, one {Wait # more second before submitting again.} other {Wait # more seconds before submitting again.}}'
 ```
 
 A frontend reads them with `t()` from `useTranslation()` in
@@ -86,9 +86,12 @@ the name under `identifier.<kind>.<id>`; without one the id itself is shown.
 
 ## Translate your refusals
 
-A hook that rejects a submission returns a machine-readable code. The UI shows
-the translation of `apiError.<CODE>`, with the rejection's `details` as
-parameters, and never the English `message`:
+A hook that rejects a submission returns a machine-readable code. The host
+sends it under your plugin's id, so `SUBMISSION_LIMIT_EXCEEDED` from
+`submission-limit` reaches the UI as
+`submission-limit.SUBMISSION_LIMIT_EXCEEDED`. The UI shows the translation of
+`<plugin id>.apiError.<CODE>` from your catalog, with the rejection's
+`details` as parameters, and never the English `message`:
 
 ```rust
 HookResponse::reject(
@@ -100,11 +103,13 @@ HookResponse::reject(
 ```
 
 ```toml
-'apiError.SUBMISSION_LIMIT_EXCEEDED' = 'You have used all {max_submissions} submissions for this problem.'
+'submission-limit.apiError.SUBMISSION_LIMIT_EXCEEDED' = 'You have used all {max_submissions} submissions for this problem.'
 ```
 
 A code with no translation falls back to a generic message for its HTTP status
-class. The same lookup applies to errors from your plugin's own HTTP routes.
+class, never the host's text for a code of the same name. The same lookup
+applies to errors from your plugin's own HTTP routes. A rejection goes out as
+`400`, `403`, `404`, `409`, `413` or `429`; any other status is sent as `400`.
 
 ## Translate your judging errors
 

@@ -28,6 +28,6 @@
 'limit.source.contest_problem' = '覆盖'
 
 # Why a submission was refused, by the rejection's code
-'apiError.SUBMISSION_LIMIT_EXCEEDED' = '本题的 {max_submissions} 次提交机会已全部用完。'
+'submission-limit.apiError.SUBMISSION_LIMIT_EXCEEDED' = '本题的 {max_submissions} 次提交机会已全部用完。'
 'plugin.submission-limit.name' = '提交次数限制'
 'plugin.submission-limit.description' = '限制选手每道题的提交次数。'

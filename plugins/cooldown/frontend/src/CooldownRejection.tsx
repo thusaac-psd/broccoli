@@ -26,7 +26,7 @@ function getCooldownSeconds(details?: Record<string, unknown>): number | null {
 }
 
 export function CooldownRejection({ error, children }: Props) {
-  if (error?.code !== 'COOLDOWN_ACTIVE') {
+  if (error?.code !== 'cooldown.COOLDOWN_ACTIVE') {
     return <>{children}</>;
   }
 

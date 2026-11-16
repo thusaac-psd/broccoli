@@ -11,6 +11,7 @@ pub mod judging_sessions;
 pub mod operation_batch;
 pub mod plugin_config;
 pub mod plugin_config_cache;
+pub mod plugin_output;
 pub mod plugin_route_access;
 pub mod plugin_storage;
 pub mod privileges;

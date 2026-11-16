@@ -166,7 +166,6 @@ mod plugin {
         if !eff.is_enabled {
             return Ok(PluginHttpResponse {
                 status: 200,
-                headers: None,
                 body: Some(serde_json::to_value(LimitStatusResponse {
                     enabled: false,
                     submissions_made: 0,
@@ -199,7 +198,6 @@ mod plugin {
 
         Ok(PluginHttpResponse {
             status: 200,
-            headers: None,
             body: Some(serde_json::to_value(LimitStatusResponse {
                 enabled: true,
                 submissions_made: count,

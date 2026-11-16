@@ -69,6 +69,14 @@ pub fn server_error(_input: String) -> FnResult<String> {
     })?)
 }
 
+/// Answers with exactly the response the request body spells out, headers
+/// and all: what any plugin could send the host.
+#[plugin_fn]
+pub fn answer(input: String) -> FnResult<String> {
+    let req: PluginHttpRequest = serde_json::from_str(&input)?;
+    Ok(serde_json::to_string(&req.body.unwrap_or_default())?)
+}
+
 /// Fails the call with internal text, as the SDK does for an internal error.
 #[plugin_fn]
 pub fn fail(_input: String) -> FnResult<String> {

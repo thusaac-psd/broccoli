@@ -21,6 +21,7 @@ static DISPATCHED_EVENTS: LazyLock<Mutex<LruCache<String, ()>>> =
 use crate::entity::plugin_config;
 use crate::error::AppError;
 use crate::host_funcs::config::extract_plugin_id;
+use crate::services::plugin_output::PluginRefusal;
 
 const MAX_CHAIN_DEPTH: u8 = 3;
 
@@ -310,36 +311,45 @@ async fn fetch_resource_enablements<C: ConnectionTrait>(
 #[derive(Debug)]
 pub enum HookOutcome {
     Allowed(serde_json::Value),
-    Rejected {
-        code: String,
-        message: String,
-        status_code: u16,
-        details: Option<serde_json::Value>,
-    },
+    Rejected(PluginRefusal),
     Stopped,
 }
 
-fn parse_reject_detail(reason: &str) -> (String, String, u16, Option<serde_json::Value>) {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(reason) {
-        let code = v
+/// The parts of a blocking hook's rejection: its code, message, status and
+/// details, before the host confines them to the plugin ([`PluginRefusal`]).
+struct RejectDetail {
+    code: String,
+    message: String,
+    status: u16,
+    details: Option<serde_json::Value>,
+}
+
+fn parse_reject_detail(reason: &str) -> RejectDetail {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(reason) else {
+        return RejectDetail {
+            code: "PLUGIN_REJECTED".into(),
+            message: reason.to_string(),
+            status: 400,
+            details: None,
+        };
+    };
+    RejectDetail {
+        code: v
             .get("code")
             .and_then(|c| c.as_str())
             .unwrap_or("PLUGIN_REJECTED")
-            .to_string();
-        let message = v
+            .to_string(),
+        message: v
             .get("message")
             .and_then(|m| m.as_str())
             .unwrap_or("Request rejected by plugin")
-            .to_string();
-        let status_code = v
+            .to_string(),
+        status: v
             .get("status_code")
             .and_then(|s| s.as_u64())
             .and_then(|n| u16::try_from(n).ok())
-            .unwrap_or(400);
-        let details = v.get("details").cloned();
-        (code, message, status_code, details)
-    } else {
-        ("PLUGIN_REJECTED".into(), reason.to_string(), 400, None)
+            .unwrap_or(400),
+        details: v.get("details").cloned(),
     }
 }
 
@@ -415,11 +425,10 @@ pub fn dispatch_hooks_background(
         {
             Ok(outcome) => match outcome {
                 HookOutcome::Allowed(_) => {}
-                HookOutcome::Rejected { code, message, .. } => {
+                HookOutcome::Rejected(refusal) => {
                     tracing::warn!(
                         topic,
-                        code,
-                        message,
+                        code = refusal.code(),
                         "Background hook returned Reject (no effect — response already sent)",
                     );
                 }
@@ -601,17 +610,18 @@ async fn dispatch_hooks_inner(
                         return Ok(HookOutcome::Stopped);
                     }
                     HookAction::Reject(reason) => {
-                        let (code, message, status_code, details) = parse_reject_detail(&reason);
-                        if code == PLUGIN_RUNTIME_ERROR_CODE {
-                            tracing::error!(topic, %code, %message, "Hook infrastructure error");
-                            return Err(AppError::Internal(message));
+                        let reject = parse_reject_detail(&reason);
+                        if reject.code == PLUGIN_RUNTIME_ERROR_CODE {
+                            tracing::error!(topic, code = %reject.code, message = %reject.message, "Hook infrastructure error");
+                            return Err(AppError::Internal(reject.message));
                         }
-                        return Ok(HookOutcome::Rejected {
-                            code,
-                            message,
-                            status_code,
-                            details,
-                        });
+                        return Ok(HookOutcome::Rejected(PluginRefusal::new(
+                            &entry.plugin_id,
+                            reject.status,
+                            &reject.code,
+                            reject.message,
+                            reject.details,
+                        )));
                     }
                     HookAction::Chain(events) => {
                         for chained in events {
@@ -961,7 +971,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blocking_hook_reject_returns_rejected_with_parsed_code() {
+    async fn a_blocking_hooks_rejection_carries_its_code_under_the_plugin_id() {
         let registry = new_shared_registry();
         let hook = Arc::new(MockHook::new(
             "rejector",
@@ -978,8 +988,42 @@ mod tests {
         let result = dispatch_global(&registry, "test", serde_json::json!({}))
             .await
             .unwrap();
-        assert!(matches!(result, HookOutcome::Rejected { ref code, .. } if code == "NO"));
+        let HookOutcome::Rejected(refusal) = result else {
+            panic!("Expected Rejected, got {result:?}");
+        };
+        assert_eq!(refusal.code(), "rejector.NO");
+        assert_eq!(refusal.status().as_u16(), 429);
         assert_eq!(hook.calls(), 1);
+    }
+
+    /// A plugin's rejection never speaks as the host: a host code and a
+    /// status the host owns ("sign in again", "busy, retrying") reach the
+    /// client as the plugin's own code on a 400.
+    #[tokio::test]
+    async fn a_rejection_naming_a_host_condition_is_the_plugins_own() {
+        let registry = new_shared_registry();
+        for (code, status) in [("TOKEN_INVALID", 401), ("PLUGIN_UNAVAILABLE", 503)] {
+            let hook = Arc::new(MockHook::new(
+                "spoofer",
+                "test",
+                HookAction::Reject(
+                    serde_json::json!({"code": code, "message": "x", "status_code": status})
+                        .to_string(),
+                ),
+            ));
+            let mut r = registry.write().await;
+            r.unregister_plugin("spoofer");
+            register_direct(&mut r, hook, HookScope::Global, HookMode::Blocking);
+            drop(r);
+            let result = dispatch_global(&registry, "test", serde_json::json!({}))
+                .await
+                .unwrap();
+            let HookOutcome::Rejected(refusal) = result else {
+                panic!("Expected Rejected, got {result:?}");
+            };
+            assert_eq!(refusal.code(), format!("spoofer.{code}"));
+            assert_eq!(refusal.status().as_u16(), 400);
+        }
     }
 
     #[tokio::test]
@@ -1190,9 +1234,10 @@ mod tests {
             .await
             .unwrap();
         match result {
-            HookOutcome::Rejected { code, details, .. } => {
-                assert_eq!(code, "LIMIT");
-                let details = details.expect("details should be Some");
+            HookOutcome::Rejected(refusal) => {
+                let (_, body) = refusal.into_parts();
+                assert_eq!(body.code, "limiter.LIMIT");
+                let details = body.details.expect("details should be Some");
                 assert_eq!(details["remaining"], 5);
                 assert_eq!(details["total"], 10);
             }
@@ -1219,9 +1264,10 @@ mod tests {
             .await
             .unwrap();
         match result {
-            HookOutcome::Rejected { code, details, .. } => {
-                assert_eq!(code, "NO");
-                assert!(details.is_none(), "details should be None when absent");
+            HookOutcome::Rejected(refusal) => {
+                let (_, body) = refusal.into_parts();
+                assert_eq!(body.code, "rejector.NO");
+                assert!(body.details.is_none(), "details should be None when absent");
             }
             other => panic!("Expected Rejected, got {:?}", other),
         }
@@ -1246,15 +1292,11 @@ mod tests {
             .await
             .unwrap();
         match result {
-            HookOutcome::Rejected {
-                code,
-                message,
-                details,
-                ..
-            } => {
-                assert_eq!(code, "PLUGIN_REJECTED");
-                assert_eq!(message, "plain text rejection");
-                assert!(details.is_none());
+            HookOutcome::Rejected(refusal) => {
+                let (_, body) = refusal.into_parts();
+                assert_eq!(body.code, "rejector.PLUGIN_REJECTED");
+                assert_eq!(body.message, "plain text rejection");
+                assert!(body.details.is_none());
             }
             other => panic!("Expected Rejected, got {:?}", other),
         }

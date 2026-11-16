@@ -39,7 +39,6 @@ impl ApiError {
             Failure::Response(r) => r,
             Failure::Internal(_) => PluginHttpResponse {
                 status: 500,
-                headers: None,
                 body: None,
             },
         }

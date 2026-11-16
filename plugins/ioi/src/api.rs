@@ -180,7 +180,6 @@ pub(crate) fn handle_use_token(
 
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(serde_json::json!({
             "remaining_tokens": remaining,
             "task_score": round_score(task_score),
@@ -198,7 +197,6 @@ pub(crate) fn handle_contest_info(
 
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(serde_json::json!({
             "scoring_mode": contest_config.scoring_mode,
             "feedback_level": contest_config.feedback_level,
@@ -280,7 +278,6 @@ pub(crate) fn handle_task_config(
 
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(body),
     })
 }
@@ -344,7 +341,6 @@ pub(crate) fn handle_submission_status(
 
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(serde_json::json!({
             "last_submission_verdict": visible_verdict,
             "last_submission_score": visible_score,
@@ -403,7 +399,6 @@ pub(crate) fn handle_token_status(
 
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(serde_json::json!({
             "mode": contest_config.tokens.mode,
             "available": if contest_config.tokens.mode == crate::config::TokenMode::None { 0 } else { avail },
@@ -570,7 +565,6 @@ pub(crate) fn handle_scoreboard(
 
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(serde_json::json!({
             "phase": phase,
             "scoring_mode": contest_config.scoring_mode,
@@ -633,8 +627,8 @@ pub(crate) fn subtask_scores_access_decision(
             }
             None => {
                 return SubtaskScoresAccess::Denied {
-                    status: 401,
-                    message: "Authentication required",
+                    status: 403,
+                    message: "Sign in to see subtask scores",
                 };
             }
         }
@@ -731,7 +725,6 @@ pub(crate) fn handle_submission_subtask_scores(
 
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(serde_json::json!({
             "subtasks": subtasks
         })),
@@ -888,8 +881,8 @@ mod subtask_scores_access_tests {
         assert_eq!(
             decision,
             SubtaskScoresAccess::Denied {
-                status: 401,
-                message: "Authentication required",
+                status: 403,
+                message: "Sign in to see subtask scores",
             }
         );
     }

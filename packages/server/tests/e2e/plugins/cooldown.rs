@@ -95,7 +95,7 @@ async fn cooldown_rejects_rapid_contest_submissions() {
     );
     assert_eq!(
         sub2_res.body["code"].as_str().unwrap_or(""),
-        "COOLDOWN_ACTIVE",
+        "cooldown.COOLDOWN_ACTIVE",
         "Error code should be COOLDOWN_ACTIVE"
     );
 }

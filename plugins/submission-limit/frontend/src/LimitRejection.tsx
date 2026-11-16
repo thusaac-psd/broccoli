@@ -25,7 +25,7 @@ function getLimitCounts(
 export function LimitRejection({ error, children }: Props) {
   const { t } = useTranslation();
 
-  if (!error || error.code !== 'SUBMISSION_LIMIT_EXCEEDED') {
+  if (!error || error.code !== 'submission-limit.SUBMISSION_LIMIT_EXCEEDED') {
     return <>{children}</>;
   }
 

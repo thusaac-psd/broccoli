@@ -1312,7 +1312,11 @@ async fn ranking_from_a_submitter_not_in_the_match_is_forbidden() {
         "a ranking from a non-participant must be forbidden: {}",
         res.text
     );
-    assert_eq!(res.body["code"], "NOT_IN_MATCH", "{}", res.text);
+    assert_eq!(
+        res.body["code"], "codelink-bracket.NOT_IN_MATCH",
+        "{}",
+        res.text
+    );
 }
 
 /// A player who never ranks must not stall the bracket: the staff start
@@ -1856,7 +1860,11 @@ async fn penalty_delays_ac_allows_opponent_to_win_and_resets_next_game() {
         "ACCEPT",
     )
     .await;
-    assert_eq!(again.body["code"], "SUBMISSION_IN_FLIGHT", "{}", again.text);
+    assert_eq!(
+        again.body["code"], "codelink-bracket.SUBMISSION_IN_FLIGHT",
+        "{}",
+        again.text
+    );
 
     let opponent = submit(
         &fx.app,
@@ -2090,9 +2098,12 @@ async fn atomic_admission_accepts_only_one_concurrent_submission_and_checks_cuto
         "codelink-bracket",
     )
     .await;
-    assert!(
-        matches!(rejected, Err(server::error::AppError::PluginRejection { ref code, .. }) if code == "SUBMISSION_TOO_LATE")
-    );
+    assert!(matches!(
+        rejected,
+        Err(server::error::AppError::AdmissionRefused(
+            server::error::AdmissionRefused::TooLate
+        ))
+    ));
     let outcomes = futures::future::join_all((0..8).map(|_| {
         server::services::submission_feedback::insert_admitted(
             &fx.app.state,
@@ -2121,7 +2132,12 @@ async fn atomic_admission_accepts_only_one_concurrent_submission_and_checks_cuto
     assert!(feedback.try_get::<Value>("", "metadata").unwrap()["delay_seconds"] == 240);
     for error in outcomes.into_iter().filter_map(Result::err) {
         assert!(
-            matches!(error, server::error::AppError::PluginRejection { ref code, .. } if code == "SUBMISSION_IN_FLIGHT"),
+            matches!(
+                error,
+                server::error::AppError::AdmissionRefused(
+                    server::error::AdmissionRefused::SlotInFlight
+                )
+            ),
             "{error:?}"
         );
     }
@@ -2146,9 +2162,10 @@ async fn atomic_admission_accepts_only_one_concurrent_submission_and_checks_cuto
     )
     .await
     .unwrap_err();
-    assert!(
-        matches!(stale, server::error::AppError::PluginRejection { code, .. } if code == "SUBMISSION_IN_FLIGHT")
-    );
+    assert!(matches!(
+        stale,
+        server::error::AppError::AdmissionRefused(server::error::AdmissionRefused::SlotInFlight)
+    ));
 }
 
 #[tokio::test]
@@ -2227,7 +2244,11 @@ async fn system_errors_remain_pending_without_penalizing_the_player() {
     let view = get_match(&fx.app, fx.contest_id, 0, &a.token).await;
     assert_eq!(view["own_feedback"]["penalty_count"], 0);
     let next = submit(&fx.app, fx.contest_id, problem, &a.token, "ACCEPT").await;
-    assert_eq!(next.body["code"], "SUBMISSION_IN_FLIGHT", "{}", next.text);
+    assert_eq!(
+        next.body["code"], "codelink-bracket.SUBMISSION_IN_FLIGHT",
+        "{}",
+        next.text
+    );
 }
 
 #[tokio::test]

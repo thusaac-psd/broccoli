@@ -311,7 +311,6 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
 
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(serde_json::json!({ "ok": true })),
     })
 }
@@ -353,7 +352,6 @@ pub fn handle_get_setup(
     let times = crate::clock::contest_times(host, contest_id).ok();
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(
             serde_json::json!({"setup": storage::load_setup(host, contest_id)?, "started": info.phase.stage() != "before",
                 "contest_start_ms": times.as_ref().map(|t| t.start_ms), "contest_end_ms": times.and_then(|t| t.end_ms)}),

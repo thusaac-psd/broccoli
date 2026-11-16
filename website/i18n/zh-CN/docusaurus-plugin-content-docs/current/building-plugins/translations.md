@@ -30,7 +30,7 @@ zh-CN = "i18n/zh-CN.toml"
 
 ```toml
 # plugins/cooldown/i18n/en.toml
-'apiError.COOLDOWN_ACTIVE' = '{remaining_seconds, plural, one {Wait # more second before submitting again.} other {Wait # more seconds before submitting again.}}'
+'cooldown.apiError.COOLDOWN_ACTIVE' = '{remaining_seconds, plural, one {Wait # more second before submitting again.} other {Wait # more seconds before submitting again.}}'
 ```
 
 前端通过 `@broccoli/web-sdk/i18n` 中 `useTranslation()` 返回的 `t()` 读取词条。`{name}` 插入参数。`{count, plural, one {...} other {...}}` 按该语言的复数规则为 `count` 选择形式，分支中的 `#` 表示该数字。日期和相对时间由 `useFormat()` 按用户语言格式化；服务器时间戳请用 `useFormat().relative` 计算，它以服务器时钟为准。
@@ -66,7 +66,7 @@ ja = "locales/ja.toml"
 
 ## 翻译拒绝原因
 
-拒绝提交的钩子返回一个机器可读的代码。界面显示 `apiError.<CODE>` 的翻译，并以拒绝时的 `details` 作为参数，从不显示英文的 `message`：
+拒绝提交的钩子返回一个机器可读的代码。主机以插件 ID 为前缀转发它，因此 `submission-limit` 给出的 `SUBMISSION_LIMIT_EXCEEDED` 到达界面时是 `submission-limit.SUBMISSION_LIMIT_EXCEEDED`。界面显示词条目录中 `<插件 ID>.apiError.<CODE>` 的翻译，并以拒绝时的 `details` 作为参数，从不显示英文的 `message`：
 
 ```rust
 HookResponse::reject(
@@ -78,10 +78,10 @@ HookResponse::reject(
 ```
 
 ```toml
-'apiError.SUBMISSION_LIMIT_EXCEEDED' = 'You have used all {max_submissions} submissions for this problem.'
+'submission-limit.apiError.SUBMISSION_LIMIT_EXCEEDED' = 'You have used all {max_submissions} submissions for this problem.'
 ```
 
-没有翻译的代码会退回到其 HTTP 状态类别的通用提示。插件自有 HTTP 路由返回的错误使用同样的查找方式。
+没有翻译的代码会退回到其 HTTP 状态类别的通用提示，绝不会显示主机对同名代码的说明。插件自有 HTTP 路由返回的错误使用同样的查找方式。拒绝只以 `400`、`403`、`404`、`409`、`413` 或 `429` 发出；其他状态码一律以 `400` 发出。
 
 ## 翻译评测错误
 

@@ -849,3 +849,104 @@ mod route_access {
         }
     }
 }
+
+/// What a plugin route answers reaches the caller only as a status and a JSON
+/// body the host vouches for: a plugin can neither set headers on the host's
+/// origin nor speak as the host or another plugin.
+mod route_output {
+    use super::*;
+
+    fn answer() -> String {
+        routes::plugin_proxy("server-plugin", "answer")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plugin_cannot_set_headers_or_serve_a_page() {
+        let app = TestApp::spawn_with_plugins().await;
+        let probe = "<img src=x onerror=alert(1)>";
+        let res = app
+            .post_without_token(
+                &answer(),
+                &json!({
+                    "status": 200,
+                    "headers": {
+                        "set-cookie": "broccoli_refresh=x; HttpOnly; Path=/",
+                        "content-type": "text/html",
+                        "location": "https://elsewhere.example/",
+                        "access-control-allow-origin": "*",
+                        "content-security-policy": "default-src *",
+                    },
+                    "body": probe,
+                }),
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        let header = |name: &str| {
+            res.headers
+                .get(name)
+                .map(|value| value.to_str().unwrap().to_string())
+        };
+        assert_eq!(header("set-cookie"), None);
+        assert_eq!(header("location"), None);
+        assert_eq!(header("access-control-allow-origin"), None);
+        assert_eq!(header("content-type").as_deref(), Some("application/json"));
+        assert_eq!(header("x-content-type-options").as_deref(), Some("nosniff"));
+        assert_eq!(
+            header("content-security-policy").as_deref(),
+            Some("default-src 'none'; frame-ancestors 'none'; sandbox")
+        );
+        assert_eq!(res.body, json!(probe), "the body is the plugin's JSON");
+    }
+
+    /// A plugin's client error is its own: the host's codes a client acts on
+    /// (rotate the session, retry later, the earlier send already succeeded)
+    /// arrive under the plugin's id, and a status the host owns as 400.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plugin_client_error_never_speaks_as_the_host() {
+        let app = TestApp::spawn_with_plugins().await;
+        for (status, code, sent_as) in [
+            (401, "TOKEN_INVALID", 400),
+            (409, "IDEMPOTENCY_RESPONSE_NOT_STORED", 409),
+            (429, "PLUGIN_UNAVAILABLE", 429),
+            (418, "TEAPOT", 400),
+        ] {
+            let res = app
+                .post_without_token(
+                    &answer(),
+                    &json!({
+                        "status": status,
+                        "body": {"code": code, "message": "m", "details": {"n": 1}},
+                    }),
+                )
+                .await;
+            assert_eq!(res.status, sent_as, "{code}: {}", res.text);
+            assert_eq!(res.body["code"], format!("server-plugin.{code}"));
+            assert_eq!(res.body["message"], "m");
+            assert_eq!(res.body["details"], json!({"n": 1}));
+        }
+
+        let res = app
+            .post_without_token(&answer(), &json!({"status": 404, "body": "gone"}))
+            .await;
+        assert_eq!(res.status, 404, "{}", res.text);
+        assert_eq!(res.body["code"], "server-plugin.NOT_FOUND");
+    }
+
+    /// A status that is neither a success nor a client error (a redirect, an
+    /// informational status) is the plugin failing: the host's generic 500.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_redirect_from_a_plugin_is_a_plugin_failure() {
+        let app = TestApp::spawn_with_plugins().await;
+        for status in [302, 101] {
+            let res = app
+                .post_without_token(
+                    &answer(),
+                    &json!({"status": status, "headers": {"location": "/x"}, "body": null}),
+                )
+                .await;
+            assert_eq!(res.status, 500, "{status}: {}", res.text);
+            assert_eq!(res.body["code"], "INTERNAL_ERROR");
+            assert!(res.headers.get("location").is_none());
+        }
+    }
+}

@@ -64,10 +64,12 @@ impl PluginHttpRequest {
     }
 
     /// The caller's user id. Only a `public` route can be reached without
-    /// one; there, an anonymous caller gets a 401 `TOKEN_MISSING` response.
+    /// one; there, an anonymous caller gets a 403 `PERMISSION_DENIED`
+    /// response (a route every caller must be signed in for declares it in
+    /// its manifest, and the host answers 401 before the handler runs).
     pub fn require_user_id(&self) -> Result<i32, PluginHttpResponse> {
         self.user_id()
-            .ok_or_else(|| PluginHttpResponse::error(401, "Authentication required"))
+            .ok_or_else(|| PluginHttpResponse::error(403, "Sign in to do this"))
     }
 
     /// The contest the route addresses. A route that does not declare
@@ -86,18 +88,26 @@ impl PluginHttpRequest {
     }
 }
 
+/// A plugin route handler's answer: a status and a JSON body, nothing else.
+/// The host writes every response header itself (the body is always
+/// `application/json`), so a plugin cannot set cookies, redirect or serve
+/// a page on the host's origin.
+///
+/// A 2xx sends `body` as it is. A client error is sent in the host's error
+/// shape with the plugin's code under its id, `<plugin id>.<code>`, and only
+/// as 400, 403, 404, 409, 413 or 429; any other client error is sent as 400
+/// (who is signed in is the host's to say). Every other status is the
+/// host's generic 500 `INTERNAL_ERROR`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginHttpResponse {
     pub status: u16,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub headers: Option<HashMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<serde_json::Value>,
 }
 
 impl PluginHttpResponse {
     /// A client error in the host's error shape, `{"code", "message"}`, with
-    /// the host's code for `status` (see [`error_code_for_status`]).
+    /// the code for `status` (see [`error_code_for_status`]).
     pub fn error(status: u16, message: impl Into<String>) -> Self {
         Self::error_with_code(status, error_code_for_status(status), message)
     }
@@ -107,19 +117,18 @@ impl PluginHttpResponse {
     pub fn error_with_code(status: u16, code: &str, message: impl Into<String>) -> Self {
         Self {
             status,
-            headers: None,
             body: Some(serde_json::json!({ "code": code, "message": message.into() })),
         }
     }
 }
 
-/// The host's error code for a client error status. The host answers every
-/// 5xx from a plugin route itself, with `INTERNAL_ERROR` and no detail, so a
+/// The error code [`PluginHttpResponse::error`] gives a client error status
+/// (the host sends it under the plugin's id). The host answers every 5xx
+/// from a plugin route itself, with `INTERNAL_ERROR` and no detail, so a
 /// plugin has no 5xx to name.
 pub fn error_code_for_status(status: u16) -> &'static str {
     match status {
         400 => "VALIDATION_ERROR",
-        401 => "TOKEN_MISSING",
         403 => "PERMISSION_DENIED",
         404 => "NOT_FOUND",
         405 => "METHOD_NOT_ALLOWED",

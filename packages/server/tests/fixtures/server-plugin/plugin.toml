@@ -102,6 +102,12 @@ access = "public"
 handler = "server_error"
 
 [[server.routes]]
+path = "/answer"
+method = "POST"
+access = "public"
+handler = "answer"
+
+[[server.routes]]
 path = "/fail"
 method = "GET"
 access = "public"

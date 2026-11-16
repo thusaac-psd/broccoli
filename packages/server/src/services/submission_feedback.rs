@@ -1,6 +1,6 @@
 //! Atomic admission and durable, plugin-owned public feedback.
 use crate::entity::{plugin_storage, submission};
-use crate::error::AppError;
+use crate::error::{AdmissionRefused, AppError};
 use crate::state::AppState;
 use crate::utils::advisory_lock;
 use broccoli_server_sdk::types::{
@@ -49,15 +49,6 @@ fn parse_outcome(value: &str) -> Result<FeedbackOutcome, DbErr> {
         .ok_or_else(|| DbErr::Custom(format!("Unknown submission feedback outcome {value:?}")))
 }
 
-fn rejected(code: &str, message: &str) -> AppError {
-    AppError::PluginRejection {
-        code: code.into(),
-        message: message.into(),
-        status_code: 409,
-        details: None,
-    }
-}
-
 /// No connection spans a guest call. The host compares opaque storage bytes,
 /// advances its own revision, inserts the submission and holds feedback atomically.
 pub async fn insert_admitted(
@@ -74,10 +65,7 @@ pub async fn insert_admitted(
             .await?;
         let (generation, pending) = slot_state(&txn, plugin_id, slot.key()).await?;
         if generation != slot.generation() || pending.is_some() {
-            return Err(rejected(
-                "SUBMISSION_IN_FLIGHT",
-                "Submission slot changed; refresh and retry.",
-            ));
+            return Err(AppError::AdmissionRefused(AdmissionRefused::SlotInFlight));
         }
     }
     let row = plugin_storage::Entity::find_by_id((
@@ -88,17 +76,9 @@ pub async fn insert_admitted(
     .lock_exclusive()
     .one(&txn)
     .await?
-    .ok_or_else(|| {
-        rejected(
-            "SUBMISSION_STATE_CHANGED",
-            "Admission state changed; refresh and retry.",
-        )
-    })?;
+    .ok_or(AppError::AdmissionRefused(AdmissionRefused::StateChanged))?;
     if crate::utils::text::plugin_storage_text(&row.data) != admission.guard.expected_value() {
-        return Err(rejected(
-            "SUBMISSION_STATE_CHANGED",
-            "Admission state changed; refresh and retry.",
-        ));
+        return Err(AppError::AdmissionRefused(AdmissionRefused::StateChanged));
     }
     let mut guarded: plugin_storage::ActiveModel = row.clone().into();
     guarded.revision = Set(row
@@ -118,10 +98,7 @@ pub async fn insert_admitted(
         .latest_arrival_ms
         .is_some_and(|end| i128::from(now.timestamp_micros()) >= i128::from(end) * 1000)
     {
-        return Err(rejected(
-            "SUBMISSION_TOO_LATE",
-            "Submission admission window has closed.",
-        ));
+        return Err(AppError::AdmissionRefused(AdmissionRefused::TooLate));
     }
     new.created_at = Set(now);
     let (model, _judgement) = crate::services::judging::create_submission(&txn, new).await?;
