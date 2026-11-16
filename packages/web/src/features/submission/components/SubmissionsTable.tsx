@@ -295,6 +295,7 @@ function SubmissionRow({
     submission.verdict ?? null,
     submission.status,
     t,
+    submission.withheld,
   );
 
   const px = compact ? 'px-2' : 'px-4';

@@ -1,24 +1,25 @@
 //! Batched plugin visibility query - the point where an UNTRUSTED plugin
 //! response enters the host's access-control decision.
 //!
-//! [`query_plugins`] fails in exactly one way: a querier that cannot answer
-//! right now ([`PluginError::is_unavailable`]: past the request's deadline,
-//! the server draining, the plugin between loads, no instance to run it), or
-//! a resource governed by a visibility plugin that is not loaded here at all
-//! (see [`visibility_queriers`]), is [`AppError::PluginUnavailable`], a 503
-//! the client retries. That is the plugin missing, never a decision, so it
-//! never turns into `Deny` (which would show an empty page, a 404 or a
-//! rejected cursor) nor into the unmasked data. Every other failure mode -
-//! a poisoned plugin-registry lock, a plugin trap, non-JSON or unparseable
-//! output, a `decisions` vector whose length doesn't match the resource batch
-//! (in EITHER direction), or an unrecognized decision variant - is the
-//! plugin's answer gone wrong and collapses to `Decision::Deny` for every
-//! resource in the batch. This mirrors the host's
-//! established fail-closed hook stance, already pinned by
-//! `plugin_core::hook`'s `non_json_output_fails_closed_reject` and
-//! `empty_output_fails_closed_reject` tests: a failed visibility query must
-//! become a 404 to the end user, never a 500 (a 500 both leaks that plugin
-//! logic exists and takes the scoreboard down mid-contest).
+//! A plugin that cannot decide - a querier that cannot answer right now
+//! ([`PluginError::is_unavailable`]: past the request's deadline, the server
+//! draining, the plugin between loads, no instance to run it), or a
+//! visibility plugin that is not loaded here at all (see
+//! [`visibility_queriers`]) - withholds exactly the resources it governs:
+//! each becomes [`Decision::Withheld`] with the [`PluginOutage`] saying why,
+//! and is shown with only what the host decides. That is the plugin missing,
+//! never a decision, so it never turns into `Deny` (which would read as "not
+//! found") nor into the unmasked data. Every other failure mode - a poisoned
+//! plugin-registry lock, a plugin trap, non-JSON or unparseable output, a
+//! `decisions` vector whose length doesn't match the resource batch (in
+//! EITHER direction), or an unrecognized decision variant - is the plugin's
+//! answer gone wrong and collapses to `Decision::Deny` for every resource in
+//! the batch. This mirrors the host's established fail-closed hook stance,
+//! already pinned by `plugin_core::hook`'s
+//! `non_json_output_fails_closed_reject` and `empty_output_fails_closed_reject`
+//! tests: a failed visibility query must become a 404 to the end user, never
+//! a 500 (a 500 both leaks that plugin logic exists and takes the scoreboard
+//! down mid-contest).
 //!
 //! The pure mapping ([`decisions_from_output`]) is kept separate from the
 //! async plugin call so the failure modes are unit-testable without a
@@ -35,6 +36,7 @@
 //! `host_rules::host_decide` - only for the resources the host did not
 //! already `Deny`.
 
+use broccoli_api_types::visibility::PluginOutage;
 use broccoli_server_sdk::types::{
     QueryContext, QueryResource, QuerySubject, VisibilityQueryInput, VisibilityQueryOutput,
     WireDecision,
@@ -108,42 +110,52 @@ impl QuerierScope {
     }
 }
 
-/// What this replica cannot decide right now: resources governed by a
-/// visibility plugin that is enabled fleet-wide but not `Loaded` here.
+/// What this replica cannot decide right now, and why: resources governed by
+/// a visibility plugin that is not `Loaded` here.
 #[derive(Debug, Default, PartialEq, Eq)]
-enum Blind {
-    /// Nothing: every enabled visibility plugin is loaded.
-    #[default]
-    Nothing,
+struct Blind {
     /// Resources in contests of these types (the contest types the missing
     /// plugins registered when they last loaded anywhere).
-    ContestTypes(std::collections::BTreeSet<String>),
-    /// Everything: a missing plugin's scope is unknown, or it governs more
-    /// than its contest types (it registered none).
-    Everything,
+    types: std::collections::BTreeMap<String, PluginOutage>,
+    /// Every resource: a missing plugin's scope is unknown, or it governs
+    /// more than its contest types (it registered none).
+    everything: Option<PluginOutage>,
 }
 
 impl Blind {
-    /// Whether this replica cannot decide resources under `scope`.
-    fn covers(&self, scope: &ResourceScope) -> bool {
-        match (self, scope) {
-            (Blind::Nothing, _) => false,
-            (Blind::Everything, _) | (_, ResourceScope::Unknown) => true,
-            (Blind::ContestTypes(types), ResourceScope::ContestType(t)) => {
-                t.as_ref().is_some_and(|t| types.contains(t))
+    fn is_empty(&self) -> bool {
+        self.types.is_empty() && self.everything.is_none()
+    }
+
+    fn add(&mut self, scope: Option<Vec<String>>, outage: PluginOutage) {
+        let worst = |slot: &mut Option<PluginOutage>| {
+            *slot = Some(match slot.take() {
+                Some(current) => current.worst(outage.clone()),
+                None => outage.clone(),
+            });
+        };
+        match scope {
+            None => worst(&mut self.everything),
+            Some(types) => {
+                for t in types {
+                    let mut slot = self.types.remove(&t);
+                    worst(&mut slot);
+                    self.types.extend(slot.map(|o| (t, o)));
+                }
             }
         }
     }
 
-    fn widen(&mut self, other: Blind) {
-        *self = match (std::mem::take(self), other) {
-            (Blind::Everything, _) | (_, Blind::Everything) => Blind::Everything,
-            (Blind::Nothing, other) | (other, Blind::Nothing) => other,
-            (Blind::ContestTypes(mut a), Blind::ContestTypes(b)) => {
-                a.extend(b);
-                Blind::ContestTypes(a)
-            }
+    /// Why this replica cannot decide resources under `scope`, if it cannot.
+    fn covers(&self, scope: &ResourceScope) -> Option<PluginOutage> {
+        let by_type = match scope {
+            ResourceScope::ContestType(t) => t.as_ref().and_then(|t| self.types.get(t)).cloned(),
+            ResourceScope::Unknown => self.types.values().cloned().reduce(PluginOutage::worst),
         };
+        match (self.everything.clone(), by_type) {
+            (Some(a), Some(b)) => Some(a.worst(b)),
+            (a, b) => a.or(b),
+        }
     }
 }
 
@@ -171,7 +183,8 @@ impl Blind {
 /// Only the governed resources are blind: standalone problems and other
 /// contest types stay readable, so one missing plugin cannot take every
 /// request on a replica down. [`query_plugins`] answers a blind resource
-/// with 503 `PLUGIN_UNAVAILABLE`.
+/// with [`Decision::Withheld`], its outage from
+/// [`crate::plugin_lifecycle::PluginLifecycle::outage`].
 ///
 /// A contest type with no visibility plugin at all has zero queriers, which
 /// is deliberately "no plugin has an opinion": `query_plugins` returns
@@ -203,7 +216,7 @@ fn visibility_queriers(state: &AppState) -> Result<(Vec<VisibilityQuerier>, Blin
         }
     }
 
-    let mut blind = Blind::Nothing;
+    let mut blind = Blind::default();
     for (id, enabled) in state.plugin_lifecycle.desired_plugins() {
         let entry = registry.get(&id);
         if entry.is_some_and(|e| e.status == PluginStatus::Loaded) {
@@ -217,16 +230,12 @@ fn visibility_queriers(state: &AppState) -> Result<(Vec<VisibilityQuerier>, Blin
             };
             match recorded {
                 _ if !declares => continue,
-                Some(g) if !g.contest_types.is_empty() => {
-                    Blind::ContestTypes(g.contest_types.into_iter().collect())
-                }
-                _ => Blind::Everything,
+                Some(g) if !g.contest_types.is_empty() => Some(g.contest_types),
+                _ => None,
             }
         } else {
             match recorded {
-                Some(g) if g.visibility && !g.contest_types.is_empty() => {
-                    Blind::ContestTypes(g.contest_types.into_iter().collect())
-                }
+                Some(g) if g.visibility && !g.contest_types.is_empty() => Some(g.contest_types),
                 _ => continue,
             }
         };
@@ -236,9 +245,9 @@ fn visibility_queriers(state: &AppState) -> Result<(Vec<VisibilityQuerier>, Blin
             status = ?entry.map(|e| &e.status),
             scope = ?scope,
             "a visibility plugin is not Loaded on this replica; what it governs \
-             is unavailable until it loads"
+             is withheld until it loads"
         );
-        blind.widen(scope);
+        blind.add(scope, state.plugin_lifecycle.outage(&id));
     }
     Ok((queriers, blind))
 }
@@ -249,7 +258,7 @@ fn visibility_queriers(state: &AppState) -> Result<(Vec<VisibilityQuerier>, Blin
 /// poisoned registry counts as narrowing, since it denies everything.
 pub(super) fn plugins_may_narrow(state: &AppState, scope: &ResourceScope) -> bool {
     visibility_queriers(state).map_or(true, |(queriers, blind)| {
-        queriers.iter().any(|q| q.scope.governs(scope)) || blind.covers(scope)
+        queriers.iter().any(|q| q.scope.governs(scope)) || blind.covers(scope).is_some()
     })
 }
 
@@ -266,40 +275,58 @@ pub(super) fn scoped_querier_loaded(state: &AppState) -> bool {
     })
 }
 
-/// Whether any of `resources` is governed by the missing plugins. A
-/// resource is governed when it sits in a contest of one of `types`, judged
-/// from the core schema the host owns:
+/// Why each of `resources` cannot be decided on this replica, if it cannot
+/// (positional with `resources`). Contests and clarifications are host
+/// records ([`Resource::degrades_in_outage`]), so they are never blind. A
+/// resource is otherwise blind when it is governed by a missing plugin,
+/// judged from the core schema the host owns:
 ///
 /// - with a contest (`resource_contests`): that contest's type;
-/// - a problem, sample or attachment reached outside a contest: any contest
-///   the problem belongs to (`contest_problem`), since a contest plugin may
-///   hide its problems wherever they are read from;
-/// - a submission outside a contest: the contests its problem belongs to;
-/// - anything else without a contest: unknown, so governed.
+/// - a problem, sample or attachment reached outside a contest, or a
+///   submission outside a contest: the contests its problem belongs to, but
+///   only for a plugin that is enabled and missing here, since every other
+///   replica still enforces it wherever the problem is read. A disabled
+///   plugin governs only what is read through its own contests;
+/// - a plugin that governs everything: everything.
 ///
 /// One small query per kind present, made only while a visibility plugin is
 /// down on this replica.
-async fn governs_any(
+async fn blind_outages(
     state: &AppState,
-    types: &std::collections::BTreeSet<String>,
+    blind: &Blind,
     resources: &[Resource],
     resource_contests: &[ResourceContest],
-) -> Result<bool, AppError> {
-    let types: Vec<String> = types.iter().cloned().collect();
+) -> Result<Vec<Option<PluginOutage>>, AppError> {
+    let mut outages: Vec<Option<PluginOutage>> = resources
+        .iter()
+        .map(|r| blind.everything.clone().filter(|_| r.degrades_in_outage()))
+        .collect();
+    if blind.types.is_empty() {
+        return Ok(outages);
+    }
+    let all_types: Vec<String> = blind.types.keys().cloned().collect();
+    let enabled_types: Vec<String> = blind
+        .types
+        .iter()
+        .filter(|(_, o)| matches!(o, PluginOutage::Unavailable))
+        .map(|(t, _)| t.clone())
+        .collect();
     let mut contests = Vec::new();
     let mut problems = Vec::new();
     let mut submissions = Vec::new();
     for (resource, contest) in resources.iter().zip(resource_contests) {
         match (&contest.id, resource) {
+            (_, r) if !r.degrades_in_outage() => {}
             (Some(c), _) => contests.push(*c),
             (None, Resource::Submission(id)) => submissions.push(*id),
             (None, r) => problems.extend(r.wire_problem_id()),
         }
     }
-    let governed = async |sql: &str,
-                          ids: Vec<i32>|
-           -> Result<std::collections::HashSet<i32>, sea_orm::DbErr> {
-        if ids.is_empty() {
+    let typed = async |sql: &str,
+                       ids: Vec<i32>,
+                       types: &[String]|
+           -> Result<std::collections::HashMap<i32, String>, sea_orm::DbErr> {
+        if ids.is_empty() || types.is_empty() {
             return Ok(Default::default());
         }
         let rows = sea_orm::ConnectionTrait::query_all_raw(
@@ -307,48 +334,59 @@ async fn governs_any(
             sea_orm::Statement::from_sql_and_values(
                 sea_orm::DbBackend::Postgres,
                 sql,
-                [ids.into(), types.clone().into()],
+                [ids.into(), types.to_vec().into()],
             ),
         )
         .await?;
-        rows.iter().map(|r| r.try_get::<i32>("", "id")).collect()
+        rows.iter()
+            .map(|r| {
+                Ok((
+                    r.try_get::<i32>("", "id")?,
+                    r.try_get::<String>("", "contest_type")?,
+                ))
+            })
+            .collect()
     };
-    let lookups = async {
-        Ok::<_, sea_orm::DbErr>((
-            governed(
-                "SELECT id FROM contest WHERE id = ANY($1) AND contest_type = ANY($2)",
-                contests,
-            )
-            .await?,
-            governed(
-                "SELECT DISTINCT cp.problem_id AS id FROM contest_problem cp \
-                   JOIN contest c ON c.id = cp.contest_id \
-                  WHERE cp.problem_id = ANY($1) AND c.contest_type = ANY($2)",
-                problems,
-            )
-            .await?,
-            governed(
-                "SELECT DISTINCT s.id FROM submission s \
-                   JOIN contest_problem cp ON cp.problem_id = s.problem_id \
-                   JOIN contest c ON c.id = cp.contest_id \
-                  WHERE s.id = ANY($1) AND c.contest_type = ANY($2)",
-                submissions,
-            )
-            .await?,
-        ))
-    };
-    let (contests, problems, submissions) = lookups.await?;
-    Ok(resources
-        .iter()
-        .zip(resource_contests)
-        .any(|(resource, contest)| match (&contest.id, resource) {
-            (Some(c), _) => contests.contains(c),
-            (None, Resource::Submission(id)) => submissions.contains(id),
-            (None, r) => match r.wire_problem_id() {
-                Some(p) => problems.contains(&p),
-                None => true,
-            },
-        }))
+    let contests = typed(
+        "SELECT id, contest_type FROM contest WHERE id = ANY($1) AND contest_type = ANY($2)",
+        contests,
+        &all_types,
+    )
+    .await?;
+    let problems = typed(
+        "SELECT DISTINCT ON (cp.problem_id) cp.problem_id AS id, c.contest_type FROM contest_problem cp \
+           JOIN contest c ON c.id = cp.contest_id \
+          WHERE cp.problem_id = ANY($1) AND c.contest_type = ANY($2)",
+        problems,
+        &enabled_types,
+    )
+    .await?;
+    let submissions = typed(
+        "SELECT DISTINCT ON (s.id) s.id, c.contest_type FROM submission s \
+           JOIN contest_problem cp ON cp.problem_id = s.problem_id \
+           JOIN contest c ON c.id = cp.contest_id \
+          WHERE s.id = ANY($1) AND c.contest_type = ANY($2)",
+        submissions,
+        &enabled_types,
+    )
+    .await?;
+    for ((outage, resource), contest) in outages.iter_mut().zip(resources).zip(resource_contests) {
+        if !resource.degrades_in_outage() {
+            continue;
+        }
+        let contest_type = match (&contest.id, resource) {
+            (Some(c), _) => contests.get(c),
+            (None, Resource::Submission(id)) => submissions.get(id),
+            (None, r) => r.wire_problem_id().and_then(|p| problems.get(&p)),
+        };
+        if let Some(by_type) = contest_type.and_then(|t| blind.types.get(t)) {
+            *outage = Some(match outage.take() {
+                Some(current) => current.worst(by_type.clone()),
+                None => by_type.clone(),
+            });
+        }
+    }
+    Ok(outages)
 }
 
 /// Maximum number of dot-separated segments in one mask path.
@@ -553,19 +591,17 @@ pub(crate) async fn query_plugins(
         Ok(found) => found,
         Err(()) => return Ok(vec![Decision::Deny; resources.len()]),
     };
-    let blind = match blind {
-        Blind::Nothing => false,
-        Blind::Everything => true,
-        Blind::ContestTypes(types) => {
-            governs_any(state, &types, resources, resource_contests).await?
-        }
+    let mut outages = if blind.is_empty() {
+        vec![None; resources.len()]
+    } else {
+        blind_outages(state, &blind, resources, resource_contests).await?
     };
-    if blind {
-        return Err(AppError::PluginUnavailable);
-    }
 
     if queriers.is_empty() {
-        return Ok(vec![Decision::Allow; resources.len()]);
+        return Ok(withhold_outages(
+            vec![Decision::Allow; resources.len()],
+            outages,
+        ));
     }
 
     let query_resources: Vec<QueryResource> = resources
@@ -620,8 +656,18 @@ pub(crate) async fn query_plugins(
         let output = match call_result {
             Ok(out) => Ok(out),
             Err(e) if e.is_unavailable() => {
+                // It cannot answer in time: what it governs is withheld, as
+                // for a plugin that is not loaded at all.
                 tracing::warn!(plugin_id = %querier.plugin_id, error = %e, "visibility querier unavailable");
-                return Err(AppError::PluginUnavailable);
+                for &i in &governed {
+                    if resources[i].degrades_in_outage() {
+                        let outage = outages[i].take().map_or(PluginOutage::Unavailable, |o| {
+                            o.worst(PluginOutage::Unavailable)
+                        });
+                        outages[i] = Some(outage);
+                    }
+                }
+                continue;
             }
             Err(e) => {
                 tracing::error!(
@@ -642,7 +688,25 @@ pub(crate) async fn query_plugins(
         combined = meet_positionally(combined, full);
     }
 
-    Ok(enforce_mask_cap_post_union(combined))
+    Ok(enforce_mask_cap_post_union(withhold_outages(
+        combined, outages,
+    )))
+}
+
+/// Meet each decision with the outage, if any, that keeps it from being
+/// made: the resource is shown with only what the host decides.
+fn withhold_outages(decisions: Vec<Decision>, outages: Vec<Option<PluginOutage>>) -> Vec<Decision> {
+    decisions
+        .into_iter()
+        .zip(outages)
+        .map(|(decision, outage)| match outage {
+            Some(outage) => decision.meet(Decision::Withheld {
+                outage,
+                mask: FieldMask::default(),
+            }),
+            None => decision,
+        })
+        .collect()
 }
 
 /// Reapply `MAX_MASK_FIELDS` to every `Redact` decision AFTER folding all
@@ -664,7 +728,9 @@ fn enforce_mask_cap_post_union(decisions: Vec<Decision>) -> Vec<Decision> {
     decisions
         .into_iter()
         .map(|decision| match decision {
-            Decision::Redact(mask) if mask.len() > MAX_MASK_FIELDS => {
+            Decision::Redact(mask) | Decision::Withheld { mask, .. }
+                if mask.len() > MAX_MASK_FIELDS =>
+            {
                 tracing::error!(
                     field_count = mask.len(),
                     max = MAX_MASK_FIELDS,
@@ -708,13 +774,28 @@ mod tests {
     }
 
     #[test]
-    fn blind_covers_what_the_missing_plugins_govern() {
-        let blind = Blind::ContestTypes(types(&["icpc"]));
-        assert!(blind.covers(&in_contest(Some("icpc"))));
-        assert!(!blind.covers(&in_contest(Some("ioi"))));
-        assert!(blind.covers(&ResourceScope::Unknown));
-        assert!(!Blind::Nothing.covers(&ResourceScope::Unknown));
-        assert!(Blind::Everything.covers(&in_contest(None)));
+    fn blind_covers_what_the_missing_plugins_govern_with_why() {
+        let disabled = PluginOutage::Disabled {
+            plugin_id: "icpc".into(),
+        };
+        let mut blind = Blind::default();
+        assert!(blind.covers(&ResourceScope::Unknown).is_none());
+        blind.add(Some(vec!["icpc".into()]), disabled.clone());
+        assert_eq!(
+            blind.covers(&in_contest(Some("icpc"))),
+            Some(disabled.clone())
+        );
+        assert_eq!(blind.covers(&in_contest(Some("ioi"))), None);
+        assert_eq!(
+            blind.covers(&ResourceScope::Unknown),
+            Some(disabled.clone())
+        );
+        blind.add(None, PluginOutage::Unavailable);
+        assert_eq!(
+            blind.covers(&in_contest(None)),
+            Some(PluginOutage::Unavailable)
+        );
+        assert_eq!(blind.covers(&in_contest(Some("icpc"))), Some(disabled));
     }
 
     use std::collections::HashMap;
@@ -1301,16 +1382,24 @@ mod tests {
     /// replica (failed to load here, or not converged yet) must fail closed:
     /// every other replica is enforcing it, so allowing here would let a
     /// load-balanced request read what the rest of the fleet hides. With no
-    /// recorded contest types it governs everything, so the batch is
-    /// unavailable.
+    /// recorded contest types it governs everything: the submission is
+    /// withheld as unavailable, while the contest, a host record, is not.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn declared_querier_that_is_enabled_but_not_loaded_makes_the_batch_unavailable() {
+    async fn declared_querier_that_is_enabled_but_not_loaded_withholds_what_it_governs() {
         let _guard = crate::metrics_test_lock();
-        assert!(matches!(
-            decide_with_failed_querier(true).await,
-            Err(AppError::PluginUnavailable)
-        ));
+        assert_eq!(
+            decide_with_failed_querier(true)
+                .await
+                .expect("the batch is answered"),
+            vec![
+                Decision::Allow,
+                Decision::Withheld {
+                    outage: PluginOutage::Unavailable,
+                    mask: FieldMask::default(),
+                },
+            ]
+        );
     }
 
     #[allow(clippy::await_holding_lock)]
@@ -1709,37 +1798,48 @@ mod tests {
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn an_unavailable_querier_is_a_retryable_error_not_a_deny() {
+    async fn an_unavailable_querier_withholds_what_it_governs_instead_of_denying_it() {
         let _guard = crate::metrics_test_lock();
 
         let registry = registry_with_order(&["plugin-allow", "plugin-busy"]);
         let mut responses = HashMap::new();
         responses.insert(
             "plugin-allow".to_string(),
-            CannedResponse::Ok(canned_output(vec![WireDecision::Allow {}])),
+            CannedResponse::Ok(canned_output(vec![
+                WireDecision::Allow {},
+                WireDecision::Allow {},
+            ])),
         );
         responses.insert("plugin-busy".to_string(), CannedResponse::Unavailable);
         let plugins: Arc<dyn PluginManager> = Arc::new(canned(registry, responses));
 
         let state = test_app_state(plugins).await;
         let subject = Subject::anonymous();
-        let resources = vec![Resource::Contest(1)];
+        let resources = vec![Resource::Contest(1), Resource::Submission(2)];
+        let contest = ResourceContest {
+            id: Some(1),
+            phase: None,
+        };
         let result = query_plugins(
             &state,
             &subject,
             Action::Read,
             Some(1),
             &resources,
-            &[ResourceContest {
-                id: Some(1),
-                phase: None,
-            }],
-            &[ResourceScope::Unknown],
+            &[contest, contest],
+            &[ResourceScope::Unknown, ResourceScope::Unknown],
         )
-        .await;
-        assert!(
-            matches!(result, Err(AppError::PluginUnavailable)),
-            "{result:?}"
+        .await
+        .expect("the batch is answered");
+        assert_eq!(
+            result,
+            vec![
+                Decision::Allow,
+                Decision::Withheld {
+                    outage: PluginOutage::Unavailable,
+                    mask: FieldMask::default(),
+                },
+            ]
         );
     }
 }

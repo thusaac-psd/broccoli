@@ -79,6 +79,9 @@ pub struct ContestResponse {
     /// Where the contest is now, on the server's clock. Clients render this
     /// rather than comparing the timeline with their own clock.
     pub phase: ContestPhase,
+    /// Set while the plugin that provides the contest's type cannot serve it:
+    /// submissions are refused and its results are unavailable.
+    pub plugin_outage: Option<crate::visibility::PluginOutage>,
 }
 
 /// One contest in a contest list.
@@ -112,6 +115,9 @@ pub struct ContestListItem {
     pub updated_at: DateTime<Utc>,
     /// Where the contest is now, on the server's clock.
     pub phase: ContestPhase,
+    /// Set while the plugin that provides the contest's type cannot serve it:
+    /// submissions are refused and its results are unavailable.
+    pub plugin_outage: Option<crate::visibility::PluginOutage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -130,8 +136,11 @@ pub struct ContestProblemResponse {
     pub label: String,
     #[schema(example = 0)]
     pub position: i32,
+    /// `None` while `withheld` is set.
     #[schema(example = "Two Sum")]
-    pub problem_title: String,
+    pub problem_title: Option<String>,
+    /// Set when what the problem holds is left out of this row.
+    pub withheld: Option<crate::visibility::Withheld>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

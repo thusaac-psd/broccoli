@@ -1,6 +1,6 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
-  type SubmissionStatus,
+  type ShownStatus,
   TestCaseOutput,
   type TestCaseResult,
 } from '@broccoli/web-sdk/submission';
@@ -98,7 +98,7 @@ export function TestCaseRow({
   index: number;
   submissionId: number;
   judgementId?: number | null;
-  status: SubmissionStatus;
+  status: ShownStatus;
 }) {
   const { t } = useTranslation();
   const [detailsOpen, setDetailsOpen] = useState(false);

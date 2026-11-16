@@ -704,7 +704,7 @@ impl Burst {
             for id in ids {
                 match client.get_submission(id).await {
                     Ok(resp) => {
-                        if resp.status.is_terminal()
+                        if resp.status.is_some_and(|s| s.is_terminal())
                             && let Some((type_idx, sent_at)) = pending.remove(&id)
                         {
                             let latency_ms = sent_at.elapsed().as_millis() as u64;

@@ -232,19 +232,19 @@ fn pad(s: &str, width: usize) -> String {
 }
 
 /// Console style for a submission's verdict/status cell.
-fn cell_style(verdict: Option<&Verdict>, status: &SubmissionStatus) -> Style {
+fn cell_style(verdict: Option<&Verdict>, status: &Option<SubmissionStatus>) -> Style {
     match verdict {
         Some(v) if v.is_accepted() => Style::new().green().bold(),
         Some(_) => Style::new().red().bold(),
-        None if status.is_error() => Style::new().red(),
+        None if status.is_some_and(|s| s.is_error()) => Style::new().red(),
         None if status.is_in_progress() => Style::new().yellow(),
         None => Style::new(),
     }
 }
 
-fn status_style(s: &SubmissionStatus) -> StyledObject<String> {
+fn status_style(s: &Option<SubmissionStatus>) -> StyledObject<String> {
     let label = s.human().to_string();
-    if s.is_error() {
+    if s.is_some_and(|s| s.is_error()) {
         style(label).red()
     } else if s.is_in_progress() {
         style(label).yellow()

@@ -1,4 +1,4 @@
-import type { SubmissionStatus, Verdict } from '@broccoli/web-sdk/submission';
+import type { ShownStatus, Verdict } from '@broccoli/web-sdk/submission';
 import { isTerminalStatus } from '@broccoli/web-sdk/submission';
 
 export type VerdictKey =
@@ -54,7 +54,7 @@ export type VerdictKey =
  */
 export function getVerdictKey(
   verdict: Verdict | null | undefined,
-  status: SubmissionStatus,
+  status: ShownStatus,
 ): VerdictKey {
   switch (verdict) {
     case 'Accepted':

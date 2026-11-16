@@ -62,7 +62,7 @@ pub fn run(args: ProblemsArgs) -> anyhow::Result<()> {
         println!(
             "    {}  {}",
             style(&p.label).yellow().bold(),
-            p.problem_title
+            broccoli_cli_core::model::problem_title(p)
         );
     }
 

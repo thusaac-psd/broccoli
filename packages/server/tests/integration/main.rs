@@ -57,5 +57,6 @@ mod user;
 mod username_identity;
 mod visibility_clarification_contents;
 mod visibility_matrix;
+mod visibility_outage;
 mod visibility_plugin;
 mod visibility_submission_count_matrix;

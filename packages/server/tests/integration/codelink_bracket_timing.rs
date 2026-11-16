@@ -1670,16 +1670,24 @@ async fn wait_published(fx: &Fixture, id: i32, token: &str) -> Value {
 async fn assert_feedback_withheld(fx: &Fixture, id: i32, token: &str) {
     let detail = fx.app.get_with_token(&routes::submission(id), token).await;
     assert_eq!(detail.status, 200, "{}", detail.text);
-    assert_eq!(detail.body["status"], "Running");
+    assert!(detail.body["status"].is_null(), "{}", detail.text);
+    assert_eq!(detail.body["withheld"], json!({"reason": "hidden"}));
     assert!(detail.body["result"].is_null(), "{}", detail.text);
     for list in [
         routes::SUBMISSIONS.to_string(),
         routes::contest_submissions(fx.contest_id),
     ] {
-        for (status, present) in [("Running", true), ("Judged", false)] {
+        // No status filter matches a hidden status, and a status sort lists
+        // the row in its own group.
+        for (query, present) in [
+            ("sort_by=status", true),
+            ("sort_by=status&sort_order=asc", true),
+            ("status=Running&sort_by=status", false),
+            ("status=Judged&sort_by=status", false),
+        ] {
             let response = fx
                 .app
-                .get_with_token(&format!("{list}?status={status}&sort_by=status"), token)
+                .get_with_token(&format!("{list}?{query}"), token)
                 .await;
             assert_eq!(response.status, 200, "{}", response.text);
             let found = response.body["data"]
@@ -1696,7 +1704,8 @@ async fn assert_feedback_withheld(fx: &Fixture, id: i32, token: &str) {
         .await;
     assert_eq!(history.status, 200, "{}", history.text);
     for judgement in history.body.as_array().unwrap() {
-        assert_eq!(judgement["status"], "Running");
+        assert!(judgement["status"].is_null(), "{judgement}");
+        assert_eq!(judgement["withheld"], json!({"reason": "hidden"}));
         assert_eq!(judgement["is_finalized"], false);
         assert!(judgement["verdict"].is_null() && judgement["score"].is_null());
         assert!(judgement["finalized_at"].is_null());
@@ -2382,7 +2391,7 @@ async fn feedback_publication_failure_retries_after_committing_the_match() {
             .app
             .get_with_token(&routes::submission(accepted.id()), &a.token)
             .await;
-        assert_eq!(public.body["status"], "Running", "{}", public.text);
+        assert!(public.body["status"].is_null(), "{}", public.text);
         let retry = fx.app.db.query_one_raw(sea_orm::Statement::from_sql_and_values(
             sea_orm::DbBackend::Postgres,
             "SELECT attempts, claimed_at FROM plugin_timer WHERE plugin_id = 'codelink-bracket' AND key = $1",

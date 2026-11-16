@@ -1,5 +1,9 @@
 use std::collections::BTreeSet;
 
+use broccoli_api_types::visibility::PluginOutage;
+
+use super::Governed;
+
 /// JSON paths to blank, dot-separated (e.g. `result.verdict`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FieldMask(BTreeSet<String>);
@@ -27,12 +31,6 @@ impl FieldMask {
         })
     }
 
-    /// This mask without the path `path` itself.
-    pub fn without(mut self, path: &str) -> Self {
-        self.0.remove(path);
-        self
-    }
-
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -48,13 +46,21 @@ impl FieldMask {
 
 /// Reachability decision for one (subject, action, resource) triple.
 ///
-/// Ordered `Allow > Redact > Deny`. Combining decisions uses [`Decision::meet`],
-/// which can only move down this order — that is what makes "plugins may narrow,
-/// never widen" an algebraic property rather than a documented promise.
+/// Ordered `Allow > Redact > Withheld > Deny`. Combining decisions uses
+/// [`Decision::meet`], which can only move down this order — that is what
+/// makes "plugins may narrow, never widen" an algebraic property rather than
+/// a documented promise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Allow,
     Redact(FieldMask),
+    /// The resource is reachable, but a plugin that governs it cannot decide
+    /// right now (`outage`). Only the fields the host decides alone are shown
+    /// (see [`Governed`]), and of those not the ones `mask` names.
+    Withheld {
+        outage: PluginOutage,
+        mask: FieldMask,
+    },
     Deny,
 }
 
@@ -62,6 +68,23 @@ impl Decision {
     pub fn meet(self, other: Decision) -> Decision {
         match (self, other) {
             (Decision::Deny, _) | (_, Decision::Deny) => Decision::Deny,
+            (
+                Decision::Withheld { outage, mask },
+                Decision::Withheld {
+                    outage: other,
+                    mask: more,
+                },
+            ) => Decision::Withheld {
+                outage: outage.worst(other),
+                mask: mask.union(more),
+            },
+            (Decision::Withheld { outage, mask }, Decision::Redact(more))
+            | (Decision::Redact(more), Decision::Withheld { outage, mask }) => Decision::Withheld {
+                outage,
+                mask: mask.union(more),
+            },
+            (w @ Decision::Withheld { .. }, Decision::Allow)
+            | (Decision::Allow, w @ Decision::Withheld { .. }) => w,
             (Decision::Redact(a), Decision::Redact(b)) => Decision::Redact(a.union(b)),
             (Decision::Redact(m), Decision::Allow) | (Decision::Allow, Decision::Redact(m)) => {
                 Decision::Redact(m)
@@ -74,11 +97,21 @@ impl Decision {
         matches!(self, Decision::Deny)
     }
 
-    /// Whether this decision keeps the value at `path` from the viewer.
-    pub fn hides(&self, path: &str) -> bool {
+    /// The outage that keeps this decision from being made, if one does.
+    pub fn outage(&self) -> Option<&PluginOutage> {
+        match self {
+            Decision::Withheld { outage, .. } => Some(outage),
+            Decision::Allow | Decision::Redact(_) | Decision::Deny => None,
+        }
+    }
+
+    /// Whether this decision keeps the value at `path` of a `T` from the
+    /// viewer.
+    pub fn hides<T: Governed>(&self, path: &str) -> bool {
         match self {
             Decision::Allow => false,
             Decision::Redact(mask) => mask.covers(path),
+            Decision::Withheld { mask, .. } => mask.covers(path) || !T::host_decides(path),
             Decision::Deny => true,
         }
     }
@@ -117,12 +150,55 @@ mod tests {
         assert!(!mask(&["result.verdict"]).covers("result"));
     }
 
+    struct Shape;
+    impl Governed for Shape {
+        const HOST_DECIDED: Option<&'static [&'static str]> = Some(&["id", "language"]);
+    }
+
+    fn withheld(fields: &[&str]) -> Decision {
+        Decision::Withheld {
+            outage: PluginOutage::Unavailable,
+            mask: mask(fields),
+        }
+    }
+
     #[test]
     fn hides_is_false_for_allow_and_true_for_deny() {
-        assert!(!Decision::Allow.hides("status"));
-        assert!(Decision::Deny.hides("status"));
-        assert!(Decision::Redact(mask(&["status"])).hides("status"));
-        assert!(!Decision::Redact(mask(&["verdict"])).hides("status"));
+        assert!(!Decision::Allow.hides::<Shape>("status"));
+        assert!(Decision::Deny.hides::<Shape>("status"));
+        assert!(Decision::Redact(mask(&["status"])).hides::<Shape>("status"));
+        assert!(!Decision::Redact(mask(&["verdict"])).hides::<Shape>("status"));
+    }
+
+    #[test]
+    fn withheld_hides_all_but_the_host_decided_fields_left_unmasked() {
+        let d = withheld(&["language"]);
+        assert!(!d.hides::<Shape>("id"));
+        assert!(d.hides::<Shape>("language"));
+        assert!(d.hides::<Shape>("status"));
+        assert!(d.hides::<Shape>("result.verdict"));
+    }
+
+    #[test]
+    fn withheld_sits_between_redact_and_deny() {
+        assert_eq!(Decision::Allow.meet(withheld(&[])), withheld(&[]));
+        assert_eq!(
+            Decision::Redact(mask(&["x"])).meet(withheld(&["y"])),
+            withheld(&["x", "y"])
+        );
+        assert_eq!(
+            withheld(&["y"]).meet(Decision::Redact(mask(&["x"]))),
+            withheld(&["x", "y"])
+        );
+        assert_eq!(withheld(&[]).meet(Decision::Deny), Decision::Deny);
+        let disabled = Decision::Withheld {
+            outage: PluginOutage::Disabled {
+                plugin_id: "p".into(),
+            },
+            mask: mask(&[]),
+        };
+        assert_eq!(withheld(&[]).meet(disabled.clone()), disabled);
+        assert_eq!(disabled.clone().meet(withheld(&[])), disabled);
     }
 
     #[test]

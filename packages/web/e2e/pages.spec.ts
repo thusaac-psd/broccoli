@@ -100,6 +100,44 @@ for (const [viewer, paths] of Object.entries(PAGES) as [Viewer, string[]][]) {
   }
 }
 
+test('a contest whose plugin is disabled says so on every page', async ({
+  page,
+}) => {
+  await mockApi(page, 'contestant');
+  const notice =
+    'Results for this contest are unavailable while its plugin is disabled.';
+
+  await page.goto('/contests/3');
+  await expect(page.getByText(notice)).toBeVisible();
+  await expect(
+    page.getByRole('link', { name: 'Unavailable', exact: true }),
+  ).toBeVisible();
+
+  await page.goto('/contests/3/problems/1');
+  await expect(page.getByText(notice).first()).toBeVisible();
+  await expect(page.getByRole('button', { name: /submit/i })).toHaveCount(0);
+
+  await page.goto('/contests/3/rankings');
+  await expect(page.getByText(notice)).toBeVisible();
+  await expect(page.getByText('This contest has no scoreboard')).toHaveCount(0);
+
+  await page.goto('/contests/3/submissions');
+  await expect(
+    page
+      .getByText("Result unavailable while the contest's plugin is disabled")
+      .first(),
+  ).toBeVisible();
+});
+
+test('a guest asking for a scoreboard is asked to sign in', async ({
+  page,
+}) => {
+  await mockApi(page, 'guest');
+  await page.goto('/contests/1/rankings');
+  await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
+  await expect(page.getByText('This contest has no scoreboard')).toHaveCount(0);
+});
+
 test('the document language and title follow the UI locale', async ({
   page,
 }) => {

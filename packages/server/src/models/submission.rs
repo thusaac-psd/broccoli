@@ -138,6 +138,8 @@ pub struct SubmissionJudgementResponse {
     pub version: i32,
     pub is_current: bool,
     pub is_finalized: bool,
+    /// `null` in a response while `withheld` is set.
+    #[schema(nullable)]
     pub status: SubmissionStatus,
     #[schema(value_type = Option<String>, example = "Accepted")]
     pub verdict: Option<Verdict>,
@@ -160,6 +162,9 @@ pub struct SubmissionJudgementResponse {
     pub test_case_results: Vec<TestCaseResultResponse>,
     #[serde(default)]
     pub test_case_pagination: Option<Pagination>,
+    /// Set when the judgement's outcome is left out of this response, with
+    /// why: the same as the submission's own.
+    pub withheld: Option<broccoli_api_types::visibility::Withheld>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]

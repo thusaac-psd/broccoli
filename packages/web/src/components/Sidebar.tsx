@@ -5,6 +5,7 @@ import {
   useAuthReady,
   USER_PERMISSIONS,
 } from '@broccoli/web-sdk/auth';
+import { contestProblemTitle } from '@broccoli/web-sdk/contest';
 import { type I18nContextValue, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   CONTEST_MANAGE,
@@ -260,8 +261,8 @@ function ContestProblemsGroup() {
                   isActive={isActive}
                   tooltip={
                     hideLabels
-                      ? p.problem_title
-                      : `${p.label}. ${p.problem_title}`
+                      ? contestProblemTitle(p, t)
+                      : `${p.label}. ${contestProblemTitle(p, t)}`
                   }
                 >
                   <Link to={`/contests/${contestId}/problems/${p.problem_id}`}>
@@ -278,7 +279,7 @@ function ContestProblemsGroup() {
                         </span>
                       </span>
                     )}
-                    <span>{p.problem_title}</span>
+                    <span>{contestProblemTitle(p, t)}</span>
                   </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>

@@ -68,7 +68,15 @@ endpoint for the same resource:
 | `401` | `TOKEN_MISSING`, `TOKEN_INVALID` | No token on a route that needs one, or a token that is invalid or stale. |
 | `403` | `PERMISSION_DENIED` | The caller lacks `permission`, or is not a participant of a public contest on a `participant` route. |
 | `404` | `NOT_FOUND` | The caller cannot read the contest or problem, it does not exist, the problem is not in the contest, or the contest has another `contest_type`. |
-| `503` | `PLUGIN_UNAVAILABLE` | The contest's visibility depends on a plugin that is not loaded right now. Carries `Retry-After`. |
+| `503` | `PLUGIN_DISABLED` | Your plugin, or the plugin that decides who may read the route's problem, is disabled. No `Retry-After`: nothing changes until an administrator enables it. |
+| `503` | `PLUGIN_UNAVAILABLE` | The plugin that decides who may read the route's problem cannot answer right now. Carries `Retry-After`. |
+
+While a contest-type plugin is disabled or not loaded, the server keeps its
+contests readable and marks them with `plugin_outage`. Problems and submissions
+the plugin governs are listed with their plugin-governed fields `null` and a
+`withheld` field saying why, and a read whose whole answer is the plugin's
+answers one of the `503`s above. A visibility query is never asked about staff
+(`contest:manage` or `submission:view_all`); they see what the host rules show.
 
 A contest that is not activated or already deactivated is visible to
 `contest:manage` only. A private contest is visible to its participants and to

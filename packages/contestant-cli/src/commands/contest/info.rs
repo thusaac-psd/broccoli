@@ -78,7 +78,7 @@ pub fn run(args: InfoArgs) -> anyhow::Result<()> {
                 "    {}  {} — {}",
                 style(&p.label).yellow().bold(),
                 style("\u{2022}").dim(),
-                p.problem_title
+                broccoli_cli_core::model::problem_title(p)
             );
         }
     }

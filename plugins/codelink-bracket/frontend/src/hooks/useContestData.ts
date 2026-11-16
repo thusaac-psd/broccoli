@@ -25,7 +25,12 @@ export function useContestProblems(contestId: number | undefined) {
         params: { path: { id: contestId as number } },
       });
       if (error || !data) return [];
-      return data;
+      // A row whose problem the host withholds has no title to show.
+      return data.flatMap((p) =>
+        p.problem_title == null
+          ? []
+          : [{ ...p, problem_title: p.problem_title }],
+      );
     },
   });
   const list = (data ?? []).filter(

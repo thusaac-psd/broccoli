@@ -176,7 +176,10 @@ async fn opaque_admission_is_atomic_plugin_scoped_and_invalidates_decision_snaps
         .remove(&admitted.id)
         .unwrap();
     let mut value = json!({"status":"Judged","result":{"verdict":"Accepted","score":1}});
-    submission_feedback::project(&mut value, feedback);
+    let submission_feedback::Feedback::Published(result) = feedback else {
+        panic!("released feedback is published: {feedback:?}");
+    };
+    submission_feedback::publish(&mut value, &result);
     assert_eq!(value["result"]["verdict"], "CustomOutcome");
     assert_eq!(value["result"]["score"], 17.0);
     assert!(

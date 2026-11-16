@@ -164,7 +164,7 @@ pub async fn enable_plugin(
     tag = "Admin",
     operation_id = "getPluginDependents",
     summary = "List what depends on a plugin right now",
-    description = "Returns the contests running now (started, not yet ended, not deleted) whose contest type the plugin provides on the serving replica, so an admin can see what disabling it would stop. A plugin that is not loaded on the serving replica provides no contest types here. Requires `plugin:manage` permission.",
+    description = "Returns the contests running now (started, not yet ended, not deleted) whose contest type the plugin registered when it last loaded, so an admin can see what disabling it would stop. The answer is the same whether the plugin is enabled or disabled. Requires `plugin:manage` permission.",
     params(("id" = String, Path, description = "Plugin ID")),
     responses(
         (status = 200, description = "What depends on the plugin", body = PluginDependentsResponse),
@@ -183,30 +183,20 @@ pub async fn get_plugin_dependents(
 
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
 
-    let contest_types: Vec<String> = state
-        .registries
-        .contest_type_registry
-        .read()
-        .await
-        .iter()
-        .filter(|(_, handlers)| handlers.plugin_id == id.as_str())
-        .map(|(contest_type, _)| contest_type.clone())
-        .collect();
-    if contest_types.is_empty() {
-        return Ok(Json(PluginDependentsResponse {
-            running_contests: Vec::new(),
-        }));
-    }
+    // The contest types come from what the plugin recorded fleet-wide when it
+    // last loaded, so the answer does not depend on whether it is loaded now.
     // "Running" is judged by the database clock, the one every replica shares.
     let running_contests = RunningContestRef::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        r#"SELECT id, title, contest_type, end_time
-             FROM contest
-            WHERE contest_type = ANY($1)
-              AND deleted_at IS NULL
-              AND start_time <= NOW() AND end_time > NOW()
-            ORDER BY end_time, id"#,
-        [contest_types.into()],
+        r#"SELECT c.id, c.title, c.contest_type, c.end_time
+             FROM contest c
+            WHERE c.contest_type IN (
+                    SELECT jsonb_array_elements_text(p.governs->'contest_types')
+                      FROM plugin p WHERE p.id = $1)
+              AND c.deleted_at IS NULL
+              AND c.start_time <= NOW() AND c.end_time > NOW()
+            ORDER BY c.end_time, c.id"#,
+        [id.as_str().into()],
     ))
     .all(&state.db)
     .await?;

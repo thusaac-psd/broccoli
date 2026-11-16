@@ -107,7 +107,7 @@ pub fn problem(client: &Client, contest: &str, input: &str) -> anyhow::Result<Re
     match_problem(&problems, input).map(|p| ResolvedProblem {
         id: p.problem_id,
         label: p.label.clone(),
-        title: p.problem_title.clone(),
+        title: crate::model::problem_title(p).to_string(),
     })
 }
 
@@ -141,9 +141,9 @@ fn match_problem<'a>(
             "'{q}' is both the label of {} ({}) and the position of {} ({}). \
              Use the label, or #<id> for a problem id.",
             a.label,
-            a.problem_title,
+            crate::model::problem_title(a),
             b.label,
-            b.problem_title
+            crate::model::problem_title(b)
         ),
         (Some(p), _) | (None, Some(p)) => return Ok(p),
         (None, None) => {}
@@ -160,13 +160,17 @@ fn match_problem<'a>(
 
     if let Some(p) = problems
         .iter()
-        .find(|p| p.problem_title.to_lowercase() == lower)
+        .find(|p| p.problem_title.as_deref().map(str::to_lowercase) == Some(lower.clone()))
     {
         return Ok(p);
     }
     let part: Vec<_> = problems
         .iter()
-        .filter(|p| p.problem_title.to_lowercase().contains(&lower))
+        .filter(|p| {
+            p.problem_title
+                .as_deref()
+                .is_some_and(|t| t.to_lowercase().contains(&lower))
+        })
         .collect();
     match part.as_slice() {
         [p] => Ok(p),
@@ -179,7 +183,7 @@ fn match_problem<'a>(
             "'{}' matches several problems: {}. Use the label.",
             q,
             many.iter()
-                .map(|p| format!("{} ({})", p.label, p.problem_title))
+                .map(|p| format!("{} ({})", p.label, crate::model::problem_title(p)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -189,7 +193,7 @@ fn match_problem<'a>(
 fn available(problems: &[crate::api::contest::ContestProblemResponse]) -> String {
     problems
         .iter()
-        .map(|p| format!("{} ({})", p.label, p.problem_title))
+        .map(|p| format!("{} ({})", p.label, crate::model::problem_title(p)))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -205,7 +209,8 @@ mod tests {
             problem_id,
             label: label.into(),
             position,
-            problem_title: title.into(),
+            problem_title: Some(title.into()),
+            withheld: None,
         }
     }
 

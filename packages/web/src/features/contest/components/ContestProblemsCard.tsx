@@ -1,4 +1,5 @@
 import { useAuth } from '@broccoli/web-sdk/auth';
+import { contestProblemTitle } from '@broccoli/web-sdk/contest';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useProblemPresentation } from '@broccoli/web-sdk/problem';
 import { QueryView, Skeleton } from '@broccoli/web-sdk/ui';
@@ -73,7 +74,7 @@ export function ContestProblemsCard({ contestId }: { contestId: number }) {
                           to={`/contests/${contestId}/problems/${p.problem_id}`}
                           className="font-medium group-hover:text-primary transition-colors"
                         >
-                          {p.problem_title}
+                          {contestProblemTitle(p, t)}
                         </Link>
                       </td>
                       <td className="px-2 py-3">

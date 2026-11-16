@@ -288,6 +288,7 @@ function JudgementRow({
     judgement.verdict ?? null,
     judgement.status,
     t,
+    judgement.withheld,
   );
 
   // The code's translation, when the packs have one.

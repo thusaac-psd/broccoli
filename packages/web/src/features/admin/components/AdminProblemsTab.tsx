@@ -3,7 +3,10 @@ import {
   useApiClient,
   useErrorMessage,
 } from '@broccoli/web-sdk/api';
-import type { ContestProblem } from '@broccoli/web-sdk/contest';
+import {
+  type ContestProblem,
+  contestProblemTitle,
+} from '@broccoli/web-sdk/contest';
 import {
   idempotencyOutcome,
   isAlreadyDone,
@@ -822,7 +825,7 @@ export function AdminProblemsTab({ contestId }: { contestId?: number }) {
             contestId,
             problemId: configContestProblem.problem_id,
           }}
-          resourceLabel={configContestProblem.problem_title}
+          resourceLabel={contestProblemTitle(configContestProblem, t)}
           open={configDialogOpen}
           onOpenChange={setConfigDialogOpen}
         />

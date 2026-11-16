@@ -31,6 +31,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
+use broccoli_api_types::visibility::PluginOutage;
 use plugin_core::error::PluginError;
 use plugin_core::registry::PluginStatus;
 use sea_orm::{ConnectionTrait, DbBackend, DbErr, EntityTrait, Set, Statement};
@@ -228,19 +229,35 @@ impl PluginLifecycle {
         self.governs.read().ok()?.get(plugin_id).cloned()
     }
 
-    /// Whether `contest_type` is provided only by plugins the fleet has
-    /// disabled: some disabled plugin last registered it and no enabled one
-    /// did. A type no plugin ever registered is not disabled, just unknown.
-    pub fn is_contest_type_disabled(&self, contest_type: &str) -> bool {
-        let Ok(governs) = self.governs.read() else {
-            return false;
-        };
-        let mut providers = governs
+    /// The plugin that keeps `contest_type` closed: every plugin that last
+    /// registered the type is disabled fleet-wide, and this is the first of
+    /// them by id. `None` when an enabled plugin provides the type, or no
+    /// plugin ever registered it (an unknown type is not disabled).
+    pub fn disabled_provider(&self, contest_type: &str) -> Option<String> {
+        let governs = self.governs.read().ok()?;
+        let mut providers: Vec<&String> = governs
             .iter()
             .filter(|(_, g)| g.contest_types.iter().any(|t| t == contest_type))
-            .map(|(id, _)| self.is_desired_enabled(id))
-            .peekable();
-        providers.peek().is_some() && providers.all(|enabled| !enabled)
+            .map(|(id, _)| id)
+            .collect();
+        if providers.iter().any(|id| self.is_desired_enabled(id)) {
+            return None;
+        }
+        providers.sort();
+        providers.first().map(|id| (*id).clone())
+    }
+
+    /// Why plugin `plugin_id`, known not to be loaded here, cannot serve:
+    /// the fleet disabled it, or it is enabled and missing on this replica
+    /// for now. This is the one place the two are told apart.
+    pub fn outage(&self, plugin_id: &str) -> PluginOutage {
+        if self.is_desired_enabled(plugin_id) {
+            PluginOutage::Unavailable
+        } else {
+            PluginOutage::Disabled {
+                plugin_id: plugin_id.to_string(),
+            }
+        }
     }
 
     pub(crate) fn set_desired(&self, plugin_id: &str, enabled: bool) {
@@ -258,6 +275,23 @@ impl PluginLifecycle {
             g.remove(plugin_id);
         }
     }
+}
+
+/// Why contests of `contest_type` cannot be served on this replica, if they
+/// cannot: the plugin providing the type is disabled fleet-wide, or no
+/// handler for it is loaded here. Submissions to such a contest are refused
+/// and its results are unavailable.
+pub async fn contest_type_outage(state: &AppState, contest_type: &str) -> Option<PluginOutage> {
+    if let Some(plugin_id) = state.plugin_lifecycle.disabled_provider(contest_type) {
+        return Some(PluginOutage::Disabled { plugin_id });
+    }
+    let registered = state
+        .registries
+        .contest_type_registry
+        .read()
+        .await
+        .contains_key(contest_type);
+    (!registered).then_some(PluginOutage::Unavailable)
 }
 
 /// Plugins that are enabled in the desired state but not `Loaded` here,

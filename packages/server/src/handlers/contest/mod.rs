@@ -119,7 +119,10 @@ pub async fn create_contest(
 
     let model = new_contest.insert(&state.db).await?;
 
-    Ok((StatusCode::CREATED, Json(contest_response(model, now))))
+    Ok((
+        StatusCode::CREATED,
+        Json(contest_response(&state, model).await),
+    ))
 }
 #[utoipa::path(
     get,
@@ -133,7 +136,6 @@ pub async fn create_contest(
         (status = 200, description = "List of contests", body = ContestListResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
-        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -233,17 +235,20 @@ pub async fn list_contests(
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
     let resources: Vec<Resource> = data.iter().map(|c| Resource::Contest(c.id)).collect();
     let decisions = kernel.decide_batch(Action::Read, &resources).await?;
-    let data: Vec<ContestListItem> = data
-        .into_iter()
-        .zip(decisions)
-        .filter_map(|(item, decision)| {
-            if decision.is_denied() {
-                None
-            } else {
-                Some(item.into_item(now))
+    let mut items = Vec::with_capacity(data.len());
+    for (row, decision) in data.into_iter().zip(decisions) {
+        if decision.is_denied() {
+            continue;
+        }
+        let outage = match &row.contest_type {
+            Some(contest_type) => {
+                crate::plugin_lifecycle::contest_type_outage(&state, contest_type).await
             }
-        })
-        .collect();
+            None => None,
+        };
+        items.push(row.into_item(now, outage));
+    }
+    let data: Vec<ContestListItem> = items;
 
     Ok(Json(ContestListResponse {
         data,
@@ -262,7 +267,6 @@ pub async fn list_contests(
         (status = 200, description = "Contest details", body = ContestResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 404, description = "Contest not found (NOT_FOUND)", body = ErrorBody),
-        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -284,7 +288,7 @@ pub async fn get_contest(
         return Err(AppError::NotFound("Contest not found".into()));
     }
 
-    Ok(Json(contest_response(model, state.clock.now())))
+    Ok(Json(contest_response(&state, model).await))
 }
 #[utoipa::path(
     get,
@@ -298,7 +302,6 @@ pub async fn get_contest(
         (status = 200, description = "Current user's contest context", body = ContestUserContextResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 404, description = "Contest not found (NOT_FOUND)", body = ErrorBody),
-        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -373,7 +376,7 @@ pub async fn update_contest(
 
     if payload == UpdateContestRequest::default() {
         let existing = find_contest(&state.db, id).await?;
-        return Ok(Json(contest_response(existing, state.clock.now())));
+        return Ok(Json(contest_response(&state, existing).await));
     }
 
     let txn = state.db.begin().await?;
@@ -432,7 +435,7 @@ pub async fn update_contest(
     let model = active.update(&txn).await?;
     txn.commit().await?;
 
-    Ok(Json(contest_response(model, state.clock.now())))
+    Ok(Json(contest_response(&state, model).await))
 }
 #[utoipa::path(
     delete,

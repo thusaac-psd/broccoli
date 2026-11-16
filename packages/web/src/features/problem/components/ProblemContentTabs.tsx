@@ -9,7 +9,8 @@ interface ProblemContentTabsProps {
   activeTab: ProblemViewTab;
   onTabChange: (tab: ProblemViewTab) => void;
   descriptionContent: ReactNode;
-  codingContent: ReactNode;
+  /** `null` when nothing may be submitted here: no coding tab is offered. */
+  codingContent: ReactNode | null;
   canEdit: boolean;
   onEdit: () => void;
 }
@@ -23,7 +24,7 @@ export function ProblemContentTabs({
   onEdit,
 }: ProblemContentTabsProps) {
   const { t } = useTranslation();
-  const isDescription = activeTab === 'description';
+  const isDescription = activeTab === 'description' || codingContent === null;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -45,15 +46,17 @@ export function ProblemContentTabs({
                   {t('problem.edit')}
                 </Button>
               )}
-              <Button
-                onClick={() => onTabChange('coding')}
-                size="sm"
-                variant="default"
-                className="h-8 gap-1.5 bg-primary px-4 font-semibold text-primary-foreground shadow-sm hover:bg-primary/90"
-              >
-                <Code2 className="h-3.5 w-3.5" />
-                {t('editor.submit')}
-              </Button>
+              {codingContent !== null && (
+                <Button
+                  onClick={() => onTabChange('coding')}
+                  size="sm"
+                  variant="default"
+                  className="h-8 gap-1.5 bg-primary px-4 font-semibold text-primary-foreground shadow-sm hover:bg-primary/90"
+                >
+                  <Code2 className="h-3.5 w-3.5" />
+                  {t('editor.submit')}
+                </Button>
+              )}
             </div>
           </>
         ) : (

@@ -150,7 +150,7 @@ async fn build_code_run_response(
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
         (status = 429, description = "Per-user rate limited (RATE_LIMITED)", body = ErrorBody),
-        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),
+        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -262,7 +262,7 @@ pub async fn run_code(
         (status = 403, description = "Forbidden (PERMISSION_DENIED); or the caller has not registered for this public contest (CONTEST_NOT_REGISTERED)", body = ErrorBody),
         (status = 404, description = "Contest or problem not found (NOT_FOUND)", body = ErrorBody),
         (status = 429, description = "Per-user rate limited (RATE_LIMITED)", body = ErrorBody),
-        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),
+        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]

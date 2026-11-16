@@ -236,7 +236,7 @@ pub async fn get_problem(
         (status = 400, description = "Contest has not started yet (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
-        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
+        (status = 503, description = "The plugin that decides who may read the problem is disabled (PLUGIN_DISABLED, no Retry-After) or cannot answer right now (PLUGIN_UNAVAILABLE, carries Retry-After)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -286,8 +286,14 @@ pub(crate) async fn require_problem_part_reachable(
         let contest = find_contest(&state.db, contest_id).await?;
         require_contest_started(auth_user, &contest, state.clock.now())?;
     }
-    if kernel.decide(action, scope.problem()).await?.is_denied() {
+    let decision = kernel.decide(action, scope.problem()).await?;
+    if decision.is_denied() {
         return Err(AppError::NotFound(not_found.into()));
+    }
+    // Whether a problem part may be read is the plugin's to decide; while
+    // it cannot, nothing of it is served.
+    if let Some(outage) = decision.outage() {
+        return Err(outage.clone().into());
     }
     Ok(())
 }

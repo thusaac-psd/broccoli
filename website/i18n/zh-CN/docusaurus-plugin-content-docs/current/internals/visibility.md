@@ -10,11 +10,15 @@ sidebar_position: 7
 
 ## 内核
 
-`VisibilityKernel::new(state, subject)` 每个请求为一个 `Subject` 构建一次。`decide_batch(action, resources)` 为每个资源给出一个 `Decision`（`Allow`、`Redact(mask)` 或 `Deny`）：
+`VisibilityKernel::new(state, subject)` 每个请求为一个 `Subject` 构建一次。`decide_batch(action, resources)` 为每个资源给出一个 `Decision`（`Allow`、`Redact(mask)`、`Withheld` 或 `Deny`）：
 
 1. `host_rules::host_decide` 以固定数量的查询为整批资源应用宿主规则：激活时间窗、公开与私有比赛、报名、题目归属、提交归属。
 2. 宿主未拒绝的每个资源，按比赛类型路由给已加载且声明了 `[[server.queries]] topic = "visibility"` 的插件，请求中带有资源的比赛 ID 和比赛阶段（`QueryResource`）。
-3. 各方答复通过 `Decision::meet` 合并，结果只会收窄。
+3. 各方答复通过 `Decision::meet` 合并，结果只会收窄：`Allow > Redact > Withheld > Deny`。
+
+插件从不收窄管理人员：持有 `contest:manage` 或 `submission:view_all` 的主体（`Subject::narrowed_by_plugins`）直接得到主机的决定，不咨询任何插件，也能看到被暂扣的反馈。可见性查询从不会被问到管理人员。
+
+DTO 只能经由 `Visible::into_masked_json` 进入响应体，该函数应用决定。经过它的每种响应形状都实现 `Governed`（`visibility/shapes.rs`），列出仅由主机决定的顶层字段。
 
 决策按内核实例缓存。`know_submission` 和 `know_contest` 把请求已经读取的行交给内核，避免重复读取。
 
@@ -36,9 +40,21 @@ sidebar_position: 7
 
 ## 可见性插件缺失时
 
-`plugin_query::visibility_queriers` 还会报告本副本无法判断的范围，即由未在本地加载的可见性插件管辖的资源：
+`plugin_query::visibility_queriers` 还会报告本副本无法判断的范围，即由未在本地加载的可见性插件管辖的资源，并为每项附上说明原因的 `PluginOutage`（由 `PluginLifecycle::outage` 区分两种情况，这是唯一做此区分的地方）：
 
-- 已启用但未在本地加载的插件（加载失败、文件缺失、副本尚未收敛）：其上次加载时在 `Governs` 中记录的比赛类型；若未记录任何类型，则为全部资源。
-- 已禁用或正在重新加载、且上次加载时作为某些比赛类型可见性插件的插件：这些比赛类型。
+- 已启用但未在本地加载的插件（加载失败、文件缺失、副本尚未收敛）：`unavailable`，范围是其上次加载时在 `Governs` 中记录的比赛类型；若未记录任何类型，则为全部资源。这也包括在比赛之外读取、但其题目属于这些比赛的题目和提交，因为其他副本在那里仍执行该插件。
+- 已禁用、且上次加载时作为某些比赛类型可见性插件的插件：`disabled`，范围仅限通过这些比赛读取的内容。
 
-涉及无法判断资源的批次返回带 `Retry-After` 的 `503 PLUGIN_UNAVAILABLE`，绝不返回未遮蔽的数据，也绝不返回会被理解为“不存在”的 `Deny`。其他类型的比赛以及不属于受管辖比赛的独立题目仍可读取。
+已加载但未能及时答复的查询方，在该请求中对其管辖的内容为 `unavailable`。
+
+降级按资源、按字段进行，绝不按批次：
+
+- 比赛和澄清是主机记录（`Resource::degrades_in_outage`），故障不会从中拿走任何内容。
+- 无法判断的题目部分或提交为 `Decision::Withheld`。其响应只显示其 `Governed` 形状列出的字段，其余字段为 `null`，`withheld` 为 `{"reason": "plugin_outage", "outage": ...}`。列表保留该行。没有主机决定字段的形状（题面、样例、附件）会以该故障使请求失败，读取以外的所有操作也是如此。
+- 故障对应 `503 PLUGIN_DISABLED`（不带 `Retry-After`）或 `503 PLUGIN_UNAVAILABLE`（带 `Retry-After`）。已禁用插件自己的路由同样返回 `PLUGIN_DISABLED`；向由已禁用插件提供比赛类型的比赛提交，返回 `CONTEST_TYPE_DISABLED`。
+
+`ContestResponse.plugin_outage` 和 `ContestListItem.plugin_outage` 来自 `plugin_lifecycle::contest_type_outage`：提供该比赛类型的插件已禁用，或本地没有加载其处理程序。客户端据此展示提交会被拒绝、结果不可用的比赛。
+
+## 被暂扣的结果
+
+对受插件收窄的查看者，当插件暂扣提交的反馈（`submission_feedback`）或某个决定隐藏其 `status` 时，提交的结果即被暂扣。提交只显示其 `Governed` 字段，`status` 为 `null`，`withheld` 为 `{"reason": "hidden"}`，客户端因此停止轮询。在 SQL 中其状态为 `NULL`（`submission_feedback::public_status`）：任何状态筛选都不匹配它。按状态排序时，所有状态被暂扣的行作为单独一组排在其余行之后，只按 id 排序，因此其位置不透露其状态。

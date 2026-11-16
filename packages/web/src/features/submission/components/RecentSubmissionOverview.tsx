@@ -1,9 +1,10 @@
 import { useErrorMessage } from '@broccoli/web-sdk/api';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import type {
-  SubmissionStatus,
+  ShownStatus,
   SubmissionSummary,
   Verdict,
+  Withheld,
 } from '@broccoli/web-sdk/submission';
 import { Badge, QueryErrorState } from '@broccoli/web-sdk/ui';
 import { formatKibibytes } from '@broccoli/web-sdk/utils';
@@ -32,7 +33,8 @@ interface OverviewRow {
   key: string;
   submissionId: number | null;
   pendingOrder: number;
-  status: SubmissionStatus;
+  status: ShownStatus;
+  withheld: Withheld | null;
   verdict: Verdict | null;
   score: number | null;
   createdAt: string | null;
@@ -40,7 +42,7 @@ interface OverviewRow {
   memoryUsed: number | null;
 }
 
-function getEntryStatus(entry: SubmissionEntry): SubmissionStatus {
+function getEntryStatus(entry: SubmissionEntry): ShownStatus {
   if (entry.submission) {
     return entry.submission.status;
   }
@@ -115,6 +117,7 @@ export function RecentSubmissionOverview({
       submissionId: item.id,
       pendingOrder: 0,
       status: item.status,
+      withheld: item.withheld ?? null,
       verdict: (item.verdict as Verdict | null) ?? null,
       score: item.score ?? null,
       createdAt: item.created_at,
@@ -155,6 +158,7 @@ export function RecentSubmissionOverview({
         submissionId: null,
         pendingOrder: entry.id,
         status: getEntryStatus(entry),
+        withheld: null,
         verdict: null,
         score: null,
         createdAt: null,
@@ -170,6 +174,7 @@ export function RecentSubmissionOverview({
       submissionId: sub.id,
       pendingOrder: 0,
       status: sub.status,
+      withheld: sub.withheld ?? null,
       verdict: sub.result?.verdict ?? null,
       score: sub.result?.score ?? null,
       createdAt: sub.created_at,
@@ -241,6 +246,7 @@ export function RecentSubmissionOverview({
             row.verdict,
             row.status,
             t,
+            row.withheld,
           );
           const scoreToneClass = getScoreToneClass(variant);
           const scoreDisplay = getSubmissionScoreDisplay(

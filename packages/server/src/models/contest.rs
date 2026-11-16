@@ -127,8 +127,13 @@ impl ContestListRow {
         )
     }
 
-    /// The list item, with the contest's phase at `now`.
-    pub fn into_item(self, now: DateTime<Utc>) -> ContestListItem {
+    /// The list item, with the contest's phase at `now` and what keeps its
+    /// type from being served (`crate::plugin_lifecycle::contest_type_outage`).
+    pub fn into_item(
+        self,
+        now: DateTime<Utc>,
+        plugin_outage: Option<broccoli_api_types::visibility::PluginOutage>,
+    ) -> ContestListItem {
         let phase = self.phase(now);
         let ContestListRow {
             id,
@@ -160,13 +165,24 @@ impl ContestListRow {
             created_at,
             updated_at,
             phase,
+            plugin_outage,
         }
     }
 }
 
-/// The contest's response, with its phase at `now`.
-pub fn contest_response(m: crate::entity::contest::Model, now: DateTime<Utc>) -> ContestResponse {
-    let phase = crate::utils::contest::contest_phase(&m, now);
+/// The contest's response, with its phase now and what keeps its type from
+/// being served (`crate::plugin_lifecycle::contest_type_outage`).
+pub async fn contest_response(
+    state: &crate::state::AppState,
+    m: crate::entity::contest::Model,
+) -> ContestResponse {
+    let phase = crate::utils::contest::contest_phase(&m, state.clock.now());
+    let plugin_outage = match &m.contest_type {
+        Some(contest_type) => {
+            crate::plugin_lifecycle::contest_type_outage(state, contest_type).await
+        }
+        None => None,
+    };
     ContestResponse {
         id: m.id,
         title: m.title,
@@ -183,6 +199,7 @@ pub fn contest_response(m: crate::entity::contest::Model, now: DateTime<Utc>) ->
         created_at: m.created_at,
         updated_at: m.updated_at,
         phase,
+        plugin_outage,
     }
 }
 

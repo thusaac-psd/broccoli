@@ -4,6 +4,7 @@ import { Slot } from '@broccoli/web-sdk/slot';
 import {
   parseSubmissionError,
   type Submission,
+  withheldLabel,
 } from '@broccoli/web-sdk/submission';
 import { TextPreview } from '@broccoli/web-sdk/ui';
 import { Timer, XCircle } from 'lucide-react';
@@ -67,6 +68,16 @@ export function SubmissionResult({
           files={submission.files}
           language={submission.language}
         />
+      )}
+
+      {/* A withheld outcome says why, in place of a result */}
+      {submission.withheld && (
+        <div
+          role="status"
+          className="py-6 text-center text-sm text-muted-foreground"
+        >
+          {withheldLabel(submission.withheld, t)}
+        </div>
       )}
 
       {/* Compilation error output */}
