@@ -10,13 +10,19 @@ use crate::error::SdkError;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigResult {
     pub config: serde_json::Value,
-    /// Nothing is stored: `config` is the schema's defaults.
-    #[serde(default)]
-    pub is_default: bool,
+    /// The row as stored, without defaults; `None` when nothing is stored
+    /// and `config` is the schema's defaults. The cascade reads it to tell
+    /// the fields a scope sets from the ones it leaves to the next scope up.
+    pub stored: Option<serde_json::Value>,
     pub enabled: Option<bool>,
 }
 
 impl ConfigResult {
+    /// Nothing is stored: `config` is the schema's defaults.
+    pub fn is_default(&self) -> bool {
+        self.stored.is_none()
+    }
+
     /// The config as the plugin's config type. A config that does not
     /// deserialize is an error, never a silent fallback to some default.
     pub fn parse<T: serde::de::DeserializeOwned>(&self) -> Result<T, SdkError> {
@@ -32,7 +38,7 @@ fn parse<T: serde::de::DeserializeOwned>(config: &serde_json::Value) -> Result<T
     })
 }
 
-/// The scope whose row an effective config comes from.
+/// The most specific scope whose row an effective config takes fields from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigSource {
@@ -59,7 +65,7 @@ impl From<&ConfigResult> for CascadeLevel {
     fn from(r: &ConfigResult) -> Self {
         Self {
             config: r.config.clone(),
-            is_default: r.is_default,
+            is_default: r.is_default(),
             enabled: r.enabled,
         }
     }
@@ -70,9 +76,7 @@ pub struct CascadeLevels {
     pub contest_problem: Option<CascadeLevel>,
     pub contest: Option<CascadeLevel>,
     pub problem: CascadeLevel,
-    /// Read only when no narrower scope decides the config alone: when none
-    /// stores the namespace, or the one that does is switched off.
-    pub plugin: Option<CascadeLevel>,
+    pub plugin: CascadeLevel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

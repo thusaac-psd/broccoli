@@ -105,7 +105,7 @@ fn load_entry_point_config(
         return Ok(None);
     };
     let result = host.config.get_problem(problem_id, CONFIG_ENTRY_POINTS)?;
-    if result.is_default {
+    if result.is_default() {
         return Ok(None);
     }
     parse_language_entry(&result.config, language_id)

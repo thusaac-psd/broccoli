@@ -648,8 +648,8 @@ function SinglePluginContent({
                 values:
                   (contestRes.data.config as Record<string, unknown>) ?? null,
                 enabled:
-                  (contestRes.data as { enabled?: boolean | null }).enabled ===
-                  true,
+                  (contestRes.data as { enabled?: boolean | null }).enabled ??
+                  null,
               }
             : undefined,
           problem: problemRes.data
@@ -657,8 +657,8 @@ function SinglePluginContent({
                 values:
                   (problemRes.data.config as Record<string, unknown>) ?? null,
                 enabled:
-                  (problemRes.data as { enabled?: boolean | null }).enabled ===
-                  true,
+                  (problemRes.data as { enabled?: boolean | null }).enabled ??
+                  null,
               }
             : undefined,
         };

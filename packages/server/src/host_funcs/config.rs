@@ -156,7 +156,7 @@ fn config_get_fn(
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
     let output = ConfigResult {
         config,
-        is_default: result.is_none(),
+        stored: stored.cloned(),
         enabled: result.as_ref().and_then(|row| row.enabled),
     };
 

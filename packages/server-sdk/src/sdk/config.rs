@@ -7,62 +7,86 @@ pub struct Config {
     pub(super) inner: ConfigMock,
 }
 
-/// The effective config of a namespace at one problem: the most specific
-/// scope that stores it wins (contest problem, contest, problem, then the
-/// plugin-wide row), and a switched-off override leaves what it overrode. The
-/// plugin scope is read only when no narrower scope decides alone.
+/// The effective config of a namespace at one problem. Each scope that
+/// stores the namespace sets the fields it stores and leaves the rest to the
+/// next scope up: contest problem, contest, problem, the plugin-wide row, then
+/// the schema's defaults (see [`overlay`]). Whether it is on is decided by the
+/// most specific scope that says; a switched-off override contributes nothing
+/// and leaves what it overrode, so when the deciding scope is switched off the
+/// config is the plugin-wide one.
 fn resolve_cascade(
     cp: Option<ConfigResult>,
     c: Option<ConfigResult>,
     p: ConfigResult,
-    plugin: impl FnOnce() -> Result<ConfigResult, SdkError>,
-) -> Result<EffectiveConfig, SdkError> {
-    let narrower: [(Option<&ConfigResult>, ConfigSource); 3] = [
+    plugin: ConfigResult,
+) -> EffectiveConfig {
+    // Most specific first, only the scopes that store the namespace.
+    let stored: Vec<(&ConfigResult, &Value, ConfigSource)> = [
         (cp.as_ref(), ConfigSource::ContestProblem),
         (c.as_ref(), ConfigSource::Contest),
         (Some(&p), ConfigSource::Problem),
-    ];
-    let explicit = |r: &Option<&ConfigResult>| r.is_some_and(|r| !r.is_default);
-    let first_explicit = narrower
-        .iter()
-        .find(|(r, _)| explicit(r))
-        .map(|(r, source)| (r.expect("explicit levels are present"), source.clone()));
-    let resolved_enabled = narrower
-        .iter()
-        .filter(|(r, _)| explicit(r))
-        .find_map(|(r, _)| r.and_then(|r| r.enabled));
+    ]
+    .into_iter()
+    .filter_map(|(r, source)| {
+        let r = r?;
+        Some((r, r.stored.as_ref()?, source))
+    })
+    .collect();
+    let decided = stored.iter().find_map(|(r, _, _)| r.enabled);
 
-    let mut levels = CascadeLevels {
-        contest_problem: cp.as_ref().map(CascadeLevel::from),
-        contest: c.as_ref().map(CascadeLevel::from),
-        problem: CascadeLevel::from(&p),
-        plugin: None,
-    };
-    let (config, source, is_enabled) = match (first_explicit, resolved_enabled) {
-        (Some((most_specific, source)), Some(true)) => (most_specific.config.clone(), source, true),
-        (Some((most_specific, source)), None) => (most_specific.config.clone(), source, false),
-        (Some(_), Some(false)) => {
-            let base = plugin()?;
-            levels.plugin = Some(CascadeLevel::from(&base));
-            (base.config, ConfigSource::Disabled, false)
-        }
+    let (config, source, is_enabled) = match (stored.first(), decided) {
         (None, _) => {
-            let base = plugin()?;
-            levels.plugin = Some(CascadeLevel::from(&base));
-            let (source, is_enabled) = if base.is_default {
-                (ConfigSource::Default, false)
+            let source = if plugin.is_default() {
+                ConfigSource::Default
             } else {
-                (ConfigSource::Plugin, base.enabled == Some(true))
+                ConfigSource::Plugin
             };
-            (base.config, source, is_enabled)
+            (plugin.config.clone(), source, plugin.enabled == Some(true))
+        }
+        (Some(_), Some(false)) => (plugin.config.clone(), ConfigSource::Disabled, false),
+        (Some((_, _, source)), decided) => {
+            let mut config = plugin.config.clone();
+            for (row, raw, _) in stored.iter().rev() {
+                if row.enabled != Some(false) {
+                    overlay(&mut config, raw, Some(&row.config));
+                }
+            }
+            (config, source.clone(), decided == Some(true))
         }
     };
-    Ok(EffectiveConfig {
+    EffectiveConfig {
         config,
         source,
         is_enabled,
-        levels,
-    })
+        levels: CascadeLevels {
+            contest_problem: cp.as_ref().map(CascadeLevel::from),
+            contest: c.as_ref().map(CascadeLevel::from),
+            problem: CascadeLevel::from(&p),
+            plugin: CascadeLevel::from(&plugin),
+        },
+    }
+}
+
+/// Lay a narrower scope's stored row over the config of the scopes above it:
+/// a field the row stores replaces the one above, except that two objects
+/// merge field by field, and a field it does not store keeps the one above.
+/// A value the row brings takes its schema defaults from `filled`, the row
+/// as the host resolved it.
+fn overlay(above: &mut Value, stored: &Value, filled: Option<&Value>) {
+    match (above, stored) {
+        (Value::Object(above), Value::Object(stored)) => {
+            for (key, value) in stored {
+                let filled = filled.and_then(|f| f.get(key));
+                match above.get_mut(key) {
+                    Some(slot) => overlay(slot, value, filled),
+                    None => {
+                        above.insert(key.clone(), filled.unwrap_or(value).clone());
+                    }
+                }
+            }
+        }
+        (above, stored) => *above = filled.unwrap_or(stored).clone(),
+    }
 }
 
 impl Config {
@@ -82,7 +106,7 @@ impl Config {
             None => (None, None),
         };
         let p = self.get_problem(problem_id, ns)?;
-        resolve_cascade(cp, c, p, || self.get_global(ns))
+        Ok(resolve_cascade(cp, c, p, self.get_global(ns)?))
     }
 }
 
@@ -213,12 +237,12 @@ impl Config {
         match self.inner.data.borrow().get(&key) {
             Some((config, enabled)) => Ok(ConfigResult {
                 config: self.inner.resolve(ns, Some(config)),
-                is_default: false,
+                stored: Some(config.clone()),
                 enabled: *enabled,
             }),
             None => Ok(ConfigResult {
                 config: self.inner.resolve(ns, None),
-                is_default: true,
+                stored: None,
                 enabled: None,
             }),
         }
@@ -304,8 +328,8 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::ConfigSource;
-    use serde_json::json;
+    use crate::types::{ConfigResult, ConfigSource};
+    use serde_json::{Value, json};
 
     fn make_host() -> crate::sdk::Host {
         crate::sdk::Host::mock()
@@ -487,6 +511,68 @@ mod tests {
         let eff = host.config.get_effective("ns", 1, None).unwrap();
         assert_eq!(eff.config["v"], 99);
         assert!(!eff.is_enabled);
+    }
+
+    /// A field a scope does not store comes from the next scope up, not from
+    /// the schema's defaults: a problem that sets only Python's interpreter
+    /// keeps the plugin-wide C++ compiler.
+    #[test]
+    fn a_scope_takes_the_fields_it_does_not_store_from_the_next_scope_up() {
+        let host = make_host();
+        host.config.seed(
+            "plugin",
+            "",
+            "ns",
+            json!({"cpp": {"compiler": "gcc-14", "flags": ["-std=c++20"]}, "python3": {"interpreter": "python3"}}),
+        );
+        host.config.seed(
+            "problem",
+            "1",
+            "ns",
+            json!({"python3": {"interpreter": "pypy3"}}),
+        );
+        host.config
+            .seed("contest", "10", "ns", json!({"cpp": {"flags": ["-O2"]}}));
+
+        let eff = host.config.get_effective("ns", 1, Some(10)).unwrap();
+        assert_eq!(eff.source, ConfigSource::Contest);
+        assert_eq!(
+            eff.config,
+            json!({"cpp": {"compiler": "gcc-14", "flags": ["-O2"]}, "python3": {"interpreter": "pypy3"}})
+        );
+    }
+
+    /// The defaults the host fills into a narrower row never hide what a
+    /// wider scope stores; they reach the effective config only where no
+    /// scope stores the field.
+    #[test]
+    fn a_narrower_rows_filled_defaults_never_hide_a_wider_scopes_field() {
+        let row = |stored: Option<Value>, config: Value| ConfigResult {
+            config,
+            stored,
+            enabled: Some(true),
+        };
+        let plugin = row(
+            Some(json!({"cpp": {"compiler": "gcc-14"}})),
+            json!({"cpp": {"compiler": "gcc-14", "flags": ["-O2"]}, "java": {"runner": "java"}}),
+        );
+        let problem = row(
+            Some(json!({"cpp": {"flags": ["-O3"]}, "kotlin": {"compiler": "kotlinc-2"}})),
+            json!({
+                "cpp": {"compiler": "g++", "flags": ["-O3"]},
+                "java": {"runner": "java"},
+                "kotlin": {"compiler": "kotlinc-2", "flags": ["-Werror"]},
+            }),
+        );
+        let eff = super::resolve_cascade(None, None, problem, plugin);
+        assert_eq!(
+            eff.config,
+            json!({
+                "cpp": {"compiler": "gcc-14", "flags": ["-O3"]},
+                "java": {"runner": "java"},
+                "kotlin": {"compiler": "kotlinc-2", "flags": ["-Werror"]},
+            })
+        );
     }
 
     #[test]

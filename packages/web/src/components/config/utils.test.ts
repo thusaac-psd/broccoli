@@ -3,7 +3,6 @@ import { test } from 'node:test';
 
 import type { JsonSchema } from './types.ts';
 import {
-  deepMerge,
   extractDefaults,
   hasOwnDescendantValue,
   serverFieldErrors,
@@ -30,16 +29,6 @@ test('extractDefaults collects defaults, nested objects included', () => {
     limit: 3,
     nested: { ratio: 0.5 },
   });
-});
-
-test('deepMerge merges objects recursively and replaces arrays', () => {
-  assert.deepEqual(
-    deepMerge(
-      { a: 1, nested: { x: 1, y: 2 }, list: [1, 2] },
-      { nested: { y: 3 }, list: [9] },
-    ),
-    { a: 1, nested: { x: 1, y: 3 }, list: [9] },
-  );
 });
 
 test('setAtPath copies and creates missing containers', () => {

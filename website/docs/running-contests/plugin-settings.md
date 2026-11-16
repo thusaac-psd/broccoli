@@ -22,12 +22,12 @@ inside one contest.
 
 ## Which level wins
 
-A contest problem value beats a contest value, which beats a problem value.
-These three levels combine automatically, and whichever one is most specific
-wins. Global works differently. The plugin that defines a setting reads a
-global value on its own, so a global value applies wherever that plugin's
-own code chooses to use it, not as an automatic fallback under the other
-three levels.
+A contest problem value beats a contest value, which beats a problem value,
+which beats the global value. The levels combine field by field: a level
+sets only the fields you saved there, and every field it leaves unset comes
+from the next broader level, down to the plugin's default. Say the global
+compilation setting names gcc-14 for C++ and one problem changes only the
+Python interpreter: that problem still compiles C++ with gcc-14.
 
 Take the cooldown plugin's submission cooldown. A contest sets it to sixty
 seconds, and one contest problem in that contest sets it to thirty seconds.
