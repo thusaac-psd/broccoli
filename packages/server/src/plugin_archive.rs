@@ -18,7 +18,7 @@ use axum::body::Bytes;
 use common::storage::ContentHash;
 
 use crate::plugin_id::PluginId;
-use plugin_core::manifest::{PluginManifest, parse_manifest, resolve_schema_includes_with};
+use plugin_core::manifest::{PluginManifest, parse_manifest};
 use plugin_core::registry::PluginEntry;
 
 const MIB: usize = 1024 * 1024;
@@ -69,9 +69,10 @@ impl std::fmt::Debug for PluginArchive {
 impl PluginArchive {
     /// Validate `bytes` as a plugin archive: the size limits, the entry
     /// types (regular files and directories only), the layout, that every
-    /// path stays inside the plugin root, that `plugin.toml` parses and
-    /// declares valid routes, and that every path it names is inside the
-    /// plugin root and its server entry point is in the archive.
+    /// path stays inside the plugin root, that the plugin builds the entry
+    /// loading it would (`PluginEntry::read`: its manifest, config schemas
+    /// and translations), and that every path it names is inside the plugin
+    /// root and its server entry point is in the archive.
     pub fn parse(bytes: impl Into<Bytes>) -> Result<Self, ArchiveError> {
         let bytes: Bytes = bytes.into();
         if bytes.len() > MAX_ARCHIVE_BYTES {
@@ -99,23 +100,25 @@ impl PluginArchive {
         })?;
         let manifest_source =
             manifest_source.ok_or_else(|| reject(format!("Archive has no {id}/plugin.toml")))?;
-        let mut manifest = parse_manifest(&manifest_source).map_err(|e| reject(e.to_string()))?;
-        let schemas = schema_files(&bytes, &manifest)?;
-        resolve_schema_includes_with(&mut manifest, |schema_path| {
-            let path = Path::new(schema_path);
-            if !stays_inside(path) {
-                return Err(format!("'{schema_path}' escapes plugin directory"));
+        let manifest = parse_manifest(&manifest_source).map_err(|e| reject(e.to_string()))?;
+        let texts = text_files(&bytes, &manifest)?;
+        // The entry loading builds (the manifest with its config schema
+        // includes, its routes and timers, its translations), from the
+        // archive's files instead of a directory.
+        let entry = PluginEntry::read(id.to_string(), PathBuf::new(), |path| {
+            if path == "plugin.toml" {
+                return Ok(manifest_source.clone());
             }
-            schemas
-                .get(&normalized(path))
+            if !stays_inside(Path::new(path)) {
+                return Err(format!("'{path}' escapes plugin directory"));
+            }
+            texts
+                .get(&normalized(Path::new(path)))
                 .cloned()
-                .ok_or_else(|| format!("'{schema_path}' is not in the archive"))
+                .ok_or_else(|| format!("'{path}' is not in the archive"))
         })
         .map_err(|e| reject(e.to_string()))?;
-        // The checks loading runs on the manifest (its config schemas, with
-        // their includes, its routes and timers), without touching disk.
-        PluginEntry::new(id.to_string(), PathBuf::new(), manifest.clone())
-            .map_err(|e| reject(e.to_string()))?;
+        let manifest = entry.manifest;
         for path in manifest.loaded_paths() {
             if !stays_inside(Path::new(path)) {
                 return Err(reject(format!(
@@ -180,10 +183,10 @@ impl PluginArchive {
     }
 }
 
-/// Whether a manifest-relative path stays inside the plugin directory.
-/// The text of every config schema file `manifest` includes, keyed by its
+/// The text files besides `plugin.toml` that loading `manifest` reads
+/// (its included config schemas and its translation files), keyed by their
 /// [`normalized`] path inside the plugin root.
-fn schema_files(
+fn text_files(
     bytes: &[u8],
     manifest: &PluginManifest,
 ) -> Result<HashMap<PathBuf, String>, ArchiveError> {
@@ -191,6 +194,7 @@ fn schema_files(
         .config
         .values()
         .filter_map(|ns| ns.schema.as_deref())
+        .chain(manifest.translations.values().map(String::as_str))
         .map(|path| normalized(Path::new(path)))
         .collect();
     let mut found = HashMap::new();
@@ -223,6 +227,7 @@ fn normalized(path: &Path) -> PathBuf {
         .collect()
 }
 
+/// Whether a manifest-relative path stays inside the plugin directory.
 fn stays_inside(path: &Path) -> bool {
     path.components()
         .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
@@ -629,6 +634,38 @@ permissions = ["storage"]
             Item::File("demo/demo.wasm", b"\0asm"),
         ]);
         assert!(error(bytes).contains("is not in the archive"));
+    }
+
+    /// An archive's translation files are checked as loading checks them,
+    /// so one whose keys loading would refuse is refused at upload, and one
+    /// that uploads loads.
+    #[test]
+    fn checks_translations_as_loading_does() {
+        let manifest = format!("{MANIFEST}\n[translations]\nen = \"i18n/en.toml\"\n");
+        let with_pack = |pack: &str| {
+            archive(&[
+                Item::File("demo/plugin.toml", manifest.as_bytes()),
+                Item::File("demo/demo.wasm", b"\0asm"),
+                Item::File("demo/i18n/en.toml", pack.as_bytes()),
+            ])
+        };
+        let message = error(with_pack("'nav.signIn' = \"Hijacked\"\n"));
+        assert!(message.contains("nav.signIn"), "{message}");
+        assert!(error(with_pack("'demo.title' = [1]\n")).contains("i18n/en.toml"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = PluginArchive::parse(with_pack("'demo.title' = \"Demo\"\n"))
+            .expect("a plugin's own keys upload")
+            .unpack(&dir.path().join("x"))
+            .unwrap();
+        let loaded = PluginEntry::from_dir(&root).unwrap();
+        assert_eq!(loaded.translations.len(), 1);
+
+        let bytes = archive(&[
+            Item::File("demo/plugin.toml", manifest.as_bytes()),
+            Item::File("demo/demo.wasm", b"\0asm"),
+        ]);
+        assert!(error(bytes).contains("i18n/en.toml"));
     }
 
     #[test]

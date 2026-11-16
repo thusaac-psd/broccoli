@@ -7,7 +7,9 @@ use serde::Serialize;
 
 use crate::error::{AssetError, PluginError};
 use crate::i18n::TranslationMap;
-use crate::manifest::{PluginManifest, RouteAccess, parse_manifest, resolve_schema_includes};
+use crate::manifest::{
+    PluginManifest, RouteAccess, dir_reader, parse_manifest, resolve_schema_includes_with,
+};
 use crate::pool::{InstancePool, Liveness};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -187,16 +189,26 @@ impl PluginEntry {
             .ok_or_else(|| PluginError::LoadFailed("Invalid plugin directory name".into()))?
             .to_string();
 
-        let toml_path = plugin_dir.join("plugin.toml");
-        let toml_content = std::fs::read_to_string(&toml_path)
-            .map_err(|e| PluginError::LoadFailed(format!("Failed to read manifest: {}", e)))?;
+        Self::read(id, plugin_dir.to_path_buf(), dir_reader(plugin_dir)?)
+    }
 
+    /// Build plugin `id`'s entry from its files, each read through `read`
+    /// (given its path relative to the plugin directory, as the manifest
+    /// names it): `plugin.toml`, the config schemas it includes and its
+    /// translation files. Loading a plugin directory and checking an
+    /// uploaded archive both build the entry here, so an archive uploads
+    /// exactly when it would load.
+    pub fn read(
+        id: String,
+        root_dir: PathBuf,
+        mut read: impl FnMut(&str) -> Result<String, String>,
+    ) -> Result<Self, PluginError> {
+        let toml_content = read("plugin.toml")
+            .map_err(|e| PluginError::LoadFailed(format!("Failed to read manifest: {e}")))?;
         let mut manifest = parse_manifest(&toml_content)?;
-
-        resolve_schema_includes(&mut manifest, plugin_dir)?;
-
-        let mut entry = Self::new(id, plugin_dir.to_path_buf(), manifest)?;
-        entry.translations = read_translations(plugin_dir, &entry.id, &entry.manifest)?;
+        resolve_schema_includes_with(&mut manifest, &mut read)?;
+        let mut entry = Self::new(id, root_dir, manifest)?;
+        entry.translations = read_translations(&entry.id, &entry.manifest, read)?;
         Ok(entry)
     }
 
@@ -228,39 +240,31 @@ impl PluginEntry {
     }
 }
 
-/// Every translation file `manifest` declares, read from `root`. A file
+/// Every translation file `manifest` declares, read through `read`. A file
 /// with a key the plugin may not provide (see [`crate::i18n::foreign_keys`])
 /// fails the load, naming the keys.
 fn read_translations(
-    root: &Path,
     plugin_id: &str,
     manifest: &PluginManifest,
+    mut read: impl FnMut(&str) -> Result<String, String>,
 ) -> Result<Vec<(String, TranslationMap)>, PluginError> {
     manifest
         .translations
         .iter()
         .map(|(lang, path)| {
-            let path = root.join(path);
-            let content = std::fs::read_to_string(&path).map_err(|e| {
-                PluginError::LoadFailed(format!(
-                    "Failed to read translation file '{}': {e}",
-                    path.display()
-                ))
+            let content = read(path).map_err(|e| {
+                PluginError::LoadFailed(format!("Failed to read translation file '{path}': {e}"))
             })?;
             let map = toml::from_str(&content).map_err(|e| {
-                PluginError::LoadFailed(format!(
-                    "Invalid translation file syntax in '{}': {e}",
-                    path.display()
-                ))
+                PluginError::LoadFailed(format!("Invalid translation file syntax in '{path}': {e}"))
             })?;
             let foreign = crate::i18n::foreign_keys(plugin_id, manifest, &map);
             if !foreign.is_empty() {
                 return Err(PluginError::LoadFailed(format!(
-                    "Translation file '{}' has keys outside plugin '{plugin_id}': {}. \
+                    "Translation file '{path}' has keys outside plugin '{plugin_id}': {}. \
                      A plugin's keys start with '{plugin_id}.', or are its manifest text \
                      ('plugin.{plugin_id}.', 'config.{plugin_id}.') or the name of an \
                      identifier it registers ('identifier.<contestType|problemType|checker>.')",
-                    path.display(),
                     foreign.join(", ")
                 )));
             }
