@@ -13,7 +13,9 @@ pub struct Config {
 /// the schema's defaults (see [`overlay`]). Whether it is on is decided by the
 /// most specific scope that says; a switched-off override contributes nothing
 /// and leaves what it overrode, so when the deciding scope is switched off the
-/// config is the plugin-wide one.
+/// config is the plugin-wide one. The admin forms preview the same rule in
+/// `packages/web-sdk/src/slot/config-cascade.ts`; see the config cascade
+/// entry of `docs/plans/dedup-backlog.md`.
 fn resolve_cascade(
     cp: Option<ConfigResult>,
     c: Option<ConfigResult>,

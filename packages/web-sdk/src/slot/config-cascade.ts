@@ -2,7 +2,9 @@
  * The config cascade's rule for the admin forms, the one the server SDK's
  * `resolve_cascade` judges with: each scope that stores a namespace sets the
  * fields it stores and leaves the rest to the next scope up (contest problem,
- * contest, problem, the plugin-wide row, then the schema's defaults).
+ * contest, problem, the plugin-wide row, then the schema's defaults). It
+ * mirrors `resolve_cascade` across the language boundary; see the config
+ * cascade entry of `docs/plans/dedup-backlog.md`.
  */
 import type {
   InheritedConfig,
