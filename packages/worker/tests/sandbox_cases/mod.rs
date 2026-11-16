@@ -39,9 +39,8 @@ pub trait Backend {
 
 /// Instantiate every shared case as a `#[tokio::test]` for one backend. The
 /// `all` attributes are applied to every generated test (e.g. the isolate
-/// suite's `#[ignore]` and `#[serial]`); the `cpp` ones are added to the cases
-/// that need a C++ compiler on the host (e.g. an `#[ignore]` keeping them
-/// opt-in where the suite otherwise runs by default).
+/// suite's `#[ignore]` and `#[serial]`). The `cpp_*` cases need a C++17
+/// compiler on `PATH`.
 #[macro_export]
 macro_rules! sandbox_suite {
     (@cases $backend:ty; $attrs:tt; $($case:ident),* $(,)?) => {
@@ -54,12 +53,10 @@ macro_rules! sandbox_suite {
             sandbox_cases::$case::<$backend>().await;
         }
     };
-    ($backend:ty; all: [$(#[$attr:meta]),* $(,)?]; cpp: [$(#[$cpp:meta]),* $(,)?] $(,)?) => {
-        $crate::sandbox_suite!(@cases $backend; [$(#[$attr])* $(#[$cpp])*];
+    ($backend:ty; all: [$(#[$attr:meta]),* $(,)?] $(;)?) => {
+        $crate::sandbox_suite!(@cases $backend; [$(#[$attr])*];
             cpp_oi_pipeline_with_io_redirection,
             cpp_compile_error_skips_dependent_step,
-        );
-        $crate::sandbox_suite!(@cases $backend; [$(#[$attr])*];
             echo_succeeds,
             nonzero_exit_fails_the_step,
             large_stdout_is_returned_as_capped_preview,
@@ -112,8 +109,8 @@ fn tools_dir() -> PathBuf {
     dir
 }
 
-/// An absolute path to a C++ compiler on PATH. The C++ cases are opt-in on
-/// every backend, so a missing compiler is a misconfigured run, not a skip.
+/// An absolute path to a C++ compiler on PATH. A missing compiler is a
+/// misconfigured run, not a skip.
 pub fn cpp_compiler() -> String {
     find_cpp_compiler().expect("no C++ compiler found on PATH")
 }
@@ -131,9 +128,9 @@ fn find_cpp_compiler() -> Option<String> {
 }
 
 /// Copy the built `broccoli-compare` binary into a fresh tools dir for a
-/// PlatformTool mount. `None` (skip the case) if the comparator isn't built:
-/// build it with `cargo build -p broccoli-compare` first.
-fn broccoli_compare_tools_dir() -> Option<PathBuf> {
+/// PlatformTool mount. `cargo test --workspace` builds the binary; a run
+/// scoped to this crate needs `cargo build -p broccoli-compare` first.
+fn broccoli_compare_tools_dir() -> PathBuf {
     let manifest = env!("CARGO_MANIFEST_DIR"); // .../packages/worker
     let src = ["debug", "release"]
         .into_iter()
@@ -143,12 +140,13 @@ fn broccoli_compare_tools_dir() -> Option<PathBuf> {
                 .join(p)
                 .join("broccoli-compare")
         })
-        .find(|p| p.exists())?;
+        .find(|p| p.exists())
+        .expect("broccoli-compare is not built: run `cargo build -p broccoli-compare`");
     let dir = tools_dir();
     let dst = dir.join("broccoli-compare");
     std::fs::copy(&src, &dst).unwrap();
     set_mode(&dst, 0o755);
-    Some(dir)
+    dir
 }
 
 fn env(id: &str) -> Environment {
@@ -918,10 +916,7 @@ fn fused_stream_op<B: Backend>(
 }
 
 pub async fn fused_builtin_stream_accepts_matching_output<B: Backend>() {
-    let Some(tools_dir) = broccoli_compare_tools_dir() else {
-        eprintln!("skipping: broccoli-compare not built (cargo build -p broccoli-compare)");
-        return;
-    };
+    let tools_dir = broccoli_compare_tools_dir();
     let handler = handler::<B>(Some(tools_dir.clone()));
 
     let op = fused_stream_op::<B>("printf '3 1 4\\n'", "3 1 4\n", "tokens", None);
@@ -959,10 +954,7 @@ pub async fn fused_builtin_stream_accepts_matching_output<B: Backend>() {
 }
 
 pub async fn fused_builtin_stream_rejects_mismatched_output<B: Backend>() {
-    let Some(tools_dir) = broccoli_compare_tools_dir() else {
-        eprintln!("skipping: broccoli-compare not built (cargo build -p broccoli-compare)");
-        return;
-    };
+    let tools_dir = broccoli_compare_tools_dir();
     let handler = handler::<B>(Some(tools_dir.clone()));
 
     let op = fused_stream_op::<B>("printf '9 9 9\\n'", "3 1 4\n", "tokens", None);
@@ -987,10 +979,7 @@ pub async fn fused_builtin_stream_rejects_mismatched_output<B: Backend>() {
 }
 
 pub async fn fused_solution_env_cannot_read_answer<B: Backend>() {
-    let Some(tools_dir) = broccoli_compare_tools_dir() else {
-        eprintln!("skipping: broccoli-compare not built (cargo build -p broccoli-compare)");
-        return;
-    };
+    let tools_dir = broccoli_compare_tools_dir();
     let handler = handler::<B>(Some(tools_dir.clone()));
 
     // A "cheating" solution probes for the answer in its own env. The answer is

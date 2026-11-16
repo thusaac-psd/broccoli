@@ -92,14 +92,15 @@ export BROCCOLI_INFRA_HOST=<box1-LAN-IP>     # so workers reach DB/MQ/S3 over th
 ```
 
 The server auto-creates its schema and registers plugins on first boot. Then
-load the problems. On this Docker install the connection settings are in the
-`connection.env` that `./install.sh infra` wrote; a native install reads its
-`config.toml` instead. The host needs `psql` (`postgresql-client`):
+load the problems from any box the installer set up. The script reads the
+`connection.env` the infra install wrote (Docker or native) from the bundle
+directory, and runs `psql` from the host when it has one, otherwise from the
+bundle's Postgres image through Docker:
 
 ```bash
 cd contest
-./import-problems.sh ../broccoli-problems-*.tar.gz --env-file ../connection.env
-#   --config PATH   a native target's config.toml (the default without --env-file)
+./import-problems.sh ../broccoli-problems-*.tar.gz
+#   --env-file PATH a connection.env elsewhere than ../connection.env
 #   --truncate      replace problems if the target already has some
 ```
 
@@ -186,9 +187,10 @@ disaster recovery of a single contest without a full-database restore.
   it in the infra config before importing.
 - **Postgres version.** Staging dumps are plain `COPY` data (PG 14) and restore
   into the bundle's Postgres (PG 18) — the forward-compatible direction.
-- **Run as the broccoli user** (or one that can read `config.toml` and reach
-  Postgres/SeaweedFS). `export` reads DB + S3 creds from `config.toml`; `import`
-  reads them from `config.toml` or, with `--env-file`, from `connection.env`.
+- **Credentials.** `export` reads DB + S3 creds from the staging server's
+  `config.toml`, so run it as a user that can read it. `import` reads them from
+  `connection.env`, so run it as a user that can read that file (and Docker,
+  when the box has no `psql`).
 - **testlib special judges** carry their `testlib.h` inside `checker_source`
   (stored in the DB), so they export/import intact with no internet — the
   `fetch-testlib.sh` in `examples/testlib-checker` is only for authoring new

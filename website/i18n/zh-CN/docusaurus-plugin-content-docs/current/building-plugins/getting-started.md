@@ -24,8 +24,9 @@ Broccoli 插件是一个运行在 Broccoli 服务端内部的 WebAssembly 模块
 
 ## 前置条件
 
-- 带有 `wasm32-wasip1` 目标的 Rust nightly 工具链。脚手架会在 `rust-toolchain.toml` 中
-  固定二者。
+- 带有 `wasm32-wasip1` 目标的 Rust 工具链。单独创建的插件会得到一个
+  `rust-toolchain.toml`，选用带该目标的 stable Rust。在已固定工具链的项目（例如
+  Broccoli 仓库）中创建的插件则使用该项目固定的工具链。
 - Broccoli CLI。其 crate 名为 `broccoli-dev-cli`，安装后的可执行文件名为 `broccoli-dev`。
 - 若插件包含前端，则需要 `pnpm`。
 - 一个用于上传的运行中的 Broccoli 服务端。

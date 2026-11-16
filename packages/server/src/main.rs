@@ -19,6 +19,15 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Prints the OpenAPI document and exits, without connecting to anything.
+    // The document does not depend on the configured values, but loading the
+    // configuration keeps one startup path.
+    if std::env::args().any(|a| a == "--openapi") {
+        let app_config = AppConfig::load().context("Failed to load configuration")?;
+        println!("{}", server::openapi_json(&app_config));
+        return Ok(());
+    }
+
     // Before anything opens sockets or files. See `common::rlimit` for why the
     // default soft limit of 1024 is not enough for a server.
     let nofile = common::rlimit::raise_nofile_limit();

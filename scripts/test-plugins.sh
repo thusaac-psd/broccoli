@@ -3,19 +3,15 @@
 #
 # The root Cargo.toml lists `plugins` in its `exclude` array (those crates
 # target wasm32 and pin their own `[workspace]` root so they build standalone
-# even when nested inside another workspace), which means
-# `cargo test --workspace` silently skips every plugin crate. This script
-# discovers plugin crates by searching for manifests instead of hardcoding a
-# crate list, so a newly added plugin is picked up automatically -- a
-# hardcoded list is exactly what let this gap open in the first place.
+# even when nested inside another workspace), so `cargo test --workspace`
+# skips every plugin crate. This script discovers plugin crates by searching
+# for manifests rather than keeping a list, so a new plugin is covered
+# without editing it.
 #
 # The search is depth-agnostic rather than a one-level `plugins/*/Cargo.toml`
-# glob, because not every plugin crate sits at the top level:
-# plugins/print/client is a nested native binary crate carrying 31 tests of
-# its own. A one-level glob silently skipped it -- the same "the gate only
-# covers what someone remembered to list" failure this script exists to end.
-# `target/` is pruned so build artefacts' vendored manifests aren't mistaken
-# for plugin crates.
+# glob, because not every plugin crate sits at the top level (for example the
+# native binary crate plugins/print/client). `target/` is pruned so build
+# artefacts' vendored manifests aren't mistaken for plugin crates.
 #
 # Deliberately invoked from the repo root and never `cd`s into a plugin
 # directory: some plugin crates carry a local `.cargo/config.toml` that pins
@@ -30,6 +26,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PLUGINS_DIR="${ROOT_DIR}/plugins"
 cd "${ROOT_DIR}"
+# One target directory for every plugin crate (see scripts/build-plugins.sh),
+# so the dependencies they share build once.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${ROOT_DIR}/target/plugins}"
 
 if [[ ! -d "${PLUGINS_DIR}" ]]; then
   echo "no plugins directory at ${PLUGINS_DIR}" >&2

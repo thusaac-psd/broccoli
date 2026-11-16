@@ -4,8 +4,8 @@
 //! harnesses were forked; this dev-dependency is the one place their shared
 //! infrastructure lives: the per-process Postgres and Redis containers, the
 //! migrated and seeded `template_test` database every test database is cloned
-//! from, the admin connection that clones it, pool teardown, and the HTTP
-//! response wrapper. Each tree keeps its own app fixture (`TestApp`,
+//! from, the admin connection that clones it, the database clock tests
+//! advance ([`DbClock`]), pool teardown, and the HTTP response wrapper. Each tree keeps its own app fixture (`TestApp`,
 //! `E2eTestApp`) and re-exports what it needs from here.
 
 use std::sync::{Mutex as StdMutex, OnceLock};
@@ -127,6 +127,10 @@ pub async fn shared_pg_port() -> u16 {
             server::seed::ensure_indexes(&template_db, false)
                 .await
                 .expect("Failed to create indexes");
+            template_db
+                .execute_unprepared(INSTALL_CLOCK)
+                .await
+                .expect("Failed to install the test clock");
             drop(template_db);
 
             (container, port)
@@ -178,6 +182,15 @@ async fn clone_template(port: u16, db_name: &str) {
                 ))
                 .await
                 .expect("Failed to create test database from template");
+            // A database-level setting, so every session on the clone (the
+            // server's pools and the plugin login's) resolves the clock.
+            admin
+                .execute_raw(Statement::from_string(
+                    DbBackend::Postgres,
+                    format!("ALTER DATABASE \"{db_name}\" SET search_path = {CLOCK_SEARCH_PATH}"),
+                ))
+                .await
+                .expect("Failed to point the test database at its clock");
         })
         .await
         .expect("admin runtime task panicked");
@@ -217,6 +230,182 @@ pub fn close_database_pool(db: DatabaseConnection) {
             };
             let _ = runtime.block_on(db.close_by_ref());
         });
+}
+
+// ---------------------------------------------------------------------------
+// Plugin builds
+// ---------------------------------------------------------------------------
+
+/// Panics unless the plugin in `plugin_dir` has its built WASM module. Plugin
+/// and fixture WASM is git-ignored build output, so a test that loads a plugin
+/// first checks it was built, instead of running without it.
+pub fn require_built_plugin(plugin_dir: &std::path::Path) {
+    let manifest = plugin_dir.join("plugin.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
+    let parsed: toml::Table =
+        toml::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", manifest.display()));
+    let Some(entry) = parsed
+        .get("server")
+        .and_then(|server| server.get("entry"))
+        .and_then(|entry| entry.as_str())
+    else {
+        return;
+    };
+    let wasm = plugin_dir.join(entry);
+    assert!(
+        wasm.is_file(),
+        "{} is missing. Plugin WASM is build output: run `just build-plugins` \
+         (or ./scripts/build-plugins.sh) before the server tests",
+        wasm.display()
+    );
+}
+
+/// [`require_built_plugin`] for every plugin directly under `plugins_dir`,
+/// which is returned for use as the server's plugins directory.
+pub fn require_built_plugins(plugins_dir: std::path::PathBuf) -> std::path::PathBuf {
+    let entries = std::fs::read_dir(&plugins_dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", plugins_dir.display()));
+    for entry in entries {
+        let dir = entry.expect("plugins dir entry").path();
+        if dir.join("plugin.toml").is_file() {
+            require_built_plugin(&dir);
+        }
+    }
+    plugins_dir
+}
+
+// ---------------------------------------------------------------------------
+// Database clock
+// ---------------------------------------------------------------------------
+
+/// `search_path` of every test database. `public` stays first, so unqualified
+/// DDL still creates tables there. `broccoli_test_clock` comes before an
+/// explicitly placed `pg_catalog`, so an unqualified `now()` (or one of its
+/// siblings) resolves to the shadowing function in [`INSTALL_CLOCK`].
+const CLOCK_SEARCH_PATH: &str = "public, broccoli_test_clock, pg_catalog";
+
+/// Installs the clock into the template: real time plus an offset the test
+/// owns. An offset rather than a pinned instant keeps time moving, so rows
+/// written one after another still order by their timestamps.
+const INSTALL_CLOCK: &str = r#"
+CREATE SCHEMA broccoli_test_clock;
+CREATE TABLE broccoli_test_clock.state (offset_us bigint NOT NULL);
+INSERT INTO broccoli_test_clock.state VALUES (0);
+CREATE FUNCTION broccoli_test_clock.shift() RETURNS interval LANGUAGE sql STABLE
+  AS $$ SELECT make_interval(secs => offset_us / 1000000.0) FROM broccoli_test_clock.state $$;
+CREATE FUNCTION broccoli_test_clock.now() RETURNS timestamptz LANGUAGE sql STABLE
+  AS $$ SELECT pg_catalog.now() + broccoli_test_clock.shift() $$;
+CREATE FUNCTION broccoli_test_clock.transaction_timestamp() RETURNS timestamptz LANGUAGE sql STABLE
+  AS $$ SELECT pg_catalog.transaction_timestamp() + broccoli_test_clock.shift() $$;
+CREATE FUNCTION broccoli_test_clock.statement_timestamp() RETURNS timestamptz LANGUAGE sql STABLE
+  AS $$ SELECT pg_catalog.statement_timestamp() + broccoli_test_clock.shift() $$;
+CREATE FUNCTION broccoli_test_clock.clock_timestamp() RETURNS timestamptz LANGUAGE sql VOLATILE
+  AS $$ SELECT pg_catalog.clock_timestamp() + broccoli_test_clock.shift() $$;
+GRANT USAGE ON SCHEMA broccoli_test_clock TO PUBLIC;
+GRANT SELECT ON broccoli_test_clock.state TO PUBLIC;
+"#;
+
+/// The clock of one test database, which a test moves forward instead of
+/// sleeping.
+///
+/// Time comparisons in this codebase run in SQL against the database clock:
+/// timer due-ness (`dispatcher::plugin_timer`), the timer host functions, a
+/// plugin's own time queries and the server's own SQL. In a test database
+/// every unqualified `now()`, `transaction_timestamp()`,
+/// `statement_timestamp()` and `clock_timestamp()` reads real time plus this
+/// clock's offset, so [`DbClock::advance`] moves all of them at once.
+///
+/// What the clock does not move: column defaults and `CURRENT_TIMESTAMP`, and
+/// every time the server reads from its own process clock (`Utc::now()`).
+/// That includes the handlers' contest-time checks (whether a contest has
+/// started or ended, `submission.created_at`). After an advance, SQL and the
+/// handlers disagree by the offset, a split production never has. A test may
+/// therefore only rely on SQL time once it has advanced. `advance` refuses to
+/// move past a contest's start or end, where that split would change what a
+/// handler decides; a test that crosses one and depends only on SQL time says
+/// so with [`DbClock::advance_across_contest_boundary`].
+#[derive(Clone)]
+pub struct DbClock {
+    db: DatabaseConnection,
+}
+
+impl DbClock {
+    pub fn new(db: &DatabaseConnection) -> Self {
+        Self { db: db.clone() }
+    }
+
+    /// Moves the database clock forward by `by`. Panics if that would pass a
+    /// contest's start or end time (see the type docs).
+    pub async fn advance(&self, by: Duration) {
+        let micros = Self::micros(by);
+        let crossed = self
+            .db
+            .query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT count(*) AS n FROM contest WHERE deleted_at IS NULL \
+                 AND (start_time > now() AND start_time <= now() + make_interval(secs => $1 / 1000000.0) \
+                  OR end_time > now() AND end_time <= now() + make_interval(secs => $1 / 1000000.0))",
+                [micros.into()],
+            ))
+            .await
+            .expect("check contest boundaries")
+            .expect("one row")
+            .try_get::<i64>("", "n")
+            .expect("n column");
+        assert_eq!(
+            crossed, 0,
+            "advancing the test clock by {by:?} passes a contest's start or end time, \
+             where handlers (process clock) and SQL (test clock) would disagree; use \
+             advance_across_contest_boundary if the test depends only on SQL time"
+        );
+        self.shift(micros).await;
+    }
+
+    /// Like [`DbClock::advance`], for a test that passes a contest boundary and
+    /// depends only on SQL time (the plugin and the timer dispatcher), never on
+    /// a handler's contest-time check.
+    pub async fn advance_across_contest_boundary(&self, by: Duration) {
+        self.shift(Self::micros(by)).await;
+    }
+
+    fn micros(by: Duration) -> i64 {
+        i64::try_from(by.as_micros()).expect("advance fits in i64 microseconds")
+    }
+
+    async fn shift(&self, micros: i64) {
+        self.db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE broccoli_test_clock.state SET offset_us = offset_us + $1",
+                [micros.into()],
+            ))
+            .await
+            .expect("advance the test clock");
+    }
+
+    /// The database's current time, in epoch milliseconds.
+    pub async fn now_ms(&self) -> i64 {
+        let row = self
+            .db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT (EXTRACT(EPOCH FROM now()) * 1000)::bigint AS ms".to_string(),
+            ))
+            .await
+            .expect("read the test clock")
+            .expect("one row");
+        row.try_get("", "ms").expect("ms column")
+    }
+
+    /// Moves the clock to `at_ms` epoch milliseconds, or leaves it if the
+    /// database is already there.
+    pub async fn advance_to_ms(&self, at_ms: i64) {
+        let behind = at_ms - self.now_ms().await;
+        if behind > 0 {
+            self.advance(Duration::from_millis(behind as u64)).await;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -2530,7 +2530,7 @@ export interface components {
       problem_id: number;
       /** @example Two Sum */
       problem_title: string;
-      result?: null | components['schemas']['CodeRunJudgeResult'];
+      result?: components['schemas']['CodeRunJudgeResult'] | null;
       status: components['schemas']['SubmissionStatus'];
       /**
        * Format: int32
@@ -3219,7 +3219,7 @@ export interface components {
        * @example 100
        */
       score?: number | null;
-      test_case_pagination?: null | components['schemas']['Pagination'];
+      test_case_pagination?: components['schemas']['Pagination'] | null;
       test_case_results: components['schemas']['TestCaseResultResponse'][];
       /**
        * Format: int32
@@ -3445,7 +3445,7 @@ export interface components {
       id: string;
       /** @example An Awesome Plugin */
       name: string;
-      server?: null | components['schemas']['ServerDetailResponse'];
+      server?: components['schemas']['ServerDetailResponse'] | null;
       /**
        * @description Load state on the replica that served this request only. Prefer
        *     `enabled` and `fleet`, which cover every server replica.
@@ -3454,8 +3454,8 @@ export interface components {
       translations: string[];
       /** @example 1.0.0 */
       version: string;
-      web?: null | components['schemas']['WebDetailResponse'];
-      worker?: null | components['schemas']['WorkerDetailResponse'];
+      web?: components['schemas']['WebDetailResponse'] | null;
+      worker?: components['schemas']['WorkerDetailResponse'] | null;
     };
     /** @description One live replica's view of a plugin. */
     PluginReplicaResponse: {
@@ -3825,7 +3825,7 @@ export interface components {
       submission_id: number;
       /** @example worker-1 */
       target_worker_id?: string | null;
-      test_case_pagination?: null | components['schemas']['Pagination'];
+      test_case_pagination?: components['schemas']['Pagination'] | null;
       test_case_results: components['schemas']['TestCaseResultResponse'][];
       /**
        * Format: int32
@@ -3934,7 +3934,7 @@ export interface components {
       problem_id: number;
       /** @example Two Sum */
       problem_title: string;
-      result?: null | components['schemas']['JudgeResultResponse'];
+      result?: components['schemas']['JudgeResultResponse'] | null;
       status: components['schemas']['SubmissionStatus'];
       /**
        * @description When set, the submission has been pinned to this worker by an admin
@@ -4005,8 +4005,8 @@ export interface components {
       problem_id?: number | null;
       /** @example Two Sum */
       problem_title?: string | null;
-      result?: null | components['schemas']['JudgeResultResponse'];
-      status?: null | components['schemas']['SubmissionStatus'];
+      result?: components['schemas']['JudgeResultResponse'] | null;
+      status?: components['schemas']['SubmissionStatus'] | null;
       /**
        * @description When set, the submission has been pinned to this worker by an admin
        *     and every operation it produces will run there.

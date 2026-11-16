@@ -35,7 +35,7 @@ use server::utils::plugin::sync_plugins;
 
 static DB_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-pub use test_support::TestResponse;
+pub use test_support::{DbClock, TestResponse};
 use test_support::{close_database_pool, create_test_database, test_database_url};
 
 struct TestPluginManager {
@@ -407,7 +407,9 @@ impl Drop for TestApp {
 }
 
 fn fixtures_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    test_support::require_built_plugins(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"),
+    )
 }
 
 /// Read a matching JSON snapshot without losing frames split across HTTP chunks.
@@ -493,6 +495,12 @@ pub struct SpawnOptions {
 }
 
 impl TestApp {
+    /// This test's database clock, which the test advances instead of
+    /// sleeping.
+    pub fn clock(&self) -> DbClock {
+        DbClock::new(&self.db)
+    }
+
     pub async fn spawn() -> Self {
         Self::spawn_internal(false, SpawnOptions::default()).await
     }

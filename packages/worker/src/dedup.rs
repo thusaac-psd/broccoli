@@ -211,10 +211,19 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "requires a live local Redis instance on redis://localhost:6379"]
     async fn claim_and_release() {
-        let dedup =
-            RedisTaskDedup::new("redis://localhost:6379", 60, "test-worker".into()).unwrap();
+        use testcontainers::runners::AsyncRunner;
+        let redis = testcontainers_modules::redis::Redis::default()
+            .start()
+            .await
+            .expect("start redis");
+        let port = redis.get_host_port_ipv4(6379).await.expect("redis port");
+        let dedup = RedisTaskDedup::new(
+            &format!("redis://127.0.0.1:{port}"),
+            60,
+            "test-worker".into(),
+        )
+        .unwrap();
         let task_id = format!("test-{}", uuid::Uuid::new_v4());
 
         assert_eq!(dedup.try_claim(&task_id).await, ClaimOutcome::Claimed);

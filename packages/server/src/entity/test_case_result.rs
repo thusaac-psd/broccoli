@@ -39,7 +39,7 @@ pub struct Model {
     #[sea_orm(belongs_to, from = "submission_id", to = "id")]
     pub submission: HasOne<super::submission::Entity>,
     #[sea_orm(belongs_to, from = "judgement_id", to = "id")]
-    pub judgement: Option<super::submission_judgement::Entity>,
+    pub judgement: HasOne<super::submission_judgement::Entity>,
     #[sea_orm(belongs_to, from = "test_case_id", to = "id")]
     pub test_case: HasOne<super::test_case::Entity>,
 

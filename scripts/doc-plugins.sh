@@ -9,13 +9,9 @@
 # picked up automatically.
 #
 # `RUSTDOCFLAGS="-D warnings"` matches what ci.yml's "Documentation" step sets
-# for the workspace, and it is the whole point of this gate: without it,
-# rustdoc merely warns about a broken intra-doc link, and a doc comment that
-# links a private or `#[cfg(test)]`-only item passes silently. That exact
-# defect has now occurred three times on this codebase -- twice in workspace
-# crates (caught by CI, which does set the flag) and once in
-# plugins/codelink-bracket, which no gate covered at all until this script
-# existed.
+# for the workspace: without it, rustdoc only warns about a broken intra-doc
+# link, and a doc comment that links a private or `#[cfg(test)]`-only item
+# passes.
 #
 # Deliberately invoked from the repo root and never `cd`s into a plugin
 # directory: some plugin crates carry a local `.cargo/config.toml` that pins
@@ -28,6 +24,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PLUGINS_DIR="${ROOT_DIR}/plugins"
 cd "${ROOT_DIR}"
+# One target directory for every plugin crate (see scripts/build-plugins.sh),
+# so the dependencies they share build once.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${ROOT_DIR}/target/plugins}"
 
 if [[ ! -d "${PLUGINS_DIR}" ]]; then
   echo "no plugins directory at ${PLUGINS_DIR}" >&2

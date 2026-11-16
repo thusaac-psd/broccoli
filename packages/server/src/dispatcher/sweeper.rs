@@ -301,7 +301,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker to start a Redis testcontainer"]
     async fn sweep_fails_closed_when_no_server_heartbeat_exists() {
         use redis::AsyncCommands;
         use testcontainers::runners::AsyncRunner;

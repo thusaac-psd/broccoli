@@ -28,9 +28,6 @@ default-members = [
 exclude = [
   "examples",
   "plugins",
-  "packages/plugins/icpc-contest",
-  "packages/plugins/standard-evaluators",
-  "packages/plugins/standard-checkers",
   # Locally-patched copy of the broccoli_queue crate (see VENDOR-PATCHES.md and
   # the [patch.crates-io] table below). Excluded so it is not treated as a
   # workspace member (it is edition 2021 with its own dev-deps/benches/tests).
@@ -75,15 +72,15 @@ hyper-util = { version = "0.1", features = [
   "tokio",
 ] }
 ipnet = "2"
-jsonwebtoken = { version = "10.2.0", features = ["rust_crypto"] }
+jsonwebtoken = { version = "10.3.0", features = ["aws_lc_rs"] }
 matchit = "0.9.1"
 mime_guess = "2.0.5"
 mq = { path = "packages/mq" }
 plugin-core = { path = "packages/plugin-core" }
 rand = "0.9"
 serde = { version = "1.0.228", features = ["derive"] }
-sea-orm = "2.0.0-rc.29"
-sea-orm-migration = { version = "2.0.0-rc.29", default-features = false, features = [
+sea-orm = "2.0.4"
+sea-orm-migration = { version = "2.0.4", default-features = false, features = [
   "runtime-tokio-rustls",
   "sqlx-postgres",
 ] }
@@ -112,15 +109,15 @@ tracing-opentelemetry = "0.32"
 opentelemetry-prometheus = "0.31"
 prometheus = "0.14"
 uuid = { version = "1", features = ["v4", "v7"] }
-utoipa = { version = "5", features = ["chrono"] }
-utoipa-axum = "0.2"
-utoipa-scalar = { version = "0.3", features = ["axum"] }
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
-rust-s3 = { version = "0.37", default-features = false, features = [
+utoipa = { version = "6", features = ["chrono"] }
+utoipa-axum = "0.3"
+utoipa-scalar = { version = "0.4", features = ["axum"] }
+utoipa-swagger-ui = { version = "10", features = ["axum"] }
+rust-s3 = { version = "0.38", default-features = false, features = [
   "tokio-rustls-tls",
 ] }
 tokio-util = { version = "0.7", features = ["io"] }
-zip = { version = "7", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 broccoli-server-sdk = { path = "packages/server-sdk" }
 broccoli-types = { path = "packages/broccoli-types" }
 crossbeam = "0.8"
@@ -138,6 +135,8 @@ ratatui = { version = "0.28", features = ["unstable-rendered-line-info"] }
 crossterm = "0.28"
 hdrhistogram = "7"
 wiremock = "0.6"
+testcontainers = "0.27"
+testcontainers-modules = "0.15"
 redis = { version = "1.0", features = ["tokio-comp"] }
 
 # Keep line tables in release builds so perf-based flame graphs resolve symbols.

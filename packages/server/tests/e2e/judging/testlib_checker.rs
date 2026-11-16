@@ -17,29 +17,10 @@
 //! would be `SystemError`, not a clean Accepted/WrongAnswer -- so these
 //! assertions genuinely fail if the path regresses.
 //!
-//! Requires a real isolate sandbox + a C++ toolchain (like the other judging
-//! verdict tests), hence `#[ignore]`; run with `--include-ignored`.
+//! Judges in a real isolate sandbox with a C++ toolchain, like the other
+//! judging verdict tests; `common::require_real_sandbox` says how to run it.
 
-use crate::common::E2eTestApp;
-
-fn is_real_sandbox() -> bool {
-    if std::env::var("E2E_SERVER_URL").is_ok() {
-        return true;
-    }
-    match std::env::var("E2E_SANDBOX_BACKEND") {
-        Ok(v) if v.eq_ignore_ascii_case("mock") => false,
-        Ok(v) if v.eq_ignore_ascii_case("isolate") => isolate_available(),
-        Ok(_) => false,
-        Err(_) => cfg!(target_os = "linux") && isolate_available(),
-    }
-}
-
-fn isolate_available() -> bool {
-    std::process::Command::new("isolate")
-        .arg("--version")
-        .status()
-        .is_ok_and(|status| status.success())
-}
+use crate::common::{E2eTestApp, require_real_sandbox};
 
 /// The canonical testlib `wcmp` checker: compare the jury answer (`ans`) and the
 /// contestant output (`ouf`) as sequences of whitespace-separated tokens; AC iff
@@ -137,13 +118,9 @@ async fn upload_checker_source(app: &E2eTestApp, problem_id: i32, token: &str) {
 /// rejecting solution correctly, end to end, entirely through the new
 /// problem-scoped `standard-checkers:checker_source` config path.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires a real judge sandbox and a C++ toolchain"]
+#[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
 async fn testlib_checker_judges_via_problem_config() {
-    assert!(
-        is_real_sandbox(),
-        "this test needs a real isolate sandbox (set E2E_SANDBOX_BACKEND=isolate); \
-         a mock backend cannot compile + run the testlib checker"
-    );
+    require_real_sandbox();
 
     let app = E2eTestApp::spawn().await;
     let admin = app

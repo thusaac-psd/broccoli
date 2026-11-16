@@ -405,7 +405,7 @@ pub async fn init_plugin_db(
             Box::pin(async move {
                 sea_orm::sqlx::Executor::execute(
                     conn,
-                    format!("SET ROLE {PLUGIN_DB_ROLE}").as_str(),
+                    sea_orm::sqlx::AssertSqlSafe(format!("SET ROLE {PLUGIN_DB_ROLE}")),
                 )
                 .await
                 .map(|_| ())

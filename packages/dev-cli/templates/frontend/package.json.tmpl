@@ -13,7 +13,8 @@
   "scripts": {
     "preinstall": "npx only-allow pnpm",
     "build": "tsdown --dts",
-    "dev": "tsdown --watch --sourcemap"
+    "dev": "tsdown --watch --sourcemap",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "tsdown": {
     "entry": ["src/index.tsx", "src/styles.css"],

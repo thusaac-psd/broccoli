@@ -333,6 +333,15 @@ fn spa_fallback_service(
 /// Upper bound on handling one API request.
 pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// The server's OpenAPI document as pretty-printed JSON: what
+/// `/api-docs/openapi.json` serves, and what `packages/web-sdk`'s `schema.ts`
+/// is generated from.
+pub fn openapi_json(config: &config::AppConfig) -> String {
+    let (_, api) = routes::api_routes(config, ApiDoc::openapi());
+    api.to_pretty_json()
+        .expect("the OpenAPI document serializes to JSON")
+}
+
 pub fn build_router(state: AppState) -> axum::Router {
     let trusted_proxies =
         client_ip::parse_trusted_proxy_networks(&state.config.server.trusted_proxies);

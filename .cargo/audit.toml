@@ -1,0 +1,17 @@
+[advisories]
+ignore = [
+  # libsqlite3-sys is listed in Cargo.lock only because sqlx and sea-orm name
+  # `sqlx-sqlite` in weak `sqlx-sqlite?/...` features, and Cargo records every
+  # optional dependency a weak feature names (rust-lang/cargo#10801). No crate
+  # enables `sqlite`, so libsqlite3-sys is never compiled or linked:
+  # `cargo tree --target all -e all -i libsqlite3-sys` prints nothing. The
+  # entry leaves the lockfile once sqlx-sqlite accepts a patched
+  # libsqlite3-sys.
+  "RUSTSEC-2026-0459",
+  # lopdf (plugins/print/client, through printpdf 0.7) overflows the stack
+  # while parsing deeply nested PDF objects. The print client only writes PDFs
+  # it lays out itself and never parses one, so the parser is unreachable.
+  # Every patched lopdf needs printpdf 0.8 or later, whose drawing API differs
+  # from 0.7; the ignore goes when the client moves to it.
+  "RUSTSEC-2026-0187",
+]

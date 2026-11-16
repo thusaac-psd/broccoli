@@ -1,23 +1,11 @@
 use serde_json::json;
 
-use crate::common::E2eTestApp;
-
-fn skip_with_mock_sandbox() -> bool {
-    if std::env::var("E2E_SERVER_URL").is_ok() {
-        return false;
-    }
-    if std::env::var("E2E_SANDBOX_BACKEND").is_ok_and(|v| v.eq_ignore_ascii_case("mock")) {
-        panic!("code-run sandbox test requires a non-mock sandbox");
-    }
-    false
-}
+use crate::common::{E2eTestApp, require_real_sandbox};
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires a non-mock judge sandbox and C++ toolchain"]
+#[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
 async fn code_run_reaches_terminal_state() {
-    if skip_with_mock_sandbox() {
-        return;
-    }
+    require_real_sandbox();
 
     let app = E2eTestApp::spawn().await;
     let admin = app
@@ -52,11 +40,9 @@ async fn code_run_reaches_terminal_state() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires a non-mock judge sandbox and C++ toolchain"]
+#[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
 async fn code_run_with_multiple_custom_test_cases() {
-    if skip_with_mock_sandbox() {
-        return;
-    }
+    require_real_sandbox();
 
     let app = E2eTestApp::spawn().await;
     let admin = app
@@ -104,11 +90,9 @@ async fn code_run_with_multiple_custom_test_cases() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires a non-mock judge sandbox and C++ toolchain"]
+#[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
 async fn contest_code_run_reaches_terminal_state() {
-    if skip_with_mock_sandbox() {
-        return;
-    }
+    require_real_sandbox();
 
     let app = E2eTestApp::spawn().await;
     let admin = app
@@ -159,11 +143,9 @@ async fn contest_code_run_reaches_terminal_state() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires a non-mock judge sandbox and C++ toolchain"]
+#[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
 async fn code_run_does_not_appear_in_submissions() {
-    if skip_with_mock_sandbox() {
-        return;
-    }
+    require_real_sandbox();
 
     let app = E2eTestApp::spawn().await;
     let admin = app

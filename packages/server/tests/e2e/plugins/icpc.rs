@@ -7,7 +7,7 @@ use server::entity::{
     contest, plugin_storage, submission, submission_judgement, test_case_result, user,
 };
 
-use crate::common::E2eTestApp;
+use crate::common::{E2eTestApp, require_real_sandbox};
 
 async fn seed_accepted_icpc_submission(
     app: &E2eTestApp,
@@ -923,8 +923,9 @@ async fn icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organiz
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires Docker-backed e2e services plus a non-mock judge sandbox and C++ toolchain"]
+#[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
 async fn icpc_short_circuits_after_first_wrong_answer() {
+    require_real_sandbox();
     let app = E2eTestApp::spawn().await;
 
     let admin = app
@@ -1001,26 +1002,7 @@ int main() {
 // POST -> dispatch routes to the icpc contest type -> on_submission ->
 // DetachedEval::start -> windowed evaluate in a real isolate sandbox ->
 // on_icpc_eval_result callback -> the shared driver's record/finalize ->
-// terminal submission verdict. Gated on a real sandbox; run with `-- --ignored`.
-
-fn is_real_sandbox() -> bool {
-    if std::env::var("E2E_SERVER_URL").is_ok() {
-        return true;
-    }
-    match std::env::var("E2E_SANDBOX_BACKEND") {
-        Ok(v) if v.eq_ignore_ascii_case("mock") => false,
-        Ok(v) if v.eq_ignore_ascii_case("isolate") => isolate_available(),
-        Ok(_) => false,
-        Err(_) => cfg!(target_os = "linux") && isolate_available(),
-    }
-}
-
-fn isolate_available() -> bool {
-    std::process::Command::new("isolate")
-        .arg("--version")
-        .status()
-        .is_ok_and(|status| status.success())
-}
+// terminal submission verdict.
 
 /// Correct: prints the sum of the n integers (the default test case expects "15").
 const CPP_SUM_AC: &str = r#"#include <iostream>
@@ -1068,11 +1050,9 @@ async fn judge_icpc_contest_solution(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires a real isolate sandbox and C++ toolchain"]
+#[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
 async fn icpc_contest_accepted_through_detached_driver() {
-    if !is_real_sandbox() {
-        return;
-    }
+    require_real_sandbox();
     let (app, sub_id) =
         judge_icpc_contest_solution("icpc_rj_ac", "ICPC Detached AC", CPP_SUM_AC).await;
     let sub = submission::Entity::find_by_id(sub_id)
@@ -1093,11 +1073,9 @@ async fn icpc_contest_accepted_through_detached_driver() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires a real isolate sandbox and C++ toolchain"]
+#[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
 async fn icpc_contest_wrong_answer_through_detached_driver() {
-    if !is_real_sandbox() {
-        return;
-    }
+    require_real_sandbox();
     let (app, sub_id) =
         judge_icpc_contest_solution("icpc_rj_wa", "ICPC Detached WA", CPP_SUM_WA).await;
     let sub = submission::Entity::find_by_id(sub_id)

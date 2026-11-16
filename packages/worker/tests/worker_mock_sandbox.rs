@@ -5,7 +5,7 @@
 mod sandbox_cases;
 
 use common::storage::BlobStore;
-use common::storage::object_storage::{ObjectStorageBlobStore, ObjectStorageConfig};
+use common::storage::object_storage::testing::Seaweedfs;
 use sandbox_cases::{Backend, unique_temp_dir};
 use std::sync::Arc;
 use worker::models::operation::file_cacher::BlobStoreFileCacher;
@@ -36,61 +36,13 @@ impl Backend for Mock {
 sandbox_suite!(
     Mock;
     all: [];
-    cpp: [#[ignore = "requires a C++17 compiler available on PATH"]],
 );
 
-fn object_storage_env(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
-async fn try_object_storage_store_for_test() -> Option<Arc<dyn BlobStore>> {
-    let endpoint = object_storage_env("BROCCOLI_S3_ENDPOINT", "http://127.0.0.1:8333");
-    let bucket = object_storage_env("BROCCOLI_S3_BUCKET", "broccoli-blobs");
-    let region = object_storage_env("BROCCOLI_S3_REGION", "us-east-1");
-    let access_key = object_storage_env("BROCCOLI_S3_ACCESS_KEY", "broccoli_s3_access");
-    let secret_key = object_storage_env("BROCCOLI_S3_SECRET_KEY", "broccoli_s3_secret");
-    let path_style = object_storage_env("BROCCOLI_S3_PATH_STYLE", "true")
-        .trim()
-        .eq_ignore_ascii_case("true");
-
-    let store = match ObjectStorageBlobStore::new(
-        ObjectStorageConfig {
-            bucket,
-            region,
-            endpoint: Some(endpoint),
-            access_key: Some(access_key),
-            secret_key: Some(secret_key),
-            path_style,
-            max_size: 128 * 1024 * 1024,
-            temp_dir: None,
-        },
-        None,
-    ) {
-        Ok(store) => Arc::new(store) as Arc<dyn BlobStore>,
-        Err(err) => {
-            eprintln!("skip object storage test: invalid config: {err}");
-            return None;
-        }
-    };
-
-    match store.put(b"worker-object-storage-probe").await {
-        Ok(hash) => {
-            let _ = store.delete(&hash).await;
-            Some(store)
-        }
-        Err(err) => {
-            eprintln!("skip object storage test: backend unavailable: {err}");
-            None
-        }
-    }
-}
-
 #[tokio::test]
-#[ignore = "requires configured object storage reachable through WORKER_OBJECT_STORAGE_* env vars"]
 async fn execute_operation_with_file_pulled_from_object_storage() {
-    let store = try_object_storage_store_for_test()
-        .await
-        .expect("object storage worker test backend unavailable");
+    let seaweedfs = Seaweedfs::start().await;
+    seaweedfs.create_bucket("broccoli-blobs").await;
+    let store: Arc<dyn BlobStore> = Arc::new(seaweedfs.store("broccoli-blobs"));
 
     let hash = store
         .put(b"40 2\n")

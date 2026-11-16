@@ -1,17 +1,23 @@
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import openapiTS, { astToString } from 'openapi-typescript';
 import prettier from 'prettier';
 import ts from 'typescript';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const url = process.argv[2];
+const source = process.argv[2];
 
-if (!url) {
-  console.error('Error: Please provide an OpenAPI JSON URL.');
+if (!source) {
+  console.error('Error: Please provide an OpenAPI JSON URL or file path.');
   process.exit(1);
 }
+
+// An http(s) URL of a running server, or a file written by
+// `server --openapi`.
+const url = /^https?:\/\//.test(source)
+  ? source
+  : pathToFileURL(path.resolve(source));
 
 async function generate() {
   console.log(`Fetching and transforming schema from: ${url}`);

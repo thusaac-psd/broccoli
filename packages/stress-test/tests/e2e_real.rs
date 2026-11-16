@@ -7,7 +7,7 @@ fn require_env(key: &str) -> String {
 }
 
 #[test]
-#[ignore = "requires a running broccoli stack; opt in with --ignored"]
+#[ignore = "needs a running stack: STRESS_TEST_E2E_URL=<url> cargo test -p stress-test --test e2e_real -- --ignored"]
 fn stress_test_passes_against_real_server() {
     let url = require_env("STRESS_TEST_E2E_URL");
     let username =
@@ -44,7 +44,7 @@ fn stress_test_passes_against_real_server() {
 }
 
 #[test]
-#[ignore = "requires a running Broccoli stack with /metrics and a no-semaphore baseline; opt in with --ignored"]
+#[ignore = "needs a running stack with /metrics and a no-semaphore baseline: STRESS_TEST_E2E_URL=<url> cargo test -p stress-test --test e2e_real -- --ignored"]
 fn burst_1000_submissions_keeps_plugin_pool_contention_below_baseline() {
     let url = require_env("STRESS_TEST_E2E_URL");
     let username =

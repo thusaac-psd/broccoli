@@ -22,11 +22,11 @@ the queue + coordination layer.
 
 ## Layout
 
-| Path      | What                                                                |
-| --------- | ------------------------------------------------------------------- |
-| `src/`    | WASM plugin: queue persistence, station coordination, HTTP handlers |
-| `web/`    | React UI: contestant print buttons, staff print-queue dashboard     |
-| `client/` | Native cross-platform print-station binary (`print-client`)         |
+| Path        | What                                                                |
+| ----------- | ------------------------------------------------------------------- |
+| `src/`      | WASM plugin: queue persistence, station coordination, HTTP handlers |
+| `frontend/` | React UI: contestant print buttons, staff print-queue dashboard     |
+| `client/`   | Native cross-platform print-station binary (`print-client`)         |
 
 ## Build
 

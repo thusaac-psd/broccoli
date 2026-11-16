@@ -32,12 +32,18 @@ Also present but not part of the main Rust workspace members list:
 
 - `packages/server-sdk`
 - plugin crates under `plugins/`
-- additional plugin-related work under `packages/plugins/`
 
-### JavaScript workspaces
+### JavaScript workspace
+
+One pnpm workspace and one `pnpm-lock.yaml` cover:
 
 - `packages/web-sdk`
 - `packages/web`
+- every plugin frontend, at `plugins/<plugin>/frontend`
+
+Shared tool and library versions live in the `catalog:` of
+`pnpm-workspace.yaml`. The documentation site under `website/` keeps its own
+lockfile.
 
 ## Commands That Actually Exist
 
@@ -81,7 +87,9 @@ just worker
 just build-js
 just dev-web
 just build-plugins
-just build-plugins-release
+just test-plugins
+just clippy-plugins
+just check-all
 just up
 just down
 ```
@@ -132,8 +140,9 @@ The checked-in Docker Postgres credentials are:
 - Root `plugins/` currently contains plugin crates such as `batch-evaluator`,
   `cooldown`, `ioi`, `standard-checkers`, and `submission-limit`, plus manifest
   only plugins such as `broccoli-zh-cn`.
-- Plugin work also exists under `packages/plugins/`; do not assume everything
-  plugin-related lives under the root `plugins/` folder.
+- The server's test fixture plugins live under
+  `packages/server/tests/fixtures*`; `just build-plugins` builds them with the
+  real plugins.
 
 ## Working Rules
 

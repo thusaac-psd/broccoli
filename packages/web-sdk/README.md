@@ -11,8 +11,9 @@ frontend needs. The Broccoli web app and every plugin frontend build against it.
 pnpm add @broccoli/web-sdk
 ```
 
-Inside this monorepo a plugin frontend depends on it by path. See
-`plugins/icpc/web` and `plugins/print/web` for working setups.
+Inside this monorepo a plugin frontend is a pnpm workspace member and depends on
+it as `workspace:*`. See `plugins/icpc/frontend` and `plugins/print/frontend`
+for working setups.
 
 ## Entry points
 
@@ -89,7 +90,8 @@ export default { presets: [preset] };
 ## Where to go next
 
 The end-to-end plugin walkthrough lives on the docs site under Building plugins.
-`plugins/icpc/web` and `plugins/print/web` are the reference frontends.
+`plugins/icpc/frontend` and `plugins/print/frontend` are the reference
+frontends.
 
 ## License
 

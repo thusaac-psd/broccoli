@@ -75,8 +75,8 @@ cp config/config.example.toml config/config.toml
 just install
 just build-js
 
-# 4. Build and install the WASM plugins.
-just build-plugins --install
+# 4. Build the plugins (WASM and frontends).
+just build-plugins
 
 # 5. Run the server. It syncs the database schema on startup.
 just server
@@ -98,15 +98,16 @@ just dev                 # All JS packages in parallel dev mode
 
 just build               # Build the default Rust crates
 just build-js            # Build all JS packages
-just build-plugins --install   # Build and install all WASM plugins
-just build-plugins-release     # Build all WASM plugins, optimized
+just build-plugins       # Build every plugin and test fixture plugin
 just build-plugin plugins/ioi --install   # Build one plugin
 
 just test                # Run Rust tests
-just clippy              # Lint Rust
+just test-plugins        # Run every plugin crate's tests
+just test-sandbox        # Run the isolate suites (needs isolate)
+just clippy              # Lint Rust, as CI does
 just lint-js             # Lint JS
 just format-check        # Check formatting
-just check-all           # clippy, test, lint-js, format-check
+just check-all           # The CI checks for Rust and JS, plugins included
 ```
 
 ## Configuration

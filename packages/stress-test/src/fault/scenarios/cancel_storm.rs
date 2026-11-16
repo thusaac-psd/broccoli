@@ -347,7 +347,6 @@ mod tests {
     use testcontainers_modules::redis::Redis;
 
     #[tokio::test]
-    #[ignore = "requires Docker to start a Redis testcontainer"]
     async fn cancel_storm_validates_hit_miss_and_toggle() {
         let redis = Redis::default()
             .start()

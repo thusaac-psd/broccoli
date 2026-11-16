@@ -14,7 +14,9 @@ use crate::common::{SpawnOptions, TestApp, routes};
 const PLUGIN: &str = "server-plugin";
 
 fn fixtures_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    test_support::require_built_plugins(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"),
+    )
 }
 
 fn status(app: &TestApp, plugin_id: &str) -> Option<PluginStatus> {

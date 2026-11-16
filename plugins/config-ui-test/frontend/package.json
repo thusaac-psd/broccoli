@@ -13,9 +13,9 @@
     "dist"
   ],
   "scripts": {
-    "preinstall": "npx only-allow pnpm",
     "build": "tsdown --dts",
-    "dev": "tsdown --watch --sourcemap"
+    "dev": "tsdown --watch --sourcemap",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "tsdown": {
     "entry": [
@@ -36,19 +36,19 @@
     }
   },
   "dependencies": {
-    "@broccoli/web-sdk": "file:../../../packages/web-sdk"
+    "@broccoli/web-sdk": "workspace:*"
   },
   "peerDependencies": {
     "react": "^18.0.0 || ^19.0.0"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.2.1",
-    "@tsdown/css": "^0.21.4",
-    "@types/react": "^19.1.16",
-    "postcss": "^8.4.0",
-    "postcss-import": "^16.1.1",
-    "tailwindcss": "^4.2.1",
-    "tsdown": "^0.21.4",
-    "typescript": "~5.9.3"
+    "@tailwindcss/postcss": "catalog:",
+    "@tsdown/css": "catalog:",
+    "@types/react": "catalog:",
+    "postcss": "catalog:",
+    "postcss-import": "catalog:",
+    "tailwindcss": "catalog:",
+    "tsdown": "catalog:",
+    "typescript": "catalog:"
   }
 }

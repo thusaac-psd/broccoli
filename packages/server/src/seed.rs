@@ -237,8 +237,8 @@ impl BootIndex {
         }
     }
 
-    /// A UNIQUE index on `cols` of `E`, optionally partial (`filter`).
-    fn unique<E: EntityTrait>(name: &str, cols: &[E::Column], filter: Option<Expr>) -> Self {
+    /// A partial UNIQUE index on `cols` of `E`, over the rows `filter` selects.
+    fn partial_unique<E: EntityTrait>(name: &str, cols: &[E::Column], filter: Expr) -> Self {
         let mut create = Index::create();
         create.unique().name(name).table(E::default());
         let mut duplicates = Query::select();
@@ -251,10 +251,8 @@ impl BootIndex {
         for &col in cols {
             create.col(col);
         }
-        if let Some(filter) = filter {
-            create.and_where(filter.clone());
-            duplicates.and_where(filter);
-        }
+        create.and_where(filter.clone());
+        duplicates.and_where(filter);
         Self {
             create,
             duplicates: Some(duplicates),
@@ -269,9 +267,13 @@ impl BootIndex {
     }
 }
 
-/// Indexes the entity schema sync does not declare. UNIQUE ones enforce
-/// invariants the application relies on (one active account per username, one
-/// current judgement per submission, ...); the rest are performance aids.
+/// Indexes the entity schema sync cannot express. The partial UNIQUE ones
+/// enforce invariants the application relies on (one active account per
+/// username, one current judgement per submission); the rest are performance
+/// aids. The per-boot schema `sync()` drops every unique index whose column set
+/// no entity declares an index on, so a non-partial unique index belongs on
+/// its entity (`unique_key`), and a partial one needs its columns declared
+/// `indexed` on the entity.
 fn boot_indexes() -> Vec<BootIndex> {
     vec![
         BootIndex::plain(
@@ -288,33 +290,16 @@ fn boot_indexes() -> Vec<BootIndex> {
                 .col(dead_letter_message::Column::Resolved)
                 .col(dead_letter_message::Column::CreatedAt),
         ),
-        BootIndex::unique::<user::Entity>(
+        BootIndex::partial_unique::<user::Entity>(
             "idx_user_username_active",
             &[user::Column::Username],
-            Some(Expr::col(user::Column::DeletedAt).is_null()),
-        ),
-        BootIndex::unique::<problem_attachment::Entity>(
-            "idx_problem_attachment_problem_path_unique",
-            &[
-                problem_attachment::Column::ProblemId,
-                problem_attachment::Column::Path,
-            ],
-            None,
+            Expr::col(user::Column::DeletedAt).is_null(),
         ),
         BootIndex::plain(
             Index::create()
                 .name("idx_problem_attachment_problem_id")
                 .table(problem_attachment::Entity)
                 .col(problem_attachment::Column::ProblemId),
-        ),
-        BootIndex::unique::<additional_file::Entity>(
-            "idx_additional_file_problem_lang_path_unique",
-            &[
-                additional_file::Column::ProblemId,
-                additional_file::Column::Language,
-                additional_file::Column::Path,
-            ],
-            None,
         ),
         BootIndex::plain(
             Index::create()
@@ -329,18 +314,10 @@ fn boot_indexes() -> Vec<BootIndex> {
                 .col(clarification::Column::ContestId)
                 .col(clarification::Column::CreatedAt),
         ),
-        BootIndex::unique::<submission_judgement::Entity>(
-            "idx_submission_judgement_version_unique",
-            &[
-                submission_judgement::Column::SubmissionId,
-                submission_judgement::Column::Version,
-            ],
-            None,
-        ),
-        BootIndex::unique::<submission_judgement::Entity>(
+        BootIndex::partial_unique::<submission_judgement::Entity>(
             "idx_submission_judgement_one_current",
             &[submission_judgement::Column::SubmissionId],
-            Some(Expr::col(submission_judgement::Column::IsCurrent)),
+            Expr::col(submission_judgement::Column::IsCurrent),
         ),
         BootIndex::plain(
             Index::create()

@@ -3,7 +3,6 @@
 
 target/
 **/*.wasm
-!packages/server/tests/fixtures/**/*.wasm
 
 node_modules/
 dist/
@@ -18,8 +17,6 @@ tmp/
 .env.local
 .env.*.local
 
-config/config.toml
-
 /data
 /vendor
 
@@ -30,17 +27,3 @@ config/config.toml
 # Embedded stress-test binaries (fetched at build time, not committed)
 packages/server/embedded/stress-test/*
 !packages/server/embedded/stress-test/.gitkeep
-
-# broccoli secrets and generated artifacts
-ops/secrets/
-ops/logs/
-
-# bulky profiling raw artifacts (regenerate via ops/collect-artifacts.sh)
-docs/profiling/run-*/artifacts/prometheus/
-docs/profiling/run-*/artifacts/jaeger/
-docs/profiling/run-*/artifacts/loki/
-docs/profiling/run-*/artifacts/docker/
-docs/profiling/run-*/artifacts/host-metrics/
-docs/profiling/run-*/artifacts/deadlock-snapshot/
-docs/profiling/run-*/snapshots/
-docs/profiling/run-*/monitor.log

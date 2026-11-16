@@ -22,21 +22,13 @@ env:
   ACR_NAMESPACE: broccoli
 
 jobs:
-  cargo-test:
-    name: Cargo test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          components: rustfmt, clippy
-          targets: wasm32-wasip1
-
-      - uses: Swatinem/rust-cache@v2
-
-      - run: cargo test --workspace --locked
+  # The full CI suite on the tagged commit: nothing is published unless it
+  # passes.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
 
   docker-lint:
     name: Dockerfile lint
@@ -44,12 +36,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: hadolint/hadolint-action@v3.1.0
+      - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
           dockerfile: Dockerfile.server
           failure-threshold: warning
 
-      - uses: hadolint/hadolint-action@v3.1.0
+      - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
           dockerfile: Dockerfile.worker
           failure-threshold: warning
@@ -80,19 +72,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain (mac universal)
-        if: matrix.platform == 'macos-universal'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: x86_64-apple-darwin,aarch64-apple-darwin
-
-      - name: Install Rust toolchain (single target)
-        if: matrix.platform != 'macos-universal'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: ${{ matrix.target }}
+      # The toolchain rust-toolchain.toml pins, plus this platform's targets.
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install
+          if [ "$TARGET" = universal2-apple-darwin ]; then
+            rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          else
+            rustup target add "$TARGET"
+          fi
 
       - name: Install musl tools
         if: contains(matrix.target, 'musl')
@@ -100,7 +91,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-${{ matrix.platform }}
 
@@ -176,19 +167,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain (mac universal)
-        if: matrix.platform == 'macos-universal'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: x86_64-apple-darwin,aarch64-apple-darwin
-
-      - name: Install Rust toolchain (single target)
-        if: matrix.platform != 'macos-universal'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: ${{ matrix.target }}
+      # The toolchain rust-toolchain.toml pins, plus this platform's targets.
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install
+          if [ "$TARGET" = universal2-apple-darwin ]; then
+            rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          else
+            rustup target add "$TARGET"
+          fi
 
       - name: Install musl tools
         if: contains(matrix.target, 'musl')
@@ -196,7 +186,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-print-client-${{ matrix.platform }}
           workspaces: plugins/print/client
@@ -273,19 +263,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain (mac universal)
-        if: matrix.platform == 'macos-universal'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: x86_64-apple-darwin,aarch64-apple-darwin
-
-      - name: Install Rust toolchain (single target)
-        if: matrix.platform != 'macos-universal'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: ${{ matrix.target }}
+      # The toolchain rust-toolchain.toml pins, plus this platform's targets.
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install
+          if [ "$TARGET" = universal2-apple-darwin ]; then
+            rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          else
+            rustup target add "$TARGET"
+          fi
 
       - name: Install musl tools
         if: contains(matrix.target, 'musl')
@@ -293,7 +282,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-contestant-cli-${{ matrix.platform }}
 
@@ -345,7 +334,7 @@ jobs:
 
   build-images:
     name: Build image ${{ matrix.name }}
-    needs: [cargo-test, docker-lint, build-stress-test]
+    needs: [ci, docker-lint, build-stress-test]
     runs-on: ubuntu-latest
     environment: release
     strategy:
@@ -390,27 +379,22 @@ jobs:
             echo "created=$(date -u +%FT%TZ)"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Install Rust toolchain for plugin assets
+      - name: Install the pinned Rust toolchain for plugin assets
         if: matrix.name == 'server'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: wasm32-wasip1
+        run: rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: matrix.name == 'server'
         with:
           key: release-plugin-assets
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         if: matrix.name == 'server'
-        with:
-          version: 10.33.0
 
       - uses: actions/setup-node@v4
         if: matrix.name == 'server'
         with:
-          node-version: 24
+          node-version-file: package.json
           cache: pnpm
 
       - name: Build plugin assets
@@ -466,24 +450,24 @@ jobs:
           print(json.dumps(manifest, indent=2))
           PY
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.ACR_REGISTRY }}
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: ${{ matrix.file }}
@@ -510,7 +494,7 @@ jobs:
           cache-to: type=gha,scope=${{ matrix.name }},mode=max
 
       - name: Trivy vulnerability scan linux/amd64
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           TRIVY_PLATFORM: linux/amd64
         with:
@@ -521,7 +505,7 @@ jobs:
           format: table
 
       - name: Trivy vulnerability scan linux/arm64
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           TRIVY_PLATFORM: linux/arm64
         with:
@@ -543,25 +527,24 @@ jobs:
           name: stress-test-linux-x86_64
           path: stress-artifacts
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: wasm32-wasip1
+      # Installs the toolchain rust-toolchain.toml pins, with its components
+      # and targets. Every cargo command in the repository, plugin builds
+      # included, resolves to it.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-bundle-plugin-assets
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.33.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version-file: package.json
           cache: pnpm
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -674,6 +657,7 @@ jobs:
     name: Publish GitHub Release
     needs:
       [
+        ci,
         build-images,
         build-stress-test,
         build-print-client,
@@ -749,7 +733,7 @@ jobs:
           cat dist/manifest.json
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true

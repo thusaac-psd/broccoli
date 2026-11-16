@@ -1,29 +1,4 @@
-use crate::common::E2eTestApp;
-
-fn is_real_sandbox() -> bool {
-    if std::env::var("E2E_SERVER_URL").is_ok() {
-        return true;
-    }
-
-    match std::env::var("E2E_SANDBOX_BACKEND") {
-        Ok(v) if v.eq_ignore_ascii_case("mock") => false,
-        Ok(v) if v.eq_ignore_ascii_case("isolate") => isolate_available(),
-        Ok(_) => false,
-        Err(_) => cfg!(target_os = "linux") && isolate_available(),
-    }
-}
-
-fn isolate_available() -> bool {
-    std::process::Command::new("isolate")
-        .arg("--version")
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-fn skip_without_real_sandbox() -> bool {
-    assert!(is_real_sandbox(), "real sandbox is not available");
-    false
-}
+use crate::common::{E2eTestApp, require_real_sandbox};
 
 const CPP_ACCEPTED: &str = r#"
 #include <iostream>
@@ -111,11 +86,9 @@ mod cpp_verdicts {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires a real judge sandbox and language toolchains"]
+    #[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
     async fn correct_cpp_gets_accepted() {
-        if skip_without_real_sandbox() {
-            return;
-        }
+        require_real_sandbox();
 
         let app = E2eTestApp::spawn().await;
         let admin = app
@@ -129,33 +102,22 @@ mod cpp_verdicts {
             .await;
         let res = app.wait_for_submission_terminal(sub_id, &admin, 60).await;
 
-        if is_real_sandbox() {
-            assert_eq!(
-                res.body["status"], "Judged",
-                "Should be Judged: {}",
-                res.text
-            );
-            assert_eq!(
-                res.body["result"]["verdict"], "Accepted",
-                "Correct program should get Accepted: {}",
-                res.text
-            );
-        } else {
-            assert!(
-                ["Judged", "CompilationError", "SystemError"]
-                    .contains(&res.body["status"].as_str().unwrap_or("")),
-                "Should reach terminal: {}",
-                res.text
-            );
-        }
+        assert_eq!(
+            res.body["status"], "Judged",
+            "Should be Judged: {}",
+            res.text
+        );
+        assert_eq!(
+            res.body["result"]["verdict"], "Accepted",
+            "Correct program should get Accepted: {}",
+            res.text
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires a real judge sandbox and language toolchains"]
+    #[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
     async fn wrong_output_gets_wrong_answer() {
-        if skip_without_real_sandbox() {
-            return;
-        }
+        require_real_sandbox();
 
         let app = E2eTestApp::spawn().await;
         let admin = app
@@ -169,22 +131,18 @@ mod cpp_verdicts {
             .await;
         let res = app.wait_for_submission_terminal(sub_id, &admin, 60).await;
 
-        if is_real_sandbox() {
-            assert_eq!(res.body["status"], "Judged");
-            assert_eq!(
-                res.body["result"]["verdict"], "WrongAnswer",
-                "Wrong output should get WrongAnswer: {}",
-                res.text
-            );
-        }
+        assert_eq!(res.body["status"], "Judged");
+        assert_eq!(
+            res.body["result"]["verdict"], "WrongAnswer",
+            "Wrong output should get WrongAnswer: {}",
+            res.text
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires a real judge sandbox and language toolchains"]
+    #[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
     async fn infinite_loop_gets_time_limit_exceeded() {
-        if skip_without_real_sandbox() {
-            return;
-        }
+        require_real_sandbox();
 
         let app = E2eTestApp::spawn().await;
         let admin = app
@@ -198,22 +156,18 @@ mod cpp_verdicts {
             .await;
         let res = app.wait_for_submission_terminal(sub_id, &admin, 120).await;
 
-        if is_real_sandbox() {
-            assert_eq!(res.body["status"], "Judged");
-            assert_eq!(
-                res.body["result"]["verdict"], "TimeLimitExceeded",
-                "Infinite loop should get TLE: {}",
-                res.text
-            );
-        }
+        assert_eq!(res.body["status"], "Judged");
+        assert_eq!(
+            res.body["result"]["verdict"], "TimeLimitExceeded",
+            "Infinite loop should get TLE: {}",
+            res.text
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires a real judge sandbox and language toolchains"]
+    #[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
     async fn memory_hog_gets_memory_limit_exceeded() {
-        if skip_without_real_sandbox() {
-            return;
-        }
+        require_real_sandbox();
 
         let app = E2eTestApp::spawn().await;
         let admin = app
@@ -227,23 +181,19 @@ mod cpp_verdicts {
             .await;
         let res = app.wait_for_submission_terminal(sub_id, &admin, 120).await;
 
-        if is_real_sandbox() {
-            assert_eq!(res.body["status"], "Judged");
-            let verdict = res.body["result"]["verdict"].as_str().unwrap_or("");
-            assert!(
-                verdict == "MemoryLimitExceeded" || verdict == "RuntimeError",
-                "Memory hog should get MLE or RE (OOM kill): got {verdict}, body: {}",
-                res.text
-            );
-        }
+        assert_eq!(res.body["status"], "Judged");
+        let verdict = res.body["result"]["verdict"].as_str().unwrap_or("");
+        assert!(
+            verdict == "MemoryLimitExceeded" || verdict == "RuntimeError",
+            "Memory hog should get MLE or RE (OOM kill): got {verdict}, body: {}",
+            res.text
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires a real judge sandbox and language toolchains"]
+    #[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
     async fn segfault_gets_runtime_error() {
-        if skip_without_real_sandbox() {
-            return;
-        }
+        require_real_sandbox();
 
         let app = E2eTestApp::spawn().await;
         let admin = app
@@ -257,22 +207,18 @@ mod cpp_verdicts {
             .await;
         let res = app.wait_for_submission_terminal(sub_id, &admin, 60).await;
 
-        if is_real_sandbox() {
-            assert_eq!(res.body["status"], "Judged");
-            assert_eq!(
-                res.body["result"]["verdict"], "RuntimeError",
-                "Segfault should get RuntimeError: {}",
-                res.text
-            );
-        }
+        assert_eq!(res.body["status"], "Judged");
+        assert_eq!(
+            res.body["result"]["verdict"], "RuntimeError",
+            "Segfault should get RuntimeError: {}",
+            res.text
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires a real judge sandbox and language toolchains"]
+    #[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
     async fn invalid_syntax_gets_compilation_error() {
-        if skip_without_real_sandbox() {
-            return;
-        }
+        require_real_sandbox();
 
         let app = E2eTestApp::spawn().await;
         let admin = app
@@ -286,13 +232,11 @@ mod cpp_verdicts {
             .await;
         let res = app.wait_for_submission_terminal(sub_id, &admin, 60).await;
 
-        if is_real_sandbox() {
-            assert_eq!(
-                res.body["status"], "CompilationError",
-                "Invalid syntax should get CompilationError: {}",
-                res.text
-            );
-        }
+        assert_eq!(
+            res.body["status"], "CompilationError",
+            "Invalid syntax should get CompilationError: {}",
+            res.text
+        );
     }
 }
 
@@ -300,11 +244,9 @@ mod multi_language {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires a real judge sandbox and Python toolchain"]
+    #[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
     async fn python_correct_gets_accepted() {
-        if skip_without_real_sandbox() {
-            return;
-        }
+        require_real_sandbox();
 
         let app = E2eTestApp::spawn().await;
         let admin = app
@@ -318,22 +260,18 @@ mod multi_language {
             .await;
         let res = app.wait_for_submission_terminal(sub_id, &admin, 60).await;
 
-        if is_real_sandbox() {
-            assert_eq!(res.body["status"], "Judged");
-            assert_eq!(
-                res.body["result"]["verdict"], "Accepted",
-                "Correct Python should get Accepted: {}",
-                res.text
-            );
-        }
+        assert_eq!(res.body["status"], "Judged");
+        assert_eq!(
+            res.body["result"]["verdict"], "Accepted",
+            "Correct Python should get Accepted: {}",
+            res.text
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires a real judge sandbox and Python toolchain"]
+    #[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
     async fn python_wrong_gets_wrong_answer() {
-        if skip_without_real_sandbox() {
-            return;
-        }
+        require_real_sandbox();
 
         let app = E2eTestApp::spawn().await;
         let admin = app
@@ -347,18 +285,14 @@ mod multi_language {
             .await;
         let res = app.wait_for_submission_terminal(sub_id, &admin, 60).await;
 
-        if is_real_sandbox() {
-            assert_eq!(res.body["status"], "Judged");
-            assert_eq!(res.body["result"]["verdict"], "WrongAnswer");
-        }
+        assert_eq!(res.body["status"], "Judged");
+        assert_eq!(res.body["result"]["verdict"], "WrongAnswer");
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires a real judge sandbox and Python toolchain"]
+    #[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
     async fn python_tle_gets_time_limit_exceeded() {
-        if skip_without_real_sandbox() {
-            return;
-        }
+        require_real_sandbox();
 
         let app = E2eTestApp::spawn().await;
         let admin = app
@@ -372,18 +306,14 @@ mod multi_language {
             .await;
         let res = app.wait_for_submission_terminal(sub_id, &admin, 120).await;
 
-        if is_real_sandbox() {
-            assert_eq!(res.body["status"], "Judged");
-            assert_eq!(res.body["result"]["verdict"], "TimeLimitExceeded");
-        }
+        assert_eq!(res.body["status"], "Judged");
+        assert_eq!(res.body["result"]["verdict"], "TimeLimitExceeded");
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires a real judge sandbox and Java toolchain"]
+    #[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
     async fn java_correct_gets_accepted() {
-        if skip_without_real_sandbox() {
-            return;
-        }
+        require_real_sandbox();
 
         let app = E2eTestApp::spawn().await;
         let admin = app
@@ -397,14 +327,12 @@ mod multi_language {
             .await;
         let res = app.wait_for_submission_terminal(sub_id, &admin, 120).await;
 
-        if is_real_sandbox() {
-            assert_eq!(res.body["status"], "Judged");
-            assert_eq!(
-                res.body["result"]["verdict"], "Accepted",
-                "Correct Java should get Accepted: {}",
-                res.text
-            );
-        }
+        assert_eq!(res.body["status"], "Judged");
+        assert_eq!(
+            res.body["result"]["verdict"], "Accepted",
+            "Correct Java should get Accepted: {}",
+            res.text
+        );
     }
 }
 
@@ -412,11 +340,9 @@ mod stress {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires a real judge sandbox and language toolchains"]
+    #[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
     async fn twenty_parallel_submissions_all_complete() {
-        if skip_without_real_sandbox() {
-            return;
-        }
+        require_real_sandbox();
 
         let app = E2eTestApp::spawn().await;
         let admin = app
@@ -495,17 +421,13 @@ mod stress {
 
         assert_eq!(completed, 20, "All 20 submissions should complete");
 
-        if is_real_sandbox() {
-            assert_eq!(accepted, 10, "10 correct submissions should be Accepted");
-        }
+        assert_eq!(accepted, 10, "10 correct submissions should be Accepted");
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires a real judge sandbox and language toolchains"]
+    #[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
     async fn mixed_languages_parallel() {
-        if skip_without_real_sandbox() {
-            return;
-        }
+        require_real_sandbox();
 
         let app = E2eTestApp::spawn().await;
         let admin = app
@@ -538,10 +460,8 @@ mod stress {
             );
         }
 
-        if is_real_sandbox() {
-            assert_eq!(res_cpp.body["result"]["verdict"], "Accepted");
-            assert_eq!(res_py.body["result"]["verdict"], "Accepted");
-            assert_eq!(res_java.body["result"]["verdict"], "Accepted");
-        }
+        assert_eq!(res_cpp.body["result"]["verdict"], "Accepted");
+        assert_eq!(res_py.body["result"]["verdict"], "Accepted");
+        assert_eq!(res_java.body["result"]["verdict"], "Accepted");
     }
 }

@@ -54,3 +54,15 @@ regenerate the translation stubs:
 ```bash
 pnpm write-translations --locale zh-CN
 ```
+
+## Dependency advisories
+
+The site has its own `pnpm-lock.yaml`, outside the root pnpm workspace, and the
+weekly security audit checks it with `pnpm audit --prod`. `pnpm.overrides` in
+`package.json` lifts transitive packages past advisories that Docusaurus's own
+ranges do not reach yet. `pnpm.auditConfig.ignoreGhsas` lists the advisories
+with no patched release:
+
+- `GHSA-gcqx-w48m-w2h4` (deepmerge prototype poisoning, reached through
+  `@svgr/plugin-svgo`): no deepmerge release fixes it, and deepmerge only
+  merges the site's own build-time SVGO options, never input from a visitor.

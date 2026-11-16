@@ -13,10 +13,14 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use server::dispatcher::plugin_timer::{TimerConfig, tick_once};
+
 use crate::common::{SpawnOptions, TestApp, routes};
 
 fn fixtures_timer_negative_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures_timer_negative")
+    test_support::require_built_plugins(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures_timer_negative"),
+    )
 }
 
 async fn spawn_timer_app() -> TestApp {
@@ -34,7 +38,7 @@ async fn schedule_timer_raw(
     delay_ms: i64,
     payload: &str,
 ) -> crate::common::TestResponse {
-    let fire_at_ms = chrono::Utc::now().timestamp_millis() + delay_ms;
+    let fire_at_ms = app.clock().now_ms().await + delay_ms;
     app.post_without_token(
         &routes::plugin_proxy(plugin_id, "timer/schedule"),
         &json!({ "key": key, "fire_at_ms": fire_at_ms, "payload": payload }),
@@ -123,8 +127,12 @@ async fn a_cancelled_timer_never_fires() {
     schedule_timer(&app, "k3", 1_500, "doomed").await;
     cancel_timer(&app, "k3").await;
 
-    // Sleep past both the fire_at and at least one real background tick.
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Past the fire_at, then one delivery cycle: nothing is due.
+    app.clock().advance(Duration::from_secs(60)).await;
+    let stats = tick_once(&app.state, &TimerConfig::default())
+        .await
+        .expect("tick_once");
+    assert_eq!(stats.claimed, 0, "a cancelled timer is never claimed");
 
     assert!(
         read_deliveries(&app).await.is_empty(),

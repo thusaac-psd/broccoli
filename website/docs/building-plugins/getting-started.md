@@ -28,8 +28,10 @@ A plugin can add two kinds of behavior:
 
 ## Prerequisites
 
-- Rust nightly with the `wasm32-wasip1` target. The scaffold pins both in
-  `rust-toolchain.toml`.
+- Rust with the `wasm32-wasip1` target. A plugin scaffolded on its own gets a
+  `rust-toolchain.toml` that selects stable Rust with that target. A plugin
+  scaffolded inside a project that already pins a toolchain, such as the
+  Broccoli repository, builds with that project's pin instead.
 - The Broccoli CLI. The crate is `broccoli-dev-cli` and the installed binary is
   `broccoli-dev`.
 - `pnpm`, if your plugin has a frontend.
