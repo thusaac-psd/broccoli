@@ -158,12 +158,28 @@ enum Restore {
     NewRolePermissions,
     /// Accounts merge by username, compared through
     /// [`crate::entity::user::username_key_sql`]. An active account the target
-    /// has stays as it is, password included; a new one gets a new id. Every bundle row that
-    /// references an account follows it to its id on the target.
+    /// has stays as it is, password and roles included; a new one gets a new
+    /// id. Every bundle row that references an account follows it to its id on
+    /// the target.
     Accounts,
     /// Rows that reference an account (`user_id`), moved to the account's id
-    /// on the target, then merged on `key`.
-    AccountRefs { key: &'static [&'static str] },
+    /// on the target, then merged on `key`. `of` says which accounts' rows
+    /// are restored.
+    AccountRefs {
+        key: &'static [&'static str],
+        of: AccountsOf,
+    },
+}
+
+/// The accounts whose rows an [`Restore::AccountRefs`] table restores.
+#[derive(Clone, Copy)]
+enum AccountsOf {
+    /// Only the accounts this import created: rows that would change what
+    /// an existing account may do (its roles) never reach it.
+    Created,
+    /// Every account of the bundle that is active on the target, created or
+    /// already there.
+    Active,
 }
 
 struct Table {
@@ -214,6 +230,7 @@ const TABLES: &[Table] = &[
         },
         restore: Restore::AccountRefs {
             key: &["user_id", "role"],
+            of: AccountsOf::Created,
         },
     },
     Table {
@@ -287,6 +304,7 @@ const TABLES: &[Table] = &[
         },
         restore: Restore::AccountRefs {
             key: &["contest_id", "user_id"],
+            of: AccountsOf::Active,
         },
     },
 ];
@@ -779,19 +797,25 @@ fn restore_statements(table: &Table, columns: &[String]) -> Vec<String> {
                 username_key_sql("u.username"),
                 username_key_sql("b.username")
             );
+            // The accounts the target has are mapped before the new ones are
+            // inserted, so `created` tells the two apart.
             vec![
                 format!(
-                    "INSERT INTO {t} ({new}) SELECT {new} FROM {s} b WHERE NOT EXISTS \
-                     (SELECT 1 FROM {t} u WHERE {same} AND u.deleted_at IS NULL)"
+                    "CREATE TEMP TABLE bundle_account_ids ON COMMIT DROP AS \
+                     SELECT b.id AS bundle_id, u.id AS target_id, false AS created FROM {s} b \
+                     JOIN {t} u ON {same} AND u.deleted_at IS NULL"
                 ),
                 format!(
-                    "CREATE TEMP TABLE bundle_account_ids ON COMMIT DROP AS \
-                     SELECT b.id AS bundle_id, u.id AS target_id FROM {s} b \
-                     JOIN {t} u ON {same} AND u.deleted_at IS NULL"
+                    "WITH created AS (\
+                       INSERT INTO {t} ({new}) SELECT {new} FROM {s} b \
+                       WHERE b.id NOT IN (SELECT bundle_id FROM bundle_account_ids) \
+                       RETURNING id, username) \
+                     INSERT INTO bundle_account_ids (bundle_id, target_id, created) \
+                     SELECT b.id, u.id, true FROM created u JOIN {s} b ON {same}"
                 ),
             ]
         }
-        Restore::AccountRefs { key } => {
+        Restore::AccountRefs { key, of } => {
             let select: Vec<String> = columns
                 .iter()
                 .map(|c| {
@@ -802,9 +826,13 @@ fn restore_statements(table: &Table, columns: &[String]) -> Vec<String> {
                     }
                 })
                 .collect();
+            let accounts = match of {
+                AccountsOf::Created => " AND a.created",
+                AccountsOf::Active => "",
+            };
             vec![format!(
                 "INSERT INTO {t} ({all}) SELECT {} FROM {s} r \
-                 JOIN bundle_account_ids a ON a.bundle_id = r.user_id {}",
+                 JOIN bundle_account_ids a ON a.bundle_id = r.user_id{accounts} {}",
                 select.join(", "),
                 merge(key, false)
             )]

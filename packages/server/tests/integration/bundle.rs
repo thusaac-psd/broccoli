@@ -117,7 +117,7 @@ async fn seed_contest(app: &TestApp) -> (i32, String) {
          INSERT INTO role_permission (role, permission) VALUES \
            ('volunteer', 'contest:manage'), ('contestant', 'problem:manage'); \
          INSERT INTO user_role (user_id, role) SELECT id, 'volunteer' FROM \"user\" \
-           WHERE username = 'dave'",
+           WHERE username IN ('carol', 'dave')",
     )
     .await;
     (contest, blob)
@@ -193,6 +193,17 @@ async fn a_contest_bundle_restores_every_row_and_blob_onto_another_server() {
         )
         .await,
         carol_before
+    );
+    // ... and its roles: the bundle's `carol` holds `volunteer`, the target's
+    // does not, and the import grants it nothing.
+    assert_eq!(
+        text(
+            &target,
+            "SELECT string_agg(ur.role, ',' ORDER BY ur.role) AS v FROM user_role ur \
+             JOIN \"user\" u ON u.id = ur.user_id WHERE u.username = 'CAROL'"
+        )
+        .await,
+        "contestant"
     );
     // A new account carries its profile and no password.
     assert_eq!(
