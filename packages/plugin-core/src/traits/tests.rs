@@ -456,10 +456,12 @@ async fn a_deadline_cancels_a_spinning_guest_and_frees_its_token() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_guest_parked_past_its_deadline_is_cancelled_when_it_resumes() {
     let h = Harness::new(2);
-    let deadline = Instant::now() + Duration::from_millis(50);
+    // The deadline passes once the guest is parked, at a point the test
+    // chooses: a clock deadline could pass before the guest reaches the park.
+    let deadline = later();
     let call = h.spawn("park_spin", CallOptions::background(deadline));
     until(|| h.fixture.read(|c| c.parked) == 1).await;
-    until(|| Instant::now() >= deadline).await;
+    crate::deadline::expire(deadline);
     h.fixture.release();
     let err = call.await.unwrap().unwrap_err();
     assert!(matches!(err, PluginError::Unavailable { .. }), "{err:?}");
