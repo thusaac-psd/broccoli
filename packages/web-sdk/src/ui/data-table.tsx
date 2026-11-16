@@ -107,6 +107,7 @@ function PaginationControls({
       </span>
       <div className="flex items-center gap-1">
         <Button
+          aria-label={t('table.firstPage')}
           variant="ghost"
           size="icon"
           className="h-7 w-7"
@@ -116,6 +117,7 @@ function PaginationControls({
           <ChevronsLeft className="h-3.5 w-3.5" />
         </Button>
         <Button
+          aria-label={t('table.previousPage')}
           variant="ghost"
           size="icon"
           className="h-7 w-7"
@@ -128,6 +130,7 @@ function PaginationControls({
           {page} / {total_pages || 1}
         </span>
         <Button
+          aria-label={t('table.nextPage')}
           variant="ghost"
           size="icon"
           className="h-7 w-7"
@@ -137,6 +140,7 @@ function PaginationControls({
           <ChevronRight className="h-3.5 w-3.5" />
         </Button>
         <Button
+          aria-label={t('table.lastPage')}
           variant="ghost"
           size="icon"
           className="h-7 w-7"

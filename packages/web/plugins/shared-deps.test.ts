@@ -83,3 +83,61 @@ test('a bundle without the placeholder builds', () => {
   );
   assert.deepEqual(emitted, ['shared-deps-map.json']);
 });
+
+// A plugin bundle reaches a shared dep through the import map, the host
+// through its own imports. In dev both must load one module instance, so the
+// shim the map points at must import exactly the URL a host module gets.
+test('in dev a shared dep resolves to the module the host imports', async () => {
+  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const { createServer } = await import('vite');
+  const { devImportMap, resolveSdkEntry } = await import('./shared-deps.ts');
+
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const dir = mkdtempSync(join(root, 'node_modules', '.shared-deps-test-'));
+  const server = await createServer({
+    configFile: false,
+    root,
+    logLevel: 'silent',
+    appType: 'custom',
+    server: { middlewareMode: true, hmr: false, ws: false },
+    optimizeDeps: { noDiscovery: true, include: [] },
+    resolve: {
+      alias: [
+        {
+          find: '@broccoli/web-sdk/ui',
+          replacement: resolveSdkEntry('@broccoli/web-sdk/ui'),
+        },
+      ],
+    },
+    plugins: [sharedDepsPlugin()],
+  });
+  const { createServer: createHttpServer } = await import('node:http');
+  const http = createHttpServer(server.middlewares);
+  await new Promise<void>((done) => http.listen(0, '127.0.0.1', done));
+  const { port } = http.address() as { port: number };
+  try {
+    // What the browser gets for `url`, and the URL its first import names.
+    const importedUrl = async (url: string) => {
+      const response = await fetch(`http://127.0.0.1:${port}${url}`);
+      assert.equal(response.status, 200, url);
+      const match = /from\s*["']([^"']+)["']/.exec(await response.text());
+      assert.ok(match, `${url} imports its dep`);
+      return match[1];
+    };
+    for (const dep of ['react-router', '@broccoli/web-sdk/ui']) {
+      const host = join(dir, `${dep.replace(/\W/g, '_')}.ts`);
+      writeFileSync(host, `export * from '${dep}';\n`);
+      assert.equal(
+        await importedUrl(devImportMap()[dep]),
+        await importedUrl(`/@fs${host}`),
+        dep,
+      );
+    }
+  } finally {
+    http.close();
+    await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

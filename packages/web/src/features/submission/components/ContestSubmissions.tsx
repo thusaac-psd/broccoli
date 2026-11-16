@@ -1,11 +1,6 @@
-import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
-import { useAuth } from '@broccoli/web-sdk/auth';
+import { useApiClient } from '@broccoli/web-sdk/api';
+import { useAuth, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import {
-  CONTEST_MANAGE,
-  SUBMISSION_REJUDGE,
-  SUBMISSION_VIEW_ALL,
-} from '@broccoli/web-sdk/permissions';
 import {
   getStatusLabel,
   SUBMISSION_STATUS_FILTER_OPTIONS,
@@ -18,27 +13,22 @@ import {
   QueryView,
   SignInPrompt,
 } from '@broccoli/web-sdk/ui';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import {
-  BookOpen,
-  Code2,
-  ListFilter,
-  Loader2,
-  RotateCcw,
-  Search,
-} from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
+import { BookOpen, Code2, ListFilter, Search } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router';
-import { toast } from 'sonner';
 
 import { useContestProblems } from '@/features/contest/hooks/use-contest-problems';
 import { fetchSupportedLanguages } from '@/features/problem/api/fetch-supported-languages';
 import {
-  fetchAllContestSubmissions,
-  fetchContestSubmissions,
-} from '@/features/submission/api/fetch-contest-submissions';
+  fetchAllPages,
+  MAX_PER_PAGE,
+} from '@/features/submission/api/fetch-all-pages';
+import { fetchContestSubmissions } from '@/features/submission/api/fetch-contest-submissions';
+import { useBulkRejudge } from '@/features/submission/hooks/use-bulk-rejudge';
 import { useCursorPages } from '@/features/submission/hooks/use-cursor-pages';
 
+import { BulkRejudgeBar, BulkRejudgeToggle } from './BulkRejudge';
 import { SubmissionListPager } from './SubmissionListPager';
 import { SubmissionsTable } from './SubmissionsTable';
 
@@ -60,23 +50,13 @@ function parseStatus(value: string | null): SubmissionStatusFilterValue {
 
 export function ContestSubmissions({ contestId }: { contestId: number }) {
   const { t } = useTranslation();
-  const errorMessage = useErrorMessage();
   const { user } = useAuth();
   const apiClient = useApiClient();
-  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [isBulkMode, setIsBulkMode] = useState(false);
-  const [selectedSubmissionIds, setSelectedSubmissionIds] = useState<
-    Set<number>
-  >(() => new Set<number>());
-  const [bulkApplyImmediately, setBulkApplyImmediately] = useState(true);
-
-  const canBulkRejudge = !!user?.permissions.includes(SUBMISSION_REJUDGE);
-  const scopedUserId =
-    user?.permissions.includes(SUBMISSION_VIEW_ALL) ||
-    user?.permissions.includes(CONTEST_MANAGE)
-      ? undefined
-      : user?.id;
+  // Which rows a viewer sees (their own, or everyone's when the contest
+  // shows submissions or they are staff) is the server's call; the cache is
+  // per viewer because the rows are.
+  const viewerKey = viewerCacheKey(user);
 
   const pages = useCursorPages();
   const appliedProblemId = parsePositiveInt(searchParams.get('problem'));
@@ -155,6 +135,12 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
     staleTime: 5 * 60 * 1000,
   });
 
+  const filters = {
+    contestId,
+    problemId: appliedProblemId,
+    language: appliedLanguage,
+    status: toSubmissionStatus(appliedStatus),
+  };
   const submissionsQuery = useQuery({
     queryKey: [
       'contest-submissions-table',
@@ -163,15 +149,12 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
       String(appliedLanguage ?? 'all'),
       appliedStatus,
       pages.cursor,
+      viewerKey,
     ],
     enabled: !!user,
     queryFn: () =>
       fetchContestSubmissions(apiClient, {
-        contestId,
-        problemId: appliedProblemId,
-        language: appliedLanguage,
-        status: toSubmissionStatus(appliedStatus),
-        userId: scopedUserId,
+        ...filters,
         cursor: pages.cursor,
         per_page: PER_PAGE,
         sort_by: 'created_at',
@@ -179,64 +162,19 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
       }),
   });
 
-  const bulkSourceQuery = useQuery({
-    queryKey: [
-      'contest-submissions-bulk-source',
-      String(contestId),
-      String(scopedUserId ?? 'all'),
-    ],
-    enabled: !!user && canBulkRejudge && isBulkMode,
-    queryFn: () =>
-      fetchAllContestSubmissions(apiClient, {
-        contestId,
-        userId: scopedUserId,
-      }),
-  });
-  // Selecting "all matched" needs the whole list; until it has loaded
-  // (or when it failed) the selection buttons stay off.
-  const allSubmissions = useMemo(
-    () => bulkSourceQuery.data ?? [],
-    [bulkSourceQuery.data],
-  );
-
-  const bulkRejudgeMutation = useMutation({
-    mutationFn: async (submissionIds: number[]) => {
-      const { data, error } = await apiClient.POST(
-        '/submissions/bulk-rejudge',
-        {
-          body: {
-            submission_ids: submissionIds,
-            apply_immediately: bulkApplyImmediately,
-          },
-        },
-      );
-
-      if (error) throw error;
-      return data;
-    },
-    onSuccess: async (data, submissionIds) => {
-      toast.success(
-        t('submissions.bulkRejudge.queued', { count: data.queued }),
-      );
-
-      setSelectedSubmissionIds((prev) => {
-        const next = new Set(prev);
-        for (const id of submissionIds) {
-          next.delete(id);
-        }
-        return next;
-      });
-
-      await queryClient.invalidateQueries({
-        queryKey: ['contest-submissions-table', String(contestId)],
-      });
-      await queryClient.invalidateQueries({
-        queryKey: ['contest-submissions-bulk-source', String(contestId)],
-      });
-    },
-    onError: (error) => {
-      toast.error(errorMessage(error, t('submissions.bulkRejudge.error')));
-    },
+  const bulk = useBulkRejudge({
+    listKey: ['contest-submissions-table', String(contestId)],
+    filterKey: ['contest', filters],
+    fetchMatching: () =>
+      fetchAllPages((cursor) =>
+        fetchContestSubmissions(apiClient, {
+          ...filters,
+          cursor,
+          per_page: MAX_PER_PAGE,
+          sort_by: 'created_at',
+          sort_order: 'desc',
+        }),
+      ),
   });
 
   const pagination = submissionsQuery.data?.pagination;
@@ -272,74 +210,6 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
     [t],
   );
 
-  const matchedSubmissionIds = useMemo(() => {
-    if (!canBulkRejudge || !isBulkMode) {
-      return [];
-    }
-
-    const targetProblemId =
-      draftProblemId === 'all' ? null : Number(draftProblemId);
-    const targetLanguage = draftLanguage === 'all' ? null : draftLanguage;
-    const targetStatus = draftStatus === 'all' ? null : draftStatus;
-
-    return allSubmissions
-      .filter((submission) => {
-        if (
-          targetProblemId !== null &&
-          submission.problem_id !== targetProblemId
-        ) {
-          return false;
-        }
-
-        if (targetLanguage !== null && submission.language !== targetLanguage) {
-          return false;
-        }
-
-        if (targetStatus !== null && submission.status !== targetStatus) {
-          return false;
-        }
-
-        return true;
-      })
-      .map((submission) => submission.id);
-  }, [
-    allSubmissions,
-    canBulkRejudge,
-    isBulkMode,
-    draftLanguage,
-    draftProblemId,
-    draftStatus,
-  ]);
-
-  useEffect(() => {
-    if (!canBulkRejudge) {
-      setIsBulkMode(false);
-      setSelectedSubmissionIds((prev) =>
-        prev.size === 0 ? prev : new Set<number>(),
-      );
-      return;
-    }
-
-    if (!isBulkMode) {
-      setSelectedSubmissionIds((prev) =>
-        prev.size === 0 ? prev : new Set<number>(),
-      );
-      return;
-    }
-
-    const validIds = new Set(allSubmissions.map((submission) => submission.id));
-
-    setSelectedSubmissionIds((prev) => {
-      const next = new Set<number>();
-      for (const id of prev) {
-        if (validIds.has(id)) {
-          next.add(id);
-        }
-      }
-      return next.size === prev.size ? prev : next;
-    });
-  }, [allSubmissions, canBulkRejudge, isBulkMode]);
-
   const applyFilters = () => {
     const nextProblemId =
       draftProblemId === 'all' ? null : Number(draftProblemId);
@@ -348,52 +218,6 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
       language: draftLanguage === 'all' ? null : draftLanguage,
       status: draftStatus,
     });
-  };
-
-  const selectMatched = () => {
-    if (matchedSubmissionIds.length === 0) {
-      return;
-    }
-
-    setSelectedSubmissionIds((prev) => {
-      const next = new Set(prev);
-      for (const id of matchedSubmissionIds) {
-        next.add(id);
-      }
-      return next;
-    });
-  };
-
-  const unselectMatched = () => {
-    if (matchedSubmissionIds.length === 0) {
-      return;
-    }
-
-    setSelectedSubmissionIds((prev) => {
-      const next = new Set(prev);
-      for (const id of matchedSubmissionIds) {
-        next.delete(id);
-      }
-      return next;
-    });
-  };
-
-  const clearSelection = () => {
-    setSelectedSubmissionIds(new Set<number>());
-  };
-
-  const toggleBulkMode = () => {
-    setIsBulkMode((prev) => !prev);
-  };
-
-  const triggerBulkRejudge = () => {
-    const ids = Array.from(selectedSubmissionIds);
-    if (ids.length === 0) {
-      toast.error(t('submissions.bulkRejudge.noSelection'));
-      return;
-    }
-
-    bulkRejudgeMutation.mutate(ids);
   };
 
   return (
@@ -427,87 +251,10 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
           <Search className="mr-1 h-4 w-4" />
           {t('submissions.filters.search')}
         </Button>
-        {canBulkRejudge && (
-          <Button
-            className="h-9 shrink-0"
-            variant={isBulkMode ? 'secondary' : 'outline'}
-            onClick={toggleBulkMode}
-          >
-            <RotateCcw className="mr-1 h-4 w-4" />
-            {isBulkMode
-              ? t('submissions.bulkRejudge.exitMode')
-              : t('submissions.bulkRejudge.enterMode')}
-          </Button>
-        )}
+        <BulkRejudgeToggle bulk={bulk} />
       </div>
 
-      {canBulkRejudge && isBulkMode && (
-        <div className="flex flex-wrap items-center gap-2 rounded-md border border-dashed px-3 py-2">
-          <Button
-            variant="outline"
-            className="h-8"
-            disabled={
-              !bulkSourceQuery.isSuccess || matchedSubmissionIds.length === 0
-            }
-            onClick={selectMatched}
-          >
-            {t('submissions.selection.selectMatched')}
-          </Button>
-          <Button
-            variant="outline"
-            className="h-8"
-            disabled={
-              !bulkSourceQuery.isSuccess || matchedSubmissionIds.length === 0
-            }
-            onClick={unselectMatched}
-          >
-            {t('submissions.selection.unselectMatched')}
-          </Button>
-          <Button
-            variant="ghost"
-            className="h-8"
-            disabled={selectedSubmissionIds.size === 0}
-            onClick={clearSelection}
-          >
-            {t('submissions.selection.clear')}
-          </Button>
-          <span className="text-xs text-muted-foreground tabular-nums">
-            {t('submissions.selection.selectedCount', {
-              count: selectedSubmissionIds.size,
-            })}{' '}
-            ·{' '}
-            {t('submissions.selection.matchingCount', {
-              count: matchedSubmissionIds.length,
-            })}
-          </span>
-          <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={bulkApplyImmediately}
-              onChange={(event) =>
-                setBulkApplyImmediately(event.currentTarget.checked)
-              }
-              className="h-4 w-4 rounded border-muted"
-            />
-            {t('submissions.bulkRejudge.applyImmediately')}
-          </label>
-          <Button
-            className="h-8 ml-auto"
-            disabled={
-              bulkRejudgeMutation.isPending || selectedSubmissionIds.size === 0
-            }
-            onClick={triggerBulkRejudge}
-          >
-            {bulkRejudgeMutation.isPending && (
-              <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-            )}
-            {!bulkRejudgeMutation.isPending && (
-              <RotateCcw className="mr-1 h-4 w-4" />
-            )}
-            {t('submissions.bulkRejudge.action')}
-          </Button>
-        </div>
-      )}
+      <BulkRejudgeBar bulk={bulk} />
 
       {/* Table */}
       <div className="border rounded-lg overflow-hidden">
@@ -530,32 +277,7 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
             <SubmissionsTable
               submissions={result.data}
               columns={SubmissionsTable.fullColumns}
-              selectable={canBulkRejudge && isBulkMode}
-              selectedSubmissionIds={selectedSubmissionIds}
-              onToggleSubmissionSelection={(submissionId, checked) => {
-                setSelectedSubmissionIds((prev) => {
-                  const next = new Set(prev);
-                  if (checked) {
-                    next.add(submissionId);
-                  } else {
-                    next.delete(submissionId);
-                  }
-                  return next;
-                });
-              }}
-              onToggleSelectVisible={(submissionIds, checked) => {
-                setSelectedSubmissionIds((prev) => {
-                  const next = new Set(prev);
-                  for (const id of submissionIds) {
-                    if (checked) {
-                      next.add(id);
-                    } else {
-                      next.delete(id);
-                    }
-                  }
-                  return next;
-                });
-              }}
+              {...bulk.tableSelection}
               linkBuilder={(sub) =>
                 `/contests/${contestId}/submissions/${sub.id}`
               }

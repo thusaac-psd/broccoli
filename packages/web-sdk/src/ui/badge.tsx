@@ -7,17 +7,18 @@ const badgeVariants = cva(
   'inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-2',
   {
     variants: {
+      // Verdict colors are dark enough for white text at 4.5:1.
       variant: {
         accepted:
-          'border-transparent bg-green-500/80 text-white shadow-sm hover:bg-green-500/90',
+          'border-transparent bg-green-700 text-white shadow-sm hover:bg-green-700/90',
         wronganswer:
-          'border-transparent bg-red-500/80 text-white shadow-sm hover:bg-red-500/90',
+          'border-transparent bg-red-700 text-white shadow-sm hover:bg-red-700/90',
         timelimitexceeded:
-          'border-transparent bg-orange-500/80 text-white shadow-sm hover:bg-orange-500/90',
+          'border-transparent bg-orange-700 text-white shadow-sm hover:bg-orange-700/90',
         memorylimitexceeded:
-          'border-transparent bg-orange-500/80 text-white shadow-sm hover:bg-orange-500/90',
+          'border-transparent bg-orange-700 text-white shadow-sm hover:bg-orange-700/90',
         runtimeerror:
-          'border-transparent bg-purple-500/80 text-white shadow-sm hover:bg-purple-500/90',
+          'border-transparent bg-purple-700 text-white shadow-sm hover:bg-purple-700/90',
         default:
           'border-transparent bg-primary text-primary-foreground shadow-sm hover:bg-primary/80',
         secondary:

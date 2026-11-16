@@ -36,6 +36,7 @@ import {
   SidebarMenuItem,
   SidebarRail,
   Skeleton,
+  useSidebar,
 } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -55,6 +56,7 @@ import {
   User,
   Users,
 } from 'lucide-react';
+import { useEffect } from 'react';
 import { Link, useLocation } from 'react-router';
 
 import { useContest } from '@/features/contest/contexts/contest-context';
@@ -345,7 +347,7 @@ function PlatformGroup() {
             </SidebarMenuItem>
           )}
           <MenuGroupItems items={adminItems} pathname={pathname} t={t} />
-          <Slot name="sidebar.platform.menu" as="div" />
+          <Slot name="sidebar.platform.menu" as={null} />
         </SidebarMenu>
       </SidebarGroupContent>
     </SidebarGroup>
@@ -356,6 +358,13 @@ export function Sidebar() {
   const { t } = useTranslation();
   const { user, logout, isLoading: sessionLoading } = useAuth();
   const { pathname, search } = useLocation();
+  const { setOpenMobile } = useSidebar();
+
+  // On a phone the sidebar is a sheet over the page: a link followed from it
+  // closes it, or it would cover the page it opened.
+  useEffect(() => {
+    setOpenMobile(false);
+  }, [pathname, setOpenMobile]);
 
   return (
     <SidebarUI collapsible="icon">
@@ -366,17 +375,13 @@ export function Sidebar() {
               <Link to="/">
                 <img
                   src={logo}
+                  alt={t('app.name')}
                   className="flex items-center justify-center w-full"
                 />
-                {/* <div className="flex flex-col gap-0.5 leading-none">
-                  <span className="font-semibold">{t('app.name')}</span>
-                  <span className="text-xs">{t('app.tagline')}</span>
-                </div>
-                */}
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
-          <Slot name="sidebar.header" as="div" />
+          <Slot name="sidebar.header" as={null} />
         </SidebarMenu>
       </SidebarHeader>
 
@@ -393,7 +398,7 @@ export function Sidebar() {
 
       <SidebarFooter>
         <SidebarMenu>
-          <Slot name="sidebar.footer" as="div" />
+          <Slot name="sidebar.footer" as={null} />
           <LocaleSelector />
           <ThemeToggle />
           <SidebarMenuItem>

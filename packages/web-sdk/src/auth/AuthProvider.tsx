@@ -2,6 +2,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useSyncExternalStore,
 } from 'react';
@@ -58,7 +59,6 @@ export function AuthProvider({
           }
         }
         if (queries === 'clear') queryClient.clear();
-        if (queries === 'invalidate') void queryClient.invalidateQueries();
       }),
     [session, sessionStatusKey, queryClient],
   );
@@ -83,7 +83,9 @@ export function AuthProvider({
 
   // Bootstrap. While the server is unreachable the session stays
   // `bootstrapping` and retries, rather than concluding nobody is signed in.
-  useEffect(() => {
+  // A layout effect, so it starts before any query's (passive) effect sends
+  // a request: those wait for it (see `Session.settled`).
+  useLayoutEffect(() => {
     if (session.getState().status !== 'bootstrapping') return;
     let hinted = false;
     try {

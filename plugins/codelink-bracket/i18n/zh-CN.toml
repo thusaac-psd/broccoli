@@ -252,6 +252,8 @@
 'codelink-bracket.setup.thirdPlace' = "季军赛"
 'codelink-bracket.setup.thirdPlaceEnabled' = "半决赛负者进入季军赛"
 'codelink-bracket.setup.thirdPlaceShared' = "沿用决赛题组"
+'codelink-bracket.setup.thirdPlaceMode' = '季军赛题目'
+'codelink-bracket.setup.slotN' = '{label}，第 {index} 个位置'
 'codelink-bracket.setup.thirdPlaceCustom' = "单独设置题组"
 'codelink-bracket.setup.thirdPlaceHint' = "冠军赛与季军赛共用最后一轮的开赛时间、计时设置和 BO / FT。"
 'codelink-bracket.setup.issue.badSchedule' = "请为{round}设置有效开轮时间，且应晚于上一轮的开轮时间。"

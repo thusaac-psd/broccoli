@@ -52,6 +52,13 @@ export function I18nProvider({
     });
   }, [defaultLocale, localeKey]);
 
+  // The document's language follows the UI's, so screen readers pronounce
+  // the page in the right language and the browser offers the right
+  // translation and hyphenation.
+  useEffect(() => {
+    document.documentElement.lang = locale;
+  }, [locale]);
+
   const setLocale = useCallback(
     (newLocale: string) => {
       // Prevent invalid locales from being stored

@@ -15,7 +15,8 @@ const TabsList = ({
   <TabsPrimitive.List
     ref={ref}
     className={cn(
-      'inline-flex h-9 items-center justify-center rounded-lg bg-muted p-1 text-muted-foreground',
+      // Scrolls rather than widening the page when the tabs outgrow it.
+      'inline-flex h-9 max-w-full items-center justify-start overflow-x-auto no-scrollbar rounded-lg bg-muted p-1 text-muted-foreground',
       className,
     )}
     {...props}

@@ -5,6 +5,9 @@ import { Skeleton } from '@broccoli/web-sdk/ui';
 import { BarChart3 } from 'lucide-react';
 
 import { PageLayout } from '@/components/PageLayout';
+import { contestPageTitle, type RouteHandle } from '@/lib/route-title';
+
+export const handle: RouteHandle = contestPageTitle('ranking.title');
 
 export default function ContestRankingPage() {
   const { t } = useTranslation();

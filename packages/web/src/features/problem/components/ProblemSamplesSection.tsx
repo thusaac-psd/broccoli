@@ -65,6 +65,7 @@ export function ProblemSamplesSection({
                 <div className="flex items-center justify-between px-1 text-sm font-medium">
                   {`${t('problem.input')} #${sampleNumber}`}
                   <Button
+                    aria-label={t('problem.copy')}
                     type="button"
                     variant="ghost"
                     size="icon"
@@ -115,6 +116,7 @@ export function ProblemSamplesSection({
                 <div className="flex items-center justify-between px-1 text-sm font-medium">
                   {`${t('problem.output')} #${sampleNumber}`}
                   <Button
+                    aria-label={t('problem.copy')}
                     type="button"
                     variant="ghost"
                     size="icon"

@@ -2,6 +2,9 @@ import { Slot } from '@broccoli/web-sdk/slot';
 import { Outlet, useParams } from 'react-router';
 
 import { ContestSlotProvider } from '@/features/contest/components/ContestSlotProvider';
+import { contestPageTitle, type RouteHandle } from '@/lib/route-title';
+
+export const handle: RouteHandle = contestPageTitle();
 
 export default function ContestLayout() {
   const { contestId } = useParams();

@@ -319,6 +319,7 @@ export function AdditionalFilesSection({
 
                 {/* Language */}
                 <select
+                  aria-label={t('admin.additionalFiles.language')}
                   value={item.language}
                   onChange={(e) => {
                     updateStagedField(item.id, 'language', e.target.value);
@@ -355,6 +356,7 @@ export function AdditionalFilesSection({
 
                 {/* Upload single */}
                 <Button
+                  aria-label={t('admin.additionalFiles.upload')}
                   type="button"
                   variant="ghost"
                   size="icon"
@@ -368,6 +370,7 @@ export function AdditionalFilesSection({
 
                 {/* Remove from staging */}
                 <Button
+                  aria-label={t('common.remove')}
                   type="button"
                   variant="ghost"
                   size="icon"
@@ -426,6 +429,7 @@ export function AdditionalFilesSection({
                         {formatBytes(file.size)}
                       </span>
                       <Button
+                        aria-label={t('common.download')}
                         type="button"
                         variant="ghost"
                         size="icon"
@@ -435,6 +439,7 @@ export function AdditionalFilesSection({
                         <Download className="h-3.5 w-3.5" />
                       </Button>
                       <Button
+                        aria-label={t('admin.delete')}
                         type="button"
                         variant="ghost"
                         size="icon"

@@ -555,6 +555,7 @@ function SetupForm({
                 onCheckedChange={(enabled) =>
                   setThirdPlace(enabled ? { mode: 'shared' } : null)
                 }
+                aria-label={t('codelink-bracket.setup.thirdPlaceEnabled')}
               />
               {t('codelink-bracket.setup.thirdPlaceEnabled')}
             </Label>
@@ -564,6 +565,7 @@ function SetupForm({
                 className="mt-3 space-y-3 disabled:opacity-60"
               >
                 <select
+                  aria-label={t('codelink-bracket.setup.thirdPlaceMode')}
                   className="w-full rounded border border-input bg-background p-2 text-sm"
                   value={thirdPlace.mode}
                   onChange={(event) =>
@@ -791,6 +793,10 @@ function SlotRow({
       <div className="flex flex-wrap items-center gap-1.5">
         {slots.map((value, i) => (
           <select
+            aria-label={t('codelink-bracket.setup.slotN', {
+              label,
+              index: i + 1,
+            })}
             key={i}
             value={value ?? ''}
             onChange={(e) =>

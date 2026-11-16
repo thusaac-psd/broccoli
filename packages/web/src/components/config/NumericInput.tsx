@@ -1,3 +1,4 @@
+import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
@@ -24,6 +25,7 @@ export function NumericInput({
   id?: string;
   inheritedPlaceholder?: string;
 }>) {
+  const { t } = useTranslation();
   const [text, setText] = useState(value !== undefined ? String(value) : '');
   const [focused, setFocused] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -140,7 +142,7 @@ export function NumericInput({
           placeholder={inheritedPlaceholder ?? (integer ? '0' : '0.0')}
         />
         {(rangeHint || unit) && (
-          <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground/60 pointer-events-none select-none tabular-nums">
+          <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground pointer-events-none select-none tabular-nums">
             {unit && rangeHint
               ? `${rangeHint} ${unit}`
               : unit
@@ -151,6 +153,7 @@ export function NumericInput({
       </div>
       <div className="flex flex-col">
         <button
+          aria-label={t('common.increase')}
           type="button"
           tabIndex={-1}
           onClick={() => increment(step)}
@@ -159,6 +162,7 @@ export function NumericInput({
           <ChevronUp className="h-3 w-3" />
         </button>
         <button
+          aria-label={t('common.decrease')}
           type="button"
           tabIndex={-1}
           onClick={() => increment(-step)}

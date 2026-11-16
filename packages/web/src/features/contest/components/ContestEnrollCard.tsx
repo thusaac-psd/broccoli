@@ -10,7 +10,7 @@ import {
 } from '@broccoli/web-sdk/ui';
 import { useState } from 'react';
 
-const ACCENT = 'hsl(var(--sidebar-ring))';
+const ACCENT = 'hsl(var(--primary))';
 
 export function ContestEnrollCard({
   onEnroll,

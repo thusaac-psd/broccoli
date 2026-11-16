@@ -305,6 +305,7 @@ function ReplyMessage({
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button
+                  aria-label={t('admin.actions')}
                   type="button"
                   className="ml-auto text-muted-foreground hover:text-foreground transition-colors rounded p-0.5 hover:bg-muted"
                 >

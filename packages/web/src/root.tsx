@@ -81,14 +81,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <html
-      lang={
-        typeof window !== 'undefined'
-          ? (localStorage.getItem(LOCALE_STORAGE_KEY) ?? 'en')
-          : 'en'
-      }
-      suppressHydrationWarning
-    >
+    // The boot script below and then `I18nProvider` set `lang` to the UI
+    // locale; React never rewrites this constant, so they keep it.
+    <html lang="en" suppressHydrationWarning>
       <head>
         <meta charSet="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -109,7 +104,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <Links />
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){var t=localStorage.getItem('${THEME_STORAGE_KEY}');if(!t)t=matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';document.documentElement.classList.add(t);var l=localStorage.getItem('${LOCALE_STORAGE_KEY}');if(l&&l!=='en')document.documentElement.style.opacity='0'})()`,
+            __html: `(function(){var t=localStorage.getItem('${THEME_STORAGE_KEY}');if(!t)t=matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';document.documentElement.classList.add(t);var l=localStorage.getItem('${LOCALE_STORAGE_KEY}');if(l&&l!=='undefined'){document.documentElement.lang=l;if(l!=='en')document.documentElement.style.opacity='0'}})()`,
           }}
         />
       </head>

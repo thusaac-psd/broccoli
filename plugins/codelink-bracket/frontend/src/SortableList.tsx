@@ -59,7 +59,7 @@ export function SortableList<T>({
         >
           <GripVertical
             aria-hidden
-            className="h-4 w-4 shrink-0 text-muted-foreground/60 group-hover:text-muted-foreground"
+            className="h-4 w-4 shrink-0 text-muted-foreground group-hover:text-muted-foreground"
           />
           <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted font-mono text-xs font-semibold tabular-nums">
             {index + 1}

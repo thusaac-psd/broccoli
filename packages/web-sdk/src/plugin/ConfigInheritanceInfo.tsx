@@ -167,7 +167,7 @@ export function ConfigInheritanceInfo({
                 </span>
               )}
               {row.disabled && (
-                <span className="text-[11px] text-muted-foreground/60 italic">
+                <span className="text-[11px] text-muted-foreground italic">
                   {t('config.inheritance.disabled')}
                 </span>
               )}

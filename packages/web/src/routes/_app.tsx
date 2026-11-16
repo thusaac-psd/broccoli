@@ -6,6 +6,7 @@ import { Outlet, useNavigate } from 'react-router';
 
 import { AppLayout } from '@/components/AppLayout';
 import { BaseProviders } from '@/components/BaseProviders';
+import { DocumentTitle } from '@/components/DocumentTitle';
 import { SessionExpiredPrompt } from '@/components/SessionExpiredPrompt';
 import { SlotPermissionsBridge } from '@/components/SlotPermissionsBridge';
 import { appConfig } from '@/config';
@@ -26,6 +27,7 @@ export default function AppShell() {
                 >
                   <ProblemPresentationProvider>
                     <SubmissionNavigationProvider>
+                      <DocumentTitle />
                       <AppLayout>
                         <Outlet />
                       </AppLayout>

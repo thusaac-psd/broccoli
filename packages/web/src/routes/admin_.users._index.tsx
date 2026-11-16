@@ -6,6 +6,9 @@ import { Users } from 'lucide-react';
 import { PageLayout } from '@/components/PageLayout';
 import { Unauthorized } from '@/components/Unauthorized';
 import { UserManagementTabs } from '@/features/user-management/components/UserManagementTabs';
+import { pageTitle, type RouteHandle } from '@/lib/route-title';
+
+export const handle: RouteHandle = pageTitle('users.title');
 
 export default function UserManagementPage() {
   const { t } = useTranslation();

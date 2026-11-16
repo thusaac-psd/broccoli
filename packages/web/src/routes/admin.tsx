@@ -19,6 +19,9 @@ import { ListSkeleton } from '@/components/ListSkeleton';
 import { PageLayout } from '@/components/PageLayout';
 import { getContestStatus } from '@/features/contest/utils/status';
 import { SubmissionsTable } from '@/features/submission/components/SubmissionsTable';
+import { pageTitle, type RouteHandle } from '@/lib/route-title';
+
+export const handle: RouteHandle = pageTitle('overview.title');
 
 export default function OverviewPage() {
   const { t } = useTranslation();
@@ -86,7 +89,7 @@ export default function OverviewPage() {
       <div className="grid gap-6 md:grid-cols-2">
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <CardTitle className="flex items-center gap-2">
                 <Trophy className="h-4 w-4" />
                 {t('overview.contests')}
@@ -135,7 +138,7 @@ export default function OverviewPage() {
         {/* Problems */}
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <CardTitle className="flex items-center gap-2">
                 <Code2 className="h-4 w-4" />
                 {t('overview.problems')}
@@ -186,7 +189,7 @@ export default function OverviewPage() {
 
         {/* Recent Submissions (logged-in only) */}
         {user && (
-          <div className="col-span-2">
+          <div className="md:col-span-2">
             <Card>
               <CardHeader>
                 <div className="flex items-start justify-between gap-2">

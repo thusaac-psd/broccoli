@@ -44,7 +44,7 @@ export function ContestSelector({ contests }: { contests: ContestSummary[] }) {
               <Badge variant={variant} className="shrink-0">
                 {label}
               </Badge>
-              <ChevronRight className="h-4 w-4 text-muted-foreground/30 group-hover:text-primary transition-colors shrink-0" />
+              <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary transition-colors shrink-0" />
             </button>
           );
         })}

@@ -1,0 +1,93 @@
+{
+  "id": "print",
+  "status": "Loaded",
+  "enabled": true,
+  "fleet": {
+    "state": "loaded",
+    "replicas_total": 1,
+    "replicas_loaded": 1,
+    "replicas_failed": 0,
+    "replicas": [
+      {
+        "server_id": "server-1",
+        "status": "loaded",
+        "error": null,
+        "up_to_date": true,
+        "retry_at": null,
+        "version": "0.1.0"
+      }
+    ]
+  },
+  "source": {
+    "kind": "bundle",
+    "archive_hash": null,
+    "bundled": true
+  },
+  "name": "print",
+  "version": "0.1.0",
+  "description": "On-demand code printing for contests (queue + station coordination)",
+  "has_server": true,
+  "has_web": true,
+  "config_schemas": [
+    {
+      "namespace": "print",
+      "description": "Code printing settings",
+      "scopes": ["contest", "plugin"],
+      "json_schema": {
+        "description": "Code printing settings",
+        "properties": {
+          "banner": {
+            "default": "",
+            "description": "Optional text shown in the printout header (e.g. the contest name).",
+            "title": "Header banner text",
+            "type": "string"
+          },
+          "enabled": {
+            "default": true,
+            "description": "Allow contestants to send print jobs.",
+            "title": "Enable printing",
+            "type": "boolean"
+          },
+          "max_pages": {
+            "default": 10,
+            "description": "Jobs whose estimated page count exceeds this are rejected.",
+            "maximum": 100,
+            "minimum": 1,
+            "title": "Max pages per job",
+            "type": "integer",
+            "x-unit": "pages"
+          },
+          "require_approval": {
+            "default": false,
+            "description": "Jobs wait for a staff member to approve them before a print station can pick them up.",
+            "title": "Require staff approval",
+            "type": "boolean"
+          },
+          "stations": {
+            "default": [],
+            "description": "Each entry authorizes one print station. The station sends 'Authorization: PrintStation <token>' and is known by its name in the queue.",
+            "items": {
+              "properties": {
+                "name": {
+                  "minLength": 1,
+                  "title": "Station name",
+                  "type": "string"
+                },
+                "token": {
+                  "description": "Opaque secret, unique per station.",
+                  "minLength": 1,
+                  "title": "Token",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "title": "Print stations",
+            "type": "array"
+          }
+        },
+        "type": "object"
+      }
+    }
+  ]
+}

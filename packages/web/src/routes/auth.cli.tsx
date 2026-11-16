@@ -11,6 +11,8 @@ import {
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router';
 
+import { pageTitle, type RouteHandle } from '@/lib/route-title';
+
 // Loopback-only redirect targets, else a crafted redirect_uri exfiltrates the token.
 function isLoopbackRedirect(uri: string): boolean {
   try {
@@ -25,6 +27,8 @@ function isLoopbackRedirect(uri: string): boolean {
     return false;
   }
 }
+
+export const handle: RouteHandle = pageTitle('cliAuth.title');
 
 export default function CliAuthPage() {
   const { t } = useTranslation();

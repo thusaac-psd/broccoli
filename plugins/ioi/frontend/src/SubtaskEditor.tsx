@@ -1708,6 +1708,7 @@ export function SubtaskEditor({
                   />
                 </div>
                 <Button
+                  aria-label={t('ioi.subtask.removeSubtask')}
                   variant="ghost"
                   size="icon"
                   onClick={() => removeSubtask(idx)}

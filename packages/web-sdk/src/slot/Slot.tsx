@@ -8,7 +8,12 @@ import { useSlotPermissions } from '@/slot/slot-permissions-context';
 
 interface SlotProps {
   name: string;
-  as?: React.ElementType;
+  /**
+   * The element the slot's content renders in. `null` renders it without a
+   * container, for a slot whose parent allows only certain children (a list
+   * item in a `<ul>`, a row in a `<tbody>`).
+   */
+  as?: React.ElementType | null;
   className?: string;
   children?: ReactNode;
   /**
@@ -130,9 +135,13 @@ export function Slot({
   return (
     <>
       {prependSlots.map(renderSlot)}
-      <Container data-slot-name={name} className={className}>
-        {content}
-      </Container>
+      {Container === null ? (
+        content
+      ) : (
+        <Container data-slot-name={name} className={className}>
+          {content}
+        </Container>
+      )}
       {appendSlots.map(renderSlot)}
     </>
   );

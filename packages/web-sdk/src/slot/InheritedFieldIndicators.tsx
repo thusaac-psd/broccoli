@@ -6,7 +6,7 @@ import { useTranslation } from '@/i18n';
 /** Badge showing the source scope of an inherited value (e.g., "Contest"). */
 export function InheritedBadge({ source }: { source: string }) {
   return (
-    <span className="inline-flex items-center rounded-full border border-dashed border-primary/30 bg-primary/5 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-primary/70">
+    <span className="inline-flex items-center rounded-full border border-dashed border-primary/30 bg-primary/5 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-primary">
       {source}
     </span>
   );
@@ -35,7 +35,7 @@ export function InheritedAnnotation({
     );
   }
   return (
-    <p className="mt-0.5 text-[10px] text-primary/60">
+    <p className="mt-0.5 text-[10px] text-primary">
       {t('plugins.config.inheritedFromAnnotation', { source })}
     </p>
   );

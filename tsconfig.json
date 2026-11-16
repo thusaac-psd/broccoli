@@ -2,8 +2,9 @@
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
+    "allowJs": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["eslint.config.js", "prettier.config.ts"],
+  "include": ["eslint.config.js", "prettier.config.ts", "eslint-rules"],
   "exclude": ["node_modules", "dist"]
 }

@@ -154,7 +154,7 @@ export function ConfirmButton({
   confirmLabel: string;
   onConfirm: () => Promise<unknown> | unknown;
   children: ReactNode;
-} & Omit<ComponentProps<typeof Button>, 'onClick'>) {
+} & ComponentProps<typeof Button> & { onClick?: never }) {
   const [confirm, confirmDialog] = useConfirmDialog();
   return (
     <>

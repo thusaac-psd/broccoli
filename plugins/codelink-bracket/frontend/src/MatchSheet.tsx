@@ -490,7 +490,7 @@ function RankingStatus({ name, done }: { name: string; done: boolean }) {
       {done ? (
         <CheckCircle2 className="h-4 w-4 text-emerald-600" />
       ) : (
-        <Circle className="h-4 w-4 text-muted-foreground/50" />
+        <Circle className="h-4 w-4 text-muted-foreground" />
       )}
       <span className="truncate font-medium">{name}</span>
       <span className="ml-auto text-xs text-muted-foreground">

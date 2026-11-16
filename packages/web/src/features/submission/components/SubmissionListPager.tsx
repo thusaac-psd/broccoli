@@ -46,6 +46,7 @@ export function SubmissionListPager({
       </span>
       <div className="flex items-center gap-1">
         <Button
+          aria-label={t('list.previous')}
           variant="outline"
           size="icon"
           className="h-8 w-8"
@@ -60,6 +61,7 @@ export function SubmissionListPager({
             : (page ?? '…')}
         </span>
         <Button
+          aria-label={t('list.next')}
           variant="outline"
           size="icon"
           className="h-8 w-8"

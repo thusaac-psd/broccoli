@@ -1,19 +1,40 @@
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { usePluginText, useTranslation } from '@broccoli/web-sdk/i18n';
 import { usePluginRegistry } from '@broccoli/web-sdk/plugin';
 import { Skeleton } from '@broccoli/web-sdk/ui';
 import { matchPath, useLocation } from 'react-router';
 
 import { ErrorCatcher } from '@/components/ErrorCatcher';
+import type { RouteHandle } from '@/lib/route-title';
+
+/** The registered plugin route the current URL matches, if any. */
+function useMatchedPluginRoute() {
+  const { routes } = usePluginRegistry();
+  const { pathname } = useLocation();
+  return routes.find((route) =>
+    matchPath({ path: route.path, caseSensitive: false, end: true }, pathname),
+  );
+}
 
 /**
- * ExtensionPage
- * Handles dynamic routing for plugins.
- * It matches the current URL against registered plugin routes.
+ * A plugin page is named by the title key its manifest declares, looked up
+ * in the plugin's language pack.
+ */
+export const handle: RouteHandle = {
+  useTitle: function usePluginPageTitle() {
+    const pluginText = usePluginText();
+    const route = useMatchedPluginRoute();
+    return route ? pluginText(route.title, route.title) : undefined;
+  },
+};
+
+/**
+ * Renders the plugin page whose registered route matches the current URL,
+ * or a 404 when none does.
  */
 export default function ExtensionPage() {
   const { t } = useTranslation();
-  const { routes, components, isLoading } = usePluginRegistry();
-  const location = useLocation();
+  const { components, isLoading } = usePluginRegistry();
+  const matchedRoute = useMatchedPluginRoute();
 
   // Show loading state while plugins are still being loaded
   if (isLoading) {
@@ -24,15 +45,6 @@ export default function ExtensionPage() {
       </div>
     );
   }
-
-  // Find the first route that matches the current pathname
-  // We use matchPath to support parameters like /contest/:id
-  const matchedRoute = routes.find((route) =>
-    matchPath(
-      { path: route.path, caseSensitive: false, end: true },
-      location.pathname,
-    ),
-  );
 
   if (!matchedRoute) {
     return <ErrorCatcher code="404" />;
