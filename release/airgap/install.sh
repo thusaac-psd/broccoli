@@ -116,6 +116,23 @@ dry_run_plan() {
 # require_role_env FILE... -- ROLE...: refuse to deploy unless the env files
 # under compose/ give every ROLE the secrets and URLs it needs (see
 # env_require_role), so an unchanged .env.*.example never reaches a container.
+# record_node_id ENV_FILE ROLE: a blank BROCCOLI__<ROLE>__ID in ENV_FILE takes
+# the id ROLE's image derives for this machine (node_id_of), recorded so it
+# stays put when the container is recreated. Runs after load-bundle.sh, once
+# the image is loaded.
+record_node_id() {
+  local env_file="$1" role="$2" key image id
+  case "$role" in
+    server) key=BROCCOLI__SERVER__ID image="$(env_get "$env_file" BROCCOLI_SERVER_IMAGE)" ;;
+    worker) key=BROCCOLI__WORKER__ID image="$(env_get "$env_file" BROCCOLI_WORKER_IMAGE)" ;;
+  esac
+  [ -z "$(env_get "$env_file" "$key")" ] || return 0
+  id="$(node_id_of "$ENGINE" "$image" "$role")" \
+    || { echo "could not ask $image for this machine's $role id; set $key in $env_file" >&2; exit 2; }
+  env_set "$env_file" "$key" "$id"
+  echo "$role id: $id"
+}
+
 require_role_env() {
   local files=() role
   while [ "$1" != -- ]; do files+=("$1"); shift; done
@@ -195,6 +212,7 @@ case "$ROLE" in
       BROCCOLI_HTTP_BIND BROCCOLI_EDGE_SUBNET BROCCOLI_EDGE_RANGE BROCCOLI_GATEWAY_EDGE_IP BROCCOLI_GATEWAY_TRUSTED_PROXIES
     [ -n "$COMPOSE" ] || { echo "no working docker/podman compose provider found" >&2; exit 2; }
     bash "$here/load-bundle.sh" --bundle "$BUNDLE"
+    record_node_id "$server_env" server
     [ -n "$GATEWAY_HOSTS" ] || gateway_tls_issue
     # Relabel every bind-mount SOURCE for rootless Podman under SELinux Enforcing
     # (no-op off podman+SELinux): the TLS leaf dir, the un-rendered Caddyfile, and
@@ -264,6 +282,7 @@ EOF
     [ -f "$worker_env" ] || { echo "missing $worker_env — run setup.sh --role worker (or copy compose/.env.worker.example and fill in secrets)" >&2; exit 2; }
     require_role_env .env.worker -- worker
     bash "$here/load-bundle.sh" --bundle "$BUNDLE"
+    record_node_id "$worker_env" worker
     # build-bundle.sh stages the preflight into the bundle at native/.
     # --host-only: isolate and the compilers live in the worker image, so only
     # the host's kernel side (cgroup v2, systemd) is checked here.

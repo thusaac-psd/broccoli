@@ -4,6 +4,8 @@
 # optional plugins.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+# The image answers the installer's node id question (bin/docker).
+export PATH="$here/bin:$PATH"
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 cp -r "$here/../." "$T/"

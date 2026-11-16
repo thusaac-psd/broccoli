@@ -34,6 +34,11 @@ struct Cli {
     /// Probe this server's `/healthz` and exit 0 when it answers 2xx.
     #[arg(long, exclusive = true)]
     healthcheck: bool,
+    /// Print the ID this machine's server takes when none is configured
+    /// (`common::node_identity::default_node_id`) and exit, so an installer
+    /// records the binary's own answer. Reads no configuration.
+    #[arg(long, exclusive = true)]
+    node_id: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -48,6 +53,13 @@ enum Command {
 
 fn main() -> anyhow::Result<()> {
     let cli = <Cli as clap::Parser>::parse();
+    if cli.node_id {
+        println!(
+            "{}",
+            common::node_identity::default_node_id(common::liveness::NodeRole::Server)
+        );
+        return Ok(());
+    }
     if cli.openapi {
         println!("{}", server::openapi_json());
         return Ok(());

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# A container engine that answers only `run ... --entrypoint BIN IMAGE
+# --node-id`, the question installers ask an image for this machine's node id
+# (lib/host.sh node_id_of). It answers ROLE-fake-HASH, HASH taken from the
+# machine-id file mounted at /run/broccoli/host/machine-id, so a test sees which
+# machine's id reached the image. FAKE_ENGINE_FAIL=1 makes the image fail.
+# Every other command goes to the real engine further down PATH. Release tests
+# put this directory first on PATH.
+set -euo pipefail
+case " $* " in
+  " run "*" --node-id ") ;;
+  *)
+    self="$(cd "$(dirname "$0")" && pwd)"
+    real="$(PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$self" | paste -sd:)" command -v docker)" \
+      || { echo "docker: command not found" >&2; exit 127; }
+    exec "$real" "$@" ;;
+esac
+shift
+role="" seed="no-machine-id" asked=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --entrypoint) role="${2##*/broccoli-}"; shift 2 ;;
+    --mount)
+      case "$2" in
+        *target=/run/broccoli/host/machine-id*)
+          src="${2#*source=}"; seed="$(cat "${src%%,*}")" ;;
+      esac
+      shift 2 ;;
+    --node-id) asked=1; shift ;;
+    *) shift ;;
+  esac
+done
+[ "$asked" = 1 ] && [ -n "$role" ] || { echo "fake engine: not a node id question" >&2; exit 1; }
+[ -z "${FAKE_ENGINE_FAIL:-}" ] || exit 1
+printf '%s-fake-%s\n' "$role" "$(printf '%s' "$seed" | sha256sum | cut -c1-8)"
