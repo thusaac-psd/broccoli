@@ -473,7 +473,7 @@ pub fn handle_station_jobs(
         .get("limit")
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(20);
-    let jobs = jobs::list_station_jobs(host, auth.contest_filter, limit)?;
+    let jobs = jobs::list_station_jobs(host, &auth.name, auth.contest_filter, limit)?;
     ok(serde_json::json!({ "data": jobs }))
 }
 
@@ -486,7 +486,7 @@ pub fn handle_station_claim(
     let body: ClaimRequest = parse_body(req)?;
     let change = Change::Claim {
         station: &station.name,
-        printer: body.printer.as_deref(),
+        printer: &body.printer,
     };
     move_job(host, id, change, station.contest_filter)
 }

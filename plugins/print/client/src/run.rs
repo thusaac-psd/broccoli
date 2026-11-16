@@ -12,11 +12,12 @@ use crate::api::{ClaimOutcome, Job, ServerClient};
 use crate::config::{Config, PrinterCfg};
 use crate::render::{self, DocMeta, RenderConfig};
 
+/// Whether `printer` may take `job`: the server pins a job to a printer by the
+/// name a station's heartbeat lists, and claims it onto that printer only.
 fn printer_matches(printer: &PrinterCfg, job: &Job) -> bool {
-    match job.target_printer.as_deref() {
-        None | Some("") => true,
-        Some(target) => target == printer.name || printer.os_id.as_deref() == Some(target),
-    }
+    job.target_printer
+        .as_deref()
+        .is_none_or(|target| target == printer.name)
 }
 
 fn format_when(epoch: Option<f64>) -> String {
@@ -300,23 +301,14 @@ mod tests {
     #[test]
     fn untargeted_jobs_match_any_printer() {
         assert!(printer_matches(&printer("main", None), &job(None)));
-        assert!(printer_matches(&printer("main", None), &job(Some(""))));
     }
 
     #[test]
-    fn targeted_jobs_match_by_name_or_os_id() {
-        assert!(printer_matches(
-            &printer("main", Some("HP_1")),
-            &job(Some("main"))
-        ));
-        assert!(printer_matches(
-            &printer("main", Some("HP_1")),
-            &job(Some("HP_1"))
-        ));
-        assert!(!printer_matches(
-            &printer("main", Some("HP_1")),
-            &job(Some("other"))
-        ));
+    fn a_pinned_job_matches_only_the_printer_of_its_name() {
+        let main = printer("main", Some("HP_1"));
+        assert!(printer_matches(&main, &job(Some("main"))));
+        assert!(!printer_matches(&main, &job(Some("HP_1"))));
+        assert!(!printer_matches(&main, &job(Some("other"))));
     }
 
     #[test]

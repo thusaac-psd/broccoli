@@ -220,8 +220,10 @@ as jobs move. From here a volunteer can do the following.
 - **Approve** a job that is awaiting approval.
 - **Reprint** a job that came out wrong, which sends it back into the queue.
 - **Cancel** a job that should not print.
-- **Pin** a job, or several, to a specific printer. This is handy for sending a
-  room's prints to the printer in that room.
+- **Pin** a job, or several, to a specific printer. Only that printer prints
+  it, and other stations never see it, so work keeps flowing while the
+  printer's station is offline. Pinning is how a room's prints reach the printer
+  in that room.
 - **View** the code that will be printed before releasing it.
 
 A separate panel shows your print stations and whether each one is online, so you

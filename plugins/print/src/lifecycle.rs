@@ -108,11 +108,10 @@ pub enum Change<'a> {
     /// Staff routes a queued or finished job to a printer (or any printer)
     /// and queues it.
     Pin { printer: Option<&'a str> },
-    /// A station takes a queued job, or one whose claim lease expired.
-    Claim {
-        station: &'a str,
-        printer: Option<&'a str>,
-    },
+    /// A station takes a queued job, or one whose claim lease expired, to
+    /// print on one of its printers. A job pinned to a printer goes only to
+    /// that printer.
+    Claim { station: &'a str, printer: &'a str },
     /// The station holding the job reports progress.
     Report {
         station: &'a str,
@@ -182,7 +181,7 @@ impl Change<'_> {
             }
             Change::Claim { station, printer } => {
                 sets.push(format!("claimed_by = {}", p.bind(station.to_string())));
-                sets.push(format!("claimed_printer = {}", bind_opt(p, printer)));
+                sets.push(format!("claimed_printer = {}", p.bind(printer.to_string())));
                 sets.push("claimed_at = NOW()".to_string());
                 sets.extend(CLEAR_RUN[3..].iter().map(|s| s.to_string()));
             }
@@ -203,11 +202,28 @@ impl Change<'_> {
     }
 
     /// Which rows this move may touch: one in a source state meeting that
-    /// source's condition. A report must also come from the station holding
-    /// the claim, which a takeover by another station ends.
+    /// source's condition. A claim must also land on a printer the job may
+    /// print on, and a report must come from the station holding the claim,
+    /// which a takeover by another station ends.
     fn guard(&self, p: &mut Params) -> String {
+        let sources = self.sources(p);
+        match *self {
+            Change::Claim { printer, .. } => {
+                let printer = p.bind(printer.to_string());
+                format!("({sources}) AND {}", fits_printer(&printer))
+            }
+            Change::Report { station, .. } => format!(
+                "({sources}) AND claimed_by = {}",
+                p.bind(station.to_string())
+            ),
+            _ => format!("({sources})"),
+        }
+    }
+
+    /// The source states this move may leave, each under its condition.
+    fn sources(&self, p: &mut Params) -> String {
         let (sources, _) = self.edge();
-        let sources = sources
+        sources
             .iter()
             .map(|edge| {
                 let status = format!("status = {}", p.bind(edge.from.as_str()));
@@ -220,15 +236,14 @@ impl Change<'_> {
                 }
             })
             .collect::<Vec<_>>()
-            .join(" OR ");
-        match *self {
-            Change::Report { station, .. } => format!(
-                "({sources}) AND claimed_by = {}",
-                p.bind(station.to_string())
-            ),
-            _ => format!("({sources})"),
-        }
+            .join(" OR ")
     }
+}
+
+/// Whether a job may print on one of `printers`, an SQL list of printer
+/// names: an unpinned job prints anywhere, a pinned one only on its printer.
+fn fits_printer(printers: &str) -> String {
+    format!("(target_printer IS NULL OR target_printer IN ({printers}))")
 }
 
 /// `None` emits a literal NULL rather than a bound parameter.
@@ -239,13 +254,19 @@ pub(crate) fn bind_opt<T: Into<serde_json::Value>>(p: &mut Params, v: Option<T>)
     }
 }
 
-/// The predicate selecting jobs a station may claim now, for listing.
-pub(crate) fn claimable(p: &mut Params) -> String {
-    Change::Claim {
-        station: "",
-        printer: None,
+/// The predicate selecting jobs `station` may claim now onto one of the
+/// printers its last heartbeat listed, for listing.
+pub(crate) fn claimable(p: &mut Params, station: &str) -> String {
+    let sources = Change::Claim {
+        station,
+        printer: "",
     }
-    .guard(p)
+    .sources(p);
+    let printers = format!(
+        "SELECT jsonb_array_elements_text(printers) FROM print_station WHERE name = {}",
+        p.bind(station.to_string())
+    );
+    format!("({sources}) AND {}", fits_printer(&printers))
 }
 
 /// The guarded `UPDATE` performing `change` on job `id`. `contest_filter`
@@ -332,7 +353,7 @@ mod tests {
         for status in [Claimed, Printing] {
             let claim = Change::Claim {
                 station: "s",
-                printer: None,
+                printer: "main",
             };
             let edge = claim.edge().0.iter().find(|e| e.from == status);
             assert_eq!(edge.map(|e| e.when), Some(When::LeaseExpired));
@@ -348,7 +369,7 @@ mod tests {
             Change::Pin { printer: None },
             Change::Claim {
                 station: "s",
-                printer: None,
+                printer: "main",
             },
         ] {
             assert!(!allowed(change, Canceled), "{change:?}");
@@ -394,7 +415,7 @@ mod tests {
         let mut p = Params::new();
         let change = Change::Claim {
             station: "room-b",
-            printer: Some("main"),
+            printer: "main",
         };
         let sql = transition_sql(&mut p, 7, &change, Some(3));
         assert!(sql.contains("claimed_at = NOW()"), "{sql}");
@@ -404,6 +425,20 @@ mod tests {
         assert!(sql.contains(" OR (status = $"), "{sql}");
         assert!(sql.contains("claimed_at <= NOW() -"), "{sql}");
         assert!(sql.contains("AND contest_id = $"), "{sql}");
+    }
+
+    #[test]
+    fn a_claim_lands_a_pinned_job_only_on_the_printer_it_is_pinned_to() {
+        let mut p = Params::new();
+        let change = Change::Claim {
+            station: "room-b",
+            printer: "main",
+        };
+        let sql = transition_sql(&mut p, 7, &change, None);
+        assert!(
+            sql.contains("AND (target_printer IS NULL OR target_printer IN ($"),
+            "{sql}"
+        );
     }
 
     #[test]

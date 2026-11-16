@@ -136,12 +136,15 @@ emoji) print as a missing-glyph box rather than vanishing.
 | cancel   | staff                  | any state except `done` / `canceled`    | `canceled` |
 | reprint  | staff                  | `done`, `failed`                        | `pending`  |
 | pin      | staff                  | `pending`, `done`, `failed`             | `pending`  |
-| claim    | any station            | `pending`, or a claim older than 10 min | `claimed`  |
+| claim    | any station, onto a printer the job may print on | `pending`, or a claim older than 10 min | `claimed`  |
 | printing | the station holding it | `claimed`                               | `printing` |
 | done     | the station holding it | `claimed`, `printing`                   | `done`     |
 | failed   | the station holding it | `claimed`, `printing`                   | `failed`   |
 
-A move from any other state answers 409. Concurrent stations are serialized by
+A job pinned to a printer prints only on that printer: a station's job listing
+offers only unpinned jobs and jobs pinned to a printer its last heartbeat
+listed, filtered before the listing's limit, and a claim onto any other printer
+answers 409. A move from any other state answers 409 too. Concurrent stations are serialized by
 an atomic SQL claim, so a job is never printed twice. A station that crashes
 while holding a job loses it after the 10-minute claim lease: another station
 may then claim it, after which the first station's reports are refused. Until

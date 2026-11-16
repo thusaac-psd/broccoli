@@ -30,7 +30,8 @@ pub struct ServerCfg {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrinterCfg {
-    /// Matched against a job's `target_printer`.
+    /// The name the station's heartbeat lists, and a job pinned to this
+    /// printer names.
     pub name: String,
     /// CUPS or Windows queue name. Empty means the system default.
     #[serde(default)]

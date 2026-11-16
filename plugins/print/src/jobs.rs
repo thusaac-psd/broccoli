@@ -316,16 +316,17 @@ pub fn list_admin_jobs(host: &Host, f: &JobFilters) -> Result<(Vec<JobRow>, i64)
     Ok((rows, total))
 }
 
-/// Jobs a station may claim now, oldest first.
+/// Jobs `station` may claim now onto its printers, oldest first.
 pub fn list_station_jobs(
     host: &Host,
+    station: &str,
     contest_filter: Option<i32>,
     limit: i64,
 ) -> Result<Vec<StationJob>, SdkError> {
     let mut p = Params::new();
     let mut sql = format!(
         "SELECT {STATION_JOB_COLS} FROM print_job WHERE {}",
-        lifecycle::claimable(&mut p)
+        lifecycle::claimable(&mut p, station)
     );
     if let Some(cid) = contest_filter {
         sql.push_str(&format!(" AND contest_id = {}", p.bind(cid)));
@@ -445,7 +446,7 @@ mod tests {
         host.db.queue_execute_result(0);
         let claim = Change::Claim {
             station: "st-1",
-            printer: Some("main"),
+            printer: "main",
         };
         assert!(apply(&host, 7, &claim, None).unwrap());
         assert!(!apply(&host, 7, &claim, None).unwrap());
@@ -455,10 +456,24 @@ mod tests {
     #[test]
     fn station_listing_offers_exactly_the_claimable_jobs() {
         let host = Host::mock();
-        list_station_jobs(&host, None, 10).unwrap();
+        list_station_jobs(&host, "global/hall", None, 10).unwrap();
         let mut p = Params::new();
-        let claimable = lifecycle::claimable(&mut p);
+        let claimable = lifecycle::claimable(&mut p, "global/hall");
         assert!(host.db.queries()[0].sql.contains(&claimable));
+    }
+
+    #[test]
+    fn a_station_is_offered_only_jobs_its_printers_take_before_the_limit() {
+        let host = Host::mock();
+        list_station_jobs(&host, "global/hall", None, 10).unwrap();
+        let sql = &host.db.queries()[0].sql;
+        let fits = sql
+            .find(
+                "(target_printer IS NULL OR target_printer IN \
+                 (SELECT jsonb_array_elements_text(printers) FROM print_station WHERE name = $",
+            )
+            .unwrap_or_else(|| panic!("no printer filter: {sql}"));
+        assert!(fits < sql.find("LIMIT").unwrap(), "{sql}");
     }
 
     #[test]

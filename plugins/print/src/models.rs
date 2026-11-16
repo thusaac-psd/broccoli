@@ -68,11 +68,11 @@ pub struct HeartbeatRequest {
     pub queue_seen: Option<i32>,
 }
 
-/// The claiming station comes from its credential.
+/// The printer the job prints on. The claiming station comes from its
+/// credential.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ClaimRequest {
-    #[serde(default)]
-    pub printer: Option<String>,
+    pub printer: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
