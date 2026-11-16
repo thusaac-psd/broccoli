@@ -234,7 +234,9 @@ plugin's code from that plugin's pack only.
 
 A missing platform tool is the worker's fault, never the submission's. A worker
 that lacks one reads no task at all: it stays live, and its heartbeat lists the
-missing tools, so the System page shows it as not taking work. A task reaches
+missing tools, so the System page shows it as not taking work and does not
+count it among the workers taking work; while no live worker takes work, the
+page says so, and its queued count shows the backlog waiting for one. A task reaches
 it only if a tool goes missing while the worker holds it; the attempt is handed
 back for a worker that has the tool. A pin never holds work for such a worker:
 an admin cannot name it as a rejudge target, a task pinned to it goes to the

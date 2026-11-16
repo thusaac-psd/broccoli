@@ -296,7 +296,7 @@ export interface paths {
     };
     /**
      * Aggregated system health
-     * @description Returns workers, queue depths, in-progress submissions, and unresolved DLQ count in a single response. While the message queue is unreachable, `queue_state` is `unreachable`, `queues` is empty and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.
+     * @description Returns workers, queue depths, whether the fleet takes work (`intake`), submissions in flight, queued and parked behind a disabled contest type, and the unresolved DLQ count in a single response. While the message queue is unreachable, `queue_state` is `unreachable`, `queues` is empty and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.
      */
     get: operations['getSystemOverview'];
     put?: never;
@@ -3429,6 +3429,11 @@ export interface components {
           };
         };
     /**
+     * @description Whether the live workers take work, as the claim gate decides it.
+     * @enum {string}
+     */
+    FleetIntake: 'accepting' | 'none_accepting' | 'no_workers';
+    /**
      * @description Fleet-wide state of one plugin.
      * @enum {string}
      */
@@ -4642,16 +4647,33 @@ export interface components {
        * @example 0
        */
       dlq_unresolved_count: number;
+      /** @description Whether the fleet takes work, as this server's claim gate sees it. */
+      intake: components['schemas']['FleetIntake'];
       /** @description Whether the worker list and queue depths below were read just now. */
       queue_state: components['schemas']['QueueState'];
       /** @description Queue depths; empty while the queue is unreachable. */
       queues: components['schemas']['QueueInfo'][];
       /**
        * Format: int64
-       * @description Submissions currently in a non-terminal state (Pending, Compiling, Running).
+       * @description Submissions being judged: claimed and not finished (Pending,
+       *     Compiling, Running).
        * @example 0
        */
       submissions_in_progress: number;
+      /**
+       * Format: int64
+       * @description Submissions waiting `Queued` whose contest type has no enabled
+       *     provider: no server claims them until one is enabled again.
+       * @example 0
+       */
+      submissions_parked: number;
+      /**
+       * Format: int64
+       * @description Submissions waiting `Queued` for a server to claim them. While
+       *     `intake` is `none_accepting`, none is claimed.
+       * @example 0
+       */
+      submissions_queued: number;
       /**
        * @description The live workers. While the queue is unreachable: the list this server
        *     last read, and `workers_stale` is true.

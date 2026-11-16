@@ -3,22 +3,14 @@ use std::time::Duration;
 
 use axum::{Json, extract::State};
 use broccoli_server_sdk::permissions as perm;
-use common::SubmissionStatus;
+use common::{StatusPhase, SubmissionStatus};
 use opentelemetry::KeyValue;
-use sea_orm::{
-    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, QueryFilter, Statement,
-};
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use tracing::{instrument, warn};
 
 use common::liveness::{self, NodeRole};
 use common::worker::HeartbeatPayload;
 
-// visibility-bypass-audited: all three handlers require perm::SYSTEM_VIEW,
-// pinned by tests/integration/system.rs's `contestant_cannot_list_workers`,
-// `contestant_cannot_list_queues`, and `contestant_cannot_view_system_overview`.
-// This is aggregate operator telemetry (worker/queue/DLQ counts), never a
-// per-row Contest/Problem/Submission/Clarification view the kernel governs.
-use crate::entity::{dead_letter_message, submission};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;
 use crate::models::system::{
@@ -105,7 +97,7 @@ pub async fn list_queues(
     tag = "System",
     operation_id = "getSystemOverview",
     summary = "Aggregated system health",
-    description = "Returns workers, queue depths, in-progress submissions, and unresolved DLQ count in a single response. While the message queue is unreachable, `queue_state` is `unreachable`, `queues` is empty and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.",
+    description = "Returns workers, queue depths, whether the fleet takes work (`intake`), submissions in flight, queued and parked behind a disabled contest type, and the unresolved DLQ count in a single response. While the message queue is unreachable, `queue_state` is `unreachable`, `queues` is empty and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.",
     responses(
         (status = 200, description = "System overview", body = SystemOverviewResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
@@ -139,28 +131,67 @@ pub async fn system_overview(
         workers_stale,
     } = workers;
 
-    let submissions_in_progress = submission::Entity::find()
-        .filter(submission::Column::Status.is_in(vec![
-            SubmissionStatus::Pending.to_string(),
-            SubmissionStatus::Compiling.to_string(),
-            SubmissionStatus::Running.to_string(),
-        ]))
-        .count(&state.db)
-        .await?;
-
-    let dlq_unresolved_count = dead_letter_message::Entity::find()
-        .filter(dead_letter_message::Column::Resolved.eq(false))
-        .count(&state.db)
-        .await?;
+    let backlog = read_backlog(&state.db).await?;
 
     Ok(Json(SystemOverviewResponse {
         queue_state,
         workers,
         workers_stale,
         queues,
-        submissions_in_progress,
-        dlq_unresolved_count,
+        intake: state.worker_slots.intake(),
+        submissions_in_progress: count(backlog.in_progress),
+        submissions_queued: count(backlog.queued),
+        submissions_parked: count(backlog.parked),
+        dlq_unresolved_count: count(backlog.dlq_unresolved),
     }))
+}
+
+/// A `COUNT(*)`, never negative.
+fn count(n: i64) -> u64 {
+    u64::try_from(n).unwrap_or(0)
+}
+
+/// The submission and dead-letter counts of the overview.
+#[derive(Debug, sea_orm::FromQueryResult)]
+struct Backlog {
+    in_progress: i64,
+    queued: i64,
+    parked: i64,
+    dlq_unresolved: i64,
+}
+
+/// The overview's counts in one statement: submissions in flight, queued
+/// (and of those, parked: their contest type has no enabled provider,
+/// `plugin_lifecycle::contest_type_open`), and unresolved dead letters.
+/// Aggregate operator telemetry behind `system:view` (pinned by
+/// `contestant_cannot_view_system_overview`): counts only, never a row the
+/// visibility kernel governs.
+async fn read_backlog(db: &common::db::DatabaseConnection) -> Result<Backlog, sea_orm::DbErr> {
+    use sea_orm::FromQueryResult;
+    let row = db
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            format!(
+                "WITH waiting AS (SELECT contest_type, status IN {queued} AS queued, \
+                                         COUNT(*) AS n \
+                                  FROM submission \
+                                  WHERE status IN {queued} OR status IN {in_flight} \
+                                  GROUP BY 1, 2), \
+                      typed AS (SELECT queued, {open} AS open, n FROM waiting) \
+                 SELECT COALESCE(SUM(n) FILTER (WHERE NOT queued), 0)::bigint AS in_progress, \
+                        COALESCE(SUM(n) FILTER (WHERE queued AND open), 0)::bigint AS queued, \
+                        COALESCE(SUM(n) FILTER (WHERE queued AND NOT open), 0)::bigint AS parked, \
+                        (SELECT COUNT(*) FROM dead_letter_message WHERE NOT resolved)::bigint \
+                            AS dlq_unresolved \
+                 FROM typed",
+                queued = StatusPhase::Queued.sql_list(),
+                in_flight = StatusPhase::InFlight.sql_list(),
+                open = crate::plugin_lifecycle::contest_type_open("waiting.contest_type"),
+            ),
+        ))
+        .await?
+        .ok_or_else(|| sea_orm::DbErr::RecordNotFound("the overview counts".into()))?;
+    Backlog::from_query_result(&row, "")
 }
 
 /// The ids of the live workers that take work, the only workers a task can

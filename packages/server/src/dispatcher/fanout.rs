@@ -25,6 +25,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use common::worker::HeartbeatPayload;
+
+use crate::models::system::FleetIntake;
 use futures::{FutureExt, StreamExt};
 use opentelemetry::KeyValue;
 use std::sync::Mutex;
@@ -67,10 +69,19 @@ impl WorkerSlots {
         self.0.servers.load(Ordering::Relaxed).max(1)
     }
 
+    /// Whether the live workers take work, as last read.
+    pub fn intake(&self) -> FleetIntake {
+        match (self.get(), self.0.refusing.load(Ordering::Relaxed)) {
+            (0, 0) => FleetIntake::NoWorkers,
+            (0, _) => FleetIntake::NoneAccepting,
+            _ => FleetIntake::Accepting,
+        }
+    }
+
     /// Live workers are known and none of them takes work: whatever is
     /// claimed now would only wait at the queue.
     pub fn none_accepting(&self) -> bool {
-        self.get() == 0 && self.0.refusing.load(Ordering::Relaxed) > 0
+        self.intake() == FleetIntake::NoneAccepting
     }
 
     /// Record the fleet from the live workers' heartbeats and the number of

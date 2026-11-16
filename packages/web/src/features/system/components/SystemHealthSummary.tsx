@@ -1,18 +1,30 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Card, CardContent } from '@broccoli/web-sdk/ui';
-import { Activity, Inbox, Server, Zap } from 'lucide-react';
+import {
+  Activity,
+  Hourglass,
+  Inbox,
+  PauseCircle,
+  Server,
+  Zap,
+} from 'lucide-react';
 
 interface Props {
-  workersOnline: number;
+  /** Live workers that take work. */
+  workersAccepting: number;
   totalInFlight: number;
   submissionsInProgress: number;
+  submissionsQueued: number;
+  submissionsParked: number;
   dlqUnresolved: number;
 }
 
 export function SystemHealthSummary({
-  workersOnline,
+  workersAccepting,
   totalInFlight,
   submissionsInProgress,
+  submissionsQueued,
+  submissionsParked,
   dlqUnresolved,
 }: Props) {
   const { t } = useTranslation();
@@ -20,7 +32,7 @@ export function SystemHealthSummary({
   const items = [
     {
       labelKey: 'system.summary.workers',
-      value: workersOnline,
+      value: workersAccepting,
       icon: Server,
       tone: 'default' as const,
     },
@@ -37,6 +49,18 @@ export function SystemHealthSummary({
       tone: 'default' as const,
     },
     {
+      labelKey: 'system.summary.submissionsQueued',
+      value: submissionsQueued,
+      icon: Hourglass,
+      tone: 'default' as const,
+    },
+    {
+      labelKey: 'system.summary.submissionsParked',
+      value: submissionsParked,
+      icon: PauseCircle,
+      tone: 'default' as const,
+    },
+    {
       labelKey: 'system.summary.dlqUnresolved',
       value: dlqUnresolved,
       icon: Inbox,
@@ -45,7 +69,7 @@ export function SystemHealthSummary({
   ] as const;
 
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
       {items.map(({ labelKey, value, icon: Icon, tone }) => (
         <Card key={labelKey}>
           <CardContent className="pt-6">

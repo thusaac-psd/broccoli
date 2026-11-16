@@ -19,7 +19,14 @@ import { WorkersGrid } from '@/features/system/components/WorkersGrid';
 import { useSystemOverview } from '@/features/system/hooks/useSystemOverview';
 import { pageTitle, type RouteHandle } from '@/lib/route-title';
 
-const STAT_SKELETONS = ['workers', 'inflight', 'submissions', 'dlq'];
+const STAT_SKELETONS = [
+  'workers',
+  'inflight',
+  'submissions',
+  'queued',
+  'parked',
+  'dlq',
+];
 
 export const handle: RouteHandle = pageTitle('system.title');
 
@@ -39,7 +46,9 @@ export default function AdminSystemPage() {
   }
 
   const totalInFlight = data?.workers.reduce((s, w) => s + w.in_flight, 0) ?? 0;
-  const onlineWorkers = data?.workers.length ?? 0;
+  // A worker that lacks a platform tool is live but no capacity.
+  const acceptingWorkers =
+    data?.workers.filter((w) => w.accepting_work).length ?? 0;
 
   return (
     <PageLayout
@@ -65,7 +74,7 @@ export default function AdminSystemPage() {
       )}
 
       {isLoading && !data && (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {STAT_SKELETONS.map((k) => (
             <Skeleton key={k} className="h-24 w-full" />
           ))}
@@ -88,12 +97,31 @@ export default function AdminSystemPage() {
         </Card>
       )}
 
+      {data?.queue_state === 'reachable' &&
+        data.intake === 'none_accepting' && (
+          <Card className="mb-6 border-destructive">
+            <CardContent className="pt-6 flex items-start gap-3">
+              <AlertCircle className="h-5 w-5 text-destructive shrink-0" />
+              <div>
+                <p className="text-destructive font-medium">
+                  {t('system.noneAccepting.title')}
+                </p>
+                <p className="text-sm text-muted-foreground mt-1">
+                  {t('system.noneAccepting.hint')}
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
       {data && (
         <>
           <SystemHealthSummary
-            workersOnline={onlineWorkers}
+            workersAccepting={acceptingWorkers}
             totalInFlight={totalInFlight}
             submissionsInProgress={data.submissions_in_progress}
+            submissionsQueued={data.submissions_queued}
+            submissionsParked={data.submissions_parked}
             dlqUnresolved={data.dlq_unresolved_count}
           />
 
