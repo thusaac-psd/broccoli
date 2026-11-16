@@ -216,6 +216,7 @@ mod tests {
             Some(Command::Bundle(_))
         ));
         assert!(parse(&["bundle", "import", "--wipe-dependents"]).is_err());
+        assert!(parse(&["bundle", "import", "--replace-contest", "--wipe-dependents"]).is_ok());
     }
 
     #[test]

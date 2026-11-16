@@ -10,7 +10,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 
 use anyhow::Context;
-use clap::{Args, Subcommand};
+use clap::{ArgGroup, Args, Subcommand};
 use common::db::{PgPoolSpec, PgSession};
 
 use super::{ExportOptions, ImportOptions, Selection};
@@ -44,6 +44,7 @@ enum Command {
         out: Option<PathBuf>,
     },
     /// Restore a bundle onto this server's database and storage.
+    #[command(group(ArgGroup::new("replacing").multiple(true).args(["replace_problems", "replace_contest"])))]
     Import {
         /// The archive to read. Default: stdin.
         archive: Option<PathBuf>,
@@ -57,7 +58,7 @@ enum Command {
         /// With --replace-problems or --replace-contest, also delete the
         /// submissions, code runs, contest links and clarifications that
         /// reference what is replaced.
-        #[arg(long)]
+        #[arg(long, requires = "replacing")]
         wipe_dependents: bool,
     },
 }
