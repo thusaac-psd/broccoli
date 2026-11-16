@@ -193,7 +193,10 @@ broccoli submit sol.cpp -c "Spring Round" -p A
 Broccoli detects the language, submits, and prints a submission number. Override
 the language with `-l` when you need to. Add `-w` to wait for the verdict right
 there instead of checking it later. With `-w` the command exits with status 3
-when the verdict is anything but Accepted.
+when the verdict is anything but Accepted. When the contest hides results until
+it releases them (during a freeze, for example), it says the result is hidden
+and exits with status 5; `broccoli status` shows the verdict once the contest
+releases it.
 
 While it waits, Broccoli says what for: a free judge while the submission is
 queued, the judge while it runs, or the contest's plugin while an organiser has

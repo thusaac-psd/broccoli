@@ -9,10 +9,16 @@
 //! its SQL and its bound strings, chars, JSON and arrays with U+FFFD, and logs
 //! the statement and the call stack, so no statement fails on a NUL and no
 //! unsanitized source goes unnoticed.
+//!
+//! It is also the one owner of fail-fast on an outage: every statement and
+//! transaction it starts passes the pool's [`Reachability`], so while the
+//! database cannot be reached a caller is refused at once instead of waiting
+//! out the acquire timeout.
 
 use std::backtrace::Backtrace;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use broccoli_types::types::sanitize_text_field;
 use sea_orm::sea_query::Value;
@@ -22,18 +28,23 @@ use sea_orm::{
 };
 use serde_json::Value as Json;
 
-/// A pooled database connection whose statements are NUL-free (see the
-/// module docs). Clones share the pool.
+use super::reachability::{Held, Reachability};
+
+/// A pooled database connection whose statements are NUL-free and fail fast
+/// while the database is unreachable (see the module docs). Clones share the
+/// pool and what it knows.
 #[derive(Clone, Debug)]
-pub struct DatabaseConnection(sea_orm::DatabaseConnection);
+pub struct DatabaseConnection(sea_orm::DatabaseConnection, Arc<Reachability>);
 
 /// A transaction opened from a [`DatabaseConnection`], with the same guarantee.
+/// While it is open, the connection it holds counts as busy, not lost, in the
+/// pool's record of whether the database can be reached.
 #[derive(Debug)]
-pub struct DatabaseTransaction(sea_orm::DatabaseTransaction);
+pub struct DatabaseTransaction(sea_orm::DatabaseTransaction, Held);
 
 impl From<sea_orm::DatabaseConnection> for DatabaseConnection {
     fn from(inner: sea_orm::DatabaseConnection) -> Self {
-        Self(inner)
+        Self(inner, Arc::default())
     }
 }
 
@@ -51,7 +62,20 @@ impl DatabaseConnection {
 
     /// Check that the database answers.
     pub async fn ping(&self) -> Result<(), DbErr> {
-        self.0.ping().await
+        self.guarded(self.0.ping()).await
+    }
+
+    /// Run `op`, which acquires a connection from the pool, past the pool's
+    /// [`Reachability`].
+    async fn guarded<T>(&self, op: impl Future<Output = Result<T, DbErr>>) -> Result<T, DbErr> {
+        let pass = self.1.pass()?;
+        let outcome = op.await;
+        self.1.settle(&pass, &outcome);
+        outcome
+    }
+
+    fn reachability(&self) -> &Arc<Reachability> {
+        &self.1
     }
 }
 
@@ -65,6 +89,20 @@ impl DatabaseTransaction {
     pub async fn rollback(self) -> Result<(), DbErr> {
         self.0.rollback().await
     }
+
+    /// A transaction's statements run on the connection it holds, so none
+    /// waits for the pool; each answer still shows the database reachable.
+    async fn guarded<T>(&self, op: impl Future<Output = Result<T, DbErr>>) -> Result<T, DbErr> {
+        let outcome = op.await;
+        if !matches!(&outcome, Err(e) if super::is_outage(e)) {
+            self.reachability().answered();
+        }
+        outcome
+    }
+
+    fn reachability(&self) -> &Arc<Reachability> {
+        self.1.reachability()
+    }
 }
 
 macro_rules! checked_connection {
@@ -76,23 +114,25 @@ macro_rules! checked_connection {
             }
 
             async fn execute_raw(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
-                self.0.execute_raw(without_nul(stmt)).await
+                self.guarded(self.0.execute_raw(without_nul(stmt))).await
             }
 
             async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
                 if sql.contains('\0') {
                     report(sql, 1);
-                    return self.0.execute_unprepared(&sanitize_text_field(sql)).await;
+                    return self
+                        .guarded(self.0.execute_unprepared(&sanitize_text_field(sql)))
+                        .await;
                 }
-                self.0.execute_unprepared(sql).await
+                self.guarded(self.0.execute_unprepared(sql)).await
             }
 
             async fn query_one_raw(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
-                self.0.query_one_raw(without_nul(stmt)).await
+                self.guarded(self.0.query_one_raw(without_nul(stmt))).await
             }
 
             async fn query_all_raw(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
-                self.0.query_all_raw(without_nul(stmt)).await
+                self.guarded(self.0.query_all_raw(without_nul(stmt))).await
             }
 
             fn support_returning(&self) -> bool {
@@ -109,7 +149,9 @@ macro_rules! checked_connection {
             type Transaction = DatabaseTransaction;
 
             async fn begin(&self) -> Result<DatabaseTransaction, DbErr> {
-                self.0.begin().await.map(DatabaseTransaction)
+                self.guarded(self.0.begin())
+                    .await
+                    .map(|txn| DatabaseTransaction(txn, self.reachability().hold()))
             }
 
             async fn begin_with_config(
@@ -117,20 +159,18 @@ macro_rules! checked_connection {
                 isolation_level: Option<IsolationLevel>,
                 access_mode: Option<AccessMode>,
             ) -> Result<DatabaseTransaction, DbErr> {
-                self.0
-                    .begin_with_config(isolation_level, access_mode)
+                self.guarded(self.0.begin_with_config(isolation_level, access_mode))
                     .await
-                    .map(DatabaseTransaction)
+                    .map(|txn| DatabaseTransaction(txn, self.reachability().hold()))
             }
 
             async fn begin_with_options(
                 &self,
                 options: TransactionOptions,
             ) -> Result<DatabaseTransaction, DbErr> {
-                self.0
-                    .begin_with_options(options)
+                self.guarded(self.0.begin_with_options(options))
                     .await
-                    .map(DatabaseTransaction)
+                    .map(|txn| DatabaseTransaction(txn, self.reachability().hold()))
             }
 
             async fn transaction<F, T, E>(&self, callback: F) -> Result<T, TransactionError<E>>
@@ -332,6 +372,52 @@ mod tests {
     fn clean_statements_pass_through_unchanged() {
         let values = vec!["clean".into(), 7i64.into(), Value::String(None)];
         assert_eq!(bound(values.clone()), values);
+    }
+
+    /// While the database cannot be reached, a statement waits for no
+    /// connection: the one probe in flight waits, every other is refused at
+    /// once as an outage.
+    #[tokio::test]
+    async fn statements_fail_fast_while_the_database_is_unreachable() {
+        use std::task::Poll;
+
+        // A database host that accepts connections and never answers.
+        let blackhole = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = blackhole.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = blackhole.accept().await {
+                held.push(socket);
+            }
+        });
+        let url = format!("postgres://u:p@{addr}/db");
+        let spec = super::super::PgPoolSpec {
+            acquire_timeout: std::time::Duration::from_millis(200),
+            ..super::super::PgPoolSpec::new(4, 0)
+        };
+        let db = super::super::connect_lazy_with(
+            spec.pool_options(),
+            super::super::pg_connect_options(&url, &super::super::PgSession::unbounded("test"))
+                .unwrap(),
+        );
+        let select = || Statement::from_string(DbBackend::Postgres, "SELECT 1");
+
+        let first = db.query_one_raw(select()).await.unwrap_err();
+        assert!(super::super::is_outage(&first), "{first}");
+
+        let mut probe = Box::pin(db.query_one_raw(select()));
+        assert!(matches!(futures::poll!(&mut probe), Poll::Pending));
+        let mut refused = Box::pin(db.execute_unprepared("SELECT 1"));
+        match futures::poll!(&mut refused) {
+            Poll::Ready(Err(e)) => assert!(super::super::is_outage(&e), "{e}"),
+            other => panic!("refused at once, got {other:?}"),
+        }
+        let mut refused = Box::pin(db.begin());
+        assert!(matches!(
+            futures::poll!(&mut refused),
+            Poll::Ready(Err(DbErr::ConnectionAcquire(_)))
+        ));
+        assert!(probe.await.is_err());
     }
 
     #[test]

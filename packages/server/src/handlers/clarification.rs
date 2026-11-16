@@ -268,7 +268,7 @@ pub async fn list_clarifications(
     tag = "Clarifications",
     operation_id = "createClarification",
     summary = "Create a clarification",
-    description = "Participants can ask questions, at most 10 a minute each. Users with `contest:manage` permission can also create announcements and direct messages to specific participants.",
+    description = "Participants can ask questions, at most 10 questions and replies a minute each. Users with `contest:manage` permission can also create announcements and direct messages to specific participants.",
     params(("id" = i32, Path, description = "Contest ID")),
     request_body = CreateClarificationRequest,
     responses(
@@ -277,7 +277,7 @@ pub async fn list_clarifications(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED), or the caller is not registered for this public contest (CONTEST_NOT_REGISTERED)", body = ErrorBody),
         (status = 404, description = "Contest not found, or the recipient is not an active participant of it (NOT_FOUND)", body = ErrorBody),
-        (status = 429, description = "Too many clarifications from this user in the last minute (RATE_LIMITED); carries Retry-After", body = ErrorBody),
+        (status = 429, description = "Too many clarifications and replies from this user in the last minute (RATE_LIMITED); carries Retry-After", body = ErrorBody),
         (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
@@ -382,7 +382,7 @@ pub async fn create_clarification(
     operation_id = "replyClarification",
     summary = "Reply to a clarification",
     description = "Users with `contest:manage` permission, the question author, or the DM recipient can reply. \
-                   Multiple replies are allowed. When an admin sets `is_public`, the reply and its question become visible to every participant; \
+                   Multiple replies are allowed; a participant's replies count toward the same 10 a minute as their questions. When an admin sets `is_public`, the reply and its question become visible to every participant; \
                    `is_public` from anyone else is ignored.",
     params(
         ("id" = i32, Path, description = "Contest ID"),
@@ -395,6 +395,7 @@ pub async fn create_clarification(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Clarification not found (NOT_FOUND)", body = ErrorBody),
+        (status = 429, description = "Too many clarifications and replies from this user in the last minute (RATE_LIMITED); carries Retry-After. Staff replies are not counted.", body = ErrorBody),
         (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
@@ -443,6 +444,11 @@ pub async fn reply_clarification(
 
     if !is_admin && !is_author && !is_recipient {
         return Err(AppError::PermissionDenied);
+    }
+    // A participant's replies share the per-user window with their questions;
+    // staff are exempt, as they are when posting.
+    if !is_admin {
+        rate_limit::admit_clarification(&state.mq, auth_user.user_id).await?;
     }
 
     let now = state.clock.now();

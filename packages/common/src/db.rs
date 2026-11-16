@@ -27,6 +27,7 @@ use sea_orm::sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sea_orm::{DbErr, RuntimeErr, SqlxPostgresConnector};
 
 mod handle;
+mod reachability;
 pub use handle::{DatabaseConnection, DatabaseTransaction};
 
 /// Default server-side `statement_timeout`. Matches the HTTP `TimeoutLayer`: a

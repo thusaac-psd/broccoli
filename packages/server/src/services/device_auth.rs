@@ -12,40 +12,74 @@ use crate::error::AppError;
 use crate::services::auth_tokens::{SignIn, issue_access_token, open_session};
 use crate::utils::hash;
 
-/// Most pending codes one client address holds; past it, its new requests
-/// get 429. Like the failed sign-in quota, it counts only what abuse leaves
-/// behind: a CLI sign-in collects its code within one poll of the approval,
-/// so a venue that shows the server one address for all its contestants
-/// holds about one code per contestant signing in at that moment, while a
-/// source minting codes nobody approves fills its allowance and stops. It is
-/// counted in the database, so it holds across replicas and while Redis is
-/// down, and requests from other addresses are never affected, so no source
-/// can lock the fleet's CLI sign-ins out. 1000 rows of a few hundred bytes
-/// each is the most one source can make the table hold.
-pub const MAX_PENDING_PER_ADDRESS: i64 = 1000;
+/// Most live codes one client address holds; past it, its new requests get
+/// 429. A code is live while a CLI is still waiting on it: requested or polled
+/// within [`LIVE_SECS`]. Like the failed sign-in quota, it counts only what
+/// abuse leaves behind: a CLI sign-in collects its code within one poll of the
+/// approval, and a CLI that gives up (or is interrupted and run again) stops
+/// polling, so its code stops counting within [`LIVE_SECS`] while it stays
+/// collectable until it expires. A venue that shows the server one address for
+/// all its contestants holds about one live code per contestant waiting at
+/// that moment, while a source minting codes nobody approves fills its
+/// allowance and stops. It is counted in the database, so it holds across
+/// replicas and while Redis is down, and requests from other addresses are
+/// never affected. One source can make the table hold at most
+/// `MAX_LIVE_PER_ADDRESS * CODE_TTL_SECS / LIVE_SECS` rows of a few hundred
+/// bytes each, purged as they expire.
+pub const MAX_LIVE_PER_ADDRESS: i64 = 1000;
+/// How long a code stays live after it is requested or polled: several poll
+/// intervals, so a CLI that waits out a slow or briefly unreachable server
+/// keeps its place.
+pub const LIVE_SECS: u64 = 60;
 /// How long a device code stays valid.
 pub const CODE_TTL_SECS: u64 = 900;
 /// Retries on a user-code collision (20^8 codes, so effectively never).
 const MAX_ATTEMPTS: usize = 10;
 
+/// The codes of client address `$1` that are live (see
+/// [`MAX_LIVE_PER_ADDRESS`]) at `now()`, with `$2` the seconds a code stays
+/// live. Shared by [`CREATE_SQL`] and [`LIVE_SQL`], so the cap and the wait
+/// it reports count the same codes.
+macro_rules! live_codes {
+    ($addr:literal, $live:literal) => {
+        concat!(
+            "device_authorization WHERE client_addr IS NOT DISTINCT FROM ",
+            $addr,
+            " AND expires_at > now() AND greatest(created_at, last_poll_at) > now() - make_interval(secs => ",
+            $live,
+            "::int)"
+        )
+    };
+}
+
 /// Insert a pending code for client address `$5` unless that address holds
-/// `$4` pending codes. Expired rows are purged in the same statement, which
-/// is what bounds the table.
-const CREATE_SQL: &str = r#"
+/// `$4` live codes (`$6` the seconds a code stays live). Expired rows are
+/// purged in the same statement, which is what bounds the table.
+const CREATE_SQL: &str = concat!(
+    r#"
 WITH purged AS (
     DELETE FROM device_authorization WHERE expires_at <= now()
 )
 INSERT INTO device_authorization
     (device_code_hash, user_code, approved_by, client_addr, created_at, expires_at, last_poll_at)
 SELECT $1, $2, NULL, $5, now(), now() + make_interval(secs => $3::int), NULL
-WHERE (SELECT count(*) FROM device_authorization
-       WHERE client_addr IS NOT DISTINCT FROM $5 AND expires_at > now()) < $4
+WHERE (SELECT count(*) FROM "#,
+    live_codes!("$5", "$6"),
+    r#") < $4
 ON CONFLICT DO NOTHING
 RETURNING 1 AS created
-"#;
+"#
+);
 
-const PENDING_COUNT_SQL: &str = "SELECT count(*) AS pending FROM device_authorization \
-     WHERE client_addr IS NOT DISTINCT FROM $1 AND expires_at > now()";
+/// How many live codes client address `$1` holds, and the seconds until the
+/// first of them stops counting (`$2` the seconds a code stays live).
+const LIVE_SQL: &str = concat!(
+    "SELECT count(*) AS live, \
+            ceil(extract(epoch FROM min(greatest(created_at, last_poll_at)) \
+                 + make_interval(secs => $2::int) - now()))::bigint AS frees_in \
+     FROM ",
+    live_codes!("$1", "$2")
+);
 
 /// Store a new pending code requested from `client`. `generate` yields
 /// `(device_code, user_code)` candidates; the user code is stored normalized.
@@ -66,8 +100,9 @@ pub async fn create(
                     hash::sha256_hex(&device_code).into(),
                     normalize(&user_code).into(),
                     (CODE_TTL_SECS as i32).into(),
-                    MAX_PENDING_PER_ADDRESS.into(),
+                    MAX_LIVE_PER_ADDRESS.into(),
                     client.clone().into(),
+                    (LIVE_SECS as i32).into(),
                 ],
             ))
             .await?;
@@ -75,18 +110,22 @@ pub async fn create(
             return Ok((device_code, user_code));
         }
         // Nothing inserted: either the address's cap or a user-code collision.
-        let pending: i64 = db
+        let row = db
             .query_one_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                PENDING_COUNT_SQL,
-                [client.clone().into()],
+                LIVE_SQL,
+                [client.clone().into(), (LIVE_SECS as i32).into()],
             ))
             .await?
-            .map(|row| row.try_get("", "pending"))
-            .transpose()?
-            .unwrap_or(0);
-        if pending >= MAX_PENDING_PER_ADDRESS {
-            return Err(AppError::RateLimited { retry_after: 60 });
+            .ok_or_else(|| AppError::Internal("live code count returned no row".into()))?;
+        let live: i64 = row.try_get("", "live")?;
+        if live >= MAX_LIVE_PER_ADDRESS {
+            // The soonest a place can open: the address's least recently seen
+            // code stops counting.
+            let frees_in: Option<i64> = row.try_get("", "frees_in")?;
+            return Err(AppError::RateLimited {
+                retry_after: frees_in.unwrap_or(1).max(1) as u64,
+            });
         }
     }
     Err(AppError::Internal(
@@ -98,12 +137,10 @@ pub async fn create(
 /// read `FOR KEY SHARE`, the lock the approval's foreign key takes anyway: a
 /// logout or credential change that ends the session first leaves nothing to
 /// approve with, so nothing is updated; one that ends it after waits and
-/// deletes the approval with the session. The session's user is written to
-/// `authorized_user_id` too, for servers of the previous release polling the
-/// code while a release rolls out (`m0013_device_approval_session`).
+/// deletes the approval with the session.
 const AUTHORIZE_SQL: &str = r#"
-UPDATE device_authorization d SET approved_by = s.id, authorized_user_id = s.user_id
-FROM (SELECT id, user_id FROM auth_session WHERE id = $2 FOR KEY SHARE) s
+UPDATE device_authorization d SET approved_by = s.id
+FROM (SELECT id FROM auth_session WHERE id = $2 FOR KEY SHARE) s
 WHERE d.user_code = $1 AND d.expires_at > now() AND d.approved_by IS NULL
 RETURNING 1 AS approved
 "#;

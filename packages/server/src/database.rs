@@ -290,8 +290,21 @@ pub async fn connect_main_pool(
     // pings the connection on release, which flushes the pending bytes and
     // drains to `ReadyForQuery`, and closes it if that surfaces an error, so
     // the pool never hands out a connection that is out of step.
-    common::db::connect(db_url, &PgPoolSpec::new(max_connections, 5), session).await
+    let spec = PgPoolSpec {
+        acquire_timeout: MAIN_POOL_ACQUIRE_TIMEOUT,
+        ..PgPoolSpec::new(max_connections, 5)
+    };
+    common::db::connect(db_url, &spec, session).await
 }
+
+/// The longest a request waits for a main-pool connection before it answers
+/// `503 DATABASE_UNAVAILABLE`. An unreachable database is refused at once
+/// after the first probe (see [`common::db::DatabaseConnection`]), so this
+/// bounds only a busy pool's queue: long enough that a contest-start burst
+/// waits for connections instead of failing, and a quarter of the request
+/// timeout (`REQUEST_TIMEOUT`, 60 s), so the request still has time to run
+/// once it gets one.
+pub const MAIN_POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Session-level advisory lock key that serializes boot-time schema work
 /// (migrations, seeding) across every

@@ -27,12 +27,6 @@ pub struct Model {
     #[sea_orm(nullable, indexed)]
     pub approved_by: Option<i64>,
 
-    /// The approving session's user, written beside `approved_by` for
-    /// servers of the previous release that read it while a release rolls
-    /// out (see `m0013_device_approval_session`). No code of this build reads
-    /// it.
-    pub authorized_user_id: Option<i32>,
-
     /// The client address that requested the code, `None` when the server
     /// could not tell it. Pending codes are bounded per address.
     #[sea_orm(nullable, indexed)]

@@ -14,8 +14,13 @@
 //! not lock a venue out.
 //!
 //! A quota that counts only some outcomes of a request (failed sign-ins, not
-//! every sign-in) splits the rule in two: [`check`] refuses once the window
-//! is full without counting, and [`record`] counts the outcome that counts.
+//! every sign-in) cannot reserve a place up front without counting what a
+//! venue does, so it splits the rule in two: [`check`] refuses once the window
+//! is full, before the work, and [`settle`] decides the outcome once the work
+//! is done. An outcome that counts takes its place then and is refused past
+//! the limit; one that does not is refused while the window is full. Requests
+//! that all passed [`check`] in parallel therefore learn at most `limit`
+//! counted outcomes between them, however many ran at once.
 
 use std::time::Duration;
 
@@ -29,16 +34,35 @@ pub async fn admit(mq: &mq::Mq, key: &str, limit: u64, window: Duration) -> Resu
 }
 
 /// Refuse a request with `RATE_LIMITED` once window `key` holds `limit`
-/// events, without counting it; the caller [`record`]s the outcomes that
-/// count.
+/// events, without counting it; the caller [`settle`]s its outcome.
 pub async fn check(mq: &mq::Mq, key: &str, limit: u64) -> Result<(), AppError> {
     refuse_past(key, mq.window_count(key).await, limit.saturating_sub(1))
 }
 
-/// Count one event toward window `key` (see [`check`]).
-pub async fn record(mq: &mq::Mq, key: &str, window: Duration) {
-    if let Err(e) = mq.count_in_window(key, window).await {
-        tracing::warn!(quota = key, error = %e, "Rate limit count failed");
+/// Whether the outcome of a [`check`]ed request counts toward its window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// Counted (a failed sign-in).
+    Counts,
+    /// Not counted (a successful sign-in).
+    Free,
+}
+
+/// Decide a [`check`]ed request by its outcome: one that [`Outcome::Counts`]
+/// takes its place in window `key` and is refused past `limit`; a
+/// [`Outcome::Free`] one is refused while the window holds `limit` events.
+/// Either way the caller answers the refusal instead of the outcome, so no
+/// request past the limit learns it.
+pub async fn settle(
+    mq: &mq::Mq,
+    key: &str,
+    limit: u64,
+    window: Duration,
+    outcome: Outcome,
+) -> Result<(), AppError> {
+    match outcome {
+        Outcome::Counts => admit(mq, key, limit, window).await,
+        Outcome::Free => check(mq, key, limit).await,
     }
 }
 

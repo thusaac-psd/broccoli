@@ -3,6 +3,8 @@ use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+pub use crate::services::window_quota::Outcome;
+
 /// Upper bound on tracked (username, ip) keys. A distributed attacker spraying
 /// unique usernames/IPs could otherwise grow the map without bound. When the cap
 /// is hit we GC aged-out keys, and if that is not enough we drop all tracking
@@ -15,8 +17,8 @@ const MAX_KEYS: usize = 50_000;
 /// Keyed on (username, client IP) and counts ONLY failed attempts, which makes
 /// it safe to run during a real onsite contest where hundreds of contestants
 /// share one venue NAT IP:
-/// - a legitimate contestant who signs in is never throttled - success
-///   [`clear`](Self::clear)s the key, and other contestants are distinct
+/// - a legitimate contestant who signs in is never throttled - a success
+///   [`settle`](Self::settle)d clears the key, and other contestants are distinct
 ///   usernames, so one person's failures never touch another's;
 /// - an attacker guessing a victim's password from the attacker's own IP only
 ///   fills the (victim, attacker-ip) key, so the victim signing in from their
@@ -24,6 +26,12 @@ const MAX_KEYS: usize = 50_000;
 /// - repeated failures for a single (username, ip) back off with a bounded
 ///   retry-after that always expires within `window`; the endpoint is never
 ///   permanently denied.
+///
+/// Like the per-address quota (`services::window_quota`), an attempt is
+/// [`check`](Self::check)ed before its password is verified and
+/// [`settle`](Self::settle)d after: a failure past the limit and a success
+/// while the pair is throttled both answer the throttle instead, so attempts
+/// verified in parallel learn at most `limit` failures between them.
 ///
 /// State is per-process and in-memory (it resets on restart). An attacker spread
 /// across replicas gets N times the budget - an accepted trade for zero DB load
@@ -61,11 +69,23 @@ impl LoginThrottle {
         if self.limit == 0 {
             return None;
         }
+        self.throttled_at(username, ip, now, self.limit)
+    }
+
+    /// `Some(retry_after_secs)` while the pair holds at least `threshold`
+    /// failures in the window.
+    fn throttled_at(
+        &self,
+        username: &str,
+        ip: IpAddr,
+        now: Instant,
+        threshold: u32,
+    ) -> Option<u64> {
         let mut guard = self.inner.lock().ok()?;
         let key = Self::key(username, ip);
         let entry = guard.get_mut(&key)?;
         prune(entry, now, self.window);
-        if entry.len() as u32 >= self.limit {
+        if entry.len() as u32 >= threshold {
             // Locked until the OLDEST failure in the window ages out and frees a
             // slot. Bounded by `window`, so the lock always lifts on its own.
             let oldest = *entry.front()?;
@@ -82,15 +102,38 @@ impl LoginThrottle {
         }
     }
 
-    /// Record one failed login for this (username, ip).
-    pub fn record_failure(&self, username: &str, ip: IpAddr) {
-        self.record_failure_at(username, ip, Instant::now())
+    /// Decide a [`check`](Self::check)ed attempt for this (username, ip) by
+    /// its outcome. A failure is recorded and is throttled past the limit; a
+    /// success is throttled while the pair is, and otherwise clears it so a
+    /// contestant who finally types the right password starts clean. Returns
+    /// `Some(retry_after_secs)` when the attempt is to be answered with the
+    /// throttle instead of its outcome.
+    pub fn settle(&self, username: &str, ip: IpAddr, outcome: Outcome) -> Option<u64> {
+        self.settle_at(username, ip, outcome, Instant::now())
+    }
+
+    fn settle_at(&self, username: &str, ip: IpAddr, outcome: Outcome, now: Instant) -> Option<u64> {
+        if self.limit == 0 {
+            return None;
+        }
+        match outcome {
+            Outcome::Counts => {
+                self.record_failure_at(username, ip, now);
+                self.throttled_at(username, ip, now, self.limit + 1)
+            }
+            Outcome::Free => {
+                let throttled = self.check_at(username, ip, now);
+                if throttled.is_none()
+                    && let Ok(mut guard) = self.inner.lock()
+                {
+                    guard.remove(&Self::key(username, ip));
+                }
+                throttled
+            }
+        }
     }
 
     fn record_failure_at(&self, username: &str, ip: IpAddr, now: Instant) {
-        if self.limit == 0 {
-            return;
-        }
         let Ok(mut guard) = self.inner.lock() else {
             return;
         };
@@ -112,17 +155,6 @@ impl LoginThrottle {
         // one window cannot grow a single deque without limit.
         while entry.len() as u32 > self.limit + 1 {
             entry.pop_front();
-        }
-    }
-
-    /// Clear a (username, ip) on a successful login so a contestant who finally
-    /// types the right password starts clean.
-    pub fn clear(&self, username: &str, ip: IpAddr) {
-        if self.limit == 0 {
-            return;
-        }
-        if let Ok(mut guard) = self.inner.lock() {
-            guard.remove(&Self::key(username, ip));
         }
     }
 }
@@ -187,12 +219,38 @@ mod tests {
     fn success_clears_the_key() {
         let t = LoginThrottle::new(3, Duration::from_secs(60));
         let now = Instant::now();
-        for _ in 0..3 {
+        for _ in 0..2 {
             t.record_failure_at("alice", ip("1.1.1.1"), now);
         }
-        assert!(t.check_at("alice", ip("1.1.1.1"), now).is_some());
-        t.clear("alice", ip("1.1.1.1"));
+        assert_eq!(
+            t.settle_at("alice", ip("1.1.1.1"), Outcome::Free, now),
+            None
+        );
+        for _ in 0..2 {
+            t.record_failure_at("alice", ip("1.1.1.1"), now);
+        }
         assert_eq!(t.check_at("alice", ip("1.1.1.1"), now), None);
+    }
+
+    #[test]
+    fn attempts_checked_in_parallel_learn_at_most_the_limit_of_failures() {
+        let t = LoginThrottle::new(3, Duration::from_secs(60));
+        let now = Instant::now();
+        // Ten attempts all pass the check before any of them is verified.
+        for _ in 0..10 {
+            assert_eq!(t.check_at("alice", ip("1.1.1.1"), now), None);
+        }
+        let answered: Vec<_> = (0..10)
+            .map(|_| t.settle_at("alice", ip("1.1.1.1"), Outcome::Counts, now))
+            .collect();
+        assert_eq!(answered.iter().filter(|a| a.is_none()).count(), 3);
+        // A right password verified while the pair is throttled answers the
+        // throttle too, and clears nothing.
+        assert!(
+            t.settle_at("alice", ip("1.1.1.1"), Outcome::Free, now)
+                .is_some()
+        );
+        assert!(t.check_at("alice", ip("1.1.1.1"), now).is_some());
     }
 
     #[test]

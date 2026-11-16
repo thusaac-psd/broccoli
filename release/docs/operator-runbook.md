@@ -376,13 +376,13 @@ without spending one of its system-error retries; so does a submission whose
 operation could not be published while Redis was down. The same holds for a
 Redis restored from an older snapshot. While a server cannot reach Redis it
 claims no new submissions; they stay queued for a server that can. The
-per-address quotas on sign-in, registration and device codes are counted in
-Redis, so while it is down they admit every request: they guard against scripted
-abuse, and an outage must not lock a venue out of signing in. The per-account
-failed-login throttle (`auth.login_failure_limit`) is kept by each server in
-memory and still applies. A worker that crashes loses nothing: the tasks it held
-are redelivered to another worker 30 to 35 seconds after it stopped refreshing
-them.
+per-address quotas on failed sign-ins and registration are counted in Redis, so
+while it is down they admit every request: they guard against scripted abuse,
+and an outage must not lock a venue out of signing in. The bound on device codes
+is counted in the database and still applies. The per-account failed-login
+throttle (`auth.login_failure_limit`) is kept by each server in memory and still
+applies. A worker that crashes loses nothing: the tasks it held are redelivered
+to another worker 30 to 35 seconds after it stopped refreshing them.
 
 Useful checks on the infra node (`operation_tasks` is
 `mq.operation_queue_name`):
@@ -467,6 +467,12 @@ itself, by one rule, and `broccoli-server --node-id` or
   starting Docker leaves the id alone.
 - With no machine id, the hostname alone is used; with neither, a random id, and
   the process warns at boot.
+- A container on a bridge network sees no physical card, so its id is
+  `ROLE-HASH` of the machine id alone: disk clones that share a machine id get
+  the same id there. The installers record the id they ask the image for in the
+  host's network, where the card counts; an id left blank in a container relies
+  on the machine id alone, so give cloned machines distinct machine ids
+  (`systemd-machine-id-setup` after clearing `/etc/machine-id`) or set the id.
 
 The installers never derive an id. A container's hostname and network change
 whenever it is recreated, so `install.sh server` and `install.sh worker` (and

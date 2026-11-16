@@ -11,6 +11,7 @@ use tracing::instrument;
 use crate::client_ip::{ClientIp, ForwardedHop};
 use crate::config::ServerConfig;
 use crate::services::ip_quota;
+use crate::services::window_quota::Outcome;
 // visibility-bypass-audited: this module has no permission gate to name
 // because it has no third-party resource parameter to gate - every query is
 // scoped to the identity resolved from the request's own credentials
@@ -164,22 +165,31 @@ pub async fn login(
     .await
     .map_err(|e| AppError::Internal(format!("Password verify error: {e}")))?;
 
+    // Both quotas are settled by the outcome before it is answered: a failure
+    // past either limit, and a success while either is full, answer 429, so
+    // attempts that passed the checks above together learn no more than the
+    // limits allow.
+    let outcome = if is_valid {
+        Outcome::Free
+    } else {
+        Outcome::Counts
+    };
+    let throttled =
+        client_ip.and_then(|ip| state.login_throttle.settle(&throttle_key, ip, outcome));
+    ip_quota::FAILED_LOGIN
+        .settle(&state.mq, client_ip, outcome)
+        .await?;
+    if let Some(retry_after) = throttled {
+        return Err(AppError::RateLimited { retry_after });
+    }
+
     // The hash that verified is what the new session is opened against.
     let Some((user, hash)) = maybe_user
         .filter(|_| is_valid)
         .and_then(|u| u.password.clone().map(|hash| (u, hash)))
     else {
-        if let Some(ip) = client_ip {
-            state.login_throttle.record_failure(&throttle_key, ip);
-        }
-        ip_quota::FAILED_LOGIN.record(&state.mq, client_ip).await;
         return Err(AppError::InvalidCredentials);
     };
-
-    // Successful auth: clear any accumulated failures for this pair.
-    if let Some(ip) = client_ip {
-        state.login_throttle.clear(&throttle_key, ip);
-    }
 
     let txn = state.db.begin().await?;
     // A credential change that committed after the check above leaves the
@@ -420,7 +430,7 @@ fn host_header(headers: &HeaderMap) -> Option<String> {
     request_body = DeviceCodeRequest,
     responses(
         (status = 200, description = "Device code generated", body = DeviceCodeResponse),
-        (status = 429, description = "Too many device codes pending for this address (RATE_LIMITED). Includes Retry-After.", body = ErrorBody),
+        (status = 429, description = "Too many device codes that a CLI is still polling for this address (RATE_LIMITED). A code stops counting a minute after its last poll; Retry-After is the wait until the first place opens.", body = ErrorBody),
     ),
 )]
 #[instrument(skip(state, headers, forwarded))]

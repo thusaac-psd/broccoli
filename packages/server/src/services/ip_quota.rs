@@ -19,7 +19,7 @@ pub struct IpQuota {
 }
 
 /// Failed `POST /auth/login` attempts ([`IpQuota::check`] and
-/// [`IpQuota::record`]): a successful sign-in counts nothing, so a venue that
+/// [`IpQuota::settle`]): a successful sign-in counts nothing, so a venue that
 /// shows the server one address for hundreds of contestants signs them all
 /// in, while one source guessing passwords across many accounts is capped.
 /// The per-account throttle (`utils::login_throttle`) bounds guessing at one
@@ -50,9 +50,9 @@ impl IpQuota {
     }
 
     /// Refuse a request from `ip` with `RATE_LIMITED` once the window holds
-    /// `limit` events, without counting it; the caller [`record`](Self::record)s
-    /// the ones that count. A request whose client address is unknown is
-    /// admitted.
+    /// `limit` events, without counting it; the caller
+    /// [`settle`](Self::settle)s its outcome. A request whose client address
+    /// is unknown is admitted.
     pub async fn check(&self, mq: &mq::Mq, ip: Option<IpAddr>) -> Result<(), AppError> {
         let Some(ip) = ip else {
             return Ok(());
@@ -60,12 +60,19 @@ impl IpQuota {
         super::window_quota::check(mq, &self.window_of(ip), self.limit).await
     }
 
-    /// Count one event from `ip` toward [`check`](Self::check).
-    pub async fn record(&self, mq: &mq::Mq, ip: Option<IpAddr>) {
+    /// Decide a [`check`](Self::check)ed request from `ip` by its outcome
+    /// ([`super::window_quota::settle`]). A request whose client address is
+    /// unknown is admitted.
+    pub async fn settle(
+        &self,
+        mq: &mq::Mq,
+        ip: Option<IpAddr>,
+        outcome: super::window_quota::Outcome,
+    ) -> Result<(), AppError> {
         let Some(ip) = ip else {
-            return;
+            return Ok(());
         };
-        super::window_quota::record(mq, &self.window_of(ip), self.window).await;
+        super::window_quota::settle(mq, &self.window_of(ip), self.limit, self.window, outcome).await
     }
 
     fn window_of(&self, ip: IpAddr) -> String {

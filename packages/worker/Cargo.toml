@@ -8,6 +8,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 broccoli-types.workspace = true
 chrono.workspace = true
+clap.workspace = true
 common = { workspace = true, features = ["sea-orm", "object-storage"] }
 config.workspace = true
 futures.workspace = true

@@ -7,6 +7,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use crate::common::{SpawnOptions, TestApp, routes};
 use serde_json::json;
 use server::services::ip_quota::FAILED_LOGIN;
+use server::services::window_quota::Outcome;
 
 /// The address every request of the test client comes from.
 const CLIENT: Option<IpAddr> = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
@@ -14,7 +15,9 @@ const CLIENT: Option<IpAddr> = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
 /// Count `n` failed sign-ins from the test client without signing in.
 async fn fail_sign_ins(app: &TestApp, n: u64) {
     for _ in 0..n {
-        FAILED_LOGIN.record(&app.state.mq, CLIENT).await;
+        let _ = FAILED_LOGIN
+            .settle(&app.state.mq, CLIENT, Outcome::Counts)
+            .await;
     }
 }
 
@@ -72,5 +75,36 @@ async fn successful_sign_ins_are_not_counted_per_address() {
         res.status, 429,
         "the address's failures are spent: {}",
         res.text
+    );
+}
+
+/// Sign-ins that all pass the check before any of them is verified, as a
+/// parallel burst does, learn no more failures between them than the quota
+/// allows: a failure past the limit, and a success while the window is full,
+/// answer 429.
+#[tokio::test]
+async fn sign_ins_checked_in_parallel_learn_no_more_failures_than_the_quota() {
+    let app = TestApp::spawn().await;
+    let mq = &app.state.mq;
+    fail_sign_ins(&app, FAILED_LOGIN.limit - 3).await;
+
+    for _ in 0..10 {
+        FAILED_LOGIN.check(mq, CLIENT).await.unwrap();
+    }
+    let mut answered = 0;
+    for _ in 0..10 {
+        if FAILED_LOGIN
+            .settle(mq, CLIENT, Outcome::Counts)
+            .await
+            .is_ok()
+        {
+            answered += 1;
+        }
+    }
+    assert_eq!(answered, 3);
+    let refused = FAILED_LOGIN.settle(mq, CLIENT, Outcome::Free).await;
+    assert!(
+        matches!(refused, Err(server::error::AppError::RateLimited { .. })),
+        "{refused:?}"
     );
 }
