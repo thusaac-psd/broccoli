@@ -1110,6 +1110,7 @@ async fn scope_fixture_to(app: &TestApp, governed_type: &str) {
             [serde_json::json!({
                 "visibility": true,
                 "contest_types": [governed_type],
+                "host_locale": null,
                 "problem_types": [],
             })
             .into()],
