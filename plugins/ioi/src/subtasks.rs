@@ -715,7 +715,7 @@ mod tests {
         ];
         let missing = make_def(SubtaskScoringMethod::GroupMin, 100.0, vec!["gone", "99"]);
         assert_eq!(
-            unjudgeable(&[missing.clone()], &cases),
+            unjudgeable(std::slice::from_ref(&missing), &cases),
             Some(Unjudgeable::NothingToScore),
             "the positive-score case belongs to no subtask"
         );

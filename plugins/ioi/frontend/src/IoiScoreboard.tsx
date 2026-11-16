@@ -293,10 +293,11 @@ function Rankings({
     String.fromCharCode(65 + i),
   );
 
-  // Per-problem max scores from backend (sum of subtask max_scores or test case scores)
+  // The server sends every problem's maximum: the sum of its subtasks'
+  // maximums, the default subtask's for a problem with no subtask config.
   const maxPerProblem: Record<number, number> = {};
   for (const pid of problemIds) {
-    maxPerProblem[pid] = scoreboard.max_scores?.[String(pid)] ?? 100;
+    maxPerProblem[pid] = scoreboard.max_scores[String(pid)] ?? 0;
   }
   const maxTotal =
     Object.values(maxPerProblem).reduce((sum, v) => sum + v, 0) || 1;
@@ -451,7 +452,7 @@ function RankRow({
       </td>
       {problemIds.map((pid) => {
         const score = problemScoreMap[pid] ?? 0;
-        const max = maxPerProblem[pid] ?? 100;
+        const max = maxPerProblem[pid] ?? 0;
         return <ScoreCell key={pid} score={score} max={max} />;
       })}
       {showTimeTiebreaker && (

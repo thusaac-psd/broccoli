@@ -304,8 +304,11 @@ async fn ioi_feedback_none_shows_a_submissions_scores_only_by_token_or_after_the
 
 /// An IOI contest scored by the sum of best subtasks, with one problem of two
 /// cases (40 and 60 points) and one judged correct submission: the admin's
-/// token, the contest and the submission.
-async fn judged_sum_best_subtask_submission(app: &E2eTestApp, name: &str) -> (String, i32, i32) {
+/// token, the contest, the problem and the submission.
+async fn judged_sum_best_subtask_submission(
+    app: &E2eTestApp,
+    name: &str,
+) -> (String, i32, i32, i32) {
     let admin = app
         .create_user_with_role(&format!("{name}_admin"), "password", "admin")
         .await;
@@ -338,7 +341,7 @@ async fn judged_sum_best_subtask_submission(app: &E2eTestApp, name: &str) -> (St
     let judged = app.wait_for_submission_terminal(sub_id, &admin, 60).await;
     assert_eq!(judged.body["status"], "Judged", "{}", judged.text);
     app.judging_idle().await;
-    (admin, contest_id, sub_id)
+    (admin, contest_id, problem_id, sub_id)
 }
 
 /// A judged submission's subtask scores, read back by the subtask-scores
@@ -346,7 +349,7 @@ async fn judged_sum_best_subtask_submission(app: &E2eTestApp, name: &str) -> (St
 #[tokio::test(flavor = "multi_thread")]
 async fn a_judged_ioi_submission_reads_back_the_subtask_scores_it_was_judged_with() {
     let app = E2eTestApp::spawn().await;
-    let (admin, contest_id, sub_id) =
+    let (admin, contest_id, _, sub_id) =
         judged_sum_best_subtask_submission(&app, "ioi_readback").await;
 
     let scores = app
@@ -380,13 +383,60 @@ async fn a_judged_ioi_submission_reads_back_the_subtask_scores_it_was_judged_wit
     );
 }
 
+/// A judgement's subtask scores read back as it was scored, after the
+/// problem's subtasks changed: the result panel shows what the judgement's
+/// total was made of, never the stored total beside a rescoring.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_judgements_subtask_scores_are_the_ones_it_was_scored_with_after_the_config_changes() {
+    let app = E2eTestApp::spawn().await;
+    let (admin, contest_id, problem_id, sub_id) =
+        judged_sum_best_subtask_submission(&app, "ioi_config_changed").await;
+
+    let mut first: server::entity::test_case::ActiveModel =
+        server::entity::test_case::Entity::find()
+            .filter(server::entity::test_case::Column::ProblemId.eq(problem_id))
+            .one(&app.db)
+            .await
+            .expect("query test cases")
+            .expect("the problem has test cases")
+            .into();
+    first.label = Set("first".into());
+    first.update(&app.db).await.expect("label the first case");
+    let res = app
+        .put_with_token(
+            &format!("/api/v1/contests/{contest_id}/problems/{problem_id}/config/ioi/task"),
+            &json!({ "config": { "subtasks": [
+                { "name": "S1", "max_score": 30, "test_cases": ["first"] },
+            ]}}),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+
+    let scores = app
+        .get_with_token(
+            &format!(
+                "/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}/submissions/{sub_id}/subtask-scores"
+            ),
+            &admin,
+        )
+        .await;
+    assert_eq!(scores.status, 200, "{}", scores.text);
+    assert_eq!(
+        scores.body["subtasks"],
+        json!([{ "name": "All Tests", "scoring_method": "sum", "score": 100.0, "max_score": 100.0 }]),
+        "{}",
+        scores.text
+    );
+}
+
 /// A judgement whose later attempt stands as a system error scores nothing
 /// in any view: the ratios an earlier attempt the platform lost stored are
 /// never credited to it.
 #[tokio::test(flavor = "multi_thread")]
 async fn ratios_a_lost_attempt_stored_are_not_credited_to_the_judgement_that_stands() {
     let app = E2eTestApp::spawn().await;
-    let (admin, contest_id, sub_id) =
+    let (admin, contest_id, _, sub_id) =
         judged_sum_best_subtask_submission(&app, "ioi_lost_attempt").await;
 
     // The judgement's next attempt stands as a system error, storing no

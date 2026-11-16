@@ -1,58 +1,37 @@
-// Every item below is reachable only from wasm32-gated production code
-// and/or the #[cfg(test)] unit tests at the bottom of this file; this file
-// has no top-level (unconditional) use of the SDK prelude, HashMap, or serde
-// derive macros, so gate these imports the same way a native (test/clippy)
-// build doesn't see them as unused.
 #[cfg(any(target_arch = "wasm32", test))]
 use std::collections::HashMap;
 
-#[cfg(any(target_arch = "wasm32", test))]
 use broccoli_server_sdk::prelude::*;
-#[cfg(any(target_arch = "wasm32", test))]
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-// Only reachable from the wasm32-gated `run_judge` below.
-#[cfg(target_arch = "wasm32")]
-use crate::config::{ContestConfig, TaskConfig};
-// Reachable from wasm32-gated production code AND directly from the
-// #[cfg(test)] unit tests below (`score_submission_subtask_details`, which
-// they call directly, and `SubtaskDef` literals they construct); gate the
-// same way so a native (test/clippy) build doesn't see these as unused.
-#[cfg(any(target_arch = "wasm32", test))]
 use crate::case_ratios::CaseRatios;
 #[cfg(target_arch = "wasm32")]
-use crate::case_ratios::{JOIN_JUDGED_RATIOS, JudgedRatios};
-#[cfg(any(target_arch = "wasm32", test))]
+use crate::case_ratios::{JOIN_JUDGED_RATIOS, JudgedSubtasks};
+#[cfg(target_arch = "wasm32")]
+use crate::config::{ContestConfig, TaskConfig};
 use crate::config::{SubtaskDef, round_score};
 #[cfg(target_arch = "wasm32")]
 use crate::judge::{JudgeContext, judge_with_context_detached};
-// Used by `sum_best_subtask_score` below (wasm32+test).
-#[cfg(any(target_arch = "wasm32", test))]
-use crate::scoring::score_sum_best_subtask;
-// `effective_subtasks` is reachable from the wasm32-gated `run_judge`
-// below AND directly from the #[cfg(test)] unit tests; `score_all_subtasks`
-// is reachable from both `score_submission_subtask_details` and
-// `sum_best_subtask_score`, which are themselves wasm32+test. Gate both the
-// same way.
 #[cfg(target_arch = "wasm32")]
 use crate::load_task_config;
 #[cfg(any(target_arch = "wasm32", test))]
-use crate::subtasks::{effective_subtasks, score_all_subtasks};
-
-// Only constructed inside `score_submission_subtask_details` below
-// (wasm32+test); gate the same way.
+use crate::scoring::score_sum_best_subtask;
 #[cfg(any(target_arch = "wasm32", test))]
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub(crate) struct SubtaskScoreDetail {
-    name: String,
-    scoring_method: crate::config::SubtaskScoringMethod,
-    score: f64,
-    max_score: f64,
+use crate::subtasks::effective_subtasks;
+use crate::subtasks::score_all_subtasks;
+
+/// One subtask's result as judging scored it, in the order of the subtasks
+/// the judgement was scored by.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SubtaskScoreDetail {
+    pub(crate) name: String,
+    pub(crate) scoring_method: crate::config::SubtaskScoringMethod,
+    pub(crate) score: f64,
+    pub(crate) max_score: f64,
 }
 
-// Called by the wasm32-gated `api.rs` subtask-scores handler AND directly by
-// the #[cfg(test)] unit tests below; gate the same way.
-#[cfg(any(target_arch = "wasm32", test))]
+/// The result of every subtask in `subtask_defs` for a judgement whose cases
+/// scored `ratios`.
 pub(crate) fn score_submission_subtask_details(
     test_cases: &[TestCaseRow],
     subtask_defs: &[SubtaskDef],
@@ -70,16 +49,17 @@ pub(crate) fn score_submission_subtask_details(
         .collect()
 }
 
-/// The ratios of a submission's current judgement, once it is finalized.
+/// The subtask results a submission's current judgement was scored with,
+/// once it is finalized.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn load_current_submission_ratios(
+pub(crate) fn load_current_judged_subtasks(
     host: &Host,
     contest_id: i32,
     submission_id: i32,
-) -> Result<Option<CaseRatios>, SdkError> {
+) -> Result<Option<Vec<SubtaskScoreDetail>>, SdkError> {
     let mut p = Params::new();
     let sql = format!(
-        "SELECT cr.ratios \
+        "SELECT cr.subtasks \
          FROM submission s \
          JOIN submission_judgement sj ON sj.submission_id = s.id \
          {JOIN_JUDGED_RATIOS} \
@@ -90,8 +70,8 @@ pub(crate) fn load_current_submission_ratios(
     );
     Ok(host
         .db
-        .query_one_with_args::<JudgedRatios>(&sql, &p.into_args())?
-        .map(|row| row.ratios))
+        .query_one_with_args::<JudgedSubtasks>(&sql, &p.into_args())?
+        .map(|row| row.subtasks))
 }
 
 #[cfg(target_arch = "wasm32")]

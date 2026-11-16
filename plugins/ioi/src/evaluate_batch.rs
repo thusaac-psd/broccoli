@@ -12,8 +12,8 @@ use crate::case_ratios::{self, judged_ratios};
 use crate::config::round_score;
 use crate::config::{SubtaskDef, SubtaskScoringMethod};
 use crate::persist::persist_results;
+use crate::score::score_submission_subtask_details;
 use crate::subtasks::MemberIndex;
-use crate::subtasks::score_all_subtasks;
 use broccoli_server_sdk::score::total_score;
 
 /// Per-test-case outcome from evaluation, with raw (0..1) scores.
@@ -77,16 +77,16 @@ impl ContestJudge for IoiJudge {
 
     fn finalize(&self, host: &Host, progress: &JudgeProgress<'_>) -> Result<(), SdkError> {
         let ratios = judged_ratios(progress.outcomes);
+        let subtasks =
+            score_submission_subtask_details(&self.all_test_cases, &self.subtask_defs, &ratios);
         case_ratios::store(
             host,
             progress.submission.judgement_id,
             progress.submission.judge_epoch,
             &ratios,
+            &subtasks,
         )?;
-        let subtask_results = score_all_subtasks(&self.subtask_defs, &self.all_test_cases, &ratios);
-        let submission_score = round_score(total_score(
-            subtask_results.iter().map(|result| result.score),
-        ));
+        let submission_score = round_score(total_score(subtasks.iter().map(|s| s.score)));
         let persist_outcomes: Vec<EvalOutcome> = progress
             .outcomes
             .iter()
@@ -797,16 +797,17 @@ mod stored_ratio_tests {
     use super::*;
     use crate::case_ratios::CaseRatios;
     use crate::config::SubtaskScoringMethod;
-    use crate::score::score_submission_subtask_details;
+    use crate::score::{SubtaskScoreDetail, score_submission_subtask_details};
 
     /// Judge `results` to completion and return the submission score live
-    /// judging persisted and the ratios it stored beside the judgement.
+    /// judging persisted and the ratios and subtask results it stored beside
+    /// the judgement.
     fn judge(
         host: &Host,
         tcs: &[TestCaseRow],
         subtasks: &[SubtaskDef],
         results: Vec<TestCaseVerdict>,
-    ) -> (f64, CaseRatios) {
+    ) -> (f64, CaseRatios, Vec<SubtaskScoreDetail>) {
         let req = test_submission(tcs.to_vec());
         evaluate_all_detached(host, &req, tcs, tcs, req.submission_id, subtasks).unwrap();
         let mut state = host.eval.detached_windowed_requests()[0].state.clone();
@@ -832,17 +833,16 @@ mod stored_ratio_tests {
             .find(|e| e.sql.contains("INSERT INTO case_ratio"))
             .expect("live judging stores the case ratios");
         let ratios = serde_json::from_value(stored.args[2].clone()).unwrap();
-        (host.submission.last_update().score.unwrap(), ratios)
+        let subtasks = serde_json::from_value(stored.args[3].clone()).unwrap();
+        (
+            host.submission.last_update().score.unwrap(),
+            ratios,
+            subtasks,
+        )
     }
 
-    fn total(details: &[crate::score::SubtaskScoreDetail]) -> f64 {
-        serde_json::to_value(details)
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|d| d["score"].as_f64().unwrap())
-            .sum()
+    fn total(details: &[SubtaskScoreDetail]) -> f64 {
+        details.iter().map(|d| d.score).sum()
     }
 
     #[test]
@@ -861,7 +861,7 @@ mod stored_ratio_tests {
             score: 0.5,
             ..TestCaseVerdict::wrong_answer(2)
         };
-        let (live, ratios) = judge(
+        let (live, ratios, stored) = judge(
             &host,
             &tcs,
             &subtasks,
@@ -871,6 +871,10 @@ mod stored_ratio_tests {
         assert_eq!(live, 50.0);
         let details = score_submission_subtask_details(&tcs, &subtasks, &ratios);
         assert_eq!(total(&details), live);
+        assert_eq!(
+            stored, details,
+            "the judgement keeps what it was scored with"
+        );
     }
 
     #[test]
@@ -888,10 +892,11 @@ mod stored_ratio_tests {
             score: 1.0 / 3.0,
             ..TestCaseVerdict::wrong_answer(1)
         };
-        let (live, ratios) = judge(&host, &tcs, &subtasks, vec![partial]);
+        let (live, ratios, stored) = judge(&host, &tcs, &subtasks, vec![partial]);
 
         assert_eq!(live, 33.33);
         let details = score_submission_subtask_details(&tcs, &subtasks, &ratios);
         assert_eq!(total(&details), live);
+        assert_eq!(total(&stored), live);
     }
 }

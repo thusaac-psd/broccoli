@@ -16,9 +16,7 @@ use crate::config::FeedbackLevel;
 #[cfg(target_arch = "wasm32")]
 use crate::feedback::viewer_has_token_feedback_for_submission;
 #[cfg(target_arch = "wasm32")]
-use crate::score::load_current_submission_ratios;
-#[cfg(target_arch = "wasm32")]
-use crate::score::score_submission_subtask_details;
+use crate::score::load_current_judged_subtasks;
 #[cfg(target_arch = "wasm32")]
 use crate::scoreboard::load_scoreboard_cells;
 #[cfg(target_arch = "wasm32")]
@@ -245,9 +243,11 @@ pub(crate) fn handle_task_config(
         (None, None)
     };
 
+    // The problem's maximum is public at every level, as on the scoreboard.
     let mut body = serde_json::json!({
         "scoring_mode": contest_config.scoring_mode,
         "feedback_level": contest_config.feedback_level,
+        "max_score": problem_max_score(&effective_subtasks),
     });
 
     if let Some(subtasks) = subtasks {
@@ -663,12 +663,11 @@ pub(crate) fn handle_submission_subtask_scores(
 
     #[derive(Deserialize)]
     struct SubInfo {
-        problem_id: i32,
         user_id: i32,
     }
     let mut p = Params::new();
     let sql = format!(
-        "SELECT problem_id, user_id FROM submission WHERE id = {} AND contest_id = {}",
+        "SELECT user_id FROM submission WHERE id = {} AND contest_id = {}",
         p.bind(submission_id),
         p.bind(contest_id)
     );
@@ -676,7 +675,6 @@ pub(crate) fn handle_submission_subtask_scores(
         .db
         .query_one_with_args::<SubInfo>(&sql, &p.into_args())?
         .ok_or_else(|| PluginHttpResponse::error(404, "Submission not found"))?;
-    let problem_id = sub_info.problem_id;
 
     let can_view_all_submissions = req.is_staff();
 
@@ -707,17 +705,14 @@ pub(crate) fn handle_submission_subtask_scores(
         } => can_view_subtask_scores,
     };
 
+    // What the judgement was scored with, even when the problem's subtasks
+    // changed since.
     let subtasks = if can_view_subtask_scores {
-        let task_config = load_task_config(host, contest_id, problem_id)?;
-        let (test_cases, subtask_defs) = load_effective_subtasks(host, problem_id, &task_config)?;
-        match load_current_submission_ratios(host, contest_id, submission_id)? {
-            Some(ratios) => serde_json::to_value(score_submission_subtask_details(
-                &test_cases,
-                &subtask_defs,
-                &ratios,
-            ))?,
-            None => serde_json::Value::Null,
-        }
+        serde_json::to_value(load_current_judged_subtasks(
+            host,
+            contest_id,
+            submission_id,
+        )?)?
     } else {
         serde_json::Value::Null
     };

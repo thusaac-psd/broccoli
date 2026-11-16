@@ -94,6 +94,12 @@ The submission view itself hides per test case results at every level below
 
 :::
 
+A submission shows the subtasks it was judged with and the score each one
+got, so a change to a problem's subtasks after judging changes no result a
+submission already shows; judge it again to score it under the new subtasks.
+The `sum_best_subtask` scoreboard combines every submission under the
+problem's current subtasks.
+
 The scoreboard follows the same level. At `none` it shows a contestant no
 score at all, their own row included, so it lists names only, without ranks.
 At `total_only` it shows totals without the per problem scores. Staff
