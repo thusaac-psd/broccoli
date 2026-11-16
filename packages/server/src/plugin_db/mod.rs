@@ -154,10 +154,7 @@ impl Lease {
     /// and counts as busy while held, like the pool's transactions.
     pub async fn connection(&self) -> Result<(common::db::PooledConnection, i32), DbErr> {
         let mut conn = self.db.acquire().await?;
-        let pid = sea_orm::sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *conn)
-            .await
-            .map_err(|e| DbErr::Query(sea_orm::RuntimeErr::SqlxError(e.into())))?;
+        let pid = conn.backend_pid().await?;
         Ok((conn, pid))
     }
 }

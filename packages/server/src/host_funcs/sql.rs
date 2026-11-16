@@ -46,7 +46,7 @@ impl PluginSql {
         &self,
         plugin_id: &str,
         call: &crate::plugin_db::SqlCall,
-        statement: impl AsyncFnOnce(&mut sea_orm::sqlx::PgConnection) -> Result<T, sea_orm::sqlx::Error>,
+        statement: impl AsyncFnOnce(&mut common::db::PooledConnection) -> Result<T, sea_orm::DbErr>,
     ) -> Result<Result<T, sea_orm::DbErr>, crate::plugin_db::Unavailable> {
         let lease = self.lease(plugin_id, call).await?;
         let (mut conn, pid) = match by_deadline(call.deadline, lease.connection()).await? {
@@ -54,11 +54,7 @@ impl PluginSql {
             Err(e) => return Ok(Err(e)),
         };
         match by_deadline(call.deadline, statement(&mut conn)).await {
-            // A failed statement reads as one in a plugin transaction does.
-            Ok(result) => {
-                Ok(result
-                    .map_err(|e| sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(e.into()))))
-            }
+            Ok(result) => Ok(result),
             Err(cut) => {
                 // The connection stays held until the cancel is sent, so the
                 // cancel never lands on a later statement that reuses it.
@@ -68,19 +64,34 @@ impl PluginSql {
             }
         }
     }
+
+    /// Run `stmt`, a plugin statement outside any transaction (`db_execute`).
+    async fn execute(
+        &self,
+        plugin_id: &str,
+        call: &crate::plugin_db::SqlCall,
+        stmt: Statement,
+    ) -> Result<Result<u64, sea_orm::DbErr>, crate::plugin_db::Unavailable> {
+        self.standalone(plugin_id, call, async |conn| {
+            conn.execute(stmt).await.map(|res| res.rows_affected())
+        })
+        .await
+    }
+
+    /// Run `stmt`, a plugin query outside any transaction (`db_query`), and
+    /// return its first row.
+    async fn query_one(
+        &self,
+        plugin_id: &str,
+        call: &crate::plugin_db::SqlCall,
+        stmt: Statement,
+    ) -> Result<Result<Option<sea_orm::QueryResult>, sea_orm::DbErr>, crate::plugin_db::Unavailable>
+    {
+        self.standalone(plugin_id, call, async |conn| conn.query_one(stmt).await)
+            .await
+    }
 }
 
-/// `stmt` as a sqlx query, bound as sea-orm binds it, so a plugin
-/// statement prepares the same way on every path.
-fn sqlx_query(
-    stmt: &Statement,
-) -> sea_orm::sqlx::query::Query<'_, sea_orm::sqlx::Postgres, sea_query_sqlx::SqlxValues> {
-    let values = stmt.values.clone().unwrap_or(sea_orm::Values(Vec::new()));
-    sea_orm::sqlx::query_with(
-        sea_orm::sqlx::AssertSqlSafe(stmt.sql.as_str()),
-        sea_query_sqlx::SqlxValues(values),
-    )
-}
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Instant;
@@ -735,11 +746,11 @@ host_fn!(pub db_execute(user_data: Arc<(String, PluginSql)>; sql: String, args: 
 
     let call = crate::plugin_db::SqlCall::current();
     let exec_result = tokio::runtime::Handle::current().block_on(
-        pools.standalone(plugin_id, &call, async |conn| sqlx_query(&stmt).execute(conn).await),
+        pools.execute(plugin_id, &call, stmt),
     ).map_err(unavailable)?;
 
     match exec_result {
-        Ok(res) => HostDbResponse::ok(JsonValue::from(res.rows_affected())).to_json_string(),
+        Ok(rows) => HostDbResponse::ok(JsonValue::from(rows)).to_json_string(),
         Err(e) => {
             let sql_preview: String = sql.chars().take(800).collect();
             let args_preview: String = args.chars().take(800).collect();
@@ -763,14 +774,12 @@ host_fn!(pub db_query(user_data: Arc<(String, PluginSql)>; sql: String, args: St
 
     let call = crate::plugin_db::SqlCall::current();
     let query_result = tokio::runtime::Handle::current().block_on(
-        pools.standalone(plugin_id, &call, async |conn| {
-            sqlx_query(&stmt).fetch_optional(conn).await
-        }),
+        pools.query_one(plugin_id, &call, stmt),
     ).map_err(unavailable)?;
 
     match query_result {
         Ok(Some(row)) => {
-            let json_val: serde_json::Value = sea_orm::sqlx::Row::try_get(&row, "json_data")
+            let json_val: serde_json::Value = row.try_get("", "json_data")
                 .unwrap_or(serde_json::json!([]));
             HostDbResponse::ok(json_val).to_json_string()
         },
@@ -1369,30 +1378,23 @@ mod tests {
             deadline,
             ..Default::default()
         };
-        sql.standalone("p", &call(None), async |conn| {
-            sqlx_query(&Statement::from_string(
-                DbBackend::Postgres,
-                "CREATE TABLE t (v text)",
-            ))
-            .execute(conn)
-            .await
-        })
+        sql.execute(
+            "p",
+            &call(None),
+            Statement::from_string(DbBackend::Postgres, "CREATE TABLE t (v text)"),
+        )
         .await
         .expect("leased")
         .expect("created");
 
         let cut = sql
-            .standalone(
+            .execute(
                 "p",
                 &call(Some(Instant::now() + Duration::from_millis(300))),
-                async |conn| {
-                    sqlx_query(&Statement::from_string(
-                        DbBackend::Postgres,
-                        "INSERT INTO t SELECT 'late' FROM pg_sleep(3)",
-                    ))
-                    .execute(conn)
-                    .await
-                },
+                Statement::from_string(
+                    DbBackend::Postgres,
+                    "INSERT INTO t SELECT 'late' FROM pg_sleep(3)",
+                ),
             )
             .await;
         assert!(
@@ -1577,6 +1579,64 @@ mod tests {
     /// One plugin statement bound with values of every JSON type in turn, on
     /// one connection: each execution binds its own types, whatever an earlier
     /// execution of the same SQL on that connection bound.
+    /// A plugin statement stores the same text whether it runs on its own
+    /// (`db_execute`) or in a transaction (`db_execute_in`): a NUL in a bound
+    /// string or JSON value is replaced by the one handle rule on both paths.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_nul_is_replaced_alike_in_and_outside_a_transaction() {
+        let (_container, url, db) = one_connection().await;
+        crate::database::BootSession::acquire(&url)
+            .await
+            .expect("boot session")
+            .migrate()
+            .await
+            .expect("migrate");
+        let sql = plugin_sql(&url).await;
+        let call = crate::plugin_db::SqlCall::default();
+        let statement = |text: &str, args: &str| plugin_statement(text, parse_args(args).unwrap());
+        sql.execute(
+            "p",
+            &call,
+            statement("CREATE TABLE t (v text, doc jsonb)", "[]"),
+        )
+        .await
+        .expect("leased")
+        .expect("created");
+
+        let insert = || {
+            statement(
+                "INSERT INTO t (v, doc) VALUES ($1, $2)",
+                r#"["a\u0000b", {"k": "c\u0000d"}]"#,
+            )
+        };
+        let standalone = sql.execute("p", &call, insert()).await.expect("leased");
+        assert_eq!(standalone.expect("standalone insert"), 1);
+        let lease = sql.lease("p", &call).await.expect("leased");
+        let txn = lease.db.begin().await.expect("begin");
+        txn.execute_raw(insert())
+            .await
+            .expect("insert in a transaction");
+        txn.commit().await.expect("commit");
+
+        let stored: Vec<(String, String)> = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT v, doc->>'k' FROM plugin_p.t ORDER BY ctid",
+            ))
+            .await
+            .expect("select")
+            .iter()
+            .map(|row| {
+                (
+                    row.try_get_by_index(0).unwrap(),
+                    row.try_get_by_index(1).unwrap(),
+                )
+            })
+            .collect();
+        let replaced = ("a\u{FFFD}b".to_string(), "c\u{FFFD}d".to_string());
+        assert_eq!(stored, [replaced.clone(), replaced]);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn one_statement_binds_each_json_type_on_one_connection() {
         use testcontainers::ImageExt;

@@ -18,7 +18,6 @@
 
 use std::backtrace::Backtrace;
 use std::future::Future;
-use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -45,30 +44,72 @@ pub struct DatabaseConnection(sea_orm::DatabaseConnection, Arc<Reachability>);
 #[derive(Debug)]
 pub struct DatabaseTransaction(sea_orm::DatabaseTransaction, Held);
 
-/// A connection checked out of a [`DatabaseConnection`]'s pool for
-/// statements its holder runs on it directly, as raw sqlx (a plugin's own
-/// SQL). Checking it out fails fast while the database is unreachable, like
-/// every statement the handle starts, and while it is held it counts as
-/// busy, not lost, as a transaction's connection does. Statements run on it skip the
-/// NUL check. Dropping it returns the connection to the pool.
+/// A connection checked out of a [`DatabaseConnection`]'s pool, for a caller
+/// that must know which backend runs its statements (a plugin's own SQL,
+/// which the host cancels on that backend at its call's deadline). Checking
+/// it out fails fast while the database is unreachable, like every statement
+/// the handle starts; while it is held it counts as busy, not lost, as a
+/// transaction's connection does. Its statements are NUL-free and record
+/// their answers as a transaction's do. Dropping it returns the connection to
+/// the pool.
 #[derive(Debug)]
 pub struct PooledConnection {
     conn: sea_orm::sqlx::pool::PoolConnection<sea_orm::sqlx::Postgres>,
-    _held: Held,
+    held: Held,
 }
 
-impl Deref for PooledConnection {
-    type Target = sea_orm::sqlx::PgConnection;
+impl PooledConnection {
+    /// Run `stmt`.
+    pub async fn execute(&mut self, stmt: Statement) -> Result<ExecResult, DbErr> {
+        let stmt = without_nul(stmt);
+        let outcome = sqlx_query(&stmt)
+            .execute(&mut *self.conn)
+            .await
+            .map(ExecResult::from)
+            .map_err(|e| DbErr::Exec(RuntimeErr::SqlxError(e.into())));
+        self.settle(outcome)
+    }
 
-    fn deref(&self) -> &Self::Target {
-        &self.conn
+    /// Run `stmt` and return its first row, if any.
+    pub async fn query_one(&mut self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
+        let stmt = without_nul(stmt);
+        let outcome = sqlx_query(&stmt)
+            .fetch_optional(&mut *self.conn)
+            .await
+            .map(|row| row.map(QueryResult::from))
+            .map_err(|e| DbErr::Query(RuntimeErr::SqlxError(e.into())));
+        self.settle(outcome)
+    }
+
+    /// The pid of the backend this connection is attached to.
+    pub async fn backend_pid(&mut self) -> Result<i32, DbErr> {
+        self.query_one(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT pg_backend_pid()",
+        ))
+        .await?
+        .ok_or_else(|| DbErr::Custom("pg_backend_pid returned no row".into()))?
+        .try_get_by_index(0)
+    }
+
+    /// Record an answer, as a transaction's statements do.
+    fn settle<T>(&self, outcome: Result<T, DbErr>) -> Result<T, DbErr> {
+        if !matches!(&outcome, Err(e) if super::is_outage(e)) {
+            self.held.reachability().answered();
+        }
+        outcome
     }
 }
 
-impl DerefMut for PooledConnection {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.conn
-    }
+/// `stmt` as a sqlx query, bound as sea-orm binds a statement.
+fn sqlx_query(
+    stmt: &Statement,
+) -> sea_orm::sqlx::query::Query<'_, sea_orm::sqlx::Postgres, sea_query_sqlx::SqlxValues> {
+    let values = stmt.values.clone().unwrap_or(sea_orm::Values(Vec::new()));
+    sea_orm::sqlx::query_with(
+        sea_orm::sqlx::AssertSqlSafe(stmt.sql.as_str()),
+        sea_query_sqlx::SqlxValues(values),
+    )
 }
 
 impl From<sea_orm::DatabaseConnection> for DatabaseConnection {
@@ -101,7 +142,7 @@ impl DatabaseConnection {
             .await
             .map(|conn| PooledConnection {
                 conn,
-                _held: self.reachability().hold(),
+                held: self.reachability().hold(),
             })
     }
 
