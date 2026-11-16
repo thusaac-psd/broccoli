@@ -5,6 +5,7 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::credentials::CredentialsFile;
+use crate::ids::{ContestId, ProblemId};
 use crate::server::ServerUrl;
 use crate::session::Session;
 
@@ -17,8 +18,11 @@ pub fn config_dir() -> PathBuf {
 }
 
 /// Cache dir for a downloaded problem (`~/.config/broccoli/cache/<contest>/<problem>`).
-pub fn problem_cache_dir(contest_id: &str, problem_id: &str) -> PathBuf {
-    config_dir().join("cache").join(contest_id).join(problem_id)
+pub fn problem_cache_dir(contest: ContestId, problem: ProblemId) -> PathBuf {
+    config_dir()
+        .join("cache")
+        .join(contest.to_string())
+        .join(problem.to_string())
 }
 
 /// Where the server a command talks to came from.

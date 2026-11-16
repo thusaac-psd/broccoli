@@ -292,10 +292,8 @@ function SubmissionRow({
   const format = useFormat();
   const { onSubmissionClick } = useSubmissionNavigation();
   const { label: verdictLabel, variant: verdictVariant } = getVerdictBadge(
-    submission.verdict ?? null,
-    submission.status,
+    submission,
     t,
-    submission.withheld,
   );
 
   const px = compact ? 'px-2' : 'px-4';
@@ -308,8 +306,14 @@ function SubmissionRow({
   > = {
     problem: () => (
       <td key="problem" className={`${px} ${py}`}>
-        <div className="flex items-center gap-2">
-          <span className="font-medium">{submission.problem_title}</span>
+        <div className="flex min-w-0 items-center gap-2">
+          {/* One line on any screen; the full title on hover. */}
+          <span
+            className="max-w-48 truncate font-medium sm:max-w-xs"
+            title={submission.problem_title}
+          >
+            {submission.problem_title}
+          </span>
           {linkBuilder ? (
             <Link
               to={linkBuilder(submission)}
@@ -336,14 +340,11 @@ function SubmissionRow({
           <span className="font-medium truncate">
             {getUserDisplayName(submission)}
           </span>
-          <span className="text-[10px] font-mono text-muted-foreground">
-            #{submission.user_id}
-            {submission.contest_id != null && (
-              <span className="ml-1.5 text-muted-foreground">
-                {t('submissions.inContest', { id: submission.contest_id })}
-              </span>
-            )}
-          </span>
+          {getUserDisplayName(submission) !== submission.username && (
+            <span className="truncate text-xs text-muted-foreground">
+              {submission.username}
+            </span>
+          )}
         </div>
       </td>
     ),

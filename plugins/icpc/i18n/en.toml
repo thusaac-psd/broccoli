@@ -20,6 +20,7 @@
 'icpc.scoreboard.header.penalty' = 'Penalty'
 
 # IcpcContestInfo
+'icpc.contestInfo.loadFailed' = 'Could not load the ICPC rules of this contest.'
 'icpc.contestInfo.title' = 'ACM-ICPC Style'
 'icpc.contestInfo.description' = 'Ranked by problems solved, then total time penalty. Each wrong submission adds {penalty_minutes} minutes of penalty.'
 'icpc.contestInfo.ceCount' = 'Compilation errors count as attempts.'

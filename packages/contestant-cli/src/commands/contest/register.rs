@@ -27,7 +27,7 @@ pub fn run(args: RegisterArgs, unregister: bool) -> anyhow::Result<()> {
             style(&cid).yellow()
         );
         client
-            .unregister_from_contest(&cid)
+            .unregister_from_contest(cid)
             .context("Failed to unregister from contest")?;
         println!(
             "{}  Unregistered from contest {}",
@@ -41,7 +41,7 @@ pub fn run(args: RegisterArgs, unregister: bool) -> anyhow::Result<()> {
             style(&cid).yellow()
         );
         client
-            .register_for_contest(&cid)
+            .register_for_contest(cid)
             .context("Failed to register for contest")?;
         println!(
             "{}  Registered for contest {}",

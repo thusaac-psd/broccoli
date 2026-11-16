@@ -54,7 +54,12 @@ export function TextPreview({
           </Button>
         )}
       </div>
-      <pre className="max-h-28 max-w-full overflow-auto whitespace-pre rounded bg-muted p-2 text-xs">
+      {/* Scrolls when long: reachable by keyboard. */}
+      <pre
+        tabIndex={0}
+        aria-label={label}
+        className="max-h-28 max-w-full overflow-auto whitespace-pre rounded bg-muted p-2 text-xs"
+      >
         {preview}
         {truncated && '…'}
       </pre>

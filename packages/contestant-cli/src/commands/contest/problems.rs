@@ -3,6 +3,7 @@ use clap::Args;
 use console::style;
 
 use broccoli_cli_core::client::Client;
+use broccoli_cli_core::ids::{ContestId, ProblemId};
 use broccoli_cli_core::{config, resolve};
 
 #[derive(Args)]
@@ -26,13 +27,13 @@ pub fn run(args: ProblemsArgs) -> anyhow::Result<()> {
     )?;
 
     if let Some(ref problem_ref) = args.problem {
-        let problem = resolve::problem(&client, &cid, problem_ref)?;
+        let problem = resolve::problem(&client, cid, problem_ref)?;
         println!(
             "{}  Problem {}",
             style("→").blue().bold(),
             style(&problem).cyan()
         );
-        return download_problem(&client, &cid, &problem.id.to_string());
+        return download_problem(&client, cid, problem.id);
     }
 
     println!(
@@ -42,7 +43,7 @@ pub fn run(args: ProblemsArgs) -> anyhow::Result<()> {
     );
 
     let problems = client
-        .list_contest_problems(&cid)
+        .list_contest_problems(cid)
         .context("Failed to fetch contest problems")?;
 
     if problems.is_empty() {
@@ -76,7 +77,11 @@ pub fn run(args: ProblemsArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn download_problem(client: &Client, contest: &str, problem_id: &str) -> anyhow::Result<()> {
+fn download_problem(
+    client: &Client,
+    contest: ContestId,
+    problem_id: ProblemId,
+) -> anyhow::Result<()> {
     println!(
         "{}  Downloading problem {} (contest {})...",
         style("→").blue().bold(),
@@ -162,7 +167,7 @@ fn write_problem(
     Ok(())
 }
 
-fn sanitize_dir_name(title: &str, problem_id: &str) -> String {
+fn sanitize_dir_name(title: &str, problem_id: ProblemId) -> String {
     let cleaned: String = title
         .chars()
         .map(|c| match c {

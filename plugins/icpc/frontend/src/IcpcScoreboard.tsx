@@ -1,17 +1,20 @@
 import { pollInterval, unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { formatRelativeSeconds, useTranslation } from '@broccoli/web-sdk/i18n';
-import { Label, Switch, useConfirmDialog } from '@broccoli/web-sdk/ui';
+import {
+  Label,
+  QueryView,
+  Switch,
+  useConfirmDialog,
+} from '@broccoli/web-sdk/ui';
 import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
 import { type ReactNode, useEffect, useState } from 'react';
 
 import { useIcpcApi } from './hooks/useIcpcApi';
-import { useIsIcpcContest } from './hooks/useIsIcpcContest';
 import type { ProblemCell, StandingsEntry, StandingsResponse } from './types';
 
 interface IcpcScoreboardProps {
   contestId?: number;
-  children?: ReactNode;
 }
 
 const MEDAL_COLORS = ['#D4AF37', '#A8A8A8', '#CD7F32'] as const;
@@ -167,8 +170,8 @@ function ProblemCellView({ cell }: { cell: ProblemCell | undefined }) {
   );
 }
 
-export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
-  const { isIcpc, isLoading: guardLoading } = useIsIcpcContest(contestId);
+// Mounted only on ICPC contests: the slot declares `contest_type = "icpc"`.
+export function IcpcScoreboard({ contestId }: IcpcScoreboardProps) {
   const api = useIcpcApi();
   const { t, locale } = useTranslation();
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -176,15 +179,9 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
   const [now, setNow] = useState(Date.now());
   const [confirm, confirmDialog] = useConfirmDialog();
 
-  const {
-    data: standings,
-    isLoading,
-    isError,
-    dataUpdatedAt,
-    refetch,
-  } = useQuery<StandingsResponse>({
+  const query = useQuery<StandingsResponse>({
     queryKey: ['icpc-standings', contestId],
-    enabled: !!contestId && isIcpc,
+    enabled: contestId !== undefined,
     queryFn: () => api.getStandings(contestId!),
     retry: 2,
     refetchInterval: pollInterval<StandingsResponse>((d) => {
@@ -194,6 +191,7 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
       return autoRefresh && live ? 30000 : false;
     }),
   });
+  const { dataUpdatedAt, refetch } = query;
 
   // Reveal is final and cannot be undone from the UI, so it is confirmed
   // first. A failure stays in the dialog: the organizer never believes it
@@ -225,32 +223,54 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
     return () => clearInterval(id);
   }, [hasData]);
 
-  if (guardLoading || !isIcpc) return <>{children}</>;
-
-  if (isError && !standings) {
-    return (
-      <div className="p-6 text-center rounded-md bg-red-500/[0.06] text-red-600 dark:text-red-400 text-[13px]">
-        {t('icpc.scoreboard.loadError')}
-      </div>
-    );
-  }
-
-  if (isLoading || !standings) {
-    return (
-      <div className="p-6 text-center text-muted-foreground">
-        {t('icpc.scoreboard.loading')}
-      </div>
-    );
-  }
-
-  const { phase, frozen, can_reveal, problem_labels, rows } = standings;
-
   // `now` ticks behind `dataUpdatedAt` right after a refetch; never read
   // that as a time in the future.
   const updated = formatRelativeSeconds(
     Math.min(0, (dataUpdatedAt - now) / 1000),
     locale,
   );
+
+  return (
+    <QueryView
+      query={query}
+      loading={
+        <div className="p-6 text-center text-muted-foreground">
+          {t('icpc.scoreboard.loading')}
+        </div>
+      }
+      failure={t('icpc.scoreboard.loadError')}
+    >
+      {(standings) => (
+        <Standings
+          standings={standings}
+          updated={updated}
+          autoRefresh={autoRefresh}
+          setAutoRefresh={setAutoRefresh}
+          onReveal={handleReveal}
+          confirmDialog={confirmDialog}
+        />
+      )}
+    </QueryView>
+  );
+}
+
+function Standings({
+  standings,
+  updated,
+  autoRefresh,
+  setAutoRefresh,
+  onReveal,
+  confirmDialog,
+}: {
+  standings: StandingsResponse;
+  updated: string;
+  autoRefresh: boolean;
+  setAutoRefresh: (on: boolean) => void;
+  onReveal: () => void;
+  confirmDialog: ReactNode;
+}) {
+  const { t } = useTranslation();
+  const { phase, frozen, can_reveal, problem_labels, rows } = standings;
 
   // The board never widens its container: a narrow screen scrolls the
   // table inside its border instead of clipping its last columns.
@@ -263,17 +283,15 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
           {can_reveal && (
             <button
               type="button"
-              onClick={handleReveal}
+              onClick={onReveal}
               className="rounded-md bg-amber-500 px-3 py-1 text-[12px] font-semibold text-white hover:bg-amber-600 disabled:opacity-50"
             >
               {t('icpc.scoreboard.reveal')}
             </button>
           )}
-          {dataUpdatedAt > 0 && (
-            <span className="text-[11px] text-muted-foreground">
-              {t('icpc.scoreboard.lastUpdated', { when: updated })}
-            </span>
-          )}
+          <span className="text-[11px] text-muted-foreground">
+            {t('icpc.scoreboard.lastUpdated', { when: updated })}
+          </span>
           {phase === 'during' && (
             <Label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer font-normal">
               <Switch

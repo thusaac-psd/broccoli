@@ -4,11 +4,7 @@ import {
   useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
-import {
-  pollInterval,
-  unsettledMessageKey,
-  useAsyncSubmit,
-} from '@broccoli/web-sdk/hooks';
+import { unsettledMessageKey, useAsyncSubmit } from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -75,11 +71,11 @@ export function PrintQueuePage() {
   const [codeViewJob, setCodeViewJob] = useState<PrintJob | null>(null);
   const [codeSource, setCodeSource] = useState<string | null>(null);
 
-  // Pull station/printer lists for the filter dropdowns.
+  // The station and printer names the filter dropdowns offer. The stations
+  // tab polls the same query and says when its refreshes fail.
   const { data: stationsResp } = useQuery({
     queryKey: ['print', 'stations'],
     queryFn: () => api.listStations(),
-    refetchInterval: pollInterval(15_000),
   });
   const stations = stationsResp?.data ?? [];
   const stationNames = stations.map((s) => s.name);

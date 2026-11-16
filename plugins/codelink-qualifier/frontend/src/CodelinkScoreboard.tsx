@@ -1,5 +1,11 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { Badge, Button, Label, Switch } from '@broccoli/web-sdk/ui';
+import {
+  Badge,
+  Button,
+  Label,
+  RefreshFailedNotice,
+  Switch,
+} from '@broccoli/web-sdk/ui';
 import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
 import { type ReactNode, useState } from 'react';
 import { Link } from 'react-router';
@@ -188,11 +194,7 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
         ))}
       </div>
 
-      {isError && (
-        <p role="alert" className="text-sm text-destructive">
-          {t('codelink-qualifier.stale')}
-        </p>
-      )}
+      {isError && <RefreshFailedNotice retry={() => void refetch()} />}
       {data.expected_problem_count > 0 &&
         data.problem_count !== data.expected_problem_count && (
           <p role="status" className="rounded-md bg-amber-500/10 p-3 text-sm">

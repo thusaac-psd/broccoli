@@ -2,7 +2,7 @@ import '@/lib/monaco-setup';
 
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { queryState } from '@broccoli/web-sdk/hooks';
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useIdentifierLabel, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Slot } from '@broccoli/web-sdk/slot';
 import { useSubmitGating } from '@broccoli/web-sdk/submission';
@@ -120,7 +120,7 @@ function getMonacoLanguage(filename: string): string {
 
 export function CodeEditor(props: CodeEditorProps) {
   const apiClient = useApiClient();
-  const languages = queryState(
+  const languages = useQueryState(
     useQuery({
       queryKey: ['supported-languages'],
       queryFn: () => fetchSupportedLanguages(apiClient),

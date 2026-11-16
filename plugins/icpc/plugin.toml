@@ -94,7 +94,7 @@ IcpcContestInfo = "IcpcContestInfo"
 # Contestant-facing slots
 [[web.slots]]
 name = "ranking.content"
-position = "wrap"
+position = "replace"
 component = "IcpcScoreboard"
 contest_type = "icpc"
 

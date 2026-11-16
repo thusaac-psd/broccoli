@@ -25,17 +25,17 @@ pub fn run(args: InfoArgs) -> anyhow::Result<()> {
     println!("{}  Fetching contest info...", style("→").blue().bold());
 
     let contest = client
-        .get_contest(&cid)
+        .get_contest(cid)
         .context("Failed to fetch contest details")?;
 
     let my_info = client
-        .get_contest_my_info(&cid)
+        .get_contest_my_info(cid)
         .context("Failed to fetch registration status")?;
 
     // Problems are listed once the contest has started.
     let problems = match contest.phase.has_started() {
         true => client
-            .list_contest_problems(&cid)
+            .list_contest_problems(cid)
             .context("Failed to fetch contest problems")?,
         false => Vec::new(),
     };

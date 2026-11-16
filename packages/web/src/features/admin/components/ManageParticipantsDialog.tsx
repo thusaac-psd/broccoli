@@ -6,8 +6,8 @@ import {
 import type { ContestSummary } from '@broccoli/web-sdk/contest';
 import {
   isAlreadyDone,
-  queryState,
   useIdempotentRequest,
+  useQueryState,
 } from '@broccoli/web-sdk/hooks';
 import {
   useFormat,
@@ -256,7 +256,7 @@ function AddParticipantsTab({
     queryKey: ['all-users-for-participants'],
     queryFn: () => fetchAllUsers(apiClient),
   });
-  const usersState = queryState(usersQuery);
+  const usersState = useQueryState(usersQuery);
   const allUsers = usersQuery.data ?? NO_USERS;
 
   const enrolledIds = useMemo(

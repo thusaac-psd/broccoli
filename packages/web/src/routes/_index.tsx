@@ -1,6 +1,6 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { queryState } from '@broccoli/web-sdk/hooks';
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { QueryErrorState, QueryLoading } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
@@ -42,7 +42,10 @@ export default function Index() {
     },
   });
 
-  const list = queryState(contestsQuery, (contests) => contests.length === 0);
+  const list = useQueryState(
+    contestsQuery,
+    (contests) => contests.length === 0,
+  );
   const contests = list.status === 'data' ? list.data : undefined;
 
   // FIX: check permissions instead of roles

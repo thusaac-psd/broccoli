@@ -16,8 +16,8 @@ import { useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 
 import type { EditorFile } from '@/components/CodeEditor';
-import { ContestOutageNotice } from '@/features/contest/components/ContestOutageNotice';
 import { ContestRegisterGate } from '@/features/contest/components/ContestRegisterGate';
+import { PluginOutageNotice } from '@/features/contest/components/PluginOutageNotice';
 import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
 import { useContestProblems } from '@/features/contest/hooks/use-contest-problems';
 import { useRestoreSubmissionScroll } from '@/features/submission/hooks/use-submission-navigation';
@@ -56,7 +56,6 @@ export default function ProblemView({
   // unavailable and submissions are refused, so the page says so in place
   // of both.
   const { contest } = useContestInfo(contestId ?? Number.NaN);
-  const outage = contestId ? contest?.plugin_outage : undefined;
   const allowed =
     presentation.allowedProblemIds === null ||
     presentation.allowedProblemIds.includes(problemId);
@@ -110,6 +109,10 @@ export default function ProblemView({
       fetchProblem(apiClient, problemId, contestId, signal),
   });
   const { data: problem, isLoading, error } = problemQuery;
+  // A contest problem is out with its contest's plugin; a problem on its own
+  // with the plugin of the contest type its practice submit uses.
+  const outage = contestId ? contest?.plugin_outage : problem?.plugin_outage;
+  const outageOf = contestId ? 'contest' : 'problem';
 
   useEffect(() => {
     if (allowed || !user) return;
@@ -378,15 +381,17 @@ export default function ProblemView({
     );
   }
 
-  if (error && !problem && outage) {
+  // The contest says its plugin is out: what that plugin governs of the
+  // problem is withheld, so there is nothing to wait for.
+  if (outage && !problem) {
     return (
       <div className="flex flex-col flex-1 min-h-0">
         <ProblemViewHeader
           problem={undefined}
           headerId={headerId}
           contestId={contestId}
+          withheld={<PluginOutageNotice outage={outage} of={outageOf} />}
         />
-        <ContestOutageNotice contest={contest} className="mx-4 md:mx-6" />
       </div>
     );
   }
@@ -439,7 +444,11 @@ export default function ProblemView({
           headerId={headerId}
           contestId={contestId}
         />
-        <ContestOutageNotice contest={contest} className="mx-4 mb-4 md:mx-6" />
+        <PluginOutageNotice
+          outage={outage}
+          of={outageOf}
+          className="mx-4 mb-4 md:mx-6"
+        />
 
         <ProblemContentTabs
           activeTab={activeTab}

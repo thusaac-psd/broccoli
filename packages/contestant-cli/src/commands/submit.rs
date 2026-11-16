@@ -3,6 +3,7 @@ use anyhow::Context;
 use broccoli_cli_core::api::submission::SubmissionFileDto;
 use broccoli_cli_core::client::Client;
 use broccoli_cli_core::fmt;
+use broccoli_cli_core::ids::{ContestId, ProblemId};
 use broccoli_cli_core::model::{StatusDisplay, VerdictDisplay};
 use broccoli_cli_core::resolve;
 use broccoli_cli_core::tui::progress::Progress;
@@ -51,14 +52,14 @@ pub fn run(args: SubmitArgs) -> anyhow::Result<()> {
         .or(ctx.as_ref().and_then(|c| c.problem.as_deref()))
         .context("No problem specified. Use -p <id|label> (e.g. -p A).")?;
 
-    let contest_id: Option<String> = if args.no_contest {
+    let contest_id: Option<ContestId> = if args.no_contest {
         None
     } else {
         let contest_ref = context::contest_ref(args.contest.as_deref())?;
         let contest_ref = contest_ref.as_str();
         Some(resolve::contest_id(&client, contest_ref)?)
     };
-    let problem_id: String = match contest_id.as_deref() {
+    let problem_id: ProblemId = match contest_id {
         Some(cid) => {
             let problem = resolve::problem(&client, cid, problem_ref)?;
             println!(
@@ -66,13 +67,9 @@ pub fn run(args: SubmitArgs) -> anyhow::Result<()> {
                 style("→").blue().bold(),
                 style(&problem).cyan()
             );
-            problem.id.to_string()
+            problem.id
         }
-        // standalone: no contest to resolve labels against, expect an id
-        None => resolve::explicit_problem_id(problem_ref)
-            .or_else(|| problem_ref.trim().parse().ok())
-            .with_context(|| format!("'{problem_ref}' is not a problem id"))?
-            .to_string(),
+        None => resolve::standalone_problem_id(problem_ref)?,
     };
 
     let mut submission_files = Vec::new();
@@ -103,9 +100,9 @@ pub fn run(args: SubmitArgs) -> anyhow::Result<()> {
         // when there is one, so another contest holding the same problem
         // cannot hide it here. A problem that cannot be read is sent as-is
         // and the server has the final word on its filename.
-        let problem = match contest_id.as_deref() {
-            Some(cid) => client.get_contest_problem(cid, &problem_id),
-            None => client.get_problem(&problem_id),
+        let problem = match contest_id {
+            Some(cid) => client.get_contest_problem(cid, problem_id),
+            None => client.get_problem(problem_id),
         };
         if let Ok(problem) = problem
             && let Some(required) =
@@ -122,7 +119,7 @@ pub fn run(args: SubmitArgs) -> anyhow::Result<()> {
         }
     }
 
-    match contest_id.as_deref() {
+    match contest_id {
         Some(c) => println!(
             "{}  Submitting to contest {}...",
             style("→").blue().bold(),
@@ -135,12 +132,12 @@ pub fn run(args: SubmitArgs) -> anyhow::Result<()> {
         ),
     }
 
-    let submission = match contest_id.as_deref() {
+    let submission = match contest_id {
         Some(cid) => client
-            .create_contest_submission(cid, &problem_id, submission_files, &language, None)
+            .create_contest_submission(cid, problem_id, submission_files, &language, None)
             .context("Failed to create submission")?,
         None => client
-            .create_submission(&problem_id, submission_files, &language, None)
+            .create_submission(problem_id, submission_files, &language, None)
             .context("Failed to create submission")?,
     };
 
@@ -153,7 +150,7 @@ pub fn run(args: SubmitArgs) -> anyhow::Result<()> {
     // persist resolved ids so future runs skip the name/label lookup
     if ctx.is_none() {
         let _ = context::save_context(&context::ProjectContext {
-            contest: contest_id.clone(),
+            contest: contest_id.map(|c| c.to_string()),
             problem: Some(format!("#{problem_id}")),
             language: Some(language),
         });

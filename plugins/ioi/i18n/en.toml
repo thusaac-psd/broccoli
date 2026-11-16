@@ -1,4 +1,5 @@
 # IoiContestInfo
+'ioi.contestInfo.loadFailed' = 'Could not load the IOI rules of this contest.'
 'ioi.contestInfo.scoringMode.maxSubmission.title' = 'Maximum Score'
 'ioi.contestInfo.scoringMode.maxSubmission.description' = 'Your task score is the highest score among all submissions.'
 'ioi.contestInfo.scoringMode.sumBestSubtask.title' = 'Sum of Best Subtasks'
@@ -183,6 +184,7 @@
 'ioi.tokenConfig.requiredForScoringMode' = 'Best Tokened or Last requires tokens, so the token system cannot be disabled.'
 
 # TokenPanel
+'ioi.tokenPanel.loadFailed' = 'Could not load your tokens.'
 'ioi.tokenPanel.title' = 'Tokens'
 'ioi.tokenPanel.available' = '{available} / {total} available'
 'ioi.tokenPanel.useToken' = 'Use Token on This Submission'

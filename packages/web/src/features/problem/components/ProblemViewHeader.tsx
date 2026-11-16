@@ -3,6 +3,7 @@ import { useIdentifierLabel, useTranslation } from '@broccoli/web-sdk/i18n';
 import { useProblemPresentation } from '@broccoli/web-sdk/problem';
 import { Slot } from '@broccoli/web-sdk/slot';
 import { formatKibibytes } from '@broccoli/web-sdk/utils';
+import type { ReactNode } from 'react';
 
 import { ContestCountdownMini } from '@/features/contest/components/ContestCountdown';
 
@@ -20,12 +21,18 @@ interface ProblemViewHeaderProps {
     | undefined;
   headerId: string;
   contestId?: number;
+  /**
+   * Why the problem is withheld: shown in place of its title and limits,
+   * which the header then leaves out instead of showing placeholders.
+   */
+  withheld?: ReactNode;
 }
 
 export function ProblemViewHeader({
   problem,
   headerId,
   contestId,
+  withheld,
 }: ProblemViewHeaderProps) {
   const { t } = useTranslation();
   const label = useIdentifierLabel();
@@ -41,14 +48,23 @@ export function ProblemViewHeader({
           hidden: a contestant needs the time left on every screen. */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="min-w-0 flex-1 basis-64">
-          <ProblemHeader
-            id={hideLabels ? undefined : headerId}
-            title={problem?.title ?? t('problem.title')}
-            type={problem ? label('problemType', problem.problem_type) : '—'}
-            io={t('problem.standardIo')}
-            timeLimit={timeLimit}
-            memoryLimit={memoryLimit}
-          />
+          {withheld ? (
+            <div className="space-y-2">
+              <h1 className="text-2xl font-bold tracking-tight">
+                {hideLabels ? t('problem.title') : headerId}
+              </h1>
+              {withheld}
+            </div>
+          ) : (
+            <ProblemHeader
+              id={hideLabels ? undefined : headerId}
+              title={problem?.title ?? t('problem.title')}
+              type={problem ? label('problemType', problem.problem_type) : '—'}
+              io={t('problem.standardIo')}
+              timeLimit={timeLimit}
+              memoryLimit={memoryLimit}
+            />
+          )}
         </div>
         {contestId && <ContestCountdownMini />}
       </div>

@@ -98,12 +98,7 @@ export function PinnedSubmissionGroup({ entries, linkBuilder }: Props) {
         {rows.map((row) => {
           const submissionId = row.entry.submission?.id ?? null;
           const canOpen = submissionId != null && !!linkBuilder;
-          const { label, variant } = getVerdictBadge(
-            row.verdict,
-            row.status,
-            t,
-            row.withheld,
-          );
+          const { label, variant } = getVerdictBadge(row, t);
           const isPolling =
             row.entry.status === 'submitting' || row.entry.status === 'polling';
           return (

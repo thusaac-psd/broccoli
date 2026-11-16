@@ -134,6 +134,16 @@ const contest = (
 });
 
 const RUNNING = contest(1, 'Spring Training Contest 2026', -60, 240, 'running');
+/** A running contest of the Codelink bracket format. */
+const BRACKET_RUNNING = {
+  ...contest(5, 'Bracket Final', -60, 240, 'running'),
+  contest_type: 'codelink-bracket',
+};
+/** A running contest of the IOI format. */
+const IOI_RUNNING = {
+  ...contest(4, 'IOI Practice Round', -60, 240, 'running'),
+  contest_type: 'ioi',
+};
 /** A running contest whose contest-type plugin an administrator disabled. */
 const DISABLED = {
   ...contest(3, 'Disabled Format Contest', -60, 240, 'running'),
@@ -157,7 +167,7 @@ const PROBLEM_TITLES = [
   'Matrix',
 ];
 
-const problem = (id: number) => ({
+export const problem = (id: number) => ({
   id,
   title: PROBLEM_TITLES[id - 1],
   content: '# Statement\n\nCompute $a+b$.\n\n```\n1 2\n```',
@@ -253,6 +263,19 @@ const SUBMISSION_DETAIL = {
   },
 };
 
+/** A submission that failed to judge, with the operator's diagnostics. */
+const SYSTEM_ERROR_DETAIL = {
+  ...submission(5, 2, 'SystemError'),
+  status: 'SystemError',
+  files: [{ filename: 'main.cpp', content: 'int main() { return 0; }\n' }],
+  result: {
+    ...SUBMISSION_DETAIL.result,
+    verdict: 'SystemError',
+    score: 0,
+    error_message: 'sandbox: cgroup memory controller unavailable',
+  },
+};
+
 /** An error answer, in the server's error shape. */
 class ErrorReply {
   readonly status: number;
@@ -333,6 +356,46 @@ export const PLUGIN_ROUTES: [string, RegExp, Handler][] = [
       ],
     }),
   ],
+  [
+    'GET',
+    /^\/p\/ioi\/api\/plugins\/ioi\/contests\/4\/info$/,
+    () => ({
+      scoring_mode: 'sum_best_subtask',
+      feedback_level: 'full',
+      scoreboard_visibility: 'all_contest_viewers',
+      scoreboard_tiebreaker: 'equal_rank',
+      token_mode: 'none',
+    }),
+  ],
+  [
+    'GET',
+    /^\/p\/ioi\/api\/plugins\/ioi\/contests\/4\/scoreboard$/,
+    () => ({
+      phase: 'during',
+      scoring_mode: 'sum_best_subtask',
+      feedback_level: 'full',
+      scoreboard_visibility: 'all_contest_viewers',
+      scoreboard_tiebreaker: 'equal_rank',
+      max_scores: { '1': 100 },
+      full_board: true,
+      rankings: [
+        {
+          rank: 1,
+          user_id: 2,
+          username: 'alice',
+          display_name: 'Alice',
+          total_score: 40,
+          total_time_seconds: 600,
+          problems: [{ problem_id: 1, score: 40 }],
+        },
+      ],
+    }),
+  ],
+  [
+    'GET',
+    /^\/p\/codelink-bracket\/api\/plugins\/codelink-bracket\/contests\/5\/bracket$/,
+    () => ({ player_count: 0, matches: [] }),
+  ],
 ];
 
 /** `METHOD path-pattern` to the body answered. */
@@ -370,6 +433,8 @@ const ROUTES: [string, RegExp, Handler][] = [
         : RUNNING,
   ],
   ['GET', /^\/contests\/2$/, () => UPCOMING],
+  ['GET', /^\/contests\/4$/, () => IOI_RUNNING],
+  ['GET', /^\/contests\/5$/, () => BRACKET_RUNNING],
   ['GET', /^\/contests\/3$/, () => DISABLED],
   [
     'GET',
@@ -426,6 +491,8 @@ const ROUTES: [string, RegExp, Handler][] = [
   ['GET', /^\/submissions$/, () => cursorPage(SUBMISSIONS)],
   ['GET', /^\/submissions\/1$/, () => SUBMISSION_DETAIL],
   ['GET', /^\/submissions\/1\/judgements$/, () => []],
+  ['GET', /^\/submissions\/5$/, () => SYSTEM_ERROR_DETAIL],
+  ['GET', /^\/submissions\/5\/judgements$/, () => []],
   [
     'GET',
     /^\/admin\/system\/overview$/,

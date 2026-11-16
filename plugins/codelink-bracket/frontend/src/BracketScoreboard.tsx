@@ -1,8 +1,14 @@
 import { useServerNow } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
-import { Button, Skeleton } from '@broccoli/web-sdk/ui';
+import {
+  Button,
+  QueryErrorState,
+  RefreshFailedNotice,
+  Skeleton,
+} from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
 import { AlertTriangle, Clock, Maximize2, Minimize2 } from 'lucide-react';
 import {
@@ -46,18 +52,21 @@ export function BracketScoreboard({
   const presentRef = useRef<HTMLDivElement>(null);
   const presenting = useFullscreen(presentRef);
 
-  const { data, isLoading, isError } = useBracket(contestId);
+  const bracket = useQueryState(useBracket(contestId));
 
   if (!contestId) return <>{children}</>;
 
-  if (isError) {
+  if (bracket.status === 'error') {
     return (
-      <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-6 text-center text-sm text-red-700">
-        {t('codelink-bracket.bracket.loadError')}
-      </div>
+      <QueryErrorState
+        error={bracket.error}
+        retry={bracket.retry}
+        retrying={bracket.retrying}
+        failure={t('codelink-bracket.bracket.loadError')}
+      />
     );
   }
-  if (isLoading || !data) {
+  if (bracket.status !== 'data') {
     return (
       <div className="grid grid-cols-4 gap-8">
         {Array.from({ length: 4 }, (_, i) => (
@@ -67,13 +76,19 @@ export function BracketScoreboard({
     );
   }
 
+  const { data, refreshError, retry } = bracket;
   const viewerId = auth.user?.id ?? null;
   const isStaff = (auth.user?.permissions ?? []).includes(CONTEST_MANAGE);
 
+  const stale = refreshError != null && <RefreshFailedNotice retry={retry} />;
+
   if (!data.player_count) {
     return (
-      <div className="rounded-lg border border-dashed border-border py-16 text-center text-muted-foreground">
-        {t('codelink-bracket.bracket.empty')}
+      <div className="space-y-4">
+        {stale}
+        <div className="rounded-lg border border-dashed border-border py-16 text-center text-muted-foreground">
+          {t('codelink-bracket.bracket.empty')}
+        </div>
       </div>
     );
   }
@@ -86,6 +101,7 @@ export function BracketScoreboard({
 
   return (
     <div className="space-y-4">
+      {stale}
       {mine && mySide && (
         <MyMatchStrip contestId={contestId} match={mine} side={mySide} />
       )}

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { type ApiClient, useApiClient } from '@/api';
 import { pollInterval } from '@/hooks/poll';
-import { queryState } from '@/hooks/query-state';
+import { useQueryState } from '@/hooks/query-state';
 
 export interface ServerTableParams {
   page: number;
@@ -159,6 +159,11 @@ export function useServerTable<T>({
     total_pages: 0,
   };
 
+  const view = useQueryState(
+    { ...query, data: data?.data },
+    (rows) => rows.length === 0,
+  );
+
   return {
     /**
      * The page's rows; empty until they arrive. Render through `view`, which
@@ -166,10 +171,7 @@ export function useServerTable<T>({
      */
     data: data?.data ?? [],
     /** The page as a `QueryState`: loading, failed, empty or rows. */
-    view: queryState(
-      { ...query, data: data?.data },
-      (rows) => rows.length === 0,
-    ),
+    view,
     pagination,
     isLoading,
     isFetching,

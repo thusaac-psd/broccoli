@@ -1,5 +1,5 @@
 import { currentPath, signInPath, useAuth } from '@broccoli/web-sdk/auth';
-import { queryState } from '@broccoli/web-sdk/hooks';
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
 import {
@@ -53,7 +53,7 @@ export default function ContestQAPage() {
     id,
     !!user && !!contestId && !Number.isNaN(id),
   );
-  const listState = queryState(clarificationsQuery);
+  const listState = useQueryState(clarificationsQuery);
   const loaded = listState.status === 'data' || listState.status === 'empty';
   const isLoading = !loaded;
   const clarifications = loaded ? listState.data : [];
