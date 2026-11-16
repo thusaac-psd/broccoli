@@ -614,6 +614,37 @@ pub(super) async fn build_judgement_response(
     })
 }
 
+/// `judgement` as the submission it belongs to shows it. A current judgement
+/// that finished as a system error the system-error retry may still re-judge
+/// (one that does not stand) is not mirrored onto its submission until the
+/// retry decides (`judging::unit::awaits_retry_decision`): the submission
+/// keeps showing the attempt in flight. The judgement history shows that
+/// judgement the same way, from the submission's projection, so neither shows
+/// a system error the retry then takes back. Any other judgement is shown as
+/// it is.
+pub(super) fn as_its_submission_shows(
+    mut judgement: submission_judgement::Model,
+    sub: &submission::Model,
+) -> submission_judgement::Model {
+    let awaits_decision = judgement.is_current
+        && judgement.is_finalized
+        && is_system_error(&judgement.status, judgement.verdict.as_ref())
+        && !judgement.error_stands;
+    if awaits_decision {
+        judgement.status = sub.status;
+        judgement.verdict = sub.verdict.clone();
+        judgement.score = sub.score;
+        judgement.time_used = sub.time_used;
+        judgement.memory_used = sub.memory_used;
+        judgement.compile_output = sub.compile_output.clone();
+        judgement.error_code = sub.error_code.clone();
+        judgement.error_message = sub.error_message.clone();
+        judgement.is_finalized = false;
+        judgement.finalized_at = None;
+    }
+    judgement
+}
+
 pub(super) fn submission_score_for_status(
     status: &SubmissionStatus,
     score: Option<f64>,
@@ -681,5 +712,91 @@ mod result_page_tests {
             ..Default::default()
         };
         assert!(result_selection(&query).is_err());
+    }
+}
+
+#[cfg(test)]
+mod judgement_history_tests {
+    use super::*;
+
+    fn submission_row(status: SubmissionStatus) -> submission::Model {
+        submission::Model {
+            id: 1,
+            files: serde_json::json!({}),
+            language: "cpp".into(),
+            user_id: 1,
+            problem_id: 1,
+            contest_id: None,
+            contest_type: "ioi".into(),
+            attempt_id: None,
+            status,
+            verdict: None,
+            compile_output: None,
+            error_code: None,
+            error_message: None,
+            score: None,
+            time_used: None,
+            memory_used: None,
+            judge_epoch: 2,
+            max_judge_epoch: 2,
+            target_worker_id: None,
+            system_error_retries: 0,
+            created_at: chrono::Utc::now(),
+            judged_at: None,
+        }
+    }
+
+    fn system_error(is_current: bool, error_stands: bool) -> submission_judgement::Model {
+        let now = chrono::Utc::now();
+        submission_judgement::Model {
+            id: 1,
+            submission_id: 1,
+            version: 1,
+            is_current,
+            is_finalized: true,
+            triggered_by_user_id: None,
+            target_worker_id: None,
+            note: None,
+            status: SubmissionStatus::SystemError,
+            verdict: Some(Verdict::SystemError),
+            score: None,
+            time_used: None,
+            memory_used: None,
+            compile_output: None,
+            error_code: Some("PLUGIN_EXECUTION_ERROR".into()),
+            error_message: Some("plugin trapped".into()),
+            judge_epoch: 2,
+            owner_server_id: None,
+            lease_heartbeat_at: None,
+            leased_at: None,
+            dispatch_retries: 0,
+            config_issues: false,
+            error_stands,
+            created_at: now,
+            queued_at: now,
+            finalized_at: Some(now),
+        }
+    }
+
+    #[test]
+    fn an_undecided_system_error_shows_the_attempt_its_submission_shows() {
+        let sub = submission_row(SubmissionStatus::Running);
+        let shown = as_its_submission_shows(system_error(true, false), &sub);
+        assert_eq!(shown.status, SubmissionStatus::Running);
+        assert_eq!(shown.verdict, None);
+        assert_eq!(shown.error_code, None);
+        assert_eq!(shown.error_message, None);
+        assert!(!shown.is_finalized);
+        assert_eq!(shown.finalized_at, None);
+    }
+
+    #[test]
+    fn a_standing_or_past_system_error_shows_as_it_is() {
+        let sub = submission_row(SubmissionStatus::Running);
+        for (is_current, error_stands) in [(true, true), (false, false)] {
+            let judgement = system_error(is_current, error_stands);
+            let shown = as_its_submission_shows(judgement.clone(), &sub);
+            assert_eq!(shown, judgement);
+        }
     }
 }

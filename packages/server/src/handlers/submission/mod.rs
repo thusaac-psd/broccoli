@@ -543,6 +543,7 @@ async fn build_visible_judgement(
     let show_test_details = visibility.has_view_all || problem_model.show_test_details;
 
     let config_issues = visibility.has_view_all.then_some(judgement.config_issues);
+    let judgement = response::as_its_submission_shows(judgement, sub);
     let mut response = build_judgement_response(
         &state.db,
         &*state.blob_store,
