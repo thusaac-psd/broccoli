@@ -1,5 +1,6 @@
 //! Per-client-address quotas on the unauthenticated endpoints a script could
-//! hammer: failed sign-ins, registering and minting device codes.
+//! hammer: failed sign-ins and registering. Device codes are bounded by what
+//! an address leaves pending (`services::device_auth`), not by a rate.
 //!
 //! Each quota is a fixed window per address, counted in Redis by
 //! [`super::window_quota`].
@@ -33,14 +34,6 @@ pub const FAILED_LOGIN: IpQuota = IpQuota {
 /// while account spam from one source is capped.
 pub const REGISTER: IpQuota = IpQuota {
     name: "register",
-    limit: 30,
-    window: Duration::from_secs(60),
-};
-
-/// `POST /auth/device-code`: never blocks a real CLI sign-in, caps a source
-/// flooding the pending-code store.
-pub const DEVICE_CODE: IpQuota = IpQuota {
-    name: "device-code",
     limit: 30,
     window: Duration::from_secs(60),
 };

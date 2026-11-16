@@ -229,6 +229,17 @@ async fn an_approval_ends_with_the_session_that_approved_it() {
     }
 }
 
+/// A venue's CLI sign-ins come from one address, all at once: what one
+/// address may request is bounded by the codes it leaves pending, never by
+/// how many it asks for in a minute.
+#[tokio::test]
+async fn one_address_starts_a_venues_sign_ins_at_once() {
+    let app = TestApp::spawn().await;
+    for _ in 0..200 {
+        start(&app).await;
+    }
+}
+
 /// Fill the table with `n` pending codes requested from `addr`.
 async fn hold_pending(app: &TestApp, addr: &str, n: i64) {
     app.db

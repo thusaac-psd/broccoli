@@ -10,17 +10,19 @@ use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 
 use crate::error::AppError;
 use crate::services::auth_tokens::{SignIn, issue_access_token, open_session};
-use crate::services::ip_quota;
 use crate::utils::hash;
 
 /// Most pending codes one client address holds; past it, its new requests
-/// get 429. It is what [`ip_quota::DEVICE_CODE`] admits from one address
-/// within a code's lifetime, so it never refuses a request the quota let
-/// through, and it still bounds the table while Redis, which counts the
-/// quota, cannot answer. Requests from other addresses are never affected,
-/// so no source can lock the fleet's CLI sign-ins out.
-pub const MAX_PENDING_PER_ADDRESS: i64 = ip_quota::DEVICE_CODE.limit as i64
-    * (CODE_TTL_SECS / ip_quota::DEVICE_CODE.window.as_secs()) as i64;
+/// get 429. Like the failed sign-in quota, it counts only what abuse leaves
+/// behind: a CLI sign-in collects its code within one poll of the approval,
+/// so a venue that shows the server one address for all its contestants
+/// holds about one code per contestant signing in at that moment, while a
+/// source minting codes nobody approves fills its allowance and stops. It is
+/// counted in the database, so it holds across replicas and while Redis is
+/// down, and requests from other addresses are never affected, so no source
+/// can lock the fleet's CLI sign-ins out. 1000 rows of a few hundred bytes
+/// each is the most one source can make the table hold.
+pub const MAX_PENDING_PER_ADDRESS: i64 = 1000;
 /// How long a device code stays valid.
 pub const CODE_TTL_SECS: u64 = 900;
 /// Retries on a user-code collision (20^8 codes, so effectively never).

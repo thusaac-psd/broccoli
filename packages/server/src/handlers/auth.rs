@@ -420,7 +420,7 @@ fn host_header(headers: &HeaderMap) -> Option<String> {
     request_body = DeviceCodeRequest,
     responses(
         (status = 200, description = "Device code generated", body = DeviceCodeResponse),
-        (status = 429, description = "Too many device codes requested from this address (30 a minute) or pending for it (RATE_LIMITED). Includes Retry-After.", body = ErrorBody),
+        (status = 429, description = "Too many device codes pending for this address (RATE_LIMITED). Includes Retry-After.", body = ErrorBody),
     ),
 )]
 #[instrument(skip(state, headers, forwarded))]
@@ -431,7 +431,6 @@ pub async fn request_device_code(
     forwarded: Option<Extension<ForwardedHop>>,
     AppJson(_payload): AppJson<DeviceCodeRequest>,
 ) -> Result<Json<DeviceCodeResponse>, AppError> {
-    ip_quota::DEVICE_CODE.admit(&state.mq, client_ip).await?;
     let (device_code, user_code) = device_auth::create(
         &state.db,
         client_ip,
