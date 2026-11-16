@@ -26,6 +26,7 @@ import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { resolveFeedbackVisibility } from './feedback-visibility';
 import { useIoiApi } from './hooks/useIoiApi';
 import { useIoiContestInfo } from './hooks/useIoiContestInfo';
+import { memberCell } from './subtask-members';
 import type {
   SubtaskInfo,
   SubtaskScoreEntry,
@@ -38,11 +39,6 @@ interface IoiSubmissionResultProps {
   testCases?: TestCaseResult[];
   children?: ReactNode;
 }
-
-type DisplayTestCaseResult = TestCaseResult & {
-  isPlaceholder?: boolean;
-  label?: string;
-};
 
 type DisplaySubtaskResult = {
   subtask: SubtaskInfo;
@@ -149,22 +145,6 @@ function scoreColor(score: number, maxScore: number): string {
 
 function formatMs(ms: number): string {
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(2)}s`;
-}
-
-function createPlaceholderTestCase(
-  label: string,
-  testCaseId: number | undefined,
-  placeholderId: number,
-  verdict: 'Pending' | 'Running',
-): DisplayTestCaseResult {
-  return {
-    id: placeholderId,
-    test_case_id: testCaseId ?? placeholderId,
-    score: 0,
-    verdict,
-    isPlaceholder: true,
-    label,
-  };
 }
 
 function buildSubtaskResults({
@@ -466,10 +446,7 @@ function SubtaskCard({
   const labels = subtask.test_cases ?? [];
   const offset = (page - 1) * 20;
   const pageLabels = labels.slice(offset, offset + 20);
-  const ids = pageLabels.flatMap((label) => {
-    const id = labelMap[label] ?? Number(label);
-    return Number.isInteger(id) && id > 0 ? [id] : [];
-  });
+  const ids = pageLabels.flatMap((label) => labelMap[label] ?? []);
   const query = useTestCasePage({
     submissionId: submission.id,
     judgementId: submission.result?.judgement_id,
@@ -480,18 +457,14 @@ function SubtaskCard({
   const results = new Map(
     query.data?.test_case_results.map((tc) => [tc.test_case_id, tc]),
   );
-  const testCases = pageLabels.map((label, i) => {
-    const id = labelMap[label] ?? Number(label);
-    return (
-      results.get(id) ??
-      createPlaceholderTestCase(
-        label,
-        Number.isNaN(id) ? undefined : id,
-        -((index + 1) * 10000 + offset + i + 1),
-        'Pending',
-      )
-    );
-  });
+  const testCases = pageLabels.map((label, i) =>
+    memberCell(
+      label,
+      labelMap,
+      results,
+      -((index + 1) * 10000 + offset + i + 1),
+    ),
+  );
   const [selectedTcIndex, setSelectedTcIndex] = useState<number | null>(null);
   const [hoveredTcIndex, setHoveredTcIndex] = useState<number | null>(null);
   const maxScore = subtask.max_score;
@@ -638,10 +611,25 @@ function SubtaskCard({
                         clickable ? () => setHoveredTcIndex(null) : undefined
                       }
                     >
-                      <VerdictIcon verdict={tc.verdict} size={14} />
+                      {tc.isMissing ? (
+                        <AlertCircle
+                          size={14}
+                          className="shrink-0 text-amber-700 dark:text-amber-300"
+                          aria-hidden
+                        />
+                      ) : (
+                        <VerdictIcon verdict={tc.verdict} size={14} />
+                      )}
                       <span className="text-[11px] text-muted-foreground">
                         #{i + 1}
                       </span>
+                      {tc.isMissing && (
+                        <span className="truncate text-[11px] text-amber-700 dark:text-amber-300">
+                          {t('ioi.submission.missingTestCase', {
+                            label: tc.label ?? '',
+                          })}
+                        </span>
+                      )}
                       {tc.score != null && (
                         <span
                           className="font-mono tabular-nums text-[10px] font-semibold"

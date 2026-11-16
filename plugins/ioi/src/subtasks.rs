@@ -101,6 +101,23 @@ pub fn member_ids_and_weights(
     (ids, weights)
 }
 
+/// The members of `def` a viewer is shown. A member that names no single
+/// test case (one a forced test data change left behind) is a problem for
+/// staff to fix, so staff see it, and the task config's id map leaves it
+/// out; a contestant is shown only members that name a test case.
+pub fn shown_members<'d>(
+    def: &'d SubtaskDef,
+    test_cases: &[TestCaseRow],
+    staff: bool,
+) -> Vec<&'d str> {
+    let members = MemberIndex::new(test_cases);
+    def.test_cases
+        .iter()
+        .filter(|key| staff || members.test_case(key).is_some())
+        .map(String::as_str)
+        .collect()
+}
+
 /// Score a single subtask using the configured method. `tc_scores` holds
 /// each judged test case's score ratio by its id. A member that names no
 /// single test case ([`MemberIndex`]) scores 0 at weight 0: it fails a
@@ -289,6 +306,19 @@ mod tests {
             expected_output: TestCaseBodyRef::Missing,
             is_custom: false,
         }
+    }
+
+    #[test]
+    fn a_member_naming_no_test_case_is_shown_to_staff_only() {
+        let def = make_def(SubtaskScoringMethod::GroupMin, 30.0, vec!["t1", "t2", "t3"]);
+        let cases = vec![
+            test_case(11, 0.0, false, Some("t1")),
+            test_case(12, 0.0, false, Some("t2")),
+        ];
+        assert_eq!(shown_members(&def, &cases, true), ["t1", "t2", "t3"]);
+        assert_eq!(shown_members(&def, &cases, false), ["t1", "t2"]);
+        let (ids, _) = member_ids_and_weights(&[def], &cases);
+        assert!(!ids.contains_key("t3"), "the id map leaves it out");
     }
 
     #[test]

@@ -27,7 +27,7 @@ use crate::scoreboard::{
     scoreboard_entries_tied,
 };
 #[cfg(target_arch = "wasm32")]
-use crate::subtasks::{member_ids_and_weights, problem_max_score};
+use crate::subtasks::{member_ids_and_weights, problem_max_score, shown_members};
 #[cfg(target_arch = "wasm32")]
 use crate::tokens::{TokenState, available_tokens, next_regen_elapsed_min};
 #[cfg(target_arch = "wasm32")]
@@ -205,7 +205,8 @@ pub(crate) fn handle_task_config(
     let (test_cases_list, effective_subtasks) =
         load_effective_subtasks(host, problem_id, &task_config)?;
 
-    let expose_full_task_feedback = req.is_staff()
+    let staff = req.is_staff();
+    let expose_full_task_feedback = staff
         || (tokens_enabled(&contest_config) && req.user_id().is_some())
         || contest_config.feedback_level == FeedbackLevel::Full;
 
@@ -218,7 +219,7 @@ pub(crate) fn handle_task_config(
                         "name": s.name,
                         "scoring_method": s.scoring_method,
                         "max_score": s.max_score,
-                        "test_cases": s.test_cases,
+                        "test_cases": shown_members(s, &test_cases_list, staff),
                     })
                 })
                 .collect::<Vec<_>>(),
