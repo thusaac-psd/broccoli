@@ -908,9 +908,9 @@ async fn record_governs(state: &AppState, plugin_id: &str) {
         .contest_type_registry
         .read()
         .await
-        .iter()
-        .filter(|(_, h)| h.plugin_id == plugin_id)
-        .map(|(t, _)| t.clone())
+        .registered_by(plugin_id)
+        .into_iter()
+        .map(|(t, _)| t)
         .collect();
     contest_types.sort();
     let governs = Governs {

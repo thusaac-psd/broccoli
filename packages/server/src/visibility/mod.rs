@@ -739,14 +739,10 @@ mod tests {
         let operation_batches = OperationBatches::default();
         let operation_waiters: OperationWaiters = Arc::new(dashmap::DashMap::new());
         let evaluate_batches = EvaluateBatches::default();
-        let contest_type_registry: ContestTypeRegistry =
-            Arc::new(tokio::sync::RwLock::new(HashMap::new()));
-        let evaluator_registry: EvaluatorRegistry =
-            Arc::new(tokio::sync::RwLock::new(HashMap::new()));
-        let checker_stage_registry: CheckerStageRegistry =
-            Arc::new(tokio::sync::RwLock::new(HashMap::new()));
-        let language_resolver_registry: LanguageResolverRegistry =
-            Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let contest_type_registry: ContestTypeRegistry = Default::default();
+        let evaluator_registry: EvaluatorRegistry = Default::default();
+        let checker_stage_registry: CheckerStageRegistry = Default::default();
+        let language_resolver_registry: LanguageResolverRegistry = Default::default();
 
         AppState {
             plugins,

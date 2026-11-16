@@ -597,12 +597,11 @@ mod test_case_description_tests {
 mod checker_format_tests {
     use super::*;
     use crate::registry::CheckerStageHandlers;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
     fn stage_reg(formats: &[&str]) -> CheckerStageRegistry {
-        let mut map = HashMap::new();
+        let mut map = crate::registry::Providers::default();
         for f in formats {
             map.insert(
                 f.to_string(),

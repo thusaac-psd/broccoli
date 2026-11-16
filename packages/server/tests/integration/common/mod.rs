@@ -1,5 +1,4 @@
 use common::db::DatabaseConnection;
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,7 +17,6 @@ use sea_orm::{
     TransactionTrait,
 };
 use serde_json::Value;
-use tokio::sync::RwLock;
 
 use common::storage::config::create_blob_store;
 use server::config::{
@@ -736,11 +734,10 @@ impl TestApp {
             app_config.server.claim_fiber_enabled = false;
         }
 
-        let contest_type_registry: ContestTypeRegistry = Arc::new(RwLock::new(HashMap::new()));
-        let evaluator_registry: EvaluatorRegistry = Arc::new(RwLock::new(HashMap::new()));
-        let checker_stage_registry: CheckerStageRegistry = Arc::new(RwLock::new(HashMap::new()));
-        let language_resolver_registry: LanguageResolverRegistry =
-            Arc::new(RwLock::new(HashMap::new()));
+        let contest_type_registry: ContestTypeRegistry = Default::default();
+        let evaluator_registry: EvaluatorRegistry = Default::default();
+        let checker_stage_registry: CheckerStageRegistry = Default::default();
+        let language_resolver_registry: LanguageResolverRegistry = Default::default();
         let operation_batches = OperationBatches::default();
         let operation_waiters: OperationWaiters = Arc::new(dashmap::DashMap::new());
         let evaluate_batches = EvaluateBatches::default();
