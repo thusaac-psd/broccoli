@@ -1,11 +1,11 @@
 use common::db::DatabaseConnection;
 use std::sync::Arc;
 
+use broccoli_server_sdk::types::host_io::{TimerCancelInput, TimerScheduleInput};
 use extism::host_fn;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, QueryFilter, Statement,
 };
-use serde::Deserialize;
 use tracing::error;
 
 use crate::entity::plugin_timer;
@@ -26,27 +26,15 @@ pub(crate) fn validate_payload(payload: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Deserialize)]
-struct ScheduleInput {
-    fire_at_ms: i64,
-    key: String,
-    payload: String,
-}
-
-#[derive(Deserialize)]
-struct CancelInput {
-    key: String,
-}
-
 /// Schedule (or reschedule) `key` for `plugin_id` to fire at `fire_at_ms`.
 ///
 /// The pending-count cap is enforced with a count-then-insert check, not
 /// atomically with the insert below: a concurrent scheduler for the SAME
 /// plugin can race past the cap by a handful of rows. That is an accepted
-/// soft-quota overshoot (see `MAX_PENDING_PER_PLUGIN`'s doc comment) -
+/// soft-quota overshoot (see `MAX_PENDING_PER_PLUGIN`'s doc comment):
 /// overshooting a soft quota is acceptable, a lost timer is not, and making
-/// this atomic would mean holding a transaction across the check, which is
-/// the self-deadlock shape this codebase has already been bitten by twice.
+/// this atomic would mean holding a transaction across the check, which can
+/// deadlock against the plugin's own writes.
 ///
 /// The count excludes `key` itself: rescheduling an existing key replaces its
 /// row rather than adding one, so it must not be blocked by a cap it does not
@@ -149,7 +137,7 @@ host_fn!(pub timer_schedule(user_data: Arc<(String, DatabaseConnection)>; input:
     let call = super::HostCall::enter(&user_data, "timer_schedule")?;
     let (plugin_id, db) = &*call;
 
-    let parsed: ScheduleInput = serde_json::from_str(&input)
+    let parsed: TimerScheduleInput = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid timer_schedule input: {e}")))?;
 
     tokio::runtime::Handle::current()
@@ -162,7 +150,7 @@ host_fn!(pub timer_cancel(user_data: Arc<(String, DatabaseConnection)>; input: S
     let call = super::HostCall::enter(&user_data, "timer_cancel")?;
     let (plugin_id, db) = &*call;
 
-    let parsed: CancelInput = serde_json::from_str(&input)
+    let parsed: TimerCancelInput = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid timer_cancel input: {e}")))?;
 
     tokio::runtime::Handle::current()

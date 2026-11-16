@@ -1,9 +1,10 @@
 use crate::entity::plugin_config;
+use broccoli_server_sdk::types::ConfigResult;
+use broccoli_server_sdk::types::host_io::{ConfigGetInput, ConfigSetInput};
 use common::db::DatabaseConnection;
 use extism::{Function, UserData, Val, ValType};
 use plugin_core::registry::PluginRegistry;
 use sea_orm::{EntityTrait, Set, sea_query::OnConflict};
-use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::error::AppError;
@@ -88,21 +89,6 @@ pub fn extract_plugin_id(composite: &str) -> &str {
         .unwrap_or(composite)
 }
 
-#[derive(Deserialize)]
-struct ConfigGetInput {
-    scope: String,
-    ref_id: String,
-    namespace: String,
-}
-
-#[derive(Deserialize)]
-struct ConfigSetInput {
-    scope: String,
-    ref_id: String,
-    namespace: String,
-    config: serde_json::Value,
-}
-
 pub fn create_config_get_function(
     plugin_id: String,
     db: DatabaseConnection,
@@ -174,13 +160,13 @@ fn config_get_fn(
         })
         .or_else(|| stored.cloned())
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-    let output_value = serde_json::json!({
-        "config": config,
-        "is_default": result.is_none(),
-        "enabled": result.as_ref().and_then(|row| row.enabled),
-    });
+    let output = ConfigResult {
+        config,
+        is_default: result.is_none(),
+        enabled: result.as_ref().and_then(|row| row.enabled),
+    };
 
-    super::write_json(plugin, outputs, &output_value, "config_get output")
+    super::write_json(plugin, outputs, &output, "config_get output")
 }
 
 fn config_set_fn(

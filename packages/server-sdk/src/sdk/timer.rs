@@ -27,11 +27,11 @@ impl Timer {
     /// replaces its payload and delivery state rather than adding a second
     /// timer.
     pub fn schedule(&self, fire_at_ms: i64, key: &str, payload: &str) -> Result<(), SdkError> {
-        let input = serde_json::json!({
-            "fire_at_ms": fire_at_ms,
-            "key": key,
-            "payload": payload,
-        });
+        let input = crate::types::host_io::TimerScheduleInput {
+            fire_at_ms,
+            key: key.to_string(),
+            payload: payload.to_string(),
+        };
         unsafe { crate::host::raw::timer_schedule(serde_json::to_string(&input)?)? };
         Ok(())
     }
@@ -39,7 +39,9 @@ impl Timer {
     /// Cancel a pending timer. Cancelling a key with nothing pending (already
     /// fired, or never scheduled) is not an error.
     pub fn cancel(&self, key: &str) -> Result<(), SdkError> {
-        let input = serde_json::json!({ "key": key });
+        let input = crate::types::host_io::TimerCancelInput {
+            key: key.to_string(),
+        };
         unsafe { crate::host::raw::timer_cancel(serde_json::to_string(&input)?)? };
         Ok(())
     }
