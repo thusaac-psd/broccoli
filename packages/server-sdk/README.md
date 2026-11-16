@@ -36,17 +36,17 @@ Evaluation plugins can cancel outstanding work through a `WindowedEvalSession`:
   scoring short-circuits such as IOI `GroupMin` and `GroupMul`.
 - `cancel_all()` cancels active evaluate batches and clears queued testcases.
 
-Detached eval and operation flows cancel outstanding work by returning the
-shared callback output action `cancel`, or by listing specific pending/active
-items in the callback output. Synchronous operation `collect(...)` cancels its
-active operation batches internally on timeout or host error.
+A detached eval session cancels outstanding work by returning the callback
+output action `cancel`, or by listing specific pending/active test cases in the
+callback output. Synchronous operation `collect(...)` cancels its active
+operation batches internally on timeout or host error.
 
 ### Detached windowed callbacks
 
-Long-running plugin exports should avoid polling worker results while holding a
-WASM plugin instance. The detached windowed APIs start bounded work on the host,
-return a session id immediately, and invoke a named plugin export for each
-result, timeout, or exhausted session event:
+Long-running judging exports should avoid polling worker results while holding a
+WASM plugin instance. The detached windowed eval API starts bounded work on the
+host, returns a session id immediately, and invokes a named plugin export for
+each result, timeout, or exhausted session event:
 
 ```rust
 host.eval
@@ -54,20 +54,13 @@ host.eval
     .concurrency(8)
     .fire_after_judging_for_submission(&submission)
     .start_detached("on_eval_result", serde_json::json!({}))?;
-
-host.operations
-    .windowed(&operations)
-    .concurrency(4)
-    .start_detached("on_operation_result", serde_json::json!({}))?;
 ```
 
-Callback inputs and outputs are shared SDK types:
-`DetachedEvaluateCallbackInput`, `DetachedEvaluateCallbackOutput`,
-`DetachedOperationCallbackInput`, and `DetachedOperationCallbackOutput`.
-Callbacks return updated opaque `state`, an action (`continue`, `finish`, or
-`cancel`), a `refill` decision, and optional active/pending work to cancel. Eval
-defaults its detached result timeout from the testcase time limits; operation
-defaults to `DEFAULT_OPERATION_RESULT_TIMEOUT_MS`. Callers can still override
+The callback input and output are the shared SDK types
+`DetachedEvaluateCallbackInput` and `DetachedEvaluateCallbackOutput`. Callbacks
+return updated opaque `state`, an action (`continue`, `finish`, or `cancel`), a
+`refill` decision, and optional active/pending work to cancel. The detached
+result timeout defaults from the testcase time limits; callers can override it
 with `.result_timeout_ms(...)`. Submission-judging eval flows should call
 `.fire_after_judging_for_submission(...)` with the submission request; the
 server then emits the normal `after_judging` hook after the terminal detached
@@ -82,8 +75,8 @@ let output = DetachedEvaluateCallbackOutput::continue_with(next_state)
     .refill_while(&input, |result| result.verdict == Verdict::Accepted);
 ```
 
-For synchronous operation exports that must return a value immediately, use the
-same builder and collect the batch result explicitly:
+Worker operations run through a windowed builder that collects the results in
+the calling export:
 
 ```rust
 let results = host
@@ -93,9 +86,8 @@ let results = host
     .collect(result_timeout_ms)?;
 ```
 
-This compatibility path still blocks the current plugin export while worker
-operations run, so detached callbacks should be preferred for long-running
-flows.
+`collect` holds the current plugin export while the operations run, so a judging
+flow that waits on many results uses the detached eval session above.
 
 Synchronous eval sessions use the same builder naming, but intentionally do not
 offer a `collect` shortcut:

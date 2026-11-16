@@ -1,6 +1,6 @@
 use crate::host_funcs::context::OperationHostDeps;
 use crate::services::operation_batch;
-use broccoli_server_sdk::types::{OperationTask, StartDetachedWindowedOperationInput};
+use broccoli_server_sdk::types::OperationTask;
 use common::worker::TaskResult;
 use extism::{Function, UserData, Val, ValType};
 use serde::{Deserialize, Serialize};
@@ -49,14 +49,6 @@ pub fn create_dispatch_functions(plugin_id: String, deps: OperationHostDeps) -> 
             start_operation_batch_fn,
         ),
         super::host_function(
-            "start_detached_windowed_operation",
-            [ValType::I64],
-            [ValType::I64],
-            user_data.clone(),
-            super::Waits::Returns,
-            start_detached_windowed_operation_fn,
-        ),
-        super::host_function(
             "get_next_operation_result",
             [ValType::I64],
             [ValType::I64],
@@ -73,32 +65,6 @@ pub fn create_dispatch_functions(plugin_id: String, deps: OperationHostDeps) -> 
             cancel_operation_batch_fn,
         ),
     ]
-}
-
-fn start_detached_windowed_operation_fn(
-    plugin: &mut extism::CurrentPlugin,
-    inputs: &[Val],
-    outputs: &mut [Val],
-    user_data: DispatchUserData,
-) -> Result<(), extism::Error> {
-    let input: StartDetachedWindowedOperationInput = super::read_json(plugin, inputs, "input")?;
-    let call = super::HostCall::enter(&user_data, "start_detached_windowed_operation")?;
-
-    let manager = call
-        .deps
-        .plugin_manager
-        .as_ref()
-        .ok_or_else(|| extism::Error::msg("Plugin manager not available for detached operation"))?
-        .get()?;
-    let session = operation_batch::start_detached_windowed_operation(
-        call.plugin_id.clone(),
-        manager,
-        call.deps.for_current_call(),
-        input,
-    )
-    .map_err(|e| extism::Error::msg(e.to_string()))?;
-
-    super::write_json(plugin, outputs, &session, "session")
 }
 
 fn start_operation_batch_fn(

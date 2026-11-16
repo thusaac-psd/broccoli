@@ -96,7 +96,6 @@ str_host_fns! {
     get_next_evaluate_result(input),
     cancel_evaluate_test_cases(input),
     start_operation_batch(input),
-    start_detached_windowed_operation(input),
     get_next_operation_result(input),
     resolve_checker(input),
     interpret_checker_result(input),

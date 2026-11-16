@@ -1,30 +1,23 @@
-//! Shared driver for a detached, windowed, callback-per-result session.
+//! The driver of a detached, windowed, callback-per-result session: the loop
+//! behind a plugin's detached evaluate session (`evaluate_batch::detached`).
 //!
-//! Both `evaluate_batch` (test cases -> verdicts) and `operation_batch`
-//! (operation tasks -> results) run the same host-side loop: keep up to
-//! `concurrency` single-item batches in flight, await each result, hand it to
-//! the plugin's callback, and act on the callback's reply (continue / finish /
-//! cancel, refill the window, cancel specific slots). That loop is factored out
-//! here as [`run_windowed_session`]; a domain plugs in the pieces that genuinely
-//! differ via [`WindowedSession`]:
+//! [`run_windowed_session`] keeps up to `concurrency` single-item batches in
+//! flight, awaits each result, hands it to the plugin's callback, and acts on
+//! the callback's reply (continue / finish / cancel, refill the window, cancel
+//! specific slots). The judging domain plugs in through [`WindowedSession`]:
 //!
-//! - **dispatch/transport** (`start_slot`): evaluate calls the evaluator plugin
-//!   in-process; operation round-trips a task through the MQ + a worker.
-//! - **result decode** (`decode`): operation must deserialize a raw worker
-//!   `TaskResult` into an `OperationResult` and can fail into a Timeout;
-//!   evaluate's verdict already arrives typed.
-//! - **cancellation** (`cancel_active`/`cancel_selected`): both async; evaluate
-//!   additionally signals Redis op-cancel keys.
-//! - **server-side retry** (`take_retry`/`note_retry*`): evaluate re-dispatches a
-//!   timed-out op a bounded number of times before surfacing the timeout;
-//!   operation never retries (the default no-ops).
-//! - **the end** (`on_end`): called once on every exit with a [`SessionEnd`];
-//!   evaluate finalizes the judgement the session judges and fires its
-//!   after-judging hooks; operation has nothing to record.
+//! - **dispatch/transport** (`start_slot`): call the evaluator plugin
+//!   in-process and spawn the slot's waiter;
+//! - **result decode** (`decode`): a delivered result that cannot be decoded
+//!   becomes a Timeout;
+//! - **cancellation** (`cancel_active`/`cancel_selected`), which also signals
+//!   the Redis op-cancel keys;
+//! - **server-side retry** (`take_retry`/`note_retry*`): a timed-out op is
+//!   re-dispatched a bounded number of times before the timeout surfaces;
+//! - **the end** (`on_end`): called once on every exit with a [`SessionEnd`],
+//!   to finalize or hand back the judgement and fire its after-judging hooks.
 //!
-//! The callback protocol itself is isomorphic across the two domains (a
-//! Continue/Finish/Cancel action, a `refill` bool, and a per-slot cancel list),
-//! so the loop drives it through the normalized [`SessionDecision`].
+//! The trait is the seam the loop's own tests drive with a scripted session.
 
 use std::collections::HashSet;
 use std::hash::Hash;
@@ -33,8 +26,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-/// Normalized terminal action from a detached callback. Both domains' concrete
-/// `Action` enums map onto this.
+/// Normalized terminal action from a detached callback; the evaluate
+/// callback's `Action` maps onto it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionAction {
     Continue,
@@ -42,13 +35,12 @@ pub enum SessionAction {
     Cancel,
 }
 
-/// A detached callback's reply, normalized across domains.
+/// A detached callback's reply, normalized.
 pub struct SessionDecision<SlotId> {
     pub state: serde_json::Value,
     pub action: SessionAction,
     pub refill: bool,
-    /// Slot ids the callback asked to cancel (evaluate: test case ids;
-    /// operation: operation indices).
+    /// Slot ids the callback asked to cancel (test case ids).
     pub cancel_ids: Vec<SlotId>,
 }
 
@@ -75,24 +67,21 @@ pub struct SlotOutcome<SlotId, Raw> {
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait WindowedSession: Send + Sync + Sized + 'static {
-    /// A pending work item (evaluate: a test case; operation: an operation task).
+    /// A pending work item (a test case).
     type Item: Send + 'static;
-    /// The raw result delivered by a slot's waiter (evaluate: a verdict;
-    /// operation: a raw worker `TaskResult`).
+    /// The raw result delivered by a slot's waiter (a verdict).
     type Raw: Send + 'static;
-    /// The decoded result handed to the callback (evaluate: verdict; operation:
-    /// `OperationResult`).
+    /// The decoded result handed to the callback.
     type Final: Send;
-    /// A slot discriminator (evaluate: `i32` test case id; operation: `usize`
-    /// index). Used to match callback cancel lists and retry bookkeeping.
+    /// A slot discriminator (a test case id). Used to match callback cancel
+    /// lists and retry bookkeeping.
     type SlotId: Copy + Eq + Hash + Send + 'static;
 
     /// Plugin id and session id, for log context only.
     fn plugin_id(&self) -> &str;
     fn session_id(&self) -> &str;
 
-    /// The slot id for the `index`-th pending item. operation: `index`;
-    /// evaluate: the item's own test case id.
+    /// The slot id for the `index`-th pending item (its own test case id).
     fn slot_id(&self, index: usize, item: &Self::Item) -> Self::SlotId;
 
     /// Dispatch `item` as a single-item batch and spawn its waiter task, which
@@ -107,8 +96,7 @@ pub trait WindowedSession: Send + Sync + Sized + 'static {
     ) -> anyhow::Result<String>;
 
     /// Decode a delivered raw result into the final result, or an error message
-    /// that becomes a Timeout event. evaluate: identity; operation: raw
-    /// `TaskResult` -> `OperationResult`.
+    /// that becomes a Timeout event.
     fn decode(&self, raw: Self::Raw) -> Result<Self::Final, String>;
 
     /// The Timeout message for a slot that delivered `Ok(None)`.
