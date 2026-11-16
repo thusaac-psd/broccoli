@@ -481,6 +481,11 @@ pub(crate) async fn sse_snapshot(
 /// the entire fixture in the test.
 #[derive(Debug, Default, Clone)]
 pub struct SpawnOptions {
+    /// Start with no live worker. The fixture otherwise starts with one live
+    /// worker that takes work ([`worker_heartbeat`]), so the claim fiber
+    /// claims; nothing refreshes the fleet afterwards, so a test changes it
+    /// with `state.worker_slots.observe`.
+    pub no_workers: bool,
     /// Cap on durable `Queued` rows accepted at POST time.
     /// `Some(0)` (the fixture default) disables the cap; `Some(n)`
     /// trips backpressure once depth reaches `n`. `None` keeps the
@@ -895,6 +900,11 @@ impl TestApp {
                 std::time::Duration::from_secs(60),
             )),
         };
+        if !options.no_workers {
+            state
+                .worker_slots
+                .observe(&[worker_heartbeat(common::worker::Intake::Accepting)], 1);
+        }
         let dispatcher = options.start_dispatcher.then(|| {
             server::dispatcher::Dispatcher::spawn(server::dispatcher::DispatcherDeps {
                 state: state.clone(),
@@ -1595,5 +1605,27 @@ impl TestApp {
 
         self.create_user_with_role(username, password, &role_name)
             .await
+    }
+}
+
+/// The heartbeat of a live worker with `intake`, for a test to show the
+/// server a fleet (`state.worker_slots.observe`).
+pub fn worker_heartbeat(intake: common::worker::Intake) -> common::worker::HeartbeatPayload {
+    common::worker::HeartbeatPayload {
+        id: "w".into(),
+        started_at: chrono::Utc::now(),
+        last_seen: chrono::Utc::now(),
+        in_flight: 0,
+        max_concurrency: Some(1),
+        fairness_mode: "unknown".into(),
+        sandbox_backend: "test".into(),
+        version: "test".into(),
+        hostname: None,
+        ip_addresses: Vec::new(),
+        os: None,
+        arch: None,
+        cpu_count: None,
+        pid: None,
+        intake,
     }
 }

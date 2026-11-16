@@ -293,11 +293,12 @@ it only if a tool goes missing while the worker holds it; the attempt is handed
 back for a worker that has the tool. A pin never holds work for such a worker:
 an admin cannot name it as a rejudge target, a task pinned to it goes to the
 shared stream, and pinned tasks waiting for it when it stops taking work move
-there within a reclaim tick (see [Message queue](./message-queue.md)). While
-live workers exist and none of them
-takes work, the claim fiber claims nothing, so submissions wait `Queued`
-instead of failing. Work already dispatched when the fleet comes to that is
-handed back the same way: every operation the server waits for fails as
+there within a reclaim tick (see [Message queue](./message-queue.md)). The
+claim fiber claims only while some live worker takes work
+(`WorkerSlots::takes_work`): with no live worker at all, or only workers that
+take none, it claims nothing, so submissions wait `Queued` instead of reading
+as being judged while nothing runs them. Work already dispatched when every
+live worker stops taking work is handed back the same way: every operation the server waits for fails as
 `NO_CAPABLE_WORKER` and gets its cancel key, and an operation started
 meanwhile is refused when it publishes
 (`consumers::operation_result::hand_back_while_none_accepting`). Workers

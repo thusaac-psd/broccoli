@@ -105,8 +105,8 @@ pub struct SystemOverviewResponse {
     /// Compiling, Running).
     #[schema(example = 0)]
     pub submissions_in_progress: u64,
-    /// Submissions waiting `Queued` for a server to claim them. While
-    /// `intake` is `none_accepting`, none is claimed.
+    /// Submissions waiting `Queued` for a server to claim them. None is
+    /// claimed unless `intake` is `accepting`.
     #[schema(example = 0)]
     pub submissions_queued: u64,
     /// Submissions waiting `Queued` whose contest type has no enabled
@@ -127,6 +127,7 @@ pub enum FleetIntake {
     /// Live workers exist and none takes work (each lacks a platform tool):
     /// nothing is claimed, and submissions wait `Queued`.
     NoneAccepting,
-    /// No live worker is known.
+    /// No live worker is known: nothing is claimed, and submissions wait
+    /// `Queued` for a worker to arrive.
     NoWorkers,
 }
