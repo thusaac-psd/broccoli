@@ -290,8 +290,19 @@ pub async fn connect_main_pool(
     // pings the connection on release, which flushes the pending bytes and
     // drains to `ReadyForQuery`, and closes it if that surfaces an error, so
     // the pool never hands out a connection that is out of step.
-    common::db::connect(db_url, &PgPoolSpec::new(max_connections, 5), session).await
+    let spec = PgPoolSpec {
+        acquire_timeout: MAIN_POOL_ACQUIRE_TIMEOUT,
+        ..PgPoolSpec::new(max_connections, 5)
+    };
+    common::db::connect(db_url, &spec, session).await
 }
+
+/// The longest a request waits for a main-pool connection before it answers
+/// `503 DATABASE_UNAVAILABLE`: well inside the request timeout, and no longer
+/// than the `Retry-After` it answers, so a retry finds the probe that was in
+/// flight (see [`common::db::DatabaseConnection`]) settled.
+pub const MAIN_POOL_ACQUIRE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(crate::error::DATABASE_RETRY_AFTER_SECS);
 
 /// Session-level advisory lock key that serializes boot-time schema work
 /// (migrations, seeding) across every
