@@ -106,7 +106,7 @@ mod unit;
 mod tests;
 
 pub(crate) use budget::RetryBudget;
-pub use dispatch::{Dispatch, DispatchedUnit, LiveDispatches, NotOwned};
+pub use dispatch::{Dispatch, DispatchedUnit, LiveDispatches, LiveUnit, NotOwned};
 pub(crate) use fault::{CallEnd, DispatchFailure};
 pub use fault::{DispatchFault, DispatchFaults};
 pub use notify::CLAIM_CHANNEL;
@@ -122,8 +122,8 @@ pub(crate) use plugin_writes::{
     SqlBindSink, as_recorded, code_run_write, code_run_write_fence, judgement_write, write_fence,
 };
 pub(crate) use unit::{
-    Abandoned, ClaimLimit, Claimed, ClaimedJudgement, claim_code_runs, claim_judgements,
-    fail_dispatch, reclaim_abandoned, refresh_leases, resolve_if_settled, retry_system_errors,
+    Abandoned, ClaimLimit, Claimed, ClaimedJudgement, ClaimedUnit, claim_code_runs,
+    claim_judgements, fail_dispatch, reclaim_abandoned, resolve_if_settled, retry_system_errors,
 };
 pub(crate) use unit::{DispatchFailed, SystemErrorPass};
-pub use unit::{Unit, UnitCounts, release_leases};
+pub use unit::{Unit, UnitCounts, refresh_leases, release_leases};

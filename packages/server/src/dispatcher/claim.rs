@@ -387,7 +387,10 @@ pub async fn claim_once(
 /// Starts the dispatch of every unit of a claim, each on one of `slots`
 /// (the claim took no more units than there are slots), after recording the
 /// claim's metrics. Nothing here can fail or wait: the claim committed, and
-/// every unit it took must reach its dispatch.
+/// every unit it took must reach its dispatch. Each unit is live
+/// ([`judging::LiveDispatches`]) from here, before its dispatch waits for a
+/// permit or prepares anything, and its dispatch holds that entry: the lease
+/// refresh keeps the lease of a unit whose dispatch has not started yet.
 fn start_claimed<T, F, Fut>(
     state: &AppState,
     server_id: &str,
@@ -396,8 +399,8 @@ fn start_claimed<T, F, Fut>(
     slots: Vec<DispatcherReservation>,
     dispatch: F,
 ) where
-    T: Send + 'static,
-    F: Fn(AppState, T) -> Fut,
+    T: judging::ClaimedUnit + Send + 'static,
+    F: Fn(AppState, T, judging::LiveUnit) -> Fut,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     // Before any claimed unit is judged: config committed before its
@@ -423,7 +426,11 @@ fn start_claimed<T, F, Fut>(
             &claim.problem_type,
             claim.queued_secs,
         );
-        slot.spawn(label, dispatch(state.clone(), claim.unit));
+        let live = state
+            .registries
+            .live_dispatches
+            .enter(claim.unit.dispatched());
+        slot.spawn(label, dispatch(state.clone(), claim.unit, live));
     }
 }
 

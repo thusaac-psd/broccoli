@@ -50,6 +50,13 @@ requeued within one scan interval however large it is.
 Every lease age is compared on the database clock: claims and refreshes stamp
 `NOW()`, and the scans compare against `NOW()`.
 
+A server refreshes the leases of the units it still works on
+(`judging::LiveDispatches`): a unit is live from the moment its claim takes
+it, before its dispatch waits for a dispatcher permit or prepares its input,
+until the last clone of its `Dispatch` is dropped. A unit the server owns but
+no longer works on (its task was lost) keeps its old heartbeat, so its lease
+lapses and a peer steals it.
+
 ## Claiming
 
 A claim fiber on each server claims work when it is told there is some. A

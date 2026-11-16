@@ -135,13 +135,12 @@ async fn claim_one(db: &DatabaseConnection, server: &str) -> ClaimedJudgement {
 fn dispatch_of(live: &LiveDispatches, j: &submission_judgement::Model) -> Dispatch {
     Dispatch::new(
         "p",
-        DispatchedUnit::Judgement {
+        live.enter(DispatchedUnit::Judgement {
             submission_id: j.submission_id,
             judgement_id: j.id,
             judge_epoch: j.judge_epoch,
-        },
+        }),
         DispatchFaults::default(),
-        live,
     )
 }
 

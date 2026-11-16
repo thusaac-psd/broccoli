@@ -12,7 +12,7 @@ use tracing::{Instrument, error, info, instrument, warn};
 use crate::entity::{problem, submission, submission_judgement, test_case};
 use crate::hooks;
 use crate::services::judging::{
-    self, ClaimedJudgement, Dispatch, DispatchFailure, DispatchFaults, DispatchedUnit, Unit,
+    self, ClaimedJudgement, Dispatch, DispatchFailure, DispatchFaults, LiveUnit, Unit,
 };
 use crate::state::AppState;
 use crate::utils::judging::files_log_summary;
@@ -240,7 +240,7 @@ struct JudgementRef {
 // The submission model is skipped: its `files` hold the contestant's full
 // source. Ids, language and file names/sizes only.
 #[instrument(
-    skip(state, claimed),
+    skip(state, claimed, live),
     fields(
         submission_id = claimed.submission.id,
         judgement_id = claimed.judgement.id,
@@ -250,7 +250,7 @@ struct JudgementRef {
         contest_id = tracing::field::Empty,
     )
 )]
-pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgement) {
+pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgement, live: LiveUnit) {
     let ClaimedJudgement {
         submission,
         judgement,
@@ -552,16 +552,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
     let function_name = handler.submission_fn.clone();
     // The judgement goes to its contest type's plugin, which alone may write
     // it, through this call and the sessions it starts.
-    let dispatch = Dispatch::new(
-        &plugin_id,
-        DispatchedUnit::Judgement {
-            submission_id: judgement_ref.submission_id,
-            judgement_id: judgement_ref.id,
-            judge_epoch: judgement_ref.judge_epoch,
-        },
-        faults.clone(),
-        &state.registries.live_dispatches,
-    );
+    let dispatch = Dispatch::new(&plugin_id, live, faults.clone());
     let plugins = state.plugins.clone();
     let hook_registry = state.registries.hook_registry.clone();
     let contest_types = state.registries.contest_type_registry.clone();

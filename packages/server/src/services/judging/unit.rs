@@ -7,6 +7,7 @@ use common::{DlqErrorCode, StatusPhase, SubmissionStatus};
 use sea_orm::{ConnectionTrait, DbBackend, DbErr, EntityTrait, Statement, TransactionTrait, Value};
 
 use super::RetryBudget;
+use super::dispatch::DispatchedUnit;
 use super::fault::{DispatchFailure, SystemErrorClass};
 use crate::dispatcher::prefer_local_handler;
 use crate::dlq::{DlqService, DlqSubject};
@@ -321,6 +322,30 @@ pub(crate) struct ClaimedJudgement {
     pub judgement: submission_judgement::Model,
 }
 
+/// A unit the claim fiber takes, as its dispatch carries it.
+pub(crate) trait ClaimedUnit {
+    fn dispatched(&self) -> DispatchedUnit;
+}
+
+impl ClaimedUnit for ClaimedJudgement {
+    fn dispatched(&self) -> DispatchedUnit {
+        DispatchedUnit::Judgement {
+            submission_id: self.judgement.submission_id,
+            judgement_id: self.judgement.id,
+            judge_epoch: self.judgement.judge_epoch,
+        }
+    }
+}
+
+impl ClaimedUnit for code_run::Model {
+    fn dispatched(&self) -> DispatchedUnit {
+        DispatchedUnit::CodeRun {
+            code_run_id: self.id,
+            judge_epoch: self.judge_epoch,
+        }
+    }
+}
+
 /// One unit a claim took, with what the claim's metrics record.
 #[derive(Debug, Clone)]
 pub(crate) struct Claim<T> {
@@ -544,7 +569,7 @@ pub struct UnitCounts {
 /// lease lapses and another server steals it. Rows are taken in id order and
 /// a busy one is skipped: it is mid-transition, and the lease TTL spans many
 /// refresh intervals.
-pub(crate) async fn refresh_leases(
+pub async fn refresh_leases(
     db: &DatabaseConnection,
     server_id: &str,
     live: &super::LiveDispatches,

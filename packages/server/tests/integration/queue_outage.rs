@@ -20,7 +20,7 @@ use server::dispatcher::fanout::WorkerSlots;
 use server::entity::{submission, user};
 use server::host_funcs::context::OperationHostDeps;
 use server::registry::OperationBatches;
-use server::services::judging::{Dispatch, DispatchFaults, DispatchedUnit};
+use server::services::judging::{Dispatch, DispatchFaults, DispatchedUnit, LiveDispatches};
 use server::services::operation_batch::{
     OperationTaskPublisher, next_operation_result_async, start_operation_batch,
 };
@@ -253,13 +253,12 @@ async fn operation_deps(slots: &WorkerSlots, faults: &DispatchFaults) -> Operati
         judgement: None,
         dispatch: Some(Dispatch::new(
             "hand-back-plugin",
-            DispatchedUnit::Judgement {
+            LiveDispatches::default().enter(DispatchedUnit::Judgement {
                 submission_id: 1,
                 judgement_id: 1,
                 judge_epoch: 0,
-            },
+            }),
             faults.clone(),
-            &Default::default(),
         )),
         worker_slots: slots.clone(),
     }

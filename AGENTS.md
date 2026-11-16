@@ -292,9 +292,11 @@ binaries warn about every key they do not read.
   `services::judging::Dispatch`, which that call, its nested calls and the
   detached sessions it starts carry in their call locals. Every plugin write to
   a unit passes `Dispatch::owned` (the owning plugin, the dispatched unit)
-  before the database fence sees it. A unit is live while any clone of its
-  dispatch exists (`judging::LiveDispatches`), and the lease refresh keeps only
-  live units' leases, so work a server owns but lost lapses and is stolen.
+  before the database fence sees it. A unit is live from its claim
+  (`judging::LiveDispatches::enter`, before its dispatch can wait) while its
+  entry or any clone of the dispatch built from it exists, and the lease refresh
+  keeps only live units' leases, so work a server owns but lost lapses and is
+  stolen.
 - A failure every attempt would repeat stands: its `DispatchFault` classes as
   standing (a problem's checker or its own program failing, `CHECKER_FAILED`,
   `PROBLEM_FAILED`), and the system-error retry never re-judges it. An evaluator
