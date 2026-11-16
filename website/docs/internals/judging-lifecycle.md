@@ -192,7 +192,13 @@ missing tools, so the System page shows it as not taking work. A task reaches
 it only if a tool goes missing while the worker holds it; the attempt is handed
 back for a worker that has the tool. While live workers exist and none of them
 takes work, the claim fiber claims nothing, so submissions wait `Queued`
-instead of failing.
+instead of failing. Work already dispatched when the fleet comes to that is
+handed back the same way: every operation the server waits for fails as
+`PLATFORM_TOOL_MISSING` and gets its cancel key, and an operation started
+meanwhile is refused when it publishes
+(`consumers::operation_result::hand_back_while_none_accepting`). Workers
+announce each change of whether they take work, so the claim fiber sees it at
+once.
 
 ## Dead letters
 

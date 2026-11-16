@@ -25,6 +25,9 @@ catalog:
 overrides:
   # monaco-editor 0.55.1 pins dompurify 3.2.7; dompurify's 3.x API is stable.
   dompurify: ^3.4.17
+  # @typescript-eslint/typescript-estree asks for minimatch ^10, which
+  # GHSA-g3hv-75wg-m249 covers; 11 keeps the `minimatch` function it calls.
+  'minimatch@10': ^11.0.1
 
 auditConfig:
   ignoreGhsas:
@@ -33,6 +36,12 @@ auditConfig:
     # ^0.16, and the web app renders math with the default `trust: false`, so
     # there is no trust restriction to bypass.
     - GHSA-238p-pmpm-9mq7
+    # minimatch before 11.0.1: patterns can amplify into a denial of service.
+    # @react-router/fs-routes (the web app's build-time route scan; 7.x and
+    # 8.x alike) asks for minimatch ^9 and calls `makeRe`, which 11 removed,
+    # so no override reaches it. It matches only the route-ignore patterns in
+    # the repo's own `routes.ts`, never input from a user.
+    - GHSA-g3hv-75wg-m249
 
 onlyBuiltDependencies:
   - esbuild

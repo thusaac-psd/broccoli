@@ -188,6 +188,7 @@ async fn operation_result_burst_has_no_missing_waiters() {
         evaluate_batches,
         judgement: None,
         faults: None,
+        worker_slots: Default::default(),
     };
 
     let batch_id = start_operation_batch(

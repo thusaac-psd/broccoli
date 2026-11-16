@@ -350,3 +350,41 @@ async fn resolve_evaluate_body_externalizes_large_inline_body() {
     );
     assert_eq!(file.filename, "input.txt");
 }
+
+/// A session judges every case with the problem inputs its first window
+/// read, even after the problem changes; a fresh session reads the change.
+#[tokio::test]
+async fn a_session_keeps_the_problem_inputs_it_started_with() {
+    use sea_orm::{ActiveModelTrait, IntoActiveModel, Set};
+
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (_user, problem_id) = crate::test_support::seed_user_and_problem(&db).await;
+    let session = ProblemInputsCache::default();
+    let first = session.get(&db, problem_id, "cpp").await.unwrap();
+    assert_eq!(first.checker_format, "lines");
+    assert!(first.additional_file_refs.is_empty());
+
+    let mut changed = problem::Entity::find_by_id(problem_id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_active_model();
+    changed.checker_format = Set("exact".into());
+    changed.update(&db).await.unwrap();
+
+    let later = session.get(&db, problem_id, "cpp").await.unwrap();
+    assert_eq!(later, first, "the session's later windows");
+    let fresh = ProblemInputsCache::default()
+        .get(&db, problem_id, "cpp")
+        .await
+        .unwrap();
+    assert_eq!(fresh.checker_format, "exact", "a new session");
+    let other_language = session.get(&db, problem_id, "python").await.unwrap();
+    assert_eq!(other_language.checker_format, "exact");
+    assert_eq!(
+        session.get(&db, problem_id, "cpp").await.unwrap(),
+        first,
+        "another language's batch leaves the session's inputs alone"
+    );
+}

@@ -60,6 +60,14 @@ impl HeartbeatPayload {
     pub fn accepts_work(&self) -> bool {
         self.missing_platform_tools.is_empty()
     }
+
+    /// What a server's view of the fleet's capacity reads from this
+    /// heartbeat: whether the worker takes work and how many task slots it
+    /// has. A worker announces every change of it (see
+    /// [`crate::node_identity::NodeClaim::announce_changes`]).
+    pub fn capacity(&self) -> (bool, Option<u32>) {
+        (self.accepts_work(), self.max_concurrency)
+    }
 }
 
 /// Why an operation failed when the failure is the platform's, not the job's.

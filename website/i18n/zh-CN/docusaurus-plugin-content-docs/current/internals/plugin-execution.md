@@ -98,7 +98,7 @@ Extism 调用在发起它的线程上一直运行到客体返回，宿主函数�
 
 ## 评测扇出
 
-服务器在评测机处未完成的测试点数量由 `dispatcher::fanout::Fanout` 限制：即整个集群每个存活评测机槽位 `TEST_CASES_PER_WORKER_SLOT`（2）个中本服务器所占的份额。`WorkerSlots` 是存活容量的唯一记录：评测机心跳中 `max_concurrency` 之和，以及存活服务器的数量（`common::liveness::live_workers_and_server_count`，对两种角色执行一次 `SCAN` 和一次流水线读取），由一个任务每 15 秒刷新一次，用于确定规模的存活信息不再有其他读取方。由它派生的每个数值都只有一个归属：
+服务器在评测机处未完成的测试点数量由 `dispatcher::fanout::Fanout` 限制：即整个集群每个存活评测机槽位 `TEST_CASES_PER_WORKER_SLOT`（2）个中本服务器所占的份额。`WorkerSlots` 是存活容量的唯一记录：评测机心跳中 `max_concurrency` 之和，以及存活服务器的数量（`common::liveness::live_workers_and_server_count`，对两种角色执行一次 `SCAN` 和一次流水线读取），由一个任务保持最新：每当评测机宣告自己加入、离开、开始或停止接收任务时（`common::liveness::changes_channel`），在最早可能过期的存活评测机键过期之后立即，以及至少每 15 秒，它都会重新读取一次。用于确定规模的存活信息不再有其他读取方。由它派生的每个数值都只有一个归属：
 
 | 数值 | 归属 | 取值 |
 |---|---|---|
