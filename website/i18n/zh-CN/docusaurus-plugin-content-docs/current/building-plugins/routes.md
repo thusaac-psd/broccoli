@@ -50,7 +50,7 @@ contest_type = "ioi"
 
 | 状态码 | 错误码 | 情形 |
 | --- | --- | --- |
-| `400` | `VALIDATION_ERROR` | 声明的 `contest` 或 `problem` 参数不是 ID。 |
+| `400` | `VALIDATION_ERROR` | 声明的 `contest` 或 `problem` 参数不是 ID，或路由声明了尚未开始的比赛中的题目（无论题目是否在比赛中都如此回答；持有 `contest:manage` 的用户可以提前读取）。 |
 | `401` | `TOKEN_MISSING`、`TOKEN_INVALID` | 需要令牌的路由未携带令牌，或令牌无效、已失效。 |
 | `403` | `PERMISSION_DENIED` | 调用者缺少 `permission`，或在 `participant` 路由上不是公开比赛的参赛者。 |
 | `404` | `NOT_FOUND` | 调用者无法读取该比赛或题目、资源不存在、题目不属于该比赛，或比赛属于其他 `contest_type`。 |

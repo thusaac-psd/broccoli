@@ -792,6 +792,60 @@ mod route_access {
         );
     }
 
+    /// Before a contest starts, a plugin route that addresses one of its
+    /// problems answers exactly what the core problem route answers, for a
+    /// problem in the contest and one that is not, so it neither serves the
+    /// problem early nor tells which problems the contest holds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn contest_problem_route_before_the_start_answers_like_the_core_route() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("ru_admin", "securepass", "admin")
+            .await;
+        let user = app
+            .create_user_with_role("ru_user", "securepass", "contestant")
+            .await;
+        let contest = app.create_contest(&admin, "Soon", true, false).await;
+        let problem = app.insert_public_problem("In contest").await;
+        app.add_problem_to_contest(contest, problem, &admin).await;
+        app.register_for_contest(contest, &user).await;
+        exec(
+            &app,
+            format!(
+                "UPDATE contest SET start_time = NOW() + INTERVAL '1 hour' WHERE id = {contest}"
+            ),
+        )
+        .await;
+
+        for p in [problem, problem + 10_000] {
+            let core = app
+                .get_with_token(&routes::contest_problem(contest, p), &user)
+                .await;
+            let plugin = app
+                .get_with_token(
+                    &proxy(&format!("contests/{contest}/problems/{p}/mine")),
+                    &user,
+                )
+                .await;
+            assert_eq!(core.status, 400, "core, problem {p}: {}", core.text);
+            assert_eq!(
+                (plugin.status, &plugin.body["code"]),
+                (core.status, &core.body["code"]),
+                "problem {p}: plugin {} vs core {}",
+                plugin.text,
+                core.text
+            );
+        }
+
+        let res = app
+            .get_with_token(
+                &proxy(&format!("contests/{contest}/problems/{problem}/mine")),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 200, "contest:manage reads early: {}", res.text);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn standalone_problem_route_answers_like_the_core_problem_route() {
         let app = TestApp::spawn_with_plugins().await;

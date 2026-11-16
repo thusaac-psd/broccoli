@@ -64,7 +64,7 @@ endpoint for the same resource:
 
 | Status | Code | When |
 | --- | --- | --- |
-| `400` | `VALIDATION_ERROR` | A declared `contest` or `problem` parameter is not an id. |
+| `400` | `VALIDATION_ERROR` | A declared `contest` or `problem` parameter is not an id, or the route declares a problem of a contest that has not started (answered whether or not the problem is in the contest; `contest:manage` reads it early). |
 | `401` | `TOKEN_MISSING`, `TOKEN_INVALID` | No token on a route that needs one, or a token that is invalid or stale. |
 | `403` | `PERMISSION_DENIED` | The caller lacks `permission`, or is not a participant of a public contest on a `participant` route. |
 | `404` | `NOT_FOUND` | The caller cannot read the contest or problem, it does not exist, the problem is not in the contest, or the contest has another `contest_type`. |

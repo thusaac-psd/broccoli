@@ -6,7 +6,8 @@
 //! Every answer matches the core route for the same resource: 401 without a
 //! (fresh) token, 403 for a missing permission, 404 for a contest or problem
 //! the caller cannot read (the visibility kernel decides), 400 for a path
-//! parameter that is not an id.
+//! parameter that is not an id or for a problem of a contest that has not
+//! started.
 
 use std::collections::HashMap;
 
@@ -17,7 +18,7 @@ use crate::error::AppError;
 use crate::extractors::auth::AuthUser;
 use crate::state::AppState;
 use crate::utils::contest::{
-    contest_phase, find_contest, is_contest_participant, participant_gate,
+    contest_phase, find_contest, is_contest_participant, participant_gate, require_contest_started,
 };
 use crate::visibility::{Action, ProblemScope, Resource, Subject, VisibilityKernel};
 
@@ -95,6 +96,13 @@ async fn resolve_contest(
     let decisions = kernel.decide_batch(Action::Read, &resources).await?;
     if decisions[0].is_denied() {
         return Err(AppError::NotFound("Contest not found".into()));
+    }
+    // A contest's problems are its own only once it starts: before then a
+    // route that addresses one answers what the core problem routes answer
+    // (`require_problem_part_reachable`), whether or not the problem is in
+    // the contest, so it neither serves nor reveals one early.
+    if problem_id.is_some() {
+        require_contest_started(user, &contest, state.clock.now())?;
     }
     if decisions.get(1).is_some_and(|d| d.is_denied()) {
         return Err(AppError::NotFound("Contest problem not found".into()));

@@ -61,6 +61,11 @@ and calls `services::plugin_route_access::authorize` with the route's checked
   with the declared problem in one `decide_batch`. Registration comes from the
   same batch (`participates`), and `participant` routes apply
   `participant_gate`, the rule `require_contest_participant` uses.
+- A route that declares a problem of the contest applies
+  `require_contest_started` between the contest's decision and the problem's,
+  the sequence `handlers::problem::require_problem_part_reachable` gives every
+  core problem part route, so before the start both answer `400` whether or
+  not the problem is in the contest.
 
 `RouteAccess` is built from the manifest by `ServerRouteConfig::access`, which
 refuses every combination of keys the proxy cannot enforce, so a route either
