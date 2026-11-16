@@ -3526,6 +3526,11 @@ export interface components {
     };
     JudgeResultResponse: {
       compile_output?: string | null;
+      /**
+       * @description The platform's code for a system error (`apiError.<code>` in the
+       *     packs), shown with `error_message` to whoever sees diagnostics.
+       */
+      error_code?: string | null;
       error_message?: string | null;
       /** Format: date-time */
       judged_at?: string | null;

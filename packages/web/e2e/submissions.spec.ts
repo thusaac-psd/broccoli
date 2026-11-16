@@ -190,3 +190,19 @@ test('a judgement whose problem had no config issues shows no notice', async ({
   ).toBeVisible();
   await expect(page.getByText(JUDGED_WITH_ISSUES)).toHaveCount(0);
 });
+
+test('staff see a system error once, its cause in their language and the server message as detail', async ({
+  page,
+}) => {
+  await page.addInitScript(() =>
+    localStorage.setItem('broccoli-locale', 'zh-CN'),
+  );
+  await mockApi(page, 'admin');
+  await page.goto('/submissions/5');
+  await expect(page.getByText('系统消息', { exact: true })).toHaveCount(1);
+  await expect(page.getByText(/队列/).first()).toBeVisible();
+  await expect(page.getByText('服务器提供的详细信息')).toBeVisible();
+  await expect(
+    page.getByText('sandbox: cgroup memory controller unavailable'),
+  ).toBeVisible();
+});

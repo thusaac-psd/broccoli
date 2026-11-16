@@ -124,6 +124,10 @@ pub struct JudgeResultResponse {
     #[schema(example = 1024)]
     pub memory_used: Option<i32>,
     pub compile_output: Option<String>,
+    /// The platform's code for a system error (`apiError.<code>` in the
+    /// packs), shown with `error_message` to whoever sees diagnostics.
+    #[serde(default)]
+    pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub judged_at: Option<DateTime<Utc>>,
     pub test_case_results: Vec<TestCaseResultResponse>,

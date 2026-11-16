@@ -115,6 +115,7 @@ pub(super) async fn apply_filter_to_judgement_response(
                 time_used: response.time_used,
                 memory_used: response.memory_used,
                 compile_output: response.compile_output.clone(),
+                error_code: response.error_code.clone(),
                 error_message: response.error_message.clone(),
                 judged_at: response.finalized_at,
                 test_case_results: response.test_case_results.clone(),
@@ -171,12 +172,12 @@ pub(super) async fn apply_filter_to_judgement_response(
     // directly as JSON, reading them with `Value` indexing rather than
     // through a struct. If you're tempted to "simplify" this back into a
     // typed round trip, don't - a masked leaf would crash it.
-    // The `obj.insert(...)` calls below assume the eight
+    // The `obj.insert(...)` calls below assume the nine
     // leaves named here are the WHOLE of `JudgeResultResponse` - i.e. that
     // splicing them one by one out of `masked_result` is equivalent to
     // splicing the whole `result` object. That is true today, but it is a
     // whitelist, not a projection: if `JudgeResultResponse` ever grows a
-    // ninth field, this splice silently keeps shipping the field from the
+    // tenth field, this splice silently keeps shipping the field from the
     // UNMASKED `response` serialization below (`obj` already has it, and
     // nothing here overwrites it) even if a future plugin's `FieldMask`
     // targets it. That is a leak, not a crash, so nothing here would fail
@@ -229,6 +230,7 @@ pub(super) async fn apply_filter_to_judgement_response(
             "error_message".into(),
             masked_result["error_message"].clone(),
         );
+        obj.insert("error_code".into(), masked_result["error_code"].clone());
         obj.insert("finalized_at".into(), masked_result["judged_at"].clone());
         obj.insert(
             "test_case_pagination".into(),
@@ -256,7 +258,7 @@ pub(super) async fn apply_filter_to_judgement_response(
 /// field is ever added to (or removed from) `JudgeResultResponse` without
 /// this pattern being updated to match, `rustc` rejects the mismatch with
 /// "pattern does not mention field `<name>`" (E0027) rather than letting the
-/// splice above silently keep whitelisting only the original eight leaves.
+/// splice above silently keep whitelisting only the nine leaves it names.
 /// Keep this pattern in exact 1:1 correspondence with the `obj.insert(...)`
 /// calls in both branches of `apply_filter_to_judgement_response` - when you
 /// add a field here, add the matching `obj.insert` (both the `is_null()` and
@@ -269,6 +271,7 @@ fn _assert_judge_result_response_fields_are_exhaustively_spliced(r: JudgeResultR
         time_used: _,
         memory_used: _,
         compile_output: _,
+        error_code: _,
         error_message: _,
         judged_at: _,
         test_case_results: _,

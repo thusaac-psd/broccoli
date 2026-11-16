@@ -272,6 +272,7 @@ const SYSTEM_ERROR_DETAIL = {
     ...SUBMISSION_DETAIL.result,
     verdict: 'SystemError',
     score: 0,
+    error_code: 'OPERATION_LOST',
     error_message: 'sandbox: cgroup memory controller unavailable',
   },
 };

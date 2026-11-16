@@ -493,6 +493,7 @@ pub(super) async fn build_submission_response_with_cases(
                 time_used: None,
                 memory_used: None,
                 compile_output: None,
+                error_code: None,
                 error_message: None,
                 judged_at: None,
                 test_case_results,
@@ -511,6 +512,10 @@ pub(super) async fn build_submission_response_with_cases(
                 } else {
                     None
                 },
+                error_code: diagnostics.filter(
+                    system_error,
+                    sub.error_code.clone().filter(|_| show_compile_output),
+                ),
                 error_message: diagnostics.filter(
                     system_error,
                     sub.error_message.clone().filter(|_| show_compile_output),

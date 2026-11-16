@@ -1,4 +1,8 @@
-import { errorKind, useErrorMessage } from '@broccoli/web-sdk/api';
+import {
+  errorCodeKey,
+  errorKind,
+  useErrorMessage,
+} from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Slot } from '@broccoli/web-sdk/slot';
 import {
@@ -22,7 +26,7 @@ export function SubmissionResult({
   submission,
   isSubmitting,
 }: SubmissionResultProps) {
-  const { t } = useTranslation();
+  const { t, lookup } = useTranslation();
 
   // No submission yet - prompt
   if (!submission && !isSubmitting) {
@@ -96,18 +100,30 @@ export function SubmissionResult({
         </div>
       )}
 
-      {/* System error: the operator's diagnostics, or for everyone else a
-          generic explanation with the judgement id to quote to staff. */}
-      {isSystemError && result?.error_message && (
-        <div className="mb-4 text-sm text-destructive space-y-1">
-          <div className="font-medium">{t('result.systemMessage')}</div>
-          <TextPreview
-            label={t('result.systemMessage')}
-            text={result.error_message}
-          />
+      {/* System error: for whoever sees diagnostics, its cause in the UI
+          language (by its code) with the server's own words as detail; for
+          everyone else a generic explanation with the judgement id to quote
+          to staff. */}
+      {isSystemError && (result?.error_code || result?.error_message) && (
+        <div className="mb-4 space-y-2 text-sm">
+          <div className="font-medium text-destructive">
+            {t('result.systemMessage')}
+          </div>
+          <p className="text-destructive">
+            {(result.error_code && lookup(errorCodeKey(result.error_code))) ||
+              t('result.systemErrorGeneric', {
+                reference: result.judgement_id ?? submission.id,
+              })}
+          </p>
+          {result.error_message && (
+            <TextPreview
+              label={t('result.systemDetail')}
+              text={result.error_message}
+            />
+          )}
         </div>
       )}
-      {isSystemError && !result?.error_message && (
+      {isSystemError && !result?.error_code && !result?.error_message && (
         <div className="mb-4 text-sm text-destructive">
           {t('result.systemErrorGeneric', {
             reference: result?.judgement_id ?? submission.id,
