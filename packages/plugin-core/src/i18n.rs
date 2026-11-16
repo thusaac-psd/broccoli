@@ -26,18 +26,44 @@ pub type I18nData = HashMap<String, TranslationMap>;
 
 /// The kinds of identifier a plugin registers and names in its pack
 /// (`identifier.<kind>.<id>`); the host names the other kinds itself.
-const PLUGIN_IDENTIFIER_KINDS: [&str; 3] = ["contestType", "problemType", "checker"];
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IdentifierKind {
+    ContestType,
+    ProblemType,
+    Checker,
+}
 
-/// Whether `key` in `plugin_id`'s pack names what its manifest declares (the
-/// key shapes `i18n/labels.ts` in the web SDK reads): the plugin's own name,
-/// description and config text, and the identifiers it registers.
+impl IdentifierKind {
+    const ALL: [IdentifierKind; 3] = [Self::ContestType, Self::ProblemType, Self::Checker];
+
+    /// The kind as its keys name it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ContestType => "contestType",
+            Self::ProblemType => "problemType",
+            Self::Checker => "checker",
+        }
+    }
+}
+
+/// The identifier `key` names, when it is the name of an identifier a
+/// plugin registers.
+fn plugin_identifier(key: &str) -> Option<(IdentifierKind, &str)> {
+    let (kind, id) = key.strip_prefix("identifier.")?.split_once('.')?;
+    IdentifierKind::ALL
+        .into_iter()
+        .find(|k| k.as_str() == kind)
+        .map(|kind| (kind, id))
+}
+
+/// Whether `key` in `plugin_id`'s pack is its manifest text (the key shapes
+/// `i18n/labels.ts` in the web SDK reads): the plugin's own name,
+/// description and config text, which the admin pages show for a plugin
+/// whether it runs or not.
 fn is_manifest_text(plugin_id: &str, key: &str) -> bool {
-    key.strip_prefix("identifier.")
-        .and_then(|rest| rest.split_once('.'))
-        .is_some_and(|(kind, _)| PLUGIN_IDENTIFIER_KINDS.contains(&kind))
-        || [("plugin.", plugin_id), ("config.", plugin_id)]
-            .iter()
-            .any(|(kind, id)| under(key.strip_prefix(kind), id))
+    [("plugin.", plugin_id), ("config.", plugin_id)]
+        .iter()
+        .any(|(kind, id)| under(key.strip_prefix(kind), id))
 }
 
 /// Whether `key` (with its prefix stripped) is `id` followed by a `.`.
@@ -46,25 +72,31 @@ fn under(key: Option<&str>, id: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('.'))
 }
 
-/// The keys of `plugin_id`'s pack that it may not provide, sorted. A plugin
-/// speaks only for itself: its keys are its own (`<plugin_id>.…`) or its
-/// manifest text (`plugin.<id>.…`, `config.<id>.…` and the names of the
-/// identifiers it registers), so it can never reword a host string
-/// or another plugin's. A language pack carries the host's strings, so every
-/// key is its own.
+/// The keys of `plugin_id`'s pack for `locale` that it may not provide,
+/// sorted. A plugin speaks only for itself: its keys are its own
+/// (`<plugin_id>.…`), its manifest text (`plugin.<id>.…`, `config.<id>.…`)
+/// or the name of an identifier (`identifier.<kind>.…`, served only while it
+/// registers that identifier, see [`served_translations`]), so it can never
+/// reword a host string or another plugin's. A language pack's file for its
+/// own locale carries the host's text, so every key of it is its own.
 pub fn foreign_keys<'a>(
     plugin_id: &str,
     manifest: &crate::manifest::PluginManifest,
+    locale: &str,
     map: &'a TranslationMap,
 ) -> Vec<&'a str> {
-    if manifest.is_language_pack() {
+    if manifest.host_locale() == Some(locale) {
         return Vec::new();
     }
     let mut foreign: Vec<&str> = map
         .0
         .keys()
         .map(String::as_str)
-        .filter(|key| !under(Some(key), plugin_id) && !is_manifest_text(plugin_id, key))
+        .filter(|key| {
+            !under(Some(key), plugin_id)
+                && !is_manifest_text(plugin_id, key)
+                && plugin_identifier(key).is_none()
+        })
         .collect();
     foreign.sort_unstable();
     foreign
@@ -74,38 +106,92 @@ pub fn foreign_keys<'a>(
 pub struct InstalledPacks<'a> {
     pub plugin_id: &'a str,
     pub loaded: bool,
+    /// The locale whose host text it provides, as a language pack.
+    pub host_locale: Option<&'a str>,
     pub packs: &'a [(String, TranslationMap)],
 }
 
-/// The translations the host serves: every loaded plugin's packs, and the
-/// manifest text of the plugins installed but not loaded (disabled, or failed
-/// to load), so the UI names a plugin the same way whether it runs or not. A
-/// plugin that is not loaded adds no locale and overrides no loaded key.
+/// Which plugin each registered identifier resolves to.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct IdentifierOwners(HashMap<(IdentifierKind, String), String>);
+
+impl IdentifierOwners {
+    /// Record that identifier `id` of `kind` resolves to `plugin_id`.
+    pub fn insert(&mut self, kind: IdentifierKind, id: &str, plugin_id: &str) {
+        self.0.insert((kind, id.to_string()), plugin_id.to_string());
+    }
+
+    fn owns(&self, plugin_id: &str, (kind, id): (IdentifierKind, &str)) -> bool {
+        self.0
+            .get(&(kind, id.to_string()))
+            .is_some_and(|owner| owner == plugin_id)
+    }
+}
+
+/// The translations the host serves, in every locale a loaded plugin
+/// provides:
 ///
-/// Plugins are merged in id order and a key two plugins provide is the first
-/// one's, so every replica serves the same text whatever order it loaded its
-/// plugins in. Only language packs and identifier names can overlap: every
-/// other key is under its plugin's id ([`foreign_keys`]).
-pub fn served_translations<'a>(plugins: impl IntoIterator<Item = InstalledPacks<'a>>) -> I18nData {
-    let mut plugins: Vec<InstalledPacks<'a>> = plugins.into_iter().collect();
-    plugins.sort_by_key(|plugin| plugin.plugin_id);
+/// - a locale's host text is the language pack's that provides it. One
+///   enabled pack provides a locale (enabling a second is refused); should
+///   two loaded packs provide one anyway, neither does, so no pack ever
+///   wins a locale by how its id sorts;
+/// - every loaded plugin's own keys (`<plugin_id>.…`) and manifest text,
+///   over a pack's text for the same key: a plugin speaks for itself;
+/// - an identifier's name only from the plugin it resolves to (`owners`):
+///   a plugin never renames another's contest type, problem type or checker;
+/// - a plugin installed but not loaded (disabled, or failed to load) adds
+///   only its manifest text, which the admin pages show for it, to the
+///   locales the loaded plugins serve.
+pub fn served_translations<'a>(
+    plugins: impl IntoIterator<Item = InstalledPacks<'a>>,
+    owners: &IdentifierOwners,
+) -> I18nData {
+    let plugins: Vec<InstalledPacks<'a>> = plugins.into_iter().collect();
     let mut merged = I18nData::new();
+    let mut providers: HashMap<&str, Vec<&str>> = HashMap::new();
     for plugin in plugins.iter().filter(|plugin| plugin.loaded) {
-        for (lang, map) in plugin.packs {
-            let served = merged.entry(lang.clone()).or_default();
-            for (key, text) in &map.0 {
-                served.0.entry(key.clone()).or_insert_with(|| text.clone());
-            }
+        if let Some(locale) = plugin.host_locale {
+            providers.entry(locale).or_default().push(plugin.plugin_id);
+        }
+        for (lang, _) in plugin.packs {
+            merged.entry(lang.clone()).or_default();
         }
     }
-    for plugin in plugins.iter().filter(|plugin| !plugin.loaded) {
+    for (locale, packs) in &providers {
+        let [pack] = packs.as_slice() else {
+            tracing::error!(
+                locale,
+                packs = ?packs,
+                "Several enabled language packs provide this locale; serving the host text of none"
+            );
+            continue;
+        };
+        let Some(served) = merged.get_mut(*locale) else {
+            continue;
+        };
+        let texts = plugins
+            .iter()
+            .filter(|plugin| plugin.plugin_id == *pack)
+            .flat_map(|plugin| plugin.packs)
+            .filter(|(lang, _)| lang == locale)
+            .flat_map(|(_, map)| &map.0);
+        served.0.extend(texts.map(|(k, v)| (k.clone(), v.clone())));
+    }
+    for plugin in &plugins {
+        let speaks = |key: &str| {
+            is_manifest_text(plugin.plugin_id, key)
+                || (plugin.loaded
+                    && (under(Some(key), plugin.plugin_id)
+                        || plugin_identifier(key)
+                            .is_some_and(|identifier| owners.owns(plugin.plugin_id, identifier))))
+        };
         for (lang, map) in plugin.packs {
             let Some(served) = merged.get_mut(lang) else {
                 continue;
             };
             for (key, text) in &map.0 {
-                if is_manifest_text(plugin.plugin_id, key) {
-                    served.0.entry(key.clone()).or_insert_with(|| text.clone());
+                if speaks(key) {
+                    served.0.insert(key.clone(), text.clone());
                 }
             }
         }
@@ -147,7 +233,10 @@ impl I18nRegistry {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{InstalledPacks, TranslationMap, foreign_keys, served_translations};
+    use super::{
+        IdentifierKind, IdentifierOwners, InstalledPacks, TranslationMap, foreign_keys,
+        served_translations,
+    };
 
     fn pack(lang: &str, entries: &[(&str, &str)]) -> (String, TranslationMap) {
         (
@@ -161,8 +250,32 @@ mod tests {
         )
     }
 
+    fn loaded<'a>(plugin_id: &'a str, packs: &'a [(String, TranslationMap)]) -> InstalledPacks<'a> {
+        InstalledPacks {
+            plugin_id,
+            loaded: true,
+            host_locale: None,
+            packs,
+        }
+    }
+
+    fn language_pack<'a>(
+        plugin_id: &'a str,
+        locale: &'a str,
+        packs: &'a [(String, TranslationMap)],
+    ) -> InstalledPacks<'a> {
+        InstalledPacks {
+            host_locale: Some(locale),
+            ..loaded(plugin_id, packs)
+        }
+    }
+
+    fn manifest(source: &str) -> crate::manifest::PluginManifest {
+        toml::from_str(source).unwrap()
+    }
+
     #[test]
-    fn a_plugin_that_is_not_loaded_keeps_its_manifest_text_in_every_served_locale() {
+    fn a_plugin_that_is_not_loaded_serves_only_its_manifest_text() {
         let host = [pack("zh-CN", &[("sidebar.plugins", "插件")])];
         let disabled = [
             pack(
@@ -179,18 +292,20 @@ mod tests {
             ),
             pack("fr", &[("plugin.ioi.name", "IOI")]),
         ];
-        let served = served_translations([
-            InstalledPacks {
-                plugin_id: "ioi",
-                loaded: false,
-                packs: &disabled,
-            },
-            InstalledPacks {
-                plugin_id: "broccoli-zh-cn",
-                loaded: true,
-                packs: &host,
-            },
-        ]);
+        let mut owners = IdentifierOwners::default();
+        owners.insert(IdentifierKind::ContestType, "ioi", "ioi");
+        let served = served_translations(
+            [
+                InstalledPacks {
+                    plugin_id: "ioi",
+                    loaded: false,
+                    host_locale: None,
+                    packs: &disabled,
+                },
+                language_pack("broccoli-zh-cn", "zh-CN", &host),
+            ],
+            &owners,
+        );
         assert_eq!(served.keys().collect::<Vec<_>>(), vec!["zh-CN"]);
         let expected = HashMap::from([
             ("sidebar.plugins".to_string(), "插件".to_string()),
@@ -203,31 +318,58 @@ mod tests {
                 "config.ioi.task.description".to_string(),
                 "子任务".to_string(),
             ),
-            ("identifier.contestType.ioi".to_string(), "IOI".to_string()),
         ]);
         assert_eq!(served["zh-CN"].0, expected);
     }
 
     #[test]
-    fn a_key_two_plugins_provide_is_the_same_whatever_order_they_load_in() {
-        let a = [pack("en", &[("identifier.checker.lines", "Lines (a)")])];
+    fn an_identifier_is_named_only_by_the_plugin_it_resolves_to() {
+        let a = [pack(
+            "en",
+            &[
+                ("identifier.checker.lines", "Lines (a)"),
+                ("identifier.contestType.icpc", "Renamed by a"),
+            ],
+        )];
         let b = [pack("en", &[("identifier.checker.lines", "Lines (b)")])];
-        let served = |order: [(&'static str, &[(String, TranslationMap)]); 2]| {
-            served_translations(order.map(|(plugin_id, packs)| InstalledPacks {
-                plugin_id,
-                loaded: true,
-                packs,
-            }))
-        };
-        let forward = served([("a", &a), ("b", &b)]);
-        let reverse = served([("b", &b), ("a", &a)]);
+        let mut owners = IdentifierOwners::default();
+        owners.insert(IdentifierKind::Checker, "lines", "b");
+        owners.insert(IdentifierKind::ContestType, "icpc", "icpc");
+        let forward = served_translations([loaded("a", &a), loaded("b", &b)], &owners);
+        let reverse = served_translations([loaded("b", &b), loaded("a", &a)], &owners);
         assert_eq!(forward["en"].0, reverse["en"].0);
-        assert_eq!(forward["en"].0["identifier.checker.lines"], "Lines (a)");
+        assert_eq!(
+            forward["en"].0,
+            HashMap::from([(
+                "identifier.checker.lines".to_string(),
+                "Lines (b)".to_string()
+            )])
+        );
+    }
+
+    /// One pack provides a locale's host text. Two loaded packs for one
+    /// locale serve the host text of neither, whatever their ids: a pack
+    /// that sorts first never takes the locale over.
+    #[test]
+    fn a_locale_two_language_packs_provide_serves_the_host_text_of_neither() {
+        let real = [pack("en", &[("nav.signIn", "Sign in")])];
+        let hijack = [pack("en", &[("nav.signIn", "HIJACKED SIGN IN")])];
+        let owners = IdentifierOwners::default();
+        let one = served_translations([language_pack("broccoli-en", "en", &real)], &owners);
+        assert_eq!(one["en"].0["nav.signIn"], "Sign in");
+        let two = served_translations(
+            [
+                language_pack("aaa-qa", "en", &hijack),
+                language_pack("broccoli-en", "en", &real),
+            ],
+            &owners,
+        );
+        assert!(two["en"].0.is_empty(), "{:?}", two["en"].0);
     }
 
     #[test]
     fn a_plugin_provides_only_its_own_keys() {
-        let manifest: crate::manifest::PluginManifest = toml::from_str(
+        let manifest = manifest(
             r#"
 name = "cooldown"
 version = "0.1.0"
@@ -239,8 +381,7 @@ entry = "index.js"
 [translations]
 en = "i18n/en.toml"
 "#,
-        )
-        .unwrap();
+        );
         let (_, map) = pack(
             "en",
             &[
@@ -259,7 +400,7 @@ en = "i18n/en.toml"
             ],
         );
         assert_eq!(
-            foreign_keys("cooldown", &manifest, &map),
+            foreign_keys("cooldown", &manifest, "en", &map),
             [
                 "apiError.COOLDOWN_ACTIVE",
                 "apiError.TOKEN_INVALID",
@@ -272,19 +413,41 @@ en = "i18n/en.toml"
         );
     }
 
+    /// A language pack's file for the locale it declares carries the host's
+    /// text; a plugin that only ships translations, without declaring a
+    /// locale, is confined to its own keys like any other.
     #[test]
-    fn a_language_pack_provides_the_hosts_strings() {
-        let manifest: crate::manifest::PluginManifest = toml::from_str(
+    fn only_a_declared_language_pack_provides_the_hosts_strings() {
+        let (_, map) = pack("ja", &[("sidebar.plugins", "プラグイン")]);
+        let declared = manifest(
             r#"
 name = "ja-language"
+version = "0.1.0"
+
+[language_pack]
+locale = "ja"
+
+[translations]
+ja = "locales/ja.toml"
+"#,
+        );
+        assert!(foreign_keys("broccoli-ja", &declared, "ja", &map).is_empty());
+        assert_eq!(
+            foreign_keys("broccoli-ja", &declared, "en", &map),
+            ["sidebar.plugins"]
+        );
+        let undeclared = manifest(
+            r#"
+name = "aaa-qa"
 version = "0.1.0"
 
 [translations]
 ja = "locales/ja.toml"
 "#,
-        )
-        .unwrap();
-        let (_, map) = pack("ja", &[("sidebar.plugins", "プラグイン")]);
-        assert!(foreign_keys("broccoli-ja", &manifest, &map).is_empty());
+        );
+        assert_eq!(
+            foreign_keys("aaa-qa", &undeclared, "ja", &map),
+            ["sidebar.plugins"]
+        );
     }
 }

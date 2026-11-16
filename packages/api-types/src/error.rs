@@ -101,6 +101,7 @@ host_codes! {
     RegistrationClosed = "REGISTRATION_CLOSED";
     UsernameTaken = "USERNAME_TAKEN";
     PluginExists = "PLUGIN_EXISTS";
+    LanguagePackTaken = "LANGUAGE_PACK_TAKEN";
     PluginNotReady = "PLUGIN_NOT_READY";
     PluginLoadFailed = "PLUGIN_LOAD_FAILED";
     PluginUploadDisabled = "PLUGIN_UPLOAD_DISABLED";

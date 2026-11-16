@@ -102,7 +102,7 @@ pub async fn activate_plugin(state: &AppState, plugin_id: &str) -> Result<(), Pl
         let manifest = plugin_manifest(state.plugins.as_ref(), plugin_id)?;
         register_plugin_hooks(state, plugin_id, &manifest).await;
         call_plugin_init(state.plugins.as_ref(), plugin_id).await?;
-        state.plugins.update_translations();
+        update_translations(state).await;
         Ok(())
     }
     .await;
@@ -111,6 +111,28 @@ pub async fn activate_plugin(state: &AppState, plugin_id: &str) -> Result<(), Pl
         fail_plugin(state, plugin_id, error).await;
     }
     result
+}
+
+/// Rebuild the translations this replica serves from its plugins and the
+/// identifiers each one resolves (see
+/// `plugin_core::i18n::served_translations`). Every change to what is loaded
+/// or registered here ends with it.
+pub async fn update_translations(state: &AppState) {
+    use crate::registry::Provided;
+    use plugin_core::i18n::{IdentifierKind, IdentifierOwners};
+
+    let mut owners = IdentifierOwners::default();
+    let registries = &state.registries;
+    for (key, handler) in registries.contest_type_registry.read().await.iter() {
+        owners.insert(IdentifierKind::ContestType, key, handler.plugin_id());
+    }
+    for (key, handler) in registries.evaluator_registry.read().await.iter() {
+        owners.insert(IdentifierKind::ProblemType, key, handler.plugin_id());
+    }
+    for (key, handler) in registries.checker_stage_registry.read().await.iter() {
+        owners.insert(IdentifierKind::Checker, key, handler.plugin_id());
+    }
+    state.plugins.update_translations(&owners);
 }
 
 /// Drop everything a half-activated plugin registered and mark it `Failed`.
@@ -361,7 +383,7 @@ pub(crate) async fn roll_back(state: &AppState, plugin_id: &str, previous: Previ
     }
     previous.registrations.restore(&state.registries).await;
     register_plugin_hooks(state, plugin_id, &manifest).await;
-    state.plugins.update_translations();
+    update_translations(state).await;
     tracing::warn!(
         plugin_id,
         "Kept the previously loaded version of the plugin"

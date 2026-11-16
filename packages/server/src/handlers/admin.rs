@@ -139,7 +139,7 @@ pub async fn get_plugin_details(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Plugin not found (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "Plugin already enabled (CONFLICT)", body = ErrorBody),
+        (status = 409, description = "Plugin already enabled (CONFLICT); or it is a language pack for a locale another enabled language pack provides (LANGUAGE_PACK_TAKEN)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -254,7 +254,7 @@ pub async fn disable_plugin(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Plugin not found (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "Plugin not enabled, or changed through another replica meanwhile (CONFLICT)", body = ErrorBody),
+        (status = 409, description = "Plugin not enabled, or changed through another replica meanwhile (CONFLICT); or it is a language pack for a locale another enabled language pack provides (LANGUAGE_PACK_TAKEN)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -510,7 +510,7 @@ pub async fn inspect_plugin_archive(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED, PLUGIN_UPLOAD_DISABLED)", body = ErrorBody),
         (status = 413, description = "Archive too large (PAYLOAD_TOO_LARGE)", body = ErrorBody),
-        (status = 409, description = "What the archive replaces (`replaces`) is no longer what is published: another change landed since the archive was inspected (CONFLICT); or `replaces` is `new` but a plugin with this id exists (PLUGIN_EXISTS)", body = ErrorBody),
+        (status = 409, description = "What the archive replaces (`replaces`) is no longer what is published: another change landed since the archive was inspected (CONFLICT); or `replaces` is `new` but a plugin with this id exists (PLUGIN_EXISTS); or the archive is a language pack for a locale another enabled language pack provides (LANGUAGE_PACK_TAKEN)", body = ErrorBody),
         (status = 422, description = "The plugin failed to load on the serving replica; nothing was published (PLUGIN_LOAD_FAILED)", body = ErrorBody),
     ),
     security(("jwt" = [])),
@@ -555,7 +555,7 @@ pub async fn upload_plugin(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Plugin not found (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "The plugin has no uploaded version, it changed through another replica meanwhile, or this replica would do something other than `expect` (CONFLICT)", body = ErrorBody),
+        (status = 409, description = "The plugin has no uploaded version, it changed through another replica meanwhile, or this replica would do something other than `expect` (CONFLICT); or the bundled copy is a language pack for a locale another enabled language pack provides (LANGUAGE_PACK_TAKEN)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]

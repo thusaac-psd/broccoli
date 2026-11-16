@@ -159,6 +159,9 @@ pub struct Governs {
     pub visibility: bool,
     /// The contest types its `init()` registered, sorted.
     pub contest_types: Vec<String>,
+    /// The locale whose host text it provides, as a language pack: one
+    /// enabled plugin at a time does ([`publish_language_pack`]).
+    pub host_locale: Option<String>,
 }
 
 /// A plugin that is enabled fleet-wide but not loaded on this replica.
@@ -708,7 +711,7 @@ async fn forget(state: &AppState, applied: &mut HashMap<String, Applied>, plugin
     if let Ok(mut registry) = state.plugins.get_registry().write() {
         registry.remove(plugin_id);
     }
-    state.plugins.update_translations();
+    plugin_utils::update_translations(state).await;
     applied.remove(plugin_id);
     state.plugin_lifecycle.forget(plugin_id);
     tracing::info!(plugin_id, "Plugin removed from the fleet; unloaded it here");
@@ -881,7 +884,7 @@ async fn deactivate(state: &AppState, plugin_id: &str) -> Result<(), PluginError
         );
     }
     state.plugin_sql.forget(plugin_id).await;
-    state.plugins.update_translations();
+    plugin_utils::update_translations(state).await;
     Ok(())
 }
 
@@ -929,13 +932,20 @@ async fn register_new_dirs(state: &AppState) -> Result<bool, DbErr> {
 
 /// What the plugin loaded here governs.
 async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
-    let visibility = state
+    let (visibility, host_locale) = state
         .plugins
         .get_registry()
         .read()
         .ok()
-        .and_then(|r| r.get(plugin_id).map(|e| declares_visibility(&e.manifest)))
-        .unwrap_or(false);
+        .and_then(|r| {
+            r.get(plugin_id).map(|e| {
+                (
+                    declares_visibility(&e.manifest),
+                    e.manifest.host_locale().map(str::to_string),
+                )
+            })
+        })
+        .unwrap_or_default();
     let mut contest_types: Vec<String> = state
         .registries
         .contest_type_registry
@@ -949,6 +959,7 @@ async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
     Governs {
         visibility,
         contest_types,
+        host_locale,
     }
 }
 
@@ -1028,7 +1039,7 @@ enum Change<'a> {
 /// record only ever describes a published version. `None` (a disable, or
 /// publishing a source that is not loaded) keeps the recorded ones.
 async fn publish(
-    state: &AppState,
+    db: &impl ConnectionTrait,
     plugin_id: &str,
     change: Change<'_>,
     loaded: Loaded<'_>,
@@ -1135,10 +1146,51 @@ async fn publish(
             ],
         ),
     };
-    match state.db.query_one_raw(statement).await? {
+    match db.query_one_raw(statement).await? {
         Some(row) => Ok(Some(row.try_get("", "generation")?)),
         None => Ok(None),
     }
+}
+
+/// [`publish`] `change` for a language pack that provides `locale`'s host
+/// text, unless another enabled plugin provides it: one enabled pack at a
+/// time provides a locale, so a second never takes it over. Under a lock on
+/// the locale, so two packs enabled at once cannot both pass the check.
+async fn publish_language_pack(
+    state: &AppState,
+    plugin_id: &str,
+    locale: &str,
+    change: Change<'_>,
+    loaded: Loaded<'_>,
+    source: &PluginSource,
+) -> Result<Option<i64>, ChangeError> {
+    use sea_orm::TransactionTrait;
+
+    let txn = state.db.begin().await.map_err(ChangeError::Db)?;
+    crate::utils::advisory_lock::lock_xact(&txn, &format!("language-pack:{locale}"))
+        .await
+        .map_err(ChangeError::Db)?;
+    let taken = txn
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT id FROM plugin \
+              WHERE id <> $1 AND is_enabled AND governs->>'host_locale' = $2 \
+              ORDER BY id LIMIT 1",
+            [plugin_id.into(), locale.into()],
+        ))
+        .await
+        .map_err(ChangeError::Db)?;
+    if let Some(row) = taken {
+        return Err(ChangeError::LanguagePackTaken {
+            locale: locale.to_string(),
+            by: row.try_get("", "id").map_err(ChangeError::Db)?,
+        });
+    }
+    let generation = publish(&txn, plugin_id, change, loaded, source)
+        .await
+        .map_err(ChangeError::Db)?;
+    txn.commit().await.map_err(ChangeError::Db)?;
+    Ok(generation)
 }
 
 /// What the serving replica loaded for a change it publishes.
@@ -1165,6 +1217,8 @@ enum ChangeError {
     Stale(String),
     /// An upload meant to add a new plugin, but a plugin with its id exists.
     AlreadyExists(String),
+    /// A language pack for a locale another enabled pack provides.
+    LanguagePackTaken { locale: String, by: String },
 }
 
 impl std::fmt::Display for ChangeError {
@@ -1175,6 +1229,9 @@ impl std::fmt::Display for ChangeError {
             ChangeError::NotEnabled(id) => write!(f, "Plugin '{id}' is not enabled"),
             ChangeError::Stale(id) => write!(f, "Plugin '{id}' changed on another server"),
             ChangeError::AlreadyExists(id) => write!(f, "Plugin '{id}' already exists"),
+            ChangeError::LanguagePackTaken { locale, by } => {
+                write!(f, "The language pack '{by}' already provides '{locale}'")
+            }
         }
     }
 }
@@ -1191,6 +1248,10 @@ impl From<ChangeError> for AppError {
                 "Plugin '{id}' was changed through another server meanwhile; refresh and try again"
             )),
             ChangeError::AlreadyExists(id) => AppError::PluginExists(id),
+            ChangeError::LanguagePackTaken { locale, by } => AppError::LanguagePackTaken {
+                locale,
+                plugin_id: by,
+            },
         }
     }
 }
@@ -1237,10 +1298,18 @@ async fn load_then_publish(
         fingerprint: fingerprint.as_ref(),
         governs: Some(&governs),
     };
-    let published = match publish(state, plugin_id, change, loaded, source).await {
+    let published = match &governs.host_locale {
+        Some(locale) => {
+            publish_language_pack(state, plugin_id, locale, change, loaded, source).await
+        }
+        None => publish(&state.db, plugin_id, change, loaded, source)
+            .await
+            .map_err(ChangeError::Db),
+    };
+    let published = match published {
         Ok(Some(generation)) => Ok(generation),
         Ok(None) => Err(refused(state, plugin_id, change).await),
-        Err(e) => Err(ChangeError::Db(e)),
+        Err(e) => Err(e),
     };
     let generation = match published {
         Ok(generation) => generation,
@@ -1406,7 +1475,7 @@ pub async fn disable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
     let result = with_applied(state, async |applied| {
         let source = published_source(state, id).await?;
         let Some(generation) = publish(
-            state,
+            &state.db,
             plugin_id,
             Change::Disable,
             Loaded::default(),
@@ -1592,7 +1661,7 @@ pub async fn remove_upload(
                     fingerprint: fingerprint.as_ref(),
                     governs: None,
                 };
-                let generation = publish(state, plugin_id, change, loaded, &PluginSource::Bundle)
+                let generation = publish(&state.db, plugin_id, change, loaded, &PluginSource::Bundle)
                 .await?
                 .ok_or_else(stale)?;
                 let desired = Desired {

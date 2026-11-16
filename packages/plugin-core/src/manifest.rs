@@ -137,6 +137,7 @@ mod tests {
             server: None,
             web: None,
             translations: HashMap::new(),
+            language_pack: None,
             config: HashMap::from([(
                 "settings".into(),
                 ConfigNamespace {
@@ -181,6 +182,7 @@ mod tests {
             server: None,
             web: None,
             translations: HashMap::new(),
+            language_pack: None,
             config: HashMap::from([(
                 "evil".into(),
                 ConfigNamespace {

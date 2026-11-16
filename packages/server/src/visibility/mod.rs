@@ -669,6 +669,7 @@ mod tests {
             }),
             web: None,
             translations: HashMap::new(),
+            language_pack: None,
             config: HashMap::new(),
         };
         let mut entry = PluginEntry::new(

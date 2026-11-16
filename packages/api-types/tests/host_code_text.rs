@@ -1,14 +1,11 @@
 //! Every host code reads in the user's language: each language pack under
-//! `plugins/` (a plugin whose manifest declares only translations) has an
+//! `plugins/` (a plugin whose manifest declares `[language_pack] locale`) has an
 //! `apiError.<CODE>` text for every [`HostCode`] that has its own text.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use broccoli_api_types::error::HostCode;
-
-/// Manifest tables that do not stop a plugin being a language pack.
-const PACK_TABLES: [&str; 2] = ["translations", "bundle"];
 
 /// Each language pack's locale and catalog file.
 fn language_packs(plugins: &Path) -> BTreeMap<String, PathBuf> {
@@ -19,20 +16,19 @@ fn language_packs(plugins: &Path) -> BTreeMap<String, PathBuf> {
             continue;
         };
         let manifest: toml::Table = text.parse().expect("plugin.toml parses");
-        let is_pack = manifest
-            .iter()
-            .filter(|(_, value)| value.is_table())
-            .all(|(table, _)| PACK_TABLES.contains(&table.as_str()));
-        let Some(translations) = manifest.get("translations").and_then(|t| t.as_table()) else {
+        let Some(locale) = manifest
+            .get("language_pack")
+            .and_then(|pack| pack.get("locale"))
+            .and_then(|locale| locale.as_str())
+        else {
             continue;
         };
-        if !is_pack {
-            continue;
-        }
-        for (locale, file) in translations {
-            let file = file.as_str().expect("catalog path is a string");
-            packs.insert(locale.clone(), dir.join(file));
-        }
+        let file = manifest
+            .get("translations")
+            .and_then(|t| t.get(locale))
+            .and_then(|file| file.as_str())
+            .expect("a language pack has a catalog for its locale");
+        packs.insert(locale.to_string(), dir.join(file));
     }
     packs
 }

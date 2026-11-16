@@ -80,6 +80,14 @@ impl PluginEntry {
     ) -> Result<Self, PluginError> {
         crate::config_schema::check_manifest(&manifest)
             .map_err(|e| PluginError::LoadFailed(format!("Plugin '{id}': {e}")))?;
+        if let Some(locale) = manifest.host_locale()
+            && !manifest.translations.contains_key(locale)
+        {
+            return Err(PluginError::LoadFailed(format!(
+                "Plugin '{id}' is a language pack for '{locale}' but declares no \
+                 translation file for it"
+            )));
+        }
         let mut router = Router::new();
 
         if let Some(server_config) = &manifest.server {
@@ -258,7 +266,7 @@ fn read_translations(
             let map = toml::from_str(&content).map_err(|e| {
                 PluginError::LoadFailed(format!("Invalid translation file syntax in '{path}': {e}"))
             })?;
-            let foreign = crate::i18n::foreign_keys(plugin_id, manifest, &map);
+            let foreign = crate::i18n::foreign_keys(plugin_id, manifest, lang, &map);
             if !foreign.is_empty() {
                 return Err(PluginError::LoadFailed(format!(
                     "Translation file '{path}' has keys outside plugin '{plugin_id}': {}. \

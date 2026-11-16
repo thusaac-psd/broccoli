@@ -1095,3 +1095,136 @@ async fn the_cli_publishes_a_new_plugin_a_new_version_and_over_a_bundled_copy() 
     assert_eq!(over_bundle.plugin_id, BUNDLED);
     assert_eq!(registered(&app, BUNDLED).0, "0.2.0");
 }
+
+/// A translations-only archive that defines `entries` in English, declaring
+/// `[language_pack] locale = "en"` when `pack` is set.
+fn translations_archive(id: &str, pack: bool, entries: &str) -> Vec<u8> {
+    let declaration = if pack {
+        "[language_pack]\nlocale = \"en\"\n\n"
+    } else {
+        ""
+    };
+    let manifest = format!(
+        "name = \"{id}\"\nversion = \"1.0.0\"\n\n{declaration}[translations]\nen = \"en.toml\"\n"
+    );
+    tar_gz(&[
+        (&format!("{id}/plugin.toml"), manifest.as_bytes()),
+        (&format!("{id}/en.toml"), entries.as_bytes()),
+    ])
+}
+
+fn served_en(app: &TestApp, key: &str) -> Option<String> {
+    let en = app
+        .state
+        .plugins
+        .get_i18n_registry()
+        .get_translations("en")?;
+    serde_json::to_value(en).unwrap()[key]
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Host text comes from the one enabled language pack that declares its
+/// locale. A translations-only upload that declares none is confined to
+/// its own keys, and a second pack for a locale another enabled pack
+/// provides is refused, whatever its id sorts as; it takes the locale only
+/// once the first is disabled.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_enabled_language_pack_provides_a_locales_host_text() {
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    let hijack = "'nav.signIn' = \"HIJACKED SIGN IN\"\n";
+
+    let res = a
+        .post_plugin_archive(
+            routes::ADMIN_PLUGIN_UPLOAD,
+            translations_archive("aaa-qa", false, hijack),
+            &[("replaces", "new")],
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 400, "{}", res.text);
+    assert!(res.text.contains("nav.signIn"), "{}", res.text);
+
+    upload(
+        &a,
+        &token,
+        translations_archive("zzz-en", true, "'nav.signIn' = \"Sign in\"\n"),
+    )
+    .await;
+    assert_eq!(served_en(&a, "nav.signIn").as_deref(), Some("Sign in"));
+
+    let res = a
+        .post_plugin_archive(
+            routes::ADMIN_PLUGIN_UPLOAD,
+            translations_archive("aaa-qa", true, hijack),
+            &[("replaces", "new")],
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 409, "{}", res.text);
+    assert_eq!(res.body["code"], "LANGUAGE_PACK_TAKEN", "{}", res.text);
+    assert_eq!(res.body["details"]["plugin_id"], "zzz-en");
+    assert!(row(&a, "aaa-qa").await.is_none(), "nothing was published");
+    assert_eq!(served_en(&a, "nav.signIn").as_deref(), Some("Sign in"));
+
+    let res = a
+        .post_with_token(&routes::admin_plugin_disable("zzz-en"), &json!({}), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    upload(&a, &token, translations_archive("aaa-qa", true, hijack)).await;
+    assert_eq!(
+        served_en(&a, "nav.signIn").as_deref(),
+        Some("HIJACKED SIGN IN")
+    );
+    let res = a
+        .post_with_token(&routes::admin_plugin_enable("zzz-en"), &json!({}), &token)
+        .await;
+    assert_eq!(res.status, 409, "{}", res.text);
+    assert_eq!(res.body["code"], "LANGUAGE_PACK_TAKEN", "{}", res.text);
+}
+
+/// A plugin names a contest type only while the type resolves to it: its
+/// name for a type another plugin provides is not served, and is once that
+/// plugin is gone and the type resolves to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_names_only_the_contest_types_it_provides() {
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    let provide = |plugin_id: &str| server::registry::ContestTypeHandlers {
+        plugin_id: plugin_id.into(),
+        submission_fn: "noop".into(),
+        code_run_fn: "noop".into(),
+        submission_admission: false,
+    };
+    a.state
+        .registries
+        .contest_type_registry
+        .write()
+        .await
+        .insert("fmt-x".into(), provide("fmt-plugin"));
+    let manifest = std::fs::read_to_string(fixture(BUNDLED).join("plugin.toml")).unwrap()
+        + "\n[translations]\nen = \"i18n/en.toml\"\n";
+    let wasm = std::fs::read(fixture(BUNDLED).join("server_plugin.wasm")).unwrap();
+    let bytes = tar_gz(&[
+        (&format!("{UPLOAD_ONLY}/plugin.toml"), manifest.as_bytes()),
+        (&format!("{UPLOAD_ONLY}/server_plugin.wasm"), &wasm),
+        (
+            &format!("{UPLOAD_ONLY}/i18n/en.toml"),
+            b"'identifier.contestType.fmt-x' = \"Renamed\"\n",
+        ),
+    ]);
+    upload(&a, &token, bytes).await;
+    assert_eq!(served_en(&a, "identifier.contestType.fmt-x"), None);
+
+    {
+        let mut types = a.state.registries.contest_type_registry.write().await;
+        types.insert("fmt-x".into(), provide(UPLOAD_ONLY));
+        types.release("fmt-plugin");
+    }
+    server::utils::plugin::update_translations(&a.state).await;
+    assert_eq!(
+        served_en(&a, "identifier.contestType.fmt-x").as_deref(),
+        Some("Renamed")
+    );
+}

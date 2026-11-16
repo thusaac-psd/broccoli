@@ -1,5 +1,8 @@
 name = 'en-language'
 version = '0.1.0'
 
+[language_pack]
+locale = "en"
+
 [translations]
 en = "locales/en.toml"

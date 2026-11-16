@@ -19,8 +19,21 @@ pub struct PluginManifest {
     #[serde(default)]
     pub translations: HashMap<String, String>,
 
+    /// Set on a language pack: the plugin that provides the host's own text
+    /// in one locale.
+    pub language_pack: Option<LanguagePack>,
+
     #[serde(default)]
     pub config: HashMap<String, ConfigNamespace>,
+}
+
+/// What a language pack declares: `[language_pack] locale = "<locale>"`. Its
+/// translation file for that locale holds the host's text in the locale;
+/// one enabled plugin at a time provides a locale's host text.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LanguagePack {
+    pub locale: String,
 }
 
 impl PluginManifest {
@@ -36,14 +49,11 @@ impl PluginManifest {
         !self.translations.is_empty()
     }
 
-    /// Whether this is a language pack: a plugin that declares only
-    /// translations. Language packs carry the host's own strings, so their
-    /// keys are not confined to the plugin's id.
-    pub fn is_language_pack(&self) -> bool {
-        self.has_translations()
-            && self.server.is_none()
-            && self.web.is_none()
-            && self.config.is_empty()
+    /// The locale whose host text this plugin provides, when it is a
+    /// language pack ([`LanguagePack`]). Only its translation file for that
+    /// locale may carry keys outside the plugin's own.
+    pub fn host_locale(&self) -> Option<&str> {
+        self.language_pack.as_ref().map(|pack| pack.locale.as_str())
     }
 
     /// Paths, relative to the plugin directory, of the files and

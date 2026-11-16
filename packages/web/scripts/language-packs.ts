@@ -1,6 +1,7 @@
 // Embeds the language packs shipped in this repository into the web build,
 // as the catalogs the UI has before (and without) the server. A language
-// pack is a plugin whose manifest declares only translations; the server
+// pack is a plugin whose manifest declares `[language_pack] locale`: its
+// translation file for that locale is the host's text in it. The server
 // serves the same packs, and whatever it serves overrides these.
 //
 // The output, `src/lib/i18n/packs.gen.ts`, is build output: it is generated
@@ -20,36 +21,39 @@ const OUTPUT = join(WEB_ROOT, 'src/lib/i18n/packs.gen.ts');
 /** The locale every other one falls back to, and the source of the key type. */
 export const SOURCE_LOCALE = 'en';
 
-/** Manifest tables that do not stop a plugin being a language pack. */
-const PACK_TABLES = new Set(['translations', 'bundle']);
-
 type Catalog = Record<string, string>;
+
+interface Manifest {
+  language_pack?: { locale?: unknown };
+  translations?: Catalog;
+}
 
 /** The language packs under `plugins/`: each locale and its catalog file. */
 export function languagePackFiles(): Map<string, string> {
   const files = new Map<string, string>();
   for (const name of readdirSync(PLUGINS_DIR).sort()) {
     const dir = join(PLUGINS_DIR, name);
-    let manifest: Record<string, unknown>;
+    let manifest: Manifest;
     try {
       manifest = parse(readFileSync(join(dir, 'plugin.toml'), 'utf8'));
     } catch {
       continue;
     }
-    const tables = Object.entries(manifest).filter(
-      ([, value]) => typeof value === 'object' && value !== null,
-    );
-    if (!tables.every(([table]) => PACK_TABLES.has(table))) continue;
-    const translations = (manifest.translations ?? {}) as Catalog;
-    for (const [locale, file] of Object.entries(translations)) {
-      if (files.has(locale)) {
-        throw new Error(`two language packs translate ${locale}: ${name}`);
-      }
-      files.set(locale, join(dir, file));
+    const locale = manifest.language_pack?.locale;
+    if (typeof locale !== 'string') continue;
+    const file = manifest.translations?.[locale];
+    if (!file) {
+      throw new Error(
+        `language pack ${name} has no translation file for ${locale}`,
+      );
     }
+    if (files.has(locale)) {
+      throw new Error(`two language packs provide ${locale}: ${name}`);
+    }
+    files.set(locale, join(dir, file));
   }
   if (!files.has(SOURCE_LOCALE)) {
-    throw new Error(`no language pack translates ${SOURCE_LOCALE}`);
+    throw new Error(`no language pack provides ${SOURCE_LOCALE}`);
   }
   return files;
 }
