@@ -10,7 +10,7 @@
 
 #![allow(dead_code)]
 
-use common::worker::{Task, TaskResult};
+use common::worker::{Executor, Task, TaskResult};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,6 +28,7 @@ use worker::models::operation::sandbox::{
 };
 use worker::models::operation::task_cache::NoopTaskCacheStore;
 use worker::models::worker::Worker;
+use worker::toolchain_fingerprint::ToolchainFingerprint;
 
 /// A sandbox backend the shared cases run against.
 pub trait Backend {
@@ -240,14 +241,11 @@ async fn run_task<B: Backend>(
     operation: OperationTask,
 ) -> (TaskResult, OperationResult) {
     let (metrics, _registry) = common::observability::init_metrics("broccoli-worker-test");
-    let worker = Worker::with_no_executors();
-    worker.register_executor(
-        "operation",
-        Arc::new(OperationTaskExecutor::new_with_sandbox_manager(
-            B::manager(),
-            metrics,
-        )),
-    );
+    let executor: Arc<dyn Executor> = Arc::new(OperationTaskExecutor::new_with_sandbox_manager(
+        B::manager(),
+        metrics,
+    ));
+    let worker = Worker::new([("operation".to_string(), executor)]);
     let task = Task {
         id: task_id.to_string(),
         task_type: "operation".to_string(),
@@ -277,7 +275,7 @@ fn handler<B: Backend>(tools_dir: Option<PathBuf>) -> OperationHandler {
         B::manager(),
         Box::new(UnavailableFileCacher::new("no blobs needed")),
         Box::new(NoopTaskCacheStore),
-        String::new(),
+        ToolchainFingerprint::Known(String::new()),
         metrics,
     )
     .with_tools_dir(tools_dir)
@@ -335,7 +333,7 @@ pub async fn blob_input_fails_when_blob_storage_is_unavailable<B: Backend>() {
         B::manager(),
         Box::new(UnavailableFileCacher::new("test storage unavailable")),
         Box::new(NoopTaskCacheStore),
-        String::new(),
+        ToolchainFingerprint::Known(String::new()),
         metrics,
     );
 

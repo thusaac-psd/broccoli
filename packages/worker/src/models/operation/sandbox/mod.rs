@@ -1,5 +1,3 @@
-#![allow(unused_imports)]
-
 mod capture;
 pub mod error;
 pub mod isolate;
@@ -13,6 +11,8 @@ pub use broccoli_types::types::{
 use error::SandboxError;
 use std::path::PathBuf;
 
+// `async_trait` marks each method `#[must_use]` on top of its boxed future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait SandboxManager {
     async fn create_sandbox(&self, id: Option<&str>) -> Result<PathBuf, SandboxError>;

@@ -69,6 +69,53 @@ mod user_deletion {
     use super::*;
 
     #[tokio::test]
+    async fn a_started_contest_blocks_deletion_even_once_hidden() {
+        use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+        use server::entity::{contest, contest_user};
+
+        let app = TestApp::spawn().await;
+        let admin_token = app
+            .create_user_with_role("admin_delete_hidden", "securepass", "admin")
+            .await;
+        let victim_token = app
+            .create_authenticated_user("victim_delete_hidden", "securepass")
+            .await;
+        let victim_id = app.get_with_token(routes::ME, &victim_token).await.id();
+        let contest_id = app
+            .create_contest(&admin_token, "Ran then hidden", true, false)
+            .await;
+        contest_user::ActiveModel {
+            contest_id: Set(contest_id),
+            user_id: Set(victim_id),
+            registered_at: Set(chrono::Utc::now()),
+        }
+        .insert(&app.db)
+        .await
+        .unwrap();
+        let mut hidden: contest::ActiveModel = contest::Entity::find_by_id(contest_id)
+            .one(&app.db)
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+        hidden.activate_time = Set(None);
+        hidden.update(&app.db).await.unwrap();
+
+        let res = app
+            .delete_with_token(&routes::user(victim_id), &admin_token)
+            .await;
+        assert_eq!(res.status, 409, "{}", res.text);
+        assert!(
+            contest_user::Entity::find_by_id((contest_id, victim_id))
+                .one(&app.db)
+                .await
+                .unwrap()
+                .is_some(),
+            "the registration standings are built from survives"
+        );
+    }
+
+    #[tokio::test]
     async fn admin_can_soft_delete_user_and_hide_from_list() {
         let app = TestApp::spawn().await;
         let admin_token = app

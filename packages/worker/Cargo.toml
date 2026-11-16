@@ -39,8 +39,15 @@ hostname = "0.4"
 local-ip-address = "0.6"
 libc = "0.2"
 
+[features]
+# Test doubles (no-op and unavailable file cachers, executors built around a
+# given sandbox manager) for this crate's and the server's tests.
+test-support = []
+
 [dev-dependencies]
 common = { workspace = true, features = ["testing", "test-util"] }
+tokio = { workspace = true, features = ["test-util"] }
+worker = { path = ".", features = ["test-support"] }
 hdrhistogram = { workspace = true }
 serial_test = "3"
 tempfile = "3"

@@ -40,10 +40,33 @@ impl Registry {
         Ok(())
     }
 
+    /// Register `handler` to evaluate test cases of `evaluator_type`, one
+    /// call per case. The handler starts and awaits its own operations.
     pub fn register_evaluator(&self, evaluator_type: &str, handler: &str) -> Result<(), SdkError> {
         let input = serde_json::json!({
             "type": evaluator_type,
             "handler": handler,
+        });
+        unsafe { crate::host::raw::register_evaluator(serde_json::to_string(&input)?)? };
+        Ok(())
+    }
+
+    /// Register a staged evaluator for `evaluator_type`. The host calls
+    /// `prepare_handler` with a `BuildEvalOpsInput` and expects a
+    /// `PreparedEvaluateCase`, runs its operations itself (holding no plugin
+    /// instance while they run), then calls `interpret_handler` with an
+    /// `EvaluateOperationResultsInput` covering several finished cases and
+    /// expects one `TestCaseVerdict` per case.
+    pub fn register_staged_evaluator(
+        &self,
+        evaluator_type: &str,
+        prepare_handler: &str,
+        interpret_handler: &str,
+    ) -> Result<(), SdkError> {
+        let input = serde_json::json!({
+            "type": evaluator_type,
+            "prepare_handler": prepare_handler,
+            "interpret_handler": interpret_handler,
         });
         unsafe { crate::host::raw::register_evaluator(serde_json::to_string(&input)?)? };
         Ok(())
@@ -113,6 +136,15 @@ impl Registry {
         &self,
         _evaluator_type: &str,
         _handler: &str,
+    ) -> Result<(), SdkError> {
+        Ok(())
+    }
+
+    pub fn register_staged_evaluator(
+        &self,
+        _evaluator_type: &str,
+        _prepare_handler: &str,
+        _interpret_handler: &str,
     ) -> Result<(), SdkError> {
         Ok(())
     }

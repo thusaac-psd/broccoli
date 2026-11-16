@@ -30,7 +30,9 @@ use std::time::{Duration, Instant};
 
 use plugin_core::error::PluginError;
 use plugin_core::registry::PluginStatus;
-use sea_orm::{ConnectionTrait, DbBackend, DbErr, EntityTrait, Set, Statement};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, QueryFilter, Set, Statement,
+};
 
 use crate::entity::plugin as plugin_entity;
 use crate::error::AppError;
@@ -61,17 +63,21 @@ pub struct PluginLifecycle {
     /// The desired `is_enabled` per plugin as of the last apply. Read on hot
     /// paths (visibility, health), so it is a plain lock over a small map.
     desired: RwLock<HashMap<String, bool>>,
-    /// The last report written to this replica's `plugin_replica` row, and
-    /// when, so an unchanged report is only re-touched every
-    /// [`plugin_fleet::TOUCH_INTERVAL`].
-    reported: std::sync::Mutex<Option<(ReplicaReport, Vec<String>, Instant)>>,
-    /// Plugins still serving a previous version because the latest failed to
-    /// load here, with that error (for readiness).
-    outdated: RwLock<HashMap<String, String>>,
+    /// This replica's latest report (also read by [`not_ready`]), and when it
+    /// was last written to the `plugin_replica` row, so an unchanged report
+    /// is only re-touched every [`plugin_fleet::TOUCH_INTERVAL`].
+    reported: std::sync::Mutex<Option<Reported>>,
     /// The recorded [`Governs`] per plugin, as of the last reconcile.
     governs: RwLock<HashMap<String, Governs>>,
     /// Set by [`stop`] at shutdown: no further report writes.
     stopped: std::sync::atomic::AtomicBool,
+}
+
+struct Reported {
+    report: ReplicaReport,
+    contest_types: Vec<String>,
+    /// `None` until a write of an equal report succeeds.
+    written_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -215,13 +221,17 @@ pub fn not_ready(state: &AppState) -> Vec<PluginNotReady> {
             reason: "plugin registry lock poisoned".into(),
         }];
     };
+    let outdated: HashMap<String, String> = match state.plugin_lifecycle.reported.lock() {
+        Ok(reported) => reported
+            .iter()
+            .flat_map(|r| &r.report)
+            .filter(|(_, p)| p.status == ReplicaPluginStatus::Outdated)
+            .map(|(id, p)| (id.clone(), p.error.clone().unwrap_or_default()))
+            .collect(),
+        Err(_) => HashMap::new(),
+    };
     for id in state.plugin_lifecycle.desired_enabled_ids() {
-        let outdated = state
-            .plugin_lifecycle
-            .outdated
-            .read()
-            .ok()
-            .and_then(|o| o.get(&id).cloned());
+        let outdated = outdated.get(&id).cloned();
         let reason = match registry.get(&id).map(|e| &e.status) {
             Some(PluginStatus::Loaded) => match outdated {
                 Some(error) => format!("still on the previous version: {error}"),
@@ -272,12 +282,6 @@ async fn with_applied<T>(
 ) -> T {
     let mut applied = state.plugin_lifecycle.applied.lock().await;
     let out = f(&mut applied).await;
-    if let Ok(mut outdated) = state.plugin_lifecycle.outdated.write() {
-        *outdated = applied
-            .iter()
-            .filter_map(|(id, a)| Some((id.clone(), a.kept_previous.clone()?)))
-            .collect();
-    }
     write_report(state, &applied).await;
     out
 }
@@ -336,37 +340,55 @@ fn build_report(
         .collect()
 }
 
-/// Write the report if it changed, or touch it if the last write is getting
-/// old. Best-effort: a failed write only makes the admin view stale.
+/// Record the report in memory, and write it if it changed or touch it if
+/// the last write is getting old. Best-effort: a failed write only makes the
+/// admin view stale.
 async fn write_report(state: &AppState, applied: &HashMap<String, Applied>) {
-    if state
-        .plugin_lifecycle
-        .stopped
-        .load(std::sync::atomic::Ordering::SeqCst)
-    {
-        return;
-    }
     let now = Instant::now();
     let report = build_report(state, applied, now);
     let contest_types = crate::dispatcher::local_contest_types(state).await;
-    let due = match state.plugin_lifecycle.reported.lock() {
-        Ok(last) => !matches!(&*last, Some((r, types, at))
-            if same_report(r, &report)
-                && *types == contest_types
-                && now.duration_since(*at) < plugin_fleet::TOUCH_INTERVAL),
-        Err(_) => true,
-    };
-    if !due {
+    if !record_report(state, &report, &contest_types, now) {
         return;
     }
     match plugin_fleet::report(&state.db, &state.config.server.id, &report, &contest_types).await {
         Ok(()) => {
-            if let Ok(mut last) = state.plugin_lifecycle.reported.lock() {
-                *last = Some((report, contest_types, now));
+            if let Ok(mut reported) = state.plugin_lifecycle.reported.lock()
+                && let Some(last) = reported.as_mut()
+                && same_report(&last.report, &report)
+            {
+                last.written_at = Some(now);
             }
         }
         Err(e) => tracing::warn!(error = %e, "Failed to write this replica's plugin report"),
     }
+}
+
+/// Keep `report` as this replica's latest, and say whether it is due to be
+/// written: it changed, its last write is getting old, or no write of it has
+/// succeeded yet. Never due once [`stop`] ran.
+fn record_report(
+    state: &AppState,
+    report: &ReplicaReport,
+    contest_types: &[String],
+    now: Instant,
+) -> bool {
+    let Ok(mut reported) = state.plugin_lifecycle.reported.lock() else {
+        return false;
+    };
+    let unchanged_at = reported
+        .as_ref()
+        .filter(|last| same_report(&last.report, report) && last.contest_types == contest_types)
+        .and_then(|last| last.written_at);
+    *reported = Some(Reported {
+        report: report.clone(),
+        contest_types: contest_types.to_vec(),
+        written_at: unchanged_at,
+    });
+    unchanged_at.is_none_or(|at| now.duration_since(at) >= plugin_fleet::TOUCH_INTERVAL)
+        && !state
+            .plugin_lifecycle
+            .stopped
+            .load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Reports are equal for write purposes when they differ at most in how long
@@ -683,8 +705,9 @@ enum Change {
 }
 
 /// Record `change` for one plugin and bump its generation, so every replica
-/// re-applies it. Returns the new generation, or `None` for a `Reload` of a
-/// plugin that is not enabled.
+/// re-applies it. Returns the new generation, or `None` for a `Disable` or
+/// `Reload` of a plugin that is not enabled. The enabled check is part of
+/// the statement, so it sees every replica's latest change.
 ///
 /// `fingerprint` is what the serving replica loaded; it becomes the version
 /// every other replica checks its own files against. `None` (a disable)
@@ -698,7 +721,7 @@ async fn publish(
     let version = fingerprint.map(|f| f.version.clone());
     let hash = fingerprint.map(|f| f.hash.clone());
     let statement = match change {
-        Change::Enable | Change::Disable => Statement::from_sql_and_values(
+        Change::Enable => Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash)
                VALUES ($1, $2, 1, NOW(), $3, $4)
@@ -709,12 +732,15 @@ async fn publish(
                      version = COALESCE(EXCLUDED.version, plugin.version),
                      content_hash = COALESCE(EXCLUDED.content_hash, plugin.content_hash)
                RETURNING generation"#,
-            [
-                plugin_id.into(),
-                (change == Change::Enable).into(),
-                version.into(),
-                hash.into(),
-            ],
+            [plugin_id.into(), true.into(), version.into(), hash.into()],
+        ),
+        Change::Disable => Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE plugin
+                  SET is_enabled = FALSE, generation = generation + 1, updated_at = NOW()
+               WHERE id = $1 AND is_enabled
+               RETURNING generation"#,
+            [plugin_id.into()],
         ),
         Change::Reload => Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -826,6 +852,14 @@ async fn load_then_publish(
     Ok(())
 }
 
+/// Whether the fleet's desired state has `plugin_id` enabled.
+async fn enabled_in_db(state: &AppState, plugin_id: &str) -> Result<bool, DbErr> {
+    Ok(plugin_entity::Entity::find_by_id(plugin_id.to_string())
+        .one(&state.db)
+        .await?
+        .is_some_and(|row| row.is_enabled))
+}
+
 /// Whether `plugin_id` is in this replica's registry, looking for newly added
 /// plugin directories first if it is not.
 fn discover(state: &AppState, plugin_id: &str) -> Result<bool, PluginError> {
@@ -852,7 +886,9 @@ fn require_known(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
 pub async fn enable(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
     with_applied(state, async |applied| {
         require_known(state, plugin_id)?;
-        if state.plugins.is_plugin_loaded(plugin_id)? {
+        // This replica may not have applied a peer's disable yet, so the
+        // desired state comes from the database, not the local cache.
+        if enabled_in_db(state, plugin_id).await? && state.plugins.is_plugin_loaded(plugin_id)? {
             return Err(AppError::Conflict(format!(
                 "Plugin '{plugin_id}' is already enabled"
             )));
@@ -869,14 +905,11 @@ pub async fn enable(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
 /// that failed to load here can still be turned off.
 pub async fn disable(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
     with_applied(state, async |applied| {
-        if !state.plugin_lifecycle.is_desired_enabled(plugin_id) {
+        let Some(generation) = publish(state, plugin_id, Change::Disable, None).await? else {
             return Err(AppError::Conflict(format!(
                 "Plugin '{plugin_id}' is not currently enabled"
             )));
-        }
-        let generation = publish(state, plugin_id, Change::Disable, None)
-            .await?
-            .ok_or_else(|| AppError::Internal("plugin upsert returned no row".into()))?;
+        };
         state.plugin_lifecycle.set_desired(plugin_id, false);
         let desired = Desired {
             enabled: false,
@@ -905,10 +938,10 @@ pub async fn disable(state: &AppState, plugin_id: &str) -> Result<(), AppError> 
 pub async fn reload(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
     with_applied(state, async |applied| {
         require_known(state, plugin_id)?;
-        if !state.plugin_lifecycle.is_desired_enabled(plugin_id) {
-            return Err(AppError::Conflict(format!(
-                "Plugin '{plugin_id}' is not enabled. Use enable instead."
-            )));
+        // Checked against the database so a peer's recent enable or disable
+        // counts; `publish` re-checks atomically for a change in between.
+        if !enabled_in_db(state, plugin_id).await? {
+            return Err(ChangeError::NotEnabled(plugin_id.to_string()).into());
         }
         Ok(load_then_publish(state, applied, plugin_id, Change::Reload).await?)
     })
@@ -928,12 +961,21 @@ pub async fn install(state: &AppState, plugin_id: &str) -> Result<(), AppError> 
 /// and pick up new plugin directories, fleet-wide.
 pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError> {
     with_applied(state, async |applied| {
+        // The fleet's desired state, not this replica's cache of it, so a
+        // peer's recent enable or disable counts.
+        let enabled_in_db: std::collections::HashSet<String> = plugin_entity::Entity::find()
+            .filter(plugin_entity::Column::IsEnabled.eq(true))
+            .all(&state.db)
+            .await?
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
         let enabled_ids: Vec<String> = state
             .plugins
             .list_plugins()?
             .into_iter()
             .map(|p| p.id)
-            .filter(|id| state.plugin_lifecycle.is_desired_enabled(id))
+            .filter(|id| enabled_in_db.contains(id))
             .collect();
 
         let mut reloaded = Vec::new();

@@ -5,6 +5,8 @@ use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{EntityTrait, Set};
 
+// `async_trait` marks each method `#[must_use]` on top of its boxed future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait TaskCacheStore: Send + Sync {
     async fn get(&self, cache_key: &str) -> Result<Option<HashMap<String, String>>, String>;

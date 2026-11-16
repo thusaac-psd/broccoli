@@ -21,6 +21,8 @@ pub struct ScenarioOutcome {
     pub transcript: Transcript,
 }
 
+// `async_trait` marks each method `#[must_use]` on top of its boxed future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Scenario {
     fn name(&self) -> &'static str;

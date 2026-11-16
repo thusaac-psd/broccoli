@@ -131,8 +131,6 @@ fn get_next_evaluate_result_fn(
     let result = evaluate_batch::next_evaluate_result(
         &call.plugin_id,
         &deps.evaluate_batches,
-        deps.metrics.as_ref(),
-        &deps.evaluate_ops_registry,
         &input.batch_id,
         Duration::from_millis(input.timeout_ms),
     )
@@ -153,9 +151,7 @@ fn cancel_evaluate_batch_fn(
     if deps.cancel_primitive_enabled
         && let Some(client) = deps.redis_client.as_ref()
     {
-        let op_task_ids = deps
-            .evaluate_ops_registry
-            .operation_task_ids_for_batch(&input.batch_id);
+        let op_task_ids = deps.evaluate_batches.operation_task_ids(&input.batch_id);
         let client = client.clone();
         let batch_id = input.batch_id.clone();
         tokio::runtime::Handle::current().block_on(async move {
@@ -173,16 +169,7 @@ fn cancel_evaluate_batch_fn(
         });
     }
 
-    deps.evaluate_ops_registry
-        .mark_batch_cancelled(&input.batch_id);
-
-    evaluate_batch::cancel_evaluate_batch(
-        &call.plugin_id,
-        &deps.evaluate_batches,
-        deps.metrics.as_ref(),
-        &deps.evaluate_ops_registry,
-        &input.batch_id,
-    );
+    evaluate_batch::cancel_evaluate_batch(&call.plugin_id, &deps.evaluate_batches, &input.batch_id);
 
     Ok(())
 }
@@ -198,15 +185,15 @@ fn cancel_evaluate_test_cases_fn(
     let deps = &call.deps;
 
     let count = deps
-        .evaluate_ops_registry
-        .mark_cancelled(&input.evaluate_batch_id, &input.test_case_ids);
+        .evaluate_batches
+        .cancel_cases(&input.evaluate_batch_id, &input.test_case_ids);
 
     if deps.cancel_primitive_enabled
         && let Some(client) = deps.redis_client.as_ref()
     {
         let op_task_ids = deps
-            .evaluate_ops_registry
-            .operation_task_ids_for_test_cases(&input.evaluate_batch_id, &input.test_case_ids);
+            .evaluate_batches
+            .operation_task_ids_for_cases(&input.evaluate_batch_id, &input.test_case_ids);
         if !op_task_ids.is_empty() {
             let client = client.clone();
             let batch_id = input.evaluate_batch_id.clone();

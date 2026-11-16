@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use common::retry::{RetryTracker, spawn_cleanup_task};
-use common::worker::Task;
+use common::worker::{Executor, Task};
 use futures::FutureExt;
 use mq::{Delivery, EntryRef, GroupConsumer, Mq, Settled};
 use tokio::sync::Mutex;
@@ -20,6 +20,7 @@ use crate::consumer::{Settlement, WorkerConsumer, WorkerConsumerDeps};
 use crate::fairness::{WorkerCapacity, effective_worker_capacity};
 use crate::heartbeat::{HeartbeatConfig, HeartbeatHandle, InFlightCounter};
 use crate::metrics::spawn_metrics_server;
+use crate::models::operation::OperationTaskExecutor;
 use crate::models::worker::Worker;
 use crate::system_info::{SystemInfo, is_wsl};
 
@@ -171,15 +172,17 @@ impl WorkerRuntime {
             }
         };
 
-        let worker = Arc::new(
-            Worker::from_config(&config, metrics.clone())
-                .await
-                .context("Failed to initialize worker executors")?,
-        );
+        let operation = OperationTaskExecutor::from_app_config(&config, metrics.clone())
+            .await
+            .context("Failed to initialize the operation executor")?;
 
         // Pre-warm subscriber: listens for contest cache-warm jobs and fills the
-        // local file cache ahead of the opening burst. Independent of judging.
-        let warm_handle = crate::warm::spawn(config.clone(), Some(metrics.clone()));
+        // local file cache ahead of the opening burst. Independent of judging,
+        // but warms through the executor's own cacher.
+        let warm_handle = crate::warm::spawn(&config, operation.file_cacher());
+
+        let operation: Arc<dyn Executor> = Arc::new(operation);
+        let worker = Arc::new(Worker::new([("operation".to_string(), operation)]));
 
         let dlq_config = config.mq.dlq.clone();
         let retry_tracker = Arc::new(Mutex::new(RetryTracker::new(dlq_config.max_retries)));

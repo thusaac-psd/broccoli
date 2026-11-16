@@ -56,7 +56,7 @@ pub fn run(host: &Host) -> Result<(), SdkError> {
             .get("previous_outcome")
             .and_then(Value::as_str)
             == Some("too_late")
-            && record.withheld
+            && record.is_withheld()
         {
             host.submission.release_feedback(
                 record.submission_id,
@@ -375,7 +375,7 @@ mod tests {
         let host = Host::mock();
         host.submission.set_feedback(vec![SubmissionFeedbackRecord {
             submission_id: 9,
-            withheld: true,
+            outcome: FeedbackOutcome::Pending,
             metadata: json!({"previous_outcome":"too_late"}),
             ..Default::default()
         }]);

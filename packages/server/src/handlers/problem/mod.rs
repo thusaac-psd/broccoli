@@ -273,7 +273,7 @@ pub(crate) async fn require_problem_part_reachable(
             return Err(AppError::NotFound(not_found.into()));
         }
         let contest = find_contest(&state.db, contest_id).await?;
-        require_contest_started(auth_user, &contest)?;
+        require_contest_started(auth_user, &contest, chrono::Utc::now())?;
     }
     if kernel.decide(action, scope.problem()).await?.is_denied() {
         return Err(AppError::NotFound(not_found.into()));

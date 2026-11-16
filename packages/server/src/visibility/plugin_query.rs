@@ -20,12 +20,11 @@
 //! Multiple plugins may register `[[server.queries]] topic = "visibility"`.
 //! Each is queried independently with an identical [`VisibilityQueryInput`],
 //! and the per-plugin decision vectors are combined element-wise with
-//! [`Decision::meet`] - associative and commutative (Task 2), so the
+//! [`Decision::meet`] - associative and commutative, so the
 //! registry's `HashMap`-backed (i.e. unordered) iteration order cannot
 //! affect the result.
 //!
-//! Called from `VisibilityKernel::decide_batch`
-//! (`packages/server/src/visibility/mod.rs`, Task 7), alongside
+//! Called from `VisibilityKernel::decide_batch`, alongside
 //! `host_rules::host_decide` - only for the resources the host did not
 //! already `Deny`.
 
@@ -41,11 +40,54 @@ use crate::state::AppState;
 use super::{Action, Decision, FieldMask, Resource, Subject};
 
 /// One plugin that declared a `[[server.queries]]` entry with
-/// `topic = "visibility"` in its manifest: which plugin, and which function
-/// to call.
+/// `topic = "visibility"` in its manifest: which plugin, which function to
+/// call, and what it governs.
 struct VisibilityQuerier {
     plugin_id: String,
     function: String,
+    scope: QuerierScope,
+}
+
+/// What a visibility querier is consulted about, from the contest types it
+/// registered when it loaded ([`crate::plugin_lifecycle::Governs`]), the
+/// same record that scopes a missing plugin ([`Blind`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QuerierScope {
+    /// It registered no contest type (or none was recorded): every resource.
+    Everything,
+    /// Resources in contests of these types, and resources whose contest
+    /// type the kernel could not tell.
+    ContestTypes(std::collections::BTreeSet<String>),
+}
+
+/// The contest type a resource, or a whole list query, falls under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceScope {
+    /// In a contest of this type (`None`: a contest with no type).
+    ContestType(Option<String>),
+    /// Not known: outside a contest, a contest the batch did not fetch, or a
+    /// list spanning contests. Every querier is consulted.
+    Unknown,
+}
+
+impl QuerierScope {
+    fn of(state: &AppState, plugin_id: &str) -> Self {
+        match state.plugin_lifecycle.governs(plugin_id) {
+            Some(g) if !g.contest_types.is_empty() => {
+                QuerierScope::ContestTypes(g.contest_types.into_iter().collect())
+            }
+            _ => QuerierScope::Everything,
+        }
+    }
+
+    fn governs(&self, scope: &ResourceScope) -> bool {
+        match (self, scope) {
+            (QuerierScope::Everything, _) | (_, ResourceScope::Unknown) => true,
+            (QuerierScope::ContestTypes(types), ResourceScope::ContestType(t)) => {
+                t.as_ref().is_some_and(|t| types.contains(t))
+            }
+        }
+    }
 }
 
 /// What this replica cannot decide right now: resources governed by a
@@ -64,6 +106,17 @@ enum Blind {
 }
 
 impl Blind {
+    /// Whether this replica cannot decide resources under `scope`.
+    fn covers(&self, scope: &ResourceScope) -> bool {
+        match (self, scope) {
+            (Blind::Nothing, _) => false,
+            (Blind::Everything, _) | (_, ResourceScope::Unknown) => true,
+            (Blind::ContestTypes(types), ResourceScope::ContestType(t)) => {
+                t.as_ref().is_some_and(|t| types.contains(t))
+            }
+        }
+    }
+
     fn widen(&mut self, other: Blind) {
         *self = match (std::mem::take(self), other) {
             (Blind::Everything, _) | (_, Blind::Everything) => Blind::Everything,
@@ -118,6 +171,7 @@ fn visibility_queriers(state: &AppState) -> Result<(Vec<VisibilityQuerier>, Blin
                 queriers.push(VisibilityQuerier {
                     plugin_id: entry.id.clone(),
                     function: query.function.clone(),
+                    scope: QuerierScope::of(state, &entry.id),
                 });
             }
         }
@@ -153,6 +207,29 @@ fn visibility_queriers(state: &AppState) -> Result<(Vec<VisibilityQuerier>, Blin
         blind.widen(scope);
     }
     Ok((queriers, blind))
+}
+
+/// Whether a visibility plugin can narrow decisions on resources under
+/// `scope` on this replica: a loaded querier governs it, or a plugin that
+/// governs it is enabled but missing here (its resources are denied). A
+/// poisoned registry counts as narrowing, since it denies everything.
+pub(super) fn plugins_may_narrow(state: &AppState, scope: &ResourceScope) -> bool {
+    visibility_queriers(state).map_or(true, |(queriers, blind)| {
+        queriers.iter().any(|q| q.scope.governs(scope)) || blind.covers(scope)
+    })
+}
+
+/// Whether a loaded visibility querier is scoped to contest types, so the
+/// kernel needs each resource's contest type to route it.
+pub(super) fn scoped_querier_loaded(state: &AppState) -> bool {
+    let Ok(registry) = state.plugins.get_registry().read() else {
+        return false;
+    };
+    registry.values().any(|entry| {
+        entry.status == PluginStatus::Loaded
+            && crate::plugin_lifecycle::declares_visibility(&entry.manifest)
+            && QuerierScope::of(state, &entry.id) != QuerierScope::Everything
+    })
 }
 
 /// Deny the resources the missing plugins govern; leave the rest to the
@@ -410,12 +487,16 @@ fn meet_positionally(acc: Vec<Decision>, next: Vec<Decision>) -> Vec<Decision> {
 /// (positional with `resources`, same length - see the `debug_assert_eq!`
 /// below) is the authority: each entry becomes that resource's own
 /// `QueryResource.contest_id` on the wire, resolved by the caller
-/// (`VisibilityKernel::decide_batch`,
-/// `packages/server/src/visibility/mod.rs`, Task 7) from the resource
+/// (`VisibilityKernel::decide_batch`) from the resource
 /// itself (`Contest`/`Problem`/`Sample`) or from `host_decide`'s submission
 /// -> contest_id map (`Submission`). Do not re-derive a batch-wide
 /// `contest_id` from `resource_contest_ids` here or anywhere downstream -
 /// that is exactly the lossy inference this parameter exists to avoid.
+///
+/// `resource_scopes` (positional with `resources`) routes each resource to
+/// the queriers that govern it: a querier scoped to contest types is sent
+/// only the resources under those types (or of unknown type), and has no
+/// say on the rest.
 pub(crate) async fn query_plugins(
     state: &AppState,
     subject: &Subject,
@@ -423,6 +504,7 @@ pub(crate) async fn query_plugins(
     contest_id: Option<i32>,
     resources: &[Resource],
     resource_contest_ids: &[Option<i32>],
+    resource_scopes: &[ResourceScope],
 ) -> Vec<Decision> {
     if resources.is_empty() {
         return Vec::new();
@@ -441,6 +523,11 @@ pub(crate) async fn query_plugins(
         resource_contest_ids.len(),
         "resource_contest_ids must be positional with resources"
     );
+    debug_assert_eq!(
+        resources.len(),
+        resource_scopes.len(),
+        "resource_scopes must be positional with resources"
+    );
 
     let (queriers, blind) = match visibility_queriers(state) {
         Ok(found) => found,
@@ -458,28 +545,38 @@ pub(crate) async fn query_plugins(
         return blind.unwrap_or_else(|| vec![Decision::Allow; resources.len()]);
     }
 
-    let input = VisibilityQueryInput {
-        subject: QuerySubject {
-            user_id: subject.user_id,
-            authenticated: subject.authenticated,
-            permissions: subject.permissions.clone(),
-        },
-        action: action.as_wire().to_string(),
-        context: QueryContext { contest_id },
-        resources: resources
-            .iter()
-            .zip(resource_contest_ids.iter())
-            .map(|(r, cid)| QueryResource {
-                kind: r.wire_kind().to_string(),
-                id: r.wire_id(),
-                contest_id: *cid,
-                problem_id: r.wire_problem_id(),
-            })
-            .collect(),
-    };
+    let query_resources: Vec<QueryResource> = resources
+        .iter()
+        .zip(resource_contest_ids.iter())
+        .map(|(r, cid)| QueryResource {
+            kind: r.wire_kind().to_string(),
+            id: r.wire_id(),
+            contest_id: *cid,
+            problem_id: r.wire_problem_id(),
+        })
+        .collect();
 
     let mut combined = blind.unwrap_or_else(|| vec![Decision::Allow; resources.len()]);
     for querier in &queriers {
+        let governed: Vec<usize> = (0..resources.len())
+            .filter(|&i| querier.scope.governs(&resource_scopes[i]))
+            .collect();
+        if governed.is_empty() {
+            continue;
+        }
+        let input = VisibilityQueryInput {
+            subject: QuerySubject {
+                user_id: subject.user_id,
+                authenticated: subject.authenticated,
+                permissions: subject.permissions.clone(),
+            },
+            action: action.as_wire().to_string(),
+            context: QueryContext { contest_id },
+            resources: governed
+                .iter()
+                .map(|&i| query_resources[i].clone())
+                .collect(),
+        };
         let call_result: Result<VisibilityQueryOutput, _> = state
             .plugins
             .call(&querier.plugin_id, &querier.function, &input)
@@ -498,8 +595,12 @@ pub(crate) async fn query_plugins(
             }
         };
 
-        let decisions = decisions_from_output(&querier.plugin_id, output, resources.len());
-        combined = meet_positionally(combined, decisions);
+        let decisions = decisions_from_output(&querier.plugin_id, output, governed.len());
+        let mut full = vec![Decision::Allow; resources.len()];
+        for (&i, decision) in governed.iter().zip(decisions) {
+            full[i] = decision;
+        }
+        combined = meet_positionally(combined, full);
     }
 
     enforce_mask_cap_post_union(combined)
@@ -538,14 +639,48 @@ fn enforce_mask_cap_post_union(decisions: Vec<Decision>) -> Vec<Decision> {
         .collect()
 }
 
-// Re-exported for `super::tests` (`packages/server/src/visibility/mod.rs`,
-// Task 7) - see the doc comment on `PanicPluginManager` below.
+// Re-exported for `super::tests` (`visibility/mod.rs`) - see the doc
+// comment on `PanicPluginManager` below.
 #[cfg(test)]
 pub(crate) use tests::PanicPluginManager;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn types(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    fn in_contest(t: Option<&str>) -> ResourceScope {
+        ResourceScope::ContestType(t.map(str::to_string))
+    }
+
+    #[test]
+    fn a_scoped_querier_governs_its_types_and_unknown_scopes_only() {
+        let scoped = QuerierScope::ContestTypes(types(&["icpc"]));
+        assert!(scoped.governs(&in_contest(Some("icpc"))));
+        assert!(!scoped.governs(&in_contest(Some("ioi"))));
+        assert!(!scoped.governs(&in_contest(None)));
+        assert!(scoped.governs(&ResourceScope::Unknown));
+        for scope in [
+            in_contest(Some("ioi")),
+            in_contest(None),
+            ResourceScope::Unknown,
+        ] {
+            assert!(QuerierScope::Everything.governs(&scope));
+        }
+    }
+
+    #[test]
+    fn blind_covers_what_the_missing_plugins_govern() {
+        let blind = Blind::ContestTypes(types(&["icpc"]));
+        assert!(blind.covers(&in_contest(Some("icpc"))));
+        assert!(!blind.covers(&in_contest(Some("ioi"))));
+        assert!(blind.covers(&ResourceScope::Unknown));
+        assert!(!Blind::Nothing.covers(&ResourceScope::Unknown));
+        assert!(Blind::Everything.covers(&in_contest(None)));
+    }
 
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -773,8 +908,8 @@ mod tests {
     // ---------------------------------------------------------------------
 
     // `pub(crate)` (rather than the private default every other test-only
-    // type in this file uses): Task 7's `VisibilityKernel::decide_batch`
-    // tests (`packages/server/src/visibility/mod.rs`) need a plugin-manager
+    // type in this file uses): the `VisibilityKernel::decide_batch` tests
+    // (`visibility/mod.rs`) need a plugin-manager
     // double that panics on any call, to prove `admin_override` and a fully
     // host-denied batch never reach for the plugin host - exactly the
     // property this type already exists to prove here. Re-exported above
@@ -1011,9 +1146,9 @@ mod tests {
         let (metrics, prometheus_registry) =
             common::observability::init_metrics("broccoli-visibility-plugin-query-test");
 
-        let operation_batches: OperationBatches = Arc::new(dashmap::DashMap::new());
+        let operation_batches = OperationBatches::default();
         let operation_waiters: OperationWaiters = Arc::new(dashmap::DashMap::new());
-        let evaluate_batches: EvaluateBatches = Arc::new(dashmap::DashMap::new());
+        let evaluate_batches = EvaluateBatches::default();
         let contest_type_registry: ContestTypeRegistry =
             Arc::new(tokio::sync::RwLock::new(HashMap::new()));
         let evaluator_registry: EvaluatorRegistry =
@@ -1053,14 +1188,14 @@ mod tests {
                     max_system_error_retries: 50,
                     cancel_primitive_enabled: false,
                     max_blocking_threads: None,
-                    batch_evaluator_fanout_concurrency: 64,
+                    evaluate_batch_fanout_concurrency: 64,
                     operation_batch_publish_concurrency: 32,
                     claim_fiber_enabled: false,
                     claim_poll_interval_ms: 1000,
                     claim_batch_size: 32,
                     max_in_flight_submissions: 256,
                     plugin_timer_tick_interval_secs: 1,
-                    plugin_timer_lease_secs: 30,
+                    plugin_timer_lease_secs: crate::config::DEFAULT_PLUGIN_TIMER_LEASE_SECS,
                     plugin_timer_batch: 64,
                     plugin_timer_max_attempts: 5,
                 },
@@ -1136,7 +1271,7 @@ mod tests {
         // A registered visibility querier exists, so if query_plugins reached
         // for the plugin host at all here, PanicPluginManager would panic and
         // fail this test - the assertion below only runs if it did not.
-        let result = query_plugins(&state, &subject, Action::Read, None, &[], &[]).await;
+        let result = query_plugins(&state, &subject, Action::Read, None, &[], &[], &[]).await;
 
         assert_eq!(result, Vec::<Decision>::new());
     }
@@ -1169,6 +1304,7 @@ mod tests {
             Some(1),
             &resources,
             &resource_contest_ids,
+            &vec![ResourceScope::Unknown; resources.len()],
         )
         .await;
 
@@ -1203,6 +1339,7 @@ mod tests {
             Some(1),
             &resources,
             &resource_contest_ids,
+            &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
     }
@@ -1272,6 +1409,7 @@ mod tests {
             Some(1),
             &resources,
             &resource_contest_ids,
+            &vec![ResourceScope::Unknown; resources.len()],
         )
         .await;
 
@@ -1315,6 +1453,7 @@ mod tests {
             Some(1),
             &resources,
             &resource_contest_ids,
+            &vec![ResourceScope::Unknown; resources.len()],
         )
         .await;
 
@@ -1366,6 +1505,7 @@ mod tests {
             Some(1),
             &resources,
             &resource_contest_ids,
+            &vec![ResourceScope::Unknown; resources.len()],
         )
         .await;
 
@@ -1436,6 +1576,7 @@ mod tests {
             Some(1),
             &resources,
             &resource_contest_ids,
+            &vec![ResourceScope::Unknown; resources.len()],
         )
         .await;
 
@@ -1496,6 +1637,7 @@ mod tests {
             Some(1),
             &resources,
             &resource_contest_ids,
+            &vec![ResourceScope::Unknown; resources.len()],
         )
         .await;
 
@@ -1554,6 +1696,7 @@ mod tests {
             Some(1),
             &resources,
             &resource_contest_ids,
+            &vec![ResourceScope::Unknown; resources.len()],
         )
         .await;
 
@@ -1603,6 +1746,7 @@ mod tests {
             Some(1),
             &resources,
             &resource_contest_ids,
+            &vec![ResourceScope::Unknown; resources.len()],
         )
         .await;
 

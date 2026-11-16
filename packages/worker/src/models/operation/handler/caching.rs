@@ -126,7 +126,7 @@ impl OperationHandler {
             .await?;
 
         let cache_start = std::time::Instant::now();
-        let cached_outputs = match self.task_cache.get(&cache_key).await {
+        let cached_outputs = match self.cache.store.get(&cache_key).await {
             Ok(Some(outputs)) => {
                 self.record_task_cache_metric(cache_start, "get", "hit");
                 outputs
@@ -158,11 +158,11 @@ impl OperationHandler {
         cache_key: &str,
     ) -> Option<TaskExecutionResult> {
         let env = environments.get(&step.env_ref)?;
-        let deadline = tokio::time::Instant::now() + self.follower_max_wait;
+        let deadline = tokio::time::Instant::now() + self.cache.follower_max_wait;
         loop {
-            tokio::time::sleep(self.follower_poll_interval).await;
+            tokio::time::sleep(self.cache.follower_poll_interval).await;
             let cache_start = std::time::Instant::now();
-            match self.task_cache.get(cache_key).await {
+            match self.cache.store.get(cache_key).await {
                 Ok(Some(outputs)) => {
                     self.record_task_cache_metric(cache_start, "get", "follower_hit");
                     return self
@@ -237,7 +237,7 @@ impl OperationHandler {
         }
 
         let cache_start = std::time::Instant::now();
-        match self.task_cache.put(&cache_key, output_hashes).await {
+        match self.cache.store.put(&cache_key, output_hashes).await {
             Ok(TaskCachePutOutcome::Inserted) => {
                 self.record_task_cache_metric(cache_start, "put", "success");
                 info!(step_id = %step.id, cache_key = %cache_key, "Stored step outputs in task cache");
@@ -262,6 +262,10 @@ impl OperationHandler {
         argv: &[String],
         key_inputs: &[String],
     ) -> Result<String> {
+        let fingerprint = self.cache.toolchain_fingerprint.current();
+        let fingerprint = fingerprint
+            .cache_key_part()
+            .context("Toolchain fingerprint is unreliable; compile cache disabled")?;
         let mut input_files = Vec::new();
         for filename in key_inputs {
             let path = safe_join(working_dir, filename)?;
@@ -270,10 +274,45 @@ impl OperationHandler {
                 .with_context(|| format!("Failed to read cache key input: {}", path.display()))?;
             input_files.push((filename.clone(), content));
         }
-        Ok(compute_cache_key(
-            &self.toolchain_fingerprint,
-            argv,
-            &input_files,
-        ))
+        Ok(compute_cache_key(fingerprint, argv, &input_files))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::operation::file_cacher::NoopFileCacher;
+    use crate::models::operation::sandbox::mock::MockSandboxManager;
+    use crate::models::operation::task_cache::NoopTaskCacheStore;
+    use crate::toolchain_fingerprint::ToolchainFingerprint;
+
+    fn handler(fingerprint: ToolchainFingerprint) -> OperationHandler {
+        let (metrics, _provider) =
+            common::observability::init_metrics_local("broccoli-worker-test");
+        OperationHandler::new(
+            Box::new(MockSandboxManager::new(std::env::temp_dir())),
+            Box::new(NoopFileCacher),
+            Box::new(NoopTaskCacheStore),
+            fingerprint,
+            metrics,
+        )
+    }
+
+    #[tokio::test]
+    async fn an_unreliable_toolchain_fingerprint_builds_no_cache_key() {
+        let argv = vec!["g++".to_string()];
+        let dir = std::env::temp_dir();
+        assert!(
+            handler(ToolchainFingerprint::Unreliable)
+                .build_cache_key(&dir, &argv, &[])
+                .await
+                .is_err()
+        );
+        assert!(
+            handler(ToolchainFingerprint::Known("fp".into()))
+                .build_cache_key(&dir, &argv, &[])
+                .await
+                .is_ok()
+        );
     }
 }

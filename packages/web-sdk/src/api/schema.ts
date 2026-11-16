@@ -1071,7 +1071,7 @@ export interface paths {
     };
     /**
      * List contest submissions
-     * @description Returns submissions for a contest.
+     * @description Returns one cursor page of a contest's submissions. A page holds only submissions the caller is shown; pass `pagination.next_cursor` as `cursor` for the next one. `pagination.total` and `pagination.total_pages` are null when a visibility plugin may hide matching submissions from the caller, since a count would disclose them.
      */
     get: operations['listContestSubmissions'];
     put?: never;
@@ -1793,7 +1793,7 @@ export interface paths {
     };
     /**
      * List submissions
-     * @description Returns a paginated list of submissions. Users see their own submissions; users with `submission:view_all` permission see all submissions.
+     * @description Returns one cursor page of submissions. Users see their own submissions; users with `submission:view_all` permission see all submissions. A page holds only submissions the caller is shown; pass `pagination.next_cursor` as `cursor` for the next one. `pagination.total` and `pagination.total_pages` are null when a visibility plugin may hide matching submissions from the caller, since a count would disclose them.
      */
     get: operations['listSubmissions'];
     put?: never;
@@ -2043,7 +2043,7 @@ export interface paths {
      * Soft-delete a user by ID
      * @description Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission; without `system:admin`, the target user may not hold any permission the caller lacks.
      *
-     *     Deletion is blocked if the user is registered in a running or recently-ended contest, or is the last active user holding `system:admin`. Registrations in future (not-yet-started) contests are automatically cancelled before deletion.
+     *     Deletion is blocked if the user is registered in a running or ended contest that is still active (not yet deactivated), or in a started contest that is not activated, or is the last active user holding `system:admin`. Registrations in contests that have not started or are not yet activated are automatically cancelled before deletion.
      */
     delete: operations['deleteUser'];
     options?: never;
@@ -2741,16 +2741,9 @@ export interface components {
     /**
      * @description A single contest type registration entry.
      *
-     *     Used to carry a fourth field, `filter_submission_fn`: the function a
-     *     contest-type plugin registered to filter/redact a submission response
-     *     body before it left the server. Retired entirely (not replaced by
-     *     anything in this struct) once the VisibilityKernel took over submission
-     *     visibility end to end - `Decision`/`FieldMask` plus each plugin's
-     *     `topic = "visibility"` query function now own that job, driven by
-     *     `packages/server/src/visibility/`, not by a per-contest-type hook listed
-     *     here. See `git show dc8112d8` ("retire filter_submission_fn plugin hook")
-     *     for the removal and SDD 2026-09-15-visibility-kernel Tasks 13-16 for what
-     *     replaced it.
+     *     Submission visibility is not a contest-type hook: each plugin's
+     *     `topic = "visibility"` query function answers it through
+     *     `crate::visibility`.
      */
     ContestTypeEntry: {
       /**
@@ -3141,10 +3134,17 @@ export interface components {
     /** @description A single evaluator registration entry. */
     EvaluatorEntry: {
       /**
-       * @description Plugin function invoked to evaluate test cases for this problem type.
+       * @description Plugin function invoked to evaluate a test case, or, for a staged
+       *     evaluator, to prepare its operations.
        * @example evaluate_communication
        */
       function_name: string;
+      /**
+       * @description For a staged evaluator, the plugin function that turns finished
+       *     operations into verdicts.
+       * @example on_operation_results
+       */
+      interpret_function_name?: string | null;
       /**
        * @description Plugin that registered this evaluator.
        * @example communication-evaluator
@@ -3277,6 +3277,40 @@ export interface components {
        *     }
        */
       template: string;
+    };
+    /**
+     * @description Cursor pagination of a list that a visibility plugin may narrow below what
+     *     its SQL matches. Every page holds only rows the caller is shown, and
+     *     `has_more`/`next_cursor` describe only such rows. A count of matching rows
+     *     would disclose rows the caller is not shown, so `total` and `total_pages`
+     *     are present only when the count is exact for this caller.
+     */
+    ListPagination: {
+      /**
+       * @description Whether the caller is shown a row after this page.
+       * @example true
+       */
+      has_more: boolean;
+      /**
+       * @description Pass as `cursor` to fetch the next page; set exactly when `has_more`.
+       * @example eyJieSI6ImNyZWF0ZWRfYXQiLCJvcmRlciI6ImRlc2MiLCJpZCI6NDJ9
+       */
+      next_cursor?: string | null;
+      /**
+       * Format: int64
+       * @example 20
+       */
+      per_page: number;
+      /**
+       * Format: int64
+       * @example 47
+       */
+      total?: number | null;
+      /**
+       * Format: int64
+       * @example 3
+       */
+      total_pages?: number | null;
     };
     LoginRequest: {
       /** @example s3cure_P@ss! */
@@ -3926,7 +3960,7 @@ export interface components {
     };
     SubmissionListResponse: {
       data: components['schemas']['SubmissionListItem'][];
-      pagination: components['schemas']['Pagination'];
+      pagination: components['schemas']['ListPagination'];
     };
     SubmissionResponse: {
       /**
@@ -8045,8 +8079,11 @@ export interface operations {
   listContestSubmissions: {
     parameters: {
       query?: {
-        /** @example 1 */
-        page?: number;
+        /**
+         * @description `pagination.next_cursor` of the previous page; omit for the first page.
+         *     A cursor is valid only with the `sort_by`/`sort_order` it was issued for.
+         */
+        cursor?: string;
         /** @example 20 */
         per_page?: number;
         /** @example 1 */
@@ -8084,7 +8121,7 @@ export interface operations {
           'application/json': components['schemas']['SubmissionListResponse'];
         };
       };
-      /** @description Validation error (VALIDATION_ERROR) */
+      /** @description Invalid query or cursor (VALIDATION_ERROR) */
       400: {
         headers: {
           [name: string]: unknown;
@@ -11066,8 +11103,11 @@ export interface operations {
   listSubmissions: {
     parameters: {
       query?: {
-        /** @example 1 */
-        page?: number;
+        /**
+         * @description `pagination.next_cursor` of the previous page; omit for the first page.
+         *     A cursor is valid only with the `sort_by`/`sort_order` it was issued for.
+         */
+        cursor?: string;
         /** @example 20 */
         per_page?: number;
         /** @example 1 */
@@ -11102,7 +11142,7 @@ export interface operations {
           'application/json': components['schemas']['SubmissionListResponse'];
         };
       };
-      /** @description Validation error (VALIDATION_ERROR) */
+      /** @description Invalid query or cursor (VALIDATION_ERROR) */
       400: {
         headers: {
           [name: string]: unknown;

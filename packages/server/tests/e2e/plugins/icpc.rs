@@ -623,7 +623,7 @@ async fn icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organiz
     let contestant_b = app
         .create_authenticated_user("icpc_freeze_b", "password")
         .await;
-    // Task 17: holds `contest:manage` WITHOUT `submission:view_all` - unlike
+    // Holds `contest:manage` WITHOUT `submission:view_all` - unlike
     // `admin` above, which holds BOTH and so cannot isolate which permission
     // a bypass actually checks. A plausible problem-setter/judge role.
     let manage_only = app
@@ -886,14 +886,12 @@ async fn icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organiz
         organizer_res.text
     );
 
-    // Task 17: a viewer holding `contest:manage` WITHOUT `submission:view_all`
-    // reading contestant B's submission during the freeze. Before this task,
-    // `decide_visibility_decisions` checked only `SUBMISSION_VIEW_ALL`, so
-    // this viewer would have been wrongly redacted here - the `organizer_res`
-    // assertions above pass via `admin`'s `SUBMISSION_VIEW_ALL` alone and
-    // never actually exercise the `CONTEST_MANAGE` branch, since the default
-    // `admin` role holds both permissions. This is the assertion that pins
-    // the fix and would fail against pre-fix code.
+    // A viewer holding `contest:manage` WITHOUT `submission:view_all`
+    // reading contestant B's submission during the freeze is not redacted:
+    // `decide_visibility_decisions` honours `CONTEST_MANAGE` as well. The
+    // `organizer_res` assertions above pass via `admin`'s
+    // `SUBMISSION_VIEW_ALL` alone and never exercise the `CONTEST_MANAGE`
+    // branch, since the default `admin` role holds both permissions.
     let manage_only_res = app.get_with_token(&sub_path, &manage_only).await;
     assert_eq!(
         manage_only_res.status, 200,

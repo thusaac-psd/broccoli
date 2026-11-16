@@ -31,7 +31,6 @@ export default function OverviewPage() {
       const { data, error } = await apiClient.GET('/contests', {
         params: {
           query: {
-            page: 1,
             per_page: 5,
             sort_by: 'start_time',
             sort_order: 'desc',
@@ -49,7 +48,6 @@ export default function OverviewPage() {
       const { data, error } = await apiClient.GET('/problems', {
         params: {
           query: {
-            page: 1,
             per_page: 5,
             sort_by: 'created_at',
             sort_order: 'desc',
@@ -68,7 +66,6 @@ export default function OverviewPage() {
       const { data, error } = await apiClient.GET('/submissions', {
         params: {
           query: {
-            page: 1,
             per_page: 5,
             sort_by: 'created_at',
             sort_order: 'desc',

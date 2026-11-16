@@ -16,6 +16,8 @@ export type Submission = components['schemas']['SubmissionResponse'];
 export type SubmissionAfterMutation =
   components['schemas']['SubmissionResponseAfterMutation'];
 export type SubmissionSummary = components['schemas']['SubmissionListItem'];
+/** Page metadata of a submission list; `total` is null when withheld. */
+export type SubmissionListPagination = components['schemas']['ListPagination'];
 export type SubmissionJudgement =
   components['schemas']['SubmissionJudgementResponse'];
 

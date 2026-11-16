@@ -7,15 +7,12 @@
 //! 30 MB fetch during the opening burst. Per-blob progress is reported to
 //! [`warm_progress_key`] for the server to aggregate.
 //!
-//! The warm cacher shares the on-disk `cache_dir` with the executor's cacher;
-//! `BlobStoreFileCacher::new` rehydrates its LRU from disk, so blobs warmed here
-//! are visible to executor cachers built later.
+//! Warming goes through the executor's own [`FileCacher`], so the cache
+//! directory has one owner and one size cap.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::metrics::Metrics;
-use common::storage::config::create_blob_store;
 use common::warm::{
     WARM_CHANNEL, WARM_KEY_TTL_SECS, WarmJob, WarmProgress, WarmState, warm_job_key,
     warm_progress_key,
@@ -27,7 +24,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::config::WorkerAppConfig;
-use crate::models::operation::file_cacher::{BlobStoreFileCacher, FileCacher};
+use crate::models::operation::file_cacher::FileCacher;
 
 /// Report progress to Redis at least every N processed blobs (plus a final
 /// terminal update), so the UI advances smoothly without a write per blob.
@@ -35,12 +32,6 @@ const PROGRESS_UPDATE_EVERY: u32 = 4;
 
 /// Delay before re-subscribing after the pub/sub stream drops.
 const RESUBSCRIBE_DELAY: Duration = Duration::from_secs(5);
-
-/// Backoff between attempts to build the warm cacher (it needs the DB), capped
-/// at [`BUILD_RETRY_MAX`]. Warming is optional, so a failed build is retried
-/// rather than disabling pre-warm for the life of the process.
-const BUILD_RETRY_START: Duration = Duration::from_secs(5);
-const BUILD_RETRY_MAX: Duration = Duration::from_secs(60);
 
 /// Liveness check for the idle subscription. A pub/sub connection only reads,
 /// so after the Redis host dies (power loss, partition) a half-open socket
@@ -58,79 +49,34 @@ const KEEPALIVE: Keepalive = Keepalive {
     timeout: Duration::from_secs(5),
 };
 
-/// Spawn the pre-warm subscriber. Failures never crash the worker: building the
-/// cacher is retried with backoff and a dropped subscription is resubscribed,
-/// while judging continues regardless. The runtime holds the returned handle
-/// the same way it holds `_cleanup_handle`: this is an independent background
-/// helper, so shutdown drains the consume loop and heartbeat and lets this
-/// detached task die on process exit.
-pub fn spawn(config: WorkerAppConfig, metrics: Option<Metrics>) -> JoinHandle<()> {
+/// Spawn the pre-warm subscriber, warming into `cacher`. Failures never crash
+/// the worker: a dropped subscription is resubscribed, while judging continues
+/// regardless. The runtime holds the returned handle the same way it holds
+/// `_cleanup_handle`: this is an independent background helper, so shutdown
+/// drains the consume loop and heartbeat and lets this detached task die on
+/// process exit.
+pub fn spawn(config: &WorkerAppConfig, cacher: Arc<dyn FileCacher>) -> JoinHandle<()> {
+    let redis_url = config.mq.url.clone();
+    let worker_id = config.worker.id.clone();
     tokio::spawn(async move {
-        if let Err(e) = run(config, metrics).await {
+        if let Err(e) = run(&redis_url, &worker_id, cacher.as_ref()).await {
             warn!(error = %e, "Pre-warm subscriber disabled");
         }
     })
 }
 
-async fn run(config: WorkerAppConfig, metrics: Option<Metrics>) -> anyhow::Result<()> {
-    let redis_url = config.mq.url.clone();
-    let worker_id = config.worker.id.clone();
-
+async fn run(redis_url: &str, worker_id: &str, cacher: &dyn FileCacher) -> anyhow::Result<()> {
     // An invalid URL is a configuration error that no retry fixes.
-    let client = redis::Client::open(redis_url.as_str())?;
-
-    let mut backoff = BUILD_RETRY_START;
-    let cacher = loop {
-        match build_cacher(&config, metrics.clone()).await {
-            Ok(cacher) => break cacher,
-            Err(e) => {
-                warn!(error = %e, retry_in_secs = backoff.as_secs(), "Pre-warm cacher unavailable; retrying");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(BUILD_RETRY_MAX);
-            }
-        }
-    };
+    let client = redis::Client::open(redis_url)?;
 
     info!(worker_id = %worker_id, channel = %WARM_CHANNEL, "Pre-warm subscriber started");
 
     loop {
-        if let Err(e) = subscribe_and_serve(&client, &worker_id, cacher.as_ref(), KEEPALIVE).await {
+        if let Err(e) = subscribe_and_serve(&client, worker_id, cacher, KEEPALIVE).await {
             warn!(error = %e, "Pre-warm subscription dropped; retrying");
         }
         tokio::time::sleep(RESUBSCRIBE_DELAY).await;
     }
-}
-
-/// Build a [`FileCacher`] over the same blob store + cache dir the executor uses.
-///
-/// KNOWN LIMITATION (low severity): this is a SEPARATE cacher instance from the
-/// executor's, each with its own in-memory LRU enforcing `max_cache_size` against
-/// the SAME on-disk `cache_dir`. Because neither knows about the other's LRU
-/// accounting, total on-disk usage can reach ~2x the configured cap before either
-/// evicts. The correct fix is to SHARE a single `Arc<dyn FileCacher>` between the
-/// warm subscriber and the executor; it is deferred because that requires
-/// threading the executor's cacher through worker startup.
-async fn build_cacher(
-    config: &WorkerAppConfig,
-    metrics: Option<Metrics>,
-) -> anyhow::Result<Arc<dyn FileCacher>> {
-    let db = common::db::connect(
-        &config.database.url,
-        &common::db::PgPoolSpec::new(2, 1),
-        &config.database.session(),
-    )
-    .await?;
-
-    let blob_store = create_blob_store(&config.storage.blob_store, db, metrics.clone()).await?;
-    let cacher = BlobStoreFileCacher::new(
-        blob_store,
-        config.storage.cache_dir.clone().into(),
-        config.storage.max_cache_size,
-        metrics,
-    )
-    .await
-    .map_err(anyhow::Error::msg)?;
-    Ok(Arc::new(cacher))
 }
 
 async fn subscribe_and_serve(

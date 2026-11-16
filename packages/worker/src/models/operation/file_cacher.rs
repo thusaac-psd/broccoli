@@ -112,6 +112,8 @@ fn ensure_world_readable(path: &Path) {
 #[cfg(not(unix))]
 fn ensure_world_readable(_path: &Path) {}
 
+// `async_trait` marks each method `#[must_use]` on top of its boxed future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait FileCacher: Send + Sync {
     async fn fetch_to_path(&self, content_hash: &str, dest: &Path) -> Result<(), String>;
@@ -124,8 +126,11 @@ pub trait FileCacher: Send + Sync {
     async fn warm(&self, content_hash: &str) -> Result<u64, String>;
 }
 
+/// Caches nothing and fetches nothing, for tests.
+#[cfg(any(test, feature = "test-support"))]
 pub struct NoopFileCacher;
 
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl FileCacher for NoopFileCacher {
     async fn fetch_to_path(&self, _content_hash: &str, _dest: &Path) -> Result<(), String> {
@@ -139,12 +144,13 @@ impl FileCacher for NoopFileCacher {
     }
 }
 
-#[allow(dead_code)]
+/// Fails every blob operation, as if blob storage were down, for tests.
+#[cfg(any(test, feature = "test-support"))]
 pub struct UnavailableFileCacher {
     reason: String,
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, feature = "test-support"))]
 impl UnavailableFileCacher {
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
@@ -153,6 +159,7 @@ impl UnavailableFileCacher {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl FileCacher for UnavailableFileCacher {
     async fn fetch_to_path(&self, content_hash: &str, _dest: &Path) -> Result<(), String> {
@@ -189,16 +196,64 @@ impl Drop for FetchLockCleanup<'_> {
 pub struct BlobStoreFileCacher {
     store: Arc<dyn BlobStore>,
     cache_dir: PathBuf,
-    max_cache_size: u64,
 
-    state: tokio::sync::Mutex<CacheState>,
+    index: std::sync::Mutex<CacheIndex>,
     fetch_locks: std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     metrics: Option<Metrics>,
 }
 
-struct CacheState {
+/// Which blobs the cache directory holds, by recency, and their total size,
+/// kept at or under `max_bytes`. The sole owner of the size accounting: every
+/// insert and eviction goes through it. It decides evictions and leaves the
+/// file removal to the caller, outside the lock.
+struct CacheIndex {
     entries: lru::LruCache<String, u64>,
-    total_size: u64,
+    total_bytes: u64,
+    max_bytes: u64,
+}
+
+impl CacheIndex {
+    fn new(max_bytes: u64) -> Self {
+        Self {
+            entries: lru::LruCache::unbounded(),
+            total_bytes: 0,
+            max_bytes,
+        }
+    }
+
+    /// Record `key` as the most recent entry with `size` bytes, and evict the
+    /// least recent others until the total fits. `key` itself is never
+    /// evicted, so a single blob over the cap stays cached (the cache then sits
+    /// one blob over) rather than failing its own fetch. Returns the size
+    /// change and the evicted entries.
+    fn insert(&mut self, key: String, size: u64) -> (i64, Vec<(String, u64)>) {
+        let old = self.entries.put(key.clone(), size).unwrap_or(0);
+        self.total_bytes = self.total_bytes - old + size;
+        let evicted = self.evict_over_cap(Some(&key));
+        let freed: u64 = evicted.iter().map(|(_, size)| size).sum();
+        (size as i64 - old as i64 - freed as i64, evicted)
+    }
+
+    /// Evict least recent entries, never `keep`, until the total fits.
+    fn evict_over_cap(&mut self, keep: Option<&str>) -> Vec<(String, u64)> {
+        let mut evicted = Vec::new();
+        while self.total_bytes > self.max_bytes {
+            match self.entries.peek_lru() {
+                Some((lru, _)) if Some(lru.as_str()) != keep => {}
+                _ => break,
+            }
+            if let Some((key, size)) = self.entries.pop_lru() {
+                self.total_bytes -= size;
+                evicted.push((key, size));
+            }
+        }
+        evicted
+    }
+
+    /// Mark `key` most recent; returns whether the index holds it.
+    fn touch(&mut self, key: &str) -> bool {
+        self.entries.get(key).is_some()
+    }
 }
 
 impl BlobStoreFileCacher {
@@ -236,19 +291,17 @@ impl BlobStoreFileCacher {
 
         entries_vec.sort_by_key(|(_, _, mtime)| *mtime);
 
-        let mut entries = lru::LruCache::unbounded();
+        let mut index = CacheIndex::new(max_cache_size);
         for (name, size, _) in entries_vec {
-            entries.put(name, size);
+            index.entries.put(name, size);
         }
+        index.total_bytes = total_size;
+        let evicted = index.evict_over_cap(None);
 
         let cacher = Self {
             store,
             cache_dir,
-            max_cache_size,
-            state: tokio::sync::Mutex::new(CacheState {
-                entries,
-                total_size,
-            }),
+            index: std::sync::Mutex::new(index),
             fetch_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
             metrics,
         };
@@ -260,9 +313,8 @@ impl BlobStoreFileCacher {
         {
             metrics.blob_cache_size_bytes.add(total_size as i64, &[]);
         }
-
-        // Startup scan: no just-inserted entry to protect.
-        cacher.evict_if_needed("").await;
+        let freed: u64 = evicted.iter().map(|(_, size)| size).sum();
+        cacher.remove_evicted(evicted, -(freed as i64)).await;
 
         Ok(cacher)
     }
@@ -288,64 +340,56 @@ impl BlobStoreFileCacher {
         }
     }
 
-    #[cfg(test)]
-    pub async fn current_size(&self) -> u64 {
-        self.state.lock().await.total_size
+    /// The cache index. Held only for in-memory bookkeeping, never across an
+    /// await; a poisoned lock still holds consistent counters (no update
+    /// panics midway), so it is recovered.
+    fn index(&self) -> std::sync::MutexGuard<'_, CacheIndex> {
+        self.index.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Evict LRU entries until under `max_cache_size`. `keep` is the hash just
-    /// inserted by the caller (empty string when there is none, e.g. startup
-    /// scan): it is never evicted, so a single blob at/over the cap cannot delete
-    /// itself and make its own fetch fail - the cache just sits one blob over cap.
-    async fn evict_if_needed(&self, keep: &str) {
-        let mut state = self.state.lock().await;
-        while state.total_size > self.max_cache_size && !state.entries.is_empty() {
-            // Peek the LRU before removing: if it is the just-inserted entry (the
-            // only case where the MRU is also the LRU), stop rather than
-            // self-evict.
-            match state.entries.peek_lru() {
-                Some((k, _)) if k.as_str() == keep => break,
-                Some(_) => {}
-                None => break,
+    #[cfg(test)]
+    pub async fn current_size(&self) -> u64 {
+        self.index().total_bytes
+    }
+
+    /// Delete evicted blobs from disk and record the size change.
+    async fn remove_evicted(&self, evicted: Vec<(String, u64)>, size_delta: i64) {
+        for (hash, _) in &evicted {
+            let path = self.cache_dir.join(hash);
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                // Most likely NotFound (unlinked out-of-band). The index has
+                // already dropped it, so its size is no longer counted.
+                tracing::warn!(path = %path.display(), error = %e, "Failed to evict cached file");
             }
-            if let Some((hash, size)) = state.entries.pop_lru() {
-                let path = self.cache_dir.join(&hash);
-                if let Err(e) = tokio::fs::remove_file(&path).await {
-                    // Most likely NotFound (unlinked out-of-band). The entry is
-                    // already gone from `entries`, so drop its size accounting too
-                    // - leaving it counted would inflate total_size permanently and
-                    // make every later insert over-evict live, in-use blobs.
-                    tracing::warn!(path = %path.display(), error = %e, "Failed to evict cached file; dropping its size accounting anyway");
-                }
-                state.total_size = state.total_size.saturating_sub(size);
-                if let Some(metrics) = &self.metrics {
-                    metrics.blob_cache_evictions_total.add(1, &[]);
-                    metrics.blob_cache_size_bytes.add(-(size as i64), &[]);
-                }
+        }
+        if let Some(metrics) = &self.metrics {
+            if !evicted.is_empty() {
+                metrics
+                    .blob_cache_evictions_total
+                    .add(evicted.len() as u64, &[]);
+            }
+            if size_delta != 0 {
+                metrics.blob_cache_size_bytes.add(size_delta, &[]);
             }
         }
     }
 
     async fn record_cache_entry(&self, hash_hex: String, size: u64) {
-        let delta: i64;
-        {
-            let mut state = self.state.lock().await;
-            let old_size = state.entries.put(hash_hex.clone(), size).unwrap_or(0);
-            state.total_size = state.total_size + size - old_size;
-            delta = size as i64 - old_size as i64;
-        }
-        if let Some(metrics) = &self.metrics
-            && delta != 0
-        {
-            metrics.blob_cache_size_bytes.add(delta, &[]);
-        }
-        // Protect the entry just inserted from being the one evicted.
-        self.evict_if_needed(&hash_hex).await;
+        let (delta, evicted) = self.index().insert(hash_hex, size);
+        self.remove_evicted(evicted, delta).await;
     }
 
+    /// Mark a cached blob most recent. A file on disk the index does not
+    /// hold (its eviction failed to unlink it) is indexed again with its
+    /// size, so the cap keeps counting it.
     async fn touch(&self, hash_hex: &str) {
-        let mut state = self.state.lock().await;
-        state.entries.get(hash_hex);
+        if self.index().touch(hash_hex) {
+            return;
+        }
+        if let Ok(meta) = tokio::fs::metadata(self.cache_path(hash_hex)).await {
+            self.record_cache_entry(hash_hex.to_string(), meta.len())
+                .await;
+        }
     }
 
     /// Ensure the blob `hash` is present in the local cache, fetching it from the
@@ -619,6 +663,56 @@ mod tests {
             .await
             .unwrap();
         (cacher, dir, store)
+    }
+
+    #[tokio::test]
+    async fn a_hit_on_an_unindexed_cached_file_counts_it_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            FilesystemBlobStore::new(dir.path().join("blobs"), 1_000_000)
+                .await
+                .unwrap(),
+        );
+        let cacher = BlobStoreFileCacher::new(store, dir.path().join("cache"), 1_000, None)
+            .await
+            .unwrap();
+        // A file left on disk by an eviction whose unlink failed.
+        let hash = "a".repeat(64);
+        tokio::fs::write(cacher.cache_path(&hash), b"12345")
+            .await
+            .unwrap();
+        assert_eq!(cacher.current_size().await, 0);
+
+        cacher.touch(&hash).await;
+        assert_eq!(cacher.current_size().await, 5);
+    }
+
+    #[test]
+    fn cache_index_evicts_least_recent_entries_down_to_the_cap() {
+        let mut index = CacheIndex::new(10);
+        assert_eq!(index.insert("a".into(), 4), (4, vec![]));
+        assert_eq!(index.insert("b".into(), 4), (4, vec![]));
+        index.touch("a");
+        let (delta, evicted) = index.insert("c".into(), 4);
+        assert_eq!(evicted, vec![("b".to_string(), 4)]);
+        assert_eq!((delta, index.total_bytes), (0, 8));
+    }
+
+    #[test]
+    fn cache_index_keeps_a_single_entry_over_the_cap() {
+        let mut index = CacheIndex::new(10);
+        index.insert("small".into(), 3);
+        let (delta, evicted) = index.insert("huge".into(), 25);
+        assert_eq!(evicted, vec![("small".to_string(), 3)]);
+        assert_eq!((delta, index.total_bytes), (22, 25));
+    }
+
+    #[test]
+    fn cache_index_replacing_an_entry_counts_only_the_new_size() {
+        let mut index = CacheIndex::new(100);
+        index.insert("a".into(), 30);
+        assert_eq!(index.insert("a".into(), 10), (-20, vec![]));
+        assert_eq!(index.total_bytes, 10);
     }
 
     #[tokio::test]

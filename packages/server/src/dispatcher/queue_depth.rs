@@ -23,9 +23,7 @@
 //! load shedding, not strict admission, so racing past the threshold
 //! by a few dozen rows is acceptable.
 
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter};
-
-use common::SubmissionStatus;
+use sea_orm::{ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter};
 
 use crate::entity::{code_run, submission_judgement};
 use crate::error::AppError;
@@ -44,19 +42,20 @@ use crate::state::AppState;
 pub const RETRY_AFTER_SECS: u64 = 2;
 
 /// Counts queued dispatch units: judgements (current or deferred) and code
-/// runs in `status='Queued'`. The judgement scan uses the index on
-/// `submission_judgement.status`; `code_run.status` carries none, which is
-/// fine at the default cap of a few thousand live rows.
+/// runs in `status='Queued'`. Each COUNT reads the table's partial index over
+/// its `Queued` rows (`idx_submission_judgement_claim`, `idx_code_run_claim`),
+/// which stays as small as the cap. The filter is the inline
+/// `QUEUED_PREDICATE` so the index stays usable under a generic plan.
 pub async fn count_queued_rows<C>(db: &C) -> Result<u64, AppError>
 where
     C: ConnectionTrait,
 {
     let code_runs = code_run::Entity::find()
-        .filter(code_run::Column::Status.eq(SubmissionStatus::Queued))
+        .filter(super::is_queued())
         .count(db)
         .await?;
     let judgements = submission_judgement::Entity::find()
-        .filter(submission_judgement::Column::Status.eq(SubmissionStatus::Queued))
+        .filter(super::is_queued())
         .count(db)
         .await?;
     Ok(code_runs + judgements)

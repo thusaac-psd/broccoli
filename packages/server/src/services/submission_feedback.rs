@@ -4,9 +4,9 @@ use crate::error::AppError;
 use crate::state::AppState;
 use crate::utils::advisory_lock;
 use broccoli_server_sdk::types::{
-    FeedbackUpdateOutcome, SubmissionAdmission, SubmissionFeedbackAction, SubmissionFeedbackQuery,
-    SubmissionFeedbackRecord, SubmissionFeedbackResult, SubmissionSlotObservation,
-    SubmissionSlotToken,
+    FeedbackOutcome, FeedbackUpdateOutcome, SubmissionAdmission, SubmissionFeedbackAction,
+    SubmissionFeedbackQuery, SubmissionFeedbackRecord, SubmissionFeedbackResult,
+    SubmissionSlotObservation, SubmissionSlotToken,
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{
@@ -16,12 +16,39 @@ use sea_orm::{
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
+/// The status everyone but a submission's judges sees while its feedback is
+/// withheld. [`public_status`] applies it in SQL for filtering and sorting,
+/// [`project`] to response bodies.
+const WITHHELD_STATUS: common::SubmissionStatus = common::SubmissionStatus::Running;
+
+/// SQL predicate: the feedback row aliased `alias` is withheld.
+fn withheld_sql(alias: &str) -> String {
+    format!(
+        "{alias}.outcome <> '{}'",
+        FeedbackOutcome::Released.as_str()
+    )
+}
+
+/// The submission status a viewer sees, as a SQL expression over
+/// `submission`, for status filters and sorting.
 pub fn public_status(can_view_all: bool) -> sea_orm::sea_query::Expr {
-    sea_orm::sea_query::Expr::cust(if can_view_all {
-        "submission.status"
-    } else {
-        "CASE WHEN EXISTS (SELECT 1 FROM submission_feedback f WHERE f.submission_id = submission.id AND f.outcome IN ('pending', 'retired')) THEN 'Running' ELSE submission.status END"
-    })
+    sea_orm::sea_query::Expr::cust(public_status_sql(can_view_all, "submission"))
+}
+
+/// [`public_status`] as SQL over the `submission` row aliased `row`.
+pub fn public_status_sql(can_view_all: bool, row: &str) -> String {
+    if can_view_all {
+        return format!("{row}.status");
+    }
+    format!(
+        "CASE WHEN EXISTS (SELECT 1 FROM submission_feedback f WHERE f.submission_id = {row}.id AND {}) THEN '{WITHHELD_STATUS}' ELSE {row}.status END",
+        withheld_sql("f")
+    )
+}
+
+fn parse_outcome(value: &str) -> Result<FeedbackOutcome, DbErr> {
+    FeedbackOutcome::parse(value)
+        .ok_or_else(|| DbErr::Custom(format!("Unknown submission feedback outcome {value:?}")))
 }
 
 fn rejected(code: &str, message: &str) -> AppError {
@@ -115,16 +142,16 @@ pub async fn query(
     query: &SubmissionFeedbackQuery,
 ) -> Result<Vec<SubmissionFeedbackRecord>, DbErr> {
     let rows = db.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT f.submission_id, f.contest_id, f.user_id, s.problem_id,
+        format!("SELECT f.submission_id, f.contest_id, f.user_id, s.problem_id,
         (EXTRACT(EPOCH FROM s.created_at)*1000000)::bigint AS submitted_at_us,
         s.status::text AS status, s.verdict, f.state_key, f.metadata, f.outcome, f.public_result, f.slot_key
         FROM submission_feedback f JOIN submission s ON s.id = f.submission_id
         WHERE f.plugin_id = $1 AND ($2::text IS NULL OR f.state_key = $2)
         AND ($3::text IS NULL OR f.slot_key = $3)
-        AND ($4::boolean = false OR f.outcome IN ('pending','retired'))
+        AND ($4::boolean = false OR {withheld})
         AND f.submission_id > $5
         AND ($7::jsonb IS NULL OR f.submission_id IN (SELECT value::int FROM jsonb_array_elements_text($7)))
-        ORDER BY f.submission_id LIMIT $6",
+        ORDER BY f.submission_id LIMIT $6", withheld = withheld_sql("f")),
         [plugin_id.into(), query.key.clone().into(), query.slot_key.clone().into(), query.unpublished_only.into(),
          query.after_id.into(), i64::from(query.page_size()).into(),
          query.submission_ids.as_ref().map(serde_json::to_value).transpose().map_err(|e| DbErr::Custom(e.to_string()))?.into()])).await?;
@@ -135,7 +162,6 @@ pub async fn query(
         let verdict: Option<String> = row.try_get("", "verdict")?;
         let public_result: Option<Value> = row.try_get("", "public_result")?;
         let outcome: String = row.try_get("", "outcome")?;
-        let slot_key: Option<String> = row.try_get("", "slot_key")?;
         records.push(SubmissionFeedbackRecord {
             submission_id,
             contest_id: row.try_get("", "contest_id")?,
@@ -150,9 +176,8 @@ pub async fn query(
                 .map_err(|e| DbErr::Custom(e.to_string()))?,
             key: row.try_get("", "state_key")?,
             metadata: row.try_get("", "metadata")?,
-            withheld: outcome != "released",
-            slot_held: outcome == "pending" && slot_key.is_some(),
-            slot_key,
+            outcome: parse_outcome(&outcome)?,
+            slot_key: row.try_get("", "slot_key")?,
             result: public_result
                 .map(serde_json::from_value)
                 .transpose()
@@ -175,8 +200,12 @@ async fn slot_state(
          (SELECT submission_id FROM submission_feedback WHERE plugin_id = $1 AND slot_key = $2
           ORDER BY submission_id DESC LIMIT 1) AS generation,
          (SELECT submission_id FROM submission_feedback WHERE plugin_id = $1 AND slot_key = $2
-          AND outcome = 'pending' LIMIT 1) AS pending",
-            [plugin_id.into(), key.into()],
+          AND outcome = $3 LIMIT 1) AS pending",
+            [
+                plugin_id.into(),
+                key.into(),
+                FeedbackOutcome::Pending.as_str().into(),
+            ],
         ))
         .await?
         .ok_or_else(|| DbErr::Custom("Missing slot observation".into()))?;
@@ -201,7 +230,7 @@ pub async fn observe_slot(
         )
         .await?
         .into_iter()
-        .find(|r| r.slot_held)
+        .find(|r| r.holds_slot())
     } else {
         None
     };
@@ -249,17 +278,12 @@ pub async fn update(
         .apply_action(action)
         .map_err(|e| DbErr::Custom(e.into()))?;
     if result == FeedbackUpdateOutcome::Applied {
-        let outcome = if !record.withheld {
-            "released"
-        } else {
-            "retired"
-        };
         txn.execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE submission_feedback SET outcome = $1, public_result = $2
              WHERE plugin_id = $3 AND submission_id = $4",
             [
-                outcome.into(),
+                record.outcome.as_str().into(),
                 record
                     .result
                     .as_ref()
@@ -277,9 +301,13 @@ pub async fn update(
     Ok(result)
 }
 
+/// What a viewer without `submission:view_all` sees of a submission's
+/// plugin-owned feedback.
 #[derive(Clone, Debug)]
 pub enum Feedback {
-    Pending,
+    /// Withheld: shown as still running, with no result.
+    Withheld,
+    /// Released with a result that replaces the judged one.
     Published(SubmissionFeedbackResult),
 }
 
@@ -293,13 +321,13 @@ pub async fn load(state: &AppState, ids: &[i32]) -> Result<HashMap<i32, Feedback
         .collect::<Vec<_>>()
         .join(",");
     let rows = state.db.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,
-        format!("SELECT submission_id, outcome, public_result FROM submission_feedback WHERE submission_id IN ({placeholders}) AND (outcome <> 'released' OR public_result IS NOT NULL)"),
+        format!("SELECT f.submission_id, f.outcome, f.public_result FROM submission_feedback f WHERE f.submission_id IN ({placeholders}) AND ({} OR f.public_result IS NOT NULL)", withheld_sql("f")),
         ids.iter().copied().map(Into::into))).await?;
     for row in rows {
         let id = row.try_get("", "submission_id")?;
         let outcome: String = row.try_get("", "outcome")?;
-        let value = if outcome != "released" {
-            Feedback::Pending
+        let value = if parse_outcome(&outcome)?.is_withheld() {
+            Feedback::Withheld
         } else {
             let result: Value = row.try_get("", "public_result")?;
             Feedback::Published(
@@ -314,8 +342,8 @@ pub async fn load(state: &AppState, ids: &[i32]) -> Result<HashMap<i32, Feedback
 /// Presentation overlays use submission API fields, never contest-specific verdicts.
 pub fn project(value: &mut Value, feedback: Feedback) {
     match feedback {
-        Feedback::Pending => {
-            value["status"] = json!("Running");
+        Feedback::Withheld => {
+            value["status"] = json!(WITHHELD_STATUS.as_str());
             if value.get("result").is_some() {
                 value["result"] = Value::Null;
             }
@@ -348,7 +376,7 @@ mod tests {
     #[test]
     fn withholding_hides_details_and_keeps_polling() {
         let mut value = json!({"id":7,"status":"Judged","result":{"verdict":"Accepted","test_case_results":[{}]}});
-        project(&mut value, Feedback::Pending);
+        project(&mut value, Feedback::Withheld);
         assert_eq!(value, json!({"id":7,"status":"Running","result":null}));
     }
     #[test]

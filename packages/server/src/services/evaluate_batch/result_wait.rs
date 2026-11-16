@@ -1,17 +1,13 @@
 use super::*;
 
-use crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry;
-
 /// The evaluate batch result-wait policy: a fixed tick, and an empty tick keeps
-/// waiting only while the ops registry says a test case's operation execution
-/// budget remains.
-pub(super) struct EvaluateWait<'a> {
-    evaluate_ops_registry: &'a EvaluateBatchOpsRegistry,
+/// waiting only while one of the batch's test cases may still produce a
+/// verdict (see [`EvaluateCases`]).
+pub(super) struct EvaluateWait {
     timeout: Duration,
 }
 
-impl WaitPolicy<TestCaseVerdict> for EvaluateWait<'_> {
-    const KIND: &'static str = "evaluate";
+impl WaitPolicy<TestCaseVerdict, EvaluateCases> for EvaluateWait {
     const DISCONNECTED: &'static str = "Evaluate batch channel disconnected";
 
     fn next_tick(&self, _waited: Duration) -> Option<Duration> {
@@ -19,11 +15,11 @@ impl WaitPolicy<TestCaseVerdict> for EvaluateWait<'_> {
     }
 
     // A zero timeout is a single non-blocking poll, never extended.
-    fn extend(&self, wait: &WaitCtx<'_, TestCaseVerdict>) -> bool {
+    fn extend(&self, wait: &WaitCtx<'_, TestCaseVerdict, EvaluateCases>) -> bool {
         let extend = !self.timeout.is_zero()
-            && self
-                .evaluate_ops_registry
-                .should_extend_wait_for_execution_timeout(wait.batch_id, self.timeout);
+            && wait
+                .batches
+                .should_extend_wait(wait.batch_id, self.timeout, Instant::now());
         if extend {
             tracing::debug!(
                 plugin_id = %wait.plugin_id,
@@ -35,9 +31,13 @@ impl WaitPolicy<TestCaseVerdict> for EvaluateWait<'_> {
         extend
     }
 
-    fn on_delivered(&self, wait: &WaitCtx<'_, TestCaseVerdict>, verdict: &TestCaseVerdict) {
-        self.evaluate_ops_registry
-            .mark_test_case_completed(wait.batch_id, verdict.test_case_id);
+    fn on_delivered(
+        &self,
+        wait: &WaitCtx<'_, TestCaseVerdict, EvaluateCases>,
+        verdict: &TestCaseVerdict,
+    ) {
+        wait.batches
+            .mark_case_completed(wait.batch_id, verdict.test_case_id);
         wait.record_outcome(
             "result",
             Some(KeyValue::new("verdict", verdict.verdict.to_string())),
@@ -50,30 +50,15 @@ impl WaitPolicy<TestCaseVerdict> for EvaluateWait<'_> {
             "Evaluate result received"
         );
     }
-
-    fn on_drained(&self, batch_id: &str) {
-        self.evaluate_ops_registry.remove_batch(batch_id);
-    }
 }
 
 pub(super) fn evaluate_wait<'a>(
     plugin_id: &'a str,
     batches: &'a EvaluateBatches,
-    metrics: Option<&'a common::metrics::Metrics>,
-    evaluate_ops_registry: &'a EvaluateBatchOpsRegistry,
     batch_id: &'a str,
     timeout: Duration,
-) -> anyhow::Result<BatchWait<'a, TestCaseVerdict, EvaluateWait<'a>>> {
-    BatchWait::open(
-        plugin_id,
-        batches,
-        metrics,
-        batch_id,
-        EvaluateWait {
-            evaluate_ops_registry,
-            timeout,
-        },
-    )
+) -> anyhow::Result<BatchWait<'a, TestCaseVerdict, EvaluateCases, EvaluateWait>> {
+    BatchWait::open(plugin_id, batches, batch_id, EvaluateWait { timeout })
 }
 
 /// Wait for the batch's next verdict, blocking the calling thread. Kept for the
@@ -81,20 +66,10 @@ pub(super) fn evaluate_wait<'a>(
 pub fn next_evaluate_result(
     plugin_id: &str,
     batches: &EvaluateBatches,
-    metrics: Option<&common::metrics::Metrics>,
-    evaluate_ops_registry: &EvaluateBatchOpsRegistry,
     batch_id: &str,
     timeout: Duration,
 ) -> anyhow::Result<Option<TestCaseVerdict>> {
-    evaluate_wait(
-        plugin_id,
-        batches,
-        metrics,
-        evaluate_ops_registry,
-        batch_id,
-        timeout,
-    )?
-    .blocking()
+    evaluate_wait(plugin_id, batches, batch_id, timeout)?.blocking()
 }
 
 /// Async sibling of [`next_evaluate_result`]. Awaits each result via flume's
@@ -105,44 +80,16 @@ pub fn next_evaluate_result(
 pub async fn next_evaluate_result_async(
     plugin_id: &str,
     batches: &EvaluateBatches,
-    metrics: Option<&common::metrics::Metrics>,
-    evaluate_ops_registry: &EvaluateBatchOpsRegistry,
     batch_id: &str,
     timeout: Duration,
 ) -> anyhow::Result<Option<TestCaseVerdict>> {
-    evaluate_wait(
-        plugin_id,
-        batches,
-        metrics,
-        evaluate_ops_registry,
-        batch_id,
-        timeout,
-    )?
-    .wait()
-    .await
+    evaluate_wait(plugin_id, batches, batch_id, timeout)?
+        .wait()
+        .await
 }
 
-pub fn cancel_evaluate_batch(
-    plugin_id: &str,
-    batches: &EvaluateBatches,
-    metrics: Option<&common::metrics::Metrics>,
-    evaluate_ops_registry: &EvaluateBatchOpsRegistry,
-    batch_id: &str,
-) {
-    if batches.remove(batch_id).is_some() {
-        evaluate_ops_registry.remove_batch(batch_id);
-        if let Some(metrics) = metrics {
-            let attrs = [
-                KeyValue::new("batch.kind", "evaluate"),
-                KeyValue::new("plugin.id", plugin_id.to_string()),
-            ];
-            metrics.batch_cancelled_total.add(1, &attrs);
-            metrics
-                .batch_active
-                .add(-1, &[KeyValue::new("batch.kind", "evaluate")]);
-        }
-    }
-
+pub fn cancel_evaluate_batch(plugin_id: &str, batches: &EvaluateBatches, batch_id: &str) {
+    batches.remove(batch_id, Removal::Cancelled { plugin_id });
     tracing::info!(
         plugin_id = %plugin_id,
         batch_id = %batch_id,

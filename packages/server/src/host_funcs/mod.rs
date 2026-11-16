@@ -3,7 +3,6 @@ pub mod config;
 pub mod context;
 pub mod dispatch;
 pub mod evaluate;
-pub mod evaluate_ops_registry;
 pub mod feedback;
 pub mod language;
 pub mod logger;
@@ -14,10 +13,10 @@ pub mod submissions;
 pub mod timer;
 
 use crate::host_funcs::context::HostFunctionDeps;
-use common::metrics::Metrics;
+use extism::ValType::I64;
 use extism::{CurrentPlugin, Function, UserData, Val, ValType};
-use opentelemetry::KeyValue;
 use plugin_core::host::HostFunctionRegistry;
+use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
@@ -132,26 +131,6 @@ pub(crate) fn write_bytes(
     Ok(())
 }
 
-// Counts a host function entering `block_in_place`. Host functions run inside
-// `spawn_blocking` and must not call it, so nothing in shipping code calls
-// this: a non-zero `broccoli.host_fn.block_in_place` count means one does, and
-// the stress wave in `tests/integration/source_invariants.rs` fails on it.
-#[track_caller]
-#[allow(dead_code)]
-pub(crate) fn record_block_in_place_regression(metrics: &Option<Metrics>, host_fn: &str) {
-    if let Some(m) = metrics {
-        let loc = std::panic::Location::caller();
-        m.host_fn_block_in_place_total.add(
-            1,
-            &[
-                KeyValue::new("host_fn", host_fn.to_string()),
-                KeyValue::new("file", loc.file().to_string()),
-                KeyValue::new("line", loc.line() as i64),
-            ],
-        );
-    }
-}
-
 pub(crate) fn host_fn_span(host_fn: &'static str, plugin_id: &str) -> Span {
     tracing::info_span!(
         parent: &Span::current(),
@@ -166,318 +145,280 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
     // `broccoli_plugin` pool: backs the raw `sql` capability. Full read + write
     // DML on data, but no schema DDL on core and no app-role powers. (`config:read`
     // runs on the PRIVILEGED pool - see its registration below.)
-    let db = deps.system.db.clone();
+    let db = &deps.system.db;
     // PRIVILEGED pool (runs as the app role): backs the server-owned structured
-    // host fns - `host.storage.*`, `host.submission.*`, and `config:write` -
-    // which build plugin-scoped SQL the server controls and run outside the
-    // plugin role's boundary (core DDL, `plugin_login_secret`).
-    let privileged_db = deps.system.privileged_db.clone();
+    // host fns - `host.storage.*`, `host.submission.*`, `host.timer.*` and
+    // `config:*` - which build plugin-scoped SQL the server controls and run
+    // outside the plugin role's boundary (core DDL, `plugin_login_secret`).
+    let privileged_db = &deps.system.privileged_db;
 
-    let feedback_db = privileged_db.clone();
-    hr.register("submission", move |plugin_id| {
+    register_fn(
+        &mut hr,
+        "logger",
+        "log_info",
+        &[I64],
+        &[],
+        str::to_string,
+        logger::log_info,
+    );
+    register_storage_functions(&mut hr, privileged_db);
+    register_timer_functions(&mut hr, privileged_db);
+    register_sql_functions(&mut hr, db);
+    register_submission_functions(&mut hr, privileged_db);
+    register_registry_functions(&mut hr, &deps);
+    register_evaluation_functions(&mut hr, &deps);
+    register_config_functions(&mut hr, &deps, privileged_db);
+    hr
+}
+
+/// Register host fn `name` under `capability`. Each plugin's instance gets
+/// `user_data(plugin_id)` as its context.
+fn register_fn<T, F>(
+    hr: &mut HostFunctionRegistry,
+    capability: &str,
+    name: &'static str,
+    params: &[ValType],
+    results: &[ValType],
+    user_data: impl Fn(&str) -> T + Send + Sync + 'static,
+    f: F,
+) where
+    T: Send + Sync + 'static,
+    F: Fn(&mut CurrentPlugin, &[Val], &mut [Val], UserData<Arc<T>>) -> Result<(), extism::Error>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    let (params, results) = (params.to_vec(), results.to_vec());
+    hr.register(capability, move |plugin_id| {
         Function::new(
-            "submission_feedback_query",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((plugin_id.to_string(), feedback_db.clone())),
-            feedback::submission_feedback_query,
+            name,
+            params.clone(),
+            results.clone(),
+            host_data(user_data(plugin_id)),
+            f.clone(),
         )
     });
+}
 
-    let feedback_db = privileged_db.clone();
-    hr.register("submission", move |plugin_id| {
-        Function::new(
-            "submission_feedback_update",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((plugin_id.to_string(), feedback_db.clone())),
-            feedback::submission_feedback_update,
-        )
-    });
+/// User data for a host fn bound to one plugin and a database pool.
+fn with_db(
+    db: &DatabaseConnection,
+) -> impl Fn(&str) -> (String, DatabaseConnection) + Send + Sync + 'static {
+    let db = db.clone();
+    move |plugin_id| (plugin_id.to_string(), db.clone())
+}
 
-    let slot_db = privileged_db.clone();
-    hr.register("submission", move |plugin_id| {
-        Function::new(
-            "submission_slot_observe",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((plugin_id.to_string(), slot_db.clone())),
-            feedback::submission_slot_observe,
-        )
-    });
+/// `host.storage.*`: plugin-scoped key-value storage, on the privileged pool.
+fn register_storage_functions(hr: &mut HostFunctionRegistry, privileged_db: &DatabaseConnection) {
+    let cap = "storage";
+    register_fn(
+        hr,
+        cap,
+        "store_set",
+        &[I64],
+        &[],
+        with_db(privileged_db),
+        storage::store_set,
+    );
+    register_fn(
+        hr,
+        cap,
+        "store_get",
+        &[I64],
+        &[I64],
+        with_db(privileged_db),
+        storage::store_get,
+    );
+    register_fn(
+        hr,
+        cap,
+        "store_compare_and_set",
+        &[I64],
+        &[I64],
+        with_db(privileged_db),
+        storage::store_compare_and_set,
+    );
+    register_fn(
+        hr,
+        cap,
+        "store_delete",
+        &[I64],
+        &[],
+        with_db(privileged_db),
+        storage::store_delete,
+    );
+    register_fn(
+        hr,
+        cap,
+        "store_scan",
+        &[I64],
+        &[I64],
+        with_db(privileged_db),
+        storage::store_scan,
+    );
+}
 
-    let scan_db = privileged_db.clone();
-    hr.register("storage", move |plugin_id| {
-        Function::new(
-            "store_scan",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((plugin_id.to_string(), scan_db.clone())),
-            storage::store_scan,
-        )
-    });
+/// `host.timer.*`. One manifest permission gates both functions, so a plugin
+/// without `"timer"` never sees either. Runs on the PRIVILEGED pool since
+/// `plugin_timer` is a server-owned core table, not plugin-scoped data
+/// reachable through the restricted `broccoli_plugin` role.
+fn register_timer_functions(hr: &mut HostFunctionRegistry, privileged_db: &DatabaseConnection) {
+    let cap = "timer";
+    register_fn(
+        hr,
+        cap,
+        "timer_schedule",
+        &[I64],
+        &[I64],
+        with_db(privileged_db),
+        timer::timer_schedule,
+    );
+    register_fn(
+        hr,
+        cap,
+        "timer_cancel",
+        &[I64],
+        &[I64],
+        with_db(privileged_db),
+        timer::timer_cancel,
+    );
+}
 
-    hr.register("logger", |plugin_id| {
-        Function::new(
-            "log_info",
-            [ValType::I64],
-            [],
-            host_data(plugin_id.to_string()),
-            logger::log_info,
-        )
-    });
-
-    let db_clone = privileged_db.clone();
-    hr.register("storage", move |plugin_id| {
-        Function::new(
-            "store_set",
-            [ValType::I64],
-            [],
-            host_data((plugin_id.to_string(), db_clone.clone())),
-            storage::store_set,
-        )
-    });
-
-    let db_clone = privileged_db.clone();
-    hr.register("storage", move |plugin_id| {
-        Function::new(
-            "store_get",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((plugin_id.to_string(), db_clone.clone())),
-            storage::store_get,
-        )
-    });
-
-    let db_clone = privileged_db.clone();
-    hr.register("storage", move |plugin_id| {
-        Function::new(
-            "store_compare_and_set",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((plugin_id.to_string(), db_clone.clone())),
-            storage::store_compare_and_set,
-        )
-    });
-
-    let db_clone = privileged_db.clone();
-    hr.register("storage", move |plugin_id| {
-        Function::new(
-            "store_delete",
-            [ValType::I64],
-            [],
-            host_data((plugin_id.to_string(), db_clone.clone())),
-            storage::store_delete,
-        )
-    });
-
-    // `timer` gates both functions behind a single manifest permission: a
-    // plugin without `"timer"` never sees `host.timer.schedule`/`.cancel` at
-    // all, matching the `storage` capability's shape above. Runs on the
-    // PRIVILEGED pool since `plugin_timer` is a server-owned core table, not
-    // plugin-scoped data reachable through the restricted `broccoli_plugin`
-    // role.
-    let db_clone = privileged_db.clone();
-    hr.register("timer", move |plugin_id| {
-        Function::new(
-            "timer_schedule",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((plugin_id.to_string(), db_clone.clone())),
-            timer::timer_schedule,
-        )
-    });
-
-    let db_clone = privileged_db.clone();
-    hr.register("timer", move |plugin_id| {
-        Function::new(
-            "timer_cancel",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((plugin_id.to_string(), db_clone.clone())),
-            timer::timer_cancel,
-        )
-    });
-
-    let db_clone = db.clone();
-    hr.register("sql", move |plugin_id| {
-        Function::new(
-            "db_execute",
-            [ValType::I64, ValType::I64],
-            [ValType::I64],
-            host_data((plugin_id.to_string(), db_clone.clone())),
-            sql::db_execute,
-        )
-    });
-
-    let db_clone = db.clone();
-    hr.register("sql", move |plugin_id| {
-        Function::new(
-            "db_query",
-            [ValType::I64, ValType::I64],
-            [ValType::I64],
-            host_data((plugin_id.to_string(), db_clone.clone())),
-            sql::db_query,
-        )
-    });
+/// The raw `sql` capability on the restricted pool, including explicit
+/// transactions shared across one plugin's calls through `txn_map`.
+fn register_sql_functions(hr: &mut HostFunctionRegistry, db: &DatabaseConnection) {
+    let cap = "sql";
+    register_fn(
+        hr,
+        cap,
+        "db_execute",
+        &[I64, I64],
+        &[I64],
+        with_db(db),
+        sql::db_execute,
+    );
+    register_fn(
+        hr,
+        cap,
+        "db_query",
+        &[I64, I64],
+        &[I64],
+        with_db(db),
+        sql::db_query,
+    );
 
     let txn_map: sql::TransactionMap = Arc::new(StdMutex::new(HashMap::new()));
+    let with_txns = || {
+        let (db, txn_map) = (db.clone(), txn_map.clone());
+        move |plugin_id: &str| (plugin_id.to_string(), db.clone(), txn_map.clone())
+    };
+    register_fn(
+        hr,
+        cap,
+        "db_begin",
+        &[I64],
+        &[I64],
+        with_txns(),
+        sql::db_begin,
+    );
+    register_fn(
+        hr,
+        cap,
+        "db_query_in",
+        &[I64, I64, I64],
+        &[I64],
+        with_txns(),
+        sql::db_query_in,
+    );
+    register_fn(
+        hr,
+        cap,
+        "db_execute_in",
+        &[I64, I64, I64],
+        &[I64],
+        with_txns(),
+        sql::db_execute_in,
+    );
+    register_fn(
+        hr,
+        cap,
+        "db_commit",
+        &[I64],
+        &[I64],
+        with_txns(),
+        sql::db_commit,
+    );
+    register_fn(
+        hr,
+        cap,
+        "db_rollback",
+        &[I64],
+        &[I64],
+        with_txns(),
+        sql::db_rollback,
+    );
+}
 
-    let db_clone = db.clone();
-    let txn_map_clone = txn_map.clone();
-    hr.register("sql", move |plugin_id| {
-        Function::new(
-            "db_begin",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((
-                plugin_id.to_string(),
-                db_clone.clone(),
-                txn_map_clone.clone(),
-            )),
-            sql::db_begin,
-        )
-    });
-
-    let db_clone = db.clone();
-    let txn_map_clone = txn_map.clone();
-    hr.register("sql", move |plugin_id| {
-        Function::new(
-            "db_query_in",
-            [ValType::I64, ValType::I64, ValType::I64],
-            [ValType::I64],
-            host_data((
-                plugin_id.to_string(),
-                db_clone.clone(),
-                txn_map_clone.clone(),
-            )),
-            sql::db_query_in,
-        )
-    });
-
-    let db_clone = db.clone();
-    let txn_map_clone = txn_map.clone();
-    hr.register("sql", move |plugin_id| {
-        Function::new(
-            "db_execute_in",
-            [ValType::I64, ValType::I64, ValType::I64],
-            [ValType::I64],
-            host_data((
-                plugin_id.to_string(),
-                db_clone.clone(),
-                txn_map_clone.clone(),
-            )),
-            sql::db_execute_in,
-        )
-    });
-
-    let db_clone = db.clone();
-    let txn_map_clone = txn_map.clone();
-    hr.register("sql", move |plugin_id| {
-        Function::new(
-            "db_commit",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((
-                plugin_id.to_string(),
-                db_clone.clone(),
-                txn_map_clone.clone(),
-            )),
-            sql::db_commit,
-        )
-    });
-
-    let db_clone = db.clone();
-    let txn_map_clone = txn_map;
-    hr.register("sql", move |plugin_id| {
-        Function::new(
-            "db_rollback",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((
-                plugin_id.to_string(),
-                db_clone.clone(),
-                txn_map_clone.clone(),
-            )),
-            sql::db_rollback,
-        )
-    });
-
-    // Structured, capability-gated core-WRITE path (`host.submission.*`). These
-    // build their SQL server-side from structured input; behind a distinct
-    // `submission` capability, they run on the PRIVILEGED pool (the raw `sql`
-    // channel above is now restricted to the read-only `broccoli_plugin` role,
-    // phase 2), so their legitimate core writes keep working.
-    let db_clone = privileged_db.clone();
-    hr.register("submission", move |plugin_id| {
-        Function::new(
-            "submission_update",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((plugin_id.to_string(), db_clone.clone())),
-            submissions::submission_update,
-        )
-    });
-
-    let db_clone = privileged_db.clone();
-    hr.register("submission", move |plugin_id| {
-        Function::new(
+/// `host.submission.*`: the structured, capability-gated core-WRITE path. It
+/// builds its SQL server-side from structured input and runs on the
+/// PRIVILEGED pool, since the raw `sql` channel is restricted to the
+/// `broccoli_plugin` role.
+fn register_submission_functions(
+    hr: &mut HostFunctionRegistry,
+    privileged_db: &DatabaseConnection,
+) {
+    let cap = "submission";
+    let functions: [(&'static str, HostFnDb); 9] = [
+        ("submission_update", submissions::submission_update),
+        (
             "submission_insert_results",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((plugin_id.to_string(), db_clone.clone())),
             submissions::submission_insert_results,
-        )
-    });
-
-    let db_clone = privileged_db.clone();
-    hr.register("submission", move |plugin_id| {
-        Function::new(
+        ),
+        (
             "submission_delete_results",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((plugin_id.to_string(), db_clone.clone())),
             submissions::submission_delete_results,
-        )
-    });
-
-    let db_clone = privileged_db.clone();
-    hr.register("submission", move |plugin_id| {
-        Function::new(
+        ),
+        (
             "submission_query_test_cases",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((plugin_id.to_string(), db_clone.clone())),
             submissions::submission_query_test_cases,
-        )
-    });
-
-    let db_clone = privileged_db.clone();
-    hr.register("submission", move |plugin_id| {
-        Function::new(
-            "code_run_update",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((plugin_id.to_string(), db_clone.clone())),
-            submissions::code_run_update,
-        )
-    });
-
-    let db_clone = privileged_db.clone();
-    hr.register("submission", move |plugin_id| {
-        Function::new(
+        ),
+        (
+            "submission_feedback_query",
+            feedback::submission_feedback_query,
+        ),
+        (
+            "submission_feedback_update",
+            feedback::submission_feedback_update,
+        ),
+        ("submission_slot_observe", feedback::submission_slot_observe),
+        ("code_run_update", submissions::code_run_update),
+        (
             "code_run_insert_results",
-            [ValType::I64],
-            [ValType::I64],
-            host_data((plugin_id.to_string(), db_clone.clone())),
             submissions::code_run_insert_results,
-        )
-    });
+        ),
+    ];
+    for (name, f) in functions {
+        register_fn(hr, cap, name, &[I64], &[I64], with_db(privileged_db), f);
+    }
+}
 
-    let contest_reg = deps.system.contest_type_registry.clone();
-    let eval_reg = deps.system.evaluator_registry.clone();
-    let checker_stage_reg = deps.system.checker_stage_registry.clone();
-    let lang_reg = deps.system.language_resolver_registry.clone();
+/// A host fn whose context is the calling plugin and a database pool.
+type HostFnDb = fn(
+    &mut CurrentPlugin,
+    &[Val],
+    &mut [Val],
+    UserData<Arc<(String, DatabaseConnection)>>,
+) -> Result<(), extism::Error>;
+
+/// `plugin:register` (contest types, evaluators, checker stages, languages)
+/// and the `language:resolve` / `checker:*` lookups into those registries.
+fn register_registry_functions(hr: &mut HostFunctionRegistry, deps: &HostFunctionDeps) {
+    let system = &deps.system;
+    let contest_reg = system.contest_type_registry.clone();
+    let eval_reg = system.evaluator_registry.clone();
+    let checker_stage_reg = system.checker_stage_registry.clone();
+    let lang_reg = system.language_resolver_registry.clone();
     hr.register_many("plugin:register", move |plugin_id| {
         registry::create_registry_functions(
             plugin_id.to_string(),
@@ -488,12 +429,46 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
         )
     });
 
+    let lang_reg = system.language_resolver_registry.clone();
+    let pm = deps.plugin_manager.clone();
+    hr.register("language:resolve", move |plugin_id| {
+        language::create_resolve_language_function(
+            plugin_id.to_string(),
+            lang_reg.clone(),
+            pm.clone(),
+        )
+    });
+
+    let checker_stage_reg = system.checker_stage_registry.clone();
+    let pm = deps.plugin_manager.clone();
+    hr.register("checker:resolve", move |plugin_id| {
+        checker::create_resolve_checker_function(
+            plugin_id.to_string(),
+            checker_stage_reg.clone(),
+            pm.clone(),
+        )
+    });
+
+    let checker_stage_reg = system.checker_stage_registry.clone();
+    let pm = deps.plugin_manager.clone();
+    hr.register("checker:interpret", move |plugin_id| {
+        checker::create_interpret_checker_function(
+            plugin_id.to_string(),
+            checker_stage_reg.clone(),
+            pm.clone(),
+        )
+    });
+}
+
+/// `evaluator:evaluate` and `operations:dispatch`, which share the server's
+/// evaluator and fan-out concurrency limits.
+fn register_evaluation_functions(hr: &mut HostFunctionRegistry, deps: &HostFunctionDeps) {
     // Cap concurrent evaluator plugin calls per server. Default = number of cores,
-    // but on hosts with spare RAM and a high-fan-out workload (Signpost: 20 testcases
-    // per submission, ICPC fans them out as parallel tokio tasks), this should be
+    // but on hosts with spare RAM and a high-fan-out workload (many test cases
+    // per submission fanned out as parallel tokio tasks), this should be
     // bumped well above core count via `BROCCOLI__PLUGIN__EVALUATOR_PARALLELISM`.
     let evaluator_parallelism = deps.system.config.plugin.resolve_evaluator_parallelism();
-    let fanout_concurrency = deps.system.config.server.batch_evaluator_fanout_concurrency as usize;
+    let fanout_concurrency = deps.system.config.server.evaluate_batch_fanout_concurrency as usize;
     tracing::info!(
         evaluator_parallelism,
         fanout_concurrency,
@@ -513,86 +488,36 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
     hr.register_many("operations:dispatch", move |plugin_id| {
         dispatch::create_dispatch_functions(plugin_id.to_string(), dispatch_deps.clone())
     });
+}
 
-    let lang_reg = deps.system.language_resolver_registry;
-    let pm_for_resolve = deps.plugin_manager.clone();
-    hr.register("language:resolve", move |plugin_id| {
-        language::create_resolve_language_function(
-            plugin_id.to_string(),
-            lang_reg.clone(),
-            pm_for_resolve.clone(),
-        )
-    });
-
-    let checker_stage_reg_for_resolve = deps.system.checker_stage_registry.clone();
-    let pm_for_resolve_checker = deps.plugin_manager.clone();
-    hr.register("checker:resolve", move |plugin_id| {
-        checker::create_resolve_checker_function(
-            plugin_id.to_string(),
-            checker_stage_reg_for_resolve.clone(),
-            pm_for_resolve_checker.clone(),
-        )
-    });
-
-    let checker_stage_reg_for_interpret = deps.system.checker_stage_registry.clone();
-    let pm_for_interpret_checker = deps.plugin_manager.clone();
-    hr.register("checker:interpret", move |plugin_id| {
-        checker::create_interpret_checker_function(
-            plugin_id.to_string(),
-            checker_stage_reg_for_interpret.clone(),
-            pm_for_interpret_checker.clone(),
-        )
-    });
-
-    // `config:read` reads `plugin_config`, which raw plugin SQL can no longer
-    // SELECT (SELECT is revoked from `broccoli_plugin` so one plugin cannot read
-    // another's config via raw SQL). It runs on the PRIVILEGED pool like
-    // `config:write`: the SQL is server-owned and plugin-scoped (the row key's
-    // namespace is always prefixed with the caller's `plugin_id`, and
-    // `validate_raw_namespace` forbids `:` so the prefix cannot be forged), so a
-    // plugin can still only read its OWN config.
-    let db_clone = privileged_db.clone();
+/// `config:read` and `config:write`, both on the PRIVILEGED pool.
+///
+/// `config:read` reads `plugin_config`, which raw plugin SQL cannot SELECT
+/// (so one plugin cannot read another's config). The SQL is server-owned and
+/// plugin-scoped: the row key's namespace is always prefixed with the
+/// caller's `plugin_id`, and `validate_raw_namespace` forbids `:` so the
+/// prefix cannot be forged, so a plugin can only read its OWN config.
+/// `config:write` mutates the core `plugin_config` table.
+fn register_config_functions(
+    hr: &mut HostFunctionRegistry,
+    deps: &HostFunctionDeps,
+    privileged_db: &DatabaseConnection,
+) {
+    let db = privileged_db.clone();
     let registry = deps.plugin_manager.get_registry().clone();
     hr.register("config:read", move |plugin_id| {
-        config::create_config_get_function(
-            plugin_id.to_string(),
-            db_clone.clone(),
-            registry.clone(),
-        )
+        config::create_config_get_function(plugin_id.to_string(), db.clone(), registry.clone())
     });
 
-    // `config:write` mutates the core `plugin_config` table, so - like
-    // `host.submission.*` and `host.storage.*` - it runs on the PRIVILEGED pool.
-    let priv_clone = privileged_db;
+    let db = privileged_db.clone();
     hr.register("config:write", move |plugin_id| {
-        config::create_config_set_function(plugin_id.to_string(), priv_clone.clone())
+        config::create_config_set_function(plugin_id.to_string(), db.clone())
     });
-
-    hr
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `record_block_in_place_regression` is `#[allow(dead_code)]` and
-    /// has no production callers; without this test it would never be
-    /// exercised. The `None` branch must be a no-op (calls into a
-    /// missing `Metrics` would panic and bring down a host function).
-    #[test]
-    fn record_block_in_place_regression_no_metrics_is_noop() {
-        record_block_in_place_regression(&None, "test_host_fn");
-    }
-
-    /// With a real `Metrics` instance, the recorder must run cleanly
-    /// (we can't easily assert the counter incremented without an
-    /// OTLP harness - non-panic is the contract under test here).
-    #[test]
-    fn record_block_in_place_regression_with_metrics_runs() {
-        let _guard = crate::metrics_test_lock();
-        let (metrics, _registry) = common::observability::init_metrics("broccoli-test");
-        record_block_in_place_regression(&Some(metrics), "test_host_fn");
-    }
 
     #[test]
     fn host_call_snapshots_context_and_releases_the_lock() {

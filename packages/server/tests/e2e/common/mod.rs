@@ -308,14 +308,14 @@ impl E2eTestApp {
                 max_system_error_retries: 50,
                 cancel_primitive_enabled: false,
                 max_blocking_threads: None,
-                batch_evaluator_fanout_concurrency: 64,
+                evaluate_batch_fanout_concurrency: 64,
                 operation_batch_publish_concurrency: 32,
                 claim_fiber_enabled: true,
                 claim_poll_interval_ms: 100,
                 claim_batch_size: 32,
                 max_in_flight_submissions: 256,
                 plugin_timer_tick_interval_secs: 1,
-                plugin_timer_lease_secs: 30,
+                plugin_timer_lease_secs: server::config::DEFAULT_PLUGIN_TIMER_LEASE_SECS,
                 plugin_timer_batch: 64,
                 plugin_timer_max_attempts: 5,
             },
@@ -356,11 +356,9 @@ impl E2eTestApp {
         let checker_stage_registry: CheckerStageRegistry = Arc::new(RwLock::new(HashMap::new()));
         let language_resolver_registry: LanguageResolverRegistry =
             Arc::new(RwLock::new(HashMap::new()));
-        let operation_batches: OperationBatches = Arc::new(dashmap::DashMap::new());
+        let operation_batches = OperationBatches::default();
         let operation_waiters: OperationWaiters = Arc::new(dashmap::DashMap::new());
-        let evaluate_batches: EvaluateBatches = Arc::new(dashmap::DashMap::new());
-        let evaluate_ops_registry =
-            server::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry::default();
+        let evaluate_batches = EvaluateBatches::default();
         let hook_registry = server::hooks::new_shared_registry();
 
         let plugins = ServerManager::new(
@@ -380,7 +378,6 @@ impl E2eTestApp {
                 checker_stage_registry: checker_stage_registry.clone(),
                 language_resolver_registry: language_resolver_registry.clone(),
                 evaluate_batches: evaluate_batches.clone(),
-                evaluate_ops_registry: evaluate_ops_registry.clone(),
                 blob_store: blob_store.clone(),
                 hook_registry: hook_registry.clone(),
                 config: app_config.clone(),
@@ -408,7 +405,7 @@ impl E2eTestApp {
                 language_resolver_registry,
                 operation_batches,
                 operation_waiters: operation_waiters.clone(),
-                evaluate_batches,
+                evaluate_batches: evaluate_batches.clone(),
                 hook_registry,
             },
             metrics: e2e_metrics.clone(),
@@ -441,7 +438,7 @@ impl E2eTestApp {
             result_consumer_handle_opt = Some(tokio::spawn(consume_operation_results(
                 mq.reply_inbox(&server_id),
                 operation_waiters.clone(),
-                evaluate_ops_registry.clone(),
+                evaluate_batches.clone(),
                 e2e_metrics.clone(),
             )));
 
@@ -512,9 +509,11 @@ impl E2eTestApp {
         } else {
             state.registries.evaluator_registry.write().await.insert(
                 "batch".into(),
-                server::registry::PluginHandler {
+                server::registry::EvaluatorHandler {
                     plugin_id: "__test__".into(),
-                    function_name: "noop".into(),
+                    functions: server::registry::EvaluatorFunctions::Direct {
+                        function: "noop".into(),
+                    },
                 },
             );
             {

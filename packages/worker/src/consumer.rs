@@ -484,13 +484,10 @@ mod tests {
         server.renew(serde_json::json!({})).await.unwrap();
 
         let calls = Arc::new(AtomicUsize::new(0));
-        let worker = Worker::with_no_executors();
-        worker.register_executor(
-            "operation",
-            Arc::new(CountingExecutor {
-                calls: calls.clone(),
-            }),
-        );
+        let executor: Arc<dyn Executor> = Arc::new(CountingExecutor {
+            calls: calls.clone(),
+        });
+        let worker = Worker::new([("operation".to_string(), executor)]);
         let (metrics, _registry) = common::observability::init_metrics("worker-consumer-test");
         let consumer = WorkerConsumer::new(WorkerConsumerDeps {
             worker: Arc::new(worker),

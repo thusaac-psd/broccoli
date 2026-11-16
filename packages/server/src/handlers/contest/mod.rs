@@ -63,7 +63,7 @@ use crate::services::plugin_config::{
     ConfigTarget, ConfigTargetPattern, delete_config_by_target, delete_config_by_target_pattern,
 };
 use crate::state::AppState;
-use crate::utils::contest::find_contest;
+use crate::utils::contest::{contest_active_condition, find_contest};
 use crate::utils::soft_delete::SoftDeletable;
 use crate::utils::text::sanitize_db_text;
 use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
@@ -156,33 +156,19 @@ pub async fn list_contests(
 
     if !auth_user.has_permission(perm::CONTEST_MANAGE) {
         let now = chrono::Utc::now();
-        select = select
-            .filter(
-                Condition::all()
-                    .add(
-                        contest::Column::ActivateTime
-                            .is_not_null()
-                            .and(contest::Column::ActivateTime.lte(now)),
-                    )
-                    .add(
-                        contest::Column::DeactivateTime
-                            .is_null()
-                            .or(contest::Column::DeactivateTime.gt(now)),
+        select = select.filter(contest_active_condition(now)).filter(
+            Condition::any()
+                .add(contest::Column::IsPublic.eq(true))
+                .add(
+                    contest::Column::Id.in_subquery(
+                        SeaQuery::select()
+                            .column(contest_user::Column::ContestId)
+                            .from(contest_user::Entity)
+                            .and_where(contest_user::Column::UserId.eq(auth_user.user_id))
+                            .to_owned(),
                     ),
-            )
-            .filter(
-                Condition::any()
-                    .add(contest::Column::IsPublic.eq(true))
-                    .add(
-                        contest::Column::Id.in_subquery(
-                            SeaQuery::select()
-                                .column(contest_user::Column::ContestId)
-                                .from(contest_user::Entity)
-                                .and_where(contest_user::Column::UserId.eq(auth_user.user_id))
-                                .to_owned(),
-                        ),
-                    ),
-            );
+                ),
+        );
     }
 
     if let Some(ref search) = query.search {

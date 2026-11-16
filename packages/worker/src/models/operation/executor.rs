@@ -5,14 +5,16 @@ use std::time::Duration;
 use super::cache_leader::{
     CacheLeaderElector, CacheLeaderOpts, NoopCacheLeaderElector, RedisCacheLeaderElector,
 };
-use super::file_cacher::{BlobStoreFileCacher, FileCacher, NoopFileCacher};
+#[cfg(any(test, feature = "test-support"))]
+use super::file_cacher::NoopFileCacher;
+use super::file_cacher::{BlobStoreFileCacher, FileCacher};
 use super::models::{MountSource, OperationTask};
 use super::sandbox::SandboxManager;
 use super::sandbox::isolate::IsolateSandboxManager;
 use super::sandbox::mock::MockSandboxManager;
 use super::task_cache::{DatabaseTaskCacheStore, NoopTaskCacheStore, TaskCacheStore};
 use crate::config::WorkerAppConfig;
-use crate::models::operation::handler::OperationHandler;
+use crate::models::operation::handler::{CompileCache, OperationHandler};
 use crate::toolchain_fingerprint;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -35,10 +37,12 @@ impl OperationTaskExecutor {
         metrics: common::metrics::Metrics,
     ) -> Result<Self> {
         Self::configure_box_slot_lock_dir(config);
-        let fingerprint =
-            toolchain_fingerprint::compute(toolchain_fingerprint::default_probes()).await;
+        let fingerprint = toolchain_fingerprint::SharedFingerprint::probe(
+            toolchain_fingerprint::default_probes(),
+        )
+        .await;
         info!(
-            worker_toolchain_fingerprint = %fingerprint,
+            worker_toolchain_fingerprint = %fingerprint.current(),
             "Computed toolchain fingerprint for compile cache key"
         );
         let sandbox_manager =
@@ -90,19 +94,27 @@ impl OperationTaskExecutor {
         }
 
         Ok(Self {
-            operation_executor: OperationHandler::with_cache_leader(
+            operation_executor: OperationHandler::with_compile_cache(
                 sandbox_manager,
                 file_cacher,
-                Arc::from(task_cache),
-                cache_leader,
-                follower_poll,
-                follower_max_wait,
-                fingerprint,
+                CompileCache {
+                    store: Arc::from(task_cache),
+                    leader: cache_leader,
+                    follower_poll_interval: follower_poll,
+                    follower_max_wait,
+                    toolchain_fingerprint: fingerprint,
+                },
                 metrics,
             )
             .with_tools_dir(tools_dir.clone()),
             tools_dir,
         })
+    }
+
+    /// The file cacher jobs materialize blobs through, for the pre-warm
+    /// subscriber to fill the same cache.
+    pub fn file_cacher(&self) -> Arc<dyn FileCacher> {
+        self.operation_executor.file_cacher()
     }
 
     /// Apply `[worker] box_slot_lock_dir` before any sandbox is created (the
@@ -204,7 +216,7 @@ impl OperationTaskExecutor {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_with_sandbox_manager(
         sandbox_manager: Box<dyn SandboxManager + Send + Sync>,
         metrics: common::metrics::Metrics,
@@ -214,14 +226,14 @@ impl OperationTaskExecutor {
                 sandbox_manager,
                 Box::new(NoopFileCacher),
                 Box::new(NoopTaskCacheStore),
-                String::new(),
+                toolchain_fingerprint::ToolchainFingerprint::Known(String::new()),
                 metrics,
             ),
             tools_dir: None,
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn new_with_sandbox_manager_and_blob_store(
         sandbox_manager: Box<dyn SandboxManager + Send + Sync>,
         blob_store: Arc<dyn common::storage::BlobStore>,
@@ -237,7 +249,7 @@ impl OperationTaskExecutor {
                 sandbox_manager,
                 Box::new(file_cacher),
                 Box::new(NoopTaskCacheStore),
-                String::new(),
+                toolchain_fingerprint::ToolchainFingerprint::Known(String::new()),
                 metrics,
             ),
             tools_dir,
@@ -281,7 +293,7 @@ impl OperationTaskExecutor {
     async fn caching_from_config(
         config: &WorkerAppConfig,
         metrics: common::metrics::Metrics,
-    ) -> Result<(Box<dyn FileCacher>, Box<dyn TaskCacheStore>)> {
+    ) -> Result<(Arc<dyn FileCacher>, Box<dyn TaskCacheStore>)> {
         let blob_store_config = config.storage.blob_store.clone();
         let cache_dir = config.storage.cache_dir.clone();
         let max_cache_size = config.storage.max_cache_size;
@@ -323,7 +335,7 @@ impl OperationTaskExecutor {
                 }
             };
 
-        let file_cacher: Box<dyn FileCacher> = match BlobStoreFileCacher::new(
+        let file_cacher: Arc<dyn FileCacher> = match BlobStoreFileCacher::new(
             blob_store,
             PathBuf::from(&cache_dir),
             max_cache_size,
@@ -331,7 +343,7 @@ impl OperationTaskExecutor {
         )
         .await
         {
-            Ok(cacher) => Box::new(cacher),
+            Ok(cacher) => Arc::new(cacher),
             Err(e) => {
                 error!(
                     error = %e,

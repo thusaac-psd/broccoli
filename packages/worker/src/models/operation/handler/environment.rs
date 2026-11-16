@@ -266,10 +266,11 @@ impl OperationHandler {
         Ok(collected)
     }
 
+    /// Remove every environment's sandbox, logging failures.
     pub(super) async fn cleanup_environments(
         &self,
         environments: &HashMap<String, EnvironmentList>,
-    ) -> Result<()> {
+    ) {
         for env in environments.values() {
             if let Err(e) = self
                 .sandbox_manager
@@ -279,6 +280,5 @@ impl OperationHandler {
                 error!(env_id = %env.id, error = %e, "Failed to cleanup sandbox");
             }
         }
-        Ok(())
     }
 }

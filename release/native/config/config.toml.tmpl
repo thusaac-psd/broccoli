@@ -4,7 +4,7 @@ host = "@HTTP_HOST@"
 port = @HTTP_PORT@
 frontend_dist = "@DATA_DIR@/packages/web/build/client"
 dispatcher_lease_steal_enabled = true
-batch_evaluator_fanout_concurrency = 16
+evaluate_batch_fanout_concurrency = 16
 max_queued_submissions = 200000
 dispatcher_admission_queue_max = 1000
 

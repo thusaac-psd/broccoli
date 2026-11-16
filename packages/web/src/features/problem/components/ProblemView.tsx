@@ -130,7 +130,6 @@ export default function ProblemView({
               query: {
                 user_id: user.id,
                 problem_id: problemId,
-                page: 1,
                 per_page: 20,
                 sort_by: 'created_at',
                 sort_order: 'desc',
@@ -147,7 +146,6 @@ export default function ProblemView({
           query: {
             user_id: user.id,
             problem_id: problemId,
-            page: 1,
             per_page: 20,
             sort_by: 'created_at',
             sort_order: 'desc',

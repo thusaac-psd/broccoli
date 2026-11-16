@@ -451,12 +451,29 @@ mod submission_listing {
         }
 
         let res = app
-            .get_with_token("/api/v1/submissions?page=1&per_page=2", &admin)
+            .get_with_token("/api/v1/submissions?per_page=2", &admin)
             .await;
 
         assert_eq!(res.status, 200);
         let data = res.body["data"].as_array().unwrap();
         assert_eq!(data.len(), 2);
         assert!(res.body["pagination"]["total"].as_i64().unwrap() >= 3);
+        let cursor = res.body["pagination"]["next_cursor"]
+            .as_str()
+            .expect("a third submission is on the next page");
+
+        let next = app
+            .get_with_token(
+                &format!("/api/v1/submissions?per_page=2&cursor={cursor}"),
+                &admin,
+            )
+            .await;
+        assert_eq!(next.status, 200);
+        let next_data = next.body["data"].as_array().unwrap();
+        assert!(!next_data.is_empty());
+        assert!(
+            next_data.iter().all(|s| !data.contains(s)),
+            "the next page continues after the first"
+        );
     }
 }

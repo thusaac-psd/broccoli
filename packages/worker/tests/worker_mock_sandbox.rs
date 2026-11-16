@@ -67,7 +67,7 @@ async fn execute_operation_with_file_pulled_from_object_storage() {
         ))),
         Box::new(cacher),
         Box::new(NoopTaskCacheStore),
-        String::new(),
+        worker::toolchain_fingerprint::ToolchainFingerprint::Known(String::new()),
         metrics,
     );
 

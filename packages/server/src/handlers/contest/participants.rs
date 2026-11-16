@@ -40,7 +40,7 @@ use crate::extractors::path::AppPath;
 use crate::middleware::idempotency::NoStore;
 use crate::models::contest::*;
 use crate::state::AppState;
-use crate::utils::contest::{ensure_self_service_contest, find_contest};
+use crate::utils::contest::{ContestPhase, ensure_self_service_contest, find_contest};
 use crate::utils::soft_delete::SoftDeletable;
 use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
@@ -237,9 +237,7 @@ pub async fn register_for_contest(
     let now = chrono::Utc::now();
     let txn = state.db.begin().await?;
     let contest_model = find_contest_for_update(&txn, contest_id).await?;
-    ensure_self_service_contest(&contest_model, now)?;
-
-    if now >= contest_model.end_time {
+    if ensure_self_service_contest(&contest_model, now)? == ContestPhase::Ended {
         return Err(AppError::Validation("Contest has ended".into()));
     }
     let new_cu = contest_user::ActiveModel {
@@ -284,12 +282,10 @@ pub async fn unregister_from_contest(
     let now = chrono::Utc::now();
     let txn = state.db.begin().await?;
     let contest_model = find_contest_for_update(&txn, contest_id).await?;
-    ensure_self_service_contest(&contest_model, now)?;
-
     // Standings are built from `contest_user`, so leaving a contest that has
-    // started would erase the participant's results. Same cut-off as
-    // `delete_user`, which refuses to drop registrations in started contests.
-    if now >= contest_model.start_time {
+    // started would erase the participant's results. `delete_user` keeps
+    // registrations in started contests for the same reason.
+    if ensure_self_service_contest(&contest_model, now)?.has_started() {
         return Err(AppError::Validation("Contest has already started".into()));
     }
 

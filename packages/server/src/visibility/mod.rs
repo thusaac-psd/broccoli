@@ -12,8 +12,9 @@ mod subject;
 mod visible;
 
 pub use decision::{Decision, FieldMask};
-pub(crate) use host_rules::host_decide;
+pub(crate) use host_rules::{HostScopes, host_decide};
 pub use mask::apply_mask;
+pub use plugin_query::ResourceScope;
 pub(crate) use plugin_query::query_plugins;
 pub use subject::{Action, ProblemScope, Resource, Subject};
 pub use visible::Visible;
@@ -62,23 +63,22 @@ fn contest_scope(resources: &[Resource]) -> Option<i32> {
 /// submissions from more than one contest) is losslessly expressible this
 /// way, where a single batch-level value could not represent it.
 ///
-/// `submission_contest_ids` is `host_decide`'s out-param
-/// (`submission_id -> submission.contest_id`), populated for every
-/// `Resource::Submission` that `host_decide` resolved while producing the
-/// `Decision`s for this same `decide_batch` call - by the time this runs,
-/// every `Resource::Submission` passed in is guaranteed to be a key in it.
+/// `scopes` is what `host_decide` resolved for this same `decide_batch`
+/// call. Its `submission_contest_ids` (`submission_id ->
+/// submission.contest_id`) has a key for every `Resource::Submission` passed
+/// in by the time this runs.
 ///
-/// `clarification_contest_ids` is the analogous out-param for `Resource::
-/// Clarification` (`clarification_id -> clarification.contest_id`). A
-/// clarification's `contest_id` column is never null - it belongs to
-/// exactly one contest, always - so a `Resource::Clarification` that WAS
-/// resolved by `host_decide` must report that contest: `None` would be
-/// silently dishonest to a plugin, not merely imprecise. It differs from a standalone problem part's principled
+/// Its `clarification_contest_ids` is the analogue for `Resource::
+/// Clarification` (`clarification_id -> clarification.contest_id`). Unlike a
+/// submission, a clarification's `contest_id` column is never null - it
+/// belongs to exactly one contest, always - so a `Resource::Clarification`
+/// that `host_decide` resolved always reports that contest: a real,
+/// single-valued `contest_id` exists and is knowable, so `None` would be
+/// wrong, not merely imprecise. It differs from a standalone problem part's principled
 /// `None` below in exactly this way - a clarification has ONE contest, a
 /// problem read outside any contest can sit in zero, one, or many. A miss in this map
 /// (the id absent as a key) can only mean this resource was never a host
-/// `Deny` target that reached here in the first place, mirroring
-/// `submission_contest_ids`'s own miss handling.
+/// `Deny` target that reached here in the first place, as for submissions.
 ///
 /// The problem parts (`Problem`, `Sample` and `Attachment`) carry their
 /// request scope inline: `Some(contest_id)` when the request came through
@@ -87,15 +87,11 @@ fn contest_scope(resources: &[Resource]) -> Option<i32> {
 /// problem, so it reports exactly the scope its problem would. `None` here
 /// is not a lost value: a standalone request is genuinely not scoped to
 /// one contest (a problem can sit in zero, one or many contests).
-fn resource_contest_id(
-    resource: &Resource,
-    submission_contest_ids: &HashMap<i32, Option<i32>>,
-    clarification_contest_ids: &HashMap<i32, i32>,
-) -> Option<i32> {
+fn resource_contest_id(resource: &Resource, scopes: &HostScopes) -> Option<i32> {
     match resource {
         Resource::Contest(id) => Some(*id),
-        Resource::Submission(id) => submission_contest_ids.get(id).copied().flatten(),
-        Resource::Clarification(id) => clarification_contest_ids.get(id).copied(),
+        Resource::Submission(id) => scopes.submission_contest_ids.get(id).copied().flatten(),
+        Resource::Clarification(id) => scopes.clarification_contest_ids.get(id).copied(),
         Resource::Problem { .. } | Resource::Sample { .. } | Resource::Attachment { .. } => {
             resource.problem_scope().and_then(|scope| scope.contest_id)
         }
@@ -164,6 +160,16 @@ impl<'a> VisibilityKernel<'a> {
         Ok(self.decide_batch(action, &[resource]).await?.remove(0))
     }
 
+    /// Whether a visibility plugin may narrow what the host rules allow this
+    /// subject on resources under `scope`: the contest type every row of a
+    /// list query falls under, or [`ResourceScope::Unknown`] for a list that
+    /// spans contests. When it may not, a list query that encodes the host
+    /// rules in SQL counts exactly the rows the caller is shown; when it may,
+    /// such a count would disclose rows the plugin hides.
+    pub fn plugins_may_narrow(&self, scope: &ResourceScope) -> bool {
+        !self.subject.is_admin_override() && plugin_query::plugins_may_narrow(self.state, scope)
+    }
+
     /// Batched, memoized, per-viewer reachability decision, for this
     /// kernel's fixed `Subject` (see the struct docs for why `Subject` is
     /// not a parameter here).
@@ -227,17 +233,13 @@ impl<'a> VisibilityKernel<'a> {
         }
 
         if !misses.is_empty() {
-            let mut submission_contest_ids: HashMap<i32, Option<i32>> = HashMap::new();
-            let mut clarification_contest_ids: HashMap<i32, i32> = HashMap::new();
-            let host_decisions = host_decide(
-                &self.state.db,
-                &self.subject,
-                action,
-                &misses,
-                &mut submission_contest_ids,
-                &mut clarification_contest_ids,
-            )
-            .await?;
+            let mut scopes = HostScopes {
+                resolve_contests: !self.subject.is_admin_override()
+                    && plugin_query::scoped_querier_loaded(self.state),
+                ..HostScopes::default()
+            };
+            let host_decisions =
+                host_decide(&self.state.db, &self.subject, action, &misses, &mut scopes).await?;
             // Compiled out in release, and that is safe — `host_decide`
             // (`host_rules.rs`) builds its return value as
             // `resources.iter().map(...).collect()`, a `.map()` over its own
@@ -284,12 +286,15 @@ impl<'a> VisibilityKernel<'a> {
                     // this.
                     let target_contest_ids: Vec<Option<i32>> = plugin_targets
                         .iter()
-                        .map(|r| {
-                            resource_contest_id(
-                                r,
-                                &submission_contest_ids,
-                                &clarification_contest_ids,
-                            )
+                        .map(|r| resource_contest_id(r, &scopes))
+                        .collect();
+                    // Each resource's contest type routes it to the queriers
+                    // that govern it.
+                    let target_scopes: Vec<ResourceScope> = target_contest_ids
+                        .iter()
+                        .map(|cid| match cid.and_then(|c| scopes.contest_types.get(&c)) {
+                            Some(contest_type) => ResourceScope::ContestType(contest_type.clone()),
+                            None => ResourceScope::Unknown,
                         })
                         .collect();
                     let contest_id = contest_scope(&plugin_targets);
@@ -300,6 +305,7 @@ impl<'a> VisibilityKernel<'a> {
                         contest_id,
                         &plugin_targets,
                         &target_contest_ids,
+                        &target_scopes,
                     )
                     .await;
                     // Compiled out in release, and that is safe —
@@ -662,9 +668,9 @@ mod tests {
         let (metrics, prometheus_registry) =
             common::observability::init_metrics("broccoli-visibility-kernel-test");
 
-        let operation_batches: OperationBatches = Arc::new(dashmap::DashMap::new());
+        let operation_batches = OperationBatches::default();
         let operation_waiters: OperationWaiters = Arc::new(dashmap::DashMap::new());
-        let evaluate_batches: EvaluateBatches = Arc::new(dashmap::DashMap::new());
+        let evaluate_batches = EvaluateBatches::default();
         let contest_type_registry: ContestTypeRegistry =
             Arc::new(tokio::sync::RwLock::new(HashMap::new()));
         let evaluator_registry: EvaluatorRegistry =
@@ -704,14 +710,14 @@ mod tests {
                     max_system_error_retries: 50,
                     cancel_primitive_enabled: false,
                     max_blocking_threads: None,
-                    batch_evaluator_fanout_concurrency: 64,
+                    evaluate_batch_fanout_concurrency: 64,
                     operation_batch_publish_concurrency: 32,
                     claim_fiber_enabled: false,
                     claim_poll_interval_ms: 1000,
                     claim_batch_size: 32,
                     max_in_flight_submissions: 256,
                     plugin_timer_tick_interval_secs: 1,
-                    plugin_timer_lease_secs: 30,
+                    plugin_timer_lease_secs: crate::config::DEFAULT_PLUGIN_TIMER_LEASE_SECS,
                     plugin_timer_batch: 64,
                     plugin_timer_max_attempts: 5,
                 },
@@ -1313,7 +1319,6 @@ mod tests {
         let redacted = results[1]
             .take()
             .expect("contest 2 was redacted, not denied");
-        assert_eq!(redacted.as_inner().id, 2);
         let json = redacted.into_masked_json().unwrap();
         assert!(
             json["score"].is_null(),

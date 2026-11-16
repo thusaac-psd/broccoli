@@ -1,11 +1,6 @@
-// `#[async_trait]` stamps its own `#[must_use]` on each rewritten async method
-// even though the boxed future it returns is already `#[must_use]`, so clippy's
-// `double_must_use` fires on macro output we don't control. Both hits are the
-// `PluginInvoker` / `PluginInvokerExt` traits in `traits.rs`; suppress crate-wide.
-#![allow(clippy::double_must_use)]
-
 pub mod call_gate;
 pub mod config;
+mod deadline;
 pub mod error;
 pub mod hook;
 pub mod host;

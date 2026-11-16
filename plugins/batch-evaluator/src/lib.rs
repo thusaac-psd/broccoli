@@ -22,37 +22,13 @@ fn load_sandbox_config(host: &Host) -> batch::SandboxConfig {
 #[plugin_fn]
 pub fn init() -> FnResult<String> {
     let host = Host::new();
-    host.registry
-        .register_evaluator("batch", "evaluate_batch")?;
+    host.registry.register_staged_evaluator(
+        "batch",
+        "prepare_evaluate_case",
+        "on_operation_results",
+    )?;
     host.log.info("Batch evaluator registered")?;
     Ok("ok".to_string())
-}
-
-#[cfg(target_arch = "wasm32")]
-#[plugin_fn]
-pub fn evaluate_batch(input: String) -> FnResult<String> {
-    let host = Host::new();
-    let req: BuildEvalOpsInput = serde_json::from_str(&input)?;
-    let prepared = prepare_case(&host, &req)?;
-
-    let mut results = host
-        .operations
-        .windowed(&prepared.operations)
-        .collect(prepared.result_timeout_ms)
-        .map_err(|e| extism_pdk::Error::msg(format!("{e}")))?;
-    if results.len() != 1 {
-        return Err(extism_pdk::Error::msg(format!(
-            "expected exactly one operation result, got {}",
-            results.len()
-        ))
-        .into());
-    }
-    let result = results.remove(0);
-
-    let verdict = interpret_case_result(&host, &req, &result)
-        .map_err(|e| extism_pdk::Error::msg(format!("{e}")))?;
-
-    Ok(serde_json::to_string(&verdict)?)
 }
 
 #[cfg(target_arch = "wasm32")]

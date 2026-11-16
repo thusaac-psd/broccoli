@@ -1,5 +1,3 @@
-//! Task 17 / Step 2b (I1), SDD 2026-09-15-visibility-kernel.
-//!
 //! `handlers/submission/mod.rs::list_contest_submissions` hand-duplicates
 //! `visibility::host_rules::decide_submission`'s non-owner branch as a SQL
 //! predicate (`can_see_all = can_view_all || (submissions_visible &&
@@ -114,11 +112,10 @@ const CONFIGS: &[ContestConfig] = &[
     },
 ];
 
-/// The three viewer archetypes I1 names, plus each cell's expected
+/// The three viewer archetypes, plus each cell's expected
 /// `pagination.total` (== expected `data.len()` == expected oracle count,
-/// since this fixture registers no visibility plugin - see Task 17 / Step
-/// 2a's `into_masked_json_caps_oversized_detail_text_with_no_mask_and_no_plugin`
-/// for the same "no plugin" premise). Two submissions exist in the contest
+/// since this fixture registers no visibility plugin - the same premise as
+/// `into_masked_json_caps_oversized_detail_text_with_no_mask_and_no_plugin`). Two submissions exist in the contest
 /// (`owner_a`'s own, `owner_b`'s own):
 ///
 /// - `view_all`: `submission:view_all`, never enrolled -> always both (host

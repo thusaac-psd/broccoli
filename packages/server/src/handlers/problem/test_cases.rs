@@ -274,7 +274,7 @@ async fn get_test_case_in(
         // `FieldMask`: the response below is built straight from `tc` with
         // no masking step. Today no plugin returns `Redact` for
         // `Resource::Problem`, so this is a documented no-op, not a live
-        // bug - see Task 20 Item 6.
+        // bug.
         let kernel = VisibilityKernel::new(state, Subject::from_auth_user(auth_user));
         require_problem_part_reachable(
             &kernel,
