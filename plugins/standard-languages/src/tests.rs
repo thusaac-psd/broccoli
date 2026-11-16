@@ -552,3 +552,57 @@ fn every_language_resolves_its_default_file_by_extension() {
         );
     }
 }
+
+mod compilation_config {
+    use broccoli_server_sdk::Host;
+    use serde_json::json;
+
+    use crate::{CONFIG_COMPILATION, CompilerOverrides, load_lang_config};
+
+    #[test]
+    fn the_deployments_compiler_applies_to_every_problem_that_sets_none() {
+        let host = Host::mock();
+        host.config.seed(
+            "plugin",
+            "",
+            CONFIG_COMPILATION,
+            json!({"cpp": {"compiler": "/opt/gcc-14/bin/g++", "flags": ["-O2"]}}),
+        );
+        let config = load_lang_config(&host, "cpp", Some(7), Some(3)).unwrap();
+        let overrides = CompilerOverrides::default();
+        let tools = config.tools(&overrides, &[]);
+        assert_eq!(tools.tool, "/opt/gcc-14/bin/g++");
+    }
+
+    #[test]
+    fn a_switched_off_override_compiles_with_the_defaults() {
+        let host = Host::mock();
+        host.config.seed_with_enabled(
+            "problem",
+            "7",
+            CONFIG_COMPILATION,
+            json!({"cpp": {"compiler": "/opt/old/g++", "flags": []}}),
+            Some(false),
+        );
+        let config = load_lang_config(&host, "cpp", Some(7), None).unwrap();
+        let overrides = CompilerOverrides::default();
+        let tools = config.tools(&overrides, &[]);
+        assert_eq!(tools.tool, "/usr/bin/g++");
+        assert_eq!(tools.flags, ["-O2"]);
+    }
+
+    #[test]
+    fn an_interpreted_language_runs_its_configured_interpreter() {
+        let host = Host::mock();
+        let config = load_lang_config(&host, "python3", Some(7), None).unwrap();
+        let overrides = CompilerOverrides::default();
+        let tools = config.tools(&overrides, &[]);
+        assert!(!tools.tool.is_empty());
+    }
+
+    #[test]
+    fn a_language_the_namespace_has_no_entry_for_is_an_error() {
+        let host = Host::mock();
+        assert!(load_lang_config(&host, "cobol", Some(7), None).is_err());
+    }
+}

@@ -1,4 +1,4 @@
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 use broccoli_server_sdk::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use broccoli_server_sdk::types::ResolveLanguageInput;
@@ -9,7 +9,7 @@ use serde::Deserialize;
 pub mod resolve;
 
 /// Config namespace for compiler paths and flags (cascades at all scopes).
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 const CONFIG_COMPILATION: &str = "compilation";
 /// Config namespace for per-problem, per-language entry point overrides.
 #[cfg(target_arch = "wasm32")]
@@ -41,7 +41,11 @@ pub fn resolve_standard_language(input: String) -> FnResult<String> {
     let host = Host::new();
     let req: ResolveLanguageInput = serde_json::from_str(&input)?;
 
-    // Config cascade returns schema defaults when nothing is explicitly set.
+    let Some(language) = resolve::language(&req.language_id) else {
+        return Err(
+            extism_pdk::Error::msg(format!("Unsupported language: {}", req.language_id)).into(),
+        );
+    };
     let lang_config = load_lang_config(&host, &req.language_id, req.problem_id, req.contest_id)?;
 
     // Explicit overrides from the caller (e.g. standard-checkers) take highest priority.
@@ -57,35 +61,18 @@ pub fn resolve_standard_language(input: String) -> FnResult<String> {
         .and_then(|c| c.extra_compile_flags.as_deref())
         .unwrap_or(&[]);
 
-    let Some(language) = resolve::language(&req.language_id) else {
-        return Err(
-            extism_pdk::Error::msg(format!("Unsupported language: {}", req.language_id)).into(),
-        );
-    };
-    let tools = resolve::Tools {
-        tool: overrides
-            .compiler
-            .as_deref()
-            .or(lang_config.compiler.as_deref())
-            .or(lang_config.interpreter.as_deref())
-            .unwrap_or(""),
-        runner: lang_config.runner.as_deref().unwrap_or(""),
-        flags: overrides
-            .flags
-            .as_deref()
-            .or(lang_config.flags.as_deref())
-            .unwrap_or(&[]),
-        extra_flags,
-    };
+    let tools = lang_config.tools(&overrides, extra_flags);
     let result = language.resolve(&req, entry_point_config.as_ref(), &tools);
 
     Ok(serde_json::to_string(&result)?)
 }
 
-/// Load per-language compilation config from the cascade. A language the
-/// namespace has no entry for keeps its built-in command; a config that does
-/// not parse is an error, never a silent fallback.
-#[cfg(target_arch = "wasm32")]
+/// The compilation config of `language_id` where it is judged: the
+/// namespace's effective config at the problem (see
+/// `broccoli_server_sdk::types::ConfigSource`), or the deployment's when no
+/// problem is named. A language the namespace has no entry for, or a config
+/// that does not parse, is an error, never a silent fallback.
+#[cfg(any(target_arch = "wasm32", test))]
 fn load_lang_config(
     host: &Host,
     language_id: &str,
@@ -94,17 +81,17 @@ fn load_lang_config(
 ) -> Result<LanguageCompilationConfig, SdkError> {
     let config = match problem_id {
         Some(pid) => {
-            let effective = host
+            host.config
+                .get_effective(CONFIG_COMPILATION, pid, contest_id)?
                 .config
-                .get_effective(CONFIG_COMPILATION, pid, contest_id)?;
-            if effective.source == broccoli_server_sdk::types::ConfigSource::Disabled {
-                return Ok(LanguageCompilationConfig::default());
-            }
-            effective.config
         }
         None => host.config.get_global(CONFIG_COMPILATION)?.config,
     };
-    parse_language_entry(&config, language_id).map(Option::unwrap_or_default)
+    parse_language_entry(&config, language_id)?.ok_or_else(|| {
+        SdkError::Serialization(format!(
+            "the {CONFIG_COMPILATION} config has no entry for language '{language_id}'"
+        ))
+    })
 }
 
 /// Load per-language entry-point config (problem scope only).
@@ -125,7 +112,7 @@ fn load_entry_point_config(
 }
 
 /// The entry for `language_id` in a per-language config map, if it has one.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 fn parse_language_entry<T: serde::de::DeserializeOwned>(
     config: &serde_json::Value,
     language_id: &str,
@@ -141,16 +128,40 @@ fn parse_language_entry<T: serde::de::DeserializeOwned>(
 }
 
 /// Per-language compilation config from the admin UI / plugin.toml schema defaults.
-/// Only constructed by the wasm32-gated `load_lang_config`/`resolve_standard_language`
-/// entry points; gated the same way so a native (test/clippy) build doesn't see it
-/// as dead code.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Deserialize, Default)]
 struct LanguageCompilationConfig {
     compiler: Option<String>,
     interpreter: Option<String>,
     runner: Option<String>,
     flags: Option<Vec<String>>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl LanguageCompilationConfig {
+    /// The tools a language resolves with: a caller's explicit compiler and
+    /// flags win over the configured ones.
+    fn tools<'a>(
+        &'a self,
+        overrides: &'a CompilerOverrides,
+        extra_flags: &'a [String],
+    ) -> resolve::Tools<'a> {
+        resolve::Tools {
+            tool: overrides
+                .compiler
+                .as_deref()
+                .or(self.compiler.as_deref())
+                .or(self.interpreter.as_deref())
+                .unwrap_or(""),
+            runner: self.runner.as_deref().unwrap_or(""),
+            flags: overrides
+                .flags
+                .as_deref()
+                .or(self.flags.as_deref())
+                .unwrap_or(&[]),
+            extra_flags,
+        }
+    }
 }
 
 /// Per-problem, per-language entry point config.
@@ -161,9 +172,7 @@ pub struct EntryPointConfig {
 }
 
 /// Override schema accepted by this resolver in `ResolveLanguageInput.overrides`.
-/// Only constructed by the wasm32-gated `resolve_standard_language` entry point;
-/// gated the same way so a native (test/clippy) build doesn't see it as dead code.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Deserialize, Default)]
 struct CompilerOverrides {
     compiler: Option<String>,

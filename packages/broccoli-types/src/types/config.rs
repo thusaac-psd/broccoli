@@ -32,13 +32,19 @@ fn parse<T: serde::de::DeserializeOwned>(config: &serde_json::Value) -> Result<T
     })
 }
 
+/// The scope whose row an effective config comes from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigSource {
     ContestProblem,
     Contest,
     Problem,
+    /// The deployment-wide row of a namespace that declares plugin scope.
+    Plugin,
+    /// No scope stores the namespace: the schema's defaults.
     Default,
+    /// The most specific override is switched off: the config is what it
+    /// overrode (the plugin-scope row, else the schema's defaults).
     Disabled,
 }
 
@@ -64,6 +70,9 @@ pub struct CascadeLevels {
     pub contest_problem: Option<CascadeLevel>,
     pub contest: Option<CascadeLevel>,
     pub problem: CascadeLevel,
+    /// Read only when no narrower scope decides the config alone: when none
+    /// stores the namespace, or the one that does is switched off.
+    pub plugin: Option<CascadeLevel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
