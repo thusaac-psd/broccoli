@@ -139,11 +139,6 @@ mod worker_liveness {
             .get_multiplexed_async_connection()
             .await
             .unwrap();
-        // Fresh: just written with the full TTL.
-        write_heartbeat(&mut conn, "fresh", TTL.as_secs()).await;
-        // Old: its TTL says it was written 12s ago; still live until it expires.
-        write_heartbeat(&mut conn, "old", TTL.as_secs() - 12).await;
-
         let app = TestApp::spawn_with_options(SpawnOptions {
             redis_url: Some(url),
             ..Default::default()
@@ -152,6 +147,11 @@ mod worker_liveness {
         let admin = app
             .create_user_with_role("liveness_admin", "pass1234", "admin")
             .await;
+        // Written right before the read, so only the request itself passes
+        // between them. Fresh: the full TTL. Old: its TTL says it was
+        // written 12s ago; still live until it expires.
+        write_heartbeat(&mut conn, "fresh", TTL.as_secs()).await;
+        write_heartbeat(&mut conn, "old", TTL.as_secs() - 12).await;
         let res = app.get_with_token(routes::SYSTEM_WORKERS, &admin).await;
         assert_eq!(res.status, 200, "{}", res.text);
         let workers = res.body["workers"].as_array().unwrap();

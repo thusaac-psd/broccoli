@@ -2533,16 +2533,22 @@ async fn variable_bracket_size_and_five_game_stage_run_through_the_real_host() {
         )
         .await;
         assert_eq!(submitted.status, 201, "{}", submitted.text);
-        let mut next = Value::Null;
-        for _ in 0..100 {
-            next = get_match(&app, contest_id, 0, &staff).await;
+        // Wait for this submission's verdict to move the match on: the next
+        // submission is refused while this one is still being judged.
+        let judged_by = tokio::time::Instant::now() + Duration::from_secs(60);
+        let next = loop {
+            let next = get_match(&app, contest_id, 0, &staff).await;
             if next["state"] == "decided"
                 || next["current_xiaoju_index"].as_u64().unwrap() > index as u64
             {
-                break;
+                break next;
             }
+            assert!(
+                tokio::time::Instant::now() < judged_by,
+                "submission {index} was never judged: {next}"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        };
         if index < 4 {
             assert_eq!(next["state"], "in_progress", "{next}");
         } else {

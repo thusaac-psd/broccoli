@@ -3,7 +3,6 @@ use broccoli_server_sdk::types::{
     CheckerStage, CheckerVerdict, InterpretCheckerInput, ResolveCheckerInput,
 };
 use extism::{Function, UserData, Val, ValType};
-use plugin_core::traits::PluginInvoker;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -17,7 +16,7 @@ use std::sync::Arc;
 struct CheckerStageContext {
     caller_plugin_id: String,
     checker_stage_registry: CheckerStageRegistry,
-    plugin_manager: Arc<dyn PluginInvoker>,
+    plugin_manager: super::context::ManagerRef,
 }
 
 impl super::HostFnContext for CheckerStageContext {
@@ -29,7 +28,7 @@ impl super::HostFnContext for CheckerStageContext {
 fn checker_stage_data(
     caller_plugin_id: String,
     checker_stage_registry: CheckerStageRegistry,
-    plugin_manager: Arc<dyn PluginInvoker>,
+    plugin_manager: super::context::ManagerRef,
 ) -> UserData<Arc<CheckerStageContext>> {
     super::host_data(CheckerStageContext {
         caller_plugin_id,
@@ -41,7 +40,7 @@ fn checker_stage_data(
 pub fn create_resolve_checker_function(
     plugin_id: String,
     checker_stage_registry: CheckerStageRegistry,
-    plugin_manager: Arc<dyn PluginInvoker>,
+    plugin_manager: super::context::ManagerRef,
 ) -> Function {
     super::host_function(
         "resolve_checker",
@@ -56,7 +55,7 @@ pub fn create_resolve_checker_function(
 pub fn create_interpret_checker_function(
     plugin_id: String,
     checker_stage_registry: CheckerStageRegistry,
-    plugin_manager: Arc<dyn PluginInvoker>,
+    plugin_manager: super::context::ManagerRef,
 ) -> Function {
     super::host_function(
         "interpret_checker_result",
@@ -98,6 +97,7 @@ fn checker_stage_call(
     tokio::runtime::Handle::current()
         .block_on(async {
             ctx.plugin_manager
+                .get()?
                 .call_raw(
                     &handler.plugin_id,
                     &function_name,

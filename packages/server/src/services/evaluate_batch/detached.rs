@@ -128,7 +128,7 @@ impl WindowedSession for EvaluateDriver {
             total,
         };
         let output = call_detached_evaluate_callback(
-            self.deps.plugin_manager.as_ref(),
+            self.deps.plugin_manager.get()?.as_ref(),
             &self.caller_plugin_id,
             &self.callback_fn,
             input,

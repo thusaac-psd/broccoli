@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use extism::{Function, UserData, Val, ValType};
-use plugin_core::traits::PluginInvoker;
 
 use crate::registry::LanguageResolverRegistry;
 
@@ -10,7 +9,7 @@ use broccoli_server_sdk::types::{ResolveLanguageInput, ResolveLanguageOutput};
 struct ResolveLanguageContext {
     caller_plugin_id: String,
     resolver_registry: LanguageResolverRegistry,
-    plugin_manager: Arc<dyn PluginInvoker>,
+    plugin_manager: super::context::ManagerRef,
 }
 
 impl super::HostFnContext for ResolveLanguageContext {
@@ -22,7 +21,7 @@ impl super::HostFnContext for ResolveLanguageContext {
 pub fn create_resolve_language_function(
     plugin_id: String,
     resolver_registry: LanguageResolverRegistry,
-    plugin_manager: Arc<dyn PluginInvoker>,
+    plugin_manager: super::context::ManagerRef,
 ) -> Function {
     super::host_function(
         "resolve_language",
@@ -78,6 +77,7 @@ fn resolve_language_fn(
     let output_bytes = tokio::runtime::Handle::current()
         .block_on(async {
             ctx.plugin_manager
+                .get()?
                 .call_raw(
                     &handler.plugin_id,
                     &handler.function_name,

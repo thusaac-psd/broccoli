@@ -9,7 +9,7 @@
 //! `E2eTestApp`) and re-exports what it needs from here.
 
 use common::db::DatabaseConnection;
-use std::sync::{Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DbBackend, Statement};
@@ -199,23 +199,56 @@ async fn clone_template(port: u16, db_name: &str) {
         .expect("admin runtime task panicked");
 }
 
-/// Clone database `db_name` from `template_test` and return its connection
-/// URL. Creation is serialized: Postgres refuses concurrent clones of one
-/// template.
-pub async fn create_test_database(db_name: &str) -> String {
+/// One test's database, cloned from `template_test` and dropped when the last
+/// clone of this handle goes, so a process running the whole suite holds only
+/// the databases of the tests still running. A clone is the handle another
+/// app instance (a replica) joins the same database with.
+#[derive(Clone, Debug)]
+pub struct TestDatabase(Arc<TestDatabaseInner>);
+
+#[derive(Debug)]
+struct TestDatabaseInner {
+    name: String,
+    url: String,
+}
+
+impl TestDatabase {
+    pub fn name(&self) -> &str {
+        &self.0.name
+    }
+
+    pub fn url(&self) -> &str {
+        &self.0.url
+    }
+}
+
+impl Drop for TestDatabaseInner {
+    fn drop(&mut self) {
+        let Some(admin) = SHARED_ADMIN_CONN.get() else {
+            return;
+        };
+        // On the admin runtime, which outlives every test's own: the test's
+        // runtime is already shutting down here. FORCE ends the sessions of
+        // pools still closing.
+        let sql = format!("DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)", self.name);
+        admin_runtime().spawn(async move {
+            let _ = admin.execute_unprepared(&sql).await;
+        });
+    }
+}
+
+/// Clone database `db_name` from `template_test`. Creation is serialized:
+/// Postgres refuses concurrent clones of one template.
+pub async fn create_test_database(db_name: &str) -> TestDatabase {
     let port = shared_pg_port().await;
     {
         let _lock = CREATE_DB_LOCK.lock().await;
         clone_template(port, db_name).await;
     }
-    test_database_url(db_name).await
-}
-
-/// Connection URL of an existing test database on the shared container, for
-/// a second app instance that joins a database another one created.
-pub async fn test_database_url(db_name: &str) -> String {
-    let port = shared_pg_port().await;
-    format!("postgres://postgres:postgres@127.0.0.1:{port}/{db_name}")
+    TestDatabase(Arc::new(TestDatabaseInner {
+        name: db_name.to_string(),
+        url: format!("postgres://postgres:postgres@127.0.0.1:{port}/{db_name}"),
+    }))
 }
 
 /// Close a test's pool off the current runtime. A test fixture is dropped at

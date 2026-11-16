@@ -37,7 +37,7 @@ use server::utils::plugin::sync_plugins;
 static DB_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 pub use test_support::{DbClock, TestResponse};
-use test_support::{close_database_pool, create_test_database, test_database_url};
+use test_support::{TestDatabase, close_database_pool, create_test_database};
 
 struct TestPluginManager {
     inner: Arc<ServerManager>,
@@ -408,8 +408,9 @@ pub struct TestApp {
     /// `dispatcher::plugin_timer::tick_once`) instead of going through HTTP.
     pub state: AppState,
     /// The test database this app runs on; pass it as
-    /// [`SpawnOptions::shared_db`] to spawn another replica on it.
-    pub db_name: String,
+    /// [`SpawnOptions::shared_db`] to spawn another replica on it. Dropped
+    /// with the last app on it.
+    pub database: TestDatabase,
     /// This app's own plugin cache (`plugin.cache_dir`): replicas never
     /// share one.
     pub plugin_cache: tempfile::TempDir,
@@ -519,9 +520,9 @@ pub struct SpawnOptions {
     /// of weakening that assertion for everyone else.
     pub allow_plugin_activation_failures: bool,
     /// Join an existing test database instead of creating a fresh one: the
-    /// spawned app is another server replica of the app whose `db_name` this
+    /// spawned app is another server replica of the app whose `database` this
     /// is (same Postgres, own process-local state). See [`TestApp::spawn_replica`].
-    pub shared_db: Option<String>,
+    pub shared_db: Option<TestDatabase>,
     /// Sets `plugin.uploads_enabled = false`.
     pub plugin_uploads_disabled: bool,
     /// Submissions and code runs per user per minute; `None` keeps the
@@ -556,7 +557,7 @@ impl TestApp {
     /// Another server replica of `self`: same database, its own plugin
     /// registry, dispatcher state and HTTP listener.
     pub async fn spawn_replica(&self, mut options: SpawnOptions) -> Self {
-        options.shared_db = Some(self.db_name.clone());
+        options.shared_db = Some(self.database.clone());
         let mut replica = Self::spawn_internal(self.load_plugins, options).await;
         let clocks = self.platform_clocks.clone();
         clocks
@@ -568,17 +569,14 @@ impl TestApp {
     }
 
     async fn spawn_internal(load_plugins: bool, options: SpawnOptions) -> Self {
-        let (db_name, db_url) = match options.shared_db.clone() {
-            Some(existing) => {
-                let url = test_database_url(&existing).await;
-                (existing, url)
-            }
+        let database = match options.shared_db.clone() {
+            Some(existing) => existing,
             None => {
                 let db_name = format!("test_{}", DB_COUNTER.fetch_add(1, Ordering::Relaxed));
-                let url = create_test_database(&db_name).await;
-                (db_name, url)
+                create_test_database(&db_name).await
             }
         };
+        let db_url = database.url().to_string();
         let mut opts = ConnectOptions::new(&db_url);
         opts.max_connections(2)
             .min_connections(0)
@@ -609,7 +607,8 @@ impl TestApp {
                 // Unique per spawned app: replicas sharing a database
                 // (`spawn_replica`) must report under distinct server ids.
                 id: format!(
-                    "test-{db_name}-{}",
+                    "test-{}-{}",
+                    database.name(),
                     DB_COUNTER.fetch_add(1, Ordering::Relaxed)
                 ),
                 dispatcher_lease_steal_enabled: false,
@@ -882,7 +881,7 @@ impl TestApp {
                 .expect("Failed to build reqwest client"),
             db,
             state: state_for_app,
-            db_name,
+            database,
             plugin_cache,
             server_handle: Some(server_handle),
             dispatcher,

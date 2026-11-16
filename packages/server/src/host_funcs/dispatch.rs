@@ -84,10 +84,12 @@ fn start_detached_windowed_operation_fn(
     let input: StartDetachedWindowedOperationInput = super::read_json(plugin, inputs, "input")?;
     let call = super::HostCall::enter(&user_data, "start_detached_windowed_operation")?;
 
-    let manager =
-        call.deps.plugin_manager.clone().ok_or_else(|| {
-            extism::Error::msg("Plugin manager not available for detached operation")
-        })?;
+    let manager = call
+        .deps
+        .plugin_manager
+        .as_ref()
+        .ok_or_else(|| extism::Error::msg("Plugin manager not available for detached operation"))?
+        .get()?;
     let session = operation_batch::start_detached_windowed_operation(
         call.plugin_id.clone(),
         manager,
