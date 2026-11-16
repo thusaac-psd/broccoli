@@ -353,6 +353,18 @@ impl E2eTestApp {
         assert!(failures.is_empty(), "reconcile failed to apply a plugin");
     }
 
+    /// Takes a sample burst on the in-process server's platform clock, as
+    /// its resample timer does.
+    pub async fn resample_clock(&self) {
+        self.state
+            .as_ref()
+            .expect("resample_clock needs the in-process server")
+            .clock
+            .sync()
+            .await
+            .expect("sample the database clock");
+    }
+
     /// Default app DB pool size. Small on purpose: e2e runs many isolated test
     /// databases and Postgres backend slots are finite.
     const DEFAULT_DB_MAX_CONNECTIONS: u32 = 3;

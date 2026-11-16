@@ -66,7 +66,11 @@ const HOLD_MARGIN_US: i64 = 100;
 /// Bound on one sample, so a stalled connection cannot stall a resample.
 const SAMPLE_TIMEOUT: Duration = Duration::from_secs(3);
 
-const CLOCK_QUERY: &str = "SELECT (extract(epoch FROM clock_timestamp()) * 1000000)::bigint";
+/// The one statement the sampling connection runs. It has no literal, so
+/// `pg_stat_statements` records exactly this text, and a measurement of what
+/// the app's work costs leaves it out by this constant: it runs on the
+/// resample timer, whatever the app is doing.
+pub const SAMPLE_QUERY: &str = "SELECT clock_timestamp()";
 
 /// One reading of the database clock against this process's monotonic clock.
 #[derive(Debug, Clone, Copy)]
@@ -148,7 +152,7 @@ struct Inner {
     url: Option<String>,
     /// The dedicated sampling connection, opened on first use and after a
     /// failure. It bypasses [`crate::db::DatabaseConnection`], which owns NUL
-    /// in bound values: it only runs [`CLOCK_QUERY`], which binds none, and a
+    /// in bound values: it only runs [`SAMPLE_QUERY`], which binds none, and a
     /// pooled handle would put pool waits inside the timed round trip.
     conn: tokio::sync::Mutex<Option<PgConnection>>,
     /// Fixed reference for turning `Instant`s into integers.
@@ -249,10 +253,11 @@ async fn take_sample(conn: &mut PgConnection) -> anyhow::Result<(Sample, i64)> {
     #[allow(clippy::disallowed_methods)] // The one place the local wall clock is read.
     let local_before = Utc::now();
     let started = Instant::now();
-    let read = sea_orm::sqlx::query_scalar::<_, i64>(CLOCK_QUERY).fetch_one(&mut *conn);
+    let read = sea_orm::sqlx::query_scalar::<_, DateTime<Utc>>(SAMPLE_QUERY).fetch_one(&mut *conn);
     let db_us = tokio::time::timeout(SAMPLE_TIMEOUT, read)
         .await
-        .map_err(|_| anyhow::anyhow!("timed out reading the database clock"))??;
+        .map_err(|_| anyhow::anyhow!("timed out reading the database clock"))??
+        .timestamp_micros();
     let rtt = started.elapsed();
     let half_rtt_us = rtt.as_micros() as i64 / 2;
     let sample = Sample {

@@ -26,7 +26,9 @@ const WAIT_MARK: &str = "statement_counts:wait";
 /// being judged, by how their normalized text starts: the claim fiber's
 /// judgement and code-run claims, the recovery scans that reclaim and retry
 /// work, and transaction control. They run at a rate set by time, so they are
-/// no part of what a case or a poll costs.
+/// no part of what a case or a poll costs. The platform clock's sample
+/// (`common::clock::SAMPLE_QUERY`, on a connection of its own) is one such
+/// loop too, left out by that constant.
 const PERIODIC: &[&str] = &[
     "WITH room AS (SELECT",
     "SELECT u.id, u.submission_id, u.is_current, u.dispatch_retries",
@@ -147,7 +149,11 @@ fn work_since(
     for (query, (calls, rows)) in after {
         let (calls_before, rows_before) = before.get(query).copied().unwrap_or((0, 0));
         let (calls, rows) = (calls - calls_before, rows - rows_before);
-        if calls == 0 || PERIODIC.iter().any(|p| text_of(query).starts_with(p)) {
+        let text = text_of(query);
+        if calls == 0
+            || PERIODIC.iter().any(|p| text.starts_with(p))
+            || text == common::clock::SAMPLE_QUERY
+        {
             continue;
         }
         let class = class_of(query);
@@ -272,6 +278,27 @@ async fn judge(
         );
     }
     measured
+}
+
+/// The platform clock resamples on a timer of its own, so a burst can land
+/// inside any measurement; what it runs is left out by construction.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clock_resample_costs_no_measured_work() {
+    if std::env::var("E2E_SERVER_URL").is_ok() {
+        return;
+    }
+    let app = E2eTestApp::spawn().await;
+    let before = snapshot(&app).await;
+    app.resample_clock().await;
+    app.resample_clock().await;
+    let after = snapshot(&app).await;
+    let sampled = after
+        .iter()
+        .filter(|(query, _)| text_of(query) == common::clock::SAMPLE_QUERY)
+        .map(|(_, (calls, _))| calls)
+        .sum::<i64>();
+    assert!(sampled > 0, "the resample ran its sample query");
+    assert_eq!(work_since(&before, &after), BTreeMap::new());
 }
 
 #[tokio::test(flavor = "multi_thread")]
