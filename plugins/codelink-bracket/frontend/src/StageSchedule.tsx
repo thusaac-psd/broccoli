@@ -1,4 +1,4 @@
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import { ChevronDown } from 'lucide-react';
 
 import { roundNameKey } from './lib/rounds';
@@ -12,15 +12,9 @@ export function StageSchedule({
   thirdPlace: boolean;
 }) {
   const { t } = useTranslation();
+  const format = useFormat();
   const date = (at: number | null) =>
-    at === null
-      ? t('codelink-bracket.schedule.unset')
-      : new Intl.DateTimeFormat(undefined, {
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-        }).format(at);
+    at === null ? t('codelink-bracket.schedule.unset') : format.dateTime(at);
   return (
     <details className="group rounded-lg border border-border">
       <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm font-medium hover:bg-muted/50">

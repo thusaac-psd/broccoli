@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { mockApi, NOW, PLUGIN_ROUTES } from './api';
+import { cursorPage, mockApi, NOW, PLUGIN_ROUTES, submission } from './api';
 
 // While a player's live bracket stream is connected, it alone keeps the
 // bracket current: the server re-reads the bracket for it every second, so
@@ -8,6 +8,9 @@ import { mockApi, NOW, PLUGIN_ROUTES } from './api';
 
 const BRACKET =
   /^\/p\/codelink-bracket\/api\/plugins\/codelink-bracket\/contests\/5\/bracket$/;
+
+const MATCH =
+  /^\/p\/codelink-bracket\/api\/plugins\/codelink-bracket\/contests\/5\/matches\/1$/;
 
 /** Alice's (user 2) first-round match, waiting for both orders. */
 const SNAPSHOT = {
@@ -99,4 +102,45 @@ test('a connected bracket stream stops the bracket polls', async ({ page }) => {
   const before = polls;
   await page.clock.runFor(60_000);
   expect(polls - before).toBe(0);
+});
+
+test("a match's submission feed names outcomes and times in the UI language", async ({
+  page,
+}) => {
+  await page.addInitScript(() =>
+    localStorage.setItem('broccoli-locale', 'zh-CN'),
+  );
+  await mockApi(page, 'admin', {
+    plugins: ['codelink-bracket'],
+    pluginRoutes: [
+      ['GET', BRACKET, () => SNAPSHOT],
+      ['GET', MATCH, () => SNAPSHOT.matches[0]],
+      ...PLUGIN_ROUTES,
+    ],
+  });
+  await page.route(/\/api\/v1\/contests\/5\/submissions(\?|$)/, (route) =>
+    route.fulfill({
+      json: cursorPage([
+        { ...submission(7, 2, 'WrongAnswer'), contest_id: 5, problem_id: 1 },
+        {
+          ...submission(8, 2, 'Accepted'),
+          contest_id: 5,
+          problem_id: 2,
+          status: 'Queued',
+          verdict: null,
+          plugin_outage: { state: 'disabled', plugin_id: 'codelink-bracket' },
+        },
+      ]),
+    }),
+  );
+  await page.goto('/contests/5/rankings');
+  await page.getByText('alice').first().click();
+  const sheet = page.getByRole('dialog');
+  await expect(sheet.getByText('答案错误').first()).toBeVisible();
+  await expect(
+    sheet.getByText('等待中：其比赛插件已被禁用').first(),
+  ).toBeVisible();
+  await expect(sheet.getByText('WrongAnswer')).toHaveCount(0);
+  await expect(sheet.getByText('Queued', { exact: true })).toHaveCount(0);
+  await expect(sheet.getByText(/[AP]M/)).toHaveCount(0);
 });

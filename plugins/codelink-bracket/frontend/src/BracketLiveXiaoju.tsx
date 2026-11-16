@@ -1,7 +1,12 @@
 import { useServerNow } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { type Submission, useSubmitGate } from '@broccoli/web-sdk/submission';
+import {
+  getStatusLabel,
+  getVerdictBadge,
+  type Submission,
+  useSubmitGate,
+} from '@broccoli/web-sdk/submission';
 import { cn } from '@broccoli/web-sdk/utils';
 
 import { useBracket } from './hooks/useBracket';
@@ -156,17 +161,23 @@ export function BracketLiveXiaoju({
 
       {submissions && submissions.length > 0 && (
         <ul className="mt-2 flex flex-col gap-1">
-          {submissions.slice(0, 5).map((entry) => (
-            <li key={entry.id} className="text-xs text-muted-foreground">
-              {entry.submission
-                ? `${entry.submission.status}${
-                    entry.submission.result?.verdict
-                      ? ` -- ${entry.submission.result.verdict}`
-                      : ''
-                  }`
-                : entry.status}
-            </li>
-          ))}
+          {submissions
+            // A submit that failed before it made a submission has no outcome.
+            .filter((entry) => entry.submission || entry.status !== 'error')
+            .slice(0, 5)
+            .map((entry) => (
+              <li key={entry.id} className="text-xs text-muted-foreground">
+                {entry.submission
+                  ? getVerdictBadge(
+                      {
+                        ...entry.submission,
+                        verdict: entry.submission.result?.verdict,
+                      },
+                      t,
+                    ).label
+                  : getStatusLabel('Pending', t)}
+              </li>
+            ))}
         </ul>
       )}
     </div>
