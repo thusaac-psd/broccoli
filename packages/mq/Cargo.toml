@@ -4,18 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow.workspace = true
-async-trait.workspace = true
-broccoli_queue.workspace = true
 common.workspace = true
+redis = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
+common = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-redis = { workspace = true }
 testcontainers.workspace = true
 testcontainers-modules = { workspace = true, features = ["redis"] }

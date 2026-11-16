@@ -39,7 +39,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Internals',
       collapsed: false,
-      items: ['internals/judging', 'internals/judging-lifecycle'],
+      items: ['internals/judging', 'internals/judging-lifecycle', 'internals/message-queue'],
     },
   ],
 };

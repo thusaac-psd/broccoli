@@ -314,7 +314,6 @@ mod tests {
                 mounts: vec![],
             }],
             channels: vec![],
-            priority: None,
             target_worker_id: None,
             evaluate_batch_id: None,
             test_case_id: None,

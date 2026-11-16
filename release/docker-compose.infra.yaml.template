@@ -52,20 +52,22 @@ services:
   redis:
     image: ${REDIS_IMAGE:-redis:7-alpine}
     restart: unless-stopped
-    # Tuned for Broccoli's MQ + heartbeat + (planned) observability streams.
+    # Holds Broccoli's message queue streams and node liveness keys. Redis 7 or
+    # newer: the queue uses stream commands added in 6.2 and 7.0.
     #
     # CRITICAL: maxmemory-policy MUST be noeviction. Every key Broccoli writes is
-    # correctness-bearing - MQ payloads are queued submissions, heartbeats drive
-    # worker dedup steal logic, dedup keys carry claim invariants, observability
-    # streams hold live SSE state. allkeys-lru would silently lose all of these.
-    # When Redis is full under noeviction, writes return OOM and the API surfaces
-    # 503 / workers retry - fail-loud beats fail-silent.
+    # correctness-bearing - stream entries are queued or in-flight operations
+    # and dead letters, and liveness keys decide which nodes are alive.
+    # allkeys-lru would silently lose them. When Redis is full under
+    # noeviction, publishes fail with OOM and the operation batch fails loudly
+    # instead of losing its tasks.
+    #
+    # AOF with everysec bounds a crash to the last second of writes; the stuck
+    # job detector recovers work lost in it.
     #
     # Sizing rationale (override via REDIS_MAXMEMORY):
-    #   ~300 MB op envelopes pending under 1000-spike (capped after Phase 2 windowing)
-    #   ~3 GB op result reply queues at peak (worst-instant; drains as servers consume)
-    #   ~600 MB observability streams at 1000 active subs (MAXLEN-bounded by §4.4 of
-    #         docs/plans/2026-05-07-observability-expansion-design.md)
+    #   ~300 MB operation task entries pending under a 1000-submission spike
+    #   replies are trimmed as each server reads them, so reply streams stay small
     #   ~30% AOF rewrite working memory headroom
     #   ~safety margin
     # Default 6 GB. Single-host: 2 GB. Large/national: 12 GB.

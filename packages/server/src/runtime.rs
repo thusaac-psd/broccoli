@@ -7,13 +7,12 @@ use anyhow::Context;
 use axum::http::{HeaderName, HeaderValue, Method, header};
 use common::storage::config::create_blob_store;
 use dashmap::DashMap;
-use mq::{MqConfig as MqConnConfig, init_mq};
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
 use crate::build_router;
-use crate::config::{AppConfig, per_replica_result_queue_name, resolve_server_id};
+use crate::config::{AppConfig, resolve_server_id};
 use crate::consumers::{consume_operation_dlq, consume_operation_results};
 use crate::dlq::run_stuck_job_detector;
 use crate::host_funcs::context::HostFunctionSystemDeps;
@@ -22,7 +21,8 @@ use crate::registry;
 use crate::serve::serve_with_shutdown;
 use crate::state::AppState;
 use crate::utils::plugin::sync_plugins;
-use common::node_identity::{NodeClaim, NodeHeartbeat, NodeRole};
+use common::liveness::NodeRole;
+use common::node_identity::{NodeClaim, NodeHeartbeat};
 
 pub struct ServerRuntime {
     listener: tokio::net::TcpListener,
@@ -64,15 +64,7 @@ impl ServerRuntime {
             );
         }
 
-        let operation_result_queue_base = app_config.mq.operation_result_queue_name.clone();
-        let per_replica_op_result_queue =
-            per_replica_result_queue_name(&operation_result_queue_base, &server_id);
-        app_config.mq.operation_result_queue_name = per_replica_op_result_queue.clone();
-        info!(
-            server_id = %server_id,
-            result_queue = %per_replica_op_result_queue,
-            "Resolved server identity"
-        );
+        info!(server_id = %server_id, "Resolved server identity");
 
         let (metrics, prometheus_registry) =
             common::observability::init_metrics(&app_config.observability.otlp.service_name);
@@ -179,18 +171,16 @@ impl ServerRuntime {
         );
 
         let mq = if app_config.mq.enabled {
-            match init_mq(MqConnConfig {
-                url: app_config.mq.url.clone(),
-                pool_size: app_config.mq.pool_size,
-            })
-            .await
-            {
+            match mq::Mq::connect(&app_config.mq.url, &app_config.mq.operation_queue_name).await {
                 Ok(queue) => {
                     info!(
                         "MQ connected to {}",
                         common::redact::redact_url(&app_config.mq.url)
                     );
-                    Some(Arc::new(queue))
+                    Some(queue)
+                }
+                Err(e @ (mq::MqError::RedisTooOld { .. } | mq::MqError::WrongKeyType { .. })) => {
+                    return Err(e.into());
                 }
                 Err(e) => {
                     warn!("MQ connection failed, submissions won't be queued: {}", e);
@@ -219,11 +209,14 @@ impl ServerRuntime {
 
         common::clock::check_clock_skew(&db, redis_client.as_deref(), &app_config.clock).await?;
 
-        // Claim the server ID before consuming this replica's result queue or
+        // Claim the server ID before consuming this replica's reply stream or
         // recovering leases under it: a second live replica with the same ID
-        // would eat its results and release its in-flight rows, so it refuses
-        // to start instead. The claim is the `broccoli:server:heartbeat:<id>`
-        // key the reply-queue sweeper reads; released on graceful shutdown.
+        // would eat its replies and release its in-flight rows, so it refuses
+        // to start instead. The claim owns the reply stream, which therefore
+        // expires with this server's liveness key; both are released on
+        // graceful shutdown.
+        // Created before the claim: losing the reply stream fails every waiter.
+        let operation_waiters: crate::registry::OperationWaiters = Arc::new(DashMap::new());
         let node_heartbeat = match redis_client.as_deref() {
             Some(client) => {
                 let started_at = chrono::Utc::now();
@@ -245,23 +238,43 @@ impl ServerRuntime {
                 };
                 let claim = NodeClaim::claim_at_boot(
                     client.clone(),
+                    &app_config.mq.operation_queue_name,
                     NodeRole::Server,
                     &server_id,
                     payload(),
                 )
                 .await?;
+                let claim = match &mq {
+                    Some(mq) => {
+                        let waiters = operation_waiters.clone();
+                        claim.own_stream(
+                            mq.topology().reply(&server_id),
+                            mq::REPLY_STREAM_TTL,
+                            move || {
+                                crate::consumers::operation_result::fail_all_waiters(
+                                    &waiters,
+                                    "this server's reply stream was lost; the result cannot arrive",
+                                );
+                            },
+                        )
+                    }
+                    None => claim,
+                };
                 Some(claim.spawn_heartbeat(payload))
             }
             None => None,
         };
 
-        if let Some(ref mq_arc) = mq {
-            let op_dlq_consumer_db = db.clone();
-            let op_dlq_consumer_mq = Arc::clone(mq_arc);
-            let op_dlq_queue = app_config.mq.operation_dlq_queue_name.clone();
-            tokio::spawn(async move {
-                consume_operation_dlq(op_dlq_consumer_db, op_dlq_consumer_mq, op_dlq_queue).await;
-            });
+        if let Some(mq) = &mq {
+            mq.check_key_types(&[(mq.topology().reply(&server_id), "stream")])
+                .await
+                .context("Checking this server's reply stream key")?;
+            let consumer = mq.dead_letter_consumer(&server_id);
+            consumer
+                .ensure_groups()
+                .await
+                .context("Creating the dead-letter consumer group")?;
+            tokio::spawn(consume_operation_dlq(db.clone(), consumer));
             info!("Operation DLQ consumer started");
         }
 
@@ -274,14 +287,12 @@ impl ServerRuntime {
         let checker_stage_registry = Arc::new(RwLock::new(HashMap::new()));
         let language_resolver_registry = Arc::new(RwLock::new(HashMap::new()));
         let operation_batches = Arc::new(DashMap::new());
-        let operation_waiters = Arc::new(DashMap::new());
         let evaluate_batches = Arc::new(DashMap::new());
         let evaluate_ops_registry =
             crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry::default();
 
         let batch_max_age = Duration::from_secs(app_config.batch_max_age_secs);
         let reaper_mq = mq.clone();
-        let reaper_op_dlq_queue = app_config.mq.operation_dlq_queue_name.clone();
         let operation_waiters_for_reaper = operation_waiters.clone();
         registry::spawn_batch_reaper(
             "operation",
@@ -292,9 +303,7 @@ impl ServerRuntime {
                 for key in batch.cleanup_keys.iter() {
                     operation_waiters_for_reaper.remove(key);
 
-                    if let Some(ref mq) = reaper_mq {
-                        let mq = Arc::clone(mq);
-                        let queue = reaper_op_dlq_queue.clone();
+                    if let Some(mq) = reaper_mq.clone() {
                         let key = key.clone();
                         tokio::spawn(async move {
                             let envelope = common::DlqEnvelope {
@@ -306,7 +315,7 @@ impl ServerRuntime {
                                 error_message: "Operation batch timed out".into(),
                                 retry_history: vec![],
                             };
-                            if let Err(e) = mq.publish(&queue, None, &envelope, None).await {
+                            if let Err(e) = mq.publish_dead_letter(&envelope).await {
                                 tracing::error!(%key, error = %e, "Failed to publish stale op to DLQ");
                             }
                         });
@@ -325,29 +334,14 @@ impl ServerRuntime {
             },
         );
 
-        if let Some(ref mq_arc) = mq {
-            let op_consumer_mq = Arc::clone(mq_arc);
-            let op_result_queue = app_config.mq.operation_result_queue_name.clone();
-            let op_waiters = operation_waiters.clone();
-            let op_evaluate_ops_registry = evaluate_ops_registry.clone();
-            let op_result_metrics = metrics.clone();
-            let op_result_poll =
-                std::time::Duration::from_millis(app_config.mq.result_poll_interval_ms);
-            tokio::spawn(async move {
-                consume_operation_results(
-                    op_consumer_mq,
-                    op_waiters,
-                    op_evaluate_ops_registry,
-                    op_result_queue,
-                    op_result_metrics,
-                    op_result_poll,
-                )
-                .await;
-            });
-            info!(
-                queue = %app_config.mq.operation_result_queue_name,
-                "Operation result consumer started (per-replica)"
-            );
+        if let Some(mq) = &mq {
+            tokio::spawn(consume_operation_results(
+                mq.reply_inbox(&server_id),
+                operation_waiters.clone(),
+                evaluate_ops_registry.clone(),
+                metrics.clone(),
+            ));
+            info!("Operation result consumer started");
         }
 
         let hook_registry = crate::hooks::new_shared_registry();
@@ -470,9 +464,7 @@ impl ServerRuntime {
 
         let dispatcher = crate::dispatcher::Dispatcher::spawn(crate::dispatcher::DispatcherDeps {
             state: state.clone(),
-            redis_client: redis_client.as_deref().cloned(),
             server_id: server_id.clone(),
-            operation_result_queue_base,
             config: app_config.server.clone(),
         });
 

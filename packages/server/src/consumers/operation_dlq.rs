@@ -1,21 +1,25 @@
-use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::DlqEnvelope;
-use mq::{BrokerMessage, Mq};
+use mq::{Delivery, GroupConsumer};
 use sea_orm::{DatabaseConnection, TransactionTrait};
 use tracing::{error, info, warn};
 
 use crate::dlq::DlqService;
 
-/// Retries before a DLQ envelope that cannot be persisted is finally rejected.
-/// The `operation_dlq` queue is already a dead-letter queue, so rejecting a
-/// message here dead-letters it to a secondary, never-drained queue -- i.e.
-/// permanent silent loss of a failed-operation record. A transient DB error
-/// (failover, brief network blip) must therefore be absorbed by retrying,
-/// not by giving up. The backoff caps at 30s, so these attempts span several
-/// minutes of unavailability before the last-resort reject.
-const MAX_PERSIST_ATTEMPTS: u32 = 10;
+/// Entries read per batch.
+const READ_BATCH: usize = 16;
+/// Deliveries after which a dead letter that still cannot be written is
+/// dropped: its write fails deterministically (a value Postgres rejects) or
+/// panics. Reclaims come every [`mq::CLAIM_IDLE`], so this rides out about ten
+/// minutes of database outage first. The envelope is logged in full, so it
+/// can still be recovered by hand.
+const MAX_PERSIST_DELIVERIES: u32 = 20;
+
+/// Deadline of one persist. Under [`mq::CLAIM_IDLE`], so an entry is not
+/// reclaimed while it is being written; a write that does outlast it is
+/// harmless because `send_to_dlq` is idempotent on `message_id`.
+const PERSIST_DEADLINE: Duration = Duration::from_secs(20);
 
 async fn persist_operation_dlq(
     db: &DatabaseConnection,
@@ -27,84 +31,95 @@ async fn persist_operation_dlq(
     Ok(())
 }
 
-pub async fn consume_operation_dlq(db: DatabaseConnection, mq: Arc<Mq>, queue_name: String) {
-    info!(queue = %queue_name, "Starting operation DLQ consumer");
+/// Write dead letters from the queue into `dead_letter_message`, for the life
+/// of the process. An entry is acknowledged only once it is written; one whose
+/// write fails stays pending and is reclaimed by any server after
+/// [`mq::CLAIM_IDLE`], so a database outage delays dead letters without losing
+/// them.
+pub async fn consume_operation_dlq(db: DatabaseConnection, consumer: GroupConsumer<DlqEnvelope>) {
+    info!(stream = %consumer.streams()[0], "Starting operation DLQ consumer");
+    let mut reader = consumer.reader();
+    let mut next_reclaim = Instant::now();
+    loop {
+        let batch = if Instant::now() >= next_reclaim {
+            next_reclaim = Instant::now() + mq::REFRESH_INTERVAL;
+            consumer.reclaim(READ_BATCH).await
+        } else {
+            reader.read(READ_BATCH).await
+        };
+        let batch = match batch {
+            Ok(batch) => batch,
+            Err(e) => {
+                warn!(error = %e, "Reading dead letters failed; retrying");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+        for delivery in batch {
+            crate::consumers::guard_handler("operation_dlq", handle(&db, &consumer, delivery))
+                .await;
+        }
+    }
+}
 
-    let result = mq
-        // Concurrency `Some(1)`, NOT `None`: the `None` code path in
-        // `process_messages` propagates a transient consume error out with `?`,
-        // which returns from this function and - since the caller only
-        // `spawn`s it with no reconnect loop - permanently halts DLQ
-        // persistence (silent failed-job loss) on a single Redis hiccup. The
-        // `Some(n)` path instead loops and retries the consume forever, the
-        // same self-healing the result and worker consumers rely on. `1` keeps
-        // DLQ handling sequential, matching the previous behaviour.
-        .process_messages(
-            &queue_name,
-            Some(1),
-            None,
-            move |message: BrokerMessage<DlqEnvelope>| {
-                let db = db.clone();
-                async move {
-                    crate::consumers::guard_handler("operation_dlq", async move {
-                        let envelope = message.payload;
-                        let message_id = envelope.message_id.clone();
+async fn handle(
+    db: &DatabaseConnection,
+    consumer: &GroupConsumer<DlqEnvelope>,
+    delivery: Delivery<DlqEnvelope>,
+) {
+    if delivery.deliveries > MAX_PERSIST_DELIVERIES {
+        error!(
+            deliveries = delivery.deliveries,
+            envelope = %delivery.raw_payload(),
+            "Dropping a dead letter that could not be written {MAX_PERSIST_DELIVERIES} times"
+        );
+        ack(consumer, &delivery).await;
+        return;
+    }
+    let envelope = match &delivery.payload {
+        Ok(envelope) => envelope,
+        Err(e) => {
+            // No consumer can read it either: drop it, loudly.
+            error!(
+                error = %e,
+                payload = %e.raw,
+                "Dropping an undecodable dead letter"
+            );
+            ack(consumer, &delivery).await;
+            return;
+        }
+    };
+    let persisted = common::deadline::bounded(
+        "operation_dlq.persist",
+        PERSIST_DEADLINE,
+        persist_operation_dlq(db, envelope),
+    )
+    .await
+    .unwrap_or_else(|| Err(anyhow::anyhow!("persist timed out")));
+    match persisted {
+        Ok(()) => {
+            info!(
+                message_id = %envelope.message_id,
+                error_code = ?envelope.error_code,
+                "Persisted operation DLQ envelope"
+            );
+            ack(consumer, &delivery).await;
+        }
+        Err(e) => warn!(
+            message_id = %envelope.message_id,
+            deliveries = delivery.deliveries,
+            error = %e,
+            "Persisting a dead letter failed; it is retried once it is reclaimed"
+        ),
+    }
+}
 
-                        // Retry the whole persist txn on any DB error: rejecting
-                        // this message would dead-letter it to a never-drained
-                        // queue, so a transient DB error must not lose the
-                        // envelope. Only give up after a generous window.
-                        let mut attempt = 0u32;
-                        loop {
-                            let persisted = common::deadline::bounded(
-                                "operation_dlq.persist",
-                                common::deadline::BACKGROUND_STEP,
-                                persist_operation_dlq(&db, &envelope),
-                            )
-                            .await
-                            .unwrap_or_else(|| Err(anyhow::anyhow!("persist timed out")));
-                            match persisted {
-                                Ok(()) => {
-                                    info!(
-                                        message_id = %message_id,
-                                        error_code = ?envelope.error_code,
-                                        "Persisted operation DLQ envelope"
-                                    );
-                                    return Ok(());
-                                }
-                                Err(e) if attempt + 1 < MAX_PERSIST_ATTEMPTS => {
-                                    attempt += 1;
-                                    let backoff = Duration::from_secs(
-                                        (1u64 << attempt.min(5)).min(30),
-                                    );
-                                    warn!(
-                                        message_id = %message_id,
-                                        attempt,
-                                        error = %e,
-                                        "Operation DLQ persistence failed; retrying after backoff"
-                                    );
-                                    tokio::time::sleep(backoff).await;
-                                }
-                                Err(e) => {
-                                    error!(
-                                        message_id = %message_id,
-                                        error = %e,
-                                        "Operation DLQ persistence failed after all retries; rejecting"
-                                    );
-                                    return Err(mq::BroccoliError::Job(format!(
-                                        "DB persistence failed after {MAX_PERSIST_ATTEMPTS} attempts: {e}"
-                                    )));
-                                }
-                            }
-                        }
-                    })
-                    .await
-                }
-            },
-        )
-        .await;
-
-    if let Err(e) = result {
-        error!(error = %e, "Operation DLQ consumer stopped unexpectedly");
+async fn ack(consumer: &GroupConsumer<DlqEnvelope>, delivery: &Delivery<DlqEnvelope>) {
+    match consumer.ack(&delivery.entry).await {
+        Ok(mq::Settled::Done) => {}
+        Ok(mq::Settled::HandedOver) => {
+            warn!("Another server took this dead letter over while it was written")
+        }
+        Err(e) => warn!(error = %e, "Acknowledging a dead letter failed; it will be written again"),
     }
 }

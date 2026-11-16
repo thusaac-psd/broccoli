@@ -47,6 +47,9 @@ Extract to the same directory on each (`tar xzf broccoli-native-v1.tar.gz`).
 
 Lab boxes are Ubuntu 22.04. Postgres/Redis install via apt; point apt at a local
 mirror or pre-install `postgresql redis-server build-essential` if fully airgapped.
+Broccoli needs Redis 7 or newer, and Ubuntu 22.04 ships 6.0: the installer adds
+the packages.redis.io repository when it can reach it, and otherwise the mirror
+must carry Redis 7.
 
 ### Box 1 — infra + server (Postgres, Redis, SeaweedFS, API)
 

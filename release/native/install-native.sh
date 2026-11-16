@@ -95,6 +95,24 @@ apt_ensure(){ # install pkgs only if missing (works against a local apt mirror)
     || die "apt install failed (${miss[*]}); on an airgap, point apt at a local mirror or pre-install these"
 }
 
+# The message queue needs Redis 7 or newer (stream commands from 6.2 and 7.0);
+# Ubuntu 22.04 ships 6.0. Older Redis gets the packages.redis.io repository
+# when it is reachable; on an airgap, the mirror must carry Redis 7.
+redis_major(){ redis-server --version 2>/dev/null | sed -n 's/.* v=\([0-9]*\)\..*/\1/p'; }
+ensure_redis7(){
+  apt_ensure redis-server
+  [ "$(redis_major)" -ge 7 ] 2>/dev/null && return 0
+  echo ">> redis-server $(redis_major) is older than 7; installing Redis 7 from packages.redis.io"
+  . /etc/os-release
+  if curl -fsSL https://packages.redis.io/gpg | gpg --dearmor --yes -o /usr/share/keyrings/redis-archive-keyring.gpg; then
+    echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb ${VERSION_CODENAME} main" \
+      > /etc/apt/sources.list.d/redis.list
+    apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis || true
+  fi
+  [ "$(redis_major)" -ge 7 ] 2>/dev/null \
+    || die "Broccoli needs Redis 7 or newer, found $(redis_major). Install Redis 7 (packages.redis.io, or a mirror carrying it) and re-run."
+}
+
 # Provision the worker's C/C++/Python toolchain for offline / live-boot boxes.
 # Order: bundled .debs matching this Ubuntu version (stage-toolchain.sh) -> apt
 # (online or LAN mirror). Then VERIFY with a real compile -- a worker that cannot
@@ -154,7 +172,8 @@ install_infra_server(){
     *) die "BROCCOLI__AUTH__SECURE_COOKIES must be true or false" ;;
   esac
   require_ubuntu; install_common_dirs
-  apt_ensure postgresql postgresql-client redis-server
+  apt_ensure postgresql postgresql-client
+  ensure_redis7
 
   # binaries
   install -m755 "$BUNDLE/bin/server" "$DATA_DIR/target/release/server"
@@ -208,6 +227,13 @@ install_infra_server(){
   sed -i "s/^bind .*/bind 127.0.0.1 $host/" "$rconf"
   sed -i "s/^# *requirepass .*/requirepass $redis_pw/; s/^requirepass .*/requirepass $redis_pw/" "$rconf"
   grep -q "^requirepass " "$rconf" || echo "requirepass $redis_pw" >> "$rconf"
+  # Queue entries are correctness-bearing: never evict them, and keep a crash
+  # to the last second of writes.
+  local opt
+  for opt in "appendonly yes" "appendfsync everysec" "maxmemory-policy noeviction"; do
+    sed -i "s/^# *${opt%% *} .*/$opt/; s/^${opt%% *} .*/$opt/" "$rconf"
+    grep -q "^${opt%% *} " "$rconf" || echo "$opt" >> "$rconf"
+  done
   systemctl restart redis-server
 
   # seaweedfs s3 identity + service. SeaweedFS itself listens on loopback

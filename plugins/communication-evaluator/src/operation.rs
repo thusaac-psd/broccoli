@@ -305,7 +305,6 @@ pub fn build_operation(
         environments,
         tasks: steps,
         channels,
-        priority: None,
         target_worker_id: req.target_worker_id.clone(),
         // Tag the op so the host's `record_ops` registers the op->batch mapping;
         // without both ids the result wait can't extend and judging reports

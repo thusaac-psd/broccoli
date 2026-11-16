@@ -648,7 +648,7 @@ mod tests {
     async fn clock_skew_check_reads_postgres_and_redis() {
         use testcontainers::runners::AsyncRunner;
         let (_pg, url) = fresh_postgres().await;
-        let redis = testcontainers_modules::redis::Redis::default()
+        let redis = common::test_util::redis_image()
             .start()
             .await
             .expect("start redis");

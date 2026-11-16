@@ -8,7 +8,6 @@
 
 pub mod config;
 pub mod consumer;
-pub mod dedup;
 pub mod error;
 pub mod heartbeat;
 pub mod metrics;

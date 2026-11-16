@@ -2,7 +2,6 @@ import { serverNow } from '@broccoli/web-sdk/api';
 import { type I18nContextValue, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Badge } from '@broccoli/web-sdk/ui';
 import {
-  AlertTriangle,
   CircleDot,
   Cpu,
   MonitorSmartphone,
@@ -65,20 +64,10 @@ export function WorkerCard({ worker }: Props) {
             <span className="font-mono text-sm font-medium truncate">
               {worker.id}
             </span>
-            {worker.stale ? (
-              <Badge
-                variant="secondary"
-                className="gap-1 text-amber-600 dark:text-amber-400"
-              >
-                <AlertTriangle className="h-3 w-3" />
-                {t('system.worker.stale')}
-              </Badge>
-            ) : (
-              <Badge variant="outline" className="gap-1 border-emerald-500/40">
-                <CircleDot className="h-3 w-3 text-emerald-500" />
-                {t('system.worker.online')}
-              </Badge>
-            )}
+            <Badge variant="outline" className="gap-1 border-emerald-500/40">
+              <CircleDot className="h-3 w-3 text-emerald-500" />
+              {t('system.worker.online')}
+            </Badge>
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span className="inline-flex items-center gap-1">

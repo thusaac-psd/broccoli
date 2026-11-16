@@ -114,7 +114,6 @@ async fn execute_operation_with_file_pulled_from_object_storage() {
             },
         ],
         channels: vec![],
-        priority: None,
         target_worker_id: None,
         evaluate_batch_id: None,
         test_case_id: None,

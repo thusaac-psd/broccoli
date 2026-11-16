@@ -106,7 +106,6 @@ impl Worker {
                         task_type: None,
                         operation: None,
                         worker_id: None,
-                        enqueued_at_unix_ms: None,
                     }
                 }
             }
@@ -120,7 +119,6 @@ impl Worker {
                 task_type: None,
                 operation: None,
                 worker_id: None,
-                enqueued_at_unix_ms: None,
             });
         };
 

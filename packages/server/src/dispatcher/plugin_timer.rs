@@ -69,8 +69,7 @@ pub struct TickStats {
 }
 
 /// Long-running loop. Polls every `config.tick_interval_secs` until the
-/// cancel channel fires. Mirrors the shape of `dispatcher::claim::run` /
-/// `dispatcher::operation_reaper::run`.
+/// cancel channel fires. Mirrors the shape of `dispatcher::claim::run`.
 pub async fn run(state: AppState, config: TimerConfig, mut cancel: watch::Receiver<bool>) {
     let mut interval =
         tokio::time::interval(StdDuration::from_secs(config.tick_interval_secs.max(1)));
@@ -104,9 +103,7 @@ pub async fn run(state: AppState, config: TimerConfig, mut cancel: watch::Receiv
 }
 
 /// One claim-and-deliver cycle. `pub` (not `pub(crate)`) so integration
-/// tests can drive it directly through `server::dispatcher::plugin_timer`,
-/// the same way `tests/integration/scaling.rs` calls
-/// `server::dispatcher::sweeper::sweep_once` directly.
+/// tests can drive it directly through `server::dispatcher::plugin_timer`.
 pub async fn tick_once(state: &AppState, config: &TimerConfig) -> Result<TickStats, DbErr> {
     let Ok(loaded) = loaded_plugin_ids(state) else {
         error!("Plugin registry lock poisoned; skipping plugin timer tick");

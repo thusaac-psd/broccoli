@@ -52,10 +52,7 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
   // (and poll) it for system admins. Without this gate the admin-only overview
   // endpoint 403-loops for every contestant viewing a submission.
   const { data: systemOverview } = useSystemOverview({ enabled: canPinWorker });
-  const liveWorkers = useMemo(
-    () => (systemOverview?.workers ?? []).filter((w) => !w.stale),
-    [systemOverview],
-  );
+  const liveWorkers = systemOverview?.workers ?? [];
 
   const { data: judgements = [], isLoading } = useQuery({
     queryKey: ['submission-judgements', submissionId],

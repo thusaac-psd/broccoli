@@ -282,7 +282,6 @@ mod tests {
     use super::*;
     use crate::models::operation::file_cacher::NoopFileCacher;
     use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::redis::Redis;
 
     /// Regression: a subscription whose server stops answering (a half-open
     /// socket after the Redis host dies, simulated with `CLIENT PAUSE`) used to
@@ -290,7 +289,10 @@ mod tests {
     /// caller resubscribes.
     #[tokio::test]
     async fn unresponsive_server_ends_the_subscription_so_it_is_resubscribed() {
-        let redis = Redis::default().start().await.expect("redis");
+        let redis = common::test_util::redis_image()
+            .start()
+            .await
+            .expect("redis");
         let port = redis.get_host_port_ipv4(6379).await.expect("port");
         let client = redis::Client::open(format!("redis://127.0.0.1:{port}")).unwrap();
         let keepalive = Keepalive {

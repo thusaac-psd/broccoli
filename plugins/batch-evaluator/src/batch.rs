@@ -273,7 +273,6 @@ pub fn build_operation(
         environments,
         tasks: steps,
         channels,
-        priority: None,
         target_worker_id: req.target_worker_id.clone(),
         evaluate_batch_id: None,
         test_case_id: None,

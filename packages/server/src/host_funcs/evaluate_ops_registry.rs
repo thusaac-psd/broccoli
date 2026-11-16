@@ -1,4 +1,3 @@
-use chrono::Utc;
 use dashmap::{DashMap, DashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -94,13 +93,14 @@ impl EvaluateBatchOpsRegistry {
         }
     }
 
-    pub fn mark_operation_started(&self, op_task_id: &str, started_at_unix_ms: i64) -> bool {
+    /// Record that an operation started, at the arrival of its start reply.
+    pub fn mark_operation_started(&self, op_task_id: &str) -> bool {
         for batch in self.batches.iter() {
             if let Some(test_case_id) = batch.by_operation_task.get(op_task_id).map(|tc| *tc) {
                 batch
                     .started_at_by_test_case
                     .entry(test_case_id)
-                    .or_insert_with(|| instant_from_unix_ms(started_at_unix_ms));
+                    .or_insert_with(Instant::now);
                 return true;
             }
         }
@@ -238,17 +238,6 @@ impl EvaluateBatchOpsRegistry {
     }
 }
 
-fn instant_from_unix_ms(started_at_unix_ms: i64) -> Instant {
-    let now = Instant::now();
-    let now_unix_ms = Utc::now().timestamp_millis();
-    let elapsed_ms = now_unix_ms.saturating_sub(started_at_unix_ms);
-    if elapsed_ms <= 0 {
-        return now;
-    }
-    now.checked_sub(Duration::from_millis(elapsed_ms as u64))
-        .unwrap_or(now)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,9 +340,9 @@ mod tests {
             ["op-1".to_string(), "op-2".to_string()],
         );
 
-        assert!(registry.mark_operation_started("op-2", Utc::now().timestamp_millis()));
+        assert!(registry.mark_operation_started("op-2"));
         std::thread::sleep(Duration::from_millis(20));
-        assert!(registry.mark_operation_started("op-1", Utc::now().timestamp_millis()));
+        assert!(registry.mark_operation_started("op-1"));
 
         assert!(
             !registry.should_extend_wait_for_execution_timeout("eval-1", Duration::from_millis(10))

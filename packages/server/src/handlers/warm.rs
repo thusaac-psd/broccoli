@@ -82,11 +82,7 @@ pub async fn prewarm_contest(
     let total_blobs = hashes.len() as u32;
     let job = publish_warm_job(client, id, hashes).await?;
 
-    let live_workers = read_workers(&state)
-        .await
-        .iter()
-        .filter(|w| !w.stale)
-        .count() as u32;
+    let live_workers = read_workers(&state).await.len() as u32;
 
     info!(
         job_id = %job.job_id,
@@ -193,7 +189,7 @@ pub async fn prewarm_status(
     // Live workers: report their progress (or "pending" if not yet started).
     for w in &live {
         let entry = by_worker.remove(&w.id);
-        let ws = worker_status(&w.id, w.stale, total_blobs, entry);
+        let ws = worker_status(&w.id, total_blobs, entry);
         fraction_sum += ws.fraction;
         if ws.state == "complete" {
             workers_complete += 1;
@@ -206,7 +202,10 @@ pub async fn prewarm_status(
     // shown for transparency but excluded from the live overall fraction.
     for (_, p) in by_worker {
         let wid = p.worker_id.clone();
-        workers.push(worker_status(&wid, true, total_blobs, Some(p)));
+        workers.push(WorkerWarmStatus {
+            stale: true,
+            ..worker_status(&wid, total_blobs, Some(p))
+        });
     }
 
     let overall_fraction = if workers_total > 0 {
@@ -228,9 +227,9 @@ pub async fn prewarm_status(
     }))
 }
 
+/// A live worker's progress (or `pending` before it reports any).
 fn worker_status(
     worker_id: &str,
-    stale: bool,
     total_blobs: u32,
     progress: Option<WarmProgress>,
 ) -> WorkerWarmStatus {
@@ -241,7 +240,7 @@ fn worker_status(
             total: p.total,
             fraction: p.fraction(),
             state: warm_state_str(p.state),
-            stale,
+            stale: false,
             reported: true,
             error: p.error,
         },
@@ -251,7 +250,7 @@ fn worker_status(
             total: total_blobs,
             fraction: if total_blobs == 0 { 1.0 } else { 0.0 },
             state: "pending".to_string(),
-            stale,
+            stale: false,
             reported: false,
             error: None,
         },

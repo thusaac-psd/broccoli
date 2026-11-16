@@ -364,7 +364,8 @@ contestants). Then:
 If the bundle was built with `--lan-host`, the server address is baked into the
 sidecar and `--lan-host` may be omitted; otherwise pass
 `--lan-host <server-ip>`. Each worker MUST use a distinct `--worker-id` — two
-workers sharing an id corrupt heartbeat and dedup bookkeeping.
+workers sharing an id share one consumer in the queue and corrupt each other's
+pending tasks.
 
 The worker connects to the server's Postgres/Redis/SeaweedFS over the LAN
 (published on the server at ports 5432/6379/8333, password-gated). No image is

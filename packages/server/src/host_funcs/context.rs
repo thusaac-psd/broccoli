@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use common::storage::BlobStore;
-use mq::MqQueue;
 use plugin_core::traits::PluginManager;
 use sea_orm::DatabaseConnection;
 use tokio::sync::Semaphore;
@@ -13,7 +12,7 @@ use crate::registry::{
     CheckerStageRegistry, ContestTypeRegistry, EvaluateBatches, EvaluatorRegistry,
     LanguageResolverRegistry, OperationBatches, OperationWaiters,
 };
-use crate::services::operation_batch::{MqOperationTaskPublisher, OperationTaskPublisher};
+use crate::services::operation_batch::OperationTaskPublisher;
 
 #[derive(Clone)]
 pub struct HostFunctionSystemDeps {
@@ -24,7 +23,7 @@ pub struct HostFunctionSystemDeps {
     /// the gated core-WRITE host fns: `host.submission.*`, `host.storage.*`,
     /// and `config:write`. See `database::init_plugin_db_privileged`.
     pub privileged_db: DatabaseConnection,
-    pub mq: Option<Arc<MqQueue>>,
+    pub mq: Option<mq::Mq>,
     pub operation_batches: OperationBatches,
     pub operation_waiters: OperationWaiters,
     pub contest_type_registry: ContestTypeRegistry,
@@ -52,8 +51,8 @@ pub struct OperationHostDeps {
     pub operation_publisher: Option<Arc<dyn OperationTaskPublisher>>,
     pub operation_batches: OperationBatches,
     pub operation_waiters: OperationWaiters,
-    pub operation_queue_name: String,
-    pub operation_result_queue_name: String,
+    /// This server's id: tasks carry it as `reply_to`.
+    pub server_id: String,
     pub blob_store: Arc<dyn BlobStore>,
     pub metrics: Option<common::metrics::Metrics>,
     pub evaluate_ops_registry: EvaluateBatchOpsRegistry,
@@ -61,9 +60,6 @@ pub struct OperationHostDeps {
     /// operations inside `start_operation_batch`. Sourced from
     /// `server.operation_batch_publish_concurrency`.
     pub operation_batch_publish_concurrency: usize,
-    /// Redis handle used only to check a pinned target worker's liveness at
-    /// publish time, so a task is not routed to a dead worker's private queue.
-    pub redis_client: Option<Arc<redis::Client>>,
 }
 
 #[derive(Clone)]
@@ -97,13 +93,13 @@ impl HostFunctionSystemDeps {
     pub fn operation_deps(&self) -> OperationHostDeps {
         OperationHostDeps {
             plugin_manager: None,
-            operation_publisher: self.mq.clone().map(|mq| {
-                Arc::new(MqOperationTaskPublisher::new(mq)) as Arc<dyn OperationTaskPublisher>
-            }),
+            operation_publisher: self
+                .mq
+                .clone()
+                .map(|mq| Arc::new(mq) as Arc<dyn OperationTaskPublisher>),
             operation_batches: self.operation_batches.clone(),
             operation_waiters: self.operation_waiters.clone(),
-            operation_queue_name: self.config.mq.operation_queue_name.clone(),
-            operation_result_queue_name: self.config.mq.operation_result_queue_name.clone(),
+            server_id: self.config.server.id.clone(),
             blob_store: self.blob_store.clone(),
             metrics: self.metrics.clone(),
             evaluate_ops_registry: self.evaluate_ops_registry.clone(),
@@ -112,7 +108,6 @@ impl HostFunctionSystemDeps {
                 .server
                 .operation_batch_publish_concurrency
                 as usize,
-            redis_client: self.redis_client.clone(),
         }
     }
 }

@@ -9,7 +9,6 @@ services:
       BROCCOLI__WORKER__ISOLATE_BIN: /usr/local/bin/isolate
       BROCCOLI__WORKER__ENABLE_CGROUPS: "true"
       BROCCOLI__WORKER__MAX_CONCURRENCY: "${BROCCOLI__WORKER__MAX_CONCURRENCY:-1}"
-      BROCCOLI__WORKER__DEDUP_TTL_SECS: "${BROCCOLI__WORKER__DEDUP_TTL_SECS:-600}"
       BROCCOLI__WORKER__FAIRNESS_UNSAFE_ALLOW: "${BROCCOLI__WORKER__FAIRNESS_UNSAFE_ALLOW:-false}"
       # Shared by every worker container on this host (including
       # `--scale worker=N` replicas) so each claims a distinct isolate box-id

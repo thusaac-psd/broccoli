@@ -72,36 +72,13 @@ pub struct MqAppConfig {
     pub enabled: bool,
     #[serde(default = "default_mq_url")]
     pub url: String,
-    #[serde(default = "default_mq_pool_size")]
-    pub pool_size: u8,
+    /// Prefix of every message queue key: the shared operation stream itself,
+    /// and `<name>:worker:<id>`, `<name>:reply:<id>`, `<name>:dlq` (see the
+    /// `mq` crate).
     #[serde(default = "default_operation_queue_name")]
     pub operation_queue_name: String,
-    #[serde(default = "default_operation_result_queue_name")]
-    pub operation_result_queue_name: String,
-    #[serde(default = "default_operation_dlq_queue_name")]
-    pub operation_dlq_queue_name: String,
     #[serde(default)]
     pub dlq: DlqConfig,
-    /// Server only: how long each of the 8 operation-result consumer tasks
-    /// naps after finding the result queue empty. Contest plugins judge one
-    /// test case at a time, so this delay is paid once per case; a shorter
-    /// nap means more Redis polls while idle. Measured on a real stack (50
-    /// tiny cases; idle ops are the server's share):
-    ///
-    /// | nap    | per case | idle Redis ops/s |
-    /// |--------|----------|------------------|
-    /// | 500 ms | 0.52 s   | ~50  (the broker's old default) |
-    /// | 100 ms | 0.21 s   | ~260 |
-    /// | 50 ms  | 0.16 s   | ~490 |
-    /// | 20 ms  | 0.15 s   | ~1150 |
-    ///
-    /// The tasks stay in step, so latency tracks the nap itself, not nap/8.
-    #[serde(default = "default_result_poll_interval_ms")]
-    pub result_poll_interval_ms: u64,
-}
-
-fn default_result_poll_interval_ms() -> u64 {
-    50
 }
 
 fn default_mq_enabled() -> bool {
@@ -110,21 +87,9 @@ fn default_mq_enabled() -> bool {
 fn default_mq_url() -> String {
     "redis://localhost:6379".into()
 }
-fn default_mq_pool_size() -> u8 {
-    5
-}
-// `pub` so the worker's config builder can reference these as the single source
-// of truth instead of re-hardcoding the same string literals in its
-// `set_default(...)` calls (the builder default overrides the serde default, so
-// the two must agree).
+// `pub` so the worker's config builder uses the same default.
 pub fn default_operation_queue_name() -> String {
     "operation_tasks".into()
-}
-pub fn default_operation_result_queue_name() -> String {
-    "operation_results".into()
-}
-pub fn default_operation_dlq_queue_name() -> String {
-    "operation_tasks_dlq".into()
 }
 
 impl Default for MqAppConfig {
@@ -132,12 +97,8 @@ impl Default for MqAppConfig {
         Self {
             enabled: default_mq_enabled(),
             url: default_mq_url(),
-            pool_size: default_mq_pool_size(),
             operation_queue_name: default_operation_queue_name(),
-            operation_result_queue_name: default_operation_result_queue_name(),
-            operation_dlq_queue_name: default_operation_dlq_queue_name(),
             dlq: DlqConfig::default(),
-            result_poll_interval_ms: default_result_poll_interval_ms(),
         }
     }
 }

@@ -1,42 +1,34 @@
 //! Node identity for servers and workers: a unique default ID per host, and a
 //! Redis claim that makes two live processes with the same ID impossible.
 //!
-//! Every node writes a TTL'd liveness key, `broccoli:{role}:heartbeat:{id}`
-//! (see [`NodeRole::heartbeat_key`]). That key doubles as the node's *claim* on
+//! Every node writes its liveness key (see [`crate::liveness`]). That key
+//! doubles as the node's *claim* on
 //! its ID: it is created with `SET NX` at boot ([`NodeClaim::claim_at_boot`]),
 //! renewed only by the process that created it (the value carries a per-process
 //! `instance` token), and deleted on graceful shutdown. A second process booting
 //! with an ID that a live node holds therefore refuses to start instead of
-//! silently sharing its queues, dedup claims and leases.
+//! silently sharing its streams, pending entries and leases.
 //!
-//! The value is the role's JSON heartbeat payload plus the `instance` field, so
-//! existing readers of the payload (which ignore unknown fields) are unaffected.
+//! The value is the role's JSON heartbeat payload plus the `instance` field,
+//! which readers of the payload ignore.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use redis::aio::MultiplexedConnection;
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-/// Prefix of a worker's heartbeat (and ID claim) key.
-pub const WORKER_HEARTBEAT_KEY_PREFIX: &str = "broccoli:worker:heartbeat:";
-/// Prefix of a server's heartbeat (and ID claim) key. The reply-queue sweeper
-/// treats a server without one as dead.
-pub const SERVER_HEARTBEAT_KEY_PREFIX: &str = "broccoli:server:heartbeat:";
-
-/// How long a heartbeat key lives without renewal. Readers treat its presence
-/// as liveness, so this is also how long a crashed node still looks alive.
-pub const HEARTBEAT_TTL: Duration = Duration::from_secs(15);
-/// How often a live node renews its heartbeat key.
-pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+use crate::liveness::{NodeRole, RENEW_INTERVAL, TTL};
+use crate::redis_conn::{COMMAND_TIMEOUT, Conn};
 
 /// Consecutive [`RenewOutcome::Lost`] renewals (about 15 s) after which the
 /// node stops: a live twin holds its ID. This also closes the fail-open boot
 /// path (booting unclaimed when Redis was unreachable), since such a twin loses
 /// its first renewals.
-const LOST_RENEWALS_BEFORE_EXIT: u32 = 3;
+const LOST_RENEWALS_BEFORE_EXIT: u32 = 5;
 /// Exit status after giving up a lost claim, so a supervisor restarts the node
 /// (whose boot claim then refuses to start while the twin is alive).
 const LOST_CLAIM_EXIT_CODE: i32 = 75;
@@ -44,41 +36,11 @@ const LOST_CLAIM_EXIT_CODE: i32 = 75;
 /// The JSON field holding the per-process token that owns a claim.
 const INSTANCE_FIELD: &str = "instance";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NodeRole {
-    Server,
-    Worker,
-}
-
-impl NodeRole {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Server => "server",
-            Self::Worker => "worker",
-        }
-    }
-
-    pub fn heartbeat_key_prefix(self) -> &'static str {
-        match self {
-            Self::Server => SERVER_HEARTBEAT_KEY_PREFIX,
-            Self::Worker => WORKER_HEARTBEAT_KEY_PREFIX,
-        }
-    }
-
-    pub fn heartbeat_key(self, id: &str) -> String {
-        format!("{}{id}", self.heartbeat_key_prefix())
-    }
-}
-
-/// Returns true if `id` is safe as a node ID: it is embedded in Redis queue
-/// names, so alphanumeric plus `-_.`, 1 to 128 chars, and no suffix that the
-/// queue's own bookkeeping keys use.
+/// Returns true if `id` is safe as a node ID: it is embedded in Redis keys
+/// that use `:` as a separator, so alphanumeric plus `-_.`, 1 to 128 chars.
 pub fn is_valid_node_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
-        && !id.ends_with("_processing")
-        && !id.ends_with("_failed")
-        && !id.ends_with("_fairness_set")
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
@@ -89,9 +51,8 @@ pub enum NodeIdError {
     #[error("{role}.id must be explicitly set to a valid value", role = .0.as_str())]
     ExplicitIdRequired(NodeRole),
     #[error(
-        "{role}.id {id:?} is invalid: use 1 to 128 of A-Z a-z 0-9 - _ . \
-         (and no _processing, _failed or _fairness_set suffix), or leave it empty \
-         to derive one for this host",
+        "{role}.id {id:?} is invalid: use 1 to 128 of A-Z a-z 0-9 - _ ., \
+         or leave it empty to derive one for this host",
         role = .role.as_str()
     )]
     Invalid { role: NodeRole, id: String },
@@ -240,41 +201,77 @@ pub enum RenewOutcome {
 }
 
 /// Renew iff the key still carries our instance token; take it again if it is
-/// gone. Returns 1 (renewed), 2 (reacquired) or 0 (held by someone else).
+/// gone, unless this process already released it (`KEYS[2]`, the release
+/// marker, exists: a renewal still queued at Redis when the release ran).
+/// Each owned stream (`KEYS[3..]`, TTL in `ARGV[1 + i]`) is created empty
+/// when missing and gets its TTL again. Returns `{code, created}`: code 1
+/// (renewed), 2 (reacquired) or 0 (held by someone else, or released), and
+/// the 1-based indexes of the owned streams that had to be created.
 const RENEW_LUA: &str = r#"
+if redis.call('EXISTS', KEYS[2]) == 1 then
+  return {0, {}}
+end
 local cur = redis.call('GET', KEYS[1])
-if not cur then
-  redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
-  return 2
+local code = 2
+if cur then
+  local ok, doc = pcall(cjson.decode, cur)
+  if not (ok and type(doc) == 'table' and doc.instance == ARGV[1]) then
+    return {0, {}}
+  end
+  code = 1
 end
-local ok, doc = pcall(cjson.decode, cur)
-if ok and type(doc) == 'table' and doc.instance == ARGV[1] then
-  redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
-  return 1
+redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+local created = {}
+for i = 3, #KEYS do
+  if redis.call('EXISTS', KEYS[i]) == 0 then
+    redis.call('XADD', KEYS[i], 'MAXLEN', 0, '*', '_', '')
+    table.insert(created, i - 2)
+  end
+  redis.call('PEXPIRE', KEYS[i], ARGV[i + 1])
 end
-return 0
+return {code, created}
 "#;
 
-/// Delete the key iff it still carries our instance token.
+/// Delete the key and the owned streams (`KEYS[3..]`) iff the key still
+/// carries our instance token, and leave the release marker (`KEYS[2]`, for
+/// one TTL) so a renewal of ours that is still in flight cannot take the ID
+/// back.
 const RELEASE_LUA: &str = r#"
+redis.call('SET', KEYS[2], 1, 'PX', ARGV[2])
 local cur = redis.call('GET', KEYS[1])
 if not cur then return 0 end
 local ok, doc = pcall(cjson.decode, cur)
 if ok and type(doc) == 'table' and doc.instance == ARGV[1] then
-  return redis.call('DEL', KEYS[1])
+  local keys = {KEYS[1]}
+  for i = 3, #KEYS do
+    table.insert(keys, KEYS[i])
+  end
+  return redis.call('DEL', unpack(keys))
 end
 return 0
 "#;
 
+/// A stream kept alive by a [`NodeClaim`] (see [`NodeClaim::own_stream`]).
+struct OwnedStream {
+    key: String,
+    ttl: Duration,
+    on_lost: Box<dyn Fn() + Send + Sync>,
+    /// Whether a renewal has seen (or created) it before.
+    existed: AtomicBool,
+}
+
 /// This process's claim on its node ID. See the module docs.
 pub struct NodeClaim {
-    client: redis::Client,
+    conn: Conn,
+    /// Liveness namespace (see [`crate::liveness`]).
+    namespace: String,
     role: NodeRole,
     id: String,
     key: String,
     instance: String,
     ttl: Duration,
-    conn: Mutex<Option<MultiplexedConnection>>,
+    /// Streams this claim keeps alive.
+    owned_streams: Vec<OwnedStream>,
 }
 
 impl NodeClaim {
@@ -288,15 +285,17 @@ impl NodeClaim {
     /// reported as [`RenewOutcome::Lost`].
     pub async fn claim_at_boot(
         client: redis::Client,
+        namespace: &str,
         role: NodeRole,
         id: &str,
         payload: serde_json::Value,
     ) -> Result<Self, NodeClaimError> {
-        Self::claim_with_timing(client, role, id, payload, HEARTBEAT_TTL, HEARTBEAT_INTERVAL).await
+        Self::claim_with_timing(client, namespace, role, id, payload, TTL, RENEW_INTERVAL).await
     }
 
     async fn claim_with_timing(
         client: redis::Client,
+        namespace: &str,
         role: NodeRole,
         id: &str,
         payload: serde_json::Value,
@@ -304,13 +303,16 @@ impl NodeClaim {
         interval: Duration,
     ) -> Result<Self, NodeClaimError> {
         let claim = Self {
-            client,
+            // Every renewal gets the command deadline: a renewal that hangs
+            // fails and the next one, an interval later, tries again.
+            conn: Conn::new(client, COMMAND_TIMEOUT),
             role,
             id: id.to_string(),
-            key: role.heartbeat_key(id),
+            key: role.key(namespace, id),
+            namespace: namespace.to_string(),
             instance: uuid::Uuid::new_v4().to_string(),
             ttl,
-            conn: Mutex::new(None),
+            owned_streams: Vec::new(),
         };
         let value = claim.value(payload);
         let deadline = tokio::time::Instant::now() + ttl + interval;
@@ -359,23 +361,63 @@ impl NodeClaim {
         &self.id
     }
 
+    /// Keep stream `key` alive with this claim: every renewal creates it
+    /// empty if it is missing and gives it `ttl` again, and the release
+    /// deletes it. A crashed node's stream therefore expires `ttl` after its
+    /// last renewal. A stream that disappears while the node runs (a Redis
+    /// that lost data, or a stall longer than `ttl`) lost whatever it held:
+    /// the renewal that recreates it calls `on_lost`. Takes effect from the
+    /// next renewal.
+    pub fn own_stream(
+        mut self,
+        key: String,
+        ttl: Duration,
+        on_lost: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        self.owned_streams.push(OwnedStream {
+            key,
+            ttl,
+            on_lost: Box::new(on_lost),
+            existed: AtomicBool::new(false),
+        });
+        self
+    }
+
     /// Refresh the claim with a new payload. See [`RenewOutcome`].
     pub async fn renew(
         &self,
         payload: serde_json::Value,
     ) -> Result<RenewOutcome, redis::RedisError> {
         let value = self.value(payload);
-        let code: i64 = self
+        let (code, created): (i64, Vec<usize>) = self
             .with_conn(|mut conn| async move {
-                redis::Script::new(RENEW_LUA)
+                let script = redis::Script::new(RENEW_LUA);
+                let mut invocation = script.prepare_invoke();
+                invocation
                     .key(&self.key)
+                    .key(self.release_marker())
                     .arg(&self.instance)
                     .arg(&value)
-                    .arg(self.ttl.as_millis() as u64)
-                    .invoke_async(&mut conn)
-                    .await
+                    .arg(self.ttl.as_millis() as u64);
+                for stream in &self.owned_streams {
+                    invocation
+                        .key(&stream.key)
+                        .arg(stream.ttl.as_millis() as u64);
+                }
+                invocation.invoke_async(&mut conn).await
             })
             .await?;
+        for (i, stream) in self.owned_streams.iter().enumerate() {
+            let recreated = created.contains(&(i + 1));
+            // The first creation is not a loss; any later one is.
+            if stream.existed.swap(true, Ordering::Relaxed) && recreated {
+                error!(
+                    stream = %stream.key,
+                    "An owned stream disappeared while this node ran; its entries are lost"
+                );
+                (stream.on_lost)();
+            }
+        }
         Ok(match code {
             1 => RenewOutcome::Renewed,
             2 => RenewOutcome::Reacquired,
@@ -390,7 +432,15 @@ impl NodeClaim {
             .with_conn(|mut conn| async move {
                 redis::Script::new(RELEASE_LUA)
                     .key(&self.key)
+                    .key(self.release_marker())
+                    .key(
+                        self.owned_streams
+                            .iter()
+                            .map(|s| s.key.as_str())
+                            .collect::<Vec<_>>(),
+                    )
                     .arg(&self.instance)
+                    .arg(self.ttl.as_millis() as u64)
                     .invoke_async(&mut conn)
                     .await
             })
@@ -398,13 +448,20 @@ impl NodeClaim {
         Ok(())
     }
 
-    /// Renew the claim every [`HEARTBEAT_INTERVAL`] with a fresh `payload()`
+    /// Marks this process's claim as released. Keyed by the per-process
+    /// instance token, outside the liveness key prefix, so no reader takes
+    /// it for a node.
+    fn release_marker(&self) -> String {
+        format!("{}:released:{}", self.namespace, self.instance)
+    }
+
+    /// Renew the claim every [`RENEW_INTERVAL`] with a fresh `payload()`
     /// until [`NodeHeartbeat::shutdown`], which then releases it.
     pub fn spawn_heartbeat<F>(self, payload: F) -> NodeHeartbeat
     where
         F: Fn() -> serde_json::Value + Send + 'static,
     {
-        self.spawn_heartbeat_every(HEARTBEAT_INTERVAL, payload)
+        self.spawn_heartbeat_every(RENEW_INTERVAL, payload)
     }
 
     fn spawn_heartbeat_every<F>(self, interval: Duration, payload: F) -> NodeHeartbeat
@@ -531,29 +588,12 @@ impl NodeClaim {
         }
     }
 
-    /// Run `op` on the cached connection, dropping it on error so the next call
-    /// reconnects.
     async fn with_conn<T, F, Fut>(&self, op: F) -> Result<T, redis::RedisError>
     where
         F: FnOnce(MultiplexedConnection) -> Fut,
         Fut: std::future::Future<Output = Result<T, redis::RedisError>>,
     {
-        let conn = {
-            let mut guard = self.conn.lock().await;
-            match guard.as_ref() {
-                Some(conn) => conn.clone(),
-                None => {
-                    let conn = self.client.get_multiplexed_async_connection().await?;
-                    *guard = Some(conn.clone());
-                    conn
-                }
-            }
-        };
-        let result = op(conn).await;
-        if result.is_err() {
-            *self.conn.lock().await = None;
-        }
-        result
+        self.conn.run(op).await
     }
 }
 
@@ -578,6 +618,8 @@ impl NodeHeartbeat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
     use testcontainers::runners::AsyncRunner;
     use testcontainers_modules::redis::Redis;
 
@@ -643,20 +685,11 @@ mod tests {
         assert!(resolve_node_id(NodeRole::Server, "bad id", true).is_err());
     }
 
-    #[test]
-    fn heartbeat_keys_follow_one_scheme() {
-        assert_eq!(
-            NodeRole::Server.heartbeat_key("s1"),
-            "broccoli:server:heartbeat:s1"
-        );
-        assert_eq!(
-            NodeRole::Worker.heartbeat_key("w1"),
-            "broccoli:worker:heartbeat:w1"
-        );
-    }
-
     async fn redis() -> (redis::Client, testcontainers::ContainerAsync<Redis>) {
-        let container = Redis::default().start().await.expect("redis");
+        let container = crate::test_util::redis_image()
+            .start()
+            .await
+            .expect("redis");
         let port = container.get_host_port_ipv4(6379).await.expect("port");
         let client = redis::Client::open(format!("redis://127.0.0.1:{port}")).unwrap();
         (client, container)
@@ -680,6 +713,7 @@ mod tests {
 
         let first = NodeClaim::claim_with_timing(
             client.clone(),
+            "ops",
             NodeRole::Worker,
             "w1",
             payload.clone(),
@@ -689,8 +723,7 @@ mod tests {
         .await
         .expect("the first claim succeeds");
         let stored: serde_json::Value =
-            serde_json::from_str(&get(&client, "broccoli:worker:heartbeat:w1").await.unwrap())
-                .unwrap();
+            serde_json::from_str(&get(&client, "ops:heartbeat:worker:w1").await.unwrap()).unwrap();
         assert_eq!(
             stored["pid"], 1,
             "the payload is stored for heartbeat readers"
@@ -705,6 +738,7 @@ mod tests {
         });
         let err = NodeClaim::claim_with_timing(
             client.clone(),
+            "ops",
             NodeRole::Worker,
             "w1",
             payload.clone(),
@@ -718,10 +752,18 @@ mod tests {
 
         // Graceful shutdown releases the claim, so a successor boots at once.
         heartbeat.shutdown().await;
-        assert!(get(&client, "broccoli:worker:heartbeat:w1").await.is_none());
-        NodeClaim::claim_with_timing(client.clone(), NodeRole::Worker, "w1", payload, ttl, tick)
-            .await
-            .expect("a released ID is free");
+        assert!(get(&client, "ops:heartbeat:worker:w1").await.is_none());
+        NodeClaim::claim_with_timing(
+            client.clone(),
+            "ops",
+            NodeRole::Worker,
+            "w1",
+            payload,
+            ttl,
+            tick,
+        )
+        .await
+        .expect("a released ID is free");
     }
 
     #[tokio::test]
@@ -734,6 +776,7 @@ mod tests {
         // A predecessor that crashed without releasing: its key just expires.
         let crashed = NodeClaim::claim_with_timing(
             client.clone(),
+            "ops",
             NodeRole::Server,
             "s1",
             payload.clone(),
@@ -744,6 +787,7 @@ mod tests {
         .unwrap();
         let successor = NodeClaim::claim_with_timing(
             client.clone(),
+            "ops",
             NodeRole::Server,
             "s1",
             payload.clone(),
@@ -774,6 +818,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_owned_stream_lives_and_dies_with_the_claim() {
+        let (client, _c) = redis().await;
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let lost = Arc::new(AtomicUsize::new(0));
+        let stream_ttl = Duration::from_secs(600);
+        let claim = NodeClaim::claim_at_boot(
+            client.clone(),
+            "ops",
+            NodeRole::Server,
+            "s1",
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap()
+        .own_stream("replies:s1".into(), stream_ttl, {
+            let lost = Arc::clone(&lost);
+            move || {
+                lost.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        // The first renewal creates the stream empty, with its own TTL, and
+        // that is not a loss.
+        claim.renew(serde_json::json!({})).await.unwrap();
+        let (len, pttl): (u64, i64) = redis::pipe()
+            .cmd("XLEN")
+            .arg("replies:s1")
+            .cmd("PTTL")
+            .arg("replies:s1")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(len, 0);
+        assert!(pttl > TTL.as_millis() as i64 && pttl <= stream_ttl.as_millis() as i64);
+        assert_eq!(lost.load(Ordering::SeqCst), 0);
+
+        // An entry survives the next renewal.
+        let _: String = redis::cmd("XADD")
+            .arg("replies:s1")
+            .arg("*")
+            .arg("p")
+            .arg("x")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        claim.renew(serde_json::json!({})).await.unwrap();
+        let len: u64 = redis::cmd("XLEN")
+            .arg("replies:s1")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(len, 1);
+        assert_eq!(lost.load(Ordering::SeqCst), 0);
+
+        // A stream that disappears is recreated and reported lost.
+        let _: () = redis::cmd("DEL")
+            .arg("replies:s1")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        claim.renew(serde_json::json!({})).await.unwrap();
+        assert_eq!(lost.load(Ordering::SeqCst), 1);
+
+        // The release deletes it.
+        claim.release().await.unwrap();
+        let exists: bool = redis::cmd("EXISTS")
+            .arg("replies:s1")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(!exists);
+    }
+
+    #[tokio::test]
+    async fn a_renewal_after_the_release_does_not_take_the_id_back() {
+        let (client, _c) = redis().await;
+        let claim = NodeClaim::claim_at_boot(
+            client.clone(),
+            "ops",
+            NodeRole::Worker,
+            "w-released",
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        claim.release().await.unwrap();
+        // A renewal that reaches Redis after the release, as a timed-out
+        // one still queued there would.
+        assert_eq!(
+            claim.renew(serde_json::json!({})).await.unwrap(),
+            RenewOutcome::Lost
+        );
+        assert!(
+            get(&client, "ops:heartbeat:worker:w-released")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn a_node_whose_id_is_held_by_a_live_twin_stops() {
         let (client, _c) = redis().await;
         let ttl = Duration::from_secs(5);
@@ -781,6 +925,7 @@ mod tests {
         let payload = serde_json::json!({});
         let owner = NodeClaim::claim_with_timing(
             client.clone(),
+            "ops",
             NodeRole::Worker,
             "w1",
             payload.clone(),
@@ -792,13 +937,14 @@ mod tests {
         // A twin that booted unclaimed (e.g. Redis timed out at boot) and so
         // never held the key.
         let twin = NodeClaim {
-            client: client.clone(),
+            conn: Conn::new(client.clone(), COMMAND_TIMEOUT),
             role: NodeRole::Worker,
             id: owner.id.clone(),
             key: owner.key.clone(),
+            namespace: owner.namespace.clone(),
             instance: "twin".into(),
             ttl,
-            conn: Mutex::new(None),
+            owned_streams: Vec::new(),
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut _hb = twin.spawn_heartbeat_with(

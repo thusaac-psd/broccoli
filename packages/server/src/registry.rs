@@ -123,12 +123,15 @@ pub fn spawn_batch_reaper<T: Send + Sync + 'static, F>(
 #[derive(Clone)]
 pub struct OperationWaiter {
     pub result_tx: Arc<std::sync::Mutex<Option<oneshot::Sender<TaskResult>>>>,
+    /// When the operation was registered, just before its publish.
+    pub published_at: Instant,
 }
 
 impl OperationWaiter {
     pub fn new(result_tx: oneshot::Sender<TaskResult>) -> Self {
         Self {
             result_tx: Arc::new(std::sync::Mutex::new(Some(result_tx))),
+            published_at: Instant::now(),
         }
     }
 }

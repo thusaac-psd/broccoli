@@ -20,9 +20,3 @@ pub enum WorkerError {
     #[error("Task panicked: {0}")]
     TaskPanic(String),
 }
-
-impl From<mq::error::MqError> for WorkerError {
-    fn from(e: mq::error::MqError) -> Self {
-        WorkerError::Mq(e.to_string())
-    }
-}

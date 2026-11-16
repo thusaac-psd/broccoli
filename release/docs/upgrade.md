@@ -92,7 +92,7 @@ for f in images/*.tar.gz; do gzip -dc "$f" | docker load; done
 2. Run
    `docker compose --env-file .env.<role> -f docker-compose.<role>.yaml up -d`.
 3. Confirm the role health check.
-4. Check logs for failed submissions or operation-result queue warnings.
+4. Check logs for failed submissions.
 
 Roll back server nodes one at a time when a gateway is present. Roll back
 workers before servers when both roles were upgraded.
