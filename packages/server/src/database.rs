@@ -716,7 +716,7 @@ mod tests {
 
     impl sea_orm_migration::MigrationName for AddProbe {
         fn name(&self) -> &str {
-            "m0002_upgrade_probe"
+            "m9999_upgrade_probe"
         }
     }
 
@@ -779,7 +779,11 @@ mod tests {
             .expect("query")
             .expect("row");
         assert_eq!(probe.try_get::<i64>("", "runs").unwrap(), 1);
-        assert_eq!(probe.try_get::<i64>("", "applied").unwrap(), 2);
+        let known = crate::migration::known_migrations::<Migrator>();
+        assert_eq!(
+            probe.try_get::<i64>("", "applied").unwrap(),
+            known.len() as i64 + 1
+        );
 
         let relations = relation_count(boot.conn()).await;
         let msg = boot
@@ -787,8 +791,8 @@ mod tests {
             .await
             .expect_err("the older build refuses a database a newer one migrated")
             .to_string();
-        assert!(msg.contains("m0002_upgrade_probe"), "{msg}");
-        assert!(msg.contains("m0001_baseline"), "{msg}");
+        assert!(msg.contains("m9999_upgrade_probe"), "{msg}");
+        assert!(msg.contains(known.last().unwrap().as_str()), "{msg}");
         assert!(!msg.contains("drop"), "{msg}");
         assert_eq!(relation_count(boot.conn()).await, relations);
         boot.release().await.expect("release");
