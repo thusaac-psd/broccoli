@@ -383,7 +383,7 @@ async fn an_immediate_rejudge_queues_both_rows_with_no_owner() {
         old.is_finalized,
         "the in-flight judgement it replaces is finalized"
     );
-    assert_eq!(old.status, SubmissionStatus::SystemError);
+    assert_eq!(old.status, SubmissionStatus::Superseded);
 
     let now = sub(&db, s.id).await;
     assert_eq!(now.status, SubmissionStatus::Queued);
@@ -1805,31 +1805,27 @@ async fn a_failed_code_run_is_handed_back_or_finalized_by_the_judgements_rule() 
 }
 
 /// A judgement superseded before it finished never got a verdict: it ends
-/// as a `SUPERSEDED` system error that stands, a decided outcome no retry
-/// takes for a failed attempt. Applied back, the submission shows it as it
-/// is instead of judging it again.
+/// `Superseded`, history and not a system error, which no retry takes and
+/// which cannot be applied back.
 #[tokio::test]
-async fn a_judgement_superseded_unfinished_stands_as_superseded() {
+async fn a_judgement_superseded_unfinished_ends_superseded() {
     let (_pg, db) = crate::test_support::postgres().await;
     let (s, first) = new_submission(&db).await;
     claim_one(&db, "srv").await;
     rejudge(&db, s.id, true).await;
     let superseded = judgement(&db, first.id).await;
-    assert_eq!(superseded.status, SubmissionStatus::SystemError);
-    assert_eq!(superseded.error_code.as_deref(), Some("SUPERSEDED"));
-    assert!(superseded.is_finalized && superseded.error_stands);
-
-    let txn = db.begin().await.unwrap();
-    let ApplyJudgement::Applied(applied) = apply_judgement(&txn, s.id, first.id).await.unwrap()
-    else {
-        panic!("applied");
-    };
-    txn.commit().await.unwrap();
-    assert_eq!(applied.status, SubmissionStatus::SystemError);
+    assert_eq!(superseded.status, SubmissionStatus::Superseded);
+    assert!(superseded.is_finalized && !superseded.is_current);
     let pass = retry_system_errors(&db, RetryBudget::new(5), 10, NO_TYPES)
         .await
         .unwrap();
     assert_eq!(pass, SystemErrorPass::default(), "nothing to re-judge");
+
+    let txn = db.begin().await.unwrap();
+    assert!(matches!(
+        apply_judgement(&txn, s.id, first.id).await.unwrap(),
+        ApplyJudgement::Superseded
+    ));
 }
 
 /// In-flight work of a parked type whose owner was lost goes back without

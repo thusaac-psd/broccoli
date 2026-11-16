@@ -1518,6 +1518,77 @@ mod judgement_history {
         assert!(applied.is_current);
     }
 
+    /// A judgement a rejudge replaced before it got a verdict is superseded:
+    /// its own state, listed as such, never a system error, and never
+    /// applicable, since applying it would show a result it never had.
+    #[tokio::test]
+    async fn a_superseded_judgement_is_listed_as_superseded_and_cannot_be_applied() {
+        let app = TestApp::spawn().await;
+        let admin_token = app
+            .create_user_with_role("admin_superseded", "pass1234", "admin")
+            .await;
+        let problem_id = app.create_problem(&admin_token, "Superseded").await;
+        let res = app
+            .post_with_token(
+                &routes::problem_submissions(problem_id),
+                &json!({
+                    "files": [{"filename": "main.cpp", "content": "int main() {}"}],
+                    "language": "cpp",
+                }),
+                &admin_token,
+            )
+            .await;
+        assert_eq!(res.status, 201, "{}", res.text);
+        let submission_id = res.body["id"].as_i64().unwrap() as i32;
+        let superseded = submission_judgement::Entity::find()
+            .filter(submission_judgement::Column::SubmissionId.eq(submission_id))
+            .one(&app.db)
+            .await
+            .unwrap()
+            .unwrap();
+        let res = app
+            .post_with_token(
+                &routes::submission_rejudge(submission_id),
+                &json!({"apply_immediately": true}),
+                &admin_token,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+
+        let res = app
+            .get_with_token(&routes::submission_judgements(submission_id), &admin_token)
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        let listed = res
+            .body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == superseded.id)
+            .cloned()
+            .unwrap();
+        assert_eq!(listed["status"], "Superseded", "{listed}");
+        assert_eq!(listed["is_finalized"], true, "{listed}");
+
+        let res = app
+            .post_with_token(
+                &routes::submission_judgement_apply(submission_id, superseded.id),
+                &json!({}),
+                &admin_token,
+            )
+            .await;
+        assert_eq!(res.status, 400, "{}", res.text);
+        let current = submission_judgement::Entity::find_by_id(superseded.id)
+            .one(&app.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !current.is_current,
+            "the superseded judgement stays history"
+        );
+    }
+
     #[tokio::test]
     async fn discard_non_current_judgement_deletes_only_that_version_and_results() {
         let app = TestApp::spawn().await;
@@ -3353,8 +3424,7 @@ mod rejudge_lifecycle {
             "superseded judgement left unfinalized in {:?}; stuck detector will re-run it",
             old.status
         );
-        assert_eq!(old.status, SubmissionStatus::SystemError);
-        assert_eq!(old.error_code.as_deref(), Some("SUPERSEDED"));
+        assert_eq!(old.status, SubmissionStatus::Superseded);
 
         // Finalized, it can now be discarded like any other old version.
         let discard = app

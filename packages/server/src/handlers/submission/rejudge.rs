@@ -61,7 +61,7 @@ use super::response::{VisibilityContext, build_submission_response};
     ),
     responses(
         (status = 200, description = "Applied judgement", body = SubmissionResponseAfterMutation),
-        (status = 400, description = "Judgement is not finalized (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 400, description = "Judgement is not finalized, or was superseded before it got a result (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Submission or judgement not found (NOT_FOUND)", body = ErrorBody),
@@ -89,6 +89,11 @@ pub async fn apply_submission_judgement(
         ApplyJudgement::NotFinalized => {
             return Err(AppError::Validation(
                 "Cannot apply a judgement that is not finalized".into(),
+            ));
+        }
+        ApplyJudgement::Superseded => {
+            return Err(AppError::Validation(
+                "Cannot apply a superseded judgement: it never got a result".into(),
             ));
         }
     };

@@ -100,6 +100,9 @@ export function getVerdictBadge(
   if (status === 'SystemError') {
     return { label: t('result.systemError'), variant: 'secondary' };
   }
+  if (status === 'Superseded') {
+    return { label: t('result.superseded'), variant: 'outline' };
+  }
   if (!verdict) {
     return { label: getStatusLabel(status, t), variant: 'outline' };
   }

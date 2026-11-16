@@ -206,8 +206,10 @@ are keyed on it.
   `sj.judge_epoch = tcr.judge_epoch`). `apply_judgement` gives the applied
   judgement a fresh epoch and moves its kept results to it.
 - A judgement that stops being current while still in flight is finalized as
-  a `SystemError` with `SUPERSEDED` that stands: it never got a verdict, and
-  no retry takes it for a failed attempt, even when an admin applies it back.
+  `Superseded`, a status of its own: it never got a verdict, so it is
+  history, not a system error. No retry takes it, and applying it is refused
+  (`400 VALIDATION_ERROR`); the version history shows it as superseded,
+  without an apply action.
 - A plugin writes only the unit its own call was dispatched with. The
   dispatch (`judging::Dispatch`: the plugin it went to, the judgement or code
   run at its epoch, and its faults) rides in the call locals of the dispatch

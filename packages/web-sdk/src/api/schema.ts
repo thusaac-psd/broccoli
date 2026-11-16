@@ -4641,7 +4641,8 @@ export interface components {
       | 'Running'
       | 'Judged'
       | 'CompilationError'
-      | 'SystemError';
+      | 'SystemError'
+      | 'Superseded';
     SystemOverviewResponse: {
       /**
        * Format: int64
@@ -13218,7 +13219,7 @@ export interface operations {
           'application/json': components['schemas']['SubmissionResponseAfterMutation'];
         };
       };
-      /** @description Judgement is not finalized (VALIDATION_ERROR) */
+      /** @description Judgement is not finalized, or was superseded before it got a result (VALIDATION_ERROR) */
       400: {
         headers: {
           [name: string]: unknown;

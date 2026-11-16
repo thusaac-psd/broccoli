@@ -6,9 +6,14 @@ import type {
   Withheld,
 } from '@/submission/types';
 
-/** Statuses after which a submission or code run will never change again. */
+/** Statuses after which a submission, judgement or code run will never change again. */
 export const TERMINAL_STATUSES: ReadonlySet<SubmissionStatus> =
-  new Set<SubmissionStatus>(['Judged', 'CompilationError', 'SystemError']);
+  new Set<SubmissionStatus>([
+    'Judged',
+    'CompilationError',
+    'SystemError',
+    'Superseded',
+  ]);
 
 /**
  * Whether a status will never change again. It takes a status the server
@@ -80,12 +85,16 @@ const STATUS_LABEL_KEYS = {
   Judged: 'result.judged',
   CompilationError: 'result.compilationError',
   SystemError: 'result.systemError',
+  Superseded: 'result.superseded',
 } as const satisfies Record<SubmissionStatus, string>;
 
-/** Every submission status, in lifecycle order. */
-const SUBMISSION_STATUSES = Object.keys(
-  STATUS_LABEL_KEYS,
-) as SubmissionStatus[];
+/**
+ * Every status a submission shows, in lifecycle order: all but `Superseded`,
+ * which only a judgement a newer one replaced has.
+ */
+const SUBMISSION_STATUSES = (
+  Object.keys(STATUS_LABEL_KEYS) as SubmissionStatus[]
+).filter((status) => status !== 'Superseded');
 
 export const SUBMISSION_STATUS_FILTER_OPTIONS: readonly SubmissionStatusFilterValue[] =
   ['all', ...SUBMISSION_STATUSES];

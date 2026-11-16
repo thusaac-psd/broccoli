@@ -37,6 +37,11 @@ pub enum SubmissionLifecycle {
     Judged,
     CompilationError,
     SystemError,
+    /// A judgement that a newer one replaced as current (a rejudge, or
+    /// applying another judgement) before it got a verdict. It is history,
+    /// never a result: no submission shows it, no retry takes it and it
+    /// cannot be applied.
+    Superseded,
 }
 
 /// Where a status sits in the judging lifecycle. Every status belongs to
@@ -87,7 +92,9 @@ impl SubmissionLifecycle {
         match self {
             Self::Queued => StatusPhase::Queued,
             Self::Pending | Self::Compiling | Self::Running => StatusPhase::InFlight,
-            Self::Judged | Self::CompilationError | Self::SystemError => StatusPhase::Terminal,
+            Self::Judged | Self::CompilationError | Self::SystemError | Self::Superseded => {
+                StatusPhase::Terminal
+            }
         }
     }
 
@@ -127,6 +134,7 @@ impl SubmissionLifecycle {
         Self::Judged,
         Self::CompilationError,
         Self::SystemError,
+        Self::Superseded,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -138,6 +146,7 @@ impl SubmissionLifecycle {
             Self::Judged => "Judged",
             Self::CompilationError => "CompilationError",
             Self::SystemError => "SystemError",
+            Self::Superseded => "Superseded",
         }
     }
 }
@@ -182,6 +191,7 @@ impl FromStr for SubmissionLifecycle {
             "Judged" => Ok(Self::Judged),
             "CompilationError" => Ok(Self::CompilationError),
             "SystemError" => Ok(Self::SystemError),
+            "Superseded" => Ok(Self::Superseded),
             _ => Err(ParseStatusError {
                 invalid: s.to_string(),
             }),
@@ -203,7 +213,7 @@ mod tests {
         );
         assert_eq!(
             StatusPhase::Terminal.sql_list(),
-            "('Judged', 'CompilationError', 'SystemError')"
+            "('Judged', 'CompilationError', 'SystemError', 'Superseded')"
         );
     }
 
