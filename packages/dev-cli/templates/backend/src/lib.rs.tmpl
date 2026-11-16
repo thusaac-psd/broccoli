@@ -29,7 +29,6 @@ pub fn hello(input: String) -> FnResult<String> {
         host.log.info("{{plugin_name_pascal}} said hello")?;
         Ok(PluginHttpResponse {
             status: 200,
-            headers: None,
             body: Some(serde_json::json!({ "message": "Hello from {{plugin_name_pascal}}!" })),
         })
     })

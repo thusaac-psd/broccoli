@@ -143,7 +143,6 @@ fn handle_status(
 
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(serde_json::json!({
             "enabled": eff.is_enabled,
             "user_id": user_id,
