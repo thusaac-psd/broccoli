@@ -93,7 +93,8 @@ impl SystemErrorClass {
         match fault {
             OperationFault::QueueUnreachable
             | OperationFault::OperationLost
-            | OperationFault::PlatformToolMissing => Self::HandBack,
+            | OperationFault::PlatformToolMissing
+            | OperationFault::NoCapableWorker => Self::HandBack,
         }
     }
 

@@ -202,7 +202,7 @@ pub async fn start_operation_batch(
             if deps.worker_slots.none_accepting() {
                 if let Some(faults) = &deps.faults {
                     faults.record(
-                        common::worker::OperationFault::PlatformToolMissing,
+                        common::worker::OperationFault::NoCapableWorker,
                         crate::consumers::operation_result::NONE_ACCEPTING,
                     );
                 }

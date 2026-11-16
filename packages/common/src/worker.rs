@@ -81,14 +81,19 @@ pub enum OperationFault {
     OperationLost,
     /// The worker that took the operation lacks a platform tool it needs.
     PlatformToolMissing,
+    /// No live worker takes work (each lacks a platform tool), so nothing can
+    /// run the operation; the server fails it instead of leaving it at a
+    /// queue no worker reads.
+    NoCapableWorker,
 }
 
 impl OperationFault {
     /// Every fault, beside the definition so a new one is listed with it.
-    pub const ALL: [OperationFault; 3] = [
+    pub const ALL: [OperationFault; 4] = [
         Self::QueueUnreachable,
         Self::OperationLost,
         Self::PlatformToolMissing,
+        Self::NoCapableWorker,
     ];
 
     /// The error code a judgement this fault ends carries.
@@ -97,6 +102,7 @@ impl OperationFault {
             Self::QueueUnreachable => "QUEUE_UNREACHABLE",
             Self::OperationLost => "OPERATION_LOST",
             Self::PlatformToolMissing => "PLATFORM_TOOL_MISSING",
+            Self::NoCapableWorker => "NO_CAPABLE_WORKER",
         }
     }
 }
