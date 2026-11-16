@@ -131,6 +131,75 @@ async fn ioi_scoreboard_reflects_judged_submission() {
     );
 }
 
+/// A judged submission's subtask scores, read back by the subtask-scores
+/// route and by the sum-best-subtask scoreboard, are the ones judging gave it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_judged_ioi_submission_reads_back_the_subtask_scores_it_was_judged_with() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_readback_admin", "password", "admin")
+        .await;
+    let contestant = app
+        .create_authenticated_user("ioi_readback_user", "password")
+        .await;
+    let problem_id = app.create_problem(&admin, "IOI Read Back").await;
+    app.create_test_case_with(problem_id, "2\n1 2", "3\n", 40, false, &admin)
+        .await;
+    app.create_test_case_with(problem_id, "3\n1 2 3", "6\n", 60, false, &admin)
+        .await;
+    let contest_id = app
+        .create_typed_contest(&admin, "IOI Read Back", "ioi", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &contestant).await;
+    let res = app
+        .put_with_token(
+            &format!("/api/v1/contests/{contest_id}/config/ioi/contest"),
+            &json!({ "config": { "scoring_mode": "sum_best_subtask" }, "enabled": true }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+
+    let sub_id = app
+        .create_contest_submission(contest_id, problem_id, &contestant, "cpp", CPP_SUM)
+        .await;
+    let judged = app.wait_for_submission_terminal(sub_id, &admin, 60).await;
+    assert_eq!(judged.body["status"], "Judged", "{}", judged.text);
+    app.judging_idle().await;
+
+    let scores = app
+        .get_with_token(
+            &format!(
+                "/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}/submissions/{sub_id}/subtask-scores"
+            ),
+            &admin,
+        )
+        .await;
+    assert_eq!(scores.status, 200, "{}", scores.text);
+    assert_eq!(
+        scores.body["subtasks"][0]["score"].as_f64(),
+        Some(100.0),
+        "{}",
+        scores.text
+    );
+
+    let board = app
+        .get_with_token(
+            &format!("/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}/scoreboard"),
+            &admin,
+        )
+        .await;
+    assert_eq!(board.status, 200, "{}", board.text);
+    assert_eq!(
+        board.body["rankings"][0]["total_score"].as_f64(),
+        Some(100.0),
+        "{}",
+        board.text
+    );
+}
+
 /// A problem with no subtask config is scored by the default All Tests
 /// subtask, which leaves out samples, so its scoreboard maximum is the sum
 /// of the non-sample test points and a perfect solution reads as full marks.
