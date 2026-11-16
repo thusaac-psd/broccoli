@@ -669,6 +669,74 @@ async fn a_reload_keeps_the_instance_a_running_call_holds_live() {
     assert_eq!(h.fixture.read(|c| c.retired.clone()), vec![false]);
 }
 
+/// A call that started before a reload still runs on the version the
+/// reload replaced; the plugin's unload retires it all the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unload_retires_a_call_still_running_on_a_version_a_reload_replaced() {
+    let h = Harness::new(2);
+    let running = h.spawn("hold", CallOptions::background(later()));
+    until(|| h.fixture.read(|c| c.running) == 1).await;
+    h.write_guest(2);
+    // A reload as the host's lifecycle does it: a fresh entry, a load, and
+    // the fresh version taking over from the one it replaced.
+    let fresh = crate::registry::PluginEntry::from_dir(&h.dir.path().join(PLUGIN)).unwrap();
+    let previous = h
+        .manager
+        .get_registry()
+        .write()
+        .unwrap()
+        .insert(PLUGIN.to_string(), fresh)
+        .unwrap();
+    h.manager.load_plugin(PLUGIN).unwrap();
+    h.manager
+        .get_registry()
+        .write()
+        .unwrap()
+        .get_mut(PLUGIN)
+        .unwrap()
+        .succeed(&previous);
+    drop(previous);
+    h.manager.unload_plugin(PLUGIN).unwrap();
+    h.fixture.release();
+    running.await.unwrap().unwrap();
+    assert_eq!(h.fixture.read(|c| c.retired.clone()), vec![true]);
+}
+
+/// A reload that does not take is dropped alone: a call running on it is
+/// retired, and the version put back keeps serving.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_discarded_version_retires_its_calls_and_spares_the_one_put_back() {
+    let h = Harness::new(2);
+    h.write_guest(2);
+    let fresh = crate::registry::PluginEntry::from_dir(&h.dir.path().join(PLUGIN)).unwrap();
+    let previous = h
+        .manager
+        .get_registry()
+        .write()
+        .unwrap()
+        .insert(PLUGIN.to_string(), fresh)
+        .unwrap();
+    h.manager.load_plugin(PLUGIN).unwrap();
+    let running = h.spawn("hold", CallOptions::background(later()));
+    until(|| h.fixture.read(|c| c.running) == 1).await;
+    let refused = h
+        .manager
+        .get_registry()
+        .write()
+        .unwrap()
+        .insert(PLUGIN.to_string(), previous)
+        .unwrap();
+    refused.discard();
+    h.fixture.release();
+    running.await.unwrap().unwrap();
+    assert_eq!(h.fixture.read(|c| c.retired.clone()), vec![true]);
+    h.spawn("mark", CallOptions::background(later()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(h.fixture.read(|c| c.marks.clone()), vec![1]);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dropped_request_is_counted_in_flight_until_its_guest_returns() {
     let (metrics, registry) = common::observability::init_metrics("plugin-core-in-flight-test");

@@ -266,8 +266,11 @@ pub(crate) struct LoadFailure {
 /// aside first and put back if anything fails, so a reload that cannot load
 /// never turns a working plugin into a failed one.
 ///
-/// On success the set-aside version is returned, so a caller that must
-/// still confirm the change (publish it to the fleet) can [`roll_back`] to it.
+/// On success the fresh version takes over the set-aside version's pools
+/// (`PluginEntry::succeed`), so calls still running on them are retired when
+/// the plugin is unloaded, and the set-aside version is returned, so a caller
+/// that must still confirm the change (publish it to the fleet) can
+/// [`roll_back`] to it.
 pub(crate) async fn load_from_dir(
     state: &AppState,
     plugin_id: &str,
@@ -305,7 +308,15 @@ pub(crate) async fn load_from_dir(
     });
 
     match activate_plugin(state, plugin_id).await {
-        Ok(()) => Ok(previous),
+        Ok(()) => {
+            if let Some(previous) = &previous
+                && let Ok(mut registry) = registry.write()
+                && let Some(entry) = registry.get_mut(plugin_id)
+            {
+                entry.succeed(&previous.entry);
+            }
+            Ok(previous)
+        }
         Err(error) => match previous {
             Some(previous) => {
                 roll_back(state, plugin_id, previous).await;
@@ -336,12 +347,17 @@ pub(crate) fn register_unloaded(state: &AppState, plugin_id: &str, root: &std::p
     }
 }
 
-/// Put back the version [`load_from_dir`] replaced.
+/// Put back the version [`load_from_dir`] replaced. The refused version's
+/// pool retires: nothing it still runs lands.
 pub(crate) async fn roll_back(state: &AppState, plugin_id: &str, previous: PreviousVersion) {
     purge_plugin_registrations(&state.registries, plugin_id).await;
     let manifest = previous.entry.manifest.clone();
-    if let Ok(mut reg) = state.plugins.get_registry().write() {
-        reg.insert(plugin_id.to_string(), previous.entry);
+    let refused = match state.plugins.get_registry().write() {
+        Ok(mut reg) => reg.insert(plugin_id.to_string(), previous.entry),
+        Err(_) => None,
+    };
+    if let Some(refused) = refused {
+        refused.discard();
     }
     previous.registrations.restore(&state.registries).await;
     register_plugin_hooks(state, plugin_id, &manifest).await;

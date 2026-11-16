@@ -303,10 +303,12 @@ binaries warn about every key they do not read.
   for it. A system error the retry may still take back is not shown: the
   submission and its judgement history show the attempt in flight until the
   retry decides.
-- Unloading a plugin retires its instance pool (`plugin_core::pool::Liveness`):
-  a call already running on a retired instance is refused at its next host
-  function (`plugin_core::executor::instance_retired`), so nothing an unloaded
-  plugin does lands.
+- Unloading a plugin retires its instance pool (`plugin_core::pool::Liveness`)
+  and every pool a reload replaced that a call still runs on
+  (`PluginEntry::succeed`): a call already running on a retired instance is
+  refused at its next host function (`plugin_core::executor::instance_retired`),
+  so nothing an unloaded plugin does lands. A registry entry is replaced only
+  through `succeed` (the reload took) or `discard` (it did not).
 - What a plugin says to a client passes `services::plugin_output`: its codes go
   out as `<plugin_id>.<CODE>` (`plugin_code`), its refusals only with a
   client-error status the host allows, and a route answers only a status and a

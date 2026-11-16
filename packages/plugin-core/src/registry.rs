@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::error::{AssetError, PluginError};
 use crate::i18n::TranslationMap;
 use crate::manifest::{PluginManifest, RouteAccess, parse_manifest, resolve_schema_includes};
-use crate::pool::InstancePool;
+use crate::pool::{InstancePool, Liveness};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum PluginStatus {
@@ -41,6 +41,10 @@ pub struct PluginEntry {
     /// the host serves for this plugin never depends on its files staying on
     /// disk.
     pub translations: Vec<(String, TranslationMap)>,
+    /// The pools of the versions this load replaced ([`Self::succeed`]):
+    /// calls that started on them still run there, and the plugin's unload
+    /// retires them with its own pool.
+    superseded: Vec<Liveness>,
 }
 
 pub type PluginRegistry = Arc<RwLock<HashMap<String, PluginEntry>>>;
@@ -130,7 +134,43 @@ impl PluginEntry {
             runtime: None,
             router,
             translations: Vec::new(),
+            superseded: Vec::new(),
         })
+    }
+
+    /// Take over from `previous`, the version of this plugin a reload
+    /// replaced: its pool, and the pools it took over in turn, stay this
+    /// load's, so calls still running on them are retired when the plugin
+    /// is unloaded ([`Self::retire`]). Pools no call runs on any more are
+    /// dropped.
+    pub fn succeed(&mut self, previous: &PluginEntry) {
+        self.superseded = previous
+            .superseded
+            .iter()
+            .cloned()
+            .chain(previous.runtime.as_ref().map(InstancePool::liveness))
+            .filter(|pool| pool.in_use())
+            .collect();
+    }
+
+    /// Unload: retire this version's pool and every pool it took over, so
+    /// no call of the plugin, whichever version it started on, runs another
+    /// host function.
+    pub fn retire(&mut self) {
+        if let Some(pool) = self.runtime.take() {
+            pool.retire();
+        }
+        for pool in self.superseded.drain(..) {
+            pool.retire();
+        }
+    }
+
+    /// Drop this version alone, a reload that did not take: its pool
+    /// retires, and the pools it took over stay with the version put back.
+    pub fn discard(mut self) {
+        if let Some(pool) = self.runtime.take() {
+            pool.retire();
+        }
     }
 
     pub fn from_dir(plugin_dir: &Path) -> Result<Self, PluginError> {

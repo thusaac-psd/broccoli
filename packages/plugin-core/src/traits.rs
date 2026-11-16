@@ -509,11 +509,10 @@ pub trait PluginManager: PluginInvoker {
             .get_mut(plugin_id)
             .ok_or_else(|| PluginError::NotFound(plugin_id.to_string()))?;
 
-        // Calls still running on the old instances keep running, but their
-        // host functions are refused from now on.
-        if let Some(pool) = plugin_entry.runtime.take() {
-            pool.retire();
-        }
+        // Calls still running on the old instances, of this version or of
+        // one a reload replaced, keep running, but their host functions are
+        // refused from now on.
+        plugin_entry.retire();
         plugin_entry.status = PluginStatus::Unloaded;
 
         info!("Plugin {} unloaded successfully", plugin_entry.manifest);

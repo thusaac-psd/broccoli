@@ -224,7 +224,11 @@ A call still queued at its deadline, or cancelled at it, fails with
 Each loaded plugin's instance pool carries a `pool::Liveness`, live until the
 plugin is unloaded (`unload_plugin` retires it). A reload replaces the pool
 without retiring the old one, so a call made across a reload finishes on the
-version it started on. Every unload, a disable or the fleet forgetting the
+version it started on, and the new version takes the old pools over
+(`PluginEntry::succeed`): the unload retires every pool a call of the plugin
+still runs on, whichever version it started on. A reload that does not take
+(its load fails, or the fleet refuses it) puts the old version back and
+retires the refused version's pool alone (`PluginEntry::discard`). Every unload, a disable or the fleet forgetting the
 plugin, goes through `plugin_lifecycle::deactivate`, which also cuts the
 plugin's judging sessions and drops its SQL pool.
 

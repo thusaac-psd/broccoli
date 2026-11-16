@@ -90,6 +90,12 @@ impl Liveness {
     pub fn retire(&self) {
         self.0.store(true, Ordering::Release);
     }
+
+    /// Whether anything but this handle still holds the pool's liveness: the
+    /// pool itself, or a call that started on it.
+    pub fn in_use(&self) -> bool {
+        Arc::strong_count(&self.0) > 1
+    }
 }
 
 /// A plugin's pool of instances. Cheap to clone; clones share one pool.
