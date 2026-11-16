@@ -34,6 +34,39 @@ struct SubmissionDispatchTestCaseRow {
     expected_output_blob_hash: Option<String>,
 }
 
+/// Runs the after-judging hooks of a submission whose result a request or a
+/// background scan just decided, in a task of its own that counts as judging
+/// work (`judging_sessions`) until they have run: the caller neither waits
+/// for the hooks' background calls nor loses them if it is dropped.
+/// Judging that is tracked already awaits [`fire_after_judging_hooks`].
+pub(crate) fn spawn_after_judging_hooks(
+    state: &AppState,
+    submission_id: i32,
+    user_id: i32,
+    problem_id: i32,
+    contest_id: Option<i32>,
+) {
+    let judging = state.registries.judging_sessions.track();
+    let db = state.db.clone();
+    let hook_registry = state.registries.hook_registry.clone();
+    let contest_types = state.registries.contest_type_registry.clone();
+    tokio::spawn(async move {
+        let _judging = judging;
+        fire_after_judging_hooks(
+            &db,
+            hook_registry,
+            &contest_types,
+            submission_id,
+            user_id,
+            problem_id,
+            contest_id,
+        )
+        .await;
+    });
+}
+
+/// Runs the after-judging hooks of `submission_id` once its result is
+/// final. The caller is tracked judging work, which these hooks are part of.
 pub(crate) async fn fire_after_judging_hooks(
     db: &DatabaseConnection,
     hook_registry: hooks::SharedHookRegistry,

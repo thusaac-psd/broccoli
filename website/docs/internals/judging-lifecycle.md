@@ -170,7 +170,13 @@ The submission keeps showing the attempt in flight until the reaper decides
 it within one scan (5 s): it requeues the judgement while the submission has
 retries left, so the submission goes on to `Queued` and the next attempt; or
 it confirms the error once the budget is spent, which marks it standing,
-projects it and fires the after-judging hooks. A client therefore never sees a terminal status
+projects it and fires the after-judging hooks. Judging work runs those
+hooks as part of itself (a contest plugin's submission call, a detached
+session); the reaper and an applied judgement start them in a task of their
+own that counts as judging work until they have run
+(`spawn_after_judging_hooks`), so neither waits for a hook. The hook event
+counts as dispatched once its dispatch completes, so one dropped midway is
+dispatched again. A client therefore never sees a terminal status
 that a retry takes back: within an attempt the statuses only move forward,
 and a terminal status is final.
 
