@@ -408,7 +408,7 @@ pub async fn boot(state: &AppState) -> anyhow::Result<Vec<PluginActivationFailur
         .into_iter()
         .map(|p| p.id)
         .collect();
-    register_rows(state, &ids).await?;
+    register_rows(&state.db, &ids).await?;
     let failures = with_applied(state, async |applied| {
         reconcile_locked(state, applied).await
     })
@@ -887,10 +887,13 @@ async fn deactivate(state: &AppState, plugin_id: &str) -> Result<(), PluginError
 
 /// Record plugins found on this replica's disk that have no row yet, as
 /// enabled (a newly installed plugin is on by default). Idempotent, so
-/// replicas booting together cannot fail on the primary key.
-async fn register_rows(state: &AppState, ids: &[String]) -> Result<(), DbErr> {
+/// replicas booting together cannot fail on the primary key, and in id
+/// order, so they cannot deadlock either: each insert locks its rows in the
+/// order it lists them, and replicas that list the same rows in one order
+/// wait for each other instead of each holding a row the other wants.
+async fn register_rows(db: &impl ConnectionTrait, ids: &[String]) -> Result<(), DbErr> {
     // A bundle directory whose name is not a valid id is never a plugin.
-    let ids: Vec<&String> = ids
+    let ids: std::collections::BTreeSet<&String> = ids
         .iter()
         .filter(|id| {
             PluginId::parse(id.as_str())
@@ -908,7 +911,7 @@ async fn register_rows(state: &AppState, ids: &[String]) -> Result<(), DbErr> {
         ..Default::default()
     }))
     .on_conflict_do_nothing_on([plugin_entity::Column::Id])
-    .exec(&state.db)
+    .exec(db)
     .await?;
     Ok(())
 }
@@ -920,7 +923,7 @@ async fn register_new_dirs(state: &AppState) -> Result<bool, DbErr> {
         tracing::error!(error = %e, "Failed to rediscover plugins");
         Vec::new()
     });
-    register_rows(state, &new_ids).await?;
+    register_rows(&state.db, &new_ids).await?;
     Ok(!new_ids.is_empty())
 }
 
@@ -1663,7 +1666,7 @@ pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError>
             tracing::error!("Failed to rediscover plugins: {}", e);
             Vec::new()
         });
-        register_rows(state, &new_ids).await?;
+        register_rows(&state.db, &new_ids).await?;
         // A new row starts enabled unless an operator already recorded it as
         // disabled; apply whatever the table says.
         let rows = plugin_entity::Entity::find().all(&state.db).await?;
@@ -1703,6 +1706,84 @@ pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two replicas booting together register overlapping plugin rows. One
+    /// holds the row of `a` (its insert has not committed) while the other
+    /// registers `b` and `a`, listed in the order a hash map gave them: the
+    /// second waits on `a` before it touches `b`, so the first registering
+    /// `b` next goes through instead of deadlocking, and both finish.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replicas_registering_the_same_plugins_together_never_deadlock() {
+        use sea_orm::TransactionTrait;
+        use testcontainers::ImageExt;
+        use testcontainers::runners::AsyncRunner;
+
+        let container = testcontainers_modules::postgres::Postgres::default()
+            .with_tag("17-alpine")
+            .start()
+            .await
+            .expect("start postgres");
+        let port = container.get_host_port_ipv4(5432).await.expect("port");
+        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        crate::database::BootSession::acquire(&url)
+            .await
+            .expect("boot session")
+            .migrate()
+            .await
+            .expect("migrate");
+        let connect = || async {
+            common::db::DatabaseConnection::from(
+                sea_orm::Database::connect(&url).await.expect("connect"),
+            )
+        };
+        let (first, second, observer) = (connect().await, connect().await, connect().await);
+
+        let holding = first.begin().await.expect("begin");
+        register_rows(&holding, &["a".to_string()])
+            .await
+            .expect("insert");
+        let registering = tokio::spawn(async move {
+            register_rows(&second, &["b".to_string(), "a".to_string()]).await
+        });
+        // The second replica waits on the row the first holds.
+        loop {
+            let waiting = observer
+                .query_one_raw(Statement::from_string(
+                    DbBackend::Postgres,
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE wait_event_type = 'Lock' AND query LIKE 'INSERT INTO \"plugin\"%'",
+                ))
+                .await
+                .expect("activity")
+                .expect("row")
+                .try_get_by_index::<i64>(0)
+                .expect("count");
+            if waiting > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        holding
+            .execute_unprepared("SET LOCAL lock_timeout = '10s'")
+            .await
+            .expect("lock timeout");
+        register_rows(&holding, &["b".to_string()])
+            .await
+            .expect("insert");
+        holding.commit().await.expect("commit");
+        registering
+            .await
+            .expect("join")
+            .expect("the second replica registers too");
+        assert_eq!(
+            plugin_entity::Entity::find()
+                .all(&observer)
+                .await
+                .expect("rows")
+                .len(),
+            2
+        );
+    }
 
     #[test]
     fn retry_delay_doubles_and_is_capped() {
