@@ -239,8 +239,8 @@
 'ioi.config.task.ambiguousTestCase' = '“{testCase}” names {count} test cases; refer to one by its id.'
 'ioi.config.task.zeroWeight' = 'Every test case of this sum subtask has score 0, so it can never score.'
 'ioi.config.task.problemHasNoTestCases' = 'This problem has no test cases, so it cannot be judged. Add test cases before contestants submit.'
-'ioi.config.task.nothingToScore' = 'No test case of this problem is judged: none is a sample, scores, or belongs to a subtask. Give a test case a score or add it to a subtask.'
+'ioi.config.task.nothingToScore' = 'No subtask of this problem can score: none is worth points and has a test case that counts toward it. Give a subtask points and a test case of this problem, or give a test case a score.'
 
 # Judging refusals (a system error that stands)
 'ioi.apiError.NO_TEST_CASES' = 'This problem has no test cases, so it cannot be judged. Ask the contest staff to add them.'
-'ioi.apiError.NOTHING_TO_SCORE' = 'No test case of this problem is judged: none is a sample, has a score or belongs to a subtask. Ask the contest staff to fix the problem.'
+'ioi.apiError.NOTHING_TO_SCORE' = 'No subtask of this problem can score: none is worth points and has a test case that counts toward it. Ask the contest staff to fix the problem.'

@@ -234,8 +234,9 @@ pub fn compute_scoring_test_case_ids(
 pub enum Unjudgeable {
     /// The problem has no test cases.
     NoTestCases,
-    /// No test case is judged: none is a sample, scores, or belongs to a
-    /// subtask ([`compute_scoring_test_case_ids`]).
+    /// No subtask can score: none is worth points and names a test case
+    /// that counts toward it ([`can_score`]), so every submission would
+    /// score 0 whatever it does.
     NothingToScore,
 }
 
@@ -253,21 +254,39 @@ impl Unjudgeable {
         match self {
             Self::NoTestCases => "Problem has no test cases",
             Self::NothingToScore => {
-                "No test case of the problem is judged: none is a sample, scores or belongs to a subtask"
+                "No subtask of the problem can score: none is worth points and has a test case that counts toward it"
             }
         }
     }
 }
 
-/// Whether `test_cases`, scored by `subtask_defs`, leave nothing to judge.
+/// Whether `test_cases`, scored by `subtask_defs` (the problem's configured
+/// subtasks, or its [`effective_subtasks`]), leave nothing to judge.
 pub fn unjudgeable(subtask_defs: &[SubtaskDef], test_cases: &[TestCaseRow]) -> Option<Unjudgeable> {
+    let members = MemberIndex::new(test_cases);
     if test_cases.is_empty() {
         Some(Unjudgeable::NoTestCases)
-    } else if compute_scoring_test_case_ids(subtask_defs, test_cases).is_empty() {
+    } else if !effective_subtasks(subtask_defs, test_cases)
+        .iter()
+        .any(|def| can_score(def, &members))
+    {
         Some(Unjudgeable::NothingToScore)
     } else {
         None
     }
+}
+
+/// Whether subtask `def` can score: it is worth points and one of its members
+/// is a test case of the problem that counts toward it. A `sum` subtask
+/// weighs its members by their points, so there a member counts only when it
+/// is worth more than 0.
+pub fn can_score(def: &SubtaskDef, members: &MemberIndex<'_>) -> bool {
+    def.max_score > 0.0
+        && def
+            .test_cases
+            .iter()
+            .filter_map(|key| members.test_case(key))
+            .any(|tc| def.scoring_method != SubtaskScoringMethod::Sum || tc.score > 0.0)
 }
 
 /// The subtasks a problem is scored by: its configured subtasks, or the
@@ -682,6 +701,50 @@ mod tests {
         let ids = compute_scoring_test_case_ids(&defs, &test_cases);
 
         assert_eq!(ids, vec![2]);
+    }
+
+    /// A problem is judged only when some subtask can score; one whose
+    /// subtasks name no test case it has scores nothing, whatever other
+    /// cases it judges.
+    #[test]
+    fn nothing_to_score_means_no_subtask_can_score() {
+        let cases = vec![
+            test_case(1, 40.0, false, Some("t1")),
+            test_case(2, 0.0, false, Some("free")),
+            test_case(3, 0.0, true, Some("sample")),
+        ];
+        let missing = make_def(SubtaskScoringMethod::GroupMin, 100.0, vec!["gone", "99"]);
+        assert_eq!(
+            unjudgeable(&[missing.clone()], &cases),
+            Some(Unjudgeable::NothingToScore),
+            "the positive-score case belongs to no subtask"
+        );
+        let worthless = make_def(SubtaskScoringMethod::GroupMin, 0.0, vec!["t1"]);
+        assert_eq!(
+            unjudgeable(&[worthless], &cases),
+            Some(Unjudgeable::NothingToScore)
+        );
+        let weightless_sum = make_def(SubtaskScoringMethod::Sum, 50.0, vec!["free"]);
+        assert_eq!(
+            unjudgeable(&[weightless_sum], &cases),
+            Some(Unjudgeable::NothingToScore)
+        );
+
+        let unweighted_group = make_def(SubtaskScoringMethod::GroupMin, 50.0, vec!["free"]);
+        assert_eq!(
+            unjudgeable(&[missing.clone(), unweighted_group], &cases),
+            None
+        );
+        assert_eq!(
+            unjudgeable(&[], &cases),
+            None,
+            "the default subtask scores t1"
+        );
+        assert_eq!(
+            unjudgeable(&[], &cases[1..]),
+            Some(Unjudgeable::NothingToScore),
+            "a sample and a zero-point case leave the default subtask empty"
+        );
     }
 
     /// A label two test cases share (a test-data change forced past the

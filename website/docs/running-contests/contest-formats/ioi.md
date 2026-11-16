@@ -50,6 +50,12 @@ subtask config gets one `sum` subtask named All Tests, covering every test
 case that is not a sample and is worth more than zero points, with a max
 score equal to the sum of those points.
 
+A problem none of whose subtasks can score is not judged: every submission
+to it ends as a system error that stands (`NOTHING_TO_SCORE`), and the
+problem's config issues say so. A subtask can score when its max score is
+above zero and one of its labels names a test case of the problem, one worth
+more than zero points for a `sum` subtask.
+
 Partial credit inside a subtask only appears when the checker scores a test
 as a fraction, for example a testlib points checker. The built in
 comparators are all or nothing.

@@ -252,6 +252,10 @@ mod tests {
         assert!(keys(&[], &[tc(1, 10.0, None)]).is_empty());
         let mut sample = tc(1, 0.0, None);
         sample.is_sample = true;
-        assert!(keys(&[], &[sample]).is_empty(), "a sample is judged");
+        assert_eq!(
+            keys(&[], &[sample]),
+            vec!["ioi.config.task.nothingToScore"],
+            "a sample is judged but scores nothing"
+        );
     }
 }
