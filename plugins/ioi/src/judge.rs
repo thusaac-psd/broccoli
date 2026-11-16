@@ -17,19 +17,17 @@ pub struct JudgeContext {
     pub subtask_defs: Vec<SubtaskDef>,
 }
 
-/// Judge a submission against `ctx`. A submission with nothing to score is
-/// finished here with score 0; otherwise a detached evaluation starts and its
-/// callbacks finish the submission.
+/// Judge a submission against `ctx`. A problem with nothing to score cannot
+/// be judged: the submission ends as a system error that stands, without
+/// being evaluated. Otherwise a detached evaluation starts and its callbacks
+/// finish the submission.
 pub fn judge_with_context_detached(
     host: &Host,
     req: &OnSubmissionInput,
     ctx: &JudgeContext,
 ) -> Result<OnSubmissionOutput, SdkError> {
     if ctx.test_cases.is_empty() {
-        let _ = host
-            .log
-            .info("No test cases found, marking as judged with score 0");
-        return finish_with_zero_score(host, req, ctx);
+        return refuse(host, req, "NO_TEST_CASES", "Problem has no test cases");
     }
 
     let scoring_test_case_ids: HashSet<i32> =
@@ -44,10 +42,12 @@ pub fn judge_with_context_detached(
         .collect();
 
     if scoring_test_cases.is_empty() {
-        let _ =
-            host.submission
-                .delete_results(ctx.submission_id, req.judgement_id, req.judge_epoch);
-        return finish_with_zero_score(host, req, ctx);
+        return refuse(
+            host,
+            req,
+            "NOTHING_TO_SCORE",
+            "No test case of the problem is judged: none is a sample, scores or belongs to a subtask",
+        );
     }
 
     evaluate_all_detached(
@@ -60,27 +60,26 @@ pub fn judge_with_context_detached(
     )
 }
 
-/// Mark the submission judged with score 0 without evaluating anything.
-fn finish_with_zero_score(
+/// Finish the submission as a system error that stands: every attempt would
+/// fail the same way until the problem changes.
+fn refuse(
     host: &Host,
     req: &OnSubmissionInput,
-    ctx: &JudgeContext,
+    code: &str,
+    message: &str,
 ) -> Result<OnSubmissionOutput, SdkError> {
-    let affected = host.submission.update(&SubmissionUpdate {
-        submission_id: ctx.submission_id,
-        judgement_id: req.judgement_id,
-        judge_epoch: req.judge_epoch,
-        status: Some(SubmissionStatus::Judged),
-        verdict: Some(Some(Verdict::Accepted)),
-        score: Some(0.0),
-        time_used: Some(None),
-        memory_used: Some(None),
-        compile_output: None,
-        error_code: None,
-        error_message: None,
-        ..Default::default()
-    })?;
-    if affected == 0 {
+    let _ = host.log.info(&format!(
+        "Submission {} cannot be judged: {message}",
+        req.submission_id
+    ));
+    let update = SubmissionUpdate::standing_system_error(
+        req.submission_id,
+        req.judgement_id,
+        req.judge_epoch,
+        code,
+        message,
+    );
+    if host.submission.update(&update)? == 0 {
         return Err(SdkError::StaleEpoch);
     }
     Ok(OnSubmissionOutput::ok())
@@ -607,18 +606,36 @@ mod tests {
         assert_eq!(rows[0].stderr.as_deref(), Some("err\u{FFFD}or"));
     }
 
+    /// A problem with nothing to score cannot be judged: the submission is
+    /// never compiled or run and never reads as Accepted. It ends as a
+    /// system error that stands, under the plugin's own code.
     #[test]
-    fn empty_test_cases() {
-        let host = Host::mock();
-        let ctx = default_ctx(vec![]);
-        judge(&host, &ctx, vec![]);
+    fn a_problem_with_nothing_to_score_refuses_every_submission() {
+        let unscored = TestCaseRow {
+            id: 1,
+            score: 0.0,
+            is_sample: false,
+            position: 0,
+            description: None,
+            label: Some("tc_01".into()),
+            input: TestCaseBodyRef::Missing,
+            expected_output: TestCaseBodyRef::Missing,
+            is_custom: false,
+        };
+        for (test_cases, code) in [
+            (vec![], "NO_TEST_CASES"),
+            (vec![unscored], "NOTHING_TO_SCORE"),
+        ] {
+            let host = Host::mock();
+            judge(&host, &default_ctx(test_cases), vec![]);
 
-        assert_eq!(host.submission.last_update().score, Some(0.0));
-        // No evaluation -> only 1 update (terminal), no Running
-        assert_eq!(host.submission.updates().len(), 1);
-        let sub = host.submission.last_update();
-        assert_eq!(sub.verdict, Some(Some(Verdict::Accepted)));
-        assert_eq!(sub.score, Some(0.0));
+            assert_eq!(host.submission.updates().len(), 1, "{code}: nothing ran");
+            let sub = host.submission.last_update();
+            assert_eq!(sub.status, Some(SubmissionStatus::Judged), "{code}");
+            assert_eq!(sub.verdict, Some(Some(Verdict::SystemError)), "{code}");
+            assert_eq!(sub.error_code, Some(Some(code.to_string())));
+            assert!(sub.stands, "{code}: every attempt repeats it");
+        }
     }
 
     #[test]
