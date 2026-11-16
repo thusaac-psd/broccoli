@@ -190,15 +190,14 @@ export function IcpcScoreboard({ contestId }: IcpcScoreboardProps) {
     queryFn: () => api.getStandings(contestId!),
     retry: 2,
     refetchInterval: pollInterval<StandingsResponse>((d) => {
-      // A board refreshes until its contest is over (one opened before the
-      // start learns from the server that it has started), as does a frozen
-      // board awaiting its reveal, so the reveal reaches viewers who leave
-      // the tab open; every board also turns over when the contest's phase
-      // does (`contestPollPace`).
+      // A board refreshes while the server says it may still change
+      // (`live`: the contest runs, a submission is still being judged, or a
+      // frozen board awaits its reveal, so the reveal reaches viewers who
+      // leave the tab open); every board also turns over when the contest's
+      // phase does (`contestPollPace`).
       if (!autoRefresh || d === undefined) return false;
       const pace = contest ? contestPollPace(contest, serverNow()) : false;
-      const live = d.phase !== 'after' || (!!d.frozen && !d.revealed);
-      if (!live) return pace;
+      if (!d.live) return pace;
       return Math.min(LIVE_BOARD_POLL_MS, pace === false ? Infinity : pace);
     }),
   });

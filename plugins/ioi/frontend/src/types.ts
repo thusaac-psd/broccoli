@@ -69,6 +69,8 @@ export interface ScoreboardEntry extends UserDisplayIdentity {
 
 export interface ScoreboardResponse {
   phase: 'before' | 'during' | 'after';
+  /** Whether the board may still change: the contest runs or a submission is still being judged. */
+  live: boolean;
   scoring_mode: ScoringMode;
   feedback_level: FeedbackLevel;
   scoreboard_visibility: ScoreboardVisibility;

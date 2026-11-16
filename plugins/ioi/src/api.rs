@@ -573,6 +573,9 @@ pub(crate) fn handle_scoreboard(
         status: 200,
         body: Some(serde_json::json!({
             "phase": phase,
+            // Whether the board may still change: the contest runs or a
+            // submission is still being judged. The board polls while it does.
+            "live": contest::results_may_change(host, contest_id, info.phase)?,
             "scoring_mode": contest_config.scoring_mode,
             "feedback_level": contest_config.feedback_level,
             "scoreboard_visibility": contest_config.scoreboard_visibility,

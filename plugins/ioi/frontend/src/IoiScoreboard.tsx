@@ -189,14 +189,15 @@ export function IoiScoreboard({ contestId }: IoiScoreboardProps) {
     enabled: contestId !== undefined,
     queryFn: () => api.getScoreboard(contestId!),
     retry: 2,
-    // A board refreshes until its contest is over (one opened before the
-    // start learns from the server that it has started), and every board
-    // turns over when the contest's phase does (`contestPollPace`): one that
-    // ended stops.
+    // A board refreshes while the server says it may still change (`live`:
+    // the contest runs or a submission is still being judged; one opened
+    // before the start learns from the server that it has started), and
+    // every board turns over when the contest's phase does
+    // (`contestPollPace`).
     refetchInterval: pollInterval<ScoreboardResponse>((scoreboard) => {
       if (!autoRefresh || scoreboard === undefined) return false;
       const pace = contest ? contestPollPace(contest, serverNow()) : false;
-      if (scoreboard.phase === 'after') return pace;
+      if (!scoreboard.live) return pace;
       return Math.min(LIVE_BOARD_POLL_MS, pace === false ? Infinity : pace);
     }),
   });

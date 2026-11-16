@@ -1218,6 +1218,7 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
                     status: 200,
                     body: Some(serde_json::json!({
                         "phase": phase,
+                        "live": contest::results_may_change(host, contest_id, info.phase)?,
                         "penalty_minutes": config.penalty_minutes,
                         "problem_labels": problem_labels,
                         "full_board": false,
@@ -1454,6 +1455,11 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         status: 200,
         body: Some(serde_json::json!({
             "phase": phase,
+            // Whether the board may still change: the contest runs, a
+            // submission is still being judged, or a frozen board awaits its
+            // reveal. The board polls while it does.
+            "live": (frozen && !revealed)
+                || contest::results_may_change(host, contest_id, info.phase)?,
             "frozen": frozen,
             "revealed": revealed,
             // Organizer-only Reveal button - shown only while the board is actually
