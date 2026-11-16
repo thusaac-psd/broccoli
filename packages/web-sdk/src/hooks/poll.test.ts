@@ -147,6 +147,47 @@ test('a failing poll keeps its jittered wait however often it is asked', () => {
   assert.equal(draws, drawn + 1);
 });
 
+test('a poll that has never loaded keeps asking whatever its pace says', () => {
+  // Every caller's pace, whether a number or a function of the data, may
+  // say `false` while there is no data ("not yet"): with nothing on screen
+  // and a failure, the poll asks again by the shared backoff all the same.
+  const stops = pollInterval<Data>(() => false, { random: () => 1 });
+  const temporary = new RequestError(503, 'PLUGIN_UNAVAILABLE');
+  for (const error of [serverError, temporary, RequestError.network()]) {
+    const query = polled({});
+    const fail = () => {
+      query.state.error = error;
+      query.state.errorUpdateCount += 1;
+      return stops(query);
+    };
+    const waits = Array.from({ length: 12 }, fail);
+    assert.ok(
+      waits.every((wait) => typeof wait === 'number' && wait > 0),
+      String(waits),
+    );
+    assert.equal(waits.at(-1), POLL_BACKOFF_MAX_MS);
+  }
+  // A refusal asking again cannot change still stops.
+  assert.equal(
+    stops(
+      polled({ error: RequestError.fromBody(403, {}), errorUpdateCount: 1 }),
+    ),
+    false,
+  );
+  // With data on screen, the caller's `false` stops as before.
+  assert.equal(
+    stops(
+      polled({
+        data: { done: true },
+        error: serverError,
+        dataUpdateCount: 1,
+        errorUpdateCount: 1,
+      }),
+    ),
+    false,
+  );
+});
+
 test("a failing poll waits at least the server's Retry-After, spread across seats", () => {
   const busy = new RequestError(503, 'QUEUE_OVERLOADED', '', undefined, 10_000);
   assert.equal(

@@ -114,3 +114,43 @@ test('a contest whose start is due is asked for by one poller at a time, and sho
   );
   expect(asked).toBeLessThan(15);
 });
+
+// A contest page whose first load meets a busy server (the rush at the
+// start) asks again by itself, ever more slowly, until the server answers:
+// nobody has to press Retry, and nothing says "no data yet" means "stop".
+test('a contest page that first loads during an outage fills in by itself once the server answers', async ({
+  page,
+}) => {
+  await page.clock.install({ time: NOW });
+  await mockApi(page, 'contestant');
+  let down = true;
+  let asked = 0;
+  await page.route(/\/api\/v1\/contests\/1(\?|$)/, (route) => {
+    asked += 1;
+    return down
+      ? route.fulfill({
+          status: 503,
+          headers: { 'retry-after': '2' },
+          json: { code: 'DATABASE_UNAVAILABLE', message: 'busy' },
+        })
+      : route.fallback();
+  });
+  await page.goto('/contests/1');
+  await runClockUntil(page, () =>
+    expect(page.getByRole('button', { name: 'Retry' }).first()).toBeVisible({
+      timeout: 500,
+    }),
+  );
+
+  const before = asked;
+  await runClockUntil(page, () => expect(asked).toBeGreaterThan(before + 2), {
+    stepMs: 10_000,
+  });
+
+  down = false;
+  await runClockUntil(page, () =>
+    expect(page.getByText('Spring Training Contest 2026').first()).toBeVisible({
+      timeout: 500,
+    }),
+  );
+});
