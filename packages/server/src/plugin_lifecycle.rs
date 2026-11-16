@@ -160,7 +160,7 @@ pub struct Governs {
     /// The contest types its `init()` registered, sorted.
     pub contest_types: Vec<String>,
     /// The locale whose host text it provides, as a language pack: one
-    /// enabled plugin at a time does ([`publish_language_pack`]).
+    /// enabled plugin at a time does (`publish_language_pack`).
     pub host_locale: Option<String>,
 }
 
