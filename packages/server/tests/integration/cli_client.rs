@@ -115,3 +115,38 @@ async fn the_cli_reads_the_languages_and_extensions_the_server_registered() {
         .expect("the test server registers cpp");
     assert!(!cpp.extensions.is_empty(), "{cpp:?}");
 }
+
+/// The server pages contests 20 to a page, newest first; the CLI reads every
+/// page, so a contest older than the newest page is still listed and found by
+/// name.
+#[tokio::test(flavor = "multi_thread")]
+async fn contests_past_the_first_page_are_listed_and_found_by_name() {
+    let app = TestApp::spawn().await;
+    let token = app
+        .create_user_with_role("organiser", "password123", "admin")
+        .await;
+    let oldest = app
+        .create_contest(&token, "Oldest Round", true, false)
+        .await;
+    for i in 1..=104 {
+        app.create_contest(&token, &format!("Round {i}"), true, false)
+            .await;
+    }
+
+    let client = Client::new(broccoli_cli_core::session::Session::explicit(
+        server(&app.url("")),
+        token,
+    ));
+    let (listed, found, exact) = blocking(move || {
+        (
+            client.contests(None).unwrap(),
+            broccoli_cli_core::resolve::contest_id(&client, "oldest").unwrap(),
+            broccoli_cli_core::resolve::contest_id(&client, "Round 1").unwrap(),
+        )
+    })
+    .await;
+    assert_eq!(listed.len(), 105);
+    assert_eq!(listed.last().map(|c| c.id), Some(oldest));
+    assert_eq!(found.to_string(), oldest.to_string());
+    assert_eq!(exact.to_string(), (oldest + 1).to_string());
+}

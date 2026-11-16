@@ -13,11 +13,11 @@ pub fn run() -> anyhow::Result<()> {
 
     println!("{}  Fetching contests...", style("→").blue().bold());
 
-    let resp = client
-        .list_contests()
+    let contests = client
+        .contests(None)
         .context("Failed to fetch contest list")?;
 
-    if resp.data.is_empty() {
+    if contests.is_empty() {
         println!("  No contests available.");
         return Ok(());
     }
@@ -27,9 +27,9 @@ pub fn run() -> anyhow::Result<()> {
     // The table needs its full width (and its indent); a narrower terminal
     // gets one card per contest.
     if term_width >= TABLE_WIDTH + 2 {
-        print_table(&resp.data);
+        print_table(&contests);
     } else {
-        print_cards(&resp.data);
+        print_cards(&contests);
     }
 
     Ok(())

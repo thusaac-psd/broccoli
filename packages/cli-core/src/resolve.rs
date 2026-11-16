@@ -16,10 +16,11 @@ pub fn contest_id(client: &Client, input: &str) -> anyhow::Result<ContestId> {
         return Ok(id);
     }
 
+    // The server's search keeps the contests whose title contains `q`, over
+    // every contest the caller can see rather than one page of them.
     let contests = client
-        .list_contests()
-        .context("Failed to list contests to resolve the name")?
-        .data;
+        .contests(Some(q))
+        .context("Failed to list contests to resolve the name")?;
     let lower = q.to_lowercase();
 
     let exact = contests_named(&contests, q);
