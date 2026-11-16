@@ -43,6 +43,7 @@ async fn insert_submission_for_problem(app: &TestApp, problem_id: i32) {
 
     let files = serde_json::json!([{"filename": "main.cpp", "content": "int main() {}"}]);
     let sub = submission::ActiveModel {
+        contest_type: Set("standard".into()),
         problem_id: Set(problem_id),
         user_id: Set(1),
         language: Set("cpp".into()),
@@ -2606,6 +2607,7 @@ async fn insert_judged_result(app: &TestApp, token: &str, pid: i32, tc_id: i32) 
     let user_id = app.get_with_token(routes::ME, token).await.id();
     let now = chrono::Utc::now();
     let sub = submission::ActiveModel {
+        contest_type: Set("standard".into()),
         files: Set(json!([{"filename": "main.cpp", "content": "int main(){}"}])),
         language: Set("cpp".into()),
         status: Set(SubmissionStatus::Judged),

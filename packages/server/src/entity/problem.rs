@@ -17,16 +17,13 @@ pub struct Model {
     pub content: String,
     pub time_limit: i32,
     pub memory_limit: i32,
-
-    #[sea_orm(default_value = "batch")]
     pub problem_type: String,
 
-    /// Always set on insert, so the column has no default of its own beside
-    /// `broccoli_api_types::problem::DEFAULT_CHECKER_FORMAT`.
+    /// Always set on insert, so the column has no default of its own: a
+    /// problem that names none gets the one its checker plugins declare
+    /// (`models::problem::default_checker_format`).
     #[sea_orm(column_type = "Text")]
     pub checker_format: String,
-
-    #[sea_orm(default_value = "ioi")]
     pub default_contest_type: String,
 
     #[sea_orm(default_value = false)]

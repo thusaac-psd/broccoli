@@ -100,6 +100,13 @@ pub struct ServerConfig {
     /// `[server.sql]`: what the plugin's raw SQL may read beyond the default.
     #[serde(default)]
     pub sql: SqlConfig,
+
+    /// The checker format, one this plugin registers, that a problem gets
+    /// when it names none. The host uses it while this plugin is the one
+    /// loaded plugin that declares a default; otherwise a new problem must
+    /// name its checker format.
+    #[serde(default)]
+    pub default_checker_format: Option<String>,
 }
 
 /// Host content columns, as `table.column`, that a plugin's SQL reads only

@@ -420,6 +420,8 @@ mod tests {
             "position": position,
             "input_preview": "1\n",
             "output_preview": "1\n",
+            "input_is_binary": false,
+            "expected_output_is_binary": false,
             "problem_id": 5,
             "created_at": "2026-05-01T00:00:00Z",
         })

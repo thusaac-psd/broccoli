@@ -52,6 +52,7 @@ async fn insert_submission(
 ) -> i32 {
     let files = json!([{"filename": "main.cpp", "content": "int main() {}"}]);
     let sub = submission::ActiveModel {
+        contest_type: Set("standard".into()),
         problem_id: Set(problem_id),
         user_id: Set(user_id),
         language: Set("cpp".into()),
@@ -406,6 +407,7 @@ mod dlq_retry {
         let sub_id = insert_submission(&app, 1, problem_id, SubmissionStatus::SystemError).await;
         // Its system-error retries are spent, so the SystemError stands.
         submission::ActiveModel {
+            contest_type: Set("standard".into()),
             id: Set(sub_id),
             system_error_retries: Set(6),
             ..Default::default()

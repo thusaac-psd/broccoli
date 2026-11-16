@@ -2989,11 +2989,13 @@ export interface components {
     };
     CreateProblemRequest: {
       /**
-       * @description How a solution's output is compared with the expected output.
-       *     Defaults to `lines`.
+       * @description How a solution's output is compared with the expected output. When
+       *     omitted, the default the checker plugins declare (see
+       *     `RegistriesResponse::default_checker_format`); required when there is
+       *     none.
        * @example lines
        */
-      checker_format?: string;
+      checker_format?: string | null;
       /** @example Given an array of integers `nums` and an integer `target`... */
       content: string;
       /**
@@ -4031,10 +4033,11 @@ export interface components {
       contest_types: string[];
       /**
        * @description The checker format a problem gets when it names none, for a form to
-       *     preselect.
+       *     preselect: the one a loaded checker plugin declares, or none when no
+       *     single plugin declares one (a problem then names its format).
        * @example lines
        */
-      default_checker_format: string;
+      default_checker_format?: string | null;
       evaluators: components['schemas']['EvaluatorEntry'][];
       hooks: components['schemas']['HookEntryInfo'][];
       languages: components['schemas']['LanguageRegistryItem'][];

@@ -298,7 +298,7 @@ pub(crate) fn build_create_problem_request(
         time_limit: scenario.time_limit_ms,
         memory_limit: scenario.memory_limit_kb,
         problem_type: problem_type.to_string(),
-        checker_format: scenario.checker_format.to_string(),
+        checker_format: Some(scenario.checker_format.to_string()),
         default_contest_type: contest_type.to_string(),
         show_test_details: None,
         is_public: None,
@@ -351,7 +351,7 @@ mod tests {
         let registries = RegistriesResponse {
             problem_types: types(&["communication", "batch"]),
             checker_formats: vec![],
-            default_checker_format: "lines".into(),
+            default_checker_format: Some("lines".into()),
             contest_types: vec![],
             languages: vec![],
             evaluators: vec![],
@@ -366,7 +366,7 @@ mod tests {
         let registries = RegistriesResponse {
             problem_types: types(&["communication", "interactive"]),
             checker_formats: vec![],
-            default_checker_format: "lines".into(),
+            default_checker_format: Some("lines".into()),
             contest_types: vec![],
             languages: vec![],
             evaluators: vec![],

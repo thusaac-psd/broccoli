@@ -27,9 +27,10 @@ pub struct RegistriesResponse {
     pub checker_formats: Vec<String>,
 
     /// The checker format a problem gets when it names none, for a form to
-    /// preselect.
+    /// preselect: the one a loaded checker plugin declares, or none when no
+    /// single plugin declares one (a problem then names its format).
     #[schema(example = "lines")]
-    pub default_checker_format: String,
+    pub default_checker_format: Option<String>,
 
     #[schema(example = json!(["icpc", "ioi"]))]
     pub contest_types: Vec<String>,

@@ -1,7 +1,7 @@
 use sea_orm_migration::prelude::*;
 
-/// `problem.checker_format` has no column default: every insert sets it, and
-/// the one default lives in `broccoli_api_types::problem::DEFAULT_CHECKER_FORMAT`.
+/// `problem.checker_format` has no column default: every insert sets it, to
+/// the format the problem names or the default its checker plugins declare.
 ///
 /// Rolling-safe: every build that writes `problem` already sets the column on
 /// insert, so older replicas keep working against the migrated schema.

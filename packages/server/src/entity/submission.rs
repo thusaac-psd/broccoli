@@ -16,8 +16,6 @@ pub struct Model {
     pub user_id: i32,
     pub problem_id: i32,
     pub contest_id: Option<i32>,
-
-    #[sea_orm(default_value = "ioi")]
     pub contest_type: String,
 
     /// The `attempt_id` of the `before_submission` event that admitted this

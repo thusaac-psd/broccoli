@@ -9,6 +9,9 @@ zh-CN = "i18n/zh-CN.toml"
 [server]
 entry = "standard_checkers.wasm"
 permissions = ["logger", "plugin:register", "operations:dispatch", "config:read", "language:resolve"]
+# Line by line, ignoring trailing whitespace on each line and trailing blank
+# lines, so an answer typed without a final newline matches `print(3)`.
+default_checker_format = "lines"
 
 # The problem's testlib checker sources, set on the problem's checker source
 # page. The host stores them here for every problem whose checker format this
