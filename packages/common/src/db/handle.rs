@@ -47,9 +47,9 @@ pub struct DatabaseTransaction(sea_orm::DatabaseTransaction, Held);
 
 /// A connection checked out of a [`DatabaseConnection`]'s pool for
 /// statements its holder runs on it directly, as raw sqlx (a plugin's own
-/// SQL). Checking it out passes the pool's [`Reachability`] like every
-/// statement the handle starts, and while it is held it counts as busy, not
-/// lost, as a transaction's connection does. Statements run on it skip the
+/// SQL). Checking it out fails fast while the database is unreachable, like
+/// every statement the handle starts, and while it is held it counts as
+/// busy, not lost, as a transaction's connection does. Statements run on it skip the
 /// NUL check. Dropping it returns the connection to the pool.
 #[derive(Debug)]
 pub struct PooledConnection {
