@@ -43,7 +43,7 @@ test-plugins:
 test-sandbox: build-plugins
     cargo build -p broccoli-compare
     cargo test -p worker --test worker_isolate_sandbox -- --ignored --test-threads=1
-    E2E_SANDBOX_BACKEND=isolate BROCCOLI_WORKER_TOOLS_DIR={{justfile_directory()}}/target/debug cargo test -p server --test e2e -- --ignored --test-threads=1
+    E2E_SANDBOX_BACKEND=isolate cargo test -p server --test e2e -- --ignored --test-threads=1
 
 # Run server tests that require opt-in bundled-stress-test feature
 test-server-bundled-downloads:

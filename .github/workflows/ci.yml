@@ -145,14 +145,6 @@ jobs:
       - name: Build plugin WASM artefacts
         run: ./scripts/build-plugins.sh
 
-      # Judging mounts broccoli-compare into the box as a platform tool.
-      - name: Build platform tools
-        run: |
-          cargo build -p broccoli-compare --locked --release
-          mkdir -p "$RUNNER_TEMP/tools"
-          cp target/release/broccoli-compare "$RUNNER_TEMP/tools/"
-          echo "BROCCOLI_WORKER_TOOLS_DIR=$RUNNER_TEMP/tools" >> "$GITHUB_ENV"
-
       # One test at a time: isolate box ids are a host-wide resource.
       - name: Worker isolate suite
         timeout-minutes: 20
