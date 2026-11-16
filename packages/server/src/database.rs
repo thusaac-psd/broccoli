@@ -298,11 +298,13 @@ pub async fn connect_main_pool(
 }
 
 /// The longest a request waits for a main-pool connection before it answers
-/// `503 DATABASE_UNAVAILABLE`: well inside the request timeout, and no longer
-/// than the `Retry-After` it answers, so a retry finds the probe that was in
-/// flight (see [`common::db::DatabaseConnection`]) settled.
-pub const MAIN_POOL_ACQUIRE_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(crate::error::DATABASE_RETRY_AFTER_SECS);
+/// `503 DATABASE_UNAVAILABLE`. An unreachable database is refused at once
+/// after the first probe (see [`common::db::DatabaseConnection`]), so this
+/// bounds only a busy pool's queue: long enough that a contest-start burst
+/// waits for connections instead of failing, and a quarter of the request
+/// timeout (`REQUEST_TIMEOUT`, 60 s), so the request still has time to run
+/// once it gets one.
+pub const MAIN_POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Session-level advisory lock key that serializes boot-time schema work
 /// (migrations, seeding) across every

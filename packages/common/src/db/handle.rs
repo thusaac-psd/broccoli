@@ -28,7 +28,7 @@ use sea_orm::{
 };
 use serde_json::Value as Json;
 
-use super::reachability::Reachability;
+use super::reachability::{Held, Reachability};
 
 /// A pooled database connection whose statements are NUL-free and fail fast
 /// while the database is unreachable (see the module docs). Clones share the
@@ -37,8 +37,10 @@ use super::reachability::Reachability;
 pub struct DatabaseConnection(sea_orm::DatabaseConnection, Arc<Reachability>);
 
 /// A transaction opened from a [`DatabaseConnection`], with the same guarantee.
+/// While it is open, the connection it holds counts as busy, not lost, in the
+/// pool's record of whether the database can be reached.
 #[derive(Debug)]
-pub struct DatabaseTransaction(sea_orm::DatabaseTransaction);
+pub struct DatabaseTransaction(sea_orm::DatabaseTransaction, Held);
 
 impl From<sea_orm::DatabaseConnection> for DatabaseConnection {
     fn from(inner: sea_orm::DatabaseConnection) -> Self {
@@ -66,10 +68,14 @@ impl DatabaseConnection {
     /// Run `op`, which acquires a connection from the pool, past the pool's
     /// [`Reachability`].
     async fn guarded<T>(&self, op: impl Future<Output = Result<T, DbErr>>) -> Result<T, DbErr> {
-        let _pass = self.1.pass()?;
+        let pass = self.1.pass()?;
         let outcome = op.await;
-        self.1.settle(&outcome);
+        self.1.settle(&pass, &outcome);
         outcome
+    }
+
+    fn reachability(&self) -> &Arc<Reachability> {
+        &self.1
     }
 }
 
@@ -84,9 +90,18 @@ impl DatabaseTransaction {
         self.0.rollback().await
     }
 
-    /// A transaction's statements run on the connection it holds.
+    /// A transaction's statements run on the connection it holds, so none
+    /// waits for the pool; each answer still shows the database reachable.
     async fn guarded<T>(&self, op: impl Future<Output = Result<T, DbErr>>) -> Result<T, DbErr> {
-        op.await
+        let outcome = op.await;
+        if !matches!(&outcome, Err(e) if super::is_outage(e)) {
+            self.reachability().answered();
+        }
+        outcome
+    }
+
+    fn reachability(&self) -> &Arc<Reachability> {
+        self.1.reachability()
     }
 }
 
@@ -134,7 +149,9 @@ macro_rules! checked_connection {
             type Transaction = DatabaseTransaction;
 
             async fn begin(&self) -> Result<DatabaseTransaction, DbErr> {
-                self.guarded(self.0.begin()).await.map(DatabaseTransaction)
+                self.guarded(self.0.begin())
+                    .await
+                    .map(|txn| DatabaseTransaction(txn, self.reachability().hold()))
             }
 
             async fn begin_with_config(
@@ -144,7 +161,7 @@ macro_rules! checked_connection {
             ) -> Result<DatabaseTransaction, DbErr> {
                 self.guarded(self.0.begin_with_config(isolation_level, access_mode))
                     .await
-                    .map(DatabaseTransaction)
+                    .map(|txn| DatabaseTransaction(txn, self.reachability().hold()))
             }
 
             async fn begin_with_options(
@@ -153,7 +170,7 @@ macro_rules! checked_connection {
             ) -> Result<DatabaseTransaction, DbErr> {
                 self.guarded(self.0.begin_with_options(options))
                     .await
-                    .map(DatabaseTransaction)
+                    .map(|txn| DatabaseTransaction(txn, self.reachability().hold()))
             }
 
             async fn transaction<F, T, E>(&self, callback: F) -> Result<T, TransactionError<E>>

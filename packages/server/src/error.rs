@@ -52,8 +52,10 @@ impl AdmissionRefused {
     }
 }
 
-/// The `Retry-After` of a `DATABASE_UNAVAILABLE` answer: about one pool
-/// acquire timeout, after which a database that came back serves again.
+/// The `Retry-After` of a `DATABASE_UNAVAILABLE` answer. While the database
+/// is unreachable a request is refused at once and one probe at a time looks
+/// for it, so a client that retries this often costs next to nothing and is
+/// served again soon after a probe finds the database back.
 pub const DATABASE_RETRY_AFTER_SECS: u64 = 5;
 
 /// The `Retry-After` of a `QUEUE_UNAVAILABLE` answer: about one Redis
