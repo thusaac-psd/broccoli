@@ -33,7 +33,11 @@
         "@broccoli/web-sdk/api",
         "@broccoli/web-sdk/i18n",
         "@broccoli/web-sdk/ui",
-        "@broccoli/web-sdk/utils"
+        "@broccoli/web-sdk/utils",
+        "@tanstack/react-query",
+        "@broccoli/web-sdk/auth",
+        "@broccoli/web-sdk/hooks",
+        "@broccoli/web-sdk/submission"
       ]
     }
   },
@@ -45,7 +49,9 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "catalog:",
+    "@tanstack/react-query": "catalog:",
     "@tsdown/css": "catalog:",
+    "@types/node": "catalog:",
     "@types/react": "catalog:",
     "postcss": "catalog:",
     "postcss-import": "catalog:",
