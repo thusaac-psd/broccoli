@@ -1,4 +1,4 @@
-import { errorKind } from '../api/errors.ts';
+import { errorKind, retryAfterOf } from '../api/errors.ts';
 import { backoffDelay } from '../utils/backoff.ts';
 
 /** What `pollInterval` reads of a TanStack query (the `Query` itself). */
@@ -23,9 +23,20 @@ export const PLUGIN_OUTAGE_POLL_MS = 30_000;
 /** The longest a failing poll waits for the next one (unless it polls slower). */
 export const POLL_BACKOFF_MAX_MS = 30_000;
 
+/**
+ * The pace a poll that has never loaded backs off from when its own pace
+ * names none: with nothing on screen, "no data yet" never means "stop".
+ */
+export const UNLOADED_POLL_MS = 1_000;
+
 export interface PollOptions {
   /** Spreads the waits of seats that failed together (default `Math.random`). */
   random?: () => number;
+}
+
+export interface PollDelayOptions extends PollOptions {
+  /** The latest failure: its `Retry-After` is the shortest wait. */
+  error?: unknown;
 }
 
 /** Per query: its success count, and its failure count when it last succeeded. */
@@ -59,17 +70,23 @@ const drawnWait = new WeakMap<
  * row: the pace while polls succeed; while they fail, a doubling backoff up
  * to `POLL_BACKOFF_MAX_MS`, spread by jitter so seats that failed together
  * do not ask again at the same instant, and never shorter than the pace.
- * Every poller, a TanStack query (`pollInterval`) or a hand-run loop, waits
- * this.
+ * When the latest failure carries a `Retry-After`, the wait is at least that,
+ * spread up to twice it, so seats the server told the same thing do not
+ * come back at the same instant either. Every poller and retry, a TanStack
+ * query (`pollInterval`, the query client's `retryDelay`) or a hand-run
+ * loop, waits this.
  */
 export function nextPollDelay(
   pace: number,
   failures: number,
-  random: () => number = Math.random,
+  { random = Math.random, error }: PollDelayOptions = {},
 ): number {
   if (failures === 0) return pace;
   const policy = { baseMs: pace, maxMs: Math.max(pace, POLL_BACKOFF_MAX_MS) };
-  return Math.max(pace, backoffDelay(failures, policy, random));
+  const backoff = Math.max(pace, backoffDelay(failures, policy, random));
+  const retryAfter = retryAfterOf(error);
+  if (retryAfter === null) return backoff;
+  return Math.max(backoff, Math.round(retryAfter * (1 + random())));
 }
 
 /**
@@ -81,9 +98,10 @@ export function nextPollDelay(
  *   `refreshError` of `useQueryState`) and each failure doubles the wait, up to
  *   `POLL_BACKOFF_MAX_MS` and spread by jitter: a server in trouble is not
  *   asked once a second by every seat at once.
- * - A poll that has never loaded backs off the same way: a page opened
- *   while the server was down fills in once it is back. `useQueryState`
- *   keeps the error on screen while each poll asks again.
+ * - A poll that has never loaded backs off the same way whatever `every`
+ *   says, from `UNLOADED_POLL_MS` when it names no pace: a page opened while
+ *   the server was down fills in once it is back. `useQueryState` keeps the
+ *   error on screen while each poll asks again.
  * - A failure asking again cannot change (no permission, gone) stops.
  * - The answer is a function of the query's state and the pace alone:
  *   TanStack asks for it on every render and restarts its timer whenever it
@@ -100,22 +118,29 @@ export function pollInterval<T>(
     const { state } = query;
     const pace = typeof every === 'number' ? every : every(state.data);
     const failures = failuresInARow(query);
-    if (pace === false || state.error == null) return pace;
+    if (state.error == null) return pace;
     const kind = errorKind(state.error);
     if (kind === 'forbidden' || kind === 'notFound') return false;
+    // With nothing on screen, a pace of `false` ("no data yet") never stops.
+    const base =
+      pace === false && state.data === undefined ? UNLOADED_POLL_MS : pace;
+    if (base === false) return false;
     // TanStack asks again on every render and restarts the timer whenever
     // the answer changes, so one failure's jittered wait is drawn once.
     const drawn = drawnWait.get(query);
     if (
       drawn?.errorUpdateCount === state.errorUpdateCount &&
-      drawn.pace === pace
+      drawn.pace === base
     ) {
       return drawn.wait;
     }
-    const wait = nextPollDelay(pace, failures, random);
+    const wait = nextPollDelay(base, failures, {
+      random,
+      error: state.error,
+    });
     drawnWait.set(query, {
       errorUpdateCount: state.errorUpdateCount,
-      pace,
+      pace: base,
       wait,
     });
     return wait;

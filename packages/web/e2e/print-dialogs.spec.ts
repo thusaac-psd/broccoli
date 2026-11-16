@@ -73,3 +73,29 @@ test('a print dialog reopened right after a print keeps what is typed', async ({
   await page.clock.runFor(5_000);
   await expect(dialog.getByLabel('Code')).toHaveValue('second draft');
 });
+
+test('a print the plugin refuses says what the plugin said, not a generic retry hint', async ({
+  page,
+}) => {
+  await openPrinting(page);
+  await page.route('**/api/plugins/print/contests/1/jobs', (route) =>
+    route.fulfill({
+      status: 429,
+      json: {
+        code: 'print.RATE_LIMITED',
+        message: 'Print limit reached (2 jobs per contestant)',
+      },
+    }),
+  );
+  await page.goto('/contests/1/problems/1?tab=coding');
+  await page.getByRole('button', { name: 'Print code' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Print code' });
+  await dialog.getByLabel('Code').fill('int main() {}');
+  await dialog.getByRole('button', { name: 'Print' }).click();
+  await expect(
+    dialog.getByText(
+      'Could not send print job (Print limit reached (2 jobs per contestant))',
+    ),
+  ).toBeVisible();
+  await expect(dialog.getByText('Too many requests')).toHaveCount(0);
+});

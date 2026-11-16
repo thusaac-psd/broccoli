@@ -3,8 +3,11 @@ import * as React from 'react';
 
 import { cn } from '@/utils';
 
+// A badge is never wider than what holds it: a long label (an outage's
+// reason) wraps onto more lines rather than pushing a phone screen sideways.
+// In a table, whose frame scrolls sideways instead, it stays on one line.
 const badgeVariants = cva(
-  'inline-flex items-center whitespace-nowrap rounded-md border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-2',
+  'inline-flex max-w-full items-center break-words in-[td]:whitespace-nowrap rounded-md border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-2',
   {
     variants: {
       // Verdict colors are dark enough for white text at 4.5:1.

@@ -243,10 +243,14 @@ export async function pollEntry(
   deps: PollDeps,
 ): Promise<void> {
   let pace = initialPace;
-  // Consecutive transient failures.
+  // Consecutive transient failures, and the latest of them.
   let failures = 0;
+  let lastError: unknown = null;
   while (!signal.aborted) {
-    await deps.sleep(nextPollDelay(pace, failures, deps.random), signal);
+    await deps.sleep(
+      nextPollDelay(pace, failures, { random: deps.random, error: lastError }),
+      signal,
+    );
     if (signal.aborted) return;
     let response: PollResponse;
     try {
@@ -261,6 +265,7 @@ export async function pollEntry(
       if (next === false) return;
       pace = next;
       failures = 0;
+      lastError = null;
     } else if (isPermanentPollFailure(response.status, deps.isSignedOut())) {
       deps.dispatch({
         type: 'failed',
@@ -270,6 +275,7 @@ export async function pollEntry(
       return;
     } else {
       failures += 1;
+      lastError = response.error;
     }
   }
 }

@@ -4,9 +4,11 @@ import { test } from 'node:test';
 import {
   describeError,
   errorCodeText,
+  type ErrorKind,
   errorKind,
   isTemporaryApiError,
   RequestError,
+  retryCanFix,
   TranslatedError,
 } from './errors.ts';
 
@@ -163,6 +165,7 @@ test("an error code a plugin raised reads only from that plugin's pack", () => {
 
 test("a plugin's refusal is described from that plugin's pack only", () => {
   const catalog: Record<string, string> = {
+    'apiError.withDetail': '{message} ({detail})',
     'cooldown.apiError.COOLDOWN_ACTIVE': 'Wait {seconds}s',
     'apiError.COOLDOWN_ACTIVE': 'Host text',
     'apiError.PLUGIN_UNAVAILABLE': 'Busy, retrying',
@@ -184,6 +187,75 @@ test("a plugin's refusal is described from that plugin's pack only", () => {
   assert.ok(!isTemporaryApiError(spoof));
   assert.deepEqual(describeError(spoof, 'Failed', translator), {
     kind: 'forbidden',
-    message: 'Not allowed',
+    message: 'Failed (busy)',
   });
+});
+
+test("an error answer carries the server's Retry-After in seconds, and nothing else as one", () => {
+  const answer = (retryAfter?: string) =>
+    new Response('{}', {
+      status: 503,
+      headers: retryAfter === undefined ? {} : { 'retry-after': retryAfter },
+    });
+  const body = { code: 'QUEUE_OVERLOADED', message: 'busy' };
+  assert.equal(
+    RequestError.fromResponse(answer('2'), body).retryAfterMs,
+    2_000,
+  );
+  assert.equal(RequestError.fromResponse(answer(), body).retryAfterMs, null);
+  assert.equal(
+    RequestError.fromResponse(answer('Wed, 21 Oct 2026 07:28:00 GMT'), body)
+      .retryAfterMs,
+    null,
+  );
+});
+
+test('an untranslated refusal of any client-error kind shows what the server said', () => {
+  const said = 'Print limit reached (2 jobs per contestant)';
+  for (const status of [400, 401, 403, 404, 409, 422, 429]) {
+    const refusal = new RequestError(status, 'print.LIMIT_REACHED', said);
+    assert.equal(
+      describeError(refusal, 'Could not print', translator).message,
+      `Could not print (${said})`,
+      String(status),
+    );
+  }
+});
+
+test('an untranslated refusal with nothing said reads as its kind or what failed', () => {
+  const kinds: Record<string, string> = {
+    'apiError.kind.forbidden': 'Not allowed',
+    'apiError.kind.notFound': 'Gone',
+    'apiError.kind.rateLimited': 'Too many requests',
+    'apiError.kind.unauthenticated': 'Sign in',
+  };
+  const lookup = { lookup: (key: string) => kinds[key] };
+  const read = (status: number) =>
+    describeError(new RequestError(status, 'x.CODE'), 'Failed', lookup).message;
+  assert.equal(read(403), 'Not allowed');
+  assert.equal(read(404), 'Gone');
+  assert.equal(read(429), 'Too many requests');
+  assert.equal(read(401), 'Sign in');
+  assert.equal(read(400), 'Failed');
+  assert.equal(read(409), 'Failed');
+});
+
+test('only a failure a retry can fix offers one', () => {
+  const kinds: ErrorKind[] = [
+    'network',
+    'temporary',
+    'unauthenticated',
+    'forbidden',
+    'notFound',
+    'rateLimited',
+    'conflict',
+    'invalid',
+    'server',
+  ];
+  assert.deepEqual(kinds.filter(retryCanFix), [
+    'network',
+    'temporary',
+    'rateLimited',
+    'server',
+  ]);
 });

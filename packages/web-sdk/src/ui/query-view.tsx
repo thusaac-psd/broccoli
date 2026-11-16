@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import type { ReactNode } from 'react';
 
-import { errorKind } from '@/api/errors';
+import { errorKind, retryCanFix } from '@/api/errors';
 import { useErrorMessage } from '@/api/use-error-message';
 import { useSignIn } from '@/auth/sign-in';
 import { type QueryLike, useQueryState } from '@/hooks/query-state';
@@ -30,10 +30,11 @@ export interface QueryErrorStateProps {
 }
 
 /**
- * A failed fetch, said for what it is: a 401 asks the user to sign in and
- * comes back here afterwards, a 403 says they may not see it, a 404 says it
- * does not exist, and anything else (no connection, a busy or broken
- * server) says so and offers a retry.
+ * A failed fetch, said for what it is (`describeError`, so in the server's
+ * words where it gave a reason no pack translates): a 401 asks the user to
+ * sign in and comes back here afterwards, a 403 says they may not see it, a
+ * 404 says it does not exist, and anything else says so, offering a retry
+ * only where one can help (`retryCanFix`).
  */
 export function QueryErrorState({
   error,
@@ -61,25 +62,23 @@ export function QueryErrorState({
     </div>
   );
   const iconClass = 'h-8 w-8 text-muted-foreground';
+  const described = errorMessage(error, failure ?? t('common.loadFailed'));
 
   switch (kind) {
     case 'unauthenticated':
       return <SignInPrompt className={className} />;
     case 'forbidden':
-      return box(
-        <Ban className={iconClass} aria-hidden />,
-        t('apiError.kind.forbidden'),
-      );
+      return box(<Ban className={iconClass} aria-hidden />, described);
     case 'notFound':
       return box(
         <FileQuestion className={iconClass} aria-hidden />,
-        notFound ?? t('apiError.kind.notFound'),
+        notFound ?? described,
       );
     default:
       return box(
         <AlertTriangle className={iconClass} aria-hidden />,
-        errorMessage(error, failure ?? t('common.loadFailed')),
-        retry && (
+        described,
+        retry && retryCanFix(kind) && (
           <Button
             variant="outline"
             size="sm"
