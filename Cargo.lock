@@ -7993,6 +7993,7 @@ dependencies = [
  "axum",
  "broccoli-types",
  "chrono",
+ "clap",
  "common",
  "config",
  "futures",

@@ -4,24 +4,37 @@ use anyhow::Context;
 use worker::config::WorkerAppConfig;
 use worker::runtime::WorkerRuntime;
 
+/// `broccoli-worker`: the judge worker. With no option it runs.
+#[derive(clap::Parser)]
+#[command(
+    name = "broccoli-worker",
+    bin_name = "broccoli-worker",
+    version,
+    about = "The Broccoli judge worker"
+)]
+struct Cli {
+    /// Check that this machine's running worker is alive and reaching Redis,
+    /// and exit 0 when it is.
+    #[arg(long, exclusive = true)]
+    healthcheck: bool,
+    /// Print the id this machine's worker takes when `worker.id` is left
+    /// blank, derived from the machine, and exit, so an installer records the
+    /// binary's own answer. Reads no configuration.
+    #[arg(long, exclusive = true)]
+    node_id: bool,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    if std::env::args().any(|a| a == "--version" || a == "-V") {
-        println!("broccoli-worker {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
-    }
-
-    // The ID this machine's worker takes when none is configured, so an
-    // installer records the binary's own answer. Reads no configuration.
-    if std::env::args().any(|a| a == "--node-id") {
+    let cli = <Cli as clap::Parser>::parse();
+    if cli.node_id {
         println!(
             "{}",
             common::node_identity::default_node_id(common::liveness::NodeRole::Worker)
         );
         return Ok(());
     }
-
-    if std::env::args().any(|a| a == "--healthcheck") {
+    if cli.healthcheck {
         run_healthcheck().await?;
         println!("ok");
         return Ok(());
@@ -198,5 +211,53 @@ mod tests {
         set_heartbeat(&url, "w2", Some("some-other-host".into())).await;
         let err = check_own_heartbeat(&url, "ops", "w2").await.unwrap_err();
         assert!(err.to_string().contains("share this worker id"), "{err:#}");
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use clap::{CommandFactory, Parser, error::ErrorKind};
+
+    use super::Cli;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("broccoli-worker").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn the_command_definition_is_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn no_arguments_run_the_worker() {
+        let cli = parse(&[]).unwrap();
+        assert!(!cli.healthcheck && !cli.node_id);
+    }
+
+    #[test]
+    fn help_and_version_print_instead_of_running() {
+        for (args, kind) in [
+            (["--help"], ErrorKind::DisplayHelp),
+            (["-h"], ErrorKind::DisplayHelp),
+            (["--version"], ErrorKind::DisplayVersion),
+            (["-V"], ErrorKind::DisplayVersion),
+        ] {
+            assert_eq!(parse(&args).err().map(|e| e.kind()), Some(kind), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn the_one_shot_flags_are_parsed_alone() {
+        assert!(parse(&["--healthcheck"]).unwrap().healthcheck);
+        assert!(parse(&["--node-id"]).unwrap().node_id);
+        assert!(parse(&["--healthcheck", "--node-id"]).is_err());
+    }
+
+    #[test]
+    fn unknown_arguments_are_refused() {
+        for args in [&["--bogus"][..], &["run"], &["--node-id", "extra"]] {
+            assert!(parse(args).is_err(), "{args:?}");
+        }
     }
 }
