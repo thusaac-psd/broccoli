@@ -175,12 +175,14 @@ class Topology:
                 "BROCCOLI__SERVER__PORT": str(3000 + i),
                 "BROCCOLI__SERVER__ID": f"perf-server-{i}",
                 "BROCCOLI__AUTH__JWT_SECRET": "perf-jwt-secret-perf-jwt-secret-perf-jwt-secret",
-                "BROCCOLI__AUTH__SECURE_COOKIES": "false",
                 "BROCCOLI__BOOTSTRAP__ADMIN_USERNAME": self.a.admin_username,
                 "BROCCOLI__BOOTSTRAP__ADMIN_PASSWORD": self.a.admin_password,
                 # Keep the per-submit rate-limit queries on the path, but never trip it.
                 "BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE": "100000000",
                 "BROCCOLI__SERVER__MAX_QUEUED_SUBMISSIONS": "0",
+                # Every point logs in from this host; the per-IP login limit
+                # would refuse the eleventh point within a minute.
+                "BROCCOLI__SERVER__RATE_LIMIT_AUTH": "false",
                 "BROCCOLI__PLUGIN__PLUGINS_DIR": str(self.a.plugins_dir),
             })
             env.update(kv(self.a.server_env))

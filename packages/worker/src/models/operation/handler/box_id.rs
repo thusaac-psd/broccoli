@@ -175,7 +175,7 @@ impl BoxIds {
                 .into_iter()
                 .map(|(id, file)| {
                     // A lock file in use is never stale to a temp-dir cleaner.
-                    let _ = file.set_modified(std::time::SystemTime::now());
+                    touch(&file);
                     BoxId {
                         number: id,
                         id: id.to_string(),
@@ -199,6 +199,15 @@ fn open_lock(path: &Path) -> std::io::Result<File> {
         // Only ever `flock`-ed, never written.
         .truncate(false)
         .open(path)
+}
+
+/// Set `file`'s access and modification times to now. The kernel stamps them,
+/// so the host's own clock, which only the host's temp-dir cleaner compares
+/// against, is the one that applies.
+fn touch(file: &File) {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: `file` owns a valid descriptor; a null `times` means now.
+    let _ = unsafe { libc::futimens(file.as_raw_fd(), std::ptr::null()) };
 }
 
 fn try_lock(file: &File) -> std::io::Result<()> {
