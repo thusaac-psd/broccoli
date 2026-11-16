@@ -106,8 +106,21 @@ export default function ProblemView({
     setTargetWorkers([]);
   }, [problemId]);
 
+  // What the server serves of a contest problem depends on whether the
+  // contest's plugin is out (it withholds what the plugin governs), so the
+  // problem is read again whenever the polled contest says that changed. A
+  // problem on its own keeps the key the submission page shares.
+  const problemKey = contestId
+    ? [
+        'problem',
+        problemId,
+        contestId,
+        viewerKey,
+        contest?.plugin_outage?.state ?? null,
+      ]
+    : ['problem', problemId, null, viewerKey];
   const problemQuery = useQuery({
-    queryKey: ['problem', problemId, contestId ?? null, viewerKey],
+    queryKey: problemKey,
     enabled: authReady && allowed && Number.isFinite(problemId),
     queryFn: ({ signal }) =>
       fetchProblem(apiClient, problemId, contestId, signal),
