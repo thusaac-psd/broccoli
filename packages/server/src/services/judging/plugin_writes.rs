@@ -29,14 +29,18 @@ fn attributed(plugin_id: &str, code: Option<Option<String>>) -> Option<Option<St
 /// error code a judgement write carries:
 ///
 /// - the plugin's own code is recorded under its id ([`plugin_error_code`]);
+/// - the plugin's word that its system error stands
+///   ([`SubmissionUpdate::stands`]) counts only on the update that ends the
+///   judgement in one;
 /// - an update that would finalize an attempt the platform lost (a fault of
 ///   the hand-back class, see [`super::DispatchFaults::lost`]) is `None`, a
 ///   write fenced out as a stale dispatch's is, whatever verdict the plugin
 ///   computed from the lost operations: the dispatch hands the judgement back
 ///   when it ends;
 /// - under any other fault, an update that ends the judgement as a system
-///   error carries the fault's bare host code and description, whatever the
-///   plugin reported, so the system-error retry treats it by its cause.
+///   error carries the fault's bare host code and description, and stands as
+///   the fault's class says, whatever the plugin reported, so the
+///   system-error retry treats it by its cause.
 ///
 /// Any other update is unchanged.
 pub(crate) fn as_recorded(
@@ -45,18 +49,21 @@ pub(crate) fn as_recorded(
     fault: Option<Recorded>,
 ) -> Option<SubmissionUpdate> {
     update.error_code = attributed(plugin_id, update.error_code);
+    let finalizes = update.status.is_some_and(|s| s.is_terminal());
+    let ends_in_system_error =
+        finalizes && matches!(update.verdict, Some(Some(Verdict::SystemError)));
+    update.stands &= ends_in_system_error;
     let Some(fault) = fault else {
         return Some(update);
     };
-    let finalizes = update.status.is_some_and(|s| s.is_terminal());
-    if SystemErrorClass::of_fault(fault.fault) == SystemErrorClass::HandBack {
+    let class = SystemErrorClass::of_fault(fault.fault);
+    if class == SystemErrorClass::HandBack {
         return (!finalizes).then_some(update);
     }
-    let ends_in_system_error =
-        finalizes && matches!(update.verdict, Some(Some(Verdict::SystemError)));
     if ends_in_system_error {
         update.error_code = Some(Some(fault.fault.code().to_string()));
         update.error_message = Some(Some(fault.message));
+        update.stands = class == SystemErrorClass::Stands;
     }
     Some(update)
 }
@@ -112,6 +119,7 @@ pub(crate) fn judgement_write<P: SqlBindSink>(
     if update.status.as_ref().is_some_and(|s| s.is_terminal()) {
         sets.push("is_finalized = TRUE".to_string());
         sets.push("finalized_at = NOW()".to_string());
+        sets.push(format!("error_stands = {}", update.stands));
     }
     let judgement = p.bind_value(update.judgement_id.into());
     let submission = p.bind_value(update.submission_id.into());
@@ -323,6 +331,34 @@ mod tests {
         .unwrap();
         assert_eq!(u.error_code, Some(Some("CHECKER_FAILED".into())));
         assert_eq!(u.error_message, Some(Some("signal 6".into())));
+    }
+
+    /// A plugin's standing system error is recorded as standing; the word
+    /// counts on nothing else it writes. A fault that stands decides it
+    /// whatever the plugin said.
+    #[test]
+    fn a_system_error_stands_only_when_its_plugin_or_its_fault_says_so() {
+        let standing = SubmissionUpdate::standing_system_error(1, 1, 0, "NO_TEST_CASES", "none");
+        let recorded = as_recorded("judge", standing, None).unwrap();
+        assert!(recorded.stands);
+        assert_eq!(
+            recorded.error_code,
+            Some(Some("judge.NO_TEST_CASES".into()))
+        );
+        for u in [
+            update(SubmissionStatus::Judged, Some(Verdict::WrongAnswer)),
+            update(SubmissionStatus::Running, Some(Verdict::SystemError)),
+        ] {
+            let u = SubmissionUpdate { stands: true, ..u };
+            assert!(!as_recorded("judge", u, None).unwrap().stands);
+        }
+        let retried = update(SubmissionStatus::Judged, Some(Verdict::SystemError));
+        assert!(!as_recorded("judge", retried.clone(), None).unwrap().stands);
+        assert!(
+            as_recorded("judge", retried, checker_failed())
+                .unwrap()
+                .stands
+        );
     }
 
     #[test]

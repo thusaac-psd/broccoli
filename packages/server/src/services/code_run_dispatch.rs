@@ -16,12 +16,13 @@ use crate::utils::judging::files_log_summary;
 async fn mark_code_run_error_or_log(
     db: &common::db::DatabaseConnection,
     code_run_id: i32,
-    code: &str,
+    code: &'static str,
     message: &str,
     judge_epoch: i32,
 ) {
+    let failure = judging::DispatchFailure::judging(code, message);
     if let Err(e) =
-        judging::fail_dispatch(db, Unit::CodeRun, code_run_id, judge_epoch, code, message).await
+        judging::fail_dispatch(db, Unit::CodeRun, code_run_id, judge_epoch, &failure).await
     {
         error!(
             code_run_id,

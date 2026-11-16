@@ -1070,33 +1070,7 @@ fn run_judge(host: &Host, req: &OnSubmissionInput) -> Result<OnSubmissionOutput,
     let test_cases = req.test_cases.clone();
 
     if test_cases.is_empty() {
-        let _ = host
-            .log
-            .info("ICPC: No test cases found; marking as SystemError (not a solve)");
-        let affected = host.submission.update(&SubmissionUpdate {
-            submission_id: req.submission_id,
-            judgement_id: req.judgement_id,
-            judge_epoch: req.judge_epoch,
-            status: Some(SubmissionStatus::Judged),
-            // A problem with NO test cases is a misconfiguration, not a solve.
-            // Marking it Accepted would credit EVERY team a free solve on the ICPC
-            // standings (compute_problem_states counts any Accepted verdict) and
-            // hand the earliest submitter a first-solve balloon. Surface it as a
-            // SystemError so it is visible and never counts as solved.
-            verdict: Some(Some(Verdict::SystemError)),
-            score: Some(0.0),
-            time_used: Some(None),
-            memory_used: Some(None),
-            compile_output: None,
-            error_code: Some(Some("NO_TEST_CASES".to_string())),
-            error_message: Some(Some(
-                "Problem has no test cases; cannot be judged".to_string(),
-            )),
-        })?;
-        if affected == 0 {
-            return Err(SdkError::StaleEpoch);
-        }
-        return Ok(OnSubmissionOutput::ok());
+        return refuse_without_test_cases(host, req);
     }
 
     match evaluate_short_circuit_detached(host, req, &test_cases, req.submission_id) {
@@ -1120,7 +1094,7 @@ fn run_standalone_judge(host: &Host, req: &OnSubmissionInput) -> OnSubmissionOut
     ));
 
     if req.test_cases.is_empty() {
-        return persist_empty_standalone(host, req).unwrap_or_else(|e| match e {
+        return refuse_without_test_cases(host, req).unwrap_or_else(|e| match e {
             SdkError::StaleEpoch => OnSubmissionOutput::ok(),
             other => OnSubmissionOutput::failed(format!("{other:?}")),
         });
@@ -1133,32 +1107,32 @@ fn run_standalone_judge(host: &Host, req: &OnSubmissionInput) -> OnSubmissionOut
     }
 }
 
+/// Ends a submission to a problem with no test cases. A problem with nothing
+/// to judge is a misconfiguration, not a solve: marking it Accepted would
+/// credit every team a free solve on the standings (compute_problem_states
+/// counts any Accepted verdict) and hand the earliest submitter a first-solve
+/// balloon. It is a system error every attempt repeats, so it stands instead
+/// of being re-judged.
 #[cfg(target_arch = "wasm32")]
-fn persist_empty_standalone(
+fn refuse_without_test_cases(
     host: &Host,
     req: &OnSubmissionInput,
 ) -> Result<OnSubmissionOutput, SdkError> {
     let _ = host
         .log
-        .info("ICPC: No test cases found, marking standalone submission as judged with score 0");
-    let affected = host.submission.update(&SubmissionUpdate {
-        submission_id: req.submission_id,
-        judgement_id: req.judgement_id,
-        judge_epoch: req.judge_epoch,
-        status: Some(SubmissionStatus::Judged),
-        verdict: Some(Some(Verdict::Accepted)),
-        score: Some(0.0),
-        time_used: Some(None),
-        memory_used: Some(None),
-        compile_output: None,
-        error_code: None,
-        error_message: None,
-    })?;
-
+        .info("ICPC: No test cases found; marking as SystemError (not a solve)");
+    let affected = host
+        .submission
+        .update(&SubmissionUpdate::standing_system_error(
+            req.submission_id,
+            req.judgement_id,
+            req.judge_epoch,
+            "NO_TEST_CASES",
+            "Problem has no test cases; cannot be judged",
+        ))?;
     if affected == 0 {
         return Err(SdkError::StaleEpoch);
     }
-
     Ok(OnSubmissionOutput::ok())
 }
 

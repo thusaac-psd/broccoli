@@ -78,6 +78,7 @@ fn finish_with_zero_score(
         compile_output: None,
         error_code: None,
         error_message: None,
+        ..Default::default()
     })?;
     if affected == 0 {
         return Err(SdkError::StaleEpoch);

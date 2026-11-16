@@ -315,26 +315,21 @@ pub const SESSION_ENDED_WITHOUT_VERDICT: &str = "PLUGIN_NO_VERDICT";
 async fn finish_judgement(
     deps: &EvaluateHostDeps,
     completion: &DetachedSubmissionCompletion,
-    error_code: &str,
+    error_code: &'static str,
     error_message: &str,
 ) {
-    let fault = deps
-        .operation_deps
-        .faults
-        .as_ref()
-        .and_then(|faults| faults.get());
-    let (error_code, error_message) = match &fault {
-        Some(fault) => (fault.fault.code(), fault.message.as_str()),
-        None => (error_code, error_message),
-    };
-    use crate::services::judging::DispatchFailed;
+    use crate::services::judging::{DispatchFailed, DispatchFailure};
+    let mut failure = DispatchFailure::judging(error_code, error_message);
+    if let Some(faults) = &deps.operation_deps.faults {
+        failure = failure.unless_fault(faults);
+    }
+    let error_code = failure.code;
     match crate::services::judging::fail_dispatch(
         &deps.db,
         crate::services::judging::Unit::Judgement,
         completion.judgement_id,
         completion.judge_epoch,
-        error_code,
-        error_message,
+        &failure,
     )
     .await
     {

@@ -78,6 +78,13 @@ pub struct Model {
     /// score may come from a config its plugin refuses.
     #[sea_orm(default_value = false)]
     pub config_issues: bool,
+    /// Whether this judgement's system error stands: a failure every attempt
+    /// would repeat, as its dispatch or its plugin decided it, or one the
+    /// system-error retry confirmed once the submission's budget was spent.
+    /// The retry never re-judges it, and the submission shows it. A requeue
+    /// clears it.
+    #[sea_orm(default_value = false)]
+    pub error_stands: bool,
 
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeUtc,

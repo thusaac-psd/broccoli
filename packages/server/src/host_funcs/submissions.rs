@@ -790,6 +790,59 @@ mod tests {
         assert_eq!(row.resolved_by, None);
     }
 
+    /// A plugin's standing system error shows on the submission at once and
+    /// the system-error retry never re-judges it; the same error not marked
+    /// standing awaits the retry, which re-judges it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plugin_system_error_that_stands_is_never_re_judged() {
+        use crate::services::judging::{RetryBudget, SystemErrorPass, retry_system_errors};
+
+        let (_pg, db) = crate::test_support::postgres().await;
+        let (sub, _) = seed_judged(&db).await;
+        for stands in [true, false] {
+            let j = open(
+                &db,
+                sub.id,
+                OpenJudgement::Rejudge {
+                    triggered_by_user_id: sub.user_id,
+                    target_worker_id: None,
+                },
+            )
+            .await;
+            let update = SubmissionUpdate {
+                stands,
+                ..SubmissionUpdate::standing_system_error(
+                    j.submission_id,
+                    j.id,
+                    j.judge_epoch,
+                    "NO_TEST_CASES",
+                    "Problem has no test cases",
+                )
+            };
+            let update = judging::as_recorded("judge", update, None).expect("recorded");
+            assert_eq!(submission_update(&db, update).await, 1);
+
+            let pass = retry_system_errors(&db, RetryBudget::new(10), 10, &[])
+                .await
+                .expect("retry");
+            let shown = submission::Entity::find_by_id(sub.id)
+                .one(&db)
+                .await
+                .expect("db")
+                .expect("row");
+            if stands {
+                assert_eq!(pass, SystemErrorPass::default(), "nothing to re-judge");
+                assert_eq!(shown.status, common::SubmissionStatus::Judged);
+                assert_eq!(shown.verdict, Some(common::Verdict::SystemError));
+                assert_eq!(shown.error_code.as_deref(), Some("judge.NO_TEST_CASES"));
+                assert_eq!(shown.system_error_retries, 0);
+            } else {
+                assert_eq!(pass.requeued, 1, "re-judged within the budget");
+                assert_eq!(shown.status, common::SubmissionStatus::Queued);
+            }
+        }
+    }
+
     /// A result insert from a dispatch whose judgement is being requeued waits
     /// for the requeue and then re-checks its fence against the committed
     /// row, so the stale rows never land.

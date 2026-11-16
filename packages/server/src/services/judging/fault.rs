@@ -8,8 +8,9 @@
 //! a platform tool, a problem's checker that crashed. When the dispatch then
 //! ends its judgement as a system error, the judgement carries the fault's
 //! code ([`DispatchFault::code`]) and description instead of whatever the
-//! plugin reported, and [`SystemErrorClass::of_fault`] decides what the
-//! retry does with it. A plugin never classifies a failure itself.
+//! plugin reported, and [`SystemErrorClass::of_fault`] decides what becomes
+//! of it. A plugin never classifies a fault: the most it says is that a
+//! system error it writes stands (`SubmissionUpdate::stands`).
 
 use std::sync::{Arc, Mutex};
 
@@ -29,15 +30,6 @@ pub enum DispatchFault {
 }
 
 impl DispatchFault {
-    /// Every fault, beside the definition so a new one is listed with it.
-    pub const ALL: [DispatchFault; 5] = [
-        Self::Operation(OperationFault::ALL[0]),
-        Self::Operation(OperationFault::ALL[1]),
-        Self::Operation(OperationFault::ALL[2]),
-        Self::Operation(OperationFault::ALL[3]),
-        Self::CheckerFailed,
-    ];
-
     /// The error code a judgement this fault ends carries.
     pub fn code(self) -> &'static str {
         match self {
@@ -124,8 +116,10 @@ fn loses(fault: DispatchFault) -> bool {
     SystemErrorClass::of_fault(fault) == SystemErrorClass::HandBack
 }
 
-/// What the system-error retry does with a judgement that ended as a system
-/// error, by the error code it carries.
+/// What becomes of a unit whose attempt ended in a system error. The class is
+/// decided where the failure is observed (a dispatch fault, the dispatcher's
+/// own failure, a plugin's write) and recorded with it, never read back from
+/// the error code, so no code a plugin writes can pass for another class.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SystemErrorClass {
     /// A failure judging the submission: retried while its submission's
@@ -139,7 +133,8 @@ pub(crate) enum SystemErrorClass {
     /// has them.
     HandBack,
     /// A failure every attempt repeats: the contest plugin refused the
-    /// submission, or the problem's checker fails. It stands at once.
+    /// submission or found the problem cannot be judged, or the problem's
+    /// checker fails. It stands at once (`error_stands`).
     Stands,
 }
 
@@ -155,50 +150,50 @@ impl SystemErrorClass {
             DispatchFault::CheckerFailed => Self::Stands,
         }
     }
+}
 
-    /// The class of a system error carrying `code`.
-    pub(crate) fn of_code(code: &str) -> Self {
-        [Self::HandBack, Self::Stands]
-            .into_iter()
-            .find(|class| class.codes().contains(&code))
-            .unwrap_or(Self::Judging)
-    }
+/// Why a dispatch ended its unit without a verdict: the code and message the
+/// unit records, and the class that decides what becomes of it
+/// ([`super::fail_dispatch`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DispatchFailure {
+    pub code: &'static str,
+    pub message: String,
+    pub class: SystemErrorClass,
+}
 
-    /// The error codes of this class; a `Judging` error carries any other
-    /// code, or none.
-    fn codes(self) -> Vec<&'static str> {
-        let faults = DispatchFault::ALL
-            .into_iter()
-            .filter(|f| Self::of_fault(*f) == self)
-            .map(DispatchFault::code);
-        match self {
-            Self::Judging => Vec::new(),
-            Self::Stands => [SubmissionDlqErrorCode::PLUGIN_REFUSED]
-                .into_iter()
-                .chain(faults)
-                .collect(),
-            Self::HandBack => faults.collect(),
+impl DispatchFailure {
+    /// A failure judging the submission, retried within its budget.
+    pub(crate) fn judging(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            class: SystemErrorClass::Judging,
         }
     }
 
-    /// SQL: the error code `column` puts its row in this class.
-    pub(crate) fn sql_matches(self, column: &str) -> String {
-        let list = |codes: Vec<&str>| {
-            let quoted: Vec<String> = codes.iter().map(|c| format!("'{c}'")).collect();
-            format!("({})", quoted.join(", "))
-        };
-        match self {
-            Self::Judging => {
-                let special = [Self::HandBack, Self::Stands]
-                    .into_iter()
-                    .flat_map(Self::codes)
-                    .collect();
-                format!("({column} IS NULL OR {column} NOT IN {})", list(special))
-            }
-            other => format!(
-                "({column} IS NOT NULL AND {column} IN {})",
-                list(other.codes())
-            ),
+    /// The contest plugin refused the work as one every attempt would fail.
+    pub(crate) fn refused(message: impl Into<String>) -> Self {
+        Self {
+            code: SubmissionDlqErrorCode::PLUGIN_REFUSED,
+            message: message.into(),
+            class: SystemErrorClass::Stands,
+        }
+    }
+
+    /// This failure, unless the dispatch met a fault: then the fault decides,
+    /// whatever the dispatch saw of it.
+    pub(crate) fn unless_fault(self, faults: &DispatchFaults) -> Self {
+        faults.get().map_or(self, Self::from)
+    }
+}
+
+impl From<Recorded> for DispatchFailure {
+    fn from(recorded: Recorded) -> Self {
+        Self {
+            code: recorded.fault.code(),
+            message: recorded.message,
+            class: SystemErrorClass::of_fault(recorded.fault),
         }
     }
 }
@@ -208,43 +203,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_fault_belongs_to_a_class_with_its_code() {
-        for fault in DispatchFault::ALL {
-            let class = SystemErrorClass::of_fault(fault);
-            assert!(class.codes().contains(&fault.code()), "{fault:?}");
-            assert_eq!(SystemErrorClass::of_code(fault.code()), class, "{fault:?}");
-            assert!(!SystemErrorClass::Judging.sql_matches("c").contains("IN ()"));
-        }
-        assert_eq!(
-            SystemErrorClass::of_code(SubmissionDlqErrorCode::PLUGIN_REFUSED),
-            SystemErrorClass::Stands
-        );
-        for fault in OperationFault::ALL {
-            assert!(DispatchFault::ALL.contains(&fault.into()), "{fault:?}");
-        }
-        assert_eq!(
-            SystemErrorClass::of_code("PLUGIN_NO_VERDICT"),
-            SystemErrorClass::Judging
-        );
-    }
-
-    /// Only the host's own codes class as a hand-back or as standing: every
-    /// one is bare, and a plugin's code is always recorded under its id
-    /// (`plugin_writes::plugin_error_code`), so no code a plugin writes,
-    /// whatever its text, can class as anything but a judging failure.
-    #[test]
-    fn no_code_a_plugin_writes_classes_as_a_host_code() {
-        for class in [SystemErrorClass::HandBack, SystemErrorClass::Stands] {
-            for code in class.codes() {
-                assert!(!code.contains('.'), "{code} must stay bare");
-                let as_plugin = super::super::plugin_writes::plugin_error_code("p", code);
-                assert_eq!(
-                    SystemErrorClass::of_code(&as_plugin),
-                    SystemErrorClass::Judging,
-                    "{as_plugin}"
-                );
-            }
-        }
+    fn a_recorded_fault_decides_the_failure() {
+        let faults = DispatchFaults::default();
+        let own = DispatchFailure::judging("PLUGIN_ERROR", "boom");
+        assert_eq!(own.clone().unless_fault(&faults), own);
+        faults.record(DispatchFault::CheckerFailed, "signal 6");
+        let failure = own.unless_fault(&faults);
+        assert_eq!(failure.code, "CHECKER_FAILED");
+        assert_eq!(failure.message, "signal 6");
+        assert_eq!(failure.class, SystemErrorClass::Stands);
     }
 
     #[test]
