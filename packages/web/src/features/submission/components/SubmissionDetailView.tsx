@@ -1,6 +1,5 @@
 import { useLanguageName, useQueryState } from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
-import { isTerminalStatus } from '@broccoli/web-sdk/submission';
 import {
   Badge,
   QueryErrorState,
@@ -20,6 +19,7 @@ import {
   submissionReturnState,
   type SubmissionReturnTarget,
 } from '@/features/submission/utils/navigation';
+import { submissionPhase } from '@/features/submission/utils/phase';
 import { getSubmissionScoreDisplay } from '@/features/submission/utils/score-display';
 import { getVerdictBadge } from '@/features/submission/utils/verdict';
 
@@ -84,7 +84,6 @@ export function SubmissionDetailView({
 
   const status = submission.status;
   const result = submission.result;
-  const isTerminal = isTerminalStatus(status);
 
   const { label: verdictLabel, variant: verdictVariant } = getVerdictBadge(
     {
@@ -95,7 +94,8 @@ export function SubmissionDetailView({
     },
     t,
   );
-  const scoreDisplay = getSubmissionScoreDisplay(status, result?.score, t);
+  const phase = submissionPhase(submission);
+  const scoreDisplay = getSubmissionScoreDisplay(submission, result?.score, t);
 
   const problemLink = contestId
     ? `/contests/${contestId}/problems/${submission.problem_id}`
@@ -114,7 +114,9 @@ export function SubmissionDetailView({
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="text-xl font-bold tabular-nums">#{submission.id}</h1>
             <Badge variant={verdictVariant} className="text-sm">
-              {!isTerminal && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+              {phase === 'judging' && (
+                <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+              )}
               {verdictLabel}
             </Badge>
             {scoreDisplay.kind === 'score' ? (
@@ -186,19 +188,6 @@ export function SubmissionDetailView({
 
       {/* Submission content */}
       <div className="rounded-lg border bg-card px-6 py-5">
-        {!isTerminal && (
-          <div className="flex items-center gap-2 pb-4">
-            <Loader2 className="h-4 w-4 animate-spin text-primary" />
-            <span className="text-sm text-muted-foreground">
-              {status === 'Compiling'
-                ? t('result.compiling')
-                : status === 'Running'
-                  ? t('result.running')
-                  : t('result.judging')}
-            </span>
-          </div>
-        )}
-
         <SubmissionResult submission={submission} />
         {judgedWithConfigIssues && (
           <JudgementConfigIssuesNotice problemId={submission.problem_id} />

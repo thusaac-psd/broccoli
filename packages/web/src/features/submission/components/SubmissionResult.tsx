@@ -9,6 +9,7 @@ import {
 import { TextPreview } from '@broccoli/web-sdk/ui';
 import { Timer, XCircle } from 'lucide-react';
 
+import { submissionPhase } from '../utils/phase';
 import { ReadOnlyCodeViewer } from './ReadOnlyCodeViewer';
 import { SubmissionTestCases } from './SubmissionTestCases';
 
@@ -32,12 +33,14 @@ export function SubmissionResult({
     );
   }
 
-  // Pure spinner states: Pending, Compiling
+  // One activity spinner, while the submission is being judged and has no
+  // live test cases to show yet. A submission waiting for its contest's
+  // plugin shows no activity: its badge says why (see `submissionPhase`).
   const status = submission?.status;
+  const phase = submission ? submissionPhase(submission) : 'judging';
   if (
     (!submission && isSubmitting) ||
-    status === 'Pending' ||
-    status === 'Compiling'
+    (phase === 'judging' && status !== 'Running')
   ) {
     const statusLabel =
       status === 'Compiling' ? t('result.compiling') : t('result.judging');
