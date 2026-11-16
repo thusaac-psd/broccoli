@@ -154,3 +154,58 @@ test('a contest page that first loads during an outage fills in by itself once t
     }),
   );
 });
+
+// A running contest's page asks about it about once a minute, so an outage
+// that starts while the page is open shows without navigating, and so does
+// its end, at a budget of about one request per seat per minute.
+test('a running contest page notices an outage that starts while it is open, and its end', async ({
+  page,
+}) => {
+  await page.clock.install({ time: NOW });
+  await mockApi(page, 'contestant');
+  const running = contest(
+    1,
+    'Spring Training Contest 2026',
+    -60,
+    240,
+    'running',
+  );
+  const outage = { state: 'disabled', plugin_id: 'icpc' };
+  let out = false;
+  let asked = 0;
+  await page.route(/\/api\/v1\/contests\/1(\?|$)/, (route) => {
+    asked += 1;
+    return route.fulfill({
+      headers: { date: new Date(NOW).toUTCString() },
+      json: out ? { ...running, plugin_outage: outage } : running,
+    });
+  });
+  const notice = page
+    .getByText(
+      'Results for this contest are unavailable while its plugin is disabled.',
+    )
+    .first();
+  await page.goto('/contests/1');
+  await expect(page.getByText('Ends In').first()).toBeVisible();
+
+  const before = asked;
+  await page.clock.runFor(10 * 60_000);
+  // Ten minutes at no more than one ask per 45 s, and at least one per 75 s.
+  expect(asked - before).toBeGreaterThanOrEqual(8);
+  expect(asked - before).toBeLessThanOrEqual(14);
+
+  out = true;
+  await runClockUntil(
+    page,
+    () => expect(notice).toBeVisible({ timeout: 500 }),
+    {
+      stepMs: 10_000,
+      steps: 12,
+    },
+  );
+  out = false;
+  await runClockUntil(page, () => expect(notice).toBeHidden({ timeout: 500 }), {
+    stepMs: 10_000,
+    steps: 12,
+  });
+});

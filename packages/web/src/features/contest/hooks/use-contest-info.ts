@@ -11,7 +11,9 @@ export const contestQueryKey = (contestId: number) => ['contest', contestId];
  * The contest `contestId`, with the phase and plugin outage the server
  * reports. The query polls itself (`contestPollPace`): once the server clock
  * passes the instant the phase next changes, until the server reports the
- * new phase, and slowly while the contest's plugin is out, until it is back.
+ * new phase; about once a minute while the contest runs, so an outage that
+ * starts or ends shows; and slowly while the contest's plugin is out, until
+ * it is back.
  * Every view of the contest shares this one query, so they move on together
  * and on the server's word, and a poll still in flight is never cancelled
  * for the next.
