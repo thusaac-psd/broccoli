@@ -280,6 +280,13 @@ const SUBMISSION_DETAIL = {
   },
 };
 
+/** The withheld submission of the disabled contest, as its page reads it. */
+const WITHHELD_DETAIL = {
+  ...WITHHELD_SUBMISSION,
+  files: SUBMISSION_DETAIL.files,
+  result: null,
+};
+
 /** A submission that failed to judge, with the operator's diagnostics. */
 export const SYSTEM_ERROR_DETAIL = {
   ...submission(5, 2, 'SystemError'),
@@ -522,6 +529,8 @@ const ROUTES: [string, RegExp, Handler][] = [
   ['GET', /^\/submissions\/1\/judgements$/, () => []],
   ['GET', /^\/submissions\/5$/, () => SYSTEM_ERROR_DETAIL],
   ['GET', /^\/submissions\/5\/judgements$/, () => []],
+  ['GET', /^\/submissions\/4$/, () => WITHHELD_DETAIL],
+  ['GET', /^\/submissions\/4\/judgements$/, () => []],
   [
     'GET',
     /^\/submissions\/\d+\/judgements\/(\d+)$/,

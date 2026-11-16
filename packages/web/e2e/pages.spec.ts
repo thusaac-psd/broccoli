@@ -33,6 +33,8 @@ const PAGES: Record<Viewer, string[]> = {
     '/contests/1/problems/2',
     '/contests/1/submissions',
     '/contests/2',
+    // An outage withholds the verdict: its badge says why, at length.
+    '/submissions/4',
   ],
 };
 
