@@ -246,3 +246,55 @@ async fn the_claim_indexes_match_the_predicates_the_queue_scans_use() {
     }
     boot.release().await.expect("release");
 }
+
+/// `error_stands` arrives on judgements decided before it: every finalized
+/// system error that no retry can take any more (one its submission already
+/// shows, or one that is not current) stands; one still awaiting the retry's
+/// decision (its submission shows the attempt in flight) does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn error_stands_marks_the_system_errors_decided_before_it() {
+    use sea_orm_migration::MigratorTrait;
+
+    let (_pg, port) = postgres().await;
+    let db = connect(&url(port, "postgres")).await;
+    let before = super::Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == "m0010_error_stands")
+        .expect("m0010 is known");
+    super::Migrator::up(db.as_sea_orm(), Some(before as u32))
+        .await
+        .expect("migrate up to m0010");
+    db.execute_unprepared(
+        "INSERT INTO \"user\" (id, username, display_name, password, created_at) \
+             VALUES (1, 'u', 'u', 'x', NOW()); \
+         INSERT INTO problem (id, title, content, time_limit, memory_limit, problem_type, \
+             default_contest_type, checker_format, created_at, updated_at) \
+             VALUES (1, 'p', 'c', 1000, 1024, 'standard', 'standard', 'lines', NOW(), NOW()); \
+         INSERT INTO submission (id, files, language, user_id, problem_id, contest_type, \
+             status, verdict, judge_epoch, max_judge_epoch, created_at) VALUES \
+             (1, '[]', 'cpp', 1, 1, 'standard', 'SystemError', 'SystemError', 2, 2, NOW()), \
+             (2, '[]', 'cpp', 1, 1, 'standard', 'Running', NULL, 2, 2, NOW()); \
+         INSERT INTO submission_judgement (id, submission_id, version, is_current, \
+             is_finalized, status, verdict, judge_epoch, created_at, queued_at) VALUES \
+             (1, 1, 2, TRUE, TRUE, 'SystemError', 'SystemError', 2, NOW(), NOW()), \
+             (2, 1, 1, FALSE, TRUE, 'Judged', 'SystemError', 1, NOW(), NOW()), \
+             (3, 2, 1, TRUE, TRUE, 'SystemError', 'SystemError', 2, NOW(), NOW()), \
+             (4, 2, 0, FALSE, TRUE, 'Judged', 'Accepted', 1, NOW(), NOW());",
+    )
+    .await
+    .expect("seed judgements decided before m0010");
+    super::Migrator::up(db.as_sea_orm(), None)
+        .await
+        .expect("migrate the rest");
+
+    let standing = rows(
+        &db,
+        "SELECT id::text AS fact FROM submission_judgement WHERE error_stands",
+    )
+    .await;
+    assert_eq!(
+        standing,
+        BTreeSet::from(["1".to_string(), "2".to_string()]),
+        "the shown and the past system errors stand; the undecided one and a verdict do not"
+    );
+}

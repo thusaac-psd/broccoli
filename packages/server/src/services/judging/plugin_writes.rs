@@ -9,6 +9,7 @@ use common::StatusPhase;
 
 use super::fault::{Recorded, SystemErrorClass};
 use super::unit::{Unit, cascade};
+use crate::error::HostCode;
 use crate::services::plugin_output::plugin_code;
 
 /// A plugin's write to the unit it was dispatched with: the parts of it
@@ -82,6 +83,9 @@ impl PluginWrite for CodeRunUpdate {
 /// error code a judgement or code run write carries:
 ///
 /// - the plugin's own code is recorded under its id ([`plugin_code`]);
+/// - an update that ends the unit as a system error states its code: one
+///   that names none is recorded as `PLUGIN_ERROR`, so no system error, one
+///   that stands least of all, is shown without a code;
 /// - the plugin's word that its system error stands
 ///   ([`SubmissionUpdate::stands`]) counts only on the update that ends the
 ///   unit in one;
@@ -106,6 +110,9 @@ pub(crate) fn as_recorded<W: PluginWrite>(
         .take()
         .map(|code| code.map(|code| plugin_code(plugin_id, &code)));
     let ends_in_system_error = update.ends_in_system_error();
+    if ends_in_system_error && !matches!(update.error_code(), Some(Some(_))) {
+        *update.error_code() = Some(Some(HostCode::PluginError.as_str().to_string()));
+    }
     update.set_stands(update.stands() && ends_in_system_error);
     let Some(fault) = fault else {
         return Some(update);
@@ -320,7 +327,6 @@ fn push_double_opt_str<P: SqlBindSink>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::HostCode;
     use crate::services::judging::fault::DispatchFault;
     use common::worker::OperationFault;
 
@@ -411,6 +417,60 @@ mod tests {
                 .unwrap()
                 .stands
         );
+    }
+
+    /// A system error a plugin writes without a code is recorded with the
+    /// host's `PLUGIN_ERROR`, a judgement's and a code run's alike.
+    #[test]
+    fn a_system_error_without_a_code_is_recorded_as_a_plugin_error() {
+        for code in [None, Some(None)] {
+            let u = SubmissionUpdate {
+                error_code: code.clone(),
+                ..update(SubmissionStatus::Judged, Some(Verdict::SystemError))
+            };
+            assert_eq!(
+                as_recorded("judge", u, None).unwrap().error_code,
+                Some(Some("PLUGIN_ERROR".into()))
+            );
+            let run = CodeRunUpdate {
+                status: Some(SubmissionStatus::Judged),
+                verdict: Some(Some(Verdict::SystemError)),
+                error_code: code,
+                ..Default::default()
+            };
+            assert_eq!(
+                as_recorded("judge", run, None).unwrap().error_code,
+                Some(Some("PLUGIN_ERROR".into()))
+            );
+        }
+        let progress = SubmissionUpdate {
+            error_code: None,
+            ..update(SubmissionStatus::Running, Some(Verdict::SystemError))
+        };
+        assert_eq!(
+            as_recorded("judge", progress, None).unwrap().error_code,
+            None
+        );
+    }
+
+    /// A plugin's write has no `SystemError` status to send: its system
+    /// error is a terminal status with a `SystemError` verdict, the one shape
+    /// [`PluginWrite::ends_in_system_error`] reads.
+    #[test]
+    fn a_plugin_cannot_write_a_system_error_status() {
+        let refused = serde_json::from_value::<SubmissionUpdate>(serde_json::json!({
+            "submission_id": 1,
+            "judgement_id": 1,
+            "judge_epoch": 1,
+            "status": "SystemError",
+        }));
+        assert!(refused.is_err());
+        let refused = serde_json::from_value::<CodeRunUpdate>(serde_json::json!({
+            "code_run_id": 1,
+            "judge_epoch": 1,
+            "status": "SystemError",
+        }));
+        assert!(refused.is_err());
     }
 
     #[test]

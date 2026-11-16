@@ -365,17 +365,21 @@ function JudgementRow({
             {formatNumber(judgement.score)} {t('result.pointsUnit')}
           </span>
         )}
-        {canManage && !judgement.is_current && judgement.is_finalized && (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={applying}
-            onClick={onApply}
-          >
-            <Check className="mr-1 h-4 w-4" />
-            {t('submissionDetail.applyVersion')}
-          </Button>
-        )}
+        {canManage &&
+          !judgement.is_current &&
+          judgement.is_finalized &&
+          // A superseded judgement never got a result to apply.
+          judgement.status !== 'Superseded' && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={applying}
+              onClick={onApply}
+            >
+              <Check className="mr-1 h-4 w-4" />
+              {t('submissionDetail.applyVersion')}
+            </Button>
+          )}
         {canManage && !judgement.is_current && judgement.is_finalized && (
           <Button
             size="sm"

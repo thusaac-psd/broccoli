@@ -78,8 +78,18 @@ impl WorkerSlots {
         }
     }
 
-    /// Live workers are known and none of them takes work: whatever is
-    /// claimed now would only wait at the queue.
+    /// Some live worker takes work: the one condition under which the claim
+    /// takes queued work. With no live worker, or only workers that take
+    /// none, whatever is claimed would only wait at the queue, out of sight,
+    /// so the work stays `Queued`.
+    pub fn takes_work(&self) -> bool {
+        self.intake() == FleetIntake::Accepting
+    }
+
+    /// Live workers are known and none of them takes work: what this server
+    /// waits for at the queue is never run, since every live worker refuses
+    /// it (see `consumers::operation_result::hand_back_while_none_accepting`).
+    /// An empty fleet is not this: the next worker to arrive reads the queue.
     pub fn none_accepting(&self) -> bool {
         self.intake() == FleetIntake::NoneAccepting
     }
@@ -383,17 +393,20 @@ mod tests {
     fn only_workers_that_take_work_are_capacity() {
         let slots = WorkerSlots::default();
         assert!(!slots.none_accepting(), "no worker known yet");
+        assert!(!slots.takes_work(), "no worker known yet");
         slots.observe(&[heartbeat(4, &["broccoli-compare"])], 1);
         assert_eq!(slots.get(), 0);
         assert!(slots.none_accepting());
         slots.observe(&[heartbeat(4, &["broccoli-compare"]), heartbeat(2, &[])], 1);
         assert_eq!(slots.get(), 2);
         assert!(!slots.none_accepting());
+        assert!(slots.takes_work());
         slots.observe(&[], 1);
         assert!(
             !slots.none_accepting(),
             "no live worker is not a refusing one"
         );
+        assert!(!slots.takes_work(), "and takes no work either");
     }
 
     #[test]

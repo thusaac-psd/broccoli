@@ -544,6 +544,35 @@ async fn a_reply_mark_from_before_the_stream_was_lost_reads_as_stale() {
     );
 }
 
+/// A mark taken before the inbox's first read names an entry of the stream
+/// as it is then; once that stream is lost, the mark reads as stale too.
+#[tokio::test]
+async fn a_reply_mark_taken_before_the_first_read_reads_as_stale_once_the_stream_is_lost() {
+    let (_c, url) = redis().await;
+    let mq = Mq::connect(&url, BASE).await.unwrap();
+    let mut conn = admin(&url).await;
+    let key = mq.topology().reply("s1");
+    let mut inbox = mq.reply_inbox("s1");
+    let _: String = redis::cmd("XADD")
+        .arg(&key)
+        .arg("5000-0")
+        .arg("p")
+        .arg(serde_json::to_string(&completed("r0")).unwrap())
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let before = inbox.mark(Some("5000-0".into()));
+    assert_eq!(inbox.read_through(&before), Some(false));
+
+    let _: () = redis::cmd("DEL")
+        .arg(&key)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(inbox.next_batch().await.unwrap().is_empty());
+    assert_eq!(inbox.read_through(&before), None, "the old mark is stale");
+}
+
 #[tokio::test]
 async fn pinned_tasks_follow_their_worker_and_move_to_the_shared_stream_when_it_dies() {
     let (_c, url) = redis().await;
@@ -698,6 +727,46 @@ async fn a_live_worker_that_takes_no_work_gets_no_pinned_task_and_gives_up_its_u
         Route::Pinned
     );
     assert_eq!(mq.drain_unread_private_streams().await.unwrap(), 0);
+}
+
+/// A worker that restarts under the same id without a platform tool takes no
+/// work and never adopts what its previous instance read: those entries go
+/// idle, and once idle past the claim threshold they are no longer held but
+/// move to the shared stream, keeping their delivery count.
+#[tokio::test]
+async fn a_refusing_workers_entries_idle_past_the_claim_threshold_move_to_the_shared_stream() {
+    let (_c, url) = redis().await;
+    let mq = Mq::connect(&url, BASE).await.unwrap();
+    let mut conn = admin(&url).await;
+    set_live(&mut conn, NodeRole::Worker, "w1").await;
+    let w1 = mq.task_consumer("w1");
+    w1.ensure_groups().await.unwrap();
+    for id in ["fresh", "stale"] {
+        assert_eq!(
+            mq.publish_task(&task(id), Some("w1")).await.unwrap(),
+            Route::Pinned
+        );
+    }
+    let held = w1.reader().read(2).await.unwrap();
+    assert_eq!(held.len(), 2);
+    let stale = held
+        .iter()
+        .find(|d| d.payload.as_ref().is_ok_and(|t| t.id == "stale"))
+        .unwrap();
+    age(&mut conn, "w1", &stale.entry, mq::CLAIM_IDLE * 2).await;
+    let refusing = Intake::from_missing(vec!["broccoli-compare".into()]);
+    set_liveness(&mut conn, NodeRole::Worker, "w1", &refusing).await;
+
+    assert_eq!(
+        mq.drain_unread_private_streams().await.unwrap(),
+        1,
+        "the stale entry moves; the one refreshed within the threshold stays"
+    );
+    let w2 = mq.task_consumer("w2");
+    w2.ensure_groups().await.unwrap();
+    let got = w2.reader().read(10).await.unwrap();
+    assert_eq!(ids(&got), BTreeSet::from(["stale".into()]));
+    assert_eq!(got[0].deliveries, 2, "the delivery count moves with it");
 }
 
 #[tokio::test]

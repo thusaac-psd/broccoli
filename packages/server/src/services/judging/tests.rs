@@ -135,13 +135,12 @@ async fn claim_one(db: &DatabaseConnection, server: &str) -> ClaimedJudgement {
 fn dispatch_of(live: &LiveDispatches, j: &submission_judgement::Model) -> Dispatch {
     Dispatch::new(
         "p",
-        DispatchedUnit::Judgement {
+        live.enter(DispatchedUnit::Judgement {
             submission_id: j.submission_id,
             judgement_id: j.id,
             judge_epoch: j.judge_epoch,
-        },
+        }),
         DispatchFaults::default(),
-        live,
     )
 }
 
@@ -384,7 +383,7 @@ async fn an_immediate_rejudge_queues_both_rows_with_no_owner() {
         old.is_finalized,
         "the in-flight judgement it replaces is finalized"
     );
-    assert_eq!(old.status, SubmissionStatus::SystemError);
+    assert_eq!(old.status, SubmissionStatus::Superseded);
 
     let now = sub(&db, s.id).await;
     assert_eq!(now.status, SubmissionStatus::Queued);
@@ -782,6 +781,44 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
         .await
         .unwrap();
     assert!(pass.confirmed.is_empty(), "confirmed once");
+}
+
+/// A system error whose submission already shows it as its final result at
+/// its epoch is decided: the retry never reopens it.
+#[tokio::test]
+async fn a_system_error_its_submission_already_shows_is_never_reopened() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (s, _) = new_submission(&db).await;
+    let claimed = claim_one(&db, "srv").await;
+    exec(
+        &db,
+        &format!(
+            "UPDATE submission_judgement SET status = 'SystemError', verdict = 'SystemError', \
+             error_code = 'PLUGIN_ERROR', is_finalized = TRUE, finalized_at = NOW(), \
+             error_stands = FALSE WHERE id = {}",
+            claimed.judgement.id,
+        ),
+    )
+    .await;
+    exec(
+        &db,
+        &format!(
+            "UPDATE submission SET status = 'SystemError', verdict = 'SystemError', \
+             error_code = 'PLUGIN_ERROR' WHERE id = {}",
+            s.id
+        ),
+    )
+    .await;
+
+    let pass = retry_system_errors(&db, RetryBudget::new(5), 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(pass, SystemErrorPass::default());
+    assert_eq!(sub(&db, s.id).await.status, SubmissionStatus::SystemError);
+    assert_eq!(
+        judgement(&db, claimed.judgement.id).await.status,
+        SubmissionStatus::SystemError
+    );
 }
 
 /// A contestant's verdict is never retried, and neither is a failure every
@@ -1433,7 +1470,7 @@ async fn provider(db: &DatabaseConnection, enabled: bool) {
         db,
         &format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
-             VALUES ('std', {enabled}, '{{\"visibility\": false, \"contest_types\": [\"standard\"]}}') \
+             VALUES ('std', {enabled}, '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         ),
     )
@@ -1495,6 +1532,66 @@ async fn work_of_a_disabled_contest_plugin_is_parked_until_it_is_enabled() {
     assert_eq!(sub(&db, waiting.id).await.status, SubmissionStatus::Queued);
 
     provider(&db, true).await;
+    assert_eq!(claimable(&db).await, 2, "both resume");
+}
+
+/// Records `standard` (the problem type [`new_submission`] uses) as
+/// evaluated by one plugin, enabled or not.
+async fn evaluator(db: &DatabaseConnection, enabled: bool) {
+    exec(
+        db,
+        &format!(
+            "INSERT INTO plugin (id, is_enabled, governs) \
+             VALUES ('eval', {enabled}, \
+                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"standard\"]}}') \
+             ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
+        ),
+    )
+    .await;
+}
+
+/// A unit needs its problem type's evaluator as much as its contest type's
+/// plugin: while every evaluator of the problem type is disabled, its work
+/// is parked exactly as for a disabled contest plugin. A failure the disable
+/// causes goes back to `Queued` spending nothing, a system error awaiting
+/// its retry is handed back instead of burning the budget, and nothing is
+/// claimed until an evaluator is enabled.
+#[tokio::test]
+async fn work_whose_evaluator_plugin_is_disabled_is_parked_until_it_is_enabled() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    evaluator(&db, true).await;
+    let (cut, _) = new_submission(&db).await;
+    let claimed = claim_one(&db, "srv").await;
+    let (erred, _) = new_submission(&db).await;
+    let failed = claim_one(&db, "srv").await;
+    finish(&db, &failed.judgement, Verdict::SystemError).await;
+
+    evaluator(&db, false).await;
+    assert_eq!(
+        fail_dispatch(
+            &db,
+            Unit::Judgement,
+            claimed.judgement.id,
+            claimed.judgement.judge_epoch,
+            &DispatchFailure::judging(HostCode::PluginExecutionError, "no evaluator"),
+        )
+        .await
+        .unwrap(),
+        DispatchFailed::HandedBack
+    );
+    let pass = retry_system_errors(&db, RetryBudget::new(1), 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(pass.handed_back, 1, "{pass:?}");
+    assert_eq!(pass.requeued, 0, "{pass:?}");
+    for id in [cut.id, erred.id] {
+        let s = sub(&db, id).await;
+        assert_eq!(s.status, SubmissionStatus::Queued);
+        assert_eq!(s.system_error_retries, 0, "no budget is spent");
+    }
+    assert_eq!(claimable(&db).await, 0, "parked work is not claimed");
+
+    evaluator(&db, true).await;
     assert_eq!(claimable(&db).await, 2, "both resume");
 }
 
@@ -1707,31 +1804,27 @@ async fn a_failed_code_run_is_handed_back_or_finalized_by_the_judgements_rule() 
 }
 
 /// A judgement superseded before it finished never got a verdict: it ends
-/// as a `SUPERSEDED` system error that stands, a decided outcome no retry
-/// takes for a failed attempt. Applied back, the submission shows it as it
-/// is instead of judging it again.
+/// `Superseded`, history and not a system error, which no retry takes and
+/// which cannot be applied back.
 #[tokio::test]
-async fn a_judgement_superseded_unfinished_stands_as_superseded() {
+async fn a_judgement_superseded_unfinished_ends_superseded() {
     let (_pg, db) = crate::test_support::postgres().await;
     let (s, first) = new_submission(&db).await;
     claim_one(&db, "srv").await;
     rejudge(&db, s.id, true).await;
     let superseded = judgement(&db, first.id).await;
-    assert_eq!(superseded.status, SubmissionStatus::SystemError);
-    assert_eq!(superseded.error_code.as_deref(), Some("SUPERSEDED"));
-    assert!(superseded.is_finalized && superseded.error_stands);
-
-    let txn = db.begin().await.unwrap();
-    let ApplyJudgement::Applied(applied) = apply_judgement(&txn, s.id, first.id).await.unwrap()
-    else {
-        panic!("applied");
-    };
-    txn.commit().await.unwrap();
-    assert_eq!(applied.status, SubmissionStatus::SystemError);
+    assert_eq!(superseded.status, SubmissionStatus::Superseded);
+    assert!(superseded.is_finalized && !superseded.is_current);
     let pass = retry_system_errors(&db, RetryBudget::new(5), 10, NO_TYPES)
         .await
         .unwrap();
     assert_eq!(pass, SystemErrorPass::default(), "nothing to re-judge");
+
+    let txn = db.begin().await.unwrap();
+    assert!(matches!(
+        apply_judgement(&txn, s.id, first.id).await.unwrap(),
+        ApplyJudgement::Superseded
+    ));
 }
 
 /// In-flight work of a parked type whose owner was lost goes back without

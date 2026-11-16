@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::common::{SpawnOptions, TestApp, routes};
+use crate::common::{SpawnOptions, TestApp, routes, worker_heartbeat};
 use broccoli_server_sdk::types::OperationTask;
 use common::SubmissionStatus;
 use common::liveness::NodeRole;
@@ -20,7 +20,7 @@ use server::dispatcher::fanout::WorkerSlots;
 use server::entity::{submission, user};
 use server::host_funcs::context::OperationHostDeps;
 use server::registry::OperationBatches;
-use server::services::judging::{Dispatch, DispatchFaults, DispatchedUnit};
+use server::services::judging::{Dispatch, DispatchFaults, DispatchedUnit, LiveDispatches};
 use server::services::operation_batch::{
     OperationTaskPublisher, next_operation_result_async, start_operation_batch,
 };
@@ -113,38 +113,30 @@ async fn queued_work_is_not_claimed_while_the_queue_is_unreachable() {
 }
 
 fn heartbeat(missing_platform_tools: &[&str]) -> common::worker::HeartbeatPayload {
-    common::worker::HeartbeatPayload {
-        id: "w".into(),
-        started_at: chrono::Utc::now(),
-        last_seen: chrono::Utc::now(),
-        in_flight: 0,
-        max_concurrency: Some(1),
-        fairness_mode: "unknown".into(),
-        sandbox_backend: "test".into(),
-        version: "test".into(),
-        hostname: None,
-        ip_addresses: Vec::new(),
-        os: None,
-        arch: None,
-        cpu_count: None,
-        pid: None,
-        intake: common::worker::Intake::from_missing(
-            missing_platform_tools
-                .iter()
-                .map(|t| t.to_string())
-                .collect(),
-        ),
-    }
+    worker_heartbeat(common::worker::Intake::from_missing(
+        missing_platform_tools
+            .iter()
+            .map(|t| t.to_string())
+            .collect(),
+    ))
 }
 
 #[tokio::test]
 async fn queued_work_waits_while_no_live_worker_takes_work() {
     let app = TestApp::spawn_with_options(SpawnOptions {
         disable_claim_fiber: true,
+        no_workers: true,
         ..Default::default()
     })
     .await;
     let row = queued_submission(&app, "no_worker_admin").await;
+
+    // No live worker at all: nothing would run the work either.
+    let pass = claim_once(&app.state, "no-worker", 32, 0).await.unwrap();
+    assert_eq!(pass, ClaimPass::CANNOT_RUN);
+    let judgement = app.current_judgement(row.id).await;
+    assert_eq!(judgement.status, SubmissionStatus::Queued);
+    assert_eq!(judgement.owner_server_id, None);
 
     app.state
         .worker_slots
@@ -253,13 +245,12 @@ async fn operation_deps(slots: &WorkerSlots, faults: &DispatchFaults) -> Operati
         judgement: None,
         dispatch: Some(Dispatch::new(
             "hand-back-plugin",
-            DispatchedUnit::Judgement {
+            LiveDispatches::default().enter(DispatchedUnit::Judgement {
                 submission_id: 1,
                 judgement_id: 1,
                 judge_epoch: 0,
-            },
+            }),
             faults.clone(),
-            &Default::default(),
         )),
         worker_slots: slots.clone(),
     }

@@ -57,8 +57,9 @@ pub struct SubmissionResponse {
     /// Set when the submission's outcome (status, verdict, score, result) is
     /// left out of this response, with why.
     pub withheld: Option<crate::visibility::Withheld>,
-    /// Set while the submission waits because the plugin judging its contest
-    /// type is disabled: it stays queued until the plugin is enabled again.
+    /// Set while the submission waits because a plugin it needs (the one
+    /// judging its contest type, or its problem type's evaluator) is
+    /// disabled: it stays queued until the plugin is enabled again.
     pub plugin_outage: Option<crate::visibility::PluginOutage>,
 }
 
@@ -101,8 +102,9 @@ pub struct SubmissionListItem {
     /// Set when the submission's outcome (status, verdict, score, times) is
     /// left out of this row, with why.
     pub withheld: Option<crate::visibility::Withheld>,
-    /// Set while the submission waits because the plugin judging its contest
-    /// type is disabled: it stays queued until the plugin is enabled again.
+    /// Set while the submission waits because a plugin it needs (the one
+    /// judging its contest type, or its problem type's evaluator) is
+    /// disabled: it stays queued until the plugin is enabled again.
     pub plugin_outage: Option<crate::visibility::PluginOutage>,
 }
 

@@ -77,9 +77,11 @@ pub(super) async fn build_submission_list_items(
             time_used: sub.time_used,
             memory_used: sub.memory_used,
             withheld: None,
-            plugin_outage: state
-                .plugin_lifecycle
-                .parked_by(&sub.contest_type, sub.status),
+            plugin_outage: state.plugin_lifecycle.parked_by(
+                &sub.contest_type,
+                &problem_model.problem_type,
+                sub.status,
+            ),
         });
     }
 
@@ -392,6 +394,7 @@ async fn load_result_page(
 struct SubmissionContext {
     username: String,
     problem_title: String,
+    problem_type: String,
     show_test_details: bool,
     contest: Option<contest::Model>,
     current_judgement_id: Option<i32>,
@@ -402,7 +405,7 @@ impl SubmissionContext {
         let row = db
             .query_one_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                r#"SELECT u.username, p.title, p.show_test_details,
+                r#"SELECT u.username, p.title, p.problem_type, p.show_test_details,
                           CASE WHEN c.id IS NULL THEN NULL ELSE to_jsonb(c) END AS contest,
                           (SELECT j.id FROM submission_judgement j
                            WHERE j.submission_id = $3 AND j.is_current) AS current_judgement_id
@@ -430,6 +433,7 @@ impl SubmissionContext {
         Ok(Self {
             username: row.try_get("", "username")?,
             problem_title: row.try_get("", "title")?,
+            problem_type: row.try_get("", "problem_type")?,
             show_test_details: row.try_get("", "show_test_details")?,
             contest,
             current_judgement_id: row.try_get("", "current_judgement_id")?,
@@ -550,9 +554,11 @@ pub(super) async fn build_submission_response_with_cases(
         created_at: sub.created_at,
         result: result_response,
         withheld: None,
-        plugin_outage: state
-            .plugin_lifecycle
-            .parked_by(&sub.contest_type, sub.status),
+        plugin_outage: state.plugin_lifecycle.parked_by(
+            &sub.contest_type,
+            &context.problem_type,
+            sub.status,
+        ),
     })
 }
 
@@ -616,7 +622,8 @@ pub(super) async fn build_judgement_response(
 
 /// `judgement` as the submission it belongs to shows it. A current judgement
 /// that finished as a system error the system-error retry may still re-judge
-/// (one that does not stand) is not mirrored onto its submission until the
+/// (one that does not stand, and that its submission does not already show
+/// as its final result) is not mirrored onto its submission until the
 /// retry decides (`judging::unit::awaits_retry_decision`): the submission
 /// keeps showing the attempt in flight. The judgement history shows that
 /// judgement the same way, from the submission's projection, so neither shows
@@ -629,7 +636,8 @@ pub(super) fn as_its_submission_shows(
     let awaits_decision = judgement.is_current
         && judgement.is_finalized
         && is_system_error(&judgement.status, judgement.verdict.as_ref())
-        && !judgement.error_stands;
+        && !judgement.error_stands
+        && !(sub.status.is_terminal() && sub.judge_epoch == judgement.judge_epoch);
     if awaits_decision {
         judgement.status = sub.status;
         judgement.verdict = sub.verdict.clone();
@@ -802,5 +810,12 @@ mod judgement_history_tests {
             let shown = as_its_submission_shows(judgement.clone(), &sub);
             assert_eq!(shown, judgement);
         }
+        // Its submission already shows it as the final result: decided.
+        let judgement = system_error(true, false);
+        let shown = as_its_submission_shows(
+            judgement.clone(),
+            &submission_row(SubmissionStatus::SystemError),
+        );
+        assert_eq!(shown, judgement);
     }
 }

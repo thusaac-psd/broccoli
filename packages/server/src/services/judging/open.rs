@@ -1,6 +1,5 @@
 //! Transitions that create judgements or move "current" between them.
 
-use crate::error::HostCode;
 use common::SubmissionStatus;
 use common::db::DatabaseTransaction;
 use sea_orm::sea_query::Expr;
@@ -154,7 +153,7 @@ pub(crate) async fn open_judgement(
             triggered_by_user_id,
             target_worker_id,
         } => {
-            supersede_current_judgement(txn, submission_id, SupersededBy::Rejudge).await?;
+            supersede_current_judgement(txn, submission_id).await?;
             let target = target_worker_id.unwrap_or_else(|| sub.target_worker_id.clone());
             let judgement = new_judgement(&sub, version, true, Some(triggered_by_user_id), target)
                 .insert(txn)
@@ -187,48 +186,26 @@ async fn next_version<C: ConnectionTrait>(txn: &C, submission_id: i32) -> Result
     Ok(max.unwrap_or(0).saturating_add(1))
 }
 
-/// Why a current judgement stops being current.
-#[derive(Clone, Copy)]
-enum SupersededBy {
-    Rejudge,
-    AppliedJudgement,
-}
-
-impl SupersededBy {
-    fn message(self) -> &'static str {
-        match self {
-            SupersededBy::Rejudge => "Superseded by rejudge",
-            SupersededBy::AppliedJudgement => "Superseded by an applied judgement",
-        }
-    }
-}
-
 /// Takes the submission's current judgement out of service in one
 /// statement: clears `is_current` and, if it was not finalized, finalizes it
-/// as a `SUPERSEDED` system error that stands: it never got a verdict, and no
-/// retry takes it for a failed attempt, even applied back. A finalized
+/// as `Superseded`: it never got a verdict, so it is history, not a result
+/// ([`apply_judgement`] refuses it, and no retry takes it). A finalized
 /// judgement accepts no plugin writes and is never dispatched again; an
 /// already finalized one keeps its verdict as version history.
 async fn supersede_current_judgement<C: ConnectionTrait>(
     txn: &C,
     submission_id: i32,
-    reason: SupersededBy,
 ) -> Result<(), DbErr> {
     txn.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         r#"UPDATE submission_judgement SET
                is_current = FALSE,
                status = CASE WHEN is_finalized THEN status ELSE $1 END,
-               error_code = CASE WHEN is_finalized THEN error_code ELSE $2 END,
-               error_message = CASE WHEN is_finalized THEN error_message ELSE $3 END,
-               error_stands = CASE WHEN is_finalized THEN error_stands ELSE TRUE END,
                finalized_at = CASE WHEN is_finalized THEN finalized_at ELSE NOW() END,
                is_finalized = TRUE
-           WHERE submission_id = $4 AND is_current = TRUE"#,
+           WHERE submission_id = $2 AND is_current = TRUE"#,
         [
-            SubmissionStatus::SystemError.to_string().into(),
-            HostCode::Superseded.as_str().into(),
-            reason.message().into(),
+            SubmissionStatus::Superseded.to_string().into(),
             submission_id.into(),
         ],
     ))
@@ -242,10 +219,13 @@ pub(crate) enum ApplyJudgement {
     SubmissionNotFound,
     JudgementNotFound,
     NotFinalized,
+    /// It was superseded before it got a verdict: there is no result to show.
+    Superseded,
 }
 
 /// Makes a finalized judgement the submission's current one, in the
-/// caller's transaction.
+/// caller's transaction. A superseded judgement never had a result and is
+/// refused.
 ///
 /// The judgement becomes current under a FRESH epoch, never its own older
 /// one: copying it back would move `judge_epoch` backwards and reuse an
@@ -279,8 +259,11 @@ pub(crate) async fn apply_judgement(
     if !judgement.is_finalized {
         return Ok(ApplyJudgement::NotFinalized);
     }
+    if judgement.status == SubmissionStatus::Superseded {
+        return Ok(ApplyJudgement::Superseded);
+    }
 
-    supersede_current_judgement(txn, submission_id, SupersededBy::AppliedJudgement).await?;
+    supersede_current_judgement(txn, submission_id).await?;
     submission_judgement::Entity::update_many()
         .col_expr(submission_judgement::Column::IsCurrent, Expr::value(true))
         .col_expr(

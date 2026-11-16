@@ -38,7 +38,7 @@ use crate::services::judging::{
     self, ApplyJudgement, DiscardJudgement, OpenJudgement, apply_judgement, discard_judgement,
     open_judgement,
 };
-use crate::services::submission_dispatch::fire_after_judging_hooks;
+use crate::services::submission_dispatch::spawn_after_judging_hooks;
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, is_problem_in_contest, required_contest_type};
 use crate::utils::judging::{files_to_json, validate_code_payload, validate_submission_contract};
@@ -61,7 +61,7 @@ use super::response::{VisibilityContext, build_submission_response};
     ),
     responses(
         (status = 200, description = "Applied judgement", body = SubmissionResponseAfterMutation),
-        (status = 400, description = "Judgement is not finalized (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 400, description = "Judgement is not finalized, or was superseded before it got a result (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Submission or judgement not found (NOT_FOUND)", body = ErrorBody),
@@ -91,19 +91,21 @@ pub async fn apply_submission_judgement(
                 "Cannot apply a judgement that is not finalized".into(),
             ));
         }
+        ApplyJudgement::Superseded => {
+            return Err(AppError::Validation(
+                "Cannot apply a superseded judgement: it never got a result".into(),
+            ));
+        }
     };
     txn.commit().await?;
 
-    fire_after_judging_hooks(
-        &state.db,
-        state.registries.hook_registry.clone(),
-        &state.registries.contest_type_registry,
+    spawn_after_judging_hooks(
+        &state,
         updated.id,
         updated.user_id,
         updated.problem_id,
         updated.contest_id,
-    )
-    .await;
+    );
 
     let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
     let response = build_submission_response(&state, updated, visibility).await?;

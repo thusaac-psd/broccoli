@@ -16,8 +16,46 @@ use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
 use std::sync::LazyLock;
 use tokio::sync::RwLock;
 
+/// The ids of the background events dispatched, or being dispatched, on
+/// this server (see [`dispatch_hooks_once`]).
 static DISPATCHED_EVENTS: LazyLock<Mutex<LruCache<String, ()>>> =
     LazyLock::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(10_000).unwrap())));
+
+fn dispatched_events() -> std::sync::MutexGuard<'static, LruCache<String, ()>> {
+    DISPATCHED_EVENTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// One dispatch's hold on an event id in [`DISPATCHED_EVENTS`]: taken before
+/// the hooks run, so a duplicate meanwhile is skipped, and given back if the
+/// dispatch is dropped before it completes, so the event is not lost.
+struct EventClaim {
+    id: String,
+    completed: bool,
+}
+
+impl EventClaim {
+    /// The claim on `id`, or `None` when the event was dispatched already or
+    /// is being dispatched now.
+    fn take(id: String) -> Option<Self> {
+        let mut events = dispatched_events();
+        if events.get(&id).is_some() {
+            return None;
+        }
+        events.put(id.clone(), ());
+        Some(Self {
+            id,
+            completed: false,
+        })
+    }
+}
+
+impl Drop for EventClaim {
+    fn drop(&mut self) {
+        if !self.completed {
+            dispatched_events().pop(&self.id);
+        }
+    }
+}
 
 use crate::entity::plugin_config;
 use crate::error::AppError;
@@ -422,9 +460,11 @@ pub fn dispatch_hooks_background(
 }
 
 /// Dispatch an event whose response no one waits for, once per `event_id`
-/// (an event already dispatched under the same id is skipped), as
-/// [`CallClass::Background`] calls. Completes when every hook has run, so a
-/// caller that awaits it can count the hooks as part of its own work.
+/// (an event dispatched, or being dispatched, under the same id is skipped),
+/// as [`CallClass::Background`] calls. Completes when every hook has run, so
+/// a caller that awaits it can count the hooks as part of its own work. The
+/// event counts as dispatched once this completes: dropped before then, it
+/// may be dispatched again.
 pub async fn dispatch_hooks_once(
     topic: &str,
     event_payload: serde_json::Value,
@@ -432,14 +472,16 @@ pub async fn dispatch_hooks_once(
     hook_registry: &SharedHookRegistry,
     event_id: Option<String>,
 ) {
-    if let Some(ref id) = event_id {
-        let mut cache = DISPATCHED_EVENTS.lock().unwrap_or_else(|e| e.into_inner());
-        if cache.get(id).is_some() {
-            tracing::debug!(event_id = %id, topic, "Skipping duplicate background hook event");
-            return;
-        }
-        cache.put(id.clone(), ());
-    }
+    let claim = match event_id {
+        Some(id) => match EventClaim::take(id.clone()) {
+            Some(claim) => Some(claim),
+            None => {
+                tracing::debug!(event_id = %id, topic, "Skipping duplicate background hook event");
+                return;
+            }
+        },
+        None => None,
+    };
 
     match dispatch_hooks(
         topic,
@@ -461,6 +503,9 @@ pub async fn dispatch_hooks_once(
         Err(e) => {
             tracing::warn!(topic, "Background hook dispatch failed: {e:?}");
         }
+    }
+    if let Some(mut claim) = claim {
+        claim.completed = true;
     }
 }
 
@@ -843,6 +888,81 @@ mod tests {
         )
         .await;
         assert_eq!(hook.calls(), 1, "the same event is dispatched once");
+    }
+
+    /// Counts its calls; the first never completes.
+    struct StallingHook {
+        id: String,
+        topics: Vec<String>,
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl GenericHook for StallingHook {
+        type Context = CallOptions;
+
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn topics(&self) -> &[String] {
+            &self.topics
+        }
+
+        async fn on_event(
+            &self,
+            _ctx: CallOptions,
+            _event: &GenericEvent,
+        ) -> anyhow::Result<GenericHookAction> {
+            if self.call_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                std::future::pending::<()>().await;
+            }
+            Ok(HookAction::Pass)
+        }
+    }
+
+    /// An event counts as dispatched only once its dispatch completes: a
+    /// duplicate while it runs is skipped, but a dispatch dropped before its
+    /// hooks ran leaves the event to be dispatched again.
+    #[tokio::test]
+    async fn an_event_whose_dispatch_was_dropped_is_dispatched_again() {
+        use futures::FutureExt;
+        let hook = Arc::new(StallingHook {
+            id: "observer".into(),
+            topics: vec!["after_judging".into()],
+            call_count: AtomicUsize::new(0),
+        });
+        let registry = new_shared_registry();
+        register_direct(
+            &mut *registry.write().await,
+            hook.clone(),
+            HookScope::Global,
+            HookMode::Notify,
+        );
+        let dispatch = || {
+            dispatch_hooks_once(
+                "after_judging",
+                serde_json::json!({}),
+                None,
+                &registry,
+                Some("dropped-test:1".to_string()),
+            )
+        };
+        let mut stalled = Box::pin(dispatch());
+        assert!((&mut stalled).now_or_never().is_none(), "the hook stalls");
+        dispatch().await;
+        assert_eq!(
+            hook.call_count.load(Ordering::SeqCst),
+            1,
+            "a duplicate of a running dispatch is skipped"
+        );
+        drop(stalled);
+        dispatch().await;
+        assert_eq!(
+            hook.call_count.load(Ordering::SeqCst),
+            2,
+            "the dropped dispatch did not use up the event"
+        );
     }
 
     #[tokio::test]

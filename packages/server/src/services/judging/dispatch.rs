@@ -56,19 +56,23 @@ impl DispatchedUnit {
     }
 }
 
-/// The dispatches running on this server: a unit is live from its
-/// [`Dispatch::new`] until the last clone of that dispatch (the contest call
-/// and every detached session it started hold one) is dropped. The lease
-/// refresh keeps exactly these units' leases fresh, so a unit this server
-/// owns but no longer works on (its task panicked or was lost) lapses and is
-/// stolen instead of being kept alive by a server that never finishes it.
+/// The units this server works on: a unit is live from the moment its claim
+/// takes it ([`LiveDispatches::enter`], before anything about its dispatch
+/// can wait) until its [`LiveUnit`] is dropped, which the [`Dispatch`] built
+/// from it holds until its last clone (the contest call and every detached
+/// session it started hold one) is dropped. The lease refresh keeps exactly
+/// these units' leases fresh, so a unit this server owns but no longer works
+/// on (its task panicked or was lost) lapses and is stolen instead of being
+/// kept alive by a server that never finishes it, and a unit whose dispatch
+/// is still preparing or waiting for a dispatcher permit keeps its lease.
 #[derive(Clone, Debug, Default)]
 pub struct LiveDispatches(Arc<Mutex<HashMap<DispatchedUnit, usize>>>);
 
 impl LiveDispatches {
-    fn enter(&self, unit: DispatchedUnit) -> LiveEntry {
+    /// Makes `unit` live until the returned entry is dropped.
+    pub fn enter(&self, unit: DispatchedUnit) -> LiveUnit {
         *self.units().entry(unit).or_default() += 1;
-        LiveEntry {
+        LiveUnit {
             live: self.clone(),
             unit,
         }
@@ -90,14 +94,20 @@ impl LiveDispatches {
     }
 }
 
-/// A dispatch's place in [`LiveDispatches`]; dropping it leaves.
+/// A unit's place in [`LiveDispatches`]; dropping it leaves.
 #[derive(Debug)]
-struct LiveEntry {
+pub struct LiveUnit {
     live: LiveDispatches,
     unit: DispatchedUnit,
 }
 
-impl Drop for LiveEntry {
+impl LiveUnit {
+    pub fn unit(&self) -> DispatchedUnit {
+        self.unit
+    }
+}
+
+impl Drop for LiveUnit {
     fn drop(&mut self) {
         let mut units = self.live.units();
         if let Some(count) = units.get_mut(&self.unit) {
@@ -118,9 +128,8 @@ pub struct Dispatch(Arc<Inner>);
 #[derive(Debug)]
 struct Inner {
     owner: String,
-    unit: DispatchedUnit,
     faults: DispatchFaults,
-    _live: LiveEntry,
+    live: LiveUnit,
 }
 
 /// The [`Dispatch`] a call tree's [`CallLocals`] hold.
@@ -139,19 +148,13 @@ pub enum NotOwned {
 }
 
 impl Dispatch {
-    /// A dispatch of `unit` to `owner`, recording into `faults`, live in
-    /// `live` until its last clone is dropped.
-    pub fn new(
-        owner: &str,
-        unit: DispatchedUnit,
-        faults: DispatchFaults,
-        live: &LiveDispatches,
-    ) -> Self {
+    /// A dispatch of the live unit `live` to `owner`, recording into
+    /// `faults`; the unit stays live until its last clone is dropped.
+    pub fn new(owner: &str, live: LiveUnit, faults: DispatchFaults) -> Self {
         Self(Arc::new(Inner {
             owner: owner.to_string(),
-            unit,
             faults,
-            _live: live.enter(unit),
+            live,
         }))
     }
 
@@ -160,7 +163,7 @@ impl Dispatch {
     }
 
     pub fn unit(&self) -> DispatchedUnit {
-        self.0.unit
+        self.0.live.unit
     }
 
     /// The faults this dispatch's operations met.
@@ -219,7 +222,7 @@ mod tests {
     fn a_seeded_call_shares_the_dispatchs_faults() {
         let faults = DispatchFaults::default();
         let locals =
-            Dispatch::new("p", UNIT, faults.clone(), &LiveDispatches::default()).call_locals();
+            Dispatch::new("p", LiveDispatches::default().enter(UNIT), faults.clone()).call_locals();
         Dispatch::of(&locals)
             .expect("seeded")
             .faults()
@@ -235,9 +238,8 @@ mod tests {
         let dispatch = || {
             Dispatch::new(
                 "p",
-                UNIT,
+                LiveDispatches::default().enter(UNIT),
                 DispatchFaults::default(),
-                &LiveDispatches::default(),
             )
         };
         assert!(dispatch().admits("p", UNIT).is_ok());

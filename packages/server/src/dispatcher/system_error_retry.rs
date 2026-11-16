@@ -50,16 +50,13 @@ pub async fn run(
                             info!(server_id = %server_id, requeued = pass.requeued, confirmed = pass.confirmed.len(), "Decided SystemError verdicts");
                         }
                         for c in pass.confirmed {
-                            crate::services::submission_dispatch::fire_after_judging_hooks(
-                                &state.db,
-                                state.registries.hook_registry.clone(),
-                                &state.registries.contest_type_registry,
+                            crate::services::submission_dispatch::spawn_after_judging_hooks(
+                                &state,
                                 c.submission_id,
                                 c.user_id,
                                 c.problem_id,
                                 c.contest_id,
-                            )
-                            .await;
+                            );
                         }
                     }
                     Some(Err(e)) => error!(server_id = %server_id, error = %e, "SystemError-retry scan failed"),

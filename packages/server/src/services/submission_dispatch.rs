@@ -12,7 +12,7 @@ use tracing::{Instrument, error, info, instrument, warn};
 use crate::entity::{problem, submission, submission_judgement, test_case};
 use crate::hooks;
 use crate::services::judging::{
-    self, ClaimedJudgement, Dispatch, DispatchFailure, DispatchFaults, DispatchedUnit, Unit,
+    self, ClaimedJudgement, Dispatch, DispatchFailure, DispatchFaults, LiveUnit, Unit,
 };
 use crate::state::AppState;
 use crate::utils::judging::files_log_summary;
@@ -34,6 +34,39 @@ struct SubmissionDispatchTestCaseRow {
     expected_output_blob_hash: Option<String>,
 }
 
+/// Runs the after-judging hooks of a submission whose result a request or a
+/// background scan just decided, in a task of its own that counts as judging
+/// work (`judging_sessions`) until they have run: the caller neither waits
+/// for the hooks' background calls nor loses them if it is dropped.
+/// Judging that is tracked already awaits [`fire_after_judging_hooks`].
+pub(crate) fn spawn_after_judging_hooks(
+    state: &AppState,
+    submission_id: i32,
+    user_id: i32,
+    problem_id: i32,
+    contest_id: Option<i32>,
+) {
+    let judging = state.registries.judging_sessions.track();
+    let db = state.db.clone();
+    let hook_registry = state.registries.hook_registry.clone();
+    let contest_types = state.registries.contest_type_registry.clone();
+    tokio::spawn(async move {
+        let _judging = judging;
+        fire_after_judging_hooks(
+            &db,
+            hook_registry,
+            &contest_types,
+            submission_id,
+            user_id,
+            problem_id,
+            contest_id,
+        )
+        .await;
+    });
+}
+
+/// Runs the after-judging hooks of `submission_id` once its result is
+/// final. The caller is tracked judging work, which these hooks are part of.
 pub(crate) async fn fire_after_judging_hooks(
     db: &DatabaseConnection,
     hook_registry: hooks::SharedHookRegistry,
@@ -240,7 +273,7 @@ struct JudgementRef {
 // The submission model is skipped: its `files` hold the contestant's full
 // source. Ids, language and file names/sizes only.
 #[instrument(
-    skip(state, claimed),
+    skip(state, claimed, live),
     fields(
         submission_id = claimed.submission.id,
         judgement_id = claimed.judgement.id,
@@ -250,7 +283,7 @@ struct JudgementRef {
         contest_id = tracing::field::Empty,
     )
 )]
-pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgement) {
+pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgement, live: LiveUnit) {
     let ClaimedJudgement {
         submission,
         judgement,
@@ -552,16 +585,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
     let function_name = handler.submission_fn.clone();
     // The judgement goes to its contest type's plugin, which alone may write
     // it, through this call and the sessions it starts.
-    let dispatch = Dispatch::new(
-        &plugin_id,
-        DispatchedUnit::Judgement {
-            submission_id: judgement_ref.submission_id,
-            judgement_id: judgement_ref.id,
-            judge_epoch: judgement_ref.judge_epoch,
-        },
-        faults.clone(),
-        &state.registries.live_dispatches,
-    );
+    let dispatch = Dispatch::new(&plugin_id, live, faults.clone());
     let plugins = state.plugins.clone();
     let hook_registry = state.registries.hook_registry.clone();
     let contest_types = state.registries.contest_type_registry.clone();

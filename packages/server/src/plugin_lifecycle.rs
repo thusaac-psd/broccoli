@@ -162,6 +162,38 @@ pub struct Governs {
     /// The locale whose host text it provides, as a language pack: one
     /// enabled plugin at a time does (`publish_language_pack`).
     pub host_locale: Option<String>,
+    /// The problem types its `init()` registered an evaluator for, sorted.
+    pub problem_types: Vec<String>,
+}
+
+/// What a key that plugins provide names: what a unit of work needs a
+/// provider of to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provided {
+    /// A contest type: its plugin judges the unit.
+    ContestType,
+    /// A problem type: its evaluator plugin runs the unit's test cases.
+    ProblemType,
+}
+
+impl Provided {
+    /// The [`Governs`] field (and `plugin.governs` key) that lists the keys.
+    fn field(self) -> &'static str {
+        match self {
+            Self::ContestType => "contest_types",
+            Self::ProblemType => "problem_types",
+        }
+    }
+}
+
+impl Governs {
+    fn provides(&self, kind: Provided, key: &str) -> bool {
+        let keys = match kind {
+            Provided::ContestType => &self.contest_types,
+            Provided::ProblemType => &self.problem_types,
+        };
+        keys.iter().any(|k| k == key)
+    }
 }
 
 /// A plugin that is enabled fleet-wide but not loaded on this replica.
@@ -231,31 +263,41 @@ impl PluginLifecycle {
         self.governs.read().ok()?.get(plugin_id).cloned()
     }
 
-    /// What keeps a submission of `contest_type` in `status` parked, if
-    /// anything: one not yet finished, of a type whose every provider is
-    /// disabled fleet-wide, waits queued until a provider is enabled (see
-    /// `contest_type_open`).
+    /// What keeps a submission of `contest_type` on a problem of
+    /// `problem_type`, in `status`, parked, if anything: one not yet
+    /// finished that cannot run now ([`Self::closed_by`]) waits queued until
+    /// a provider is enabled (see `work_runnable`).
     pub fn parked_by(
         &self,
         contest_type: &str,
+        problem_type: &str,
         status: common::SubmissionStatus,
     ) -> Option<PluginOutage> {
         if status.is_terminal() {
             return None;
         }
-        self.disabled_provider(contest_type)
+        self.closed_by(contest_type, problem_type)
             .map(|plugin_id| PluginOutage::Disabled { plugin_id })
     }
 
-    /// The plugin that keeps `contest_type` closed: every plugin that last
-    /// registered the type is disabled fleet-wide, and this is the first of
-    /// them by id. `None` when an enabled plugin provides the type, or no
-    /// plugin ever registered it (an unknown type is not disabled).
-    pub fn disabled_provider(&self, contest_type: &str) -> Option<String> {
+    /// The plugin that keeps work of `contest_type` on a problem of
+    /// `problem_type` from running: its contest type's, else its problem
+    /// type's ([`Self::disabled_provider`]). `None` when both have an enabled
+    /// provider (or none was ever recorded).
+    pub fn closed_by(&self, contest_type: &str, problem_type: &str) -> Option<String> {
+        self.disabled_provider(Provided::ContestType, contest_type)
+            .or_else(|| self.disabled_provider(Provided::ProblemType, problem_type))
+    }
+
+    /// The plugin that keeps `key` (a `kind` of key) closed: every plugin
+    /// that last registered the key is disabled fleet-wide, and this is the
+    /// first of them by id. `None` when an enabled plugin provides the key,
+    /// or no plugin ever registered it (an unknown key is not disabled).
+    pub fn disabled_provider(&self, kind: Provided, key: &str) -> Option<String> {
         let governs = self.governs.read().ok()?;
         let mut providers: Vec<&String> = governs
             .iter()
-            .filter(|(_, g)| g.contest_types.iter().any(|t| t == contest_type))
+            .filter(|(_, g)| g.provides(kind, key))
             .map(|(id, _)| id)
             .collect();
         if providers.iter().any(|id| self.is_desired_enabled(id)) {
@@ -265,9 +307,8 @@ impl PluginLifecycle {
         providers.first().map(|id| (*id).clone())
     }
 
-    // `contest_type_open` below states the same rule in SQL over the rows
-    // this reads (`plugin.is_enabled`, `plugin.governs`); change them
-    // together.
+    // `work_runnable` below states the same rule in SQL over the rows this
+    // reads (`plugin.is_enabled`, `plugin.governs`); change them together.
 
     /// Why plugin `plugin_id`, known not to be loaded here, cannot serve:
     /// the fleet disabled it, or it is enabled and missing on this replica
@@ -305,17 +346,29 @@ impl PluginLifecycle {
     }
 }
 
-/// SQL: whether work of the contest type `contest_type` (an SQL expression)
-/// may be judged now, as [`PluginLifecycle::disabled_provider`] decides it:
-/// unless every plugin that recorded the type is disabled fleet-wide. Work of
-/// a type whose provider was disabled on purpose is parked: it stays queued,
-/// unclaimed and unretried, and resumes once a provider is enabled again. A
-/// type no plugin ever recorded is open, so whoever takes it fails it
-/// visibly.
-pub(crate) fn contest_type_open(contest_type: &str) -> String {
+/// SQL: whether work of the contest type `contest_type` on a problem of the
+/// type `problem_type` (both SQL expressions) may run now, as
+/// [`PluginLifecycle::closed_by`] decides it: unless every plugin that
+/// recorded the contest type, or every plugin that recorded the problem
+/// type's evaluator, is disabled fleet-wide. Work that cannot run because a
+/// provider was disabled on purpose is parked: it stays queued, unclaimed
+/// and unretried, and resumes once a provider is enabled again. A key no
+/// plugin ever recorded is open, so whoever takes the work fails it visibly.
+pub(crate) fn work_runnable(contest_type: &str, problem_type: &str) -> String {
+    format!(
+        "({} AND {})",
+        provider_enabled(Provided::ContestType, contest_type),
+        provider_enabled(Provided::ProblemType, problem_type),
+    )
+}
+
+/// SQL: some plugin that recorded `key` (an SQL expression) as a `kind` is
+/// enabled, or none ever recorded it.
+fn provider_enabled(kind: Provided, key: &str) -> String {
     format!(
         "COALESCE((SELECT bool_or(p.is_enabled) FROM plugin p \
-                    WHERE p.governs->'contest_types' @> jsonb_build_array({contest_type})), TRUE)"
+                    WHERE p.governs->'{field}' @> jsonb_build_array({key})), TRUE)",
+        field = kind.field(),
     )
 }
 
@@ -324,7 +377,10 @@ pub(crate) fn contest_type_open(contest_type: &str) -> String {
 /// handler for it is loaded here. Submissions to such a contest are refused
 /// and its results are unavailable.
 pub async fn contest_type_outage(state: &AppState, contest_type: &str) -> Option<PluginOutage> {
-    if let Some(plugin_id) = state.plugin_lifecycle.disabled_provider(contest_type) {
+    if let Some(plugin_id) = state
+        .plugin_lifecycle
+        .disabled_provider(Provided::ContestType, contest_type)
+    {
         return Some(PluginOutage::Disabled { plugin_id });
     }
     let registered = state
@@ -336,15 +392,18 @@ pub async fn contest_type_outage(state: &AppState, contest_type: &str) -> Option
     (!registered).then_some(PluginOutage::Unavailable)
 }
 
-/// The handler a new submission or code run of `contest_type` is accepted
-/// through, or why none can take it now: the one acceptance rule of every
-/// submit path, contest or practice. A type whose provider is disabled
-/// fleet-wide is closed (`CONTEST_TYPE_DISABLED`); one with no handler loaded
-/// here is briefly unavailable (`CONTEST_TYPE_UNAVAILABLE`, retry later).
-/// Accepting either would park the work unseen.
+/// The handler a new submission or code run of `contest_type` on a problem
+/// of `problem_type` is accepted through, or why none can take it now: the
+/// one acceptance rule of every submit path, contest or practice. A contest
+/// type whose provider is disabled fleet-wide is closed
+/// (`CONTEST_TYPE_DISABLED`), and so is a problem type whose evaluator
+/// plugin is (`PLUGIN_DISABLED`); a contest type with no handler loaded here
+/// is briefly unavailable (`CONTEST_TYPE_UNAVAILABLE`, retry later).
+/// Accepting any of them would park the work unseen.
 pub async fn accepting_handler(
     state: &AppState,
     contest_type: &str,
+    problem_type: &str,
 ) -> Result<crate::registry::ContestTypeHandlers, AppError> {
     let handler = match contest_type_outage(state, contest_type).await {
         Some(PluginOutage::Disabled { .. }) => {
@@ -359,7 +418,15 @@ pub async fn accepting_handler(
             .get(contest_type)
             .cloned(),
     };
-    handler.ok_or_else(|| AppError::ContestTypeUnavailable(contest_type.to_string()))
+    let handler =
+        handler.ok_or_else(|| AppError::ContestTypeUnavailable(contest_type.to_string()))?;
+    match state
+        .plugin_lifecycle
+        .disabled_provider(Provided::ProblemType, problem_type)
+    {
+        Some(plugin_id) => Err(AppError::PluginDisabled(plugin_id)),
+        None => Ok(handler),
+    }
 }
 
 /// Plugins that are enabled in the desired state but not `Loaded` here,
@@ -962,10 +1029,21 @@ async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
         .map(|(t, _)| t)
         .collect();
     contest_types.sort();
+    let mut problem_types: Vec<String> = state
+        .registries
+        .evaluator_registry
+        .read()
+        .await
+        .registered_by(plugin_id)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
+    problem_types.sort();
     Governs {
         visibility,
         contest_types,
         host_locale,
+        problem_types,
     }
 }
 

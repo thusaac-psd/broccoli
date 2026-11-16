@@ -36,6 +36,7 @@
 //! `host_rules::host_decide` - only for the resources the host did not
 //! already `Deny`.
 
+use crate::plugin_lifecycle::Provided;
 use broccoli_api_types::visibility::PluginOutage;
 use broccoli_server_sdk::types::{
     QueryContext, QueryResource, QuerySubject, VisibilityQueryInput, VisibilityQueryOutput,
@@ -243,7 +244,12 @@ fn visibility_queriers(state: &AppState) -> Result<(Vec<VisibilityQuerier>, Blin
                 Some(g) if g.visibility => g
                     .contest_types
                     .into_iter()
-                    .filter(|t| state.plugin_lifecycle.disabled_provider(t).is_some())
+                    .filter(|t| {
+                        state
+                            .plugin_lifecycle
+                            .disabled_provider(Provided::ContestType, t)
+                            .is_some()
+                    })
                     .collect(),
                 _ => continue,
             };

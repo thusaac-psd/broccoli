@@ -211,7 +211,8 @@ pub async fn run_code(
     validate_run_language(&payload.language, &known_languages)?;
 
     let contest_type = problem.default_contest_type.clone();
-    crate::plugin_lifecycle::accepting_handler(&state, &contest_type).await?;
+    crate::plugin_lifecycle::accepting_handler(&state, &contest_type, &problem.problem_type)
+        .await?;
     let custom_tcs_json =
         serde_json::to_value(&payload.custom_test_cases).unwrap_or(serde_json::Value::Null);
 
@@ -291,7 +292,7 @@ pub async fn run_contest_code(
     // pool under sustained load — see `submission::create_contest_submission`
     // for the full analysis. Each step runs on the pool directly.
     let contest_model = find_contest(&state.db, contest_id).await?;
-    let _problem = find_problem(&state.db, problem_id).await?;
+    let problem = find_problem(&state.db, problem_id).await?;
     if !is_problem_in_contest(&state.db, contest_id, problem_id).await? {
         return Err(AppError::NotFound(
             "Problem not found in this contest".into(),
@@ -310,7 +311,8 @@ pub async fn run_contest_code(
 
     let language = payload.language.trim().to_string();
     let contest_type = required_contest_type(&contest_model)?;
-    crate::plugin_lifecycle::accepting_handler(&state, &contest_type).await?;
+    crate::plugin_lifecycle::accepting_handler(&state, &contest_type, &problem.problem_type)
+        .await?;
     let new_code_run = code_run::ActiveModel {
         files: Set(files_to_json(&payload.files)),
         language: Set(language),

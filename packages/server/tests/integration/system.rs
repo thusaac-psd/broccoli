@@ -224,35 +224,17 @@ mod worker_liveness {
 mod backlog {
     use super::*;
     use crate::common::SpawnOptions;
+    use crate::common::worker_heartbeat as heartbeat;
     use common::SubmissionStatus;
-    use common::worker::{HeartbeatPayload, Intake};
+    use common::worker::Intake;
     use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
     use server::entity::{submission, user};
-
-    fn heartbeat(intake: Intake) -> HeartbeatPayload {
-        HeartbeatPayload {
-            id: "w".into(),
-            started_at: chrono::Utc::now(),
-            last_seen: chrono::Utc::now(),
-            in_flight: 0,
-            max_concurrency: Some(1),
-            fairness_mode: "unknown".into(),
-            sandbox_backend: "test".into(),
-            version: "test".into(),
-            hostname: None,
-            ip_addresses: Vec::new(),
-            os: None,
-            arch: None,
-            cpu_count: None,
-            pid: None,
-            intake,
-        }
-    }
 
     #[tokio::test]
     async fn the_overview_counts_queued_parked_and_in_flight_work_and_a_fleet_that_takes_none() {
         let app = TestApp::spawn_with_options(SpawnOptions {
             disable_claim_fiber: true,
+            no_workers: true,
             ..Default::default()
         })
         .await;
@@ -270,7 +252,7 @@ mod backlog {
         app.db
             .execute_unprepared(
                 "INSERT INTO plugin (id, is_enabled, governs) VALUES \
-                 ('backlog-parked', false, '{\"visibility\": false, \"contest_types\": [\"parked-x\"]}')",
+                 ('backlog-parked', false, '{\"visibility\": false, \"contest_types\": [\"parked-x\"], \"problem_types\": []}')",
             )
             .await
             .unwrap();

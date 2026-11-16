@@ -165,9 +165,6 @@ host_codes! {
     PluginRefused = "PLUGIN_REFUSED";
     StuckJob = "STUCK_JOB";
     DispatchRetryExhausted = "DISPATCH_RETRY_EXHAUSTED";
-    /// A judgement still in flight when a newer judgement replaced it as
-    /// current (rejudge, DLQ retry, applying another judgement).
-    Superseded = "SUPERSEDED";
     // Dead letters: why a message or a stuck unit was dead-lettered.
     /// An operation task failed past its retry budget.
     MaxRetriesExceeded = "MAX_RETRIES_EXCEEDED";

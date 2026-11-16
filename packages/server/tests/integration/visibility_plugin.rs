@@ -1107,7 +1107,12 @@ async fn scope_fixture_to(app: &TestApp, governed_type: &str) {
         .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE plugin SET governs = $1 WHERE id = 'server-plugin'",
-            [serde_json::json!({ "visibility": true, "contest_types": [governed_type] }).into()],
+            [serde_json::json!({
+                "visibility": true,
+                "contest_types": [governed_type],
+                "problem_types": [],
+            })
+            .into()],
         ))
         .await
         .expect("record governs");

@@ -50,6 +50,13 @@ requeued within one scan interval however large it is.
 Every lease age is compared on the database clock: claims and refreshes stamp
 `NOW()`, and the scans compare against `NOW()`.
 
+A server refreshes the leases of the units it still works on
+(`judging::LiveDispatches`): a unit is live from the moment its claim takes
+it, before its dispatch waits for a dispatcher permit or prepares its input,
+until the last clone of its `Dispatch` is dropped. A unit the server owns but
+no longer works on (its task was lost) keeps its old heartbeat, so its lease
+lapses and a peer steals it.
+
 ## Claiming
 
 A claim fiber on each server claims work when it is told there is some. A
@@ -108,12 +115,19 @@ type is disabled, a submission to its contests is refused with
 (with `Retry-After`) means only that the serving replica has not loaded the
 plugin yet.
 
-## A disabled contest plugin parks its work
+## A disabled plugin parks the work that needs it
 
-A contest type is parked while every plugin that recorded it (`plugin.governs`)
-is disabled fleet-wide; `contest_type_open` states that in SQL and
-`PluginLifecycle::disabled_provider` in Rust. Work of a parked type waits
-`Queued` and resumes once a provider is enabled again:
+A unit of work needs two plugins: the one that provides its contest type and
+the evaluator of its problem's type. It is parked while every plugin that
+recorded either key (`plugin.governs`, `contest_types` and `problem_types`)
+is disabled fleet-wide; `work_runnable` states that in SQL
+(`judging::Unit::runnable` over a unit's scan) and
+`PluginLifecycle::closed_by` in Rust. Parked work waits `Queued` and resumes
+once a provider is enabled again. A new submission or code run that would be
+parked is refused: `503 CONTEST_TYPE_DISABLED` for its contest type,
+`503 PLUGIN_DISABLED` naming the evaluator for its problem type, neither with
+`Retry-After`. A system error a plugin writes without a code is recorded as
+`PLUGIN_ERROR`, so none is shown without one:
 
 - The claim statement takes no judgement or code run of a parked type, so
   nothing is dispatched to a plugin that is not there.
@@ -156,12 +170,20 @@ submission together.
 
 One projection waits: a current judgement that finalized as a system error
 that does not stand yet (`error_stands` is false), which the system-error
-retry may still re-judge.
+retry may still re-judge. A system error its submission already shows as its
+final result (a terminal status at the judgement's epoch) is decided, stands
+or not, and no retry reopens it (`awaits_retry_decision`).
 The submission keeps showing the attempt in flight until the reaper decides
 it within one scan (5 s): it requeues the judgement while the submission has
 retries left, so the submission goes on to `Queued` and the next attempt; or
 it confirms the error once the budget is spent, which marks it standing,
-projects it and fires the after-judging hooks. A client therefore never sees a terminal status
+projects it and fires the after-judging hooks. Judging work runs those
+hooks as part of itself (a contest plugin's submission call, a detached
+session); the reaper and an applied judgement start them in a task of their
+own that counts as judging work until they have run
+(`spawn_after_judging_hooks`), so neither waits for a hook. The hook event
+counts as dispatched once its dispatch completes, so one dropped midway is
+dispatched again. A client therefore never sees a terminal status
 that a retry takes back: within an attempt the statuses only move forward,
 and a terminal status is final.
 
@@ -184,8 +206,10 @@ are keyed on it.
   `sj.judge_epoch = tcr.judge_epoch`). `apply_judgement` gives the applied
   judgement a fresh epoch and moves its kept results to it.
 - A judgement that stops being current while still in flight is finalized as
-  a `SystemError` with `SUPERSEDED` that stands: it never got a verdict, and
-  no retry takes it for a failed attempt, even when an admin applies it back.
+  `Superseded`, a status of its own: it never got a verdict, so it is
+  history, not a system error. No retry takes it, and applying it is refused
+  (`400 VALIDATION_ERROR`); the version history shows it as superseded,
+  without an apply action.
 - A plugin writes only the unit its own call was dispatched with. The
   dispatch (`judging::Dispatch`: the plugin it went to, the judgement or code
   run at its epoch, and its faults) rides in the call locals of the dispatch
@@ -288,11 +312,12 @@ it only if a tool goes missing while the worker holds it; the attempt is handed
 back for a worker that has the tool. A pin never holds work for such a worker:
 an admin cannot name it as a rejudge target, a task pinned to it goes to the
 shared stream, and pinned tasks waiting for it when it stops taking work move
-there within a reclaim tick (see [Message queue](./message-queue.md)). While
-live workers exist and none of them
-takes work, the claim fiber claims nothing, so submissions wait `Queued`
-instead of failing. Work already dispatched when the fleet comes to that is
-handed back the same way: every operation the server waits for fails as
+there within a reclaim tick (see [Message queue](./message-queue.md)). The
+claim fiber claims only while some live worker takes work
+(`WorkerSlots::takes_work`): with no live worker at all, or only workers that
+take none, it claims nothing, so submissions wait `Queued` instead of reading
+as being judged while nothing runs them. Work already dispatched when every
+live worker stops taking work is handed back the same way: every operation the server waits for fails as
 `NO_CAPABLE_WORKER` and gets its cancel key, and an operation started
 meanwhile is refused when it publishes
 (`consumers::operation_result::hand_back_while_none_accepting`). Workers

@@ -684,8 +684,8 @@ mod tests {
         let late = submission_update(&db, finish(&first, Verdict::WrongAnswer, 0.0)).await;
         assert_eq!(late, 0, "a superseded judgement's late result is rejected");
         assert_eq!(
-            judgement(&db, first.id).await.error_code.as_deref(),
-            Some("SUPERSEDED"),
+            judgement(&db, first.id).await.status,
+            common::SubmissionStatus::Superseded,
             "it keeps the supersede outcome"
         );
         delete_results(&db, &first).await;

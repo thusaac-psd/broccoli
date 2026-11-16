@@ -38,7 +38,7 @@ async fn record_dispatch_failure(
 
 // The code-run model is skipped: its `files` hold the full source.
 #[instrument(
-    skip(state, code_run),
+    skip(state, code_run, live),
     fields(
         code_run_id = code_run.id,
         language = %code_run.language,
@@ -47,7 +47,11 @@ async fn record_dispatch_failure(
         contest_id = tracing::field::Empty,
     )
 )]
-pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_run::Model) {
+pub(crate) async fn dispatch_code_run_to_plugin(
+    state: AppState,
+    code_run: code_run::Model,
+    live: judging::LiveUnit,
+) {
     // What the dispatch's operations meet, wherever they run: its plugin
     // call starts with these faults in its call locals.
     let faults = DispatchFaults::default();
@@ -228,21 +232,12 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
         plugin_id = %plugin_id,
         function_name = %function_name,
     );
-    let live_dispatches = state.registries.live_dispatches.clone();
     tokio::spawn(async move {
         async move {
             // The run goes to its contest type's plugin, which alone may
             // write it; the dispatch records into this run's faults, which
             // decide how the call ends.
-            let dispatch = crate::services::judging::Dispatch::new(
-                &plugin_id,
-                crate::services::judging::DispatchedUnit::CodeRun {
-                    code_run_id,
-                    judge_epoch,
-                },
-                faults.clone(),
-                &live_dispatches,
-            );
+            let dispatch = judging::Dispatch::new(&plugin_id, live, faults.clone());
             let options = plugins
                 .get_config()
                 .judging_call()
