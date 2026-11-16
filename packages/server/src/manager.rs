@@ -53,6 +53,10 @@ impl PluginInvoker for ServerManager {
         &self.state.registry
     }
 
+    fn executor(&self) -> &plugin_core::executor::Executor {
+        &self.state.executor
+    }
+
     fn get_metrics(&self) -> Option<&common::metrics::Metrics> {
         self.metrics.as_ref()
     }

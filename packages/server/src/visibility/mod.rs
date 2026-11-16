@@ -307,7 +307,7 @@ impl<'a> VisibilityKernel<'a> {
                         &target_contest_ids,
                         &target_scopes,
                     )
-                    .await;
+                    .await?;
                     // Compiled out in release, and that is safe —
                     // `query_plugins` (`plugin_query.rs`) always returns
                     // exactly `resources.len()` decisions: the empty-batch,
@@ -447,17 +447,13 @@ mod tests {
     use common::SubmissionStatus;
     use common::storage::filesystem::FilesystemBlobStore;
     use plugin_core::config::PluginConfig;
-    use plugin_core::error::PluginError;
-    use plugin_core::host::HostFunctionRegistry;
-    use plugin_core::i18n::I18nRegistry;
     use plugin_core::manifest::{
         PluginManifest, ServerConfig as ManifestServerConfig, ServerQuery,
     };
     use plugin_core::registry::{PluginEntry, PluginRegistry, PluginStatus};
-    use plugin_core::traits::{PluginInvoker, PluginManager};
+    use plugin_core::traits::PluginManager;
     use sea_orm::{DatabaseBackend, DatabaseConnection, MockDatabase};
 
-    use super::plugin_query::PanicPluginManager;
     use super::*;
     use crate::config::{
         AppConfig, AuthConfig, BlobStoreConfig, BootstrapConfig, CorsConfig, DatabaseConfig,
@@ -471,6 +467,7 @@ mod tests {
         LanguageResolverRegistry, OperationBatches, OperationWaiters,
     };
     use crate::state::RegistryState;
+    use crate::test_support::MockPlugins;
 
     // -----------------------------------------------------------------
     // Fixtures shared by every test below.
@@ -594,65 +591,30 @@ mod tests {
     /// called and the full parsed input of each call - the latter lets
     /// tests assert on exactly what was sent to the plugin (which resources,
     /// with which `contest_id`, and the batch-level `QueryContext`).
-    struct RecordingPluginManager {
+    fn recording(
         registry: PluginRegistry,
-        config: PluginConfig,
-        host_functions: HostFunctionRegistry,
-        i18n: I18nRegistry,
         calls: Arc<AtomicUsize>,
         captured: Arc<StdMutex<Vec<VisibilityQueryInput>>>,
         answers: HashMap<(String, String), WireDecision>,
-    }
-
-    #[async_trait::async_trait]
-    impl PluginInvoker for RecordingPluginManager {
-        fn get_registry(&self) -> &PluginRegistry {
-            &self.registry
-        }
-
-        fn get_config(&self) -> &PluginConfig {
-            &self.config
-        }
-
-        async fn call_raw(
-            &self,
-            _plugin_id: &str,
-            _func_name: &str,
-            input: Vec<u8>,
-        ) -> Result<Vec<u8>, PluginError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            let parsed: VisibilityQueryInput = serde_json::from_slice(&input)
+    ) -> MockPlugins {
+        MockPlugins::new(registry, move |_, _, input| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let parsed: VisibilityQueryInput = serde_json::from_slice(input)
                 .expect("test double: input must deserialize as VisibilityQueryInput");
-
             let decisions = parsed
                 .resources
                 .iter()
                 .map(|r| {
-                    self.answers
+                    answers
                         .get(&(r.kind.clone(), r.id.clone()))
                         .cloned()
                         .unwrap_or(WireDecision::Allow {})
                 })
                 .collect();
-            self.captured.lock().unwrap().push(parsed);
-
-            let output = VisibilityQueryOutput { decisions };
-            Ok(serde_json::to_vec(&output).expect("serialize VisibilityQueryOutput"))
-        }
-    }
-
-    impl PluginManager for RecordingPluginManager {
-        fn get_host_functions(&self) -> &HostFunctionRegistry {
-            &self.host_functions
-        }
-
-        fn get_i18n_registry(&self) -> &I18nRegistry {
-            &self.i18n
-        }
-
-        fn resolve(&self, _manifest: &PluginManifest) -> Option<(String, Vec<String>)> {
-            None
-        }
+            captured.lock().unwrap().push(parsed);
+            Ok(serde_json::to_vec(&VisibilityQueryOutput { decisions })
+                .expect("serialize VisibilityQueryOutput"))
+        })
     }
 
     /// Mirrors `plugin_query::tests::test_app_state` (private to that
@@ -709,15 +671,11 @@ mod tests {
                     max_dispatch_retries: 5,
                     max_system_error_retries: 50,
                     cancel_primitive_enabled: false,
-                    max_blocking_threads: None,
-                    evaluate_batch_fanout_concurrency: 64,
-                    operation_batch_publish_concurrency: 32,
                     claim_fiber_enabled: false,
                     claim_poll_interval_ms: 1000,
                     claim_batch_size: 32,
                     max_in_flight_submissions: 256,
                     plugin_timer_tick_interval_secs: 1,
-                    plugin_timer_lease_secs: crate::config::DEFAULT_PLUGIN_TIMER_LEASE_SECS,
                     plugin_timer_batch: 64,
                     plugin_timer_max_attempts: 5,
                 },
@@ -746,6 +704,7 @@ mod tests {
                 batch_max_age_secs: 600,
                 bootstrap: BootstrapConfig::default(),
                 clock: Default::default(),
+                removed_keys_set: Vec::new(),
             },
             mq: None,
             redis_client: None,
@@ -763,6 +722,7 @@ mod tests {
             metrics,
             prometheus_registry,
             dispatcher_permits: DispatcherSemaphore::new(true, 1, 0),
+            worker_slots: Default::default(),
             plugin_lifecycle: Default::default(),
             login_throttle: Arc::new(crate::utils::login_throttle::LoginThrottle::new(
                 0,
@@ -788,9 +748,9 @@ mod tests {
             .into_connection();
 
         // A registered visibility querier exists and WOULD answer Allow if
-        // called - PanicPluginManager panics on any call, so this test only
-        // passes if decide_batch never reaches for it for this resource.
-        let plugins: Arc<dyn PluginManager> = Arc::new(PanicPluginManager::new(
+        // called - `MockPlugins::never_called` panics on any call, so this
+        // test only passes if decide_batch never reaches for it for this resource.
+        let plugins: Arc<dyn PluginManager> = Arc::new(MockPlugins::never_called(
             registry_with_visibility_plugin("vis-plugin"),
         ));
         let state = test_app_state(plugins, db).await;
@@ -816,15 +776,12 @@ mod tests {
 
         let calls = Arc::new(AtomicUsize::new(0));
         let captured = Arc::new(StdMutex::new(Vec::new()));
-        let plugins: Arc<dyn PluginManager> = Arc::new(RecordingPluginManager {
-            registry: registry_with_visibility_plugin("vis-plugin"),
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-            calls: calls.clone(),
-            captured: captured.clone(),
-            answers: HashMap::new(),
-        });
+        let plugins: Arc<dyn PluginManager> = Arc::new(recording(
+            registry_with_visibility_plugin("vis-plugin"),
+            calls.clone(),
+            captured.clone(),
+            HashMap::new(),
+        ));
         let state = test_app_state(plugins, db).await;
         let kernel = VisibilityKernel::new(&state, subject(1));
 
@@ -869,15 +826,12 @@ mod tests {
                 fields: vec!["x".to_string()],
             },
         );
-        let plugins: Arc<dyn PluginManager> = Arc::new(RecordingPluginManager {
-            registry: registry_with_visibility_plugin("vis-plugin"),
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-            calls: Arc::new(AtomicUsize::new(0)),
-            captured: Arc::new(StdMutex::new(Vec::new())),
+        let plugins: Arc<dyn PluginManager> = Arc::new(recording(
+            registry_with_visibility_plugin("vis-plugin"),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(StdMutex::new(Vec::new())),
             answers,
-        });
+        ));
         let state = test_app_state(plugins, db).await;
         let kernel = VisibilityKernel::new(&state, subject(1));
 
@@ -936,15 +890,12 @@ mod tests {
         );
         let calls = Arc::new(AtomicUsize::new(0));
         let captured = Arc::new(StdMutex::new(Vec::new()));
-        let plugins: Arc<dyn PluginManager> = Arc::new(RecordingPluginManager {
-            registry: registry_with_visibility_plugin("vis-plugin"),
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-            calls: calls.clone(),
-            captured: captured.clone(),
+        let plugins: Arc<dyn PluginManager> = Arc::new(recording(
+            registry_with_visibility_plugin("vis-plugin"),
+            calls.clone(),
+            captured.clone(),
             answers,
-        });
+        ));
         let state = test_app_state(plugins, db).await;
         let kernel = VisibilityKernel::new(&state, subject(1));
 
@@ -991,15 +942,12 @@ mod tests {
             },
         );
         let calls = Arc::new(AtomicUsize::new(0));
-        let plugins: Arc<dyn PluginManager> = Arc::new(RecordingPluginManager {
-            registry: registry_with_visibility_plugin("vis-plugin"),
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-            calls: calls.clone(),
-            captured: Arc::new(StdMutex::new(Vec::new())),
+        let plugins: Arc<dyn PluginManager> = Arc::new(recording(
+            registry_with_visibility_plugin("vis-plugin"),
+            calls.clone(),
+            Arc::new(StdMutex::new(Vec::new())),
             answers,
-        });
+        ));
         let state = test_app_state(plugins, db).await;
         let kernel = VisibilityKernel::new(&state, subject(1));
 
@@ -1033,10 +981,10 @@ mod tests {
         // times, so an empty MockDatabase is enough.
         let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
 
-        // A registered visibility querier exists - PanicPluginManager
+        // A registered visibility querier exists - MockPlugins::never_called
         // proves decide_batch never reaches it for an admin_override
         // subject, for any resource in the batch.
-        let plugins: Arc<dyn PluginManager> = Arc::new(PanicPluginManager::new(
+        let plugins: Arc<dyn PluginManager> = Arc::new(MockPlugins::never_called(
             registry_with_visibility_plugin("vis-plugin"),
         ));
         let state = test_app_state(plugins, db).await;
@@ -1064,7 +1012,7 @@ mod tests {
         let _guard = crate::metrics_test_lock();
 
         let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-        let plugins: Arc<dyn PluginManager> = Arc::new(PanicPluginManager::new(
+        let plugins: Arc<dyn PluginManager> = Arc::new(MockPlugins::never_called(
             registry_with_visibility_plugin("vis-plugin"),
         ));
         let state = test_app_state(plugins, db).await;
@@ -1096,15 +1044,12 @@ mod tests {
             .into_connection();
 
         let captured = Arc::new(StdMutex::new(Vec::new()));
-        let plugins: Arc<dyn PluginManager> = Arc::new(RecordingPluginManager {
-            registry: registry_with_visibility_plugin("vis-plugin"),
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-            calls: Arc::new(AtomicUsize::new(0)),
-            captured: captured.clone(),
-            answers: HashMap::new(),
-        });
+        let plugins: Arc<dyn PluginManager> = Arc::new(recording(
+            registry_with_visibility_plugin("vis-plugin"),
+            Arc::new(AtomicUsize::new(0)),
+            captured.clone(),
+            HashMap::new(),
+        ));
         let state = test_app_state(plugins, db).await;
         let kernel = VisibilityKernel::new(&state, subject(1));
 
@@ -1145,15 +1090,12 @@ mod tests {
             .into_connection();
 
         let captured = Arc::new(StdMutex::new(Vec::new()));
-        let plugins: Arc<dyn PluginManager> = Arc::new(RecordingPluginManager {
-            registry: registry_with_visibility_plugin("vis-plugin"),
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-            calls: Arc::new(AtomicUsize::new(0)),
-            captured: captured.clone(),
-            answers: HashMap::new(),
-        });
+        let plugins: Arc<dyn PluginManager> = Arc::new(recording(
+            registry_with_visibility_plugin("vis-plugin"),
+            Arc::new(AtomicUsize::new(0)),
+            captured.clone(),
+            HashMap::new(),
+        ));
         let state = test_app_state(plugins, db).await;
         let kernel = VisibilityKernel::new(&state, subject(1));
 
@@ -1206,15 +1148,12 @@ mod tests {
             .into_connection();
 
         let captured = Arc::new(StdMutex::new(Vec::new()));
-        let plugins: Arc<dyn PluginManager> = Arc::new(RecordingPluginManager {
-            registry: registry_with_visibility_plugin("vis-plugin"),
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-            calls: Arc::new(AtomicUsize::new(0)),
-            captured: captured.clone(),
-            answers: HashMap::new(),
-        });
+        let plugins: Arc<dyn PluginManager> = Arc::new(recording(
+            registry_with_visibility_plugin("vis-plugin"),
+            Arc::new(AtomicUsize::new(0)),
+            captured.clone(),
+            HashMap::new(),
+        ));
         let state = test_app_state(plugins, db).await;
         let kernel = VisibilityKernel::new(&state, subject(1));
 
@@ -1266,15 +1205,12 @@ mod tests {
                 fields: vec!["score".to_string()],
             },
         );
-        let plugins: Arc<dyn PluginManager> = Arc::new(RecordingPluginManager {
-            registry: registry_with_visibility_plugin("vis-plugin"),
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-            calls: Arc::new(AtomicUsize::new(0)),
-            captured: Arc::new(StdMutex::new(Vec::new())),
+        let plugins: Arc<dyn PluginManager> = Arc::new(recording(
+            registry_with_visibility_plugin("vis-plugin"),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(StdMutex::new(Vec::new())),
             answers,
-        });
+        ));
         let state = test_app_state(plugins, db).await;
         let kernel = VisibilityKernel::new(&state, subject(1));
 
@@ -1343,7 +1279,7 @@ mod tests {
             .append_query_results([Vec::<contest_user::Model>::new()])
             .into_connection();
 
-        let plugins: Arc<dyn PluginManager> = Arc::new(PanicPluginManager::new(
+        let plugins: Arc<dyn PluginManager> = Arc::new(MockPlugins::never_called(
             registry_with_visibility_plugin("vis-plugin"),
         ));
         let state = test_app_state(plugins, db).await;
@@ -1364,6 +1300,56 @@ mod tests {
         assert!(
             result.is_none(),
             "a denied resource must be None so callers 404 instead of rendering a placeholder"
+        );
+    }
+
+    async fn busy_kernel_state(contests: Vec<crate::entity::contest::Model>) -> AppState {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([contests])
+            .append_query_results([Vec::<contest_user::Model>::new()])
+            .into_connection();
+        let plugins: Arc<dyn PluginManager> = Arc::new(MockPlugins::unavailable(
+            registry_with_visibility_plugin("vis-plugin"),
+        ));
+        test_app_state(plugins, db).await
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn an_unavailable_plugin_fails_a_single_read_instead_of_hiding_it() {
+        let _guard = crate::metrics_test_lock();
+        let state = busy_kernel_state(vec![contest_row(2, true, Some(-1), None, true)]).await;
+        let kernel = VisibilityKernel::new(&state, subject(1));
+        let result = kernel
+            .fetch_visible(
+                Action::Read,
+                Resource::Contest(2),
+                ScoredEntity { id: 2, score: None },
+            )
+            .await;
+        assert!(
+            matches!(result, Err(AppError::PluginUnavailable)),
+            "a busy plugin is a 503, not a 404: {:?}",
+            result.map(|v| v.is_some())
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn an_unavailable_plugin_fails_a_list_instead_of_emptying_it() {
+        let _guard = crate::metrics_test_lock();
+        let state = busy_kernel_state(vec![
+            contest_row(2, true, Some(-1), None, true),
+            contest_row(3, true, Some(-1), None, true),
+        ])
+        .await;
+        let kernel = VisibilityKernel::new(&state, subject(1));
+        let result = kernel
+            .decide_batch(Action::Read, &[Resource::Contest(2), Resource::Contest(3)])
+            .await;
+        assert!(
+            matches!(result, Err(AppError::PluginUnavailable)),
+            "a busy plugin is a 503, not an all-Deny page: {result:?}"
         );
     }
 }

@@ -41,39 +41,44 @@ pub fn create_evaluate_functions(plugin_id: String, deps: EvaluateHostDeps) -> V
     let user_data = super::host_data(EvaluateContext { plugin_id, deps });
 
     vec![
-        Function::new(
+        super::host_function(
             "start_evaluate_batch",
             [ValType::I64],
             [ValType::I64],
             user_data.clone(),
+            super::Waits::Blocks,
             start_evaluate_batch_fn,
         ),
-        Function::new(
+        super::host_function(
             "start_detached_windowed_evaluate",
             [ValType::I64],
             [ValType::I64],
             user_data.clone(),
+            super::Waits::Returns,
             start_detached_windowed_evaluate_fn,
         ),
-        Function::new(
+        super::host_function(
             "get_next_evaluate_result",
             [ValType::I64],
             [ValType::I64],
             user_data.clone(),
+            super::Waits::Blocks,
             get_next_evaluate_result_fn,
         ),
-        Function::new(
+        super::host_function(
             "cancel_evaluate_batch",
             [ValType::I64],
             [],
             user_data.clone(),
+            super::Waits::Blocks,
             cancel_evaluate_batch_fn,
         ),
-        Function::new(
+        super::host_function(
             "cancel_evaluate_test_cases",
             [ValType::I64],
             [ValType::I64],
             user_data,
+            super::Waits::Blocks,
             cancel_evaluate_test_cases_fn,
         ),
     ]
@@ -132,7 +137,7 @@ fn get_next_evaluate_result_fn(
         &call.plugin_id,
         &deps.evaluate_batches,
         &input.batch_id,
-        Duration::from_millis(input.timeout_ms),
+        super::within_call_deadline(Duration::from_millis(input.timeout_ms)),
     )
     .map_err(|e| extism::Error::msg(e.to_string()))?;
     let response = serde_json::json!({ "result": result });

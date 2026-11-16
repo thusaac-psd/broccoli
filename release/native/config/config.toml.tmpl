@@ -4,7 +4,6 @@ host = "@HTTP_HOST@"
 port = @HTTP_PORT@
 frontend_dist = "@DATA_DIR@/packages/web/build/client"
 dispatcher_lease_steal_enabled = true
-evaluate_batch_fanout_concurrency = 16
 max_queued_submissions = 200000
 dispatcher_admission_queue_max = 1000
 
@@ -56,8 +55,6 @@ path_style = true
 temp_dir = ""
 
 [plugin]
-pool_max_instances = 32
-evaluator_parallelism = 32
 plugins_dir = "@DATA_DIR@/plugins"
 enable_wasi = true
 

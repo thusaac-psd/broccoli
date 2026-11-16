@@ -120,6 +120,9 @@ pub struct E2eTestApp {
     /// The in-process server's liveness key; dropping it releases the key
     /// and the reply stream. `None` against an external server.
     _node_heartbeat: Option<common::node_identity::NodeHeartbeat>,
+    /// The in-process server's plugin cache (`plugin.cache_dir`), so a test
+    /// never writes into the source tree. `None` against an external server.
+    _plugin_cache: Option<tempfile::TempDir>,
     /// A contest type this server actually registers, for problem creation
     /// (which requires one): `icpc` from the real plugins, or the stub
     /// `standard` a plugin-less server registers instead.
@@ -231,6 +234,7 @@ impl E2eTestApp {
             worker_handle: None,
             result_consumer_handle: None,
             _node_heartbeat: None,
+            _plugin_cache: None,
             // An external server runs with the real plugins.
             contest_type: "icpc",
         }
@@ -238,6 +242,7 @@ impl E2eTestApp {
 
     async fn spawn_internal(load_plugins: bool, db_max_connections: u32) -> Self {
         let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let plugin_cache = tempfile::tempdir().expect("plugin cache tempdir");
 
         let db_name = format!("e2e_{test_id}");
         let (db_url, redis_port) =
@@ -307,15 +312,11 @@ impl E2eTestApp {
                 max_dispatch_retries: 5,
                 max_system_error_retries: 50,
                 cancel_primitive_enabled: false,
-                max_blocking_threads: None,
-                evaluate_batch_fanout_concurrency: 64,
-                operation_batch_publish_concurrency: 32,
                 claim_fiber_enabled: true,
                 claim_poll_interval_ms: 100,
                 claim_batch_size: 32,
                 max_in_flight_submissions: 256,
                 plugin_timer_tick_interval_secs: 1,
-                plugin_timer_lease_secs: server::config::DEFAULT_PLUGIN_TIMER_LEASE_SECS,
                 plugin_timer_batch: 64,
                 plugin_timer_max_attempts: 5,
             },
@@ -335,6 +336,7 @@ impl E2eTestApp {
             },
             plugin: PluginConfig {
                 plugins_dir: plugins_dir(),
+                cache_dir: plugin_cache.path().to_path_buf(),
                 ..Default::default()
             },
             submission: SubmissionConfig::default(),
@@ -349,6 +351,7 @@ impl E2eTestApp {
             batch_max_age_secs: 600,
             bootstrap: BootstrapConfig::default(),
             clock: Default::default(),
+            removed_keys_set: Vec::new(),
         };
 
         let contest_type_registry: ContestTypeRegistry = Arc::new(RwLock::new(HashMap::new()));
@@ -383,6 +386,7 @@ impl E2eTestApp {
                 config: app_config.clone(),
                 metrics: None,
                 redis_client: None,
+                worker_slots: Default::default(),
             },
             None,
         )
@@ -411,6 +415,7 @@ impl E2eTestApp {
             metrics: e2e_metrics.clone(),
             prometheus_registry: e2e_prom_registry,
             dispatcher_permits: server::dispatcher::permits::DispatcherSemaphore::default(),
+            worker_slots: Default::default(),
             plugin_lifecycle: Default::default(),
             login_throttle: Arc::new(server::utils::login_throttle::LoginThrottle::new(
                 0,
@@ -572,6 +577,7 @@ impl E2eTestApp {
             worker_handle: worker_handle_opt,
             result_consumer_handle: result_consumer_handle_opt,
             _node_heartbeat: Some(node_heartbeat),
+            _plugin_cache: Some(plugin_cache),
             contest_type: if load_plugins { "icpc" } else { "standard" },
         }
     }

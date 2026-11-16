@@ -104,10 +104,11 @@ impl Dispatcher {
             deps.state.clone(),
             plugin_timer::TimerConfig {
                 tick_interval_secs: deps.config.plugin_timer_tick_interval_secs,
-                lease_secs: deps.config.plugin_timer_lease_secs,
                 batch: deps.config.plugin_timer_batch,
                 max_attempts: deps.config.plugin_timer_max_attempts,
-                call_budget: deps.state.plugins.get_config().call_timeout(),
+                ..plugin_timer::TimerConfig::for_call_budget(
+                    deps.state.plugins.get_config().call_timeout(),
+                )
             },
             cancel_rx.clone(),
         )));

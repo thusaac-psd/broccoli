@@ -328,6 +328,47 @@ fn spa_fallback_service(
 /// Upper bound on handling one API request.
 pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How long before [`REQUEST_TIMEOUT`] the request's plugin calls give up, so
+/// a call that cannot finish answers 503 (retry) before the timeout layer
+/// answers 408 (outcome unknown).
+pub(crate) const PLUGIN_DEADLINE_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The deadline of a request's plugin calls, measured from its start.
+const PLUGIN_DEADLINE: std::time::Duration = REQUEST_TIMEOUT.saturating_sub(PLUGIN_DEADLINE_MARGIN);
+
+tokio::task_local! {
+    /// When the plugin calls of the request being handled reach their deadline.
+    static REQUEST_DEADLINE: std::time::Instant;
+}
+
+/// The deadline of every interactive plugin call the request this task is
+/// handling makes: [`PLUGIN_DEADLINE_MARGIN`] before the request times out.
+/// Outside a request (a test driving a handler's logic directly) that long
+/// from now.
+pub(crate) fn request_deadline() -> std::time::Instant {
+    REQUEST_DEADLINE
+        .try_with(|deadline| *deadline)
+        .unwrap_or_else(|_| std::time::Instant::now() + PLUGIN_DEADLINE)
+}
+
+/// Options for an interactive plugin call made by the current request.
+pub(crate) fn interactive_call() -> plugin_core::executor::CallOptions {
+    plugin_core::executor::CallOptions::interactive(request_deadline())
+}
+
+/// Records the request's deadline for [`request_deadline`].
+async fn with_request_deadline(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    REQUEST_DEADLINE
+        .scope(
+            std::time::Instant::now() + PLUGIN_DEADLINE,
+            next.run(request),
+        )
+        .await
+}
+
 /// The server's OpenAPI document as pretty-printed JSON: what
 /// `/api-docs/openapi.json` serves, and what `packages/web-sdk`'s `schema.ts`
 /// is generated from.
@@ -348,10 +389,12 @@ pub fn build_router(state: AppState) -> axum::Router {
     // The timeout sits INSIDE the idempotency middleware so a timed-out
     // handler surfaces as a 408 the middleware settles (as outcome unknown),
     // rather than cancelling the middleware with its key still pending.
-    let router = router.layer(TimeoutLayer::with_status_code(
-        StatusCode::REQUEST_TIMEOUT,
-        REQUEST_TIMEOUT,
-    ));
+    let router = router
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
+        .layer(axum::middleware::from_fn(with_request_deadline));
     let router = router.layer(axum::middleware::from_fn_with_state(
         state.clone(),
         middleware::idempotency_middleware,

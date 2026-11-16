@@ -125,6 +125,7 @@ pub async fn add_contest_problem(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 404, description = "Contest not found (NOT_FOUND)", body = ErrorBody),
+        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]

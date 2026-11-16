@@ -96,7 +96,7 @@
       "gridPos": { "h": 7, "w": 8, "x": 16, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (le, plugin_id, plugin_function, outcome) (rate(broccoli_plugin_instance_acquire_duration_seconds_bucket[5m])))", "legendFormat": "acquire {{plugin_id}}/{{plugin_function}}/{{outcome}}", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum by (le, plugin_kind, outcome) (rate(broccoli_plugin_admission_wait_duration_seconds_bucket[5m])))", "legendFormat": "admission {{plugin_kind}}/{{outcome}}", "refId": "A" },
         { "expr": "histogram_quantile(0.95, sum by (le, plugin_id, plugin_function, outcome) (rate(broccoli_plugin_call_duration_seconds_bucket[5m])))", "legendFormat": "call {{plugin_id}}/{{plugin_function}}/{{outcome}}", "refId": "B" }
       ],
       "fieldConfig": { "defaults": { "unit": "s" } }

@@ -1,12 +1,17 @@
 //! Batched plugin visibility query - the point where an UNTRUSTED plugin
 //! response enters the host's access-control decision.
 //!
-//! [`query_plugins`] is **infallible by design**: it returns `Vec<Decision>`,
-//! never a `Result`. Every failure mode - a poisoned plugin-registry lock, a
-//! plugin timeout/trap/pool-acquire failure, non-JSON or unparseable output,
-//! a `decisions` vector whose length doesn't match the resource batch (in
-//! EITHER direction), or an unrecognized decision variant - collapses to
-//! `Decision::Deny` for every resource in the batch. This mirrors the host's
+//! [`query_plugins`] fails in exactly one way: a querier that cannot answer
+//! right now ([`PluginError::is_unavailable`]: past the request's deadline,
+//! the server draining, the plugin between loads, no instance to run it) is
+//! [`AppError::PluginUnavailable`], a 503 the client retries. That is load on
+//! this server, never a decision, so it never turns into `Deny` (which would
+//! show an empty page, a 404 or a rejected cursor). Every other failure mode -
+//! a poisoned plugin-registry lock, a plugin trap, non-JSON or unparseable
+//! output, a `decisions` vector whose length doesn't match the resource batch
+//! (in EITHER direction), or an unrecognized decision variant - is the
+//! plugin's answer gone wrong and collapses to `Decision::Deny` for every
+//! resource in the batch. This mirrors the host's
 //! established fail-closed hook stance, already pinned by
 //! `plugin_core::hook`'s `non_json_output_fails_closed_reject` and
 //! `empty_output_fails_closed_reject` tests: a failed visibility query must
@@ -32,9 +37,10 @@ use broccoli_server_sdk::types::{
     QueryContext, QueryResource, QuerySubject, VisibilityQueryInput, VisibilityQueryOutput,
     WireDecision,
 };
+use plugin_core::error::PluginError;
 use plugin_core::registry::PluginStatus;
-use plugin_core::traits::PluginInvokerExt;
 
+use crate::error::AppError;
 use crate::state::AppState;
 
 use super::{Action, Decision, FieldMask, Resource, Subject};
@@ -505,9 +511,9 @@ pub(crate) async fn query_plugins(
     resources: &[Resource],
     resource_contest_ids: &[Option<i32>],
     resource_scopes: &[ResourceScope],
-) -> Vec<Decision> {
+) -> Result<Vec<Decision>, AppError> {
     if resources.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     // M4: compiled out in release, and that is safe for the same reason as
     // `meet_positionally`'s — this has one call site
@@ -531,10 +537,10 @@ pub(crate) async fn query_plugins(
 
     let (queriers, blind) = match visibility_queriers(state) {
         Ok(found) => found,
-        Err(()) => return vec![Decision::Deny; resources.len()],
+        Err(()) => return Ok(vec![Decision::Deny; resources.len()]),
     };
     let blind = match blind {
-        Blind::Everything => return vec![Decision::Deny; resources.len()],
+        Blind::Everything => return Ok(vec![Decision::Deny; resources.len()]),
         Blind::Nothing => None,
         Blind::ContestTypes(types) => {
             Some(blind_decisions(state, &types, resources, resource_contest_ids).await)
@@ -542,7 +548,7 @@ pub(crate) async fn query_plugins(
     };
 
     if queriers.is_empty() {
-        return blind.unwrap_or_else(|| vec![Decision::Allow; resources.len()]);
+        return Ok(blind.unwrap_or_else(|| vec![Decision::Allow; resources.len()]));
     }
 
     let query_resources: Vec<QueryResource> = resources
@@ -577,13 +583,28 @@ pub(crate) async fn query_plugins(
                 .map(|&i| query_resources[i].clone())
                 .collect(),
         };
-        let call_result: Result<VisibilityQueryOutput, _> = state
-            .plugins
-            .call(&querier.plugin_id, &querier.function, &input)
-            .await;
+        let call_result = match serde_json::to_vec(&input) {
+            Ok(input) => {
+                state
+                    .plugins
+                    .call_raw(
+                        &querier.plugin_id,
+                        &querier.function,
+                        input,
+                        crate::interactive_call(),
+                    )
+                    .await
+            }
+            Err(e) => Err(PluginError::from(e)),
+        }
+        .and_then(|bytes| Ok(serde_json::from_slice::<VisibilityQueryOutput>(&bytes)?));
 
         let output = match call_result {
             Ok(out) => Ok(out),
+            Err(e) if e.is_unavailable() => {
+                tracing::warn!(plugin_id = %querier.plugin_id, error = %e, "visibility querier unavailable");
+                return Err(AppError::PluginUnavailable);
+            }
             Err(e) => {
                 tracing::error!(
                     plugin_id = %querier.plugin_id,
@@ -603,7 +624,7 @@ pub(crate) async fn query_plugins(
         combined = meet_positionally(combined, full);
     }
 
-    enforce_mask_cap_post_union(combined)
+    Ok(enforce_mask_cap_post_union(combined))
 }
 
 /// Reapply `MAX_MASK_FIELDS` to every `Redact` decision AFTER folding all
@@ -639,14 +660,10 @@ fn enforce_mask_cap_post_union(decisions: Vec<Decision>) -> Vec<Decision> {
         .collect()
 }
 
-// Re-exported for `super::tests` (`visibility/mod.rs`) - see the doc
-// comment on `PanicPluginManager` below.
-#[cfg(test)]
-pub(crate) use tests::PanicPluginManager;
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::MockPlugins;
 
     fn types(names: &[&str]) -> std::collections::BTreeSet<String> {
         names.iter().map(|n| n.to_string()).collect()
@@ -689,13 +706,11 @@ mod tests {
     use common::storage::filesystem::FilesystemBlobStore;
     use plugin_core::config::PluginConfig;
     use plugin_core::error::PluginError;
-    use plugin_core::host::HostFunctionRegistry;
-    use plugin_core::i18n::I18nRegistry;
     use plugin_core::manifest::{
         PluginManifest, ServerConfig as ManifestServerConfig, ServerQuery,
     };
     use plugin_core::registry::{PluginEntry, PluginRegistry};
-    use plugin_core::traits::{PluginInvoker, PluginManager};
+    use plugin_core::traits::PluginManager;
     use sea_orm::{DatabaseBackend, MockDatabase};
 
     use crate::config::{
@@ -899,77 +914,10 @@ mod tests {
 
     // ---------------------------------------------------------------------
     // query_plugins - needs an AppState, so a minimal one is built here.
-    // Modeled on `dispatcher::steal::tests::NoopPluginManager` (the only
-    // existing precedent in this crate for constructing an AppState in a
-    // unit test), but this manager PANICS on any call instead of returning
-    // an error, so these tests also serve as a hard check that
-    // `query_plugins` does not reach for the plugin host at all when it has
-    // no work to do.
+    // Most of these tests use `MockPlugins::never_called`, which panics on
+    // any call, so they also serve as a hard check that `query_plugins` does
+    // not reach for the plugin host at all when it has no work to do.
     // ---------------------------------------------------------------------
-
-    // `pub(crate)` (rather than the private default every other test-only
-    // type in this file uses): the `VisibilityKernel::decide_batch` tests
-    // (`visibility/mod.rs`) need a plugin-manager
-    // double that panics on any call, to prove `admin_override` and a fully
-    // host-denied batch never reach for the plugin host - exactly the
-    // property this type already exists to prove here. Re-exported above
-    // this module (`pub(crate) use tests::PanicPluginManager;`) so `mod.rs`'s
-    // own test module can name it as `super::plugin_query::PanicPluginManager`.
-    // The fields stay private; construct via `PanicPluginManager::new` instead.
-    pub(crate) struct PanicPluginManager {
-        registry: PluginRegistry,
-        config: PluginConfig,
-        host_functions: HostFunctionRegistry,
-        i18n: I18nRegistry,
-    }
-
-    impl PanicPluginManager {
-        pub(crate) fn new(registry: PluginRegistry) -> Self {
-            Self {
-                registry,
-                config: PluginConfig::default(),
-                host_functions: HostFunctionRegistry::new(),
-                i18n: I18nRegistry::new(),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl PluginInvoker for PanicPluginManager {
-        fn get_registry(&self) -> &PluginRegistry {
-            &self.registry
-        }
-
-        fn get_config(&self) -> &PluginConfig {
-            &self.config
-        }
-
-        async fn call_raw(
-            &self,
-            plugin_id: &str,
-            func_name: &str,
-            _input: Vec<u8>,
-        ) -> Result<Vec<u8>, PluginError> {
-            panic!(
-                "query_plugins must not call plugin '{plugin_id}'::{func_name} here \
-                 (no resources, or no registered visibility querier)"
-            );
-        }
-    }
-
-    impl PluginManager for PanicPluginManager {
-        fn get_host_functions(&self) -> &HostFunctionRegistry {
-            &self.host_functions
-        }
-
-        fn get_i18n_registry(&self) -> &I18nRegistry {
-            &self.i18n
-        }
-
-        fn resolve(&self, _manifest: &PluginManifest) -> Option<(String, Vec<String>)> {
-            None
-        }
-    }
 
     /// A `Loaded` plugin entry that registers one `visibility` query.
     fn visibility_plugin_entry(plugin_id: &str) -> PluginEntry {
@@ -1034,11 +982,10 @@ mod tests {
     // ---------------------------------------------------------------------
     // query_plugins - the multi-querier fold loop, with calls that SUCCEED.
     //
-    // `PanicPluginManager` above proves plugins are never called when they
+    // `MockPlugins::never_called` proves plugins are never called when they
     // shouldn't be; it cannot exercise the loop that combines two or more
-    // *successful* responses, because it panics on any call. `CannedPluginManager`
-    // is a second double that answers each `plugin_id` with a canned,
-    // pre-serialized response (or a trap), so these tests drive the real
+    // *successful* responses. `canned` answers each `plugin_id` with a
+    // canned, pre-serialized response (or a trap), so these tests drive the real
     // `for querier in &queriers` loop in `query_plugins` and the real
     // `HashMap`-backed `PluginRegistry` scan in `visibility_queriers`, not a
     // hand-rolled call to `meet_positionally`.
@@ -1047,63 +994,29 @@ mod tests {
     enum CannedResponse {
         Ok(Vec<u8>),
         Trap,
+        Unavailable,
     }
 
-    struct CannedPluginManager {
-        registry: PluginRegistry,
-        config: PluginConfig,
-        host_functions: HostFunctionRegistry,
-        i18n: I18nRegistry,
-        /// Keyed by `plugin_id` - every `Loaded` entry in `registry` that
-        /// registers a `visibility` query MUST have an entry here, or the
-        /// call panics (a missing canned response is a test-setup bug, not
-        /// a case to fail closed on).
-        responses: HashMap<String, CannedResponse>,
-    }
-
-    #[async_trait::async_trait]
-    impl PluginInvoker for CannedPluginManager {
-        fn get_registry(&self) -> &PluginRegistry {
-            &self.registry
-        }
-
-        fn get_config(&self) -> &PluginConfig {
-            &self.config
-        }
-
-        async fn call_raw(
-            &self,
-            plugin_id: &str,
-            func_name: &str,
-            _input: Vec<u8>,
-        ) -> Result<Vec<u8>, PluginError> {
-            match self.responses.get(plugin_id) {
+    /// Answers each `plugin_id` with its canned response; a plugin with none
+    /// configured panics (a test-setup bug, not a case to fail closed on).
+    fn canned(registry: PluginRegistry, responses: HashMap<String, CannedResponse>) -> MockPlugins {
+        MockPlugins::new(registry, move |plugin_id, func_name, _| {
+            match responses.get(plugin_id) {
                 Some(CannedResponse::Ok(bytes)) => Ok(bytes.clone()),
                 Some(CannedResponse::Trap) => Err(PluginError::ExecutionFailed {
                     plugin_id: plugin_id.to_string(),
                     func_name: func_name.to_string(),
                     message: "deliberate test trap".to_string(),
                 }),
+                Some(CannedResponse::Unavailable) => Err(PluginError::Unavailable {
+                    plugin_id: plugin_id.to_string(),
+                    func_name: func_name.to_string(),
+                }),
                 None => panic!(
-                    "CannedPluginManager has no canned response configured for \
-                     plugin_id='{plugin_id}' - fix the test"
+                    "no canned response configured for plugin_id='{plugin_id}' - fix the test"
                 ),
             }
-        }
-    }
-
-    impl PluginManager for CannedPluginManager {
-        fn get_host_functions(&self) -> &HostFunctionRegistry {
-            &self.host_functions
-        }
-
-        fn get_i18n_registry(&self) -> &I18nRegistry {
-            &self.i18n
-        }
-
-        fn resolve(&self, _manifest: &PluginManifest) -> Option<(String, Vec<String>)> {
-            None
-        }
+        })
     }
 
     fn canned_output(decisions: Vec<WireDecision>) -> Vec<u8> {
@@ -1185,15 +1098,11 @@ mod tests {
                     max_dispatch_retries: 5,
                     max_system_error_retries: 50,
                     cancel_primitive_enabled: false,
-                    max_blocking_threads: None,
-                    evaluate_batch_fanout_concurrency: 64,
-                    operation_batch_publish_concurrency: 32,
                     claim_fiber_enabled: false,
                     claim_poll_interval_ms: 1000,
                     claim_batch_size: 32,
                     max_in_flight_submissions: 256,
                     plugin_timer_tick_interval_secs: 1,
-                    plugin_timer_lease_secs: crate::config::DEFAULT_PLUGIN_TIMER_LEASE_SECS,
                     plugin_timer_batch: 64,
                     plugin_timer_max_attempts: 5,
                 },
@@ -1222,6 +1131,7 @@ mod tests {
                 batch_max_age_secs: 600,
                 bootstrap: BootstrapConfig::default(),
                 clock: Default::default(),
+                removed_keys_set: Vec::new(),
             },
             mq: None,
             redis_client: None,
@@ -1239,6 +1149,7 @@ mod tests {
             metrics,
             prometheus_registry,
             dispatcher_permits: DispatcherSemaphore::new(true, 1, 0),
+            worker_slots: Default::default(),
             plugin_lifecycle: Default::default(),
             login_throttle: Arc::new(crate::utils::login_throttle::LoginThrottle::new(
                 0,
@@ -1256,20 +1167,19 @@ mod tests {
         let mut registry_map = HashMap::new();
         registry_map.insert(entry.id.clone(), entry);
 
-        let plugins: Arc<dyn PluginManager> = Arc::new(PanicPluginManager {
-            registry: Arc::new(RwLock::new(registry_map)),
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-        });
+        let plugins: Arc<dyn PluginManager> = Arc::new(MockPlugins::never_called(Arc::new(
+            RwLock::new(registry_map),
+        )));
 
         let state = test_app_state(plugins).await;
         let subject = Subject::anonymous();
 
         // A registered visibility querier exists, so if query_plugins reached
-        // for the plugin host at all here, PanicPluginManager would panic and
+        // for the plugin host at all here, MockPlugins::never_called would panic and
         // fail this test - the assertion below only runs if it did not.
-        let result = query_plugins(&state, &subject, Action::Read, None, &[], &[], &[]).await;
+        let result = query_plugins(&state, &subject, Action::Read, None, &[], &[], &[])
+            .await
+            .expect("plugins answered");
 
         assert_eq!(result, Vec::<Decision>::new());
     }
@@ -1283,12 +1193,9 @@ mod tests {
         let mut registry_map = HashMap::new();
         registry_map.insert(entry.id.clone(), entry);
 
-        let plugins: Arc<dyn PluginManager> = Arc::new(PanicPluginManager {
-            registry: Arc::new(RwLock::new(registry_map)),
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-        });
+        let plugins: Arc<dyn PluginManager> = Arc::new(MockPlugins::never_called(Arc::new(
+            RwLock::new(registry_map),
+        )));
 
         let state = test_app_state(plugins).await;
         let subject = Subject::anonymous();
@@ -1304,7 +1211,8 @@ mod tests {
             &resource_contest_ids,
             &vec![ResourceScope::Unknown; resources.len()],
         )
-        .await;
+        .await
+        .expect("plugins answered");
 
         assert_eq!(result, vec![Decision::Allow, Decision::Allow]);
     }
@@ -1315,12 +1223,9 @@ mod tests {
         let mut registry_map = HashMap::new();
         registry_map.insert(entry.id.clone(), entry);
 
-        let plugins: Arc<dyn PluginManager> = Arc::new(PanicPluginManager {
-            registry: Arc::new(RwLock::new(registry_map)),
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-        });
+        let plugins: Arc<dyn PluginManager> = Arc::new(MockPlugins::never_called(Arc::new(
+            RwLock::new(registry_map),
+        )));
 
         let state = test_app_state(plugins).await;
         state
@@ -1340,11 +1245,12 @@ mod tests {
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
+        .expect("plugins answered")
     }
 
     /// A plugin that DECLARES a `topic = "visibility"` query but is disabled
     /// fleet-wide has no opinion: it is excluded from `queriers` exactly like
-    /// one with no query at all. `PanicPluginManager` also proves the
+    /// one with no query at all. `MockPlugins::never_called` also proves the
     /// not-`Loaded` plugin is never called.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
@@ -1388,12 +1294,7 @@ mod tests {
         }
         assert!(registry.is_poisoned());
 
-        let plugins: Arc<dyn PluginManager> = Arc::new(PanicPluginManager {
-            registry,
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-        });
+        let plugins: Arc<dyn PluginManager> = Arc::new(MockPlugins::never_called(registry));
 
         let state = test_app_state(plugins).await;
         let subject = Subject::anonymous();
@@ -1409,7 +1310,8 @@ mod tests {
             &resource_contest_ids,
             &vec![ResourceScope::Unknown; resources.len()],
         )
-        .await;
+        .await
+        .expect("plugins answered");
 
         assert_eq!(result, vec![Decision::Deny, Decision::Deny]);
     }
@@ -1431,13 +1333,7 @@ mod tests {
             CannedResponse::Ok(canned_output(vec![WireDecision::Deny {}])),
         );
 
-        let plugins: Arc<dyn PluginManager> = Arc::new(CannedPluginManager {
-            registry,
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-            responses,
-        });
+        let plugins: Arc<dyn PluginManager> = Arc::new(canned(registry, responses));
 
         let state = test_app_state(plugins).await;
         let subject = Subject::anonymous();
@@ -1453,7 +1349,8 @@ mod tests {
             &resource_contest_ids,
             &vec![ResourceScope::Unknown; resources.len()],
         )
-        .await;
+        .await
+        .expect("plugins answered");
 
         assert_eq!(
             result,
@@ -1483,13 +1380,7 @@ mod tests {
             }])),
         );
 
-        let plugins: Arc<dyn PluginManager> = Arc::new(CannedPluginManager {
-            registry,
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-            responses,
-        });
+        let plugins: Arc<dyn PluginManager> = Arc::new(canned(registry, responses));
 
         let state = test_app_state(plugins).await;
         let subject = Subject::anonymous();
@@ -1505,7 +1396,8 @@ mod tests {
             &resource_contest_ids,
             &vec![ResourceScope::Unknown; resources.len()],
         )
-        .await;
+        .await
+        .expect("plugins answered");
 
         assert_eq!(
             result,
@@ -1554,13 +1446,7 @@ mod tests {
             }])),
         );
 
-        let plugins: Arc<dyn PluginManager> = Arc::new(CannedPluginManager {
-            registry,
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-            responses,
-        });
+        let plugins: Arc<dyn PluginManager> = Arc::new(canned(registry, responses));
 
         let state = test_app_state(plugins).await;
         let subject = Subject::anonymous();
@@ -1576,7 +1462,8 @@ mod tests {
             &resource_contest_ids,
             &vec![ResourceScope::Unknown; resources.len()],
         )
-        .await;
+        .await
+        .expect("plugins answered");
 
         assert_eq!(
             result,
@@ -1615,13 +1502,7 @@ mod tests {
             }])),
         );
 
-        let plugins: Arc<dyn PluginManager> = Arc::new(CannedPluginManager {
-            registry,
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-            responses,
-        });
+        let plugins: Arc<dyn PluginManager> = Arc::new(canned(registry, responses));
 
         let state = test_app_state(plugins).await;
         let subject = Subject::anonymous();
@@ -1637,7 +1518,8 @@ mod tests {
             &resource_contest_ids,
             &vec![ResourceScope::Unknown; resources.len()],
         )
-        .await;
+        .await
+        .expect("plugins answered");
 
         match &result[0] {
             Decision::Redact(mask) => assert_eq!(
@@ -1674,13 +1556,7 @@ mod tests {
             CannedResponse::Ok(canned_output(vec![WireDecision::Deny {}])),
         );
 
-        let plugins: Arc<dyn PluginManager> = Arc::new(CannedPluginManager {
-            registry,
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-            responses,
-        });
+        let plugins: Arc<dyn PluginManager> = Arc::new(canned(registry, responses));
 
         let state = test_app_state(plugins).await;
         let subject = Subject::anonymous();
@@ -1696,7 +1572,8 @@ mod tests {
             &resource_contest_ids,
             &vec![ResourceScope::Unknown; resources.len()],
         )
-        .await;
+        .await
+        .expect("plugins answered");
 
         assert_eq!(
             result,
@@ -1724,13 +1601,7 @@ mod tests {
             CannedResponse::Ok(canned_output(vec![WireDecision::Allow {}])),
         );
 
-        let plugins: Arc<dyn PluginManager> = Arc::new(CannedPluginManager {
-            registry,
-            config: PluginConfig::default(),
-            host_functions: HostFunctionRegistry::new(),
-            i18n: I18nRegistry::new(),
-            responses,
-        });
+        let plugins: Arc<dyn PluginManager> = Arc::new(canned(registry, responses));
 
         let state = test_app_state(plugins).await;
         let subject = Subject::anonymous();
@@ -1746,13 +1617,47 @@ mod tests {
             &resource_contest_ids,
             &vec![ResourceScope::Unknown; resources.len()],
         )
-        .await;
+        .await
+        .expect("plugins answered");
 
         assert_eq!(
             result,
             vec![Decision::Deny],
             "one plugin trapping must deny the whole batch even though the \
              other two allowed - the third querier's response cannot rescue it"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn an_unavailable_querier_is_a_retryable_error_not_a_deny() {
+        let _guard = crate::metrics_test_lock();
+
+        let registry = registry_with_order(&["plugin-allow", "plugin-busy"]);
+        let mut responses = HashMap::new();
+        responses.insert(
+            "plugin-allow".to_string(),
+            CannedResponse::Ok(canned_output(vec![WireDecision::Allow {}])),
+        );
+        responses.insert("plugin-busy".to_string(), CannedResponse::Unavailable);
+        let plugins: Arc<dyn PluginManager> = Arc::new(canned(registry, responses));
+
+        let state = test_app_state(plugins).await;
+        let subject = Subject::anonymous();
+        let resources = vec![Resource::Contest(1)];
+        let result = query_plugins(
+            &state,
+            &subject,
+            Action::Read,
+            Some(1),
+            &resources,
+            &[Some(1)],
+            &[ResourceScope::Unknown],
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AppError::PluginUnavailable)),
+            "{result:?}"
         );
     }
 }

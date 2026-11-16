@@ -122,6 +122,7 @@ pub async fn add_participant(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden when show_participants_list is false (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Contest not found (NOT_FOUND)", body = ErrorBody),
+        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]

@@ -24,7 +24,7 @@ pub fn create_resolve_language_function(
     resolver_registry: LanguageResolverRegistry,
     plugin_manager: Arc<dyn PluginInvoker>,
 ) -> Function {
-    Function::new(
+    super::host_function(
         "resolve_language",
         [ValType::I64],
         [ValType::I64],
@@ -33,6 +33,7 @@ pub fn create_resolve_language_function(
             resolver_registry,
             plugin_manager,
         }),
+        super::Waits::Blocks,
         resolve_language_fn,
     )
 }
@@ -77,7 +78,12 @@ fn resolve_language_fn(
     let output_bytes = tokio::runtime::Handle::current()
         .block_on(async {
             ctx.plugin_manager
-                .call_raw(&handler.plugin_id, &handler.function_name, input_bytes)
+                .call_raw(
+                    &handler.plugin_id,
+                    &handler.function_name,
+                    input_bytes,
+                    plugin_core::executor::CallOptions::nested(),
+                )
                 .await
         })
         .map_err(|e| extism::Error::msg(format!("Language resolver plugin error: {}", e)))?;

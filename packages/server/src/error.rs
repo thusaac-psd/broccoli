@@ -13,6 +13,11 @@ use sea_orm::DbErr;
 /// reconcile interval, after which this replica may have loaded the plugin.
 const CONTEST_TYPE_RETRY_AFTER_SECS: u64 = 5;
 
+/// `Retry-After` for [`AppError::PluginUnavailable`]: a plugin call that
+/// could not run in time has nothing to wait for but load to drop, which a
+/// couple of seconds usually sees.
+pub const PLUGIN_RETRY_AFTER_SECS: u64 = 2;
+
 #[derive(Debug)]
 pub enum AppError {
     Validation(String),
@@ -46,6 +51,10 @@ pub enum AppError {
     Overloaded {
         retry_after: u64,
     },
+    /// A plugin the request needs could not answer before the request's
+    /// deadline: this server is too busy right now. Never a decision about
+    /// the request; the client retries after [`PLUGIN_RETRY_AFTER_SECS`].
+    PluginUnavailable,
     PluginRejection {
         code: String,
         message: String,
@@ -149,6 +158,16 @@ impl AppError {
                     ),
                 ),
             ),
+            AppError::PluginUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                simple(
+                    "PLUGIN_UNAVAILABLE",
+                    format!(
+                        "A plugin this request needs is busy; retry in \
+                         {PLUGIN_RETRY_AFTER_SECS} seconds"
+                    ),
+                ),
+            ),
             AppError::PluginRejection {
                 code,
                 message,
@@ -228,6 +247,7 @@ impl IntoResponse for AppError {
                 Some(*retry_after)
             }
             AppError::ContestTypeUnavailable(_) => Some(CONTEST_TYPE_RETRY_AFTER_SECS),
+            AppError::PluginUnavailable => Some(PLUGIN_RETRY_AFTER_SECS),
             _ => None,
         };
 
@@ -275,13 +295,12 @@ impl From<PluginError> for AppError {
                 AppError::PluginNotReady(err.to_string())
             }
             PluginError::Serialization(_) => AppError::Validation(err.to_string()),
-            // Note: `PluginError::PoolTimeout` deliberately falls through to
-            // `Internal` (500). Hot-path callers (submission dispatch,
-            // evaluate batch, hook firing) retry transparently via
-            // `plugin_core::retry::call_raw_with_pool_retry`, so by the time a
-            // PoolTimeout reaches HTTP error mapping the server is genuinely
-            // overloaded - a 429 would misleadingly tell the *client* to back
-            // off when the right signal is server-internal failure.
+            PluginError::Unavailable { .. }
+            | PluginError::ShuttingDown
+            | PluginError::InstanceBuild { .. } => {
+                tracing::warn!("{err}");
+                AppError::PluginUnavailable
+            }
             _ => AppError::Internal(err.to_string()),
         }
     }
@@ -376,6 +395,31 @@ mod tests {
             .expect("body");
         let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("json");
         assert_eq!(body["code"], "QUEUE_OVERLOADED");
+    }
+
+    #[tokio::test]
+    async fn a_plugin_that_cannot_answer_now_is_a_503_with_retry_after() {
+        for err in [
+            PluginError::Unavailable {
+                plugin_id: "p".into(),
+                func_name: "f".into(),
+            },
+            PluginError::ShuttingDown,
+            PluginError::InstanceBuild {
+                plugin_id: "p".into(),
+                message: "out of memory".into(),
+            },
+        ] {
+            let response = AppError::from(err).into_response();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                response.headers().get("Retry-After").unwrap(),
+                &PLUGIN_RETRY_AFTER_SECS.to_string()
+            );
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["code"], "PLUGIN_UNAVAILABLE");
+        }
     }
 
     /// Sanity check that 429 RateLimited and 503 Overloaded both

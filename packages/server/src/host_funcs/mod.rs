@@ -21,7 +21,6 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::Semaphore;
 use tracing::Span;
 use tracing::span::EnteredSpan;
 
@@ -62,6 +61,51 @@ pub(crate) fn host_data<C>(ctx: C) -> UserData<Arc<C>> {
     UserData::new(Arc::new(ctx))
 }
 
+/// Whether a host function waits on something outside the guest: the
+/// database, the queue, a judging result or another plugin call. Every host
+/// function declares it where it is built ([`host_function`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Waits {
+    /// The call is parked for the whole body: its CPU token goes to another
+    /// call and comes back, ahead of its class's queued calls, when the
+    /// body returns (see [`plugin_core::executor::parked`]).
+    Blocks,
+    /// The body returns at once (a log line, an in-memory registry update);
+    /// the call keeps its token.
+    Returns,
+}
+
+/// Build host function `name`, parking its call around the body when it
+/// [`Waits::Blocks`].
+pub(crate) fn host_function<T, F>(
+    name: &'static str,
+    params: impl IntoIterator<Item = ValType>,
+    results: impl IntoIterator<Item = ValType>,
+    user_data: UserData<T>,
+    waits: Waits,
+    f: F,
+) -> Function
+where
+    T: 'static,
+    F: Fn(&mut CurrentPlugin, &[Val], &mut [Val], UserData<T>) -> Result<(), extism::Error>
+        + Send
+        + Sync
+        + 'static,
+{
+    match waits {
+        Waits::Blocks => Function::new(
+            name,
+            params,
+            results,
+            user_data,
+            move |plugin: &mut CurrentPlugin, inputs: &[Val], outputs: &mut [Val], data| {
+                plugin_core::executor::parked(|| f(plugin, inputs, outputs, data))
+            },
+        ),
+        Waits::Returns => Function::new(name, params, results, user_data, f),
+    }
+}
+
 /// An in-flight host fn call: the snapshot of its context plus the entered
 /// `host_fn` span, which closes when the guard is dropped at the end of the
 /// body. Derefs to the context.
@@ -93,6 +137,16 @@ impl<C> std::ops::Deref for HostCall<C> {
 
     fn deref(&self) -> &C {
         &self.ctx
+    }
+}
+
+/// `wait`, cut short at the deadline of the plugin call this host function
+/// serves: a guest asking for a long result wait cannot outwait its own
+/// call.
+pub(crate) fn within_call_deadline(wait: std::time::Duration) -> std::time::Duration {
+    match plugin_core::executor::current_deadline() {
+        Some(deadline) => wait.min(deadline.saturating_duration_since(std::time::Instant::now())),
+        None => wait,
     }
 }
 
@@ -156,9 +210,9 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
         &mut hr,
         "logger",
         "log_info",
-        &[I64],
-        &[],
+        (&[I64], &[]),
         str::to_string,
+        Waits::Returns,
         logger::log_info,
     );
     register_storage_functions(&mut hr, privileged_db);
@@ -177,9 +231,9 @@ fn register_fn<T, F>(
     hr: &mut HostFunctionRegistry,
     capability: &str,
     name: &'static str,
-    params: &[ValType],
-    results: &[ValType],
+    (params, results): (&[ValType], &[ValType]),
     user_data: impl Fn(&str) -> T + Send + Sync + 'static,
+    waits: Waits,
     f: F,
 ) where
     T: Send + Sync + 'static,
@@ -191,11 +245,12 @@ fn register_fn<T, F>(
 {
     let (params, results) = (params.to_vec(), results.to_vec());
     hr.register(capability, move |plugin_id| {
-        Function::new(
+        host_function(
             name,
             params.clone(),
             results.clone(),
             host_data(user_data(plugin_id)),
+            waits,
             f.clone(),
         )
     });
@@ -216,45 +271,45 @@ fn register_storage_functions(hr: &mut HostFunctionRegistry, privileged_db: &Dat
         hr,
         cap,
         "store_set",
-        &[I64],
-        &[],
+        (&[I64], &[]),
         with_db(privileged_db),
+        Waits::Blocks,
         storage::store_set,
     );
     register_fn(
         hr,
         cap,
         "store_get",
-        &[I64],
-        &[I64],
+        (&[I64], &[I64]),
         with_db(privileged_db),
+        Waits::Blocks,
         storage::store_get,
     );
     register_fn(
         hr,
         cap,
         "store_compare_and_set",
-        &[I64],
-        &[I64],
+        (&[I64], &[I64]),
         with_db(privileged_db),
+        Waits::Blocks,
         storage::store_compare_and_set,
     );
     register_fn(
         hr,
         cap,
         "store_delete",
-        &[I64],
-        &[],
+        (&[I64], &[]),
         with_db(privileged_db),
+        Waits::Blocks,
         storage::store_delete,
     );
     register_fn(
         hr,
         cap,
         "store_scan",
-        &[I64],
-        &[I64],
+        (&[I64], &[I64]),
         with_db(privileged_db),
+        Waits::Blocks,
         storage::store_scan,
     );
 }
@@ -269,18 +324,18 @@ fn register_timer_functions(hr: &mut HostFunctionRegistry, privileged_db: &Datab
         hr,
         cap,
         "timer_schedule",
-        &[I64],
-        &[I64],
+        (&[I64], &[I64]),
         with_db(privileged_db),
+        Waits::Blocks,
         timer::timer_schedule,
     );
     register_fn(
         hr,
         cap,
         "timer_cancel",
-        &[I64],
-        &[I64],
+        (&[I64], &[I64]),
         with_db(privileged_db),
+        Waits::Blocks,
         timer::timer_cancel,
     );
 }
@@ -293,18 +348,18 @@ fn register_sql_functions(hr: &mut HostFunctionRegistry, db: &DatabaseConnection
         hr,
         cap,
         "db_execute",
-        &[I64, I64],
-        &[I64],
+        (&[I64, I64], &[I64]),
         with_db(db),
+        Waits::Blocks,
         sql::db_execute,
     );
     register_fn(
         hr,
         cap,
         "db_query",
-        &[I64, I64],
-        &[I64],
+        (&[I64, I64], &[I64]),
         with_db(db),
+        Waits::Blocks,
         sql::db_query,
     );
 
@@ -317,45 +372,45 @@ fn register_sql_functions(hr: &mut HostFunctionRegistry, db: &DatabaseConnection
         hr,
         cap,
         "db_begin",
-        &[I64],
-        &[I64],
+        (&[I64], &[I64]),
         with_txns(),
+        Waits::Blocks,
         sql::db_begin,
     );
     register_fn(
         hr,
         cap,
         "db_query_in",
-        &[I64, I64, I64],
-        &[I64],
+        (&[I64, I64, I64], &[I64]),
         with_txns(),
+        Waits::Blocks,
         sql::db_query_in,
     );
     register_fn(
         hr,
         cap,
         "db_execute_in",
-        &[I64, I64, I64],
-        &[I64],
+        (&[I64, I64, I64], &[I64]),
         with_txns(),
+        Waits::Blocks,
         sql::db_execute_in,
     );
     register_fn(
         hr,
         cap,
         "db_commit",
-        &[I64],
-        &[I64],
+        (&[I64], &[I64]),
         with_txns(),
+        Waits::Blocks,
         sql::db_commit,
     );
     register_fn(
         hr,
         cap,
         "db_rollback",
-        &[I64],
-        &[I64],
+        (&[I64], &[I64]),
         with_txns(),
+        Waits::Blocks,
         sql::db_rollback,
     );
 }
@@ -399,7 +454,15 @@ fn register_submission_functions(
         ),
     ];
     for (name, f) in functions {
-        register_fn(hr, cap, name, &[I64], &[I64], with_db(privileged_db), f);
+        register_fn(
+            hr,
+            cap,
+            name,
+            (&[I64], &[I64]),
+            with_db(privileged_db),
+            Waits::Blocks,
+            f,
+        );
     }
 }
 
@@ -460,26 +523,16 @@ fn register_registry_functions(hr: &mut HostFunctionRegistry, deps: &HostFunctio
     });
 }
 
-/// `evaluator:evaluate` and `operations:dispatch`, which share the server's
-/// evaluator and fan-out concurrency limits.
+/// `evaluator:evaluate` and `operations:dispatch`. Test cases outstanding
+/// at workers are bounded by the live worker slots ([`Fanout`]).
+///
+/// [`Fanout`]: crate::dispatcher::fanout::Fanout
 fn register_evaluation_functions(hr: &mut HostFunctionRegistry, deps: &HostFunctionDeps) {
-    // Cap concurrent evaluator plugin calls per server. Default = number of cores,
-    // but on hosts with spare RAM and a high-fan-out workload (many test cases
-    // per submission fanned out as parallel tokio tasks), this should be
-    // bumped well above core count via `BROCCOLI__PLUGIN__EVALUATOR_PARALLELISM`.
-    let evaluator_parallelism = deps.system.config.plugin.resolve_evaluator_parallelism();
-    let fanout_concurrency = deps.system.config.server.evaluate_batch_fanout_concurrency as usize;
-    tracing::info!(
-        evaluator_parallelism,
-        fanout_concurrency,
-        "evaluator and fan-out semaphores configured"
-    );
-    let evaluator_slots = Arc::new(Semaphore::new(evaluator_parallelism));
-    let fanout_slots = crate::dispatcher::fanout::FanoutSemaphore::new(
-        fanout_concurrency,
+    let fanout = crate::dispatcher::fanout::Fanout::new(
+        deps.system.worker_slots.clone(),
         deps.system.metrics.clone(),
     );
-    let eval_deps = deps.evaluate_deps(evaluator_slots, fanout_slots);
+    let eval_deps = deps.evaluate_deps(fanout);
     hr.register_many("evaluator:evaluate", move |plugin_id| {
         evaluate::create_evaluate_functions(plugin_id.to_string(), eval_deps.clone())
     });

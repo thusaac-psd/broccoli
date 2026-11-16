@@ -120,6 +120,65 @@ pub async fn live_nodes<C: ConnectionLike>(
         .collect())
 }
 
+/// Every live worker, as [`live_nodes`] returns them, and how many servers
+/// are live, from one `SCAN` pass over both roles and one pipelined round
+/// trip for the workers' payloads.
+pub async fn live_workers_and_server_count<C: ConnectionLike>(
+    conn: &mut C,
+    namespace: &str,
+) -> redis::RedisResult<(Vec<LiveNode>, usize)> {
+    let pattern = format!("{namespace}:heartbeat:*");
+    let worker_prefix = NodeRole::Worker.key_prefix(namespace);
+    let server_prefix = NodeRole::Server.key_prefix(namespace);
+    let mut keys = Vec::new();
+    let mut cursor = 0_u64;
+    loop {
+        let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(&pattern)
+            .arg("COUNT")
+            .arg(256_u32)
+            .query_async(conn)
+            .await?;
+        keys.extend(batch);
+        cursor = next;
+        if cursor == 0 {
+            break;
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    let servers = keys
+        .iter()
+        .filter(|k| k.starts_with(&server_prefix))
+        .count();
+    let workers: Vec<&String> = keys
+        .iter()
+        .filter(|k| k.starts_with(&worker_prefix))
+        .collect();
+    if workers.is_empty() {
+        return Ok((Vec::new(), servers));
+    }
+    let mut pipe = redis::pipe();
+    for key in &workers {
+        pipe.cmd("GET").arg(*key).cmd("PTTL").arg(*key);
+    }
+    let replies: Vec<(Option<String>, i64)> = pipe.query_async(conn).await?;
+    let nodes = workers
+        .iter()
+        .zip(replies)
+        .filter_map(|(key, (payload, pttl))| {
+            Some(LiveNode {
+                id: key.strip_prefix(&worker_prefix)?.to_string(),
+                payload: payload?,
+                age: age_from_pttl(pttl),
+            })
+        })
+        .collect();
+    Ok((nodes, servers))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +242,35 @@ mod tests {
         assert!(live[0].age < Duration::from_secs(2));
         assert!(live[1].age >= Duration::from_secs(3));
         assert_eq!(live[2].age, Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn one_scan_reads_the_workers_and_counts_the_servers() {
+        let (_container, url) = crate::test_util::redis().await;
+        let client = redis::Client::open(url).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        for (key, value) in [
+            (NodeRole::Worker.key("ops", "w1"), r#"{"id":"w1"}"#),
+            (NodeRole::Worker.key("ops", "w2"), r#"{"id":"w2"}"#),
+            (NodeRole::Server.key("ops", "s1"), "{}"),
+            (NodeRole::Server.key("ops", "s2"), "{}"),
+            (NodeRole::Server.key("ops", "s3"), "{}"),
+            (NodeRole::Worker.key("other", "w9"), "{}"),
+        ] {
+            let _: () = redis::cmd("SET")
+                .arg(key)
+                .arg(value)
+                .arg("PX")
+                .arg(TTL.as_millis() as u64)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+        }
+        let (workers, servers) = live_workers_and_server_count(&mut conn, "ops")
+            .await
+            .unwrap();
+        let ids: Vec<_> = workers.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, ["w1", "w2"]);
+        assert_eq!(servers, 3);
     }
 }

@@ -3,7 +3,6 @@ use std::sync::Arc;
 use common::storage::BlobStore;
 use plugin_core::traits::PluginManager;
 use sea_orm::DatabaseConnection;
-use tokio::sync::Semaphore;
 
 use crate::config::AppConfig;
 use crate::hooks::SharedHookRegistry;
@@ -35,6 +34,8 @@ pub struct HostFunctionSystemDeps {
     pub config: AppConfig,
     pub metrics: Option<common::metrics::Metrics>,
     pub redis_client: Option<Arc<redis::Client>>,
+    /// Task slots of the live workers; sizes the judging fan-out.
+    pub worker_slots: crate::dispatcher::fanout::WorkerSlots,
 }
 
 #[derive(Clone)]
@@ -55,10 +56,6 @@ pub struct OperationHostDeps {
     pub metrics: Option<common::metrics::Metrics>,
     /// Evaluate batches whose test cases an operation may run for.
     pub evaluate_batches: EvaluateBatches,
-    /// Per-batch cap on concurrent in-flight blob-externalize + mq.publish
-    /// operations inside `start_operation_batch`. Sourced from
-    /// `server.operation_batch_publish_concurrency`.
-    pub operation_batch_publish_concurrency: usize,
 }
 
 #[derive(Clone)]
@@ -67,8 +64,7 @@ pub struct EvaluateHostDeps {
     pub evaluator_registry: EvaluatorRegistry,
     pub evaluate_batches: EvaluateBatches,
     pub operation_deps: OperationHostDeps,
-    pub evaluator_slots: Arc<Semaphore>,
-    pub fanout_slots: crate::dispatcher::fanout::FanoutSemaphore,
+    pub fanout: crate::dispatcher::fanout::Fanout,
     pub plugin_manager: Arc<dyn PluginManager>,
     pub blob_store: Arc<dyn BlobStore>,
     pub hook_registry: SharedHookRegistry,
@@ -101,21 +97,12 @@ impl HostFunctionSystemDeps {
             blob_store: self.blob_store.clone(),
             metrics: self.metrics.clone(),
             evaluate_batches: self.evaluate_batches.clone(),
-            operation_batch_publish_concurrency: self
-                .config
-                .server
-                .operation_batch_publish_concurrency
-                as usize,
         }
     }
 }
 
 impl HostFunctionDeps {
-    pub fn evaluate_deps(
-        &self,
-        evaluator_slots: Arc<Semaphore>,
-        fanout_slots: crate::dispatcher::fanout::FanoutSemaphore,
-    ) -> EvaluateHostDeps {
+    pub fn evaluate_deps(&self, fanout: crate::dispatcher::fanout::Fanout) -> EvaluateHostDeps {
         EvaluateHostDeps {
             db: self.system.db.clone(),
             evaluator_registry: self.system.evaluator_registry.clone(),
@@ -125,8 +112,7 @@ impl HostFunctionDeps {
                 deps.plugin_manager = Some(self.plugin_manager.clone());
                 deps
             },
-            evaluator_slots,
-            fanout_slots,
+            fanout,
             plugin_manager: self.plugin_manager.clone(),
             blob_store: self.system.blob_store.clone(),
             hook_registry: self.system.hook_registry.clone(),

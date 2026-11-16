@@ -228,6 +228,7 @@ pub async fn get_test_case(
         (status = 400, description = "Contest has not started yet (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 404, description = "Test case not found (NOT_FOUND)", body = ErrorBody),
+        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]

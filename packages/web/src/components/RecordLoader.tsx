@@ -1,4 +1,4 @@
-import { getErrorMessage } from '@broccoli/web-sdk/api';
+import { getErrorMessage, isTemporaryApiError } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import { type QueryKey, useQuery } from '@tanstack/react-query';
@@ -13,7 +13,8 @@ import { type ReactNode, useState } from 'react';
  * create-mode defaults. That first copy is then kept for the loader's
  * lifetime: a later refetch, failed or not, never replaces a mounted form,
  * and the loader does not refetch on window focus or reconnect. Until the
- * record arrives a failed fetch shows its error with a retry button.
+ * record arrives a failed fetch shows its error with a retry button; a busy
+ * server (503) shows as a temporary state instead.
  *
  * `allowCached` renders a cached copy at once instead, for read-only views.
  *
@@ -51,6 +52,19 @@ export function RecordLoader<T>({
   if (usable) return children(query.data);
 
   if (query.isError && !query.isFetching) {
+    // A busy server is a wait, not a failure.
+    if (isTemporaryApiError(query.error)) {
+      return (
+        <div role="status" className="space-y-3 py-8 text-center">
+          <p className="text-sm text-muted-foreground">
+            {t('common.temporarilyUnavailable')}
+          </p>
+          <Button variant="outline" size="sm" onClick={() => query.refetch()}>
+            {t('common.retry')}
+          </Button>
+        </div>
+      );
+    }
     return (
       <div role="alert" className="space-y-3 py-8 text-center">
         <p className="text-sm text-destructive">

@@ -52,6 +52,10 @@ impl PluginInvoker for TestPluginManager {
         self.inner.get_config()
     }
 
+    fn executor(&self) -> &plugin_core::executor::Executor {
+        self.inner.executor()
+    }
+
     fn call_gate(&self) -> Option<&plugin_core::call_gate::CallGate> {
         self.inner.call_gate()
     }
@@ -61,12 +65,15 @@ impl PluginInvoker for TestPluginManager {
         plugin_id: &str,
         func_name: &str,
         input: Vec<u8>,
+        options: plugin_core::executor::CallOptions,
     ) -> Result<Vec<u8>, PluginError> {
         if plugin_id == "__test__" && func_name == "noop" {
             return Ok(br#"{"success":true,"error_message":null}"#.to_vec());
         }
 
-        self.inner.call_raw(plugin_id, func_name, input).await
+        self.inner
+            .call_raw(plugin_id, func_name, input, options)
+            .await
     }
 }
 
@@ -601,9 +608,6 @@ impl TestApp {
                 max_dispatch_retries: 5,
                 max_system_error_retries: 50,
                 cancel_primitive_enabled: false,
-                max_blocking_threads: None,
-                evaluate_batch_fanout_concurrency: 64,
-                operation_batch_publish_concurrency: 32,
                 // Enable the claim fiber by default so integration
                 // tests that rely on the `Queued`-on-POST flow see the
                 // row transition all the way to dispatch.
@@ -612,7 +616,6 @@ impl TestApp {
                 claim_batch_size: 32,
                 max_in_flight_submissions: 256,
                 plugin_timer_tick_interval_secs: 1,
-                plugin_timer_lease_secs: server::config::DEFAULT_PLUGIN_TIMER_LEASE_SECS,
                 plugin_timer_batch: 64,
                 plugin_timer_max_attempts: 5,
             },
@@ -646,6 +649,7 @@ impl TestApp {
             batch_max_age_secs: 600,
             bootstrap: BootstrapConfig::default(),
             clock: Default::default(),
+            removed_keys_set: Vec::new(),
         };
 
         if let Some(cap) = options.max_queued_submissions {
@@ -689,6 +693,7 @@ impl TestApp {
                 config: app_config.clone(),
                 metrics: Some(test_metrics.clone()),
                 redis_client: None,
+                worker_slots: Default::default(),
             },
             Some(test_metrics.clone()),
         )
@@ -780,6 +785,7 @@ impl TestApp {
             metrics: test_metrics.clone(),
             prometheus_registry: test_prom_registry.clone(),
             dispatcher_permits: server::dispatcher::permits::DispatcherSemaphore::default(),
+            worker_slots: Default::default(),
             plugin_lifecycle: Default::default(),
             login_throttle: std::sync::Arc::new(server::utils::login_throttle::LoginThrottle::new(
                 0,

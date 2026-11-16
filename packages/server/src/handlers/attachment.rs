@@ -199,6 +199,7 @@ pub async fn list_attachments(
         (status = 400, description = "Contest has not started yet (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 404, description = "Problem not found or not accessible (NOT_FOUND)", body = ErrorBody),
+        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -328,6 +329,7 @@ pub async fn download_attachment(
         (status = 400, description = "Contest has not started yet, or invalid attachment ID (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 404, description = "Attachment not found or not accessible (NOT_FOUND)", body = ErrorBody),
+        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]

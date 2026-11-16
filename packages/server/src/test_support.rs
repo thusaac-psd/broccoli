@@ -82,3 +82,98 @@ pub(crate) async fn wait_until_blocked_on_a_lock(db: &DatabaseConnection) {
         tokio::task::yield_now().await;
     }
 }
+
+/// What [`MockPlugins`] answers a call with, from the plugin id, the function
+/// name and the call's input.
+type Answer =
+    dyn Fn(&str, &str, &[u8]) -> Result<Vec<u8>, plugin_core::error::PluginError> + Send + Sync;
+
+/// The crate's one plugin-manager double: it owns a registry and answers
+/// every call with a closure, never running a guest.
+pub(crate) struct MockPlugins {
+    registry: plugin_core::registry::PluginRegistry,
+    config: plugin_core::config::PluginConfig,
+    host_functions: plugin_core::host::HostFunctionRegistry,
+    i18n: plugin_core::i18n::I18nRegistry,
+    answer: Box<Answer>,
+}
+
+impl MockPlugins {
+    /// Answers each call with `answer(plugin_id, func_name, input)`.
+    pub(crate) fn new(
+        registry: plugin_core::registry::PluginRegistry,
+        answer: impl Fn(&str, &str, &[u8]) -> Result<Vec<u8>, plugin_core::error::PluginError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            registry,
+            config: plugin_core::config::PluginConfig::default(),
+            host_functions: plugin_core::host::HostFunctionRegistry::new(),
+            i18n: plugin_core::i18n::I18nRegistry::new(),
+            answer: Box::new(answer),
+        }
+    }
+
+    /// Panics on any call: proves the code under test never reaches for the
+    /// plugin host.
+    pub(crate) fn never_called(registry: plugin_core::registry::PluginRegistry) -> Self {
+        Self::new(registry, |plugin_id, func_name, _| {
+            panic!("plugin '{plugin_id}'::{func_name} must not be called here")
+        })
+    }
+
+    /// A plugin that cannot answer before its deadline: every call is
+    /// [`PluginError::Unavailable`](plugin_core::error::PluginError::Unavailable).
+    pub(crate) fn unavailable(registry: plugin_core::registry::PluginRegistry) -> Self {
+        Self::new(registry, |plugin_id, func_name, _| {
+            Err(plugin_core::error::PluginError::Unavailable {
+                plugin_id: plugin_id.to_string(),
+                func_name: func_name.to_string(),
+            })
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl plugin_core::traits::PluginInvoker for MockPlugins {
+    fn get_registry(&self) -> &plugin_core::registry::PluginRegistry {
+        &self.registry
+    }
+
+    fn get_config(&self) -> &plugin_core::config::PluginConfig {
+        &self.config
+    }
+
+    fn executor(&self) -> &plugin_core::executor::Executor {
+        plugin_core::executor::Executor::shared_for_tests()
+    }
+
+    async fn call_raw(
+        &self,
+        plugin_id: &str,
+        func_name: &str,
+        input: Vec<u8>,
+        _options: plugin_core::executor::CallOptions,
+    ) -> Result<Vec<u8>, plugin_core::error::PluginError> {
+        (self.answer)(plugin_id, func_name, &input)
+    }
+}
+
+impl plugin_core::traits::PluginManager for MockPlugins {
+    fn get_host_functions(&self) -> &plugin_core::host::HostFunctionRegistry {
+        &self.host_functions
+    }
+
+    fn get_i18n_registry(&self) -> &plugin_core::i18n::I18nRegistry {
+        &self.i18n
+    }
+
+    fn resolve(
+        &self,
+        _manifest: &plugin_core::manifest::PluginManifest,
+    ) -> Option<(String, Vec<String>)> {
+        None
+    }
+}

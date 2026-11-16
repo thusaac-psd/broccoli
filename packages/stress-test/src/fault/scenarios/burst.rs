@@ -49,9 +49,9 @@ pub struct Burst {
     pub terminal_deadline_secs: u64,
     pub metrics_url: Option<String>,
     pub fanout_test_cases_per_problem: usize,
-    pub baseline_plugin_pool_contention_delta: Option<u64>,
-    pub max_plugin_pool_contention_baseline_ratio: f64,
-    pub max_plugin_pool_contention_delta: u64,
+    pub baseline_plugin_admission_queued_delta: Option<u64>,
+    pub max_plugin_admission_queued_baseline_ratio: f64,
+    pub max_plugin_admission_queued_delta: u64,
     pub require_fanout_saturation: bool,
     pub keep_fixtures: bool,
     pub contest_type: Option<String>,
@@ -73,9 +73,9 @@ impl Default for Burst {
             terminal_deadline_secs: 300,
             metrics_url: None,
             fanout_test_cases_per_problem: 1,
-            baseline_plugin_pool_contention_delta: None,
-            max_plugin_pool_contention_baseline_ratio: 0.2,
-            max_plugin_pool_contention_delta: 10,
+            baseline_plugin_admission_queued_delta: None,
+            max_plugin_admission_queued_baseline_ratio: 0.2,
+            max_plugin_admission_queued_delta: 10,
             require_fanout_saturation: false,
             keep_fixtures: false,
             contest_type: None,
@@ -211,13 +211,13 @@ fn new_hist() -> Histogram<u64> {
 
 #[derive(Debug, Clone, Copy)]
 struct MetricsSnapshot {
-    plugin_pool_contention: u64,
+    plugin_admission_queued: u64,
     fanout_saturated: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct MetricsDelta {
-    plugin_pool_contention: u64,
+    plugin_admission_queued: u64,
     fanout_saturated: u64,
 }
 
@@ -225,9 +225,9 @@ impl MetricsSnapshot {
     async fn scrape(url: &str) -> anyhow::Result<Self> {
         let text = reqwest::get(url).await?.error_for_status()?.text().await?;
         Ok(Self {
-            plugin_pool_contention: prometheus_counter_sum(
+            plugin_admission_queued: prometheus_counter_sum(
                 &text,
-                "broccoli_plugin_pool_contention_total",
+                "broccoli_plugin_admission_queued_total",
             )?,
             fanout_saturated: prometheus_counter_sum(
                 &text,
@@ -238,9 +238,9 @@ impl MetricsSnapshot {
 
     fn delta(self, before: &Self) -> MetricsDelta {
         MetricsDelta {
-            plugin_pool_contention: self
-                .plugin_pool_contention
-                .saturating_sub(before.plugin_pool_contention),
+            plugin_admission_queued: self
+                .plugin_admission_queued
+                .saturating_sub(before.plugin_admission_queued),
             fanout_saturated: self
                 .fanout_saturated
                 .saturating_sub(before.fanout_saturated),
@@ -771,8 +771,8 @@ impl Burst {
                         "metrics delta captured",
                         BTreeMap::from_iter([
                             (
-                                "plugin_pool_contention_delta".into(),
-                                serde_json::json!(delta.plugin_pool_contention),
+                                "plugin_admission_queued_delta".into(),
+                                serde_json::json!(delta.plugin_admission_queued),
                             ),
                             (
                                 "fanout_saturated_delta".into(),
@@ -828,22 +828,22 @@ impl Burst {
         }
 
         if let Some(delta) = metrics_delta {
-            let mut contention_cap = self.max_plugin_pool_contention_delta;
-            if let Some(baseline) = self.baseline_plugin_pool_contention_delta {
+            let mut contention_cap = self.max_plugin_admission_queued_delta;
+            if let Some(baseline) = self.baseline_plugin_admission_queued_delta {
                 let baseline_cap = ((baseline as f64)
-                    * self.max_plugin_pool_contention_baseline_ratio)
+                    * self.max_plugin_admission_queued_baseline_ratio)
                     .ceil() as u64;
                 contention_cap = contention_cap.min(baseline_cap.max(1));
             }
 
-            if delta.plugin_pool_contention > contention_cap {
+            if delta.plugin_admission_queued > contention_cap {
                 passed = false;
                 transcript.record(
                     EventKind::Assertion,
                     Severity::Error,
                     format!(
-                        "plugin_pool_contention_total delta {} exceeds cap {}",
-                        delta.plugin_pool_contention, contention_cap
+                        "plugin_admission_queued_total delta {} exceeds cap {}",
+                        delta.plugin_admission_queued, contention_cap
                     ),
                 );
             } else {
@@ -851,8 +851,8 @@ impl Burst {
                     EventKind::Assertion,
                     Severity::Info,
                     format!(
-                        "plugin_pool_contention_total delta {} within cap {}",
-                        delta.plugin_pool_contention, contention_cap
+                        "plugin_admission_queued_total delta {} within cap {}",
+                        delta.plugin_admission_queued, contention_cap
                     ),
                 );
             }
@@ -1138,15 +1138,15 @@ mod tests {
     #[test]
     fn prometheus_counter_sum_requires_present_exact_counter() {
         let metrics = r#"
-# HELP broccoli_plugin_pool_contention_total total contention events
-# TYPE broccoli_plugin_pool_contention_total counter
-broccoli_plugin_pool_contention_total{plugin="ioi"} 2
-broccoli_plugin_pool_contention_total{plugin="icpc"} 3
-broccoli_plugin_pool_contention_total_created 123
+# HELP broccoli_plugin_admission_queued_total total contention events
+# TYPE broccoli_plugin_admission_queued_total counter
+broccoli_plugin_admission_queued_total{plugin="ioi"} 2
+broccoli_plugin_admission_queued_total{plugin="icpc"} 3
+broccoli_plugin_admission_queued_total_created 123
 "#;
 
         assert_eq!(
-            prometheus_counter_sum(metrics, "broccoli_plugin_pool_contention_total").unwrap(),
+            prometheus_counter_sum(metrics, "broccoli_plugin_admission_queued_total").unwrap(),
             5
         );
 
@@ -1188,8 +1188,8 @@ broccoli_plugin_pool_contention_total_created 123
                     let (contention, fanout) = if call == 0 { (100, 0) } else { (105, 1) };
                     ResponseTemplate::new(200).set_body_string(format!(
                         "\
-# TYPE broccoli_plugin_pool_contention_total counter
-broccoli_plugin_pool_contention_total{{plugin_id=\"ioi\"}} {contention}
+# TYPE broccoli_plugin_admission_queued_total counter
+broccoli_plugin_admission_queued_total{{plugin_id=\"ioi\"}} {contention}
 # TYPE broccoli_evaluate_batch_fanout_saturated_total counter
 broccoli_evaluate_batch_fanout_saturated_total{{problem_type=\"batch\"}} {fanout}
 "
@@ -1290,7 +1290,7 @@ broccoli_evaluate_batch_fanout_saturated_total{{problem_type=\"batch\"}} {fanout
             contest_type: Some("icpc".into()),
             problem_type: Some("batch".into()),
             fanout_test_cases_per_problem: 20,
-            baseline_plugin_pool_contention_delta: Some(100),
+            baseline_plugin_admission_queued_delta: Some(100),
             require_fanout_saturation: true,
             ..Burst::default()
         }
@@ -1302,13 +1302,13 @@ broccoli_evaluate_batch_fanout_saturated_total{{problem_type=\"batch\"}} {fanout
         assert_eq!(outcome.transcript.summary["terminal"], json!(1000));
         assert!(outcome.transcript.events.iter().any(|event| {
             event.message == "metrics delta captured"
-                && event.fields.get("plugin_pool_contention_delta") == Some(&json!(5))
+                && event.fields.get("plugin_admission_queued_delta") == Some(&json!(5))
                 && event.fields.get("fanout_saturated_delta") == Some(&json!(1))
         }));
         assert!(outcome.transcript.events.iter().any(|event| {
             event
                 .message
-                .contains("plugin_pool_contention_total delta 5 within cap")
+                .contains("plugin_admission_queued_total delta 5 within cap")
         }));
     }
 }

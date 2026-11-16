@@ -3,7 +3,6 @@ use std::time::Duration;
 use anyhow::Context;
 use server::config::AppConfig;
 use server::runtime::ServerRuntime;
-use tracing::info;
 
 // Use jemalloc instead of the system (glibc) allocator. Under concurrent judging
 // of large-testcase problems glibc retains freed mmap'd allocations and inflates
@@ -41,16 +40,8 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    let max_blocking_threads = app_config.server.effective_max_blocking_threads();
-    info!(
-        max_blocking_threads,
-        configured = ?app_config.server.max_blocking_threads,
-        "Sizing tokio blocking-thread pool"
-    );
-
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .max_blocking_threads(max_blocking_threads)
         .thread_name("broccoli-server")
         .build()
         .context("Failed to build tokio runtime")?;

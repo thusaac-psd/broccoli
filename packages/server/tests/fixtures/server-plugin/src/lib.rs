@@ -54,6 +54,26 @@ pub fn reflect(input: String) -> FnResult<String> {
     })?)
 }
 
+/// Spends `millions` million loop iterations of guest CPU, then answers: a
+/// slow plugin route for load probes.
+#[plugin_fn]
+pub fn burn(input: String) -> FnResult<String> {
+    let req: PluginHttpRequest = serde_json::from_str(&input)?;
+    let millions: u64 = req
+        .params
+        .get("millions")
+        .and_then(|m| m.parse().ok())
+        .unwrap_or(1);
+    let mut acc = 0u64;
+    for i in 0..millions * 1_000_000 {
+        acc = std::hint::black_box(acc.wrapping_mul(31).wrapping_add(i));
+    }
+    Ok(serde_json::to_string(&PluginHttpResponse {
+        status: 200,
+        body: Some(serde_json::json!({ "acc": acc })),
+    })?)
+}
+
 #[plugin_fn]
 pub fn kv_write(input: String) -> FnResult<String> {
     let req: PluginHttpRequest = serde_json::from_str(&input)?;

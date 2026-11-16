@@ -141,6 +141,7 @@ pub async fn create_contest(
         (status = 200, description = "List of contests", body = ContestListResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
+        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -249,6 +250,7 @@ pub async fn list_contests(
         (status = 200, description = "Contest details", body = ContestResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 404, description = "Contest not found (NOT_FOUND)", body = ErrorBody),
+        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -284,6 +286,7 @@ pub async fn get_contest(
         (status = 200, description = "Current user's contest context", body = ContestUserContextResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 404, description = "Contest not found (NOT_FOUND)", body = ErrorBody),
+        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]

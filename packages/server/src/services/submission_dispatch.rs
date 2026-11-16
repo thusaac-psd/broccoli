@@ -4,7 +4,6 @@ use broccoli_server_sdk::types::{
     SourceFile, TestCaseBodyRef, TestCaseRow,
 };
 use common::SubmissionDlqErrorCode;
-use plugin_core::retry::{PoolRetryPolicy, call_raw_with_pool_retry};
 use sea_orm::prelude::Expr;
 use sea_orm::*;
 use tracing::{Instrument, error, info, instrument, warn};
@@ -538,16 +537,16 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
     );
     tokio::spawn(async move {
         async move {
-            // Retry on plugin-pool contention. Pool exhaustion is transient backpressure
-            // and must never produce a permanent SystemError verdict for the contestant.
-            let result = call_raw_with_pool_retry(
-                plugins.as_ref(),
-                &plugin_id,
-                &function_name,
-                input_bytes,
-                PoolRetryPolicy::default(),
-            )
-            .await;
+            // The contest call waits in host functions for the whole
+            // judgement, holding no CPU token while it does.
+            let result = plugins
+                .call_raw(
+                    &plugin_id,
+                    &function_name,
+                    input_bytes,
+                    plugins.get_config().judging_call(),
+                )
+                .await;
 
             match result {
                 Ok(output_bytes) => {

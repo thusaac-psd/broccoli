@@ -1,52 +1,22 @@
-// NOTE: `start_evaluate_batch` is not exercised by direct unit tests here. It
-// consumes a full `EvaluateHostDeps` graph (plugin manager, DB connection,
-// blob store, evaluator/operation registries) that can only be wired up in the
-// integration suite. The FanoutSemaphore that bounds fan-out is tested in
-// `crate::dispatcher::fanout` and the end-to-end bounded fan-out behaviour
-// relies on the integration suite + stress-test harness for verification.
-
 use super::*;
 
 /// The evaluator plugin a batch dispatches to, with what every call into it
-/// needs: the plugin manager, the evaluator concurrency slots and the metric
-/// attributes.
+/// needs.
 #[derive(Clone)]
 struct EvaluatorStage {
     pm: Arc<dyn plugin_core::traits::PluginManager>,
-    evaluator_slots: Arc<tokio::sync::Semaphore>,
     plugin_id: String,
-    problem_type: String,
-    metrics: Option<common::metrics::Metrics>,
 }
 
 impl EvaluatorStage {
-    /// Take an evaluator slot for calling `function`, recording the wait.
-    async fn acquire(&self, function: &str) -> anyhow::Result<tokio::sync::SemaphorePermit<'_>> {
-        let wait_start = Instant::now();
-        let permit = self.evaluator_slots.acquire().await;
-        record_evaluator_semaphore_wait(
-            self.metrics.as_ref(),
-            &self.plugin_id,
-            function,
-            &self.problem_type,
-            if permit.is_ok() { "success" } else { "closed" },
-            wait_start.elapsed(),
-        );
-        permit.map_err(|_| anyhow!("Evaluator dispatcher is shutting down"))
-    }
-
-    /// Call `function` on the evaluator with JSON `input`, retrying on plugin
-    /// pool contention (a transient backpressure signal, not a failure of the
-    /// contestant's submission).
+    /// Call `function` on the evaluator with JSON `input` as background work.
+    /// How many evaluator guests run at once is admission's business.
     async fn call(&self, function: &str, input_bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-        Ok(call_raw_with_pool_retry(
-            self.pm.as_ref(),
-            &self.plugin_id,
-            function,
-            input_bytes,
-            PoolRetryPolicy::default(),
-        )
-        .await?)
+        let options = self.pm.get_config().background_call();
+        Ok(self
+            .pm
+            .call_raw(&self.plugin_id, function, input_bytes, options)
+            .await?)
     }
 }
 
@@ -100,10 +70,7 @@ pub async fn start_evaluate_batch(
 
     let stage = EvaluatorStage {
         pm: deps.plugin_manager.clone(),
-        evaluator_slots: deps.evaluator_slots.clone(),
         plugin_id: evaluator.plugin_id.clone(),
-        problem_type,
-        metrics: deps.metrics.clone(),
     };
 
     let function = match evaluator.functions {
@@ -112,7 +79,7 @@ pub async fn start_evaluate_batch(
             spawn_staged_dispatch(
                 stage,
                 StagedFunctions { prepare, interpret },
-                deps.fanout_slots.clone(),
+                deps.fanout.clone(),
                 deps.operation_deps.clone(),
                 batch_id.clone(),
                 resolved_inputs,
@@ -123,7 +90,7 @@ pub async fn start_evaluate_batch(
     };
 
     spawn_fanout(
-        deps.fanout_slots.clone(),
+        deps.fanout.clone(),
         resolved_inputs,
         batch_tx,
         move |tc_input, batch_tx| {
@@ -155,7 +122,6 @@ async fn evaluate_case(
     function: &str,
     tc_input: BuildEvalOpsInput,
 ) -> anyhow::Result<TestCaseVerdict> {
-    let _permit = stage.acquire(function).await?;
     let input_bytes =
         serde_json::to_vec(&tc_input).with_context(|| "Failed to serialize evaluator input")?;
     let result_bytes = stage
@@ -168,18 +134,15 @@ async fn evaluate_case(
 
 /// Bounded fan-out: a dedicated dispatcher task acquires one fan-out permit
 /// per test case BEFORE spawning `run_case` for it. The permit is held for
-/// the spawned task's whole lifetime, so the count of live test-case tasks
-/// server-wide is bounded by `fanout_slots` regardless of incoming batch size.
-/// Without this, a 1000-submission burst with 20 test cases per submission
-/// would spawn 20,000 tasks in milliseconds, all contending on the inner
-/// `evaluator_slots` semaphore.
+/// the spawned task's whole lifetime, so the test cases this server has
+/// outstanding are bounded by the live worker slots (see
+/// [`crate::dispatcher::fanout`]) whatever the incoming batch size.
 ///
-/// Every case gets exactly one result: `run_case` delivers it, a closed
-/// fan-out semaphore (server shutdown) delivers a SystemError inline, and a
+/// Every case gets exactly one result: `run_case` delivers it, and a
 /// [`DispatchGuard`] delivers one for every case not yet handed off if the
 /// loop unwinds.
 fn spawn_fanout<F, Fut>(
-    fanout: crate::dispatcher::fanout::FanoutSemaphore,
+    fanout: crate::dispatcher::fanout::Fanout,
     inputs: Vec<BuildEvalOpsInput>,
     batch_tx: BatchSender<TestCaseVerdict>,
     run_case: F,
@@ -195,14 +158,7 @@ fn spawn_fanout<F, Fut>(
         };
         for tc_input in inputs {
             let tc_id = tc_input.test_case_id;
-            let Ok(permit) = fanout.acquire().await else {
-                batch_tx.deliver(system_error_verdict(
-                    tc_id,
-                    "Fan-out semaphore closed (server shutting down)",
-                ));
-                guard.claim(tc_id);
-                continue;
-            };
+            let permit = fanout.acquire().await;
             // Claim BEFORE spawning: the spawned task owns the delivery from
             // here on, so an unwind must not deliver this case again.
             guard.claim(tc_id);
@@ -228,7 +184,7 @@ struct StagedFunctions {
 fn spawn_staged_dispatch(
     stage: EvaluatorStage,
     functions: StagedFunctions,
-    fanout: crate::dispatcher::fanout::FanoutSemaphore,
+    fanout: crate::dispatcher::fanout::Fanout,
     operation_deps: crate::host_funcs::context::OperationHostDeps,
     batch_id: String,
     resolved_inputs: Vec<BuildEvalOpsInput>,
@@ -290,14 +246,12 @@ async fn prepare_and_run_case(
     evaluate_batch_id: String,
     tc_input: BuildEvalOpsInput,
 ) -> anyhow::Result<EvaluateOperationResultInput> {
-    let prepare_permit = stage.acquire(prepare).await?;
     let input_bytes = serde_json::to_vec(&tc_input)
         .with_context(|| "Failed to serialize evaluator prepare input")?;
     let prepared_bytes = stage
         .call(prepare, input_bytes)
         .await
         .with_context(|| "Evaluator prepare call failed")?;
-    drop(prepare_permit);
 
     let mut prepared = serde_json::from_slice::<PreparedEvaluateCase>(&prepared_bytes)
         .with_context(|| "Failed to deserialize evaluator prepared case")?;
@@ -458,7 +412,6 @@ async fn call_interpret(
     interpret: &str,
     items: Vec<EvaluateOperationResultInput>,
 ) -> anyhow::Result<Vec<TestCaseVerdict>> {
-    let _permit = stage.acquire(interpret).await?;
     let input = EvaluateOperationResultsInput { results: items };
     let input_bytes = serde_json::to_vec(&input)
         .with_context(|| "Failed to serialize evaluator interpret input")?;

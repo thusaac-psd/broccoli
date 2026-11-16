@@ -13,7 +13,6 @@ use axum::{
     },
 };
 use plugin_core::http::{PluginHttpAuth, PluginHttpRequest, PluginHttpResponse};
-use plugin_core::traits::PluginInvokerExt;
 use tracing::{info, instrument, warn};
 
 use sea_orm::{ColumnTrait, QueryFilter, QuerySelect};
@@ -233,10 +232,19 @@ async fn handle_plugin_request_impl(
 
     info!("Forwarding request to plugin handler: {}", handler_name);
 
-    let response: PluginHttpResponse = state
+    let request = serde_json::to_vec(&request)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize plugin request: {e}")))?;
+    let response = state
         .plugins
-        .call(&plugin_id, &handler_name, request)
+        .call_raw(
+            &plugin_id,
+            &handler_name,
+            request,
+            crate::interactive_call(),
+        )
         .await?;
+    let response: PluginHttpResponse =
+        serde_json::from_slice(&response).map_err(plugin_core::error::PluginError::from)?;
 
     let mut builder = Response::builder().status(response.status);
 
@@ -345,6 +353,7 @@ macro_rules! proxy_handler {
                 (status = 403, description = "Forbidden", body = ErrorBody),
                 (status = 404, description = "Plugin or Route not found", body = ErrorBody),
                 (status = 405, description = "Method Not Allowed", body = ErrorBody),
+                (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
             ),
             security(("jwt" = []))
         )]
@@ -379,6 +388,7 @@ macro_rules! proxy_handler {
                 (status = 403, description = "Forbidden", body = ErrorBody),
                 (status = 404, description = "Plugin or Route not found", body = ErrorBody),
                 (status = 405, description = "Method Not Allowed", body = ErrorBody),
+                (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
             ),
             security(("jwt" = []))
         )]

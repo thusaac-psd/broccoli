@@ -43,11 +43,12 @@ pub fn create_resolve_checker_function(
     checker_stage_registry: CheckerStageRegistry,
     plugin_manager: Arc<dyn PluginInvoker>,
 ) -> Function {
-    Function::new(
+    super::host_function(
         "resolve_checker",
         [ValType::I64],
         [ValType::I64],
         checker_stage_data(plugin_id, checker_stage_registry, plugin_manager),
+        super::Waits::Blocks,
         resolve_checker_fn,
     )
 }
@@ -57,11 +58,12 @@ pub fn create_interpret_checker_function(
     checker_stage_registry: CheckerStageRegistry,
     plugin_manager: Arc<dyn PluginInvoker>,
 ) -> Function {
-    Function::new(
+    super::host_function(
         "interpret_checker_result",
         [ValType::I64],
         [ValType::I64],
         checker_stage_data(plugin_id, checker_stage_registry, plugin_manager),
+        super::Waits::Blocks,
         interpret_checker_fn,
     )
 }
@@ -96,7 +98,12 @@ fn checker_stage_call(
     tokio::runtime::Handle::current()
         .block_on(async {
             ctx.plugin_manager
-                .call_raw(&handler.plugin_id, &function_name, request_bytes)
+                .call_raw(
+                    &handler.plugin_id,
+                    &function_name,
+                    request_bytes,
+                    plugin_core::executor::CallOptions::nested(),
+                )
                 .await
         })
         .map_err(|e| extism::Error::msg(format!("Checker stage plugin error: {e}")))

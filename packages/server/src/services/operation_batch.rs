@@ -13,7 +13,6 @@ use common::storage::BlobStore;
 use common::worker::{Task, TaskResult};
 use futures::stream::{self, StreamExt, TryStreamExt};
 use opentelemetry::KeyValue;
-use plugin_core::retry::{PoolRetryPolicy, call_raw_with_pool_retry};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -26,6 +25,12 @@ use crate::services::windowed_session::{
 };
 
 const INLINE_FILE_BLOB_THRESHOLD_BYTES: usize = 1_048_576;
+
+/// Operations of one batch being externalized and published at once. Each
+/// publish is one Redis round trip, so a window this size starts a
+/// thousand-operation batch in a few dozen round trips without flooding the
+/// broker; the fleet-wide bound on outstanding work is the judging fan-out.
+const PUBLISH_WINDOW: usize = 32;
 
 // `async_trait` marks each method `#[must_use]` on top of its boxed future.
 #[allow(clippy::double_must_use)]
@@ -146,7 +151,6 @@ pub async fn start_operation_batch(
     // publish ordering invariant by sequential await inside one
     // closure; cross-op ordering is intentionally unordered. First error
     // short-circuits via try_collect; in-flight peers are dropped.
-    let publish_concurrency = deps.operation_batch_publish_concurrency.max(1);
     let per_op_inputs: Vec<(String, OperationTask)> =
         correlation_ids.iter().cloned().zip(operations).collect();
 
@@ -243,7 +247,7 @@ pub async fn start_operation_batch(
             Ok::<(), anyhow::Error>(())
         }
     }))
-    .buffer_unordered(publish_concurrency)
+    .buffer_unordered(PUBLISH_WINDOW)
     .try_collect::<Vec<()>>()
     .await
     .inspect_err(|_| cleanup_failed_operation_batch(&deps, &batch_id))?;
@@ -455,15 +459,15 @@ async fn call_detached_operation_callback(
 ) -> anyhow::Result<DetachedOperationCallbackOutput> {
     let input_bytes = serde_json::to_vec(&input)
         .with_context(|| "Failed to serialize detached operation callback input")?;
-    let output_bytes = call_raw_with_pool_retry(
-        plugin_manager,
-        plugin_id,
-        callback_fn,
-        input_bytes,
-        PoolRetryPolicy::default(),
-    )
-    .await
-    .with_context(|| "Detached operation callback failed")?;
+    let output_bytes = plugin_manager
+        .call_raw(
+            plugin_id,
+            callback_fn,
+            input_bytes,
+            plugin_manager.get_config().background_call(),
+        )
+        .await
+        .with_context(|| "Detached operation callback failed")?;
     serde_json::from_slice::<DetachedOperationCallbackOutput>(&output_bytes)
         .with_context(|| "Failed to deserialize detached operation callback output")
 }
@@ -887,7 +891,6 @@ mod tests {
             blob_store,
             metrics: None,
             evaluate_batches,
-            operation_batch_publish_concurrency: 32,
         }
     }
 

@@ -31,8 +31,8 @@ const STORED_PREVIEW_CHARS: usize = PREVIEW_CHARS + 1;
 /// all-blob 52.5 MiB run is both correct and 4x faster than the 4.8 MiB
 /// inline run. The measured safe/unsafe cliff sits between 25 MiB and
 /// 48 MiB; this budget is set well below that margin. Note that the guest's
-/// own configured cap is 1.5 GiB (`max_instance_memory_pages` in
-/// `plugin-core`), so ~48 MiB tripping it implies roughly 30x amplification
+/// own linear-memory cap is up to 1.5 GiB (`MemoryBudget::instance_memory_pages`
+/// in `plugin-core`), so ~48 MiB tripping it implies roughly 30x amplification
 /// somewhere that this budget does NOT explain or fix -- it only removes the
 /// trigger.
 pub const AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES: usize = 8 * 1024 * 1024;

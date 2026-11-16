@@ -35,6 +35,7 @@ pub use broccoli_api_types::problem::{ProblemSamplesResponse, SampleCase};
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Contest or problem not found (NOT_FOUND)", body = ErrorBody),
+        (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
