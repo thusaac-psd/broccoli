@@ -674,7 +674,7 @@ export interface paths {
     put?: never;
     /**
      * Create a clarification
-     * @description Users can create questions. Users with `contest:manage` permission can also create announcements and direct messages to specific participants.
+     * @description Participants can ask questions, at most 10 a minute each. Users with `contest:manage` permission can also create announcements and direct messages to specific participants.
      */
     post: operations['createClarification'];
     delete?: never;
@@ -7143,7 +7143,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden (PERMISSION_DENIED), or the caller is not registered for this public contest (CONTEST_NOT_REGISTERED) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -7152,8 +7152,17 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Contest or recipient not found (NOT_FOUND) */
+      /** @description Contest not found, or the recipient is not an active participant of it (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Too many clarifications from this user in the last minute (RATE_LIMITED); carries Retry-After */
+      429: {
         headers: {
           [name: string]: unknown;
         };
