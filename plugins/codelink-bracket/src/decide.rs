@@ -45,7 +45,7 @@ pub fn oldest_in_flight(subs: &[SubmissionRecord]) -> Option<i32> {
 /// to which problem, when it was SUBMITTED (not judged -- see
 /// [`decide_xiaoju`]'s doc comment for why that distinction matters), its
 /// verdict if judging has completed (`None` while still pending or while a
-/// system fault is being retried -- see [`submission_in_flight`]), and its host
+/// system fault is being retried -- see `submission_in_flight`), and its host
 /// submission id (surfaced to staff via [`XiaojuOutcome::AwaitingJudge`] so
 /// they know which submission to rejudge).
 #[derive(Debug, Clone)]
@@ -110,7 +110,7 @@ pub enum XiaojuOutcome {
         winner: Option<i32>,
     },
     /// The deadline has passed, but an older submission is STILL in flight
-    /// (see [`submission_in_flight`]) and could still beat the current best AC --
+    /// (see `submission_in_flight`) and could still beat the current best AC --
     /// awarding the AC now could hand the 小局 to the wrong player once that
     /// verdict lands, but staying `NotYet` forever would let a platform
     /// fault cost a player the 小局 outright (it would never resolve without
