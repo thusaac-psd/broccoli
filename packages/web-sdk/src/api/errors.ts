@@ -275,18 +275,58 @@ export interface ErrorDescription {
   message: string;
 }
 
+/** Whether `kind` is a refusal: the server answered, and said no. */
+function isRefusal(kind: ErrorKind): boolean {
+  switch (kind) {
+    case 'unauthenticated':
+    case 'forbidden':
+    case 'notFound':
+    case 'rateLimited':
+    case 'conflict':
+    case 'invalid':
+      return true;
+    case 'network':
+    case 'temporary':
+    case 'server':
+      return false;
+  }
+}
+
 /**
- * Describe `err` for the user, in their language, never in the server's
- * English:
+ * Whether asking again, as it is, can succeed: no answer, a busy or broken
+ * server, a rate limit that lapses. Only these offer the user a retry.
+ */
+export function retryCanFix(kind: ErrorKind): boolean {
+  switch (kind) {
+    case 'network':
+    case 'temporary':
+    case 'rateLimited':
+    case 'server':
+      return true;
+    case 'unauthenticated':
+    case 'forbidden':
+    case 'notFound':
+    case 'conflict':
+    case 'invalid':
+      return false;
+  }
+}
+
+/**
+ * Describe `err` for the user, in their language:
  *
  * 1. The translation of its code (`errorCodeKey`): a host code from the
  *    host catalog, a plugin's only from that plugin's pack, with the error's
  *    `details` as parameters.
- * 2. For a refusal without one (`invalid`, `conflict`), `failure`: what the
- *    caller was doing went wrong ("Could not save the problem"), followed by
- *    the server's own text as detail, which helps whoever set things up.
- * 3. Otherwise the generic message for its kind ("The server cannot be
- *    reached"), which says more than `failure` would.
+ * 2. For a refusal without one (any 4xx) where the server said why,
+ *    `failure`, what the caller was doing ("Could not print"), followed by
+ *    the server's own words ("Print limit reached"): they are specific, and
+ *    a generic text for the kind could only guess.
+ * 3. For a refusal the server said nothing about, the generic message for
+ *    its kind ("You do not have permission to do this"), or `failure` for a
+ *    bad request or a conflict, which their kind says nothing more about.
+ * 4. For no answer or a server failure, the generic message for its kind
+ *    ("The server cannot be reached"), never the server's internal text.
  */
 export function describeError(
   err: unknown,
@@ -299,15 +339,16 @@ export function describeError(
   const byCode =
     parsed && lookup(errorCodeKey(parsed.code), detailParams(parsed.details));
   if (byCode) return { kind, message: byCode };
-  if (kind === 'invalid' || kind === 'conflict') {
-    const detail = parsed?.message;
+  const detail = parsed?.message;
+  if (isRefusal(kind) && detail) {
     return {
       kind,
-      message: detail
-        ? (lookup('apiError.withDetail', { message: failure, detail }) ??
-          `${failure} (${detail})`)
-        : failure,
+      message:
+        lookup('apiError.withDetail', { message: failure, detail }) ??
+        `${failure} (${detail})`,
     };
   }
+  if (kind === 'invalid' || kind === 'conflict')
+    return { kind, message: failure };
   return { kind, message: lookup(errorKindKey(kind)) ?? failure };
 }
