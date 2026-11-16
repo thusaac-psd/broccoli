@@ -4671,8 +4671,8 @@ export interface components {
       submissions_parked: number;
       /**
        * Format: int64
-       * @description Submissions waiting `Queued` for a server to claim them. While
-       *     `intake` is `none_accepting`, none is claimed.
+       * @description Submissions waiting `Queued` for a server to claim them. None is
+       *     claimed unless `intake` is `accepting`.
        * @example 0
        */
       submissions_queued: number;
