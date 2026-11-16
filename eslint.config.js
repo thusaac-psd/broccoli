@@ -19,6 +19,7 @@ export default defineConfig([
     '**/coverage/*',
     'packages/web-sdk/src/api/schema.ts',
     'packages/web/.react-router/**',
+    'packages/web/src/lib/i18n/packs.gen.ts',
     // The docs site is not a member of the root pnpm workspace; its
     // dependencies install from website/pnpm-lock.yaml.
     'website/**',
@@ -193,6 +194,23 @@ export default defineConfig([
           selector:
             'CallExpression[callee.name=/^set(Error|Message|Notice)$/] > :matches(Literal[value=/[A-Za-z]/], TemplateLiteral)',
           message: 'Shown error text comes from a translation key: use t().',
+        },
+        {
+          // `const { data = [] } = useQuery(...)` shows a failed or unfinished
+          // fetch as an empty list. Render the query through QueryView or
+          // queryState() from @broccoli/web-sdk, which keep the states apart.
+          selector:
+            'VariableDeclarator[init.type="CallExpression"][init.callee.name=/^use[A-Z]/] > ObjectPattern > Property[key.name="data"] > AssignmentPattern',
+          message:
+            'Do not default a query result: render it through QueryView or queryState() so loading, failure and empty stay distinct.',
+        },
+        {
+          // A server's `message` is English detail for logs; what the user
+          // reads comes from useErrorMessage(), which translates by code.
+          selector:
+            "CallExpression:matches([callee.object.name='toast'], [callee.name=/^set(Error|Message|Notice)$/]) MemberExpression[property.name='message']",
+          message:
+            'Show a failure through useErrorMessage() from @broccoli/web-sdk/api, never its raw message.',
         },
         {
           selector:

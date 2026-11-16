@@ -15,18 +15,13 @@ export function useSubmissionDetail(submissionId: number) {
   const apiClient = useApiClient();
   const session = useSessionView();
 
-  const {
-    data: submission,
-    isLoading,
-    error,
-  } = useQuery<Submission>({
+  return useQuery<Submission>({
     queryKey: ['submission', submissionId],
     queryFn: async () => {
-      const { data, error, response } = await apiClient.GET(
-        '/submissions/{id}',
-        { params: { path: { id: submissionId } } },
-      );
-      if (error) throw { ...error, status: response.status };
+      const { data, error } = await apiClient.GET('/submissions/{id}', {
+        params: { path: { id: submissionId } },
+      });
+      if (error) throw error;
       return data;
     },
     // Polls until the verdict is final, or until a failure asking again
@@ -48,6 +43,4 @@ export function useSubmissionDetail(submissionId: number) {
       return POLL_INTERVAL_MS;
     },
   });
-
-  return { submission: submission ?? null, isLoading, error };
 }

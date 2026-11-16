@@ -14,25 +14,25 @@ import {
 } from 'lucide-react';
 import { useSyncExternalStore } from 'react';
 
-import { retryPageLoad } from '@/lib/chunk-reload';
+import { type ChunkRecovery, retryPageLoad } from '@/lib/chunk-reload';
 
 interface AppErrorPageProps {
   /** The error was a failure to load code (offline, or a redeploy). */
   chunkLoad: boolean;
-  /** The page is already reloading to fetch fresh code. */
-  reloading: boolean;
+  /** For a failure to load code, where recovering from it stands. */
+  phase: ChunkRecovery;
 }
 
 /** What the root error boundary shows, in the user's language. */
-export function AppErrorPage({ chunkLoad, reloading }: AppErrorPageProps) {
+export function AppErrorPage({ chunkLoad, phase }: AppErrorPageProps) {
   const { t } = useTranslation();
-  // A reload while offline lands on the browser's offline page, so the retry
-  // waits for the connection (the boundary reloads by itself once it is back).
   const offline = useSyncExternalStore(
     subscribeToOnlineStatus,
     isKnownOffline,
     () => false,
   );
+  const waiting = chunkLoad && phase === 'waiting';
+  const reloading = chunkLoad && phase === 'reloading';
   const Icon = reloading
     ? Loader2
     : chunkLoad
@@ -49,28 +49,31 @@ export function AppErrorPage({ chunkLoad, reloading }: AppErrorPageProps) {
         />
       </div>
 
-      <div className="space-y-2">
+      <div
+        role={waiting || reloading ? 'status' : 'alert'}
+        className="space-y-2"
+      >
         <h1 className="text-3xl font-bold tracking-tighter sm:text-4xl">
-          {chunkLoad ? t('error.chunk.title') : t('error.crash.title')}
+          {waiting
+            ? t('error.connection.title')
+            : chunkLoad
+              ? t('error.chunk.title')
+              : t('error.crash.title')}
         </h1>
         <p className="text-gray-500 md:text-xl/relaxed dark:text-gray-400 max-w-[600px]">
           {reloading
             ? t('error.chunk.reloading')
-            : chunkLoad
-              ? offline
-                ? t('error.offline.desc')
-                : t('error.chunk.desc')
-              : t('error.crash.desc')}
+            : waiting
+              ? t('error.connection.retrying')
+              : chunkLoad
+                ? t('error.chunk.desc')
+                : t('error.crash.desc')}
         </p>
       </div>
 
-      {!reloading && (
+      {!waiting && !reloading && (
         <div className="mt-8 flex justify-center gap-4">
-          <Button
-            onClick={() => retryPageLoad()}
-            disabled={offline}
-            variant="default"
-          >
+          <Button onClick={() => retryPageLoad()} variant="default">
             <RotateCcw className="mr-2 h-4 w-4" />
             {chunkLoad ? t('error.action.retry') : t('error.action.reload')}
           </Button>

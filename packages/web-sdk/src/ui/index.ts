@@ -15,6 +15,7 @@ export * from '@/ui/label';
 export * from '@/ui/navigation-menu';
 export * from '@/ui/paginated-list';
 export * from '@/ui/popover';
+export * from '@/ui/query-view';
 export * from '@/ui/select';
 export * from '@/ui/separator';
 export * from '@/ui/sheet';

@@ -1,5 +1,8 @@
 import { serverNow } from '@broccoli/web-sdk/api';
+import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
 import type { BadgeProps } from '@broccoli/web-sdk/ui';
+
+import type { MessageKey } from '@/lib/i18n/catalog';
 
 export type ContestPhase = 'upcoming' | 'running' | 'ended';
 
@@ -53,7 +56,7 @@ export function contestStatus(
 
 const STATUS_BADGES: Record<
   ContestStatus,
-  { key: string; variant: NonNullable<BadgeProps['variant']> }
+  { key: MessageKey; variant: NonNullable<BadgeProps['variant']> }
 > = {
   draft: { key: 'contests.draft', variant: 'outline' },
   scheduled: { key: 'contests.scheduled', variant: 'outline' },
@@ -65,7 +68,7 @@ const STATUS_BADGES: Record<
 
 export function getContestStatus(
   window: ContestWindow,
-  t: (key: string) => string,
+  t: I18nContextValue['t'],
 ): { label: string; variant: NonNullable<BadgeProps['variant']> } {
   const { key, variant } = STATUS_BADGES[contestStatus(window, serverNow())];
   return { label: t(key), variant };

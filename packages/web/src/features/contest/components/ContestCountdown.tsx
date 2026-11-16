@@ -1,6 +1,7 @@
 import { useApiClient, useServerNow } from '@broccoli/web-sdk/api';
 import { useAuthReady } from '@broccoli/web-sdk/auth';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import { useQuery } from '@tanstack/react-query';
 import { Fragment } from 'react';
 import { useParams } from 'react-router';
@@ -22,7 +23,7 @@ function getTimeLeft(targetMs: number, now: number) {
 /** The digit groups to show: days only when at least a day is left. */
 function countdownSegments(
   tl: ReturnType<typeof getTimeLeft>,
-  t: (key: string) => string,
+  t: I18nContextValue['t'],
 ) {
   return [
     ...(tl.days > 0 ? [{ value: tl.days, label: t('countdown.days') }] : []),
@@ -75,7 +76,8 @@ function useCountdownData(contestId: number) {
 
 export function ContestCountdown() {
   const { contestId } = useParams();
-  const { t, locale } = useTranslation();
+  const { t } = useTranslation();
+  const format = useFormat();
   const d = useCountdownData(Number(contestId));
 
   if (!d) return null;
@@ -90,16 +92,6 @@ export function ContestCountdown() {
       : phase === 'running'
         ? t('countdown.endsIn')
         : t('countdown.contestOver');
-
-  const fmtDate = (dateStr: string) => {
-    const d = new Date(dateStr);
-    const month = d.toLocaleDateString(locale, { month: 'short' });
-    const day = d.getDate();
-    const year = d.getFullYear();
-    const h = String(d.getHours()).padStart(2, '0');
-    const m = String(d.getMinutes()).padStart(2, '0');
-    return `${month} ${day}, ${year} ${h}:${m}`;
-  };
 
   return (
     <div className="rounded-lg border p-6 space-y-5">
@@ -180,13 +172,13 @@ export function ContestCountdown() {
           <span className="text-muted-foreground/40 mr-1.5">
             {t('contest.countdown.start')}
           </span>
-          {fmtDate(contest.start_time)}
+          {format.dateTime(contest.start_time, { timeZoneName: true })}
         </div>
         <div>
           <span className="text-muted-foreground/40 mr-1.5">
             {t('contest.countdown.end')}
           </span>
-          {fmtDate(contest.end_time)}
+          {format.dateTime(contest.end_time, { timeZoneName: true })}
         </div>
       </div>
     </div>

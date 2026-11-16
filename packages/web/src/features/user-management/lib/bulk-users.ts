@@ -4,9 +4,38 @@ export type ParsedBulkUser = {
   password?: string;
 };
 
+/** Why a bulk user list was refused, as the key of its message. */
+export type BulkUsersProblem =
+  | 'admin.bulkParticipantsError'
+  | 'admin.bulkParticipantsInvalidJson'
+  | 'admin.bulkParticipantsInvalidUsername'
+  | 'admin.bulkParticipantsInvalidPassword'
+  | 'admin.bulkParticipantsInvalidDisplayName'
+  | 'admin.bulkParticipantsDuplicate'
+  | 'admin.bulkParticipantsEmpty'
+  | 'users.create.tooMany';
+
+/** A bulk user list that cannot be imported. */
+export class BulkUsersError extends Error {
+  readonly key: BulkUsersProblem;
+
+  constructor(key: BulkUsersProblem) {
+    super(key);
+    this.name = 'BulkUsersError';
+    this.key = key;
+  }
+}
+
+/** The message key for a failure to read a bulk user list. */
+export function bulkUsersProblem(error: unknown): BulkUsersProblem {
+  return error instanceof BulkUsersError
+    ? error.key
+    : 'admin.bulkParticipantsInvalidJson';
+}
+
 export function normalizeBulkUsers(input: unknown): ParsedBulkUser[] {
   if (!Array.isArray(input)) {
-    throw new Error('admin.bulkParticipantsInvalidJson');
+    throw new BulkUsersError('admin.bulkParticipantsInvalidJson');
   }
 
   const users: ParsedBulkUser[] = [];
@@ -29,7 +58,7 @@ export function normalizeBulkUsers(input: unknown): ParsedBulkUser[] {
         typeof record.username === 'string' ? record.username.trim() : '';
       displayName = record.display_name;
       if (record.password != null && typeof record.password !== 'string') {
-        throw new Error('admin.bulkParticipantsInvalidPassword');
+        throw new BulkUsersError('admin.bulkParticipantsInvalidPassword');
       }
       if (typeof record.password === 'string') {
         password = record.password;
@@ -37,11 +66,11 @@ export function normalizeBulkUsers(input: unknown): ParsedBulkUser[] {
     }
 
     if (!username) {
-      throw new Error('admin.bulkParticipantsInvalidUsername');
+      throw new BulkUsersError('admin.bulkParticipantsInvalidUsername');
     }
 
     if (username.length > 32 || !/^[A-Za-z0-9_]+$/.test(username)) {
-      throw new Error('admin.bulkParticipantsInvalidUsername');
+      throw new BulkUsersError('admin.bulkParticipantsInvalidUsername');
     }
 
     if (
@@ -49,21 +78,21 @@ export function normalizeBulkUsers(input: unknown): ParsedBulkUser[] {
       (new TextEncoder().encode(password).length < 8 ||
         new TextEncoder().encode(password).length > 128)
     ) {
-      throw new Error('admin.bulkParticipantsInvalidPassword');
+      throw new BulkUsersError('admin.bulkParticipantsInvalidPassword');
     }
 
     if (displayName != null && typeof displayName !== 'string') {
-      throw new Error('admin.bulkParticipantsInvalidDisplayName');
+      throw new BulkUsersError('admin.bulkParticipantsInvalidDisplayName');
     }
     const name =
       (typeof displayName === 'string' ? displayName.trim() : '') || username;
     if ([...name].length > 64 || /\p{Cc}/u.test(name)) {
-      throw new Error('admin.bulkParticipantsInvalidDisplayName');
+      throw new BulkUsersError('admin.bulkParticipantsInvalidDisplayName');
     }
 
     const key = username.toLowerCase();
     if (seen.has(key)) {
-      throw new Error('admin.bulkParticipantsDuplicate');
+      throw new BulkUsersError('admin.bulkParticipantsDuplicate');
     }
     seen.add(key);
 
@@ -71,7 +100,7 @@ export function normalizeBulkUsers(input: unknown): ParsedBulkUser[] {
   }
 
   if (users.length === 0) {
-    throw new Error('admin.bulkParticipantsEmpty');
+    throw new BulkUsersError('admin.bulkParticipantsEmpty');
   }
 
   return users;

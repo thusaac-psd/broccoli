@@ -6,7 +6,7 @@ import {
   isChunkLoadError,
   isStylesheetPreloadError,
 } from '@broccoli/web-sdk/utils';
-import { useEffect, useMemo } from 'react';
+import { useEffect, useState } from 'react';
 import {
   isRouteErrorResponse,
   Links,
@@ -23,9 +23,11 @@ import { BaseProviders } from '@/components/BaseProviders';
 import { ErrorReporter } from '@/components/error-reporter';
 import { getSubmissionScrollKey } from '@/features/submission/utils/navigation';
 import {
-  canReloadForFreshChunks,
+  type ChunkRecovery,
   reloadForFreshChunks,
+  waitUntilReachable,
 } from '@/lib/chunk-reload';
+import { preloadRouteModules } from '@/lib/preload-routes';
 import { reportError, reportVitals } from '@/lib/telemetry';
 
 export function Layout({ children }: { children: React.ReactNode }) {
@@ -35,6 +37,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     reportVitals();
+    preloadRouteModules();
   }, []);
 
   useEffect(() => {
@@ -125,50 +128,46 @@ export default function Root() {
 
 /**
  * Every error no route handles lands here: a render crash, or code that
- * failed to load (offline for a moment, or a redeploy removed the chunks this
- * page points at). A lazy import's own caller retries first (see `retryLoad`
- * in the SDK), and React Router reloads the page itself when a route module
- * fails to load; code that still fails reloads once here for fresh chunks
- * (once back online, if the browser is offline). Anything else gets a
+ * failed to load (the server went away for a moment, or a redeploy removed
+ * the chunks this page points at). A lazy import's own caller retries first
+ * (see `retryLoad` in the SDK). Code that still fails waits until the server
+ * answers, saying the connection is lost meanwhile, and then reloads once
+ * for fresh chunks; a reload sent while the server is down would land on the
+ * browser's own error page, with no way back. Anything else gets a
  * translated error page.
  */
 export function ErrorBoundary() {
   const error = useRouteError();
   const chunkLoad = isChunkLoadError(error);
-  const reloading = useMemo(
-    () => chunkLoad && canReloadForFreshChunks(),
-    [chunkLoad],
+  const [phase, setPhase] = useState<ChunkRecovery>(
+    chunkLoad ? 'waiting' : 'failed',
   );
 
   useEffect(() => {
-    if (reloading) {
-      reloadForFreshChunks();
+    if (!chunkLoad) {
+      reportError(
+        isRouteErrorResponse(error)
+          ? { message: `${error.status} ${error.statusText}` }
+          : error instanceof Error
+            ? { message: error.message, stack: error.stack }
+            : { message: String(error) },
+      );
       return;
     }
-    reportError(
-      isRouteErrorResponse(error)
-        ? { message: `${error.status} ${error.statusText}` }
-        : error instanceof Error
-          ? { message: error.message, stack: error.stack }
-          : { message: String(error) },
-    );
-  }, [error, reloading]);
-
-  // Offline, no reload was attempted (it would land on the browser's offline
-  // page); try once the connection is back.
-  useEffect(() => {
-    if (!chunkLoad || reloading) return;
-    const onOnline = () => reloadForFreshChunks();
-    window.addEventListener('online', onOnline);
-    return () => window.removeEventListener('online', onOnline);
-  }, [chunkLoad, reloading]);
+    const controller = new AbortController();
+    void waitUntilReachable(controller.signal).then((reachable) => {
+      if (!reachable) return;
+      setPhase(reloadForFreshChunks() ? 'reloading' : 'failed');
+    });
+    return () => controller.abort();
+  }, [error, chunkLoad]);
 
   // The translated page needs the providers the crash may have come from;
   // should they fail again, ErrorReporter falls back to plain English.
   return (
     <ErrorReporter>
       <BaseProviders>
-        <AppErrorPage chunkLoad={chunkLoad} reloading={reloading} />
+        <AppErrorPage chunkLoad={chunkLoad} phase={phase} />
       </BaseProviders>
     </ErrorReporter>
   );

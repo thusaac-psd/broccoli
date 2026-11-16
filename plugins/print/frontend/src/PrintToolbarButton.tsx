@@ -1,4 +1,4 @@
-import { getErrorMessage } from '@broccoli/web-sdk/api';
+import { useErrorMessage } from '@broccoli/web-sdk/api';
 import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
@@ -42,6 +42,7 @@ type Phase = 'idle' | 'sending' | 'done' | 'error';
 
 export function PrintToolbarButton() {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const api = usePrintApi();
   const params = useParams();
   const contestId = params.contestId ? Number(params.contestId) : undefined;
@@ -106,7 +107,7 @@ export function PrintToolbarButton() {
       }, 2200);
     } catch (e) {
       setPhase('error');
-      setMessage(getErrorMessage(e, t('print.action.failed')));
+      setMessage(errorMessage(e, t('print.action.failed')));
     }
   };
 

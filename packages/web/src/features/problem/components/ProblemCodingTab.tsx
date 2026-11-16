@@ -26,6 +26,7 @@ interface ProblemCodingTabProps {
   submissionFormat?: Record<string, string[]> | null;
   latestSubmission: Submission | null;
   submissionHistory: SubmissionSummary[];
+  submissionHistoryError: { error: unknown; retry: () => void } | null;
   submissions?: SubmissionEntry[];
   isSubmitting: boolean;
   overviewVisibleCount?: number;
@@ -53,6 +54,7 @@ export function ProblemCodingTab({
   submissionFormat,
   latestSubmission,
   submissionHistory,
+  submissionHistoryError,
   submissions,
   isSubmitting,
   overviewVisibleCount,
@@ -99,6 +101,7 @@ export function ProblemCodingTab({
           <RecentSubmissionOverview
             entries={submissions ?? []}
             history={submissionHistory}
+            historyError={submissionHistoryError}
             isSubmitting={isSubmitting}
             visibleCount={overviewVisibleCount}
             linkBuilder={submissionDetailLinkBuilder}

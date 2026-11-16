@@ -2,6 +2,7 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { type ApiClient, useApiClient } from '@/api';
+import { queryState } from '@/hooks/query-state';
 
 export interface ServerTableParams {
   page: number;
@@ -95,11 +96,12 @@ export function useServerTable<T>({
     ...(sortBy && { sort_order: sortOrder }),
   };
 
-  const { data, isLoading, isFetching } = useQuery({
+  const query = useQuery({
     queryKey: [...queryKey, params],
     queryFn: () => fetchFn(apiClient, params),
     placeholderData: keepPreviousData,
   });
+  const { data, isLoading, isFetching } = query;
 
   const setPage = useCallback(
     (nextPage: number) => {
@@ -153,7 +155,16 @@ export function useServerTable<T>({
   };
 
   return {
+    /**
+     * The page's rows; empty until they arrive. Render through `view`, which
+     * tells an empty page from one that failed or has not loaded.
+     */
     data: data?.data ?? [],
+    /** The page as a `QueryState`: loading, failed, empty or rows. */
+    view: queryState(
+      { ...query, data: data?.data },
+      (rows) => rows.length === 0,
+    ),
     pagination,
     isLoading,
     isFetching,

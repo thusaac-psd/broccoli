@@ -1,6 +1,6 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
 import { useRegistries } from '@broccoli/web-sdk/hooks';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useIdentifierLabel, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
   DropdownMenu,
@@ -28,7 +28,14 @@ import {
   type ProblemFormData,
 } from '@/features/admin/problem-form-values';
 import type { Attachment } from '@/features/problem/api/attachments';
-import { fetchSupportedLanguages } from '@/features/problem/api/fetch-supported-languages';
+import {
+  fetchSupportedLanguages,
+  type SupportedLanguage,
+} from '@/features/problem/api/fetch-supported-languages';
+
+// Template languages offered by the form; a failed load offers none and the
+// form still saves.
+const NO_LANGUAGES: SupportedLanguage[] = [];
 
 interface ProblemFormProps {
   data: ProblemFormData;
@@ -44,13 +51,15 @@ export function ProblemForm({
   attachments,
 }: ProblemFormProps) {
   const { t } = useTranslation();
+  const label = useIdentifierLabel();
   const apiClient = useApiClient();
   const { data: registries } = useRegistries();
-  const { data: supportedLanguages = [] } = useQuery({
+  const languagesQuery = useQuery({
     queryKey: ['supported-languages'],
     queryFn: () => fetchSupportedLanguages(apiClient),
     staleTime: 5 * 60 * 1000,
   });
+  const supportedLanguages = languagesQuery.data ?? NO_LANGUAGES;
   const [selectedLanguage, setSelectedLanguage] = useState('');
   const [newFilenameByLanguage, setNewFilenameByLanguage] = useState<
     Record<string, string>
@@ -296,7 +305,7 @@ export function ProblemForm({
             <SelectContent>
               {problemTypes.map((opt) => (
                 <SelectItem key={opt} value={opt}>
-                  {opt}
+                  {label('problemType', opt)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -318,7 +327,7 @@ export function ProblemForm({
             <SelectContent>
               {checkerFormats.map((opt) => (
                 <SelectItem key={opt} value={opt}>
-                  {opt}
+                  {label('checker', opt)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -340,7 +349,7 @@ export function ProblemForm({
             <SelectContent>
               {contestTypes.map((opt) => (
                 <SelectItem key={opt} value={opt}>
-                  {opt}
+                  {label('contestType', opt)}
                 </SelectItem>
               ))}
             </SelectContent>

@@ -1,6 +1,7 @@
+import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
 import type { SubmissionStatus } from '@broccoli/web-sdk/submission';
 
-type Translate = (key: string, values?: Record<string, string>) => string;
+type Translate = I18nContextValue['t'];
 
 export type SubmissionScoreDisplay =
   | { kind: 'score'; value: string }

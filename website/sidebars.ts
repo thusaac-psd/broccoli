@@ -40,6 +40,7 @@ const sidebars: SidebarsConfig = {
         'building-plugins/getting-started',
         'building-plugins/routes',
         'building-plugins/configuration',
+        'building-plugins/translations',
       ],
     },
     {

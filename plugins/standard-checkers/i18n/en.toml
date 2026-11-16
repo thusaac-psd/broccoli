@@ -1,0 +1,7 @@
+'identifier.checker.exact' = 'Exact match'
+'identifier.checker.lines' = 'Line by line'
+'identifier.checker.tokens' = 'Token by token'
+'identifier.checker.tokens-case-insensitive' = 'Tokens, ignoring case'
+'identifier.checker.tokens-float' = 'Tokens, with float tolerance'
+'identifier.checker.testlib' = 'Testlib checker'
+'identifier.checker.none' = 'No checker'

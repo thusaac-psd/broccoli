@@ -8,8 +8,9 @@ import { PageLayout } from '@/components/PageLayout';
 
 export default function ContestRankingPage() {
   const { t } = useTranslation();
-  // The scoreboard is a plugin view: until plugins have loaded, "no
-  // participants" would be a false statement.
+  // The scoreboard is a plugin view. Until plugins have loaded nothing can be
+  // said; after, an empty slot means this contest's format shows none, which
+  // says nothing about its participants.
   const { isLoading } = usePluginRegistry();
 
   return (
@@ -25,7 +26,7 @@ export default function ContestRankingPage() {
           <Skeleton className="h-64 w-full" />
         ) : (
           <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
-            {t('ranking.empty')}
+            {t('ranking.unavailable')}
           </div>
         )}
       </Slot>

@@ -1,5 +1,10 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import {
+  pluginKeys,
+  useFormat,
+  usePluginText,
+  useTranslation,
+} from '@broccoli/web-sdk/i18n';
 import type { PluginFullDetail, UploadRemoval } from '@broccoli/web-sdk/plugin';
 import {
   Badge,
@@ -9,11 +14,11 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
+  QueryErrorState,
   Skeleton,
 } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import {
-  AlertCircle,
   Globe,
   Loader2,
   Package,
@@ -120,7 +125,8 @@ const REPLICA_BADGE: Record<
 };
 
 function FleetSection({ fleet }: { fleet: PluginFleet }) {
-  const { t, locale } = useTranslation();
+  const { t } = useTranslation();
+  const format = useFormat();
 
   return (
     <Section
@@ -159,7 +165,7 @@ function FleetSection({ fleet }: { fleet: PluginFleet }) {
               {r.retry_at && (
                 <p className="text-muted-foreground">
                   {t('plugins.detail.retryAt', {
-                    time: new Date(r.retry_at).toLocaleTimeString(locale),
+                    time: format.time(r.retry_at),
                   })}
                 </p>
               )}
@@ -452,13 +458,10 @@ export function PluginDetailDialog({
   removingUpload?: boolean;
 }) {
   const { t } = useTranslation();
+  const pluginText = usePluginText();
   const apiClient = useApiClient();
 
-  const {
-    data: plugin,
-    isLoading,
-    error,
-  } = useQuery({
+  const pluginQuery = useQuery({
     queryKey: ['admin-plugin-detail', pluginId],
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/admin/plugins/{id}', {
@@ -469,13 +472,16 @@ export function PluginDetailDialog({
     },
     enabled: open && !!pluginId,
   });
+  const { data: plugin, isLoading, error } = pluginQuery;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
-            {plugin ? plugin.name : t('plugins.detail.title')}
+            {plugin
+              ? pluginText(pluginKeys.name(plugin.id), plugin.name)
+              : t('plugins.detail.title')}
           </DialogTitle>
           <DialogDescription asChild>
             <div className="text-sm text-muted-foreground">
@@ -520,13 +526,13 @@ export function PluginDetailDialog({
           </div>
         )}
 
-        {error && (
-          <div className="py-6 text-center">
-            <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />
-            <p className="text-sm text-destructive">
-              {t('plugins.detail.loadError')}
-            </p>
-          </div>
+        {error && !plugin && (
+          <QueryErrorState
+            error={error}
+            retry={() => void pluginQuery.refetch()}
+            retrying={pluginQuery.isFetching}
+            failure={t('plugins.detail.loadError')}
+          />
         )}
 
         {plugin && (

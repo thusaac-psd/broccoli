@@ -1,5 +1,5 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
   Button,
@@ -9,10 +9,11 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  QueryErrorState,
   useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, Loader2, RotateCw, Trash2 } from 'lucide-react';
+import { Loader2, RotateCw, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { toast } from 'sonner';
@@ -27,11 +28,14 @@ interface Props {
 
 export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
+  const format = useFormat();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const open = messageId !== null;
 
-  const { data, isLoading, error } = useDlqMessage(messageId);
+  const messageQuery = useDlqMessage(messageId);
+  const { data, isLoading, error } = messageQuery;
   const meta = data ? messageTypeMeta(data.message_type) : null;
 
   const [busy, setBusy] = useState(false);
@@ -45,7 +49,7 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
         params: { path: { id: messageId } },
       });
       if (error) {
-        toast.error(getErrorMessage(error, t('dlq.detail.retryError')));
+        toast.error(errorMessage(error, t('dlq.detail.retryError')));
         return;
       }
       toast.success(t('dlq.detail.retrySuccess'));
@@ -89,11 +93,13 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
           </div>
         )}
 
-        {error && (
-          <div className="flex items-start gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
-            <AlertTriangle className="h-4 w-4 shrink-0 text-destructive" />
-            <p>{t('dlq.detail.loadError')}</p>
-          </div>
+        {error && !data && (
+          <QueryErrorState
+            error={error}
+            retry={() => void messageQuery.refetch()}
+            retrying={messageQuery.isFetching}
+            failure={t('dlq.detail.loadError')}
+          />
         )}
 
         {data && (
@@ -106,7 +112,7 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
                 {meta && (
                   <span className="inline-flex items-center gap-1.5 rounded-md border bg-muted/30 px-2 py-0.5 text-xs">
                     <meta.icon className="h-3 w-3 text-muted-foreground" />
-                    {t(meta.labelKey)}
+                    {meta.labelKey ? t(meta.labelKey) : data.message_type}
                   </span>
                 )}
               </Field>
@@ -118,17 +124,17 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
               </Field>
               <Field label={t('dlq.detail.firstFailedAt')}>
                 <span className="font-mono text-xs">
-                  {new Date(data.first_failed_at).toLocaleString()}
+                  {format.dateTime(data.first_failed_at)}
                 </span>
               </Field>
               <Field label={t('dlq.detail.lastFailedAt')}>
                 <span className="font-mono text-xs">
-                  {new Date(data.last_failed_at).toLocaleString()}
+                  {format.dateTime(data.last_failed_at)}
                 </span>
               </Field>
               <Field label={t('dlq.detail.createdAt')}>
                 <span className="font-mono text-xs">
-                  {new Date(data.created_at).toLocaleString()}
+                  {format.dateTime(data.created_at)}
                 </span>
               </Field>
               {data.submission_id != null && (

@@ -1,3 +1,4 @@
+import type { I18nContextValue } from '@/i18n';
 import type {
   SubmissionError,
   SubmissionStatus,
@@ -77,7 +78,7 @@ export const SUBMISSION_STATUS_FILTER_OPTIONS: readonly SubmissionStatusFilterVa
 
 export function getStatusLabel(
   status: SubmissionStatusFilterValue,
-  t: (key: string) => string,
+  t: I18nContextValue['t'],
 ): string {
   return status === 'all'
     ? t('submissions.filters.allStatuses')

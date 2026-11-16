@@ -9,6 +9,7 @@ import {
   SHARED_DEPS,
   sharedDepsPlugin,
 } from './plugins/shared-deps';
+import { languagePacksPlugin } from './scripts/language-packs';
 
 // https://vite.dev/config/
 export default defineConfig(() => {
@@ -26,7 +27,12 @@ export default defineConfig(() => {
   ];
 
   return {
-    plugins: [tailwindcss(), sharedDepsPlugin(), reactRouter()],
+    plugins: [
+      languagePacksPlugin(),
+      tailwindcss(),
+      sharedDepsPlugin(),
+      reactRouter(),
+    ],
     server: {
       proxy: {
         '/api': 'http://localhost:3000',

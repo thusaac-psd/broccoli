@@ -1,4 +1,4 @@
-import { getErrorMessage, isTemporaryApiError } from '@broccoli/web-sdk/api';
+import { isTemporaryApiError, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import { type QueryKey, useQuery } from '@tanstack/react-query';
@@ -33,6 +33,7 @@ export function RecordLoader<T>({
   children: (record: T) => ReactNode;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const query = useQuery({
     queryKey,
     queryFn,
@@ -68,7 +69,7 @@ export function RecordLoader<T>({
     return (
       <div role="alert" className="space-y-3 py-8 text-center">
         <p className="text-sm text-destructive">
-          {getErrorMessage(query.error, t('common.loadFailed'))}
+          {errorMessage(query.error, t('common.loadFailed'))}
         </p>
         <Button variant="outline" size="sm" onClick={() => query.refetch()}>
           {t('common.retry')}

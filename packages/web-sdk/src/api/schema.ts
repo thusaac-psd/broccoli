@@ -147,6 +147,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/admin/plugins/{id}/dependents': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List what depends on a plugin right now
+     * @description Returns the contests running now (started, not yet ended, not deleted) whose contest type the plugin provides on the serving replica, so an admin can see what disabling it would stop. A plugin that is not loaded on the serving replica provides no contest types here. Requires `plugin:manage` permission.
+     */
+    get: operations['getPluginDependents'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/admin/plugins/{id}/disable': {
     parameters: {
       query?: never;
@@ -3626,6 +3646,15 @@ export interface components {
       /** Format: date-time */
       updated_at?: string | null;
     };
+    /** @description What depends on a plugin right now. */
+    PluginDependentsResponse: {
+      /**
+       * @description Contests running now (started, not ended) whose contest type this
+       *     plugin provides on the serving replica. Disabling the plugin stops
+       *     their submissions from being accepted and judged.
+       */
+      running_contests: components['schemas']['RunningContestRef'][];
+    };
     PluginDetailResponse: {
       config_schemas: components['schemas']['ConfigSchemaResponse'][];
       /** @example This plugin does awesome things! */
@@ -4077,6 +4106,20 @@ export interface components {
       files: components['schemas']['SubmissionFileDto'][];
       /** @example cpp */
       language: string;
+    };
+    /** @description A running contest whose format a plugin provides. */
+    RunningContestRef: {
+      /** @example icpc */
+      contest_type: string;
+      /** Format: date-time */
+      end_time: string;
+      /**
+       * Format: int32
+       * @example 1
+       */
+      id: number;
+      /** @example Spring Contest */
+      title: string;
     };
     SampleCase: {
       /** @description Optional markdown note explaining this sample (author-written). */
@@ -5093,7 +5136,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description What the archive replaces (`replaces`) is no longer what is published: another change landed since the archive was inspected (CONFLICT) */
+      /** @description What the archive replaces (`replaces`) is no longer what is published: another change landed since the archive was inspected (CONFLICT); or `replaces` is `new` but a plugin with this id exists (PLUGIN_EXISTS) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -5173,6 +5216,47 @@ export interface operations {
       };
       /** @description Archive too large (PAYLOAD_TOO_LARGE) */
       413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  getPluginDependents: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Plugin ID */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description What depends on the plugin */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['PluginDependentsResponse'];
+        };
+      };
+      /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Forbidden (PERMISSION_DENIED) */
+      403: {
         headers: {
           [name: string]: unknown;
         };
@@ -8265,7 +8349,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden (PERMISSION_DENIED); or the caller has not registered for this public contest (CONTEST_NOT_REGISTERED) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -8712,7 +8796,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden (PERMISSION_DENIED); or the caller has not registered for this public contest (CONTEST_NOT_REGISTERED) */
       403: {
         headers: {
           [name: string]: unknown;

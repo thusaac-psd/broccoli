@@ -1,5 +1,5 @@
-import { useApiClient } from '@broccoli/web-sdk/api';
-import { useAuth } from '@broccoli/web-sdk/auth';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
+import { safeReturnPath, signInPath, useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -12,15 +12,18 @@ import {
   Label,
 } from '@broccoli/web-sdk/ui';
 import { type FormEvent, useState } from 'react';
-import { Link, useNavigate } from 'react-router';
+import { Link, useNavigate, useSearchParams } from 'react-router';
 
 import { DisplayNameField } from '@/components/DisplayNameField';
 import { useRegistrationStatus } from '@/features/auth/hooks/use-registration-status';
 
 export default function RegisterForm() {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const { login } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const next = safeReturnPath(searchParams.get('next'));
 
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -62,22 +65,14 @@ export default function RegisterForm() {
       });
 
       if (regError) {
-        if (regError.code === 'USERNAME_TAKEN') {
-          setError(t('auth.usernameTaken'));
-        } else if (regError.code === 'REGISTRATION_CLOSED') {
-          setError(t('auth.registrationClosed'));
-        } else {
-          setError(regError.message || t('auth.validationError'));
-        }
+        setError(errorMessage(regError, t('auth.validationError')));
         return;
       }
 
       await login({ username, password });
-      navigate('/');
+      navigate(next);
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : t('auth.validationError');
-      setError(message);
+      setError(errorMessage(err, t('auth.validationError')));
     } finally {
       setIsSubmitting(false);
     }
@@ -153,7 +148,7 @@ export default function RegisterForm() {
           </Button>
           <p className="text-sm text-muted-foreground">
             {t('auth.haveAccount')}{' '}
-            <Link to="/login" className="text-primary underline">
+            <Link to={signInPath(next)} className="text-primary underline">
               {t('auth.login')}
             </Link>
           </p>

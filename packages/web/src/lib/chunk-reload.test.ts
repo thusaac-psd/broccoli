@@ -5,8 +5,10 @@ import { isKnownOffline } from '@broccoli/web-sdk/utils';
 
 import {
   canReloadForFreshChunks,
+  type ReachabilityDeps,
   reloadForFreshChunks,
   retryPageLoad,
+  waitUntilReachable,
 } from './chunk-reload.ts';
 
 function withBrowser(onLine: boolean, run: (reloads: () => number) => void) {
@@ -70,4 +72,45 @@ test('offline, nothing reloads onto the browser offline page', () => {
     assert.equal(reloadForFreshChunks(), true);
     assert.equal(reloads(), 2);
   });
+});
+
+function reachability(answers: boolean[]) {
+  const slept: number[] = [];
+  let probes = 0;
+  return {
+    slept,
+    probes: () => probes,
+    deps: {
+      probe: async () => answers[probes++] ?? true,
+      sleep: async (ms: number): Promise<void> => {
+        slept.push(ms);
+      },
+    } as ReachabilityDeps,
+  };
+}
+
+test('nothing reloads until the server answers, asking again with backoff', async () => {
+  const r = reachability([false, false, false, true]);
+  assert.equal(
+    await waitUntilReachable(new AbortController().signal, r.deps),
+    true,
+  );
+  assert.equal(r.probes(), 4);
+  assert.deepEqual(r.slept, [1_000, 2_000, 4_000]);
+});
+
+test('a server that answers at once is not waited on', async () => {
+  const r = reachability([true]);
+  assert.equal(
+    await waitUntilReachable(new AbortController().signal, r.deps),
+    true,
+  );
+  assert.deepEqual(r.slept, []);
+});
+
+test('waiting stops when the page goes away', async () => {
+  const controller = new AbortController();
+  const r = reachability([false]);
+  r.deps.sleep = async () => controller.abort();
+  assert.equal(await waitUntilReachable(controller.signal, r.deps), false);
 });

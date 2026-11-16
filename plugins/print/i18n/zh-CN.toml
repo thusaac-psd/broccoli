@@ -64,6 +64,7 @@
 # My Prints panel (contestant sidebar)
 'print.myPrints.title' = '我的打印'
 'print.myPrints.empty' = '暂无打印任务'
+'print.myPrints.loadFailed' = '无法加载您的打印任务。'
 'print.myPrints.noContest' = '打开比赛题目以查看打印任务'
 
 # 状态标签
@@ -77,6 +78,7 @@
 
 # 打印站面板
 'print.stations.empty' = '暂无打印站签入'
+'print.stations.loadFailed' = '无法加载打印站。'
 'print.stations.online' = '在线'
 'print.stations.offline' = '离线'
 'print.stations.col.name' = '站名'

@@ -50,7 +50,7 @@ export async function fetchSampleCase(
             signal,
           },
         );
-  if (error || !data) return null;
+  if (error) throw error;
   return data;
 }
 

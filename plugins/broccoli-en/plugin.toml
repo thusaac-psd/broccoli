@@ -1,0 +1,5 @@
+name = 'en-language'
+version = '0.1.0'
+
+[translations]
+en = "locales/en.toml"

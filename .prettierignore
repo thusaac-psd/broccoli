@@ -10,3 +10,6 @@ pnpm-lock.yaml
 # Docusaurus site manages its own formatting (and MDX/admonition syntax that
 # prose-wrapping would break).
 /website
+
+# Generated from the language packs (packages/web/scripts/language-packs.ts).
+/packages/web/src/lib/i18n/packs.gen.ts

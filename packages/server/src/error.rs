@@ -35,6 +35,9 @@ pub enum AppError {
     TokenInvalid,
     InvalidCredentials,
     PermissionDenied,
+    /// The caller may see a public contest but has not registered for it, so
+    /// may not act in it (submit, run code) until they do.
+    ContestNotRegistered,
     NotFound(String),
     MethodNotAllowed,
     Conflict(String),
@@ -43,6 +46,8 @@ pub enum AppError {
     UsernameTaken(Vec<String>),
     /// `POST /auth/register` while self-registration is closed.
     RegistrationClosed,
+    /// An upload meant to add a new plugin, but one with its id exists.
+    PluginExists(String),
     PluginNotReady(String),
     /// A valid plugin archive whose plugin failed to load or initialize on
     /// the serving replica; nothing was published.
@@ -140,6 +145,13 @@ impl AppError {
                 StatusCode::FORBIDDEN,
                 simple("PERMISSION_DENIED", "Insufficient permissions".into()),
             ),
+            AppError::ContestNotRegistered => (
+                StatusCode::FORBIDDEN,
+                simple(
+                    "CONTEST_NOT_REGISTERED",
+                    "Register for this contest first".into(),
+                ),
+            ),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, simple("NOT_FOUND", msg)),
             AppError::MethodNotAllowed => (
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -173,6 +185,16 @@ impl AppError {
                     },
                 )
             }
+            AppError::PluginExists(id) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    code: "PLUGIN_EXISTS".into(),
+                    message: format!(
+                        "Plugin '{id}' already exists; upload it as a replacement instead"
+                    ),
+                    details: Some(serde_json::json!({ "plugin_id": id })),
+                },
+            ),
             AppError::PluginNotReady(msg) => {
                 (StatusCode::BAD_REQUEST, simple("PLUGIN_NOT_READY", msg))
             }

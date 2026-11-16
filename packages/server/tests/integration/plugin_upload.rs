@@ -311,6 +311,31 @@ async fn an_upload_is_refused_when_what_it_replaces_changed_meanwhile() {
     assert_eq!(res.status, 400, "replaces is required: {}", res.text);
 }
 
+/// An upload that expects a new plugin, for an id that already exists, says
+/// so: nothing changed meanwhile, the plugin was simply there already.
+#[tokio::test(flavor = "multi_thread")]
+async fn uploading_a_new_plugin_whose_id_exists_says_it_exists() {
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    upload(&a, &token, archive(UPLOAD_ONLY, "1.0.0")).await;
+
+    let res = a
+        .post_plugin_archive(
+            routes::ADMIN_PLUGIN_UPLOAD,
+            archive(UPLOAD_ONLY, "1.1.0"),
+            &[("replaces", "new")],
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 409, "{}", res.text);
+    assert_eq!(res.body["code"], "PLUGIN_EXISTS", "{}", res.text);
+    assert_eq!(res.body["details"]["plugin_id"], UPLOAD_ONLY);
+    assert_eq!(
+        row(&a, UPLOAD_ONLY).await.unwrap().version.as_deref(),
+        Some("1.0.0")
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn inspecting_an_archive_reports_what_it_would_publish() {
     let a = TestApp::spawn_with_plugins().await;

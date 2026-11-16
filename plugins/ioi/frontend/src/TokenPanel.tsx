@@ -1,6 +1,6 @@
 import {
-  getErrorMessage,
-  PluginApiError,
+  RequestError,
+  useErrorMessage,
   useServerNow,
   useServerTimeReached,
 } from '@broccoli/web-sdk/api';
@@ -40,6 +40,7 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
   const api = useIoiApi();
   const queryClient = useQueryClient();
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const [isUsing, setIsUsing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingSubmissionId, setConfirmingSubmissionId] = useState<
@@ -57,7 +58,8 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
         return await api.getTokenStatus(cId!);
       } catch (error) {
         if (
-          error instanceof PluginApiError &&
+          error instanceof RequestError &&
+          error.status !== null &&
           [401, 403, 404].includes(error.status)
         ) {
           return null;
@@ -138,7 +140,7 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
       // shows which, instead of inviting a second use.
       if (!result.settled) setError(t(unsettledMessageKey(result.outcome)));
     } catch (e: unknown) {
-      setError(getErrorMessage(e, t('ioi.tokenPanel.useFailed')));
+      setError(errorMessage(e, t('ioi.tokenPanel.useFailed')));
     } finally {
       setIsUsing(false);
       // Refetch on failure too: the token may have been spent (an unknown

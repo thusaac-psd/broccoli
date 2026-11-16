@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+
 import { matchesInRound, roundNameKey } from './rounds.ts';
 
 test('stage names and widths follow bracket size', () => {

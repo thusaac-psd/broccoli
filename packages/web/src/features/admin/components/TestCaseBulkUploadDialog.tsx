@@ -1,4 +1,4 @@
-import { useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   TEST_CASE_MERGE_STRATEGIES,
@@ -43,6 +43,7 @@ export function TestCaseBulkUploadDialog({
 }: TestCaseBulkUploadDialogProps) {
   const apiClient = useApiClient();
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -129,11 +130,7 @@ export function TestCaseBulkUploadDialog({
         },
       });
 
-      if (result.error) {
-        throw new Error(
-          result.error.message || t('admin.testCases.bulkUpload.uploadError'),
-        );
-      }
+      if (result.error) throw result.error;
 
       toast.success(t('admin.testCases.bulkUpload.uploadSuccess'));
       invalidateProblemTestCases(queryClient, problemId);
@@ -145,9 +142,7 @@ export function TestCaseBulkUploadDialog({
     } catch (error) {
       console.error('Bulk upload error:', error);
       toast.error(
-        error instanceof Error
-          ? error.message
-          : t('admin.testCases.bulkUpload.uploadError'),
+        errorMessage(error, t('admin.testCases.bulkUpload.uploadError')),
       );
     } finally {
       setLoading(false);

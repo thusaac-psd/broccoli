@@ -1,10 +1,11 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
 import {
+  signInPath,
   useAuth,
   useAuthReady,
   USER_PERMISSIONS,
 } from '@broccoli/web-sdk/auth';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { type I18nContextValue, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   CONTEST_MANAGE,
   DLQ_MANAGE,
@@ -34,6 +35,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
+  Skeleton,
 } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -57,13 +59,14 @@ import { Link, useLocation } from 'react-router';
 
 import { useContest } from '@/features/contest/contexts/contest-context';
 import { useContestProblems } from '@/features/contest/hooks/use-contest-problems';
+import type { MessageKey } from '@/lib/i18n/catalog';
 
 import logo from '../../resources/Logo.png';
 import { LocaleSelector } from './LocaleSelector';
 import { ThemeToggle } from './ThemeSwitcher';
 
 interface MenuItem {
-  key: string;
+  key: MessageKey;
   icon: React.ComponentType<React.SVGProps<SVGSVGElement>>;
   url: string;
   exact: boolean;
@@ -151,7 +154,7 @@ function MenuGroupItems({
 }: {
   items: MenuItem[];
   pathname: string;
-  t: (k: string) => string;
+  t: I18nContextValue['t'];
 }) {
   return (
     <>
@@ -203,7 +206,8 @@ function ContestProblemsGroup() {
 
   const resolvedTitle = contestTitle ?? contestData?.title ?? null;
 
-  const { data: problems = [] } = useContestProblems(contestId);
+  // Navigation only: the contest pages themselves report a failed load.
+  const problems = useContestProblems(contestId).data ?? [];
 
   if (!contestId) return <></>;
 
@@ -350,7 +354,8 @@ function PlatformGroup() {
 
 export function Sidebar() {
   const { t } = useTranslation();
-  const { user, logout } = useAuth();
+  const { user, logout, isLoading: sessionLoading } = useAuth();
+  const { pathname, search } = useLocation();
 
   return (
     <SidebarUI collapsible="icon">
@@ -396,9 +401,18 @@ export function Sidebar() {
               <DropdownMenuTrigger asChild>
                 <SidebarMenuButton>
                   <User className="h-4 w-4" />
-                  <span className="flex-1">
-                    {user ? user.display_name : t('sidebar.guest')}
-                  </span>
+                  {/* Nobody is known while the session is restored: neither
+                      the user nor a guest. */}
+                  {sessionLoading ? (
+                    <Skeleton
+                      className="h-4 flex-1"
+                      aria-label={t('common.loading')}
+                    />
+                  ) : (
+                    <span className="flex-1">
+                      {user ? user.display_name : t('sidebar.guest')}
+                    </span>
+                  )}
                   <ChevronUp className="ml-auto h-4 w-4" />
                 </SidebarMenuButton>
               </DropdownMenuTrigger>
@@ -415,7 +429,9 @@ export function Sidebar() {
                   </Link>
                 ) : (
                   <DropdownMenuItem asChild>
-                    <Link to="/login">{t('nav.signIn')}</Link>
+                    <Link to={signInPath(`${pathname}${search}`)}>
+                      {t('nav.signIn')}
+                    </Link>
                   </DropdownMenuItem>
                 )}
               </DropdownMenuContent>

@@ -1388,6 +1388,7 @@ mod contest_submissions {
         assert_eq!(res.body["contest_id"], contest_id);
     }
 
+    /// The refusal names the reason, so the UI can offer to register instead.
     #[tokio::test]
     async fn non_participant_cannot_submit_to_public_contest() {
         let app = TestApp::spawn().await;
@@ -1413,7 +1414,7 @@ mod contest_submissions {
             .await;
 
         assert_eq!(res.status, 403);
-        assert_eq!(res.body["code"], "PERMISSION_DENIED");
+        assert_eq!(res.body["code"], "CONTEST_NOT_REGISTERED");
     }
 
     #[tokio::test]
@@ -3394,7 +3395,7 @@ mod standalone_submit_to_hidden_contest_problem {
             )
             .await;
         assert_eq!(res.status, 403, "contest-scoped submit: {}", res.text);
-        assert_eq!(res.body["code"], "PERMISSION_DENIED");
+        assert_eq!(res.body["code"], "CONTEST_NOT_REGISTERED");
 
         // ...so the standalone route must not be a way around it.
         assert_standalone_submit_hidden(&app, pid, &outsider, "unregistered user").await;

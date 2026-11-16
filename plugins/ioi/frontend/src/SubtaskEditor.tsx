@@ -1,4 +1,4 @@
-import { getErrorMessage } from '@broccoli/web-sdk/api';
+import { useErrorMessage } from '@broccoli/web-sdk/api';
 /**
  * Visual subtask definition editor for IOI-style contest problems.
  */
@@ -874,6 +874,7 @@ export function SubtaskEditor({
   inheritedSource,
 }: ConfigFieldSlotProps) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const subtasks: SubtaskValue[] = Array.isArray(value)
     ? (value as Record<string, unknown>[]).map((raw) => ({
         name: (raw.name as string) ?? '',
@@ -1435,7 +1436,7 @@ export function SubtaskEditor({
 
       {problemId && tcError != null && (
         <div className="px-4 py-3 rounded-lg bg-red-500/[0.06] border border-red-500/20 flex items-center justify-between text-xs text-red-600">
-          <span>{getErrorMessage(tcError, t('ioi.subtask.loadFailed'))}</span>
+          <span>{errorMessage(tcError, t('ioi.subtask.loadFailed'))}</span>
           <Button
             variant="outline"
             size="sm"

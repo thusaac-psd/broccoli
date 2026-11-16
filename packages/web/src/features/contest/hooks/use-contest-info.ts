@@ -5,11 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 export function useContestInfo(contestId: number) {
   const apiClient = useApiClient();
   const authReady = useAuthReady();
-  const {
-    data: contest,
-    isLoading,
-    error,
-  } = useQuery({
+  const query = useQuery({
     queryKey: ['contest', contestId],
     enabled: authReady && Number.isFinite(contestId),
     queryFn: async () => {
@@ -20,5 +16,10 @@ export function useContestInfo(contestId: number) {
       return data;
     },
   });
-  return { contest, isLoading, error };
+  return {
+    contest: query.data,
+    isLoading: query.isLoading,
+    error: query.error,
+    query,
+  };
 }

@@ -49,7 +49,7 @@ export function DlqStatsSummary({ stats }: Props) {
       icon: Clock,
       tone: 'default' as const,
     },
-  ];
+  ] as const;
 
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">

@@ -1,14 +1,12 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useLanguageName } from '@broccoli/web-sdk/hooks';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import type {
   Submission,
   SubmissionSummary,
 } from '@broccoli/web-sdk/submission';
 import { Badge, Button } from '@broccoli/web-sdk/ui';
-import {
-  formatKibibytes,
-  formatRelativeDatetime,
-} from '@broccoli/web-sdk/utils';
+import { formatKibibytes } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
 import {
   Check,
@@ -27,6 +25,7 @@ import {
   useSubmissionNavigation,
 } from '@/features/submission/hooks/use-submission-navigation';
 import { getVerdictBadge } from '@/features/submission/utils/verdict';
+import type { MessageKey } from '@/lib/i18n/catalog';
 
 import { SubmissionResult } from './SubmissionResult';
 
@@ -69,7 +68,7 @@ const ADMIN_COLUMNS: SubmissionsTableColumn[] = [
   { key: 'submitted', align: 'right' },
 ];
 
-const COLUMN_HEADERS: Record<SubmissionsTableColumn['key'], string> = {
+const COLUMN_HEADERS: Record<SubmissionsTableColumn['key'], MessageKey> = {
   problem: 'overview.problem',
   user: 'overview.user',
   verdict: 'overview.verdict',
@@ -289,6 +288,8 @@ function SubmissionRow({
   rowClassName?: string;
 }) {
   const { t } = useTranslation();
+  const languageName = useLanguageName();
+  const format = useFormat();
   const { onSubmissionClick } = useSubmissionNavigation();
   const { label: verdictLabel, variant: verdictVariant } = getVerdictBadge(
     submission.verdict ?? null,
@@ -401,7 +402,7 @@ function SubmissionRow({
             : ''
         }`}
       >
-        {submission.language}
+        {languageName(submission.language)}
       </td>
     ),
     time: () => (
@@ -429,7 +430,7 @@ function SubmissionRow({
         key="submitted"
         className={`${px} ${py} text-muted-foreground/50 text-right whitespace-nowrap ${compact ? 'pr-3' : ''}`}
       >
-        {formatRelativeDatetime(submission.created_at, t)}
+        {format.relative(submission.created_at)}
       </td>
     ),
   };

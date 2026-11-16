@@ -1,0 +1,3 @@
+'identifier.problemType.batch' = '传统题'
+'plugin.batch-evaluator.description' = '评测传统题：编译、逐个测试点运行并检查输出。'
+'config.batch-evaluator.sandbox.description' = '编译和运行步骤的沙箱资源限制'

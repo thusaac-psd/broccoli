@@ -1,4 +1,4 @@
-import { getErrorMessage } from '@broccoli/web-sdk/api';
+import { useErrorMessage } from '@broccoli/web-sdk/api';
 import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { Submission } from '@broccoli/web-sdk/submission';
@@ -25,6 +25,7 @@ type Phase = 'idle' | 'sending' | 'done' | 'error';
 
 export function PrintSubmissionButton({ submission }: Props) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const api = usePrintApi();
   const [open, setOpen] = useState(false);
   const [phase, setPhase] = useState<Phase>('idle');
@@ -75,7 +76,7 @@ export function PrintSubmissionButton({ submission }: Props) {
       }, 2000);
     } catch (e) {
       setPhase('error');
-      setMessage(getErrorMessage(e, t('print.action.failed')));
+      setMessage(errorMessage(e, t('print.action.failed')));
     }
   };
 

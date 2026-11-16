@@ -73,6 +73,95 @@ mod plugin_management {
             )
             .await;
         assert_eq!(res.status, 403);
+
+        let res = app
+            .get_with_token(
+                &routes::admin_plugin_dependents("server-plugin"),
+                &contestant,
+            )
+            .await;
+        assert_eq!(res.status, 403);
+    }
+
+    /// Disabling a contest-format plugin is confirmed against the contests it
+    /// would stop: those running now in a format the plugin provides.
+    #[tokio::test]
+    async fn dependents_lists_the_running_contests_of_the_formats_a_plugin_provides() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("dependents_admin", "securepass", "admin")
+            .await;
+        app.state
+            .registries
+            .contest_type_registry
+            .write()
+            .await
+            .insert(
+                "fmt-x".into(),
+                server::registry::ContestTypeHandlers {
+                    plugin_id: "fmt-plugin".into(),
+                    submission_fn: "noop".into(),
+                    code_run_fn: "noop".into(),
+                    submission_admission: false,
+                },
+            );
+        let contest = |title: &str, contest_type: &str, start: &str, end: &str| {
+            json!({
+                "title": title,
+                "description": "A contest.",
+                "start_time": start,
+                "end_time": end,
+                "is_public": true,
+                "contest_type": contest_type,
+            })
+        };
+        let mut ids = Vec::new();
+        for body in [
+            contest(
+                "running",
+                "fmt-x",
+                "2020-01-01T00:00:00Z",
+                "2099-01-01T00:00:00Z",
+            ),
+            contest(
+                "ended",
+                "fmt-x",
+                "2020-01-01T00:00:00Z",
+                "2021-01-01T00:00:00Z",
+            ),
+            contest(
+                "upcoming",
+                "fmt-x",
+                "2098-01-01T00:00:00Z",
+                "2099-01-01T00:00:00Z",
+            ),
+            contest(
+                "other format",
+                "standard",
+                "2020-01-01T00:00:00Z",
+                "2099-01-01T00:00:00Z",
+            ),
+        ] {
+            let res = app.post_with_token(routes::CONTESTS, &body, &admin).await;
+            assert_eq!(res.status, 201, "{}", res.text);
+            ids.push(res.id());
+        }
+
+        let res = app
+            .get_with_token(&routes::admin_plugin_dependents("fmt-plugin"), &admin)
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        let running = res.body["running_contests"].as_array().unwrap();
+        assert_eq!(running.len(), 1, "{}", res.text);
+        assert_eq!(running[0]["id"], ids[0]);
+        assert_eq!(running[0]["title"], "running");
+        assert_eq!(running[0]["contest_type"], "fmt-x");
+
+        let res = app
+            .get_with_token(&routes::admin_plugin_dependents("unrelated"), &admin)
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        assert_eq!(res.body["running_contests"], json!([]));
     }
 
     #[tokio::test(flavor = "multi_thread")]

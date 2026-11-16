@@ -20,3 +20,6 @@
 'cooldown.source.problem' = 'from problem'
 'cooldown.source.contest' = 'from contest'
 'cooldown.source.contest_problem' = 'override'
+
+# Why a submission was refused, by the rejection's code
+'apiError.COOLDOWN_ACTIVE' = '{remaining_seconds, plural, one {Wait # more second before submitting again.} other {Wait # more seconds before submitting again.}}'

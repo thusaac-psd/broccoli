@@ -254,7 +254,7 @@ pub async fn run_code(
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 413, description = "Request body over the endpoint's limit (PAYLOAD_TOO_LARGE)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
-        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED); or the caller has not registered for this public contest (CONTEST_NOT_REGISTERED)", body = ErrorBody),
         (status = 404, description = "Contest or problem not found (NOT_FOUND)", body = ErrorBody),
         (status = 429, description = "Per-user rate limited (RATE_LIMITED)", body = ErrorBody),
         (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),

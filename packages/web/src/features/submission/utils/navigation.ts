@@ -7,6 +7,8 @@ import {
   USER_MANAGE,
 } from '@broccoli/web-sdk/permissions';
 
+import type { MessageKey } from '@/lib/i18n/catalog';
+
 type SourceKind =
   | 'allSubmissions'
   | 'contestSubmissions'
@@ -39,7 +41,7 @@ const BACK_LABELS = {
 
 export interface SubmissionReturnTarget {
   to: string;
-  labelKey: string;
+  labelKey: MessageKey;
   source?: SubmissionReturnContext;
 }
 

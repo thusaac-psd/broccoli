@@ -108,12 +108,43 @@ test('an unreachable server keeps the session and its old token is not handed ou
   assert.equal(nextRefreshInMs(state), 3_000);
 });
 
-test('a rejected refresh signs out', async () => {
+test('a rejected refresh signs out, as an expired session', async () => {
   const { session } = sessionWith(async () => ({ status: 'rejected' }));
   session.dispatch({ type: 'signed-in', session: login('jwt-1') });
 
   assert.equal(await session.refresh(), null);
-  assert.equal(session.getState().status, 'signedOut');
+  assert.deepEqual(session.getState(), {
+    status: 'signedOut',
+    epoch: 2,
+    expired: true,
+  });
+});
+
+test('signing out, or nobody signing in, is not an expired session', () => {
+  const active = transition(INITIAL_SESSION, {
+    type: 'signed-in',
+    session: login('jwt-1'),
+  });
+  const out = transition(active, { type: 'signed-out' });
+  assert.equal(out.status === 'signedOut' && out.expired, false);
+  const none = transition(INITIAL_SESSION, { type: 'no-session' });
+  assert.equal(none.status === 'signedOut' && none.expired, false);
+});
+
+test('signing in again clears an expired session', () => {
+  const expired = transition(
+    transition(INITIAL_SESSION, { type: 'signed-in', session: login('a') }),
+    {
+      type: 'refresh-settled',
+      epoch: 1,
+      outcome: { status: 'rejected' },
+    },
+  );
+  assert.equal(expired.status === 'signedOut' && expired.expired, true);
+  assert.equal(
+    transition(expired, { type: 'signed-in', session: login('b') }).status,
+    'active',
+  );
 });
 
 test('logging in settles the bootstrap', () => {

@@ -1,6 +1,6 @@
 import { type ReactNode, useCallback, useState } from 'react';
 
-import { getErrorMessage } from '@/api/errors';
+import { useErrorMessage } from '@/api/use-error-message';
 import { useAsyncSubmit } from '@/hooks/use-async-submit';
 import { useTranslation } from '@/i18n';
 import { Button } from '@/ui/button';
@@ -23,7 +23,8 @@ export interface ConfirmOptions {
   /**
    * Runs when the user confirms. The dialog stays open while it runs and
    * closes once it resolves; when it rejects, the dialog stays open and shows
-   * the error's message (or `failureMessage` when it has none).
+   * the error, described by `useErrorMessage` with `failureMessage` (or a
+   * generic failure) as what went wrong.
    */
   onConfirm: () => Promise<unknown> | unknown;
   failureMessage?: string;
@@ -84,6 +85,7 @@ function ConfirmDialog({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const { state, submitting, submit } = useAsyncSubmit();
 
   const handleConfirm = async () => {
@@ -106,7 +108,7 @@ function ConfirmDialog({
         </DialogHeader>
         {state.status === 'failed' && (
           <p role="alert" className="text-sm text-destructive">
-            {getErrorMessage(
+            {errorMessage(
               state.error,
               options.failureMessage ?? t('confirm.failed'),
             )}

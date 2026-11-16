@@ -1,5 +1,7 @@
 import type { Problem } from '@broccoli/web-sdk/problem';
 
+import type { MessageKey } from '@/lib/i18n/catalog';
+
 /** What the problem create and edit forms hold. */
 export interface ProblemFormData {
   title: string;
@@ -59,7 +61,7 @@ export function checkerFormatFor(
 }
 
 /** The i18n key of the first problem with `data`, or null when it is valid. */
-export function problemFormProblem(data: ProblemFormData): string | null {
+export function problemFormProblem(data: ProblemFormData): MessageKey | null {
   if (!data.title.trim()) return 'validation.titleRequired';
   if (!data.content.trim()) return 'validation.contentRequired';
   if (!data.problemType) return 'validation.problemTypeRequired';

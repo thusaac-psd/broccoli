@@ -1,4 +1,8 @@
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import {
+  pluginKeys,
+  usePluginText,
+  useTranslation,
+} from '@broccoli/web-sdk/i18n';
 import {
   InheritedAnnotation,
   InheritedBadge,
@@ -62,8 +66,23 @@ export function SchemaField({
   inherited?: InheritedConfig;
 }>) {
   const { t } = useTranslation();
+  const pluginText = usePluginText();
   const fieldId = `cfg-${path.join('-')}`;
-  const label = prop.title ?? name;
+  // A plugin can name its fields in its own translation pack.
+  const label =
+    pluginId && namespace
+      ? pluginText(
+          pluginKeys.configField(pluginId, namespace, path, 'title'),
+          prop.title ?? name,
+        )
+      : (prop.title ?? name);
+  const description =
+    pluginId && namespace
+      ? pluginText(
+          pluginKeys.configField(pluginId, namespace, path, 'description'),
+          prop.description,
+        )
+      : prop.description;
   const dotPath = path.join('.');
   const error = errors[dotPath];
   const isFieldExplicit = isExplicitValue(path);
@@ -134,7 +153,7 @@ export function SchemaField({
       return (
         <BlobRefField
           label={label}
-          description={prop.description}
+          description={description}
           value={value as { filename: string; hash: string } | undefined}
           onChange={(v) => updateValue(path, v)}
           isExplicit={isFieldExplicit}
@@ -156,9 +175,9 @@ export function SchemaField({
               <h4 className="text-sm font-medium">{label}</h4>
               {!hasFieldOverride && <DefaultBadge />}
             </div>
-            {prop.description && (
+            {description && (
               <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
-                {prop.description}
+                {description}
               </p>
             )}
           </div>
@@ -207,9 +226,9 @@ export function SchemaField({
                 </span>
               )}
             </div>
-            {prop.description && (
+            {description && (
               <p className="text-xs text-muted-foreground leading-relaxed">
-                {prop.description}
+                {description}
               </p>
             )}
             {annotation}
@@ -242,10 +261,8 @@ export function SchemaField({
               </Label>
               {badge}
             </div>
-            {prop.description && (
-              <p className="text-xs text-muted-foreground">
-                {prop.description}
-              </p>
+            {description && (
+              <p className="text-xs text-muted-foreground">{description}</p>
             )}
           </div>
           <div>
@@ -297,10 +314,8 @@ export function SchemaField({
               </Label>
               {badge}
             </div>
-            {prop.description && (
-              <p className="text-xs text-muted-foreground">
-                {prop.description}
-              </p>
+            {description && (
+              <p className="text-xs text-muted-foreground">{description}</p>
             )}
           </div>
           <div>
@@ -345,8 +360,8 @@ export function SchemaField({
             </Label>
             {!hasFieldOverride && <DefaultBadge />}
           </div>
-          {prop.description && (
-            <p className="text-xs text-muted-foreground">{prop.description}</p>
+          {description && (
+            <p className="text-xs text-muted-foreground">{description}</p>
           )}
           <div className="space-y-2">
             {/* Index keys: deletion may cause stale NumericInput.text state, acceptable for config forms */}
@@ -423,10 +438,8 @@ export function SchemaField({
               </Label>
               {badge}
             </div>
-            {prop.description && (
-              <p className="text-xs text-muted-foreground">
-                {prop.description}
-              </p>
+            {description && (
+              <p className="text-xs text-muted-foreground">{description}</p>
             )}
           </div>
           <div>

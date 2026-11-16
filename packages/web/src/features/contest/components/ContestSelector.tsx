@@ -1,14 +1,14 @@
 import type { ContestSummary } from '@broccoli/web-sdk/contest';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Badge } from '@broccoli/web-sdk/ui';
-import { formatDateTime } from '@broccoli/web-sdk/utils';
 import { CalendarDays, ChevronRight, Trophy } from 'lucide-react';
 import { useNavigate } from 'react-router';
 
 import { getContestStatus } from '@/features/contest/utils/status';
 
 export function ContestSelector({ contests }: { contests: ContestSummary[] }) {
-  const { t, locale } = useTranslation();
+  const { t } = useTranslation();
+  const format = useFormat();
   const navigate = useNavigate();
 
   return (
@@ -35,8 +35,10 @@ export function ContestSelector({ contests }: { contests: ContestSummary[] }) {
                 <div className="font-medium">{contest.title}</div>
                 <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1.5">
                   <CalendarDays className="h-3 w-3" />
-                  {formatDateTime(contest.start_time, locale)} —{' '}
-                  {formatDateTime(contest.end_time, locale)}
+                  {format.dateTime(contest.start_time, {
+                    timeZoneName: true,
+                  })}{' '}
+                  — {format.dateTime(contest.end_time, { timeZoneName: true })}
                 </div>
               </div>
               <Badge variant={variant} className="shrink-0">

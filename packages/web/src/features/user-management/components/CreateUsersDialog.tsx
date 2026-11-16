@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import type { CreatedUser } from '@broccoli/web-sdk/auth';
 import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -25,6 +25,8 @@ import { toast } from 'sonner';
 
 import { DisplayNameField } from '@/components/DisplayNameField';
 import {
+  BulkUsersError,
+  bulkUsersProblem,
   normalizeBulkUsers,
   type ParsedBulkUser,
 } from '@/features/user-management/lib/bulk-users';
@@ -37,6 +39,7 @@ export function CreateUsersDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const sendIdempotent = useIdempotentRequest();
@@ -61,18 +64,12 @@ export function CreateUsersDialog({
 
   function parseUsers(input: unknown) {
     if (Array.isArray(input) && input.length > 100)
-      throw new Error('users.create.tooMany');
+      throw new BulkUsersError('users.create.tooMany');
     return normalizeBulkUsers(input);
   }
 
   function showValidation(error: unknown) {
-    const message = error instanceof Error ? error.message : '';
-    const key =
-      message.startsWith('admin.bulkParticipants') ||
-      message === 'users.create.tooMany'
-        ? message
-        : 'admin.bulkParticipantsInvalidJson';
-    setErrorMsg(t(key));
+    setErrorMsg(t(bulkUsersProblem(error)));
   }
 
   function refreshUserLists() {
@@ -130,7 +127,7 @@ export function CreateUsersDialog({
         unsettledMessage(error, t, {
           refetch: refreshUserLists,
           outcomeUnknownKey: 'users.create.outcomeUnknown',
-        }) ?? getErrorMessage(error, t('users.create.error')),
+        }) ?? errorMessage(error, t('users.create.error')),
       );
     } finally {
       setBusy(false);
