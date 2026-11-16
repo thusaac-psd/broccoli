@@ -283,7 +283,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &faults,
                 DispatchFailure::judging(
                     "NO_HANDLER_REGISTERED",
-                    &format!("No plugin registered for contest type {:?}", contest_type),
+                    format!("No plugin registered for contest type {:?}", contest_type),
                 ),
             )
             .await;
@@ -305,7 +305,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &faults,
                 DispatchFailure::judging(
                     "PROBLEM_NOT_FOUND",
-                    &format!("Problem {} not found", submission.problem_id),
+                    format!("Problem {} not found", submission.problem_id),
                 ),
             )
             .await;
@@ -320,7 +320,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &faults,
                 DispatchFailure::judging(
                     "DATABASE_ERROR",
-                    &format!("Failed to fetch problem: {}", e),
+                    format!("Failed to fetch problem: {}", e),
                 ),
             )
             .await;
@@ -339,7 +339,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &faults,
                 DispatchFailure::judging(
                     "INVALID_FILES",
-                    &format!("Failed to parse submission files: {}", e),
+                    format!("Failed to parse submission files: {}", e),
                 ),
             )
             .await;
@@ -382,7 +382,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                     &state.metrics,
                     judgement_ref,
                     &faults,
-                    DispatchFailure::judging("DATABASE_ERROR", &format!("Failed to query test cases: {}", e)),
+                    DispatchFailure::judging("DATABASE_ERROR", format!("Failed to query test cases: {}", e)),
                 )
                 .await;
                 return;
@@ -447,7 +447,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                         &faults,
                         DispatchFailure::judging(
                             "BLOB_STORE_ERROR",
-                            &format!("Failed to store oversized inline test case input: {e}"),
+                            format!("Failed to store oversized inline test case input: {e}"),
                         ),
                     )
                     .await;
@@ -472,7 +472,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                         &faults,
                         DispatchFailure::judging(
                             "BLOB_STORE_ERROR",
-                            &format!(
+                            format!(
                                 "Failed to store oversized inline test case expected_output: {e}"
                             ),
                         ),
@@ -525,7 +525,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &faults,
                 DispatchFailure::judging(
                     "SERIALIZATION_ERROR",
-                    &format!("Failed to serialize input: {}", e),
+                    format!("Failed to serialize input: {}", e),
                 ),
             )
             .await;
@@ -650,7 +650,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                                 &metrics,
                                 judgement_ref,
                                 &faults,
-                                DispatchFailure::judging("PLUGIN_INVALID_OUTPUT", &format!("Plugin returned invalid output: {}", e)),
+                                DispatchFailure::judging("PLUGIN_INVALID_OUTPUT", format!("Plugin returned invalid output: {}", e)),
                             )
                             .await;
                         }
@@ -671,7 +671,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                         &metrics,
                         judgement_ref,
                         &faults,
-                        DispatchFailure::judging("PLUGIN_EXECUTION_ERROR", &e.to_string()),
+                        DispatchFailure::judging("PLUGIN_EXECUTION_ERROR", e.to_string()),
                     )
                     .await;
                 }
