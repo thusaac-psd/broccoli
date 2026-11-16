@@ -92,6 +92,7 @@ fn system_error_verdict(test_case_id: i32, message: impl Into<String>) -> TestCa
         message: Some(message.into()),
         stdout: None,
         stderr: None,
+        problem_failure: None,
     }
 }
 

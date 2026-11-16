@@ -230,16 +230,23 @@ after-judging hook sees a `SystemError` that is then taken back.
 A failure every attempt repeats stands at once (`SystemErrorClass::Stands`): a
 contest plugin's refusal (`PLUGIN_REFUSED`), a problem its contest plugin says
 cannot be judged (a `SystemError` written with `SubmissionUpdate::stands`,
-for example IOI's and ICPC's `NO_TEST_CASES`), or the problem's checker
-failing (`CHECKER_FAILED`). The judgement records it in `error_stands`, which
+for example IOI's and ICPC's `NO_TEST_CASES`), the problem's checker
+failing (`CHECKER_FAILED`), or another program the problem supplies failing
+(`PROBLEM_FAILED`). The judgement records it in `error_stands`, which
 the reaper reads; the submission shows it at once. A checker plugin reports
 the checker failing on its verdict
 (`CheckerVerdict::checker_failure`, set by the standard testlib checker when
 the checker does not compile, was killed by a signal, failed to start, or
 exited with a code testlib gives no meaning); the host records it as the dispatch's fault, so the
 system error carries the code and how the checker failed (staff only, like
-every system-error diagnostic). Any other system error is retried within the
-budget.
+every system-error diagnostic). An evaluator plugin reports a program of the
+problem failing (an interactor or manager that does not build or exits
+non-zero) on the case's verdict (`TestCaseVerdict::problem_failure`, set by the
+communication evaluator); the host records it the same way, as
+`PROBLEM_FAILED`, where it receives the evaluator's verdict
+(`evaluate_batch::dispatch`), so the system error the contest plugin ends the
+submission with stands without the contest plugin knowing why. Any other
+system error is retried within the budget.
 
 A system error's class is decided where the failure is observed and recorded
 with it (`DispatchFailure` for a dispatch, `judging::as_recorded` for a

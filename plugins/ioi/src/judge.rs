@@ -596,6 +596,7 @@ mod tests {
                 message: Some("bad message".into()),
                 stdout: Some("out put".into()),
                 stderr: Some("err or".into()),
+                problem_failure: None,
             }],
         );
 
@@ -692,6 +693,7 @@ mod tests {
                     message: None,
                     stdout: None,
                     stderr: None,
+                    problem_failure: None,
                 },
             ],
         );
@@ -752,6 +754,7 @@ mod tests {
                     message: None,
                     stdout: None,
                     stderr: None,
+                    problem_failure: None,
                 },
                 TestCaseVerdict {
                     test_case_id: 2,
@@ -762,6 +765,7 @@ mod tests {
                     message: None,
                     stdout: None,
                     stderr: None,
+                    problem_failure: None,
                 },
             ],
         );
@@ -874,6 +878,7 @@ mod tests {
                     message: None,
                     stdout: None,
                     stderr: None,
+                    problem_failure: None,
                 },
                 TestCaseVerdict::accepted(2),
             ],

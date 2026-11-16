@@ -26,6 +26,10 @@ pub enum DispatchFault {
     /// signal, exited with a code its format gives no meaning), as its
     /// checker plugin reported through `CheckerVerdict::checker_failure`.
     CheckerFailed,
+    /// Another program the problem supplies (an interactor or a manager)
+    /// failed, as its evaluator plugin reported through
+    /// `TestCaseVerdict::problem_failure`.
+    ProblemFailed,
 }
 
 impl DispatchFault {
@@ -34,6 +38,7 @@ impl DispatchFault {
         match self {
             Self::Operation(fault) => fault.code(),
             Self::CheckerFailed => HostCode::CheckerFailed,
+            Self::ProblemFailed => HostCode::ProblemFailed,
         }
     }
 }
@@ -125,7 +130,7 @@ impl SystemErrorClass {
                 | OperationFault::PlatformToolMissing
                 | OperationFault::NoCapableWorker,
             ) => Self::HandBack,
-            DispatchFault::CheckerFailed => Self::Stands,
+            DispatchFault::CheckerFailed | DispatchFault::ProblemFailed => Self::Stands,
         }
     }
 }

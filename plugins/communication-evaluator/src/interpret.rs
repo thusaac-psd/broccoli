@@ -23,6 +23,7 @@ pub fn interpret_result(
             message: result.error.clone(),
             stdout: None,
             stderr: None,
+            problem_failure: None,
         };
     }
 
@@ -37,6 +38,7 @@ pub fn interpret_result(
             message: result.error.clone().or(Some("Operation failed".into())),
             stdout: None,
             stderr: None,
+            problem_failure: None,
         };
     }
 
@@ -55,6 +57,11 @@ pub fn interpret_result(
             )),
             stdout: None,
             stderr: None,
+            // The problem's manager does not build: every attempt fails alike.
+            problem_failure: Some(truncate(
+                &compile_mgr.sandbox_result.stderr,
+                "Manager compilation failed",
+            )),
         };
     }
 
@@ -151,6 +158,7 @@ pub fn interpret_result(
             message: Some(message),
             stdout: None,
             stderr: opt_nonempty(&sandbox.stderr),
+            problem_failure: None,
         };
     }
 
@@ -166,6 +174,7 @@ pub fn interpret_result(
                 message: Some("Manager run step missing".into()),
                 stdout: None,
                 stderr: None,
+                problem_failure: None,
             };
         }
     };
@@ -186,6 +195,11 @@ pub fn interpret_result(
             )),
             stdout: None,
             stderr: opt_nonempty(&mgr_sandbox.stderr),
+            // The problem's manager failed: every attempt fails alike.
+            problem_failure: Some(format!(
+                "Manager exited with code {}",
+                mgr_sandbox.exit_code.unwrap_or(-1)
+            )),
         };
     }
 
@@ -205,6 +219,7 @@ pub fn interpret_result(
                 )),
                 stdout: opt_nonempty(&mgr_sandbox.stdout),
                 stderr: opt_nonempty(&mgr_sandbox.stderr),
+                problem_failure: None,
             };
         }
     };
@@ -230,6 +245,7 @@ pub fn interpret_result(
         message,
         stdout: opt_nonempty(&mgr_sandbox.stdout),
         stderr: opt_nonempty(&mgr_sandbox.stderr),
+        problem_failure: None,
     }
 }
 
@@ -244,6 +260,7 @@ fn without_run(test_case_id: i32, verdict: Verdict, message: String) -> TestCase
         message: Some(message),
         stdout: None,
         stderr: None,
+        problem_failure: None,
     }
 }
 
@@ -332,6 +349,55 @@ mod tests {
             stderr: message.to_string(),
             ..Default::default()
         }
+    }
+
+    /// A failure of the problem's own manager stands (`problem_failure`),
+    /// so the host does not judge the submission again; a contestant's or
+    /// the platform's failure does not.
+    #[test]
+    fn only_the_managers_own_failure_is_the_problems_fault() {
+        let ops = |tasks: Vec<(String, TaskExecutionResult)>| OperationResult {
+            success: true,
+            task_results: HashMap::from_iter(tasks),
+            error: None,
+        };
+        let broken_build = ops(vec![task_result(
+            "compile_manager",
+            false,
+            ok_sandbox(1, 1.0, 8192),
+        )]);
+        let verdict = interpret_result(42, &broken_build, 1);
+        assert_eq!(verdict.verdict, Verdict::SystemError);
+        assert!(verdict.problem_failure.is_some(), "{verdict:?}");
+
+        let crashed = ops(vec![
+            task_result("compile_manager", true, ok_sandbox(0, 1.0, 8192)),
+            task_result("compile_contestant_0", true, ok_sandbox(0, 1.0, 8192)),
+            task_result("run_contestant_0", true, ok_sandbox(0, 0.5, 4096)),
+            task_result(
+                "run_manager",
+                true,
+                ExecutionResult {
+                    exit_code: Some(3),
+                    ..mgr_result("", "assertion failed")
+                },
+            ),
+        ]);
+        let verdict = interpret_result(42, &crashed, 1);
+        assert_eq!(verdict.verdict, Verdict::SystemError);
+        assert_eq!(
+            verdict.problem_failure.as_deref(),
+            Some("Manager exited with code 3")
+        );
+
+        let lost = OperationResult {
+            success: false,
+            task_results: HashMap::new(),
+            error: Some("worker gone".into()),
+        };
+        let verdict = interpret_result(42, &lost, 1);
+        assert_eq!(verdict.verdict, Verdict::SystemError);
+        assert_eq!(verdict.problem_failure, None, "the platform's failure");
     }
 
     #[test]

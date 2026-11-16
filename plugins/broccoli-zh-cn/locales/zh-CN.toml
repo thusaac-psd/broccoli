@@ -1294,6 +1294,7 @@
 'apiError.NO_CAPABLE_WORKER' = "没有在线评测机能够运行本次尝试：每台评测机都缺少平台工具。该尝试已退回队列，待有评测机具备所需工具后再评测。"
 'apiError.PLUGIN_REFUSED' = "评测插件拒绝了此提交。"
 'apiError.CHECKER_FAILED' = "本题的检查器自身出错（崩溃、被信号终止，或以其格式未定义的退出码退出）。每次尝试都会同样失败，因此不再重新评测此提交：请修复检查器后重新评测。"
+'apiError.PROBLEM_FAILED' = "本题提供的程序（交互器或管理程序）自身出错。每次尝试都会同样失败，因此不再重新评测此提交：请修复本题的程序后重新评测。"
 'apiError.STUCK_JOB' = "评测耗时过长，已被终止。"
 'apiError.DISPATCH_RETRY_EXHAUSTED' = "多次尝试后仍无法开始评测。"
 'apiError.SUPERSEDED' = "此评测已被更新的评测取代。"

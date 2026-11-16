@@ -353,6 +353,7 @@ mod tests {
             message: Some("late cancel".into()),
             stdout: None,
             stderr: None,
+            problem_failure: None,
         };
         let out2 = drive(&host, out1.state, cancelled);
         assert_eq!(out2.action, DetachedEvaluateCallbackAction::Continue);
@@ -384,6 +385,7 @@ mod tests {
             message: Some("msg".into()),
             stdout: Some("STDOUT-BYTES".into()),
             stderr: Some("STDERR-BYTES".into()),
+            problem_failure: None,
         };
         let out = drive(&host, s0, verdict);
 
@@ -559,6 +561,7 @@ mod tests {
                 message: Some("bad\0message".into()),
                 stdout: Some("out\0put".into()),
                 stderr: Some("err\0or".into()),
+                problem_failure: None,
             },
         );
         let rows = host.submission.results();

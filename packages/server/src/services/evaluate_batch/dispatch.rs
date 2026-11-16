@@ -12,6 +12,13 @@ struct EvaluatorStage {
 }
 
 impl EvaluatorStage {
+    /// What the host takes from a verdict this evaluator returned, besides
+    /// the verdict itself: a failure of the problem's own program, which
+    /// stands for the whole dispatch ([`record_problem_failure`]).
+    fn received(&self, verdict: &TestCaseVerdict) {
+        record_problem_failure(self.operation_deps.faults(), verdict);
+    }
+
     /// Call `function` on the evaluator with JSON `input` as background work.
     /// How many evaluator guests run at once is admission's business.
     async fn call(&self, function: &str, input_bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
@@ -152,8 +159,32 @@ async fn evaluate_case(
         .call(function, input_bytes)
         .await
         .with_context(|| "Evaluator call failed")?;
-    serde_json::from_slice::<TestCaseVerdict>(&result_bytes)
-        .with_context(|| "Failed to deserialize evaluator result")
+    let verdict = serde_json::from_slice::<TestCaseVerdict>(&result_bytes)
+        .with_context(|| "Failed to deserialize evaluator result")?;
+    stage.received(&verdict);
+    Ok(verdict)
+}
+
+/// Record a verdict's `problem_failure` (a program the problem supplies
+/// failed) as the dispatch's fault, as a checker's failure is recorded
+/// (`host_funcs::checker`): the system error the contest plugin then ends the
+/// submission with stands under `PROBLEM_FAILED` (`judging::as_recorded`),
+/// instead of being judged again.
+fn record_problem_failure(
+    faults: Option<&crate::services::judging::DispatchFaults>,
+    verdict: &TestCaseVerdict,
+) {
+    if let (Some(faults), Some(failure)) = (faults, verdict.problem_failure.as_ref()) {
+        tracing::warn!(
+            test_case_id = verdict.test_case_id,
+            failure = %failure,
+            "A program the problem supplies failed"
+        );
+        faults.record(
+            crate::services::judging::DispatchFault::ProblemFailed,
+            failure.clone(),
+        );
+    }
 }
 
 /// Bounded fan-out: a dedicated dispatcher task acquires one fan-out permit
@@ -445,8 +476,12 @@ async fn call_interpret(
         .await
         .with_context(|| "Evaluator interpret call failed")?;
 
-    serde_json::from_slice::<Vec<TestCaseVerdict>>(&output_bytes)
-        .with_context(|| "Failed to deserialize evaluator interpret verdicts")
+    let verdicts = serde_json::from_slice::<Vec<TestCaseVerdict>>(&output_bytes)
+        .with_context(|| "Failed to deserialize evaluator interpret verdicts")?;
+    for verdict in &verdicts {
+        stage.received(verdict);
+    }
+    Ok(verdicts)
 }
 
 /// What every test case of one problem in one language is judged with,
@@ -633,4 +668,58 @@ async fn resolve_inputs(
     }
 
     Ok(resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use broccoli_server_sdk::types::{SubmissionStatus, SubmissionUpdate, Verdict};
+
+    use super::*;
+    use crate::error::HostCode;
+    use crate::services::judging::{DispatchFailure, DispatchFault, DispatchFaults, as_recorded};
+
+    fn verdict(problem_failure: Option<&str>) -> TestCaseVerdict {
+        TestCaseVerdict {
+            test_case_id: 7,
+            verdict: Verdict::SystemError,
+            score: 0.0,
+            time_used_ms: None,
+            memory_used_kb: None,
+            message: Some("manager error".into()),
+            stdout: None,
+            stderr: None,
+            problem_failure: problem_failure.map(str::to_string),
+        }
+    }
+
+    /// An evaluator's word that the problem's own program failed becomes the
+    /// dispatch's standing fault, so the contest plugin's system error for
+    /// the submission stands under `PROBLEM_FAILED`; any other verdict
+    /// records nothing.
+    #[test]
+    fn a_problem_failure_from_an_evaluator_makes_the_system_error_stand() {
+        let faults = DispatchFaults::default();
+        record_problem_failure(Some(&faults), &verdict(None));
+        assert_eq!(faults.get(), None);
+
+        record_problem_failure(Some(&faults), &verdict(Some("Manager exited with code 3")));
+        let recorded = faults.get().expect("recorded");
+        assert_eq!(recorded.fault, DispatchFault::ProblemFailed);
+        assert_eq!(
+            DispatchFailure::from(recorded.clone()).code,
+            HostCode::ProblemFailed
+        );
+
+        let update = SubmissionUpdate {
+            submission_id: 1,
+            judgement_id: 1,
+            judge_epoch: 1,
+            status: Some(SubmissionStatus::Judged),
+            verdict: Some(Some(Verdict::SystemError)),
+            ..Default::default()
+        };
+        let written = as_recorded("contest", update, Some(recorded)).expect("not a lost attempt");
+        assert_eq!(written.error_code, Some(Some("PROBLEM_FAILED".into())));
+        assert!(written.stands, "a problem's own failure is never retried");
+    }
 }

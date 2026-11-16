@@ -514,6 +514,15 @@ pub struct TestCaseVerdict {
     pub stdout: Option<String>,
     #[serde(default)]
     pub stderr: Option<String>,
+    /// Set, with how it failed, when this case's `SystemError` is the
+    /// problem's own fault: a program the problem supplies (an interactor, a
+    /// manager) failed, so every attempt fails the same way. The host records
+    /// it as the dispatch's fault, so the system error the contest plugin
+    /// ends the submission with stands under `PROBLEM_FAILED` instead of
+    /// being judged again (as `CheckerVerdict::checker_failure` does for a
+    /// checker).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem_failure: Option<String>,
 }
 
 impl TestCaseVerdict {
@@ -527,6 +536,7 @@ impl TestCaseVerdict {
             message: None,
             stdout: None,
             stderr: None,
+            problem_failure: None,
         }
     }
 
@@ -540,6 +550,7 @@ impl TestCaseVerdict {
             message: Some("Wrong answer".into()),
             stdout: None,
             stderr: None,
+            problem_failure: None,
         }
     }
 
@@ -553,6 +564,7 @@ impl TestCaseVerdict {
             message: Some("Time limit exceeded".into()),
             stdout: None,
             stderr: None,
+            problem_failure: None,
         }
     }
 
@@ -566,6 +578,7 @@ impl TestCaseVerdict {
             message: Some("Compilation failed".into()),
             stdout: None,
             stderr: None,
+            problem_failure: None,
         }
     }
 
@@ -579,6 +592,7 @@ impl TestCaseVerdict {
             message: Some("System error".into()),
             stdout: None,
             stderr: None,
+            problem_failure: None,
         }
     }
 }

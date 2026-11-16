@@ -62,6 +62,7 @@ pub fn interpret_fused_result(
             message: None,
             stdout: exec_stdout,
             stderr: exec_stderr,
+            problem_failure: None,
         });
     }
 
@@ -79,6 +80,7 @@ pub fn interpret_fused_result(
             )),
             stdout: exec_stdout,
             stderr: exec_stderr,
+            problem_failure: None,
         });
     };
     // Display preview: the run output preview (exec stdout, File mode) or the
@@ -106,6 +108,7 @@ pub fn interpret_fused_result(
             )),
             stdout: display_stdout,
             stderr: exec_stderr,
+            problem_failure: None,
         });
     }
 
@@ -119,6 +122,7 @@ pub fn interpret_fused_result(
             message: v.message,
             stdout: display_stdout,
             stderr: exec_stderr,
+            problem_failure: None,
         }),
         Err(e) => Ok(TestCaseVerdict {
             test_case_id,
@@ -129,6 +133,7 @@ pub fn interpret_fused_result(
             message: Some(format!("Checker interpret failed: {e:?}")),
             stdout: display_stdout,
             stderr: exec_stderr,
+            problem_failure: None,
         }),
     }
 }
@@ -195,6 +200,7 @@ pub(crate) fn precheck_verdict(
             message: result.error.clone(),
             stdout: None,
             stderr: None,
+            problem_failure: None,
         });
     }
 
@@ -212,6 +218,7 @@ pub(crate) fn precheck_verdict(
             })),
             stdout: None,
             stderr: None,
+            problem_failure: None,
         });
     }
 
@@ -282,6 +289,7 @@ pub(crate) fn precheck_verdict(
         message: Some(message),
         stdout: opt_nonempty(&sandbox.stdout),
         stderr: opt_nonempty(&sandbox.stderr),
+        problem_failure: None,
     })
 }
 
@@ -296,6 +304,7 @@ fn without_run(test_case_id: i32, verdict: Verdict) -> TestCaseVerdict {
         message: None,
         stdout: None,
         stderr: None,
+        problem_failure: None,
     }
 }
 

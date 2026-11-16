@@ -203,5 +203,6 @@ fn system_error(test_case_id: i32, message: impl Into<String>) -> TestCaseVerdic
         message: Some(message.into()),
         stdout: None,
         stderr: None,
+        problem_failure: None,
     }
 }

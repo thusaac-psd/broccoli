@@ -153,6 +153,9 @@ host_codes! {
     NoCapableWorker = "NO_CAPABLE_WORKER";
     /// The problem's checker program failed.
     CheckerFailed = "CHECKER_FAILED";
+    /// A program the problem supplies besides its checker (an interactor or
+    /// a manager) failed: every attempt fails the same way.
+    ProblemFailed = "PROBLEM_FAILED";
     /// A contest-type plugin refused the submission deterministically
     /// (`OnSubmissionOutput::refused`). Terminal: never re-judged
     /// automatically.
