@@ -18,7 +18,7 @@ use uuid::Uuid;
 // participation.
 use crate::entity::{additional_file, problem};
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::{AuthUser, Authorized, FreshAuthUser, ProblemEdit};
+use crate::extractors::auth::{AuthUser, Authorized, ProblemEdit};
 use crate::extractors::path::AppPath;
 use crate::models::attachment::{AdditionalFileListResponse, AdditionalFileResponse};
 use crate::state::AppState;
@@ -298,7 +298,7 @@ pub async fn download_additional_file(
 )]
 #[instrument(skip(state, auth_user), fields(problem_id, ref_id))]
 pub async fn delete_additional_file(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath((problem_id, ref_id)): AppPath<(i32, String)>,
 ) -> Result<impl IntoResponse, AppError> {

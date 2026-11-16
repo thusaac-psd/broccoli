@@ -10,28 +10,32 @@ pub struct Claims {
     pub jti: String,
     pub sub: String,
     pub uid: i32,
+    /// The sign-in session (`entity::auth_session`) the token belongs to.
+    pub sid: i64,
     pub roles: Vec<String>,
     pub permissions: Vec<String>,
     pub exp: u64,
     /// Issued-at (unix seconds), compared against the user's
-    /// `credentials_changed_at` by the `FreshAuthUser` extractor.
+    /// `credentials_changed_at` by `extractors::auth::fresh_user`.
     pub iat: u64,
 }
 
-/// How long an access token is valid. Access tokens are checked without a
-/// session lookup (the read path makes no database call to authenticate), so
-/// logging out, which revokes the refresh token, leaves an access token already
-/// issued usable for at most this long. A credential change (password, roles,
-/// deactivation) ends it at once on every `FreshAuthUser` endpoint.
+/// How long an access token is valid. A read checks the token without a
+/// database lookup, so a token that a credential change (password, roles,
+/// deactivation) or a logout has ended still reads for at most this long. Every mutating
+/// request checks it against the database (`extractors::auth::AuthUser`) and
+/// refuses it at once.
 pub const ACCESS_TOKEN_TTL: Duration = Duration::minutes(5);
 
 /// Sign an access token valid for [`ACCESS_TOKEN_TTL`] from `issued_at`.
 ///
 /// `issued_at` is the database clock (see `services::auth_tokens`), which is
 /// also the platform clock every replica verifies `exp` against, and the
-/// clock that stamps `user.credentials_changed_at` for `FreshAuthUser`.
+/// clock that stamps `user.credentials_changed_at`, which freshness compares
+/// `iat` with.
 pub fn sign_access_token(
     user_id: i32,
+    session_id: i64,
     username: &str,
     roles: Vec<String>,
     permissions: Vec<String>,
@@ -44,6 +48,7 @@ pub fn sign_access_token(
         jti: generate_random_string(),
         sub: username.to_owned(),
         uid: user_id,
+        sid: session_id,
         roles,
         permissions,
         exp: expiration.max(0) as u64,
@@ -62,8 +67,8 @@ pub fn sign_access_token(
 /// How far past `now` a token's `iat` may lie. Every replica signs and
 /// verifies with the platform clock, so a later `iat` comes only from a key
 /// holder minting tokens dated in the future, which would otherwise outlive
-/// every credential change made before that date (`FreshAuthUser` compares
-/// `iat` with `credentials_changed_at`).
+/// every credential change made before that date (freshness compares `iat`
+/// with `credentials_changed_at`).
 pub const IAT_LEEWAY_SECS: i64 = 30;
 
 /// Verify `token`'s signature, that it has not expired at `now`, the platform
@@ -102,7 +107,7 @@ mod tests {
     fn expiry_is_judged_against_the_given_platform_time_not_this_host_clock() {
         // Issued in 2001, far from this host's clock in either direction.
         let issued = at(1_000_000_000);
-        let token = sign_access_token(1, "u", vec![], vec![], issued, "secret").unwrap();
+        let token = sign_access_token(1, 1, "u", vec![], vec![], issued, "secret").unwrap();
         let claims = verify(&token, "secret", issued + Duration::minutes(4)).unwrap();
         assert_eq!(claims.iat, issued.timestamp() as u64);
         assert!(verify(&token, "secret", issued + ACCESS_TOKEN_TTL).is_err());
@@ -111,14 +116,15 @@ mod tests {
     #[test]
     fn a_token_signed_with_another_secret_is_rejected() {
         let issued = at(1_000_000_000);
-        let token = sign_access_token(1, "u", vec![], vec![], issued, "secret").unwrap();
+        let token = sign_access_token(1, 1, "u", vec![], vec![], issued, "secret").unwrap();
         assert!(verify(&token, "other", issued).is_err());
     }
 
     #[test]
     fn a_token_issued_in_the_future_is_rejected() {
         let now = at(1_000_000_000);
-        let token = |issued| sign_access_token(1, "u", vec![], vec![], issued, "secret").unwrap();
+        let token =
+            |issued| sign_access_token(1, 1, "u", vec![], vec![], issued, "secret").unwrap();
         let near = token(now + Duration::seconds(IAT_LEEWAY_SECS));
         assert!(verify(&near, "secret", now).is_ok());
         let ahead = token(now + Duration::seconds(IAT_LEEWAY_SECS + 1));

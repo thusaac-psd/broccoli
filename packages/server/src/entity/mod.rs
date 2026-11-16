@@ -1,4 +1,5 @@
 pub mod additional_file;
+pub mod auth_session;
 pub mod clarification;
 pub mod clarification_reply;
 pub mod code_run;

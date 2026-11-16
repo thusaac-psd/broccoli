@@ -46,7 +46,7 @@ use tracing::instrument;
 // call sites.
 use crate::entity::{contest, contest_user};
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::{AuthUser, FreshAuthUser};
+use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::contest::*;
@@ -86,7 +86,7 @@ pub use samples::*;
 )]
 #[instrument(skip(state, auth_user, payload), fields(title = %payload.title))]
 pub async fn create_contest(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppJson(payload): AppJson<CreateContestRequest>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -358,7 +358,7 @@ pub async fn get_contest_my_info(
 )]
 #[instrument(skip(state, auth_user, payload), fields(id))]
 pub async fn update_contest(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
     AppJson(payload): AppJson<UpdateContestRequest>,
@@ -455,7 +455,7 @@ pub async fn update_contest(
 )]
 #[instrument(skip(state, auth_user), fields(id))]
 pub async fn delete_contest(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
 ) -> Result<impl IntoResponse, AppError> {

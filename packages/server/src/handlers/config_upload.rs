@@ -6,7 +6,7 @@ use broccoli_server_sdk::permissions as perm;
 use tracing::instrument;
 
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::FreshAuthUser;
+use crate::extractors::auth::AuthUser;
 use crate::models::config_upload::ConfigBlobUploadResponse;
 use crate::state::AppState;
 use crate::upload_limits::LARGE_UPLOAD_LIMIT_BYTES;
@@ -38,7 +38,7 @@ pub fn config_upload_body_limit() -> usize {
 )]
 #[instrument(skip(state, auth_user, multipart))]
 pub async fn upload_config_blob(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, AppError> {

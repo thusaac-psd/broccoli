@@ -35,8 +35,8 @@ enum Command {
         /// that is not deleted.
         #[arg(long, value_delimiter = ',')]
         problems: Option<Vec<i32>>,
-        /// Keep the accounts' password hashes. Without it every password in
-        /// the bundle is blank.
+        /// Keep the accounts' password hashes. Without it no account in the
+        /// bundle has a password; an admin sets one before it can sign in.
         #[arg(long, requires = "contest")]
         with_secrets: bool,
         /// Write the archive here instead of stdout.

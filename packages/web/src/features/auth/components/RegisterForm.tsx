@@ -82,7 +82,9 @@ export default function RegisterForm() {
     return (
       <Card className="w-full max-w-md">
         <CardHeader>
-          <CardTitle className="text-2xl">{t('auth.registerTitle')}</CardTitle>
+          <CardTitle className="text-2xl">
+            {t('auth.registrationClosedTitle')}
+          </CardTitle>
         </CardHeader>
         <CardContent>
           <p role="status" className="text-sm text-muted-foreground">

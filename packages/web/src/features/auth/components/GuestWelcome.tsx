@@ -3,8 +3,11 @@ import { Button } from '@broccoli/web-sdk/ui';
 import { Code2 } from 'lucide-react';
 import { Link } from 'react-router';
 
+import { useRegistrationOpen } from '@/features/auth/hooks/use-registration-status';
+
 export function GuestWelcome() {
   const { t } = useTranslation();
+  const registrationOpen = useRegistrationOpen();
 
   return (
     <div className="flex flex-col items-center justify-center min-h-[60vh] text-center px-4">
@@ -21,9 +24,11 @@ export function GuestWelcome() {
         <Button size="lg" asChild>
           <Link to="/login">{t('nav.signIn')}</Link>
         </Button>
-        <Button size="lg" variant="outline" asChild>
-          <Link to="/register">{t('nav.signUp')}</Link>
-        </Button>
+        {registrationOpen && (
+          <Button size="lg" variant="outline" asChild>
+            <Link to="/register">{t('nav.signUp')}</Link>
+          </Button>
+        )}
       </div>
     </div>
   );

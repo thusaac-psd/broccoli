@@ -20,7 +20,7 @@ use tracing::instrument;
 // the same pattern as `handlers/submission/mod.rs`.
 use crate::entity::{contest_problem, problem};
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::{AuthUser, FreshAuthUser};
+use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::contest::*;
@@ -53,7 +53,7 @@ use super::find_contest_for_update;
 )]
 #[instrument(skip(state, auth_user, payload), fields(contest_id))]
 pub async fn add_contest_problem(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(contest_id): AppPath<i32>,
     AppJson(payload): AppJson<AddContestProblemRequest>,
@@ -242,7 +242,7 @@ pub async fn list_contest_problems(
 )]
 #[instrument(skip(state, auth_user, payload), fields(contest_id, problem_id))]
 pub async fn update_contest_problem(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath((contest_id, problem_id)): AppPath<(i32, i32)>,
     AppJson(payload): AppJson<UpdateContestProblemRequest>,
@@ -320,7 +320,7 @@ pub async fn update_contest_problem(
 )]
 #[instrument(skip(state, auth_user), fields(contest_id, problem_id))]
 pub async fn remove_contest_problem(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath((contest_id, problem_id)): AppPath<(i32, i32)>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -358,7 +358,7 @@ pub async fn remove_contest_problem(
 )]
 #[instrument(skip(state, auth_user, payload), fields(contest_id))]
 pub async fn reorder_contest_problems(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(contest_id): AppPath<i32>,
     AppJson(payload): AppJson<ReorderContestProblemsRequest>,
@@ -423,7 +423,7 @@ pub async fn reorder_contest_problems(
 )]
 #[instrument(skip(state, auth_user, payload), fields(contest_id))]
 pub async fn bulk_delete_contest_problems(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(contest_id): AppPath<i32>,
     AppJson(payload): AppJson<BulkDeleteContestProblemsRequest>,

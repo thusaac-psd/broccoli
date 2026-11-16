@@ -79,6 +79,25 @@ test('a translated code wins, with the details as parameters', () => {
   );
 });
 
+test('a list in the details is a parameter of its items, comma separated', () => {
+  const taken = new RequestError(
+    409,
+    'USERNAME_TAKEN',
+    'Usernames already taken: ann, bob',
+    { usernames: ['ann', 'bob'] },
+  );
+  const names = {
+    lookup: (key: string, params?: Record<string, string | number>) =>
+      key === 'apiError.USERNAME_TAKEN'
+        ? `Taken: ${String(params?.usernames)}`
+        : undefined,
+  };
+  assert.equal(
+    describeError(taken, 'Failed', names).message,
+    'Taken: ann, bob',
+  );
+});
+
 test('an untranslated refusal says what failed, with the server text as detail', () => {
   const err = new RequestError(400, 'VALIDATION_ERROR', 'Title too long');
   assert.equal(

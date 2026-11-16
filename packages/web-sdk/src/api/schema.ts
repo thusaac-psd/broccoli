@@ -378,7 +378,7 @@ export interface paths {
     put?: never;
     /**
      * Issue a long-lived refresh token for the CLI
-     * @description Exchanges the caller's current access token for a fresh access token plus a long-lived refresh token. The CLI stores the refresh token and uses POST /auth/cli-refresh to obtain new access tokens without re-prompting.
+     * @description Exchanges the caller's current access token for a fresh access token plus a long-lived refresh token, both in the caller's sign-in session. The CLI stores the refresh token and uses POST /auth/cli-refresh to obtain new access tokens without re-prompting.
      */
     post: operations['issueCliToken'];
     delete?: never;
@@ -478,7 +478,7 @@ export interface paths {
     put?: never;
     /**
      * Log out user
-     * @description Revokes the refresh token and clears the cookie.
+     * @description Ends the sign-in session the refresh cookie belongs to, and the one the bearer access token names, if either is sent, then clears the cookie. Ending a session deletes all of its refresh tokens, and its access tokens are refused from then on on every state-changing request (401 TOKEN_INVALID); a read accepts them until they expire, at most 5 minutes. The user's other sessions (other browsers, the CLI) stay signed in. A CLI logs out by sending its access token. Always 204: an unknown, expired or already ended session needs no ending.
      */
     post: operations['logoutUser'];
     delete?: never;
@@ -496,7 +496,7 @@ export interface paths {
     };
     /**
      * Get current authenticated user profile
-     * @description Returns the authenticated user's profile, including the roles and permissions embedded in their JWT.
+     * @description Returns the authenticated user's profile, including the roles and permissions embedded in their JWT. A token that a credential change, a logout or a deactivation has ended is 401 TOKEN_INVALID here, so a client learns at once that it must refresh.
      */
     get: operations['getCurrentUser'];
     put?: never;
@@ -4844,6 +4844,11 @@ export interface components {
        */
       created_at: string;
       display_name: string;
+      /**
+       * @description Whether the account has a password. One without (imported without its
+       *     secrets) cannot sign in until an admin sets one.
+       */
+      has_password: boolean;
       /**
        * Format: int32
        * @example 1

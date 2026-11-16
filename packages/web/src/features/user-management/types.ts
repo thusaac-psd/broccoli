@@ -1,10 +1,6 @@
-export interface ManagedUserRow {
-  id: number;
-  username: string;
-  display_name: string;
-  roles: string[];
-  created_at: string;
-}
+import type { ApiSchemas } from '@broccoli/web-sdk/api';
+
+export type ManagedUserRow = ApiSchemas['UserResponse'];
 
 export interface RolePermissionsRow {
   role: string;

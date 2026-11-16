@@ -27,18 +27,21 @@ pub fn get_dummy_hash() -> &'static str {
     })
 }
 
+/// Whether `password` matches `password_hash`. No hash (an unknown user, or
+/// an account without a password) never matches, but costs the same check
+/// against a dummy hash, so the time an answer takes does not tell the cases
+/// apart.
 pub fn verify_password(password: &str, password_hash: Option<&str>) -> Result<bool> {
     let hash_to_verify = match password_hash {
         Some(hash) => hash,
         None => get_dummy_hash(),
     };
-
     let parsed_hash =
         PasswordHash::new(hash_to_verify).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-    Ok(Argon2::default()
+    let matches = Argon2::default()
         .verify_password(password.as_bytes(), &parsed_hash)
-        .is_ok())
+        .is_ok();
+    Ok(matches && password_hash.is_some())
 }
 
 pub fn generate_random_string() -> String {
@@ -184,6 +187,14 @@ mod tests {
             release.send(()).unwrap();
             blocker.await.unwrap();
         });
+    }
+
+    #[test]
+    fn no_hash_never_matches_not_even_the_dummy_password() {
+        assert!(!verify_password("__broccoli_dummy__", None).unwrap());
+        let hash = hash_password("secret").unwrap();
+        assert!(verify_password("secret", Some(&hash)).unwrap());
+        assert!(!verify_password("wrong", Some(&hash)).unwrap());
     }
 
     #[tokio::test]

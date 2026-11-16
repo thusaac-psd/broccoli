@@ -56,6 +56,7 @@ const sidebars: SidebarsConfig = {
         'internals/plugin-database',
         'internals/schema-migrations',
         'internals/visibility',
+        'internals/authentication',
         'internals/performance',
         'internals/sandbox-overhead',
       ],

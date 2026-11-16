@@ -53,7 +53,8 @@ and calls `services::plugin_route_access::authorize` with the route's checked
 `RouteAccess` before it calls the plugin:
 
 - The bearer token goes through `extractors::auth::fresh_user`, the same
-  freshness rule `FreshAuthUser` applies, so a stale token is a 401 here too.
+  freshness check every mutating core request applies, so a stale token is a
+  401 here too, on reads as well.
 - `permission` is checked against the token's permissions.
 - A declared contest is read once (`find_contest`), checked against the route's
   `contest_type`, handed to a kernel with `know_contest`, and decided together

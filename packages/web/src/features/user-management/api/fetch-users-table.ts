@@ -74,13 +74,7 @@ export async function fetchUsersTable(
   const { data, error } = await apiClient.GET('/users');
   if (error) throw error;
 
-  const users: ManagedUserRow[] = data.map((item) => ({
-    id: item.id,
-    username: item.username,
-    display_name: item.display_name,
-    roles: item.roles,
-    created_at: item.created_at,
-  }));
+  const users: ManagedUserRow[] = data;
 
   const keyword = params.search?.trim().toLowerCase();
   const filtered = keyword
