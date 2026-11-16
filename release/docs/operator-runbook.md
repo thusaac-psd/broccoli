@@ -373,8 +373,8 @@ value left in `.env.server` shows up in that warning: delete it.
 
 Every server replica and every worker needs an id of its own. Left unset,
 `BROCCOLI__SERVER__ID` and `BROCCOLI__WORKER__ID` are derived by the binary
-itself, by one rule (`common::node_identity`), and `broccoli-server --node-id`
-or `broccoli-worker --node-id` prints the id it would take:
+itself, by one rule, and `broccoli-server --node-id` or
+`broccoli-worker --node-id` prints the id it would take:
 
 - The id is `ROLE-HOST-HASH`, for example `worker-ubuntu-3f9c2a1b`: the first
   label of the hostname, then the first 8 hex digits of
@@ -395,10 +395,10 @@ the air-gapped `install.sh`, for an id `setup.sh` left blank) ask the image
 once: they run its binary with `--node-id` in the host's network with the host's
 machine id mounted, and record the answer in `.env.server` or `.env.worker`,
 where re-runs keep it. The native worker leaves the id unset and derives it at
-every boot, which gives the same answer on the same machine. Set the id yourself
-only when two replicas share one machine, or when you write env files by hand
-(`.env.server.example` ships `server-1`): then give each replica a unique stable
-value.
+every boot, which gives the same answer on the same machine. The env examples
+leave the id blank, so an env file copied from one derives its id at boot. Set
+the id yourself only when two replicas share one machine: then give each replica
+a unique stable value.
 
 **Why it matters:** each server reads its own reply stream
 (`operation_tasks:reply:<server_id>`) and owns in-flight work under its ID. A

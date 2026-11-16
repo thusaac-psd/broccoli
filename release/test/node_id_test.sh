@@ -53,7 +53,16 @@ for role in worker server; do
   grep -q "^# $key: .*Blank means the binary derives it at boot" ".env.$role" \
     || fail "the $role env file does not say a blank id is derived at boot"
 done
+run single-host || fail "single-host dry run"
+for key in BROCCOLI__SERVER__ID BROCCOLI__WORKER__ID; do
+  grep -qx "$key=''" .env.single-host || fail "a single-host dry run recorded $key: $(grep "^$key=" .env.single-host)"
+done
 rm .env.worker
 BROCCOLI__WORKER__ID=worker-7 run worker || fail "worker dry run with an id"
 [ "$(env_get .env.worker BROCCOLI__WORKER__ID)" = worker-7 ] || fail "install.sh replaced a given id"
+# The shipped env examples name no node id, so a copied example never gives
+# two nodes the same one.
+for f in "$rel"/.env*.example; do
+  ! grep -Eq '^BROCCOLI__(SERVER|WORKER)__ID=.' "$f" || fail "$f fixes a node id"
+done
 echo "PASS: installers ask the loaded image for the id without pulling, keep a given one, and leave it to the binary in a dry run"
