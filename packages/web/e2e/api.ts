@@ -358,6 +358,7 @@ export const PLUGIN_ROUTES: [string, RegExp, Handler][] = [
     /^\/p\/icpc\/api\/plugins\/icpc\/contests\/1\/standings$/,
     () => ({
       phase: 'during',
+      live: true,
       penalty_minutes: 20,
       problem_labels: ['A', 'B', 'C'],
       full_board: true,
@@ -401,6 +402,7 @@ export const PLUGIN_ROUTES: [string, RegExp, Handler][] = [
     /^\/p\/ioi\/api\/plugins\/ioi\/contests\/4\/scoreboard$/,
     () => ({
       phase: 'during',
+      live: true,
       scoring_mode: 'sum_best_subtask',
       feedback_level: 'full',
       scoreboard_visibility: 'all_contest_viewers',
