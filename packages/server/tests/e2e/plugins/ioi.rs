@@ -1741,30 +1741,6 @@ async fn a_judgement_made_while_a_config_has_issues_is_marked() {
     assert_eq!(judgement_marks(fixed).await, json!(false));
 }
 
-/// The problem's `config_issues` flag, as stored: what judging copies onto
-/// the judgements it claims.
-async fn config_issues_flag(app: &E2eTestApp, problem_id: i32) -> bool {
-    server::entity::problem::Entity::find_by_id(problem_id)
-        .one(&app.db)
-        .await
-        .unwrap()
-        .expect("the problem")
-        .config_issues
-}
-
-/// Sets the flag directly, as a stale value a recheck must correct.
-async fn set_config_issues_flag(app: &E2eTestApp, problem_id: i32, value: bool) {
-    server::entity::problem::Entity::update_many()
-        .col_expr(
-            server::entity::problem::Column::ConfigIssues,
-            sea_orm::sea_query::Expr::value(value),
-        )
-        .filter(server::entity::problem::Column::Id.eq(problem_id))
-        .exec(&app.db)
-        .await
-        .unwrap();
-}
-
 /// A change to a plugin changes which stored configs are checked, and how,
 /// so it rechecks the flag of every problem with a config of that plugin:
 /// disabling `ioi` leaves its broken config unchecked, enabling it checks it
@@ -1784,14 +1760,14 @@ async fn a_plugin_change_rechecks_the_config_issues_of_the_problems_it_configure
         )
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
-    assert!(config_issues_flag(&app, problem_id).await);
+    assert!(app.config_issues_flag(problem_id).await);
 
     let res = app
         .post_with_token("/api/v1/admin/plugins/ioi/disable", &json!({}), &admin)
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
     assert!(
-        !config_issues_flag(&app, problem_id).await,
+        !app.config_issues_flag(problem_id).await,
         "a disabled plugin's configs are not checked"
     );
 
@@ -1799,14 +1775,14 @@ async fn a_plugin_change_rechecks_the_config_issues_of_the_problems_it_configure
         .post_with_token("/api/v1/admin/plugins/ioi/enable", &json!({}), &admin)
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
-    assert!(config_issues_flag(&app, problem_id).await);
+    assert!(app.config_issues_flag(problem_id).await);
 
-    set_config_issues_flag(&app, problem_id, false).await;
+    app.set_config_issues_flag(problem_id, false).await;
     let res = app
         .post_with_token("/api/v1/admin/plugins/ioi/reload", &json!({}), &admin)
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
-    assert!(config_issues_flag(&app, problem_id).await);
+    assert!(app.config_issues_flag(problem_id).await);
 }
 
 /// A write to a contest's own configs can change what its problems' configs
@@ -1834,10 +1810,10 @@ async fn a_contest_config_write_rechecks_the_config_issues_of_its_problems() {
         }
     };
 
-    set_config_issues_flag(&app, problem_id, true).await;
+    app.set_config_issues_flag(problem_id, true).await;
     write_contest_config("sum_best_subtask").await;
     assert!(
-        !config_issues_flag(&app, problem_id).await,
+        !app.config_issues_flag(problem_id).await,
         "no config has issues, so the stale flag is cleared"
     );
 
@@ -1849,10 +1825,112 @@ async fn a_contest_config_write_rechecks_the_config_issues_of_its_problems() {
         )
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
-    set_config_issues_flag(&app, problem_id, false).await;
+    app.set_config_issues_flag(problem_id, false).await;
     write_contest_config("max_submission").await;
     assert!(
-        config_issues_flag(&app, problem_id).await,
+        app.config_issues_flag(problem_id).await,
         "the broken subtask config sets the stale flag again"
     );
+}
+
+/// An IOI problem whose contest-problem config names a test case that is
+/// renamed away, so its `config_issues` flag is set. Returns the problem and
+/// the contest.
+async fn ioi_problem_with_a_config_issue(app: &E2eTestApp, admin: &str) -> (i32, i32) {
+    let (problem_id, contest_id, t2) = ioi_problem_with_two_subtasks(app, admin).await;
+    let res = app
+        .patch_with_token(
+            &format!("/api/v1/problems/{problem_id}/test-cases/{t2}?force=true"),
+            &json!({ "label": "t9" }),
+            admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(app.config_issues_flag(problem_id).await);
+    (problem_id, contest_id)
+}
+
+/// Removing a problem from a contest deletes its configs in that contest, so
+/// an issue only they had goes with them, and so does the flag.
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_a_contest_problem_clears_the_config_issues_its_configs_had() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_remove_issues_admin", "password", "admin")
+        .await;
+    let (problem_id, contest_id) = ioi_problem_with_a_config_issue(&app, &admin).await;
+
+    let res = app
+        .delete_with_token(
+            &format!("/api/v1/contests/{contest_id}/problems/{problem_id}"),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 204, "{}", res.text);
+    let issues = app
+        .get_with_token(
+            &format!("/api/v1/problems/{problem_id}/config/issues"),
+            &admin,
+        )
+        .await;
+    assert_eq!(issues.body, json!([]), "{}", issues.text);
+    assert!(!app.config_issues_flag(problem_id).await);
+}
+
+/// The bulk removal deletes the same configs, and clears the flag the same
+/// way.
+#[tokio::test(flavor = "multi_thread")]
+async fn bulk_removing_contest_problems_clears_the_config_issues_their_configs_had() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_bulk_issues_admin", "password", "admin")
+        .await;
+    let (problem_id, contest_id) = ioi_problem_with_a_config_issue(&app, &admin).await;
+
+    let res = app
+        .delete_with_body_and_token(
+            &format!("/api/v1/contests/{contest_id}/problems/bulk"),
+            &json!({ "problem_ids": [problem_id] }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(!app.config_issues_flag(problem_id).await);
+}
+
+/// Deleting a contest deletes its configs and those of its problems in it,
+/// so the flag those configs set clears.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_contest_clears_the_config_issues_its_configs_had() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_contest_delete_issues_admin", "password", "admin")
+        .await;
+    let (problem_id, contest_id) = ioi_problem_with_a_config_issue(&app, &admin).await;
+
+    let res = app
+        .delete_with_token(&format!("/api/v1/contests/{contest_id}"), &admin)
+        .await;
+    assert_eq!(res.status, 204, "{}", res.text);
+    assert!(!app.config_issues_flag(problem_id).await);
+}
+
+/// A server start loads plugins that may check configs differently than the
+/// ones that checked them last, and finds configs no running server checked
+/// (a restored bundle's), so it rechecks the flag of every problem with a
+/// stored config, both ways.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_start_rechecks_the_config_issues_of_every_configured_problem() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_start_issues_admin", "password", "admin")
+        .await;
+    let (broken, _) = ioi_problem_with_a_config_issue(&app, &admin).await;
+    let (clean, _, _) = ioi_problem_with_two_subtasks(&app, &admin).await;
+    app.set_config_issues_flag(broken, false).await;
+    app.set_config_issues_flag(clean, true).await;
+
+    app.restart_plugins().await;
+    assert!(app.config_issues_flag(broken).await);
+    assert!(!app.config_issues_flag(clean).await);
 }

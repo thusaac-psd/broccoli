@@ -9,7 +9,9 @@ use crate::extractors::auth::{AuthUser, Authorized, ProblemEdit};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::problem::*;
-use crate::services::plugin_config::{ConfigTarget, delete_config, get_config, store_config};
+use crate::services::plugin_config::{
+    ConfigTarget, Reads, RowSettings, delete_config, get_config, write_config,
+};
 use crate::state::AppState;
 use crate::utils::problem::find_problem;
 
@@ -24,12 +26,13 @@ use crate::utils::problem::find_problem;
     request_body = UploadCheckerSourceRequest,
     responses(
         (status = 200, description = "Checker source updated", body = CheckerSourceResponse),
-        (status = 400, description = "Validation error", body = ErrorBody),
+        (status = 400, description = "Validation error (VALIDATION_ERROR): the files break the checker source namespace's schema, or its plugin's validate function refuses them; `details.fields` lists each broken field", body = ErrorBody),
         (status = 413, description = "Request body over the endpoint's limit (PAYLOAD_TOO_LARGE)", body = ErrorBody),
         (status = 401, description = "Unauthorized", body = ErrorBody),
         (status = 403, description = "Forbidden", body = ErrorBody),
         (status = 404, description = "Problem not found", body = ErrorBody),
         (status = 409, description = "The plugin providing the problem's checker format declares no checker source (CHECKER_SOURCE_UNSUPPORTED)", body = ErrorBody),
+        (status = 503, description = "The plugin that checks the checker source cannot answer right now (PLUGIN_UNAVAILABLE)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -45,19 +48,20 @@ pub async fn upload_checker_source(
         .await?
         .ok_or(AppError::CheckerSourceUnsupported(id))?;
 
-    let config = serde_json::json!({ "files": files });
-    plugin_core::config_schema::validate(&owner.schema, &config)
-        .map_err(AppError::InvalidConfig)?;
-    let _ = store_config(
+    let (_, change) = write_config(
         &state.db,
+        state.plugins.as_ref(),
+        Reads::Committed,
         &ConfigTarget::problem(id),
         &owner.plugin_id,
         &owner.namespace,
-        config,
-        None,
-        0,
+        serde_json::json!({ "files": files }),
+        RowSettings::Kept,
     )
     .await?;
+    change
+        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .await;
 
     Ok(Json(CheckerSourceResponse { files: Some(files) }))
 }
@@ -68,7 +72,6 @@ pub async fn upload_checker_source(
 struct CheckerSourceOwner {
     plugin_id: String,
     namespace: String,
-    schema: plugin_core::manifest::ConfigNamespace,
 }
 
 impl CheckerSourceOwner {
@@ -98,10 +101,9 @@ impl CheckerSourceOwner {
                 .config
                 .iter()
                 .find(|(_, ns)| ns.checker_source)
-                .map(|(namespace, schema)| Self {
+                .map(|(namespace, _)| Self {
                     plugin_id: plugin_id.clone(),
                     namespace: namespace.clone(),
-                    schema: schema.clone(),
                 })
         }))
     }
@@ -195,7 +197,12 @@ pub async fn delete_checker_source(
     )
     .await
     {
-        Ok(_) | Err(AppError::NotFound(_)) => {}
+        Ok(change) => {
+            change
+                .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+                .await
+        }
+        Err(AppError::NotFound(_)) => {}
         Err(e) => return Err(e),
     }
 

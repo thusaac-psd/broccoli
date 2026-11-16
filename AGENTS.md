@@ -329,6 +329,13 @@ binaries warn about every key they do not read.
   a stored config is checked against (test data, a plugin, a contest- or
   plugin-scope config) rechecks it there, after it commits and off the judging
   path.
+- Every write or delete of a stored plugin config, an admin's, a plugin's
+  (`config_set`) or the host's own as a problem or contest goes, goes through
+  `services::plugin_config` (`write_config`, `delete_config*`): a write passes
+  the namespace's schema and `validate` function before it is stored, and each
+  returns the `ConfigChange` that rechecks the `config_issues` flags it reaches
+  once it commits. Only a bundle import writes the table in bulk; the server's
+  next start rechecks what it restored.
 - A plugin route declares its access in `plugin.toml` (`access`, `permission`,
   `contest`, `problem`); the proxy resolves the route's contest or problem
   through the visibility kernel and checks the token's freshness before the

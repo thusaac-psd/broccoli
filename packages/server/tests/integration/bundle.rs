@@ -396,3 +396,177 @@ async fn an_account_imported_without_its_password_signs_in_once_one_is_set() {
         .await;
     assert_eq!(login.status, 200, "{}", login.text);
 }
+
+/// One problem with a problem-scope config, on a server that also has a
+/// plugin-wide setting `{"who": "<who>"}`. Returns the problem's id.
+async fn seed_problem_with_configs(app: &TestApp, who: &str) -> i32 {
+    let admin = app
+        .create_user_with_role("bundle_config_admin", "pass1234", "admin")
+        .await;
+    let problem = app.create_problem(&admin, "Configured").await;
+    exec(
+        app,
+        &format!(
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) VALUES \
+             ('problem', '{problem}', 'someplugin:task', '{{\"from\": \"{who}\"}}', 0, now()), \
+             ('plugin', 'someplugin', 'settings', '{{\"who\": \"{who}\"}}', 0, now())"
+        ),
+    )
+    .await;
+    problem
+}
+
+async fn plugin_settings(app: &TestApp) -> String {
+    text(
+        app,
+        "SELECT coalesce((SELECT config::text FROM plugin_config \
+         WHERE scope = 'plugin' AND ref_id = 'someplugin'), 'none') AS v",
+    )
+    .await
+}
+
+/// A bundle carries the configs of what it exports, never a plugin's
+/// fleet-wide settings: importing a problem leaves the target's own settings
+/// as they were, and brings none to a target that has none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bundle_carries_no_plugin_wide_config() {
+    let source = TestApp::spawn().await;
+    let problem = seed_problem_with_configs(&source, "source").await;
+    let archive = export(
+        &source,
+        ExportOptions {
+            selection: Selection::Problems(vec![problem]),
+            with_secrets: false,
+        },
+    )
+    .await
+    .expect("export");
+
+    let target = TestApp::spawn().await;
+    exec(
+        &target,
+        "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+         VALUES ('plugin', 'someplugin', 'settings', '{\"who\": \"target\"}', 0, now())",
+    )
+    .await;
+    import(&target, &archive, ImportOptions::default())
+        .await
+        .expect("import");
+    assert_eq!(plugin_settings(&target).await, r#"{"who": "target"}"#);
+    assert_eq!(
+        text(
+            &target,
+            "SELECT string_agg(scope || '/' || ref_id || '/' || namespace, ',') AS v \
+             FROM plugin_config WHERE scope <> 'plugin'"
+        )
+        .await,
+        format!("problem/{problem}/someplugin:task"),
+        "the problem's own config comes along"
+    );
+
+    let empty = TestApp::spawn().await;
+    import(&empty, &archive, ImportOptions::default())
+        .await
+        .expect("import");
+    assert_eq!(plugin_settings(&empty).await, "none");
+}
+
+/// Replacing the target's problems replaces their configs too: no config of
+/// a replaced problem, at the problem scope or in a contest, survives to
+/// configure the imported problem that takes its id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replacing_problems_removes_the_configs_of_the_replaced_ones() {
+    let source = TestApp::spawn().await;
+    let admin = source
+        .create_user_with_role("bundle_replace_admin", "pass1234", "admin")
+        .await;
+    let problem = source.create_problem(&admin, "Fresh").await;
+    let archive = export(
+        &source,
+        ExportOptions {
+            selection: Selection::Problems(vec![problem]),
+            with_secrets: false,
+        },
+    )
+    .await
+    .expect("export");
+
+    let target = TestApp::spawn().await;
+    let admin = target
+        .create_user_with_role("bundle_replace_admin", "pass1234", "admin")
+        .await;
+    let old = target.create_problem(&admin, "Old").await;
+    assert_eq!(old, problem, "the imported problem takes the replaced id");
+    let contest = target.create_contest(&admin, "Old Cup", true, false).await;
+    target.add_problem_to_contest(contest, old, &admin).await;
+    exec(
+        &target,
+        &format!(
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) VALUES \
+             ('problem', '{old}', 'someplugin:old_ns', '{{}}', 0, now()), \
+             ('contest_problem', '{contest}:{old}', 'someplugin:limits', '{{}}', 0, now()), \
+             ('contest', '{contest}', 'someplugin:scoring', '{{}}', 0, now())"
+        ),
+    )
+    .await;
+
+    import(
+        &target,
+        &archive,
+        ImportOptions {
+            replace_problems: true,
+            wipe_dependents: true,
+        },
+    )
+    .await
+    .expect("replace");
+    assert_eq!(
+        text(
+            &target,
+            "SELECT coalesce(string_agg(scope || '/' || namespace, ',' ORDER BY scope), '') AS v \
+             FROM plugin_config"
+        )
+        .await,
+        "contest/someplugin:scoring",
+        "only the contest's own config, which no replaced problem owns, stays"
+    );
+}
+
+/// Whether a problem's configs have issues is a fact about the target's
+/// plugins, so a bundle does not carry the flag: an imported problem starts
+/// clear and the server's next start checks its configs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_imported_problem_does_not_carry_the_config_issues_flag() {
+    let source = TestApp::spawn().await;
+    let admin = source
+        .create_user_with_role("bundle_flag_admin", "pass1234", "admin")
+        .await;
+    let problem = source.create_problem(&admin, "Flagged").await;
+    exec(
+        &source,
+        &format!("UPDATE problem SET config_issues = true WHERE id = {problem}"),
+    )
+    .await;
+    let archive = export(
+        &source,
+        ExportOptions {
+            selection: Selection::Problems(vec![problem]),
+            with_secrets: false,
+        },
+    )
+    .await
+    .expect("export");
+
+    let target = TestApp::spawn().await;
+    import(&target, &archive, ImportOptions::default())
+        .await
+        .expect("import");
+    assert_eq!(
+        text(
+            &target,
+            &format!("SELECT config_issues::text AS v FROM problem WHERE id = {problem}")
+        )
+        .await,
+        "false"
+    );
+}

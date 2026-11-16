@@ -1064,3 +1064,95 @@ mod schema_validation {
         }
     }
 }
+
+/// A plugin's own writes (`config_set`) follow the rules every config write
+/// does: its namespace's validate function checks them before they are
+/// stored, and the problem's `config_issues` flag is rechecked after.
+mod plugin_writes {
+    use super::*;
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    async fn stored(app: &TestApp, problem_id: i32) -> Option<serde_json::Value> {
+        app.db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                format!(
+                    "SELECT config FROM plugin_config WHERE scope = 'problem' \
+                     AND ref_id = '{problem_id}' AND namespace = 'server-plugin:checked'"
+                ),
+            ))
+            .await
+            .unwrap()
+            .map(|row| row.try_get("", "config").unwrap())
+    }
+
+    async fn flag(app: &TestApp, problem_id: i32) -> bool {
+        app.db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                format!("SELECT config_issues FROM problem WHERE id = {problem_id}"),
+            ))
+            .await
+            .unwrap()
+            .expect("the problem")
+            .try_get("", "config_issues")
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_plugin_write_its_validate_function_refuses_is_not_stored() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("plugin_write_admin", "password123", "admin")
+            .await;
+        let problem_id = app.insert_public_problem("P").await;
+        let path = routes::plugin_proxy("server-plugin", &format!("config/problems/{problem_id}"));
+
+        let res = app
+            .put_with_token(&path, &json!({ "refuse": true }), &admin)
+            .await;
+        assert_eq!(
+            res.status, 500,
+            "a refused write fails the call: {}",
+            res.text
+        );
+        assert_eq!(stored(&app, problem_id).await, None);
+
+        let res = app
+            .put_with_token(&path, &json!({ "refuse": false }), &admin)
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        assert_eq!(
+            stored(&app, problem_id).await,
+            Some(json!({ "refuse": false }))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plugin_write_rechecks_the_problems_config_issues() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("plugin_write_flag_admin", "password123", "admin")
+            .await;
+        let problem_id = app.insert_public_problem("P").await;
+        app.db
+            .execute_unprepared(&format!(
+                "UPDATE problem SET config_issues = true WHERE id = {problem_id}"
+            ))
+            .await
+            .unwrap();
+
+        let res = app
+            .put_with_token(
+                &routes::plugin_proxy("server-plugin", &format!("config/problems/{problem_id}")),
+                &json!({ "refuse": false }),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        assert!(
+            !flag(&app, problem_id).await,
+            "no stored config has issues, so the stale flag clears"
+        );
+    }
+}

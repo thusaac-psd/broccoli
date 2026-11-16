@@ -32,6 +32,7 @@ use tokio_util::io::SyncIoBridge;
 
 use crate::entity::user::username_key_sql;
 use crate::migration::{Migrator, known_migrations};
+use crate::services::plugin_config::ConfigScope;
 
 /// [`Manifest::format`] of every bundle this build writes and reads.
 pub const FORMAT: &str = "broccoli-bundle/v1";
@@ -253,14 +254,15 @@ const TABLES: &[Table] = &[
         rows: |s| Some(format!("problem_id IN ({})", s.problems)),
         restore: Restore::Insert,
     },
-    // Plugin-wide config, and the config of the bundle's problems, contest
-    // and contest problems (`models::plugin_config::config_key` names them).
+    // The configs of the bundle's problems, contest and contest problems
+    // (`models::plugin_config::config_key` names them), never a plugin-scope
+    // config: those are each server's own settings, which an import leaves
+    // as they are.
     Table {
         name: "plugin_config",
         rows: |s| {
             let mut rows = format!(
-                "scope = 'plugin' OR (scope = 'problem' AND ref_id IN \
-                 (SELECT id::text FROM ({}) p))",
+                "(scope = 'problem' AND ref_id IN (SELECT id::text FROM ({}) p))",
                 s.problems
             );
             if let Some(c) = s.contest {
@@ -308,6 +310,12 @@ const TABLES: &[Table] = &[
         },
     },
 ];
+
+/// Columns a bundle never carries: what the target works out for itself.
+/// Whether a problem's configs have issues depends on the plugins that
+/// check them, so an imported problem starts clear and the target's next
+/// start checks its configs (`services::config_issues`).
+const DERIVED: &[(&str, &str)] = &[("problem", "config_issues")];
 
 /// The tables import empties before restoring problems.
 fn problem_tables() -> impl Iterator<Item = &'static str> {
@@ -394,7 +402,11 @@ pub async fn export(
         let Some(rows) = (table.rows)(&scope) else {
             continue;
         };
-        let columns = columns(&mut tx, table.name).await?;
+        let columns: Vec<String> = columns(&mut tx, table.name)
+            .await?
+            .into_iter()
+            .filter(|c| !DERIVED.contains(&(table.name, c.as_str())))
+            .collect();
         let select: Vec<String> = columns
             .iter()
             .map(|c| match (table.name, c.as_str(), options.with_secrets) {
@@ -658,9 +670,10 @@ pub async fn import(
     Ok(summary)
 }
 
-/// Refuse to import onto problems unless asked to replace them, and refuse to
-/// replace problems anything references unless asked to delete that too. The
-/// referencing tables are read from the schema's foreign keys.
+/// Empty the problem tables for the bundle's problems. Refuse to import onto
+/// problems unless asked to replace them, and refuse to replace problems
+/// anything references unless asked to delete that too. The referencing
+/// tables are read from the schema's foreign keys.
 async fn prepare_problem_tables(
     tx: &mut Transaction<'_, Postgres>,
     options: ImportOptions,
@@ -668,9 +681,30 @@ async fn prepare_problem_tables(
     let existing: i64 = sqlx::query_scalar("SELECT count(*) FROM problem")
         .fetch_one(&mut **tx)
         .await?;
-    if existing == 0 {
-        return Ok(());
+    if existing > 0 {
+        replace_problems(tx, options, existing).await?;
     }
+    // The bundle's problems keep the ids they had on the source. A config
+    // names its problem by id in text, with no foreign key, so every problem
+    // and contest-problem config the target holds goes with the problems it
+    // had: none stays to configure the imported problem that takes its id.
+    sqlx::query("DELETE FROM plugin_config WHERE scope = ANY($1)")
+        .bind([
+            ConfigScope::Problem.as_str(),
+            ConfigScope::ContestProblem.as_str(),
+        ])
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Delete the target's `existing` problems and, with `wipe_dependents`,
+/// every row that references them.
+async fn replace_problems(
+    tx: &mut Transaction<'_, Postgres>,
+    options: ImportOptions,
+    existing: i64,
+) -> anyhow::Result<()> {
     ensure!(
         options.replace_problems,
         "the database already has {existing} problem(s); pass --replace-problems to replace them"

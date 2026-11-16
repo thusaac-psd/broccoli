@@ -52,8 +52,8 @@ type, does not load.
 
 A write through the admin API, or through `host.config.set*`, is refused
 unless the plugin declares the namespace for that scope and the value
-satisfies its schema. An admin's write must also pass the namespace's
-`validate` function, when it declares one (see below):
+satisfies its schema. Every write, your plugin's own included, must also
+pass the namespace's `validate` function, when it declares one (see below):
 
 | Response | Code | When |
 | --- | --- | --- |
@@ -70,7 +70,7 @@ stored config the new schema refuses under `incompatible_configs`.
 A schema checks types and bounds, not meaning. A subtask list can be
 well-typed and still name a test case the problem does not have, which would
 score every submission 0. Name a function under `validate`, and the host calls
-it on every admin write to the namespace, after the schema check and before it
+it on every write to the namespace, after the schema check and before it
 stores anything:
 
 ```toml
@@ -124,9 +124,10 @@ so a plugin cannot show the host's strings or another plugin's. A function that
 fails or returns something unreadable refuses the write too: the host never
 stores a value its validator did not accept.
 
-Writes your plugin makes with `host.config.set*` are checked against the
-schema only. The plugin owns those values, so the host does not call its
-validator on them.
+Writes your plugin makes with `host.config.set*` pass the same checks: the
+host calls your validator as a call nested under the one that writes, and a
+write it refuses fails that call, as any refused write does. A validator that
+itself writes configs nests again, so keep config writes out of validators.
 
 The test data a config refers to can change after the config is stored. Every
 change to a problem's test cases (create, edit, delete, reorder, bulk delete
@@ -145,11 +146,29 @@ are any says so to staff (`config_issues` on the submission's judgements, and
 a warning on the submission page).
 
 Whether a problem has any is rechecked whenever the answer can change: on a
-test data change and on a config write for the problem, and, for every problem
-it reaches, when your plugin is enabled, disabled, reloaded or upgraded, when
-its plugin-scope config is written, and when a contest's own config is
-written. While your plugin is disabled its configs are not checked, so they
+test data change; on every write or delete of one of its configs, at the
+problem scope or in a contest, whoever makes it (an admin, your plugin's
+`host.config.set*`, a checker source upload, removing the problem from a
+contest, deleting the contest); and, for every problem it reaches, when your
+plugin is enabled, disabled, reloaded or upgraded, when its plugin-scope config
+is written or deleted, when a contest's own config is written or deleted, and
+when the server starts. While your plugin is disabled its configs are not checked, so they
 count as having no issues until it is enabled again.
+
+## Move it with a bundle
+
+A problem or contest bundle (`broccoli-server bundle export`) carries the
+configs of what it exports: its problems' own and, for a contest, the
+contest's and those of its problems in it. It never carries a plugin-scope
+config: those are each server's own settings, and an import leaves the
+target's as they are. An import replaces every problem and contest-problem
+config the target had along with its problems, so no config of a replaced
+problem stays to configure the imported problem that takes its id.
+
+An import runs no plugin, so it checks none of the configs it restores, and
+the problems' `config_issues` flags do not travel: they describe the source's
+plugins. The server's next start checks every restored config and sets each
+problem's flag.
 
 ## Read it
 

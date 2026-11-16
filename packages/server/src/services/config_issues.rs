@@ -6,18 +6,26 @@
 //!
 //! - a test-data change sets it in its own commit
 //!   ([`crate::services::test_data::TestDataEdit`]);
-//! - a problem or contest-problem config write can only resolve issues, since
-//!   the write itself is checked, so it clears a flag that no longer holds
-//!   ([`clear_resolved_config_issues`]);
+//! - every write or delete of a stored config, an admin's, a plugin's or the
+//!   host's own as a problem or contest goes, returns the
+//!   `services::plugin_config::ConfigChange` that rechecks the problems it
+//!   reaches once it commits:
+//!   a problem or contest-problem config is checked before it is stored, so
+//!   its change can only clear the flag; a contest or plugin-scope config is
+//!   what other configs are checked against, so its change moves the flag
+//!   either way;
 //! - a change to a plugin (enabled, disabled, reloaded, upgraded, its upload
-//!   removed) changes which configs are checked and how, and a plugin- or
-//!   contest-scope config write changes what a check may read: each rechecks
-//!   the problems it reaches, both ways ([`recheck_problems_of_plugins`],
-//!   [`recheck_problems_of_contest`]).
+//!   removed) changes which configs are checked and how, so it rechecks the
+//!   problems with a config of that plugin, both ways
+//!   ([`recheck_problems_of_plugins`]);
+//! - a server start loads plugins that may check configs differently than
+//!   the ones that last checked them, and finds configs no running server
+//!   checked (a restored bundle's), so it rechecks every problem that has a
+//!   config or a set flag, both ways ([`recheck_every_problem`]).
 //!
-//! The rechecks run after the change committed, on the admin action that made
-//! it, never on the judging path. A recheck that fails is logged and leaves
-//! the flag as it was.
+//! The rechecks run after the change committed, on the action that made it,
+//! never on the judging path. A recheck that fails is logged and leaves the
+//! flag as it was.
 
 use std::collections::BTreeSet;
 
@@ -26,13 +34,13 @@ use plugin_core::traits::PluginManager;
 use sea_orm::sea_query::{Expr, LockType};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, TransactionTrait};
 
-use crate::entity::{contest_problem, problem};
+use crate::entity::problem;
 use crate::error::AppError;
 use crate::services::plugin_config::{Reads, problem_config_issues, problems_with_configs_of};
 
-/// Which way a recheck may move the flag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Recheck {
+/// Which way a recheck may move the flag; `Both` covers `ClearOnly`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Recheck {
     /// Only clear a set flag: the change cannot have added an issue.
     ClearOnly,
     /// Set or clear it to match the configs.
@@ -53,18 +61,6 @@ pub(crate) async fn set_config_issues(
     Ok(())
 }
 
-/// Clears problem `problem_id`'s flag once a config write leaves none of its
-/// stored configs with issues. A config write is checked before it is stored,
-/// so it can resolve issues but never add one; when the flag is clear there
-/// is nothing to check.
-pub(crate) async fn clear_resolved_config_issues(
-    db: &DatabaseConnection,
-    plugins: &dyn PluginManager,
-    problem_id: i32,
-) {
-    recheck_logged(db, plugins, problem_id, Recheck::ClearOnly).await;
-}
-
 /// Rechecks the flag of every problem with a stored config of one of
 /// `plugin_ids`, after a change to those plugins.
 pub(crate) async fn recheck_problems_of_plugins(
@@ -72,8 +68,10 @@ pub(crate) async fn recheck_problems_of_plugins(
     plugins: &dyn PluginManager,
     plugin_ids: &[&str],
 ) {
-    match problems_with_configs_of(db, plugin_ids).await {
-        Ok(problems) => recheck_all(db, plugins, problems).await,
+    match problems_with_configs_of(db, Some(plugin_ids)).await {
+        Ok(problems) => {
+            recheck_problems(db, plugins, problems, Recheck::Both, Reads::Committed).await
+        }
         Err(error) => tracing::warn!(
             ?plugin_ids,
             ?error,
@@ -82,52 +80,49 @@ pub(crate) async fn recheck_problems_of_plugins(
     }
 }
 
-/// Rechecks the flag of every problem in contest `contest_id`, after a write
-/// to the contest's own configs.
-pub(crate) async fn recheck_problems_of_contest(
-    db: &DatabaseConnection,
-    plugins: &dyn PluginManager,
-    contest_id: i32,
-) {
-    let problems = contest_problem::Entity::find()
-        .select_only()
-        .column(contest_problem::Column::ProblemId)
-        .filter(contest_problem::Column::ContestId.eq(contest_id))
-        .into_tuple::<i32>()
-        .all(db)
-        .await;
-    match problems {
-        Ok(problems) => recheck_all(db, plugins, problems.into_iter().collect()).await,
+/// Rechecks the flag of every problem that has a stored config or a set
+/// flag, at a server start.
+pub(crate) async fn recheck_every_problem(db: &DatabaseConnection, plugins: &dyn PluginManager) {
+    let problems = async {
+        let mut problems = problems_with_configs_of(db, None).await?;
+        let flagged = problem::Entity::find()
+            .select_only()
+            .column(problem::Column::Id)
+            .filter(problem::Column::ConfigIssues.eq(true))
+            .into_tuple::<i32>()
+            .all(db)
+            .await?;
+        problems.extend(flagged);
+        Ok::<_, AppError>(problems)
+    };
+    match problems.await {
+        Ok(problems) => {
+            recheck_problems(db, plugins, problems, Recheck::Both, Reads::Committed).await
+        }
         Err(error) => tracing::warn!(
-            contest_id,
             ?error,
-            "could not find the problems whose config issues a contest config write affects"
+            "could not find the problems whose config issues a server start rechecks"
         ),
     }
 }
 
-async fn recheck_all(
+/// Rechecks the flag of each of `problems`, moving it as `recheck` allows,
+/// the plugins reading as `reads` says.
+pub(crate) async fn recheck_problems(
     db: &DatabaseConnection,
     plugins: &dyn PluginManager,
     problems: BTreeSet<i32>,
+    recheck: Recheck,
+    reads: Reads<'_>,
 ) {
     for problem_id in problems {
-        recheck_logged(db, plugins, problem_id, Recheck::Both).await;
-    }
-}
-
-async fn recheck_logged(
-    db: &DatabaseConnection,
-    plugins: &dyn PluginManager,
-    problem_id: i32,
-    recheck: Recheck,
-) {
-    if let Err(error) = try_recheck(db, plugins, problem_id, recheck).await {
-        tracing::warn!(
-            problem_id,
-            ?error,
-            "could not recheck the problem's config issues"
-        );
+        if let Err(error) = try_recheck(db, plugins, problem_id, recheck, reads).await {
+            tracing::warn!(
+                problem_id,
+                ?error,
+                "could not recheck the problem's config issues"
+            );
+        }
     }
 }
 
@@ -138,6 +133,7 @@ async fn try_recheck(
     plugins: &dyn PluginManager,
     problem_id: i32,
     recheck: Recheck,
+    reads: Reads<'_>,
 ) -> Result<(), AppError> {
     let txn = db.begin().await?;
     let Some(row) = problem::Entity::find_by_id(problem_id)
@@ -150,7 +146,7 @@ async fn try_recheck(
     if recheck == Recheck::ClearOnly && !row.config_issues {
         return Ok(());
     }
-    let has_issues = !problem_config_issues(&txn, plugins, problem_id, true, Reads::Committed)
+    let has_issues = !problem_config_issues(&txn, plugins, problem_id, true, reads)
         .await?
         .is_empty();
     let moves = match recheck {

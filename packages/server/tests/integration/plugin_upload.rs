@@ -407,7 +407,7 @@ async fn inspecting_an_archive_reports_what_it_would_publish() {
     assert_eq!(res.body["version"], "0.2.0");
     assert_eq!(
         res.body["permissions"],
-        json!(["storage", "sql", "timer", "submission"])
+        json!(["storage", "sql", "timer", "submission", "config:write"])
     );
     assert_eq!(res.body["current"]["source"], "bundle", "{}", res.text);
     assert_eq!(res.body["current"]["enabled"], true);

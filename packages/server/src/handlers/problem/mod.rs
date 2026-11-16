@@ -26,9 +26,7 @@ use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::problem::*;
 use crate::models::shared::PageWindow;
-use crate::services::plugin_config::{
-    ConfigTarget, ConfigTargetPattern, delete_config_by_target, delete_config_by_target_pattern,
-};
+use crate::services::plugin_config::{Reads, delete_configs_of_problem};
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, require_contest_started};
 use crate::utils::problem::find_problem;
@@ -510,11 +508,12 @@ pub async fn delete_problem(
     active.deleted_at = Set(Some(state.clock.now()));
     active.update(&txn).await?;
 
-    delete_config_by_target(&txn, &ConfigTarget::problem(id)).await?;
-    delete_config_by_target_pattern(&txn, &ConfigTargetPattern::contest_problem_by_problem(id))
-        .await?;
+    let change = delete_configs_of_problem(&txn, id).await?;
 
     txn.commit().await?;
+    change
+        .recheck(&state.db, state.plugins.as_ref(), Reads::Committed)
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 

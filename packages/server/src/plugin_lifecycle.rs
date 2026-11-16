@@ -397,7 +397,9 @@ pub fn not_ready(state: &AppState) -> Vec<PluginNotReady> {
 
 /// Boot: discover every plugin on disk, record new ones as enabled, and load
 /// whatever the desired state says. Returns the plugins that failed to load
-/// (they are retried by [`run`]).
+/// (they are retried by [`run`]). The plugins loaded may check configs
+/// differently than the ones that last checked them, so boot then rechecks
+/// every problem's config issues (see `services::config_issues`).
 pub async fn boot(state: &AppState) -> anyhow::Result<Vec<PluginActivationFailure>> {
     state.plugins.discover_plugins()?;
     let ids: Vec<String> = state
@@ -407,10 +409,12 @@ pub async fn boot(state: &AppState) -> anyhow::Result<Vec<PluginActivationFailur
         .map(|p| p.id)
         .collect();
     register_rows(state, &ids).await?;
-    Ok(with_applied(state, async |applied| {
+    let failures = with_applied(state, async |applied| {
         reconcile_locked(state, applied).await
     })
-    .await?)
+    .await?;
+    crate::services::config_issues::recheck_every_problem(&state.db, state.plugins.as_ref()).await;
+    Ok(failures)
 }
 
 /// Converge this replica onto the desired state once.

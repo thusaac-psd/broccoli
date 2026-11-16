@@ -1,14 +1,13 @@
-use crate::entity::plugin_config;
 use broccoli_server_sdk::types::ConfigResult;
 use broccoli_server_sdk::types::host_io::{ConfigGetInput, ConfigSetInput};
 use common::db::DatabaseConnection;
 use extism::{Function, UserData, Val, ValType};
 use plugin_core::registry::PluginRegistry;
-use sea_orm::{EntityTrait, Set, sea_query::OnConflict};
 use std::sync::Arc;
 
+use super::context::ManagerRef;
 use crate::error::AppError;
-use crate::services::plugin_config::{ConfigScope, check_schema};
+use crate::services::plugin_config::{ConfigTarget, Reads, RowSettings, write_config};
 use crate::services::plugin_config_cache::PluginConfigCache;
 use plugin_core::config_schema;
 
@@ -18,12 +17,7 @@ type ConfigGetUserData = (
     PluginRegistry,
     PluginConfigCache,
 );
-type ConfigSetUserData = (
-    String,
-    DatabaseConnection,
-    PluginRegistry,
-    PluginConfigCache,
-);
+type ConfigSetUserData = (String, DatabaseConnection, ManagerRef, PluginConfigCache);
 
 const VALID_SCOPES: &[&str] = &["problem", "contest_problem", "contest", "plugin"];
 
@@ -108,14 +102,14 @@ pub fn create_config_get_function(
 pub fn create_config_set_function(
     plugin_id: String,
     db: DatabaseConnection,
-    registry: PluginRegistry,
+    manager: ManagerRef,
     cache: PluginConfigCache,
 ) -> Function {
     super::host_function(
         "config_set",
         [ValType::I64],
         [],
-        super::host_data((plugin_id, db, registry, cache)),
+        super::host_data((plugin_id, db, manager, cache)),
         super::Waits::Blocks,
         config_set_fn,
     )
@@ -177,7 +171,7 @@ fn config_set_fn(
 ) -> Result<(), extism::Error> {
     let input: ConfigSetInput = super::read_json(plugin, inputs, "config_set input")?;
     let call = super::HostCall::enter(&user_data, "config_set")?;
-    let (plugin_id, db, registry, cache) = &*call;
+    let (plugin_id, db, manager, cache) = &*call;
 
     let ref_id = if input.scope == "plugin" {
         plugin_id.clone()
@@ -188,55 +182,45 @@ fn config_set_fn(
     validate_raw_namespace(&input.namespace)?;
     let namespace = resolve_namespace(&input.scope, plugin_id, &input.namespace);
     validate_config_input(&input.scope, &ref_id, &namespace)?;
-    let scope = ConfigScope::parse(&input.scope)
-        .ok_or_else(|| extism::Error::msg(format!("Invalid scope '{}'", input.scope)))?;
-    // The plugin owns its own namespaces' values, so its writes are checked
-    // against the schema only, never handed back to its validate function.
-    check_schema(registry, scope, plugin_id, &input.namespace, &input.config).map_err(|e| {
-        let why = match e {
-            AppError::InvalidConfig(fields) => config_schema::describe(&fields),
-            AppError::ConfigNamespaceNotFound(why) => why,
-            other => format!("{other:?}"),
-        };
-        extism::Error::msg(format!("config_set refused: {why}"))
+    let target = ConfigTarget::of_row(&input.scope, &ref_id).ok_or_else(|| {
+        extism::Error::msg(format!(
+            "config_set refused: '{ref_id}' names no {} config target",
+            input.scope
+        ))
     })?;
-
-    let key = (input.scope.clone(), ref_id.clone(), namespace.clone());
+    let manager = manager
+        .get()
+        .map_err(|e| extism::Error::msg(format!("config_set: {e}")))?;
+    // A plugin's write is checked like an admin's, its validate function
+    // running as a call nested under this one, and rechecks the config
+    // issues it reaches.
     tokio::runtime::Handle::current()
         .block_on(async {
-            let active = plugin_config::ActiveModel {
-                scope: Set(input.scope),
-                ref_id: Set(ref_id),
-                namespace: Set(namespace),
-                config: Set(input.config),
-                enabled: Set(None),
-                position: Set(0),
-                updated_at: sea_orm::NotSet,
-            };
-
-            plugin_config::Entity::insert(active)
-                .on_conflict(
-                    OnConflict::columns([
-                        plugin_config::Column::Scope,
-                        plugin_config::Column::RefId,
-                        plugin_config::Column::Namespace,
-                    ])
-                    .update_columns([
-                        plugin_config::Column::Config,
-                        plugin_config::Column::UpdatedAt,
-                    ])
-                    .to_owned(),
-                )
-                .exec(db)
-                .await?;
-
-            Ok::<_, sea_orm::DbErr>(())
+            let (_, change) = write_config(
+                db,
+                manager.as_ref(),
+                Reads::InCall,
+                &target,
+                plugin_id,
+                &input.namespace,
+                input.config,
+                RowSettings::Kept,
+            )
+            .await?;
+            // The plugin may read its write back before the change
+            // notification.
+            cache.forget(&input.scope, &ref_id, &namespace);
+            change.recheck(db, manager.as_ref(), Reads::InCall).await;
+            Ok::<_, AppError>(())
         })
-        .map_err(|e| extism::Error::msg(format!("DB error in config_set: {}", e)))?;
-    // The plugin may read its write back before the change notification.
-    cache.forget(&key.0, &key.1, &key.2);
-
-    Ok(())
+        .map_err(|e| {
+            let why = match e {
+                AppError::InvalidConfig(fields) => config_schema::describe(&fields),
+                AppError::ConfigNamespaceNotFound(why) => why,
+                other => format!("{other:?}"),
+            };
+            extism::Error::msg(format!("config_set refused: {why}"))
+        })
 }
 
 #[cfg(test)]

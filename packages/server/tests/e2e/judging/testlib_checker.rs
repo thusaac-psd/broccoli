@@ -187,6 +187,34 @@ async fn a_checker_source_lives_in_the_namespace_its_checker_plugin_declares() {
     assert!(got.body["files"].is_null(), "{}", got.text);
 }
 
+/// A checker source is a stored config like any other: writing or clearing
+/// it rechecks the problem's `config_issues` flag, so a flag that no longer
+/// holds clears.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_checker_source_write_rechecks_the_config_issues_flag() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("v_checker_issues_admin", "pass1234", "admin")
+        .await;
+    let problem_id = app
+        .create_problem_with_checker_format(&admin, "Checker Source Issues", "testlib")
+        .await;
+
+    app.set_config_issues_flag(problem_id, true).await;
+    upload_checker_source(&app, problem_id, &admin).await;
+    assert!(!app.config_issues_flag(problem_id).await);
+
+    app.set_config_issues_flag(problem_id, true).await;
+    let cleared = app
+        .delete_with_token(
+            &format!("/api/v1/problems/{problem_id}/checker-source"),
+            &admin,
+        )
+        .await;
+    assert_eq!(cleared.status, 204, "{}", cleared.text);
+    assert!(!app.config_issues_flag(problem_id).await);
+}
+
 /// One problem with a real testlib checker judges both an accepting and a
 /// rejecting solution correctly, end to end, entirely through the checker
 /// plugin's problem-scoped config.

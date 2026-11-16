@@ -365,6 +365,43 @@ impl E2eTestApp {
             .expect("sample the database clock");
     }
 
+    /// Runs this server's start-up plugin sync again: what its next start
+    /// does with the plugins and data it finds.
+    pub async fn restart_plugins(&self) {
+        let state = self
+            .state
+            .as_ref()
+            .expect("restart_plugins needs the in-process server");
+        let failures = sync_plugins(state).await.expect("sync the plugins");
+        assert!(failures.is_empty(), "a plugin failed to load");
+    }
+
+    /// The problem's `config_issues` flag, as stored: what judging copies
+    /// onto the judgements it claims.
+    pub async fn config_issues_flag(&self, problem_id: i32) -> bool {
+        use sea_orm::EntityTrait;
+        server::entity::problem::Entity::find_by_id(problem_id)
+            .one(&self.db)
+            .await
+            .unwrap()
+            .expect("the problem")
+            .config_issues
+    }
+
+    /// Sets the flag directly, as a stale value a recheck must correct.
+    pub async fn set_config_issues_flag(&self, problem_id: i32, value: bool) {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        server::entity::problem::Entity::update_many()
+            .col_expr(
+                server::entity::problem::Column::ConfigIssues,
+                sea_orm::sea_query::Expr::value(value),
+            )
+            .filter(server::entity::problem::Column::Id.eq(problem_id))
+            .exec(&self.db)
+            .await
+            .unwrap();
+    }
+
     /// Default app DB pool size. Small on purpose: e2e runs many isolated test
     /// databases and Postgres backend slots are finite.
     const DEFAULT_DB_MAX_CONNECTIONS: u32 = 3;
