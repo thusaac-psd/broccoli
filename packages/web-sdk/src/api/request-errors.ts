@@ -38,7 +38,7 @@ export function withRequestErrors<C extends object>(client: C): C {
         ? result
         : {
             ...result,
-            error: RequestError.fromBody(result.response.status, result.error),
+            error: RequestError.fromResponse(result.response, result.error),
           };
     };
   }

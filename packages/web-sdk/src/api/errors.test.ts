@@ -187,3 +187,22 @@ test("a plugin's refusal is described from that plugin's pack only", () => {
     message: 'Not allowed',
   });
 });
+
+test("an error answer carries the server's Retry-After in seconds, and nothing else as one", () => {
+  const answer = (retryAfter?: string) =>
+    new Response('{}', {
+      status: 503,
+      headers: retryAfter === undefined ? {} : { 'retry-after': retryAfter },
+    });
+  const body = { code: 'QUEUE_OVERLOADED', message: 'busy' };
+  assert.equal(
+    RequestError.fromResponse(answer('2'), body).retryAfterMs,
+    2_000,
+  );
+  assert.equal(RequestError.fromResponse(answer(), body).retryAfterMs, null);
+  assert.equal(
+    RequestError.fromResponse(answer('Wed, 21 Oct 2026 07:28:00 GMT'), body)
+      .retryAfterMs,
+    null,
+  );
+});

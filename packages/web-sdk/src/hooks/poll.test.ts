@@ -109,31 +109,19 @@ test('a failure asking again cannot change stops polling, loaded or not', () => 
 });
 
 test('a failing poll waits a jittered backoff, never less than its pace', () => {
-  assert.equal(
-    nextPollDelay(1_000, 0, () => 0),
-    1_000,
-  );
+  assert.equal(nextPollDelay(1_000, 0, { random: () => 0 }), 1_000);
   // Equal jitter: somewhere in the upper half of the doubled wait.
+  assert.equal(nextPollDelay(1_000, 3, { random: () => 0 }), 4_000);
+  assert.equal(nextPollDelay(1_000, 3, { random: () => 1 }), 8_000);
   assert.equal(
-    nextPollDelay(1_000, 3, () => 0),
-    4_000,
-  );
-  assert.equal(
-    nextPollDelay(1_000, 3, () => 1),
-    8_000,
-  );
-  assert.equal(
-    nextPollDelay(1_000, 20, () => 1),
+    nextPollDelay(1_000, 20, { random: () => 1 }),
     POLL_BACKOFF_MAX_MS,
   );
   assert.equal(
-    nextPollDelay(1_000, 20, () => 0),
+    nextPollDelay(1_000, 20, { random: () => 0 }),
     POLL_BACKOFF_MAX_MS / 2,
   );
-  assert.equal(
-    nextPollDelay(60_000, 5, () => 0),
-    60_000,
-  );
+  assert.equal(nextPollDelay(60_000, 5, { random: () => 0 }), 60_000);
 });
 
 test('a failing poll keeps its jittered wait however often it is asked', () => {
@@ -157,4 +145,21 @@ test('a failing poll keeps its jittered wait however often it is asked', () => {
   query.state.errorUpdateCount += 1;
   jittered(query);
   assert.equal(draws, drawn + 1);
+});
+
+test("a failing poll waits at least the server's Retry-After, spread across seats", () => {
+  const busy = new RequestError(503, 'QUEUE_OVERLOADED', '', undefined, 10_000);
+  assert.equal(
+    nextPollDelay(1_000, 1, { random: () => 0, error: busy }),
+    10_000,
+  );
+  assert.equal(
+    nextPollDelay(1_000, 1, { random: () => 1, error: busy }),
+    20_000,
+  );
+  // A backoff already longer than Retry-After stands.
+  assert.equal(
+    nextPollDelay(1_000, 20, { random: () => 1, error: busy }),
+    POLL_BACKOFF_MAX_MS,
+  );
 });

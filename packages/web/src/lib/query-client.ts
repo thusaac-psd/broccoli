@@ -1,8 +1,12 @@
-import { errorKind, isTemporaryApiError } from '@broccoli/web-sdk/api';
+import { errorKind } from '@broccoli/web-sdk/api';
+import { nextPollDelay } from '@broccoli/web-sdk/hooks';
 import { QueryClient } from '@tanstack/react-query';
 
 /** Retries of a query the server answered with a temporary error. */
 const TEMPORARY_RETRIES = 6;
+
+/** The first retry of a failed query waits about this long. */
+const RETRY_BASE_MS = 1_000;
 
 function retriesFor(error: unknown): number {
   switch (errorKind(error)) {
@@ -16,6 +20,20 @@ function retriesFor(error: unknown): number {
   }
 }
 
+/**
+ * The wait before retry `attempt` (0 for the first) of a query that failed
+ * with `error`: the shared poll backoff (`nextPollDelay`), jittered so the
+ * seats a blip failed together do not retry in lockstep, and never sooner
+ * than the server's `Retry-After`.
+ */
+export function queryRetryDelay(
+  attempt: number,
+  error: unknown,
+  random: () => number = Math.random,
+): number {
+  return nextPollDelay(RETRY_BASE_MS, attempt + 1, { random, error });
+}
+
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -24,11 +42,7 @@ export const queryClient = new QueryClient({
       // server error is retried once. A refusal (401, 403, 404, ...) is the
       // answer: retrying it only delays showing it.
       retry: (failures, error) => failures < retriesFor(error),
-      // 2s, matching the server's Retry-After, doubling up to 16s.
-      retryDelay: (attempt, error) =>
-        isTemporaryApiError(error)
-          ? Math.min(2_000 * 2 ** attempt, 16_000)
-          : Math.min(1_000 * 2 ** attempt, 30_000),
+      retryDelay: (attempt, error) => queryRetryDelay(attempt, error),
     },
   },
 });

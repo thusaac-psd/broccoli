@@ -1,4 +1,4 @@
-import { errorKind } from '../api/errors.ts';
+import { errorKind, retryAfterOf } from '../api/errors.ts';
 import { backoffDelay } from '../utils/backoff.ts';
 
 /** What `pollInterval` reads of a TanStack query (the `Query` itself). */
@@ -26,6 +26,11 @@ export const POLL_BACKOFF_MAX_MS = 30_000;
 export interface PollOptions {
   /** Spreads the waits of seats that failed together (default `Math.random`). */
   random?: () => number;
+}
+
+export interface PollDelayOptions extends PollOptions {
+  /** The latest failure: its `Retry-After` is the shortest wait. */
+  error?: unknown;
 }
 
 /** Per query: its success count, and its failure count when it last succeeded. */
@@ -59,17 +64,23 @@ const drawnWait = new WeakMap<
  * row: the pace while polls succeed; while they fail, a doubling backoff up
  * to `POLL_BACKOFF_MAX_MS`, spread by jitter so seats that failed together
  * do not ask again at the same instant, and never shorter than the pace.
- * Every poller, a TanStack query (`pollInterval`) or a hand-run loop, waits
- * this.
+ * When the latest failure carries a `Retry-After`, the wait is at least that,
+ * spread up to twice it, so seats the server told the same thing do not
+ * come back at the same instant either. Every poller and retry, a TanStack
+ * query (`pollInterval`, the query client's `retryDelay`) or a hand-run
+ * loop, waits this.
  */
 export function nextPollDelay(
   pace: number,
   failures: number,
-  random: () => number = Math.random,
+  { random = Math.random, error }: PollDelayOptions = {},
 ): number {
   if (failures === 0) return pace;
   const policy = { baseMs: pace, maxMs: Math.max(pace, POLL_BACKOFF_MAX_MS) };
-  return Math.max(pace, backoffDelay(failures, policy, random));
+  const backoff = Math.max(pace, backoffDelay(failures, policy, random));
+  const retryAfter = retryAfterOf(error);
+  if (retryAfter === null) return backoff;
+  return Math.max(backoff, Math.round(retryAfter * (1 + random())));
 }
 
 /**
@@ -112,7 +123,10 @@ export function pollInterval<T>(
     ) {
       return drawn.wait;
     }
-    const wait = nextPollDelay(pace, failures, random);
+    const wait = nextPollDelay(pace, failures, {
+      random,
+      error: state.error,
+    });
     drawnWait.set(query, {
       errorUpdateCount: state.errorUpdateCount,
       pace,

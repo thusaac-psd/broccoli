@@ -21,28 +21,48 @@ export const HTTP_ERROR = 'HTTP_ERROR';
  * request failed: `status` is the HTTP status, or null when no answer came
  * (`code` is then `NETWORK_ERROR`). `message` is the server's own text, for
  * logs and as secondary detail; what the user reads comes from
- * `describeError`.
+ * `describeError`. `retryAfterMs` is the answer's `Retry-After`, the
+ * soonest the server asks to be asked again, or null without one.
  */
 export class RequestError extends Error implements ApiError {
   readonly status: number | null;
   readonly code: string;
   readonly details?: unknown;
+  readonly retryAfterMs: number | null;
 
   constructor(
     status: number | null,
     code: string,
     message = '',
     details?: unknown,
+    retryAfterMs: number | null = null,
   ) {
     super(message);
     this.name = 'RequestError';
     this.status = status;
     this.code = code;
     this.details = details;
+    this.retryAfterMs = retryAfterMs;
   }
 
-  /** The error for an answer with `status` and the parsed `body`. */
-  static fromBody(status: number, body: unknown): RequestError {
+  /** The error for the error answer `response`, whose parsed body is `body`. */
+  static fromResponse(response: Response, body: unknown): RequestError {
+    return RequestError.fromBody(
+      response.status,
+      body,
+      parseRetryAfter(response.headers.get('retry-after')),
+    );
+  }
+
+  /**
+   * The error for an answer with `status` and the parsed `body`, and the
+   * `retryAfterMs` its `Retry-After` asks for.
+   */
+  static fromBody(
+    status: number,
+    body: unknown,
+    retryAfterMs: number | null = null,
+  ): RequestError {
     const fields =
       typeof body === 'object' && body !== null
         ? (body as Record<string, unknown>)
@@ -55,6 +75,7 @@ export class RequestError extends Error implements ApiError {
       typeof fields.code === 'string' ? fields.code : HTTP_ERROR,
       message ?? '',
       fields.details,
+      retryAfterMs,
     );
   }
 
@@ -64,6 +85,21 @@ export class RequestError extends Error implements ApiError {
     if (cause !== undefined) (error as { cause?: unknown }).cause = cause;
     return error;
   }
+}
+
+/**
+ * A `Retry-After` header in milliseconds. The server sends whole seconds; an
+ * HTTP date names an instant on the server's clock, which the browser's
+ * cannot be compared with, so it counts as no header.
+ */
+function parseRetryAfter(header: string | null): number | null {
+  if (header === null || !/^\s*\d+\s*$/.test(header)) return null;
+  return Number(header) * 1_000;
+}
+
+/** The `Retry-After` of a failure in milliseconds, or null without one. */
+export function retryAfterOf(err: unknown): number | null {
+  return err instanceof RequestError ? err.retryAfterMs : null;
 }
 
 /**
@@ -86,7 +122,7 @@ export async function toRequestError(
     .clone()
     .json()
     .catch(() => undefined);
-  return RequestError.fromBody(response.status, body);
+  return RequestError.fromResponse(response, body);
 }
 
 /**

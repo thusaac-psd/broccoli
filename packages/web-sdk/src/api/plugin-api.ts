@@ -54,7 +54,7 @@ async function readBody(response: Response): Promise<unknown> {
 
 async function toError(response: Response): Promise<RequestError> {
   const body = await readBody(response).catch(() => undefined);
-  return RequestError.fromBody(response.status, body);
+  return RequestError.fromResponse(response, body);
 }
 
 function encode(body: PluginRequestBody): {
