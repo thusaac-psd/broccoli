@@ -302,6 +302,12 @@ async fn icpc_standings_private_by_default_restricts_each_contestant_to_their_ow
         "private standings should restrict a contestant to exactly their own row, got: {rows_b:?}"
     );
     assert_eq!(rows_b[0]["username"], "icpc_priv_b");
+    // A board of one row cannot place that row among the others: it carries
+    // no rank rather than an invented first place.
+    for row in rows_a.iter().chain(rows_b) {
+        assert!(row["rank"].is_null(), "{row}");
+    }
+    assert_eq!(res_a.body["full_board"], false, "{}", res_a.text);
 
     // The organizer (`contest:manage`) always sees every row regardless of
     // `public_standings`.
@@ -319,6 +325,7 @@ async fn icpc_standings_private_by_default_restricts_each_contestant_to_their_ow
         2,
         "an organizer should see every contestant's row, got: {rows_admin:?}"
     );
+    assert_eq!(res_admin.body["full_board"], true, "{}", res_admin.text);
 }
 
 // Companion to the test above: with `public_standings: true` explicitly set,
@@ -601,6 +608,52 @@ async fn icpc_config_penalty_minutes() {
     );
 }
 
+/// Configures `contest_id` with public standings and a 4-minute freeze, and
+/// moves it 8 minutes into a 10-minute contest, so the freeze window (the
+/// final 4 minutes) opened 2 minutes ago and the contest is still running.
+/// Returns the contest's start time. Public standings keep the redaction
+/// under test purely the freeze, not the private-standings rule that shares
+/// `must_hide_other_submission`.
+async fn open_icpc_freeze_window(
+    app: &E2eTestApp,
+    contest_id: i32,
+    admin: &str,
+) -> chrono::DateTime<Utc> {
+    let config_path = format!("/api/v1/contests/{contest_id}/config/icpc/contest");
+    let put_res = app
+        .put_with_token(
+            &config_path,
+            &json!({
+                "config": { "public_standings": true, "freeze_minutes": 4 },
+                "enabled": true
+            }),
+            admin,
+        )
+        .await;
+    assert_eq!(
+        put_res.status, 200,
+        "Failed to set ICPC freeze config: {}",
+        put_res.text
+    );
+
+    let now = Utc::now();
+    let start_time = now - Duration::minutes(8);
+    let contest_model = contest::Entity::find_by_id(contest_id)
+        .one(&app.db)
+        .await
+        .expect("query contest")
+        .expect("contest should exist");
+    let mut contest_active: contest::ActiveModel = contest_model.into();
+    contest_active.start_time = Set(start_time);
+    contest_active.end_time = Set(now + Duration::minutes(2));
+    contest_active.activate_time = Set(Some(start_time));
+    contest_active
+        .update(&app.db)
+        .await
+        .expect("advance contest into its freeze window");
+    start_time
+}
+
 // Pins the ICPC scoreboard freeze end to end: the redaction it depends on is
 // authored by the `icpc` plugin's own `decide_visibility` export (see
 // `plugins/icpc/src/lib.rs::decide_visibility_decisions`), reached through
@@ -652,52 +705,7 @@ async fn icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organiz
     // not exercise the plugin's `CONTEST_MANAGE` branch.
     app.register_for_contest(contest_id, &manage_only).await;
 
-    // Non-zero freeze window, and public standings so the redaction under
-    // test is purely the freeze mechanism, not the separate
-    // hide-other-teams-during-the-contest rule that also lives in
-    // `must_hide_other_submission`.
-    let config_path = format!("/api/v1/contests/{contest_id}/config/icpc/contest");
-    let put_res = app
-        .put_with_token(
-            &config_path,
-            &json!({
-                "config": {
-                    "public_standings": true,
-                    "freeze_minutes": 4
-                },
-                "enabled": true
-            }),
-            &admin,
-        )
-        .await;
-    assert_eq!(
-        put_res.status, 200,
-        "Failed to set ICPC freeze config: {}",
-        put_res.text
-    );
-
-    // Advance into the freeze window. There is no clock-mocking harness for
-    // e2e tests, so this is done the same way the rest of this file
-    // simulates "elapsed contest time": by writing concrete timestamps
-    // directly. A 10-minute contest, already 8 minutes in, with a 4-minute
-    // freeze: the freeze window (the final 4 minutes) opened 2 minutes ago
-    // and the contest has not ended yet ("during").
-    let now = Utc::now();
-    let start_time = now - Duration::minutes(8);
-    let end_time = now + Duration::minutes(2);
-    let contest_model = contest::Entity::find_by_id(contest_id)
-        .one(&app.db)
-        .await
-        .expect("query contest")
-        .expect("contest should exist");
-    let mut contest_active: contest::ActiveModel = contest_model.into();
-    contest_active.start_time = Set(start_time);
-    contest_active.end_time = Set(end_time);
-    contest_active.activate_time = Set(Some(start_time));
-    contest_active
-        .update(&app.db)
-        .await
-        .expect("advance contest into its freeze window");
+    let start_time = open_icpc_freeze_window(&app, contest_id, &admin).await;
 
     let user_b = user::Entity::find()
         .filter(user::Column::Username.eq("icpc_freeze_b"))
@@ -774,42 +782,11 @@ async fn icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organiz
     let sub_path = format!("/api/v1/submissions/{sub_id}");
 
     // Peer (contestant A) reading contestant B's submission during the
-    // freeze: verdict/score/time/memory blanked, and test_case_results is an
-    // empty array - not null.
+    // freeze: the submission reads as still running, with no result at all.
     let peer_res = app.get_with_token(&sub_path, &contestant_a).await;
     assert_eq!(peer_res.status, 200, "Peer read failed: {}", peer_res.text);
-    assert_eq!(
-        peer_res.body["result"]["verdict"],
-        serde_json::Value::Null,
-        "{}",
-        peer_res.text
-    );
-    assert_eq!(
-        peer_res.body["result"]["score"],
-        serde_json::Value::Null,
-        "{}",
-        peer_res.text
-    );
-    assert_eq!(
-        peer_res.body["result"]["time_used"],
-        serde_json::Value::Null,
-        "{}",
-        peer_res.text
-    );
-    assert_eq!(
-        peer_res.body["result"]["memory_used"],
-        serde_json::Value::Null,
-        "{}",
-        peer_res.text
-    );
-    assert_eq!(
-        peer_res.body["result"]["test_case_results"]
-            .as_array()
-            .map(Vec::len),
-        Some(0),
-        "a frozen peer must see an empty array, not null: {}",
-        peer_res.text
-    );
+    assert_eq!(peer_res.body["status"], "Running", "{}", peer_res.text);
+    assert!(peer_res.body["result"].is_null(), "{}", peer_res.text);
 
     // Owner (contestant B) reading their own submission during the same
     // freeze: a team always sees its own results, even while frozen.
@@ -922,6 +899,112 @@ async fn icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organiz
         "{}",
         manage_only_res.text
     );
+}
+
+/// A frozen peer submission reveals only that it was submitted: its status
+/// reads as running in the contest list, the detail and the judgement
+/// history, and a list filtered or sorted by status never places it, so a
+/// compilation error (an attempt that may count as penalty) cannot be read
+/// off the status column, a `?status=` filter or the sort order.
+#[tokio::test(flavor = "multi_thread")]
+async fn icpc_freeze_hides_a_peer_submission_status_from_lists_filters_and_sorts() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("icpc_status_admin", "password", "admin")
+        .await;
+    let peer = app
+        .create_authenticated_user("icpc_status_peer", "password")
+        .await;
+    let owner = app
+        .create_authenticated_user("icpc_status_owner", "password")
+        .await;
+    let problem_id = app.create_problem(&admin, "ICPC Status Problem").await;
+    let contest_id = app
+        .create_typed_contest(&admin, "ICPC Status Contest", "icpc", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &peer).await;
+    app.register_for_contest(contest_id, &owner).await;
+    let start_time = open_icpc_freeze_window(&app, contest_id, &admin).await;
+
+    let owner_id = user_id_by_username(&app, "icpc_status_owner").await;
+    let frozen = seed_current_icpc_submission(
+        &app,
+        owner_id,
+        problem_id,
+        contest_id,
+        Verdict::WrongAnswer,
+        start_time + Duration::minutes(7),
+        1,
+    )
+    .await;
+    let mut frozen_row: submission::ActiveModel = submission::Entity::find_by_id(frozen)
+        .one(&app.db)
+        .await
+        .unwrap()
+        .unwrap()
+        .into();
+    frozen_row.status = Set(SubmissionStatus::CompilationError);
+    frozen_row.verdict = Set(None);
+    frozen_row.update(&app.db).await.unwrap();
+
+    let list = format!("/api/v1/contests/{contest_id}/submissions");
+    let rows = |body: &serde_json::Value| -> Vec<serde_json::Value> {
+        body["data"].as_array().cloned().unwrap_or_default()
+    };
+
+    let res = app.get_with_token(&list, &peer).await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let row = rows(&res.body)
+        .into_iter()
+        .find(|r| r["id"] == frozen)
+        .unwrap_or_else(|| panic!("the unfiltered list shows the row: {}", res.text));
+    assert_eq!(row["status"], "Running", "{row}");
+    assert!(row["verdict"].is_null(), "{row}");
+
+    for query in [
+        "?status=CompilationError",
+        "?status=Running",
+        "?sort_by=status&sort_order=asc",
+        "?sort_by=status&sort_order=desc",
+    ] {
+        let res = app.get_with_token(&format!("{list}{query}"), &peer).await;
+        assert_eq!(res.status, 200, "{query}: {}", res.text);
+        assert!(
+            rows(&res.body).iter().all(|r| r["id"] != frozen),
+            "{query} must not place a row whose status is hidden: {}",
+            res.text
+        );
+    }
+
+    // The owner still sees, filters and sorts by the real status.
+    let res = app
+        .get_with_token(&format!("{list}?status=CompilationError"), &owner)
+        .await;
+    assert!(
+        rows(&res.body).iter().any(|r| r["id"] == frozen),
+        "{}",
+        res.text
+    );
+
+    let detail = app
+        .get_with_token(&format!("/api/v1/submissions/{frozen}"), &peer)
+        .await;
+    assert_eq!(detail.status, 200, "{}", detail.text);
+    assert_eq!(detail.body["status"], "Running", "{}", detail.text);
+    assert!(detail.body["result"].is_null(), "{}", detail.text);
+
+    let history = app
+        .get_with_token(&format!("/api/v1/submissions/{frozen}/judgements"), &peer)
+        .await;
+    assert_eq!(history.status, 200, "{}", history.text);
+    let judgements = history.body.as_array().cloned().unwrap_or_default();
+    assert!(!judgements.is_empty(), "{}", history.text);
+    for judgement in judgements {
+        assert_eq!(judgement["status"], "Running", "{judgement}");
+        assert!(judgement["verdict"].is_null(), "{judgement}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

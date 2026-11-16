@@ -21,6 +21,12 @@ pub struct PrintConfig {
     pub enabled: bool,
     pub require_approval: bool,
     pub max_pages: i32,
+    /// Whether contestants may print code they paste or upload, besides their
+    /// own submissions.
+    pub allow_arbitrary: bool,
+    /// Jobs each contestant may send in the contest, 0 for no limit. Staff
+    /// prints do not count.
+    pub max_jobs_per_user: i32,
     pub banner: String,
     pub stations: Vec<StationCredential>,
 }
@@ -44,6 +50,8 @@ mod tests {
         assert!(cfg.enabled);
         assert!(!cfg.require_approval);
         assert_eq!(cfg.max_pages, 10);
+        assert!(!cfg.allow_arbitrary, "pasted-code printing is opt-in");
+        assert_eq!(cfg.max_jobs_per_user, 20);
         assert!(cfg.stations.is_empty());
     }
 

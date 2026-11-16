@@ -23,11 +23,6 @@ handler = "api_print_submission"
 
 [[server.routes]]
 method = "POST"
-path = "/api/plugins/print/jobs"
-handler = "api_print_arbitrary"
-
-[[server.routes]]
-method = "POST"
 path = "/api/plugins/print/contests/{contest_id}/jobs"
 contest = "{contest_id}"
 handler = "api_print_arbitrary"
@@ -133,6 +128,21 @@ default = 10
 min = 1
 max = 100
 unit = "pages"
+
+[config.print.properties.allow_arbitrary]
+type = "boolean"
+title = "Allow printing pasted code"
+description = "Let contestants print code they paste or upload, not only their own submissions."
+default = false
+
+[config.print.properties.max_jobs_per_user]
+type = "integer"
+title = "Max jobs per contestant"
+description = "Print jobs each contestant may send in the contest. Set to 0 for no limit. Staff prints do not count."
+default = 20
+min = 0
+max = 1000
+unit = "jobs"
 
 [config.print.properties.banner]
 type = "string"

@@ -31,13 +31,13 @@ use crate::scoring::score_best_tokened_or_last;
 // visible under `test` too, hence the split from the wasm32-only import above.
 #[cfg(any(target_arch = "wasm32", test))]
 use crate::scoring::score_sum_best_subtask;
-// `build_default_subtasks` is reachable from the wasm32-gated `run_judge`
+// `effective_subtasks` is reachable from the wasm32-gated `run_judge`
 // below AND directly from the #[cfg(test)] unit tests; `score_all_subtasks`
 // is reachable from both `score_submission_subtask_details` and
 // `sum_best_subtask_score`, which are themselves wasm32+test. Gate both the
 // same way.
 #[cfg(any(target_arch = "wasm32", test))]
-use crate::subtasks::{build_default_subtasks, score_all_subtasks};
+use crate::subtasks::{effective_subtasks, score_all_subtasks};
 #[cfg(target_arch = "wasm32")]
 use crate::{load_effective_subtasks, load_task_config, load_token_state};
 
@@ -179,11 +179,7 @@ pub(crate) fn run_judge(
 
     let test_cases = req.test_cases.clone();
 
-    let subtask_defs = if task_config.subtasks.is_empty() {
-        build_default_subtasks(&test_cases)
-    } else {
-        task_config.subtasks.clone()
-    };
+    let subtask_defs = effective_subtasks(&task_config.subtasks, &test_cases);
 
     let ctx = JudgeContext {
         contest_config: contest_config.clone(),
@@ -572,7 +568,7 @@ mod tests {
                 is_custom: false,
             },
         ];
-        let subtasks = build_default_subtasks(&test_cases);
+        let subtasks = effective_subtasks(&[], &test_cases);
         let current_rows = vec![
             TcResultRow {
                 test_case_id: 11,

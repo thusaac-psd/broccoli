@@ -8,6 +8,11 @@
 //! after a keyset position, and `has_more` says whether one more shown row
 //! exists. The cursor names the last row shown, and is accepted only while
 //! the caller is shown that row, so its position is never a hidden row's.
+//!
+//! A row the kernel shows may still have fields hidden from the caller. A
+//! list filtered or sorted by such a field would disclose its value through
+//! which rows match or where a row lands, so a row is shown in a list only
+//! when every field the list filters or sorts on is visible to the caller.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -24,9 +29,10 @@ use super::response::build_submission_list_items;
 use crate::entity::{submission, user};
 use crate::error::AppError;
 use crate::models::shared::ListPagination;
+use crate::models::submission::SubmissionListQuery;
 use crate::services::submission_feedback::public_status_sql;
 use crate::state::AppState;
-use crate::visibility::{Action, Resource, VisibilityKernel};
+use crate::visibility::{Action, Decision, Resource, VisibilityKernel};
 
 /// Most rows decided in one kernel batch. The first chunk is one page plus
 /// the look-ahead row, so a list nothing hides costs one query and one
@@ -89,6 +95,14 @@ impl ListOrder {
         }
     }
 
+    /// The list item field the sort key orders by.
+    fn key_field(&self) -> &'static str {
+        match self.key {
+            SortKey::CreatedAt => "created_at",
+            SortKey::Status => "status",
+        }
+    }
+
     /// The sort key as SQL over the `submission` row aliased `row`.
     fn key_sql(&self, row: &str) -> String {
         match self.key {
@@ -139,17 +153,42 @@ impl ListOrder {
     }
 }
 
+/// The list item fields `query` filters rows on.
+pub(super) fn filtered_fields(query: &SubmissionListQuery) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    if query.problem_id.is_some() {
+        fields.push("problem_id");
+    }
+    if query.user_id.is_some() {
+        fields.push("user_id");
+    }
+    if query.language.is_some() {
+        fields.push("language");
+    }
+    if query.status.is_some() {
+        fields.push("status");
+    }
+    if query.q.is_some() {
+        fields.extend(["username", "problem_title", "contest_id"]);
+    }
+    fields
+}
+
 fn invalid_cursor() -> AppError {
     AppError::Validation("Invalid cursor".into())
 }
 
 /// One page of `select` in `order`, after `cursor`, holding up to `per_page`
-/// rows the caller is shown. `total` is the exact count for this caller, or
-/// `None` when it is withheld.
+/// rows the caller is shown. `filtered_on` names the fields `select` filters
+/// on (see [`filtered_fields`]). `total` is the exact count for this caller,
+/// or `None` when it is withheld.
+// The page is one request's parameters; a struct would only rename them.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn visible_page(
     state: &AppState,
     kernel: &VisibilityKernel<'_>,
     select: Select<submission::Entity>,
+    filtered_on: &[&'static str],
     order: ListOrder,
     cursor: Option<&str>,
     per_page: u64,
@@ -162,6 +201,9 @@ pub(super) async fn visible_page(
     let wanted = per_page as usize + 1;
     let mut chunk = per_page + 1;
     let mut shown = Vec::with_capacity(wanted);
+    let listed = |decision: &Decision| {
+        !decision.hides(order.key_field()) && !filtered_on.iter().any(|f| decision.hides(f))
+    };
 
     loop {
         let mut rows = select.clone();
@@ -185,13 +227,13 @@ pub(super) async fn visible_page(
             resources.push(Resource::Submission(id));
         }
         let mut decisions = kernel.decide_batch(Action::Read, &resources).await?;
-        if resources.len() > rows.len() && decisions.pop().is_none_or(|d| d.is_denied()) {
+        if resources.len() > rows.len() && decisions.pop().is_none_or(|d| !listed(&d)) {
             return Err(invalid_cursor());
         }
 
         after = rows.last().map(|(row, _)| row.id).or(after);
         for (row, decision) in rows.into_iter().zip(decisions) {
-            if !decision.is_denied() {
+            if listed(&decision) {
                 shown.push(row);
             }
         }

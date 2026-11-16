@@ -36,8 +36,11 @@ export function PrintSubmissionButton({ submission }: Props) {
     [files],
   );
 
-  // Only meaningful once a submission with source exists.
-  if (!submission || files.length === 0) return null;
+  // Only a contest submission with source can be printed.
+  if (!submission || submission.contest_id == null || files.length === 0) {
+    return null;
+  }
+  const contestId = submission.contest_id;
 
   const reset = () => {
     setPhase('idle');
@@ -49,22 +52,7 @@ export function PrintSubmissionButton({ submission }: Props) {
     setMessage(null);
     try {
       let resultStatus: string | undefined;
-      const results =
-        submission.contest_id != null
-          ? [await api.printSubmission(submission.contest_id, submission.id)]
-          : [];
-      if (submission.contest_id == null) {
-        // Without a contest, print each file as standalone text.
-        for (const f of files) {
-          const r = await api.printArbitrary({
-            filename: f.filename,
-            language: submission.language,
-            source: f.content,
-          });
-          results.push(r);
-          if (!r.settled) break;
-        }
-      }
+      const results = [await api.printSubmission(contestId, submission.id)];
       for (const r of results) {
         if (!r.settled) {
           // A job may already be queued: say so instead of inviting a

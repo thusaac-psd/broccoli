@@ -17,7 +17,8 @@ export interface ProblemCell {
 }
 
 export interface StandingsEntry extends UserDisplayIdentity {
-  rank: number;
+  /** `null` when the board shows only the viewer's own row. */
+  rank: number | null;
   user_id: number;
   solved: number;
   penalty: number;
@@ -34,5 +35,7 @@ export interface StandingsResponse {
   can_reveal?: boolean;
   penalty_minutes: number;
   problem_labels: string[];
+  /** False when `rows` holds only the viewer's own row, or nothing. */
+  full_board: boolean;
   rows: StandingsEntry[];
 }

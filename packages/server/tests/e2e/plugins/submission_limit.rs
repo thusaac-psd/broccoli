@@ -611,3 +611,88 @@ async fn a_committed_submission_consumes_a_slot() {
     seed_counted_submission(&app, "sl_user_committed", problem_id, contest_id).await;
     assert_eq!(submit(&app, &token, problem_id, contest_id).await, 429);
 }
+
+/// An attempt the limit admitted but a later hook rejected never becomes a
+/// submission, so it holds no slot once the rejection is returned: with two
+/// committed submissions of three, an attempt the cooldown rejects leaves
+/// one slot, and the next attempt the cooldown passes takes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_attempt_a_later_hook_rejects_releases_its_slot() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("sl_release_admin", "password", "admin")
+        .await;
+    let contestant = app
+        .create_authenticated_user("sl_release_user", "password")
+        .await;
+    let problem_id = app.create_problem(&admin, "Limit Release Problem").await;
+    let contest_id = app
+        .create_typed_contest(&admin, "Limit Release Contest", "icpc", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &contestant).await;
+
+    // Enabled first, so the limit admits the attempt before the cooldown runs.
+    let config = |plugin: &str, key: &str| {
+        format!("/api/v1/contests/{contest_id}/problems/{problem_id}/config/{plugin}/{key}")
+    };
+    let res = app
+        .put_with_token(
+            &config("submission-limit", "limits"),
+            &json!({ "config": { "max_submissions": 3 }, "enabled": true }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let res = app
+        .put_with_token(
+            &config("cooldown", "cooldown"),
+            &json!({ "config": { "cooldown_seconds": 30 }, "enabled": true }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+
+    let committed = [
+        seed_counted_submission(&app, "sl_release_user", problem_id, contest_id).await,
+        seed_counted_submission(&app, "sl_release_user", problem_id, contest_id).await,
+    ];
+
+    let sub_path = format!("/api/v1/contests/{contest_id}/problems/{problem_id}/submissions");
+    let body = json!({
+        "files": [{"filename": "main.cpp", "content": "int main() { return 0; }"}],
+        "language": "cpp",
+    });
+    let rejected = app.post_with_token(&sub_path, &body, &contestant).await;
+    assert_eq!(rejected.status, 429, "{}", rejected.text);
+    assert_eq!(
+        rejected.body["code"], "COOLDOWN_ACTIVE",
+        "{}",
+        rejected.text
+    );
+
+    let status_path = format!(
+        "/api/v1/p/submission-limit/api/plugins/submission-limit/contests/{contest_id}/problems/{problem_id}/status"
+    );
+    let status = app.get_with_token(&status_path, &contestant).await;
+    assert_eq!(status.status, 200, "{}", status.text);
+    assert_eq!(
+        status.body["submissions_made"].as_u64(),
+        Some(2),
+        "the rejected attempt must not hold a slot: {}",
+        status.text
+    );
+
+    // The cooldown has run out: move the committed submissions an hour back
+    // rather than waiting.
+    app.db
+        .execute_unprepared(&format!(
+            "UPDATE submission SET created_at = NOW() - INTERVAL '1 hour' WHERE id IN ({}, {})",
+            committed[0], committed[1]
+        ))
+        .await
+        .unwrap();
+    let third = app.post_with_token(&sub_path, &body, &contestant).await;
+    assert_eq!(third.status, 201, "the third slot is free: {}", third.text);
+}

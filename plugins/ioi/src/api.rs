@@ -9,7 +9,7 @@ use broccoli_server_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_arch = "wasm32")]
-use crate::config::{ContestConfig, TaskConfig, resolve_tc_label, round_score};
+use crate::config::{ContestConfig, resolve_tc_label, round_score};
 // Used by both the wasm32 handlers below and subtask_scores_access_decision,
 // which is deliberately reachable under `#[cfg(test)]` too (see its doc
 // comment) so `cargo test` can exercise the feedback-level access matrix.
@@ -30,6 +30,8 @@ use crate::scoreboard::{
     combined_score_time_seconds, compare_scoreboard_entries, full_scoreboard_visible_for_phase,
     scoreboard_entries_tied,
 };
+#[cfg(target_arch = "wasm32")]
+use crate::subtasks::problem_max_score;
 #[cfg(target_arch = "wasm32")]
 use crate::tokens::{TokenState, available_tokens, next_regen_elapsed_min};
 #[cfg(target_arch = "wasm32")]
@@ -453,26 +455,9 @@ pub(crate) fn handle_scoreboard(
 
     let mut max_scores: HashMap<i32, f64> = HashMap::new();
     for &pid in &problem_ids {
-        let task_config: TaskConfig = crate::load_task_config(host, contest_id, pid)?;
-
-        let max: f64 = if task_config.subtasks.is_empty() {
-            let mut p = Params::new();
-            let sql = format!(
-                "SELECT COALESCE(SUM(score), 0)::float8 AS max_score \
-                 FROM test_case WHERE problem_id = {}",
-                p.bind(pid)
-            );
-            #[derive(Deserialize)]
-            struct ProblemMax {
-                max_score: f64,
-            }
-            host.db
-                .query_one_with_args::<ProblemMax>(&sql, &p.into_args())?
-                .map_or(0.0, |r| r.max_score)
-        } else {
-            task_config.subtasks.iter().map(|s| s.max_score).sum()
-        };
-        max_scores.insert(pid, max);
+        let task_config = load_task_config(host, contest_id, pid)?;
+        let (_, subtasks) = load_effective_subtasks(host, pid, &task_config)?;
+        max_scores.insert(pid, problem_max_score(&subtasks));
     }
 
     let mut p = Params::new();
@@ -495,7 +480,9 @@ pub(crate) fn handle_scoreboard(
 
     #[derive(Serialize)]
     struct RankEntry {
-        rank: usize,
+        /// `None` on a board restricted to the viewer's own row, which cannot
+        /// place that row among the others.
+        rank: Option<usize>,
         user_id: i32,
         username: String,
         display_name: String,
@@ -556,7 +543,7 @@ pub(crate) fn handle_scoreboard(
         };
 
         entries.push(RankEntry {
-            rank: 0,
+            rank: None,
             user_id: participant.user_id,
             username: participant.username.clone(),
             display_name: participant.display_label().to_owned(),
@@ -579,19 +566,20 @@ pub(crate) fn handle_scoreboard(
         )
     });
 
-    for i in 0..entries.len() {
-        if i > 0
-            && scoreboard_entries_tied(
-                entries[i].total_score,
-                entries[i].total_time_seconds,
-                entries[i - 1].total_score,
-                entries[i - 1].total_time_seconds,
-                contest_config.scoreboard_tiebreaker,
-            )
-        {
-            entries[i].rank = entries[i - 1].rank;
-        } else {
-            entries[i].rank = i + 1;
+    if full_scoreboard_visible {
+        for i in 0..entries.len() {
+            entries[i].rank = if i > 0
+                && scoreboard_entries_tied(
+                    entries[i].total_score,
+                    entries[i].total_time_seconds,
+                    entries[i - 1].total_score,
+                    entries[i - 1].total_time_seconds,
+                    contest_config.scoreboard_tiebreaker,
+                ) {
+                entries[i - 1].rank
+            } else {
+                Some(i + 1)
+            };
         }
     }
 
@@ -605,6 +593,9 @@ pub(crate) fn handle_scoreboard(
             "scoreboard_visibility": contest_config.scoreboard_visibility,
             "scoreboard_tiebreaker": contest_config.scoreboard_tiebreaker,
             "max_scores": max_scores,
+            // Whether `rankings` holds every participant, rather than only
+            // the viewer's own row (or nothing, for a viewer with none).
+            "full_board": full_scoreboard_visible,
             "rankings": entries,
         })),
     })

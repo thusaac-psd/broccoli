@@ -15,6 +15,11 @@
 //! snapshot, so each attempt is counted exactly once: by its reservation until
 //! its submission commits, then by the submission.
 //!
+//! An attempt that ends without a submission (a later hook rejected it, or its
+//! insert failed) releases its reservation when the host announces it
+//! abandoned, so it holds no slot afterwards; a reservation whose release
+//! never arrives still expires with the attempt.
+//!
 //! Keys are written through `::uuid::text`, so every stored key is a valid
 //! UUID and the `::uuid` lookup against `submission.attempt_id` (indexed)
 //! never fails on a stored key.
@@ -117,6 +122,18 @@ pub fn claim_sql(
     )
 }
 
+/// Drop `attempt_id`'s reservation on `key`. A committed submission of the
+/// attempt keeps its slot through the committed count, so releasing is safe
+/// however the attempt ended.
+pub fn release_sql(p: &mut Params, key: &LimitKey, attempt_id: &str) -> String {
+    let attempt = p.bind(attempt_id.to_string());
+    format!(
+        "UPDATE submission_limit_claim SET reservations = reservations - {attempt}::uuid::text \
+         WHERE {}",
+        key.claim_row(p, "submission_limit_claim")
+    )
+}
+
 /// The slots `key` holds, as one `count` column. Reads the same terms the claim
 /// enforces.
 pub fn held_count_sql(p: &mut Params, key: &LimitKey) -> String {
@@ -150,6 +167,18 @@ mod tests {
             p.into_args().contains(&serde_json::json!("a1")),
             "the attempt id is bound, not inlined"
         );
+    }
+
+    #[test]
+    fn a_release_drops_only_that_attempts_reservation() {
+        let mut p = Params::new();
+        let sql = release_sql(&mut p, &KEY, "a1");
+        assert!(sql.contains("reservations - $1::uuid::text"), "{sql}");
+        assert!(
+            sql.contains("submission_limit_claim.contest_id = $4"),
+            "{sql}"
+        );
+        assert_eq!(p.into_args()[0], serde_json::json!("a1"));
     }
 
     #[test]

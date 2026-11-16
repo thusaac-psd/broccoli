@@ -56,7 +56,9 @@ pub use rejudge::*;
 // prepare the judgement lineage through the same primitive as the admin
 // rejudge endpoints (see `crate::handlers::dlq`).
 
-use dispatch::{dispatch_before_submission_hooks, find_submission, fire_after_submission_hooks};
+use dispatch::{
+    PendingAttempt, dispatch_before_submission_hooks, find_submission, fire_after_submission_hooks,
+};
 use filter::{apply_filter_to_judgement_response, apply_filter_to_response};
 use response::{
     VisibilityContext, build_judgement_response, build_submission_response,
@@ -192,8 +194,7 @@ pub async fn create_submission(
         None,
     )
     .await?;
-    dispatch_before_submission_hooks(&state, &hook_event, Some(&enabled_plugins), None).await?;
-
+    let attempt = PendingAttempt::new(&state, &hook_event, &enabled_plugins);
     let language = payload.language.trim().to_string();
     let new_submission = submission::ActiveModel {
         files: Set(files_to_json(&payload.files)),
@@ -209,9 +210,14 @@ pub async fn create_submission(
     // Persisted `Queued` with its first judgement; the claim fiber dispatches
     // it. Dispatching from the handler instead would lose the submission if
     // the api crashed between commit and dispatch.
-    let txn = state.db.begin().await?;
-    let (model, _judgement) = judging::create_submission(&txn, new_submission).await?;
-    txn.commit().await?;
+    let inserted = async {
+        dispatch_before_submission_hooks(&state, &hook_event, Some(&enabled_plugins), None).await?;
+        let txn = state.db.begin().await?;
+        let (model, _judgement) = judging::create_submission(&txn, new_submission).await?;
+        txn.commit().await?;
+        Ok(model)
+    };
+    let model = attempt.settle(inserted.await).await?;
 
     fire_after_submission_hooks(
         &state,
@@ -354,6 +360,7 @@ pub async fn list_submissions(
         &state,
         &kernel,
         base_select,
+        &list_page::filtered_fields(&query),
         order,
         query.cursor.as_deref(),
         per_page,
@@ -792,13 +799,7 @@ pub async fn create_contest_submission(
         file_count: payload.files.len(),
         contest_type: contest_type.clone(),
     };
-    let admission = dispatch_before_submission_hooks(
-        &state,
-        &hook_event,
-        Some(&enabled_plugins),
-        admission_owner,
-    )
-    .await?;
+    let attempt = PendingAttempt::new(&state, &hook_event, &enabled_plugins);
 
     let language = payload.language.trim().to_string();
     let new_submission = submission::ActiveModel {
@@ -812,29 +813,39 @@ pub async fn create_contest_submission(
         ..Default::default()
     };
 
-    let model = match admission {
-        Some(admission) if handler.submission_admission => {
-            crate::services::submission_feedback::insert_admitted(
-                &state,
-                new_submission,
-                &admission,
-                &handler.plugin_id,
-            )
-            .await?
-        }
-        None if handler.submission_admission => {
-            return Err(AppError::Internal(
-                "Contest plugin did not provide submission admission".into(),
-            ));
-        }
-        Some(_) => return Err(AppError::Internal("Unexpected submission admission".into())),
-        None => {
-            let txn = state.db.begin().await?;
-            let (model, _judgement) = judging::create_submission(&txn, new_submission).await?;
-            txn.commit().await?;
-            model
-        }
+    let inserted = async {
+        let admission = dispatch_before_submission_hooks(
+            &state,
+            &hook_event,
+            Some(&enabled_plugins),
+            admission_owner,
+        )
+        .await?;
+        Ok(match admission {
+            Some(admission) if handler.submission_admission => {
+                crate::services::submission_feedback::insert_admitted(
+                    &state,
+                    new_submission,
+                    &admission,
+                    &handler.plugin_id,
+                )
+                .await?
+            }
+            None if handler.submission_admission => {
+                return Err(AppError::Internal(
+                    "Contest plugin did not provide submission admission".into(),
+                ));
+            }
+            Some(_) => return Err(AppError::Internal("Unexpected submission admission".into())),
+            None => {
+                let txn = state.db.begin().await?;
+                let (model, _judgement) = judging::create_submission(&txn, new_submission).await?;
+                txn.commit().await?;
+                model
+            }
+        })
     };
+    let model = attempt.settle(inserted.await).await?;
 
     fire_after_submission_hooks(
         &state,
@@ -1009,6 +1020,7 @@ pub async fn list_contest_submissions(
         &state,
         &kernel,
         base_select,
+        &list_page::filtered_fields(&query),
         order,
         query.cursor.as_deref(),
         per_page,

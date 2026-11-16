@@ -156,11 +156,28 @@ pub fn compute_scoring_test_case_ids(
         .collect()
 }
 
+/// The subtasks a problem is scored by: its configured subtasks, or the
+/// default "All Tests" subtask when none are configured. Scoring, feedback
+/// and the scoreboard all read a problem's subtasks through this.
+pub fn effective_subtasks(
+    configured: &[SubtaskDef],
+    test_cases: &[TestCaseRow],
+) -> Vec<SubtaskDef> {
+    if configured.is_empty() {
+        build_default_subtasks(test_cases)
+    } else {
+        configured.to_vec()
+    }
+}
+
+/// A problem's maximum score: the sum of its subtasks' maximum scores.
+pub fn problem_max_score(subtasks: &[SubtaskDef]) -> f64 {
+    subtasks.iter().map(|s| s.max_score).sum()
+}
+
 /// Build a default "All Tests" subtask (Sum scoring) over the non-sample,
 /// positive-score test cases. Returns no subtasks when none qualify.
-///
-/// Used when no subtask definitions are configured.
-pub fn build_default_subtasks(test_cases: &[TestCaseRow]) -> Vec<SubtaskDef> {
+fn build_default_subtasks(test_cases: &[TestCaseRow]) -> Vec<SubtaskDef> {
     let scoring_test_cases: Vec<&TestCaseRow> = test_cases
         .iter()
         .filter(|tc| !tc.is_sample && tc.score > 0.0)
@@ -423,6 +440,31 @@ mod tests {
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].max_score, 100.0);
         assert_eq!(defs[0].test_cases, vec!["tc_01"]);
+    }
+
+    #[test]
+    fn problem_max_score_without_subtask_config_leaves_out_samples() {
+        let test_cases = vec![
+            test_case(1, 10.0, true, None),
+            test_case(2, 90.0, false, None),
+        ];
+        assert_eq!(
+            problem_max_score(&effective_subtasks(&[], &test_cases)),
+            90.0
+        );
+    }
+
+    #[test]
+    fn problem_max_score_with_subtask_config_sums_the_configured_maxima() {
+        let configured = vec![
+            make_def(SubtaskScoringMethod::Sum, 30.0, vec!["a"]),
+            make_def(SubtaskScoringMethod::GroupMin, 70.0, vec!["b"]),
+        ];
+        let test_cases = vec![test_case(1, 10.0, true, None)];
+        assert_eq!(
+            problem_max_score(&effective_subtasks(&configured, &test_cases)),
+            100.0
+        );
     }
 
     #[test]

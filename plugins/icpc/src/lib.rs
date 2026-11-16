@@ -71,34 +71,15 @@ pub(crate) fn standings_restriction(
     }
 }
 
-/// Field mask covering every result field on EITHER host shape, unioned into
-/// one list. The host applies a mask with
-/// `apply_mask` (`packages/server/src/visibility/mask.rs`), which is a
-/// documented no-op on a path that does not exist - a missing key, a type
-/// mismatch, or `*` on a non-array never inserts anything. That is what
-/// makes one union mask safe to use for both shapes `decide_visibility` is
-/// never told apart (list items carry verdict/score/time_used/memory_used at
-/// the top level and have no `result` key at all; detail responses nest the
-/// same four fields, plus compile_output/error_message/test_case_results,
-/// under `result`): whichever shape the host happens to be rendering, only
-/// the paths that actually exist in THAT shape are blanked, and the paths
-/// belonging to the other shape are silently skipped.
+/// Field mask for a submission whose outcome is hidden from the viewer. It
+/// hides the submission's status, which makes the host withhold the whole
+/// outcome on every submission shape: the submission reads as still running
+/// with no verdict, score, resources or test results, and no list filtered
+/// or sorted by status places it. A frozen submission therefore discloses
+/// only that it was submitted, and when, never whether it compiled.
 #[cfg(any(target_arch = "wasm32", test))]
 fn hidden_result_mask_fields() -> Vec<String> {
-    vec![
-        "verdict".to_string(),
-        "score".to_string(),
-        "time_used".to_string(),
-        "memory_used".to_string(),
-        "result.verdict".to_string(),
-        "result.score".to_string(),
-        "result.time_used".to_string(),
-        "result.memory_used".to_string(),
-        "result.compile_output".to_string(),
-        "result.error_message".to_string(),
-        "result.test_case_results".to_string(),
-        "result.test_case_pagination".to_string(),
-    ]
+    vec![broccoli_server_sdk::visibility::SUBMISSION_STATUS_PATH.to_string()]
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -256,43 +237,10 @@ mod filter_tests {
     }
 
     #[test]
-    fn hidden_result_mask_covers_every_list_shape_result_field() {
-        // A list item hides verdict, score, time_used and memory_used, and
-        // nothing else: status stays visible so the pending '?' cell still
-        // renders.
-        let fields = hidden_result_mask_fields();
-        for f in ["verdict", "score", "time_used", "memory_used"] {
-            assert!(
-                fields.contains(&f.to_string()),
-                "missing list-shape field {f}"
-            );
-        }
-        assert!(
-            !fields.iter().any(|f| f == "status"),
-            "status must stay visible"
-        );
-    }
-
-    #[test]
-    fn hidden_result_mask_covers_every_detail_shape_result_field() {
-        // A detail response hides the same four, plus compile_output,
-        // error_message and test_case_results, all nested under `result`.
-        let fields = hidden_result_mask_fields();
-        for f in [
-            "result.verdict",
-            "result.score",
-            "result.time_used",
-            "result.memory_used",
-            "result.compile_output",
-            "result.error_message",
-            "result.test_case_results",
-            "result.test_case_pagination",
-        ] {
-            assert!(
-                fields.contains(&f.to_string()),
-                "missing detail-shape field {f}"
-            );
-        }
+    fn hidden_result_mask_withholds_the_status_itself() {
+        // Hiding the verdict alone would leave the status column, a status
+        // filter and a status sort disclosing a compilation error.
+        assert_eq!(hidden_result_mask_fields(), vec!["status".to_string()]);
     }
 
     fn subject(user_id: Option<i32>) -> QuerySubject {
@@ -343,8 +291,7 @@ mod filter_tests {
     }
 
     #[test]
-    fn decide_visibility_redacts_the_exact_hide_submission_result_field_set_for_a_frozen_peer_submission()
-     {
+    fn decide_visibility_withholds_the_status_of_a_frozen_peer_submission() {
         let host = Host::mock();
         host.config.seed(
             "contest",
@@ -369,36 +316,10 @@ mod filter_tests {
         assert_eq!(decisions.len(), 1);
         match &decisions[0] {
             WireDecision::Redact { fields } => {
-                let mut got = fields.clone();
-                got.sort();
-                // Hard-coded literal, NOT a second call to
-                // hidden_result_mask_fields(): comparing the SUT's output
-                // against the same helper it is built from is a tautology
-                // that stays green even if the helper's field list drifts
-                // away from what hide_submission_result actually blanks.
-                let mut want = vec![
-                    "verdict".to_string(),
-                    "score".to_string(),
-                    "time_used".to_string(),
-                    "memory_used".to_string(),
-                    "result.verdict".to_string(),
-                    "result.score".to_string(),
-                    "result.time_used".to_string(),
-                    "result.memory_used".to_string(),
-                    "result.compile_output".to_string(),
-                    "result.error_message".to_string(),
-                    "result.test_case_results".to_string(),
-                    "result.test_case_pagination".to_string(),
-                ];
-                want.sort();
                 assert_eq!(
-                    got.len(),
-                    12,
-                    "no extra fields beyond the documented set: {got:?}"
-                );
-                assert_eq!(
-                    got, want,
-                    "decide_visibility must redact EXACTLY what hide_submission_result blanked"
+                    fields,
+                    &vec!["status".to_string()],
+                    "a frozen peer submission withholds its status"
                 );
             }
             other => panic!("expected Redact, got {other:?}"),
@@ -680,34 +601,10 @@ mod filter_tests {
         // Allow.
         match &decisions[0] {
             WireDecision::Redact { fields } => {
-                let mut got = fields.clone();
-                got.sort();
-                // Hard-coded literal - see the sibling comment in
-                // decide_visibility_redacts_the_exact_hide_submission_result_field_set_for_a_frozen_peer_submission
-                // for why this must not re-derive from hidden_result_mask_fields().
-                let mut want = vec![
-                    "verdict".to_string(),
-                    "score".to_string(),
-                    "time_used".to_string(),
-                    "memory_used".to_string(),
-                    "result.verdict".to_string(),
-                    "result.score".to_string(),
-                    "result.time_used".to_string(),
-                    "result.memory_used".to_string(),
-                    "result.compile_output".to_string(),
-                    "result.error_message".to_string(),
-                    "result.test_case_results".to_string(),
-                    "result.test_case_pagination".to_string(),
-                ];
-                want.sort();
                 assert_eq!(
-                    got.len(),
-                    12,
-                    "no extra fields beyond the documented set: {got:?}"
-                );
-                assert_eq!(
-                    got, want,
-                    "submission 7 (in-freeze, non-owner) must be Redact with the exact hidden-result mask"
+                    fields,
+                    &vec!["status".to_string()],
+                    "submission 7 (in-freeze, non-owner) withholds its status"
                 );
             }
             other => {
@@ -913,7 +810,7 @@ use crate::evaluate::{
 #[cfg(target_arch = "wasm32")]
 use crate::standings::{
     StandingsSubmission, compute_first_solvers, compute_pending, compute_problem_states,
-    counts_as_live,
+    counts_as_live, shared_board_ranks,
 };
 
 // -- Plugin entry points -------------------------------------------------
@@ -1507,6 +1404,7 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
                         "phase": phase,
                         "penalty_minutes": config.penalty_minutes,
                         "problem_labels": problem_labels,
+                        "full_board": false,
                         "rows": [],
                     })),
                 });
@@ -1597,6 +1495,19 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     // always sees their OWN submissions un-frozen (real verdicts on their row), so
     // only OTHER teams are hidden. When not frozen, freeze_start_ms = i64::MAX so
     // everything is live and this is a no-op.
+    // Ranks come from the board every viewer shares, and only a board of
+    // every team can place a team among the others: a view restricted to the
+    // viewer's own row carries no rank.
+    let ranks = restricted_user_id.is_none().then(|| {
+        let user_ids: Vec<i32> = participants.iter().map(|p| p.user_id).collect();
+        shared_board_ranks(
+            &standings_submissions,
+            &user_ids,
+            freeze_start_ms,
+            config.count_compile_error,
+            config.penalty_minutes,
+        )
+    });
     let own_uid = req.user_id();
     let (pre_freeze, during_freeze): (Vec<StandingsSubmission>, Vec<StandingsSubmission>) =
         standings_submissions
@@ -1630,7 +1541,7 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
 
     #[derive(Serialize)]
     struct StandingsEntry {
-        rank: usize,
+        rank: Option<usize>,
         user_id: i32,
         username: String,
         display_name: String,
@@ -1691,7 +1602,9 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         }
 
         entries.push(StandingsEntry {
-            rank: 0,
+            rank: ranks
+                .as_ref()
+                .and_then(|ranks| ranks.get(&participant.user_id).copied()),
             user_id: participant.user_id,
             username: participant.username.clone(),
             display_name: participant.display_label().to_owned(),
@@ -1714,25 +1627,12 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         }
     }
 
-    // Sort: solved DESC, penalty ASC, username ASC
+    // Board order: rank, then username.
     entries.sort_by(|a, b| {
-        b.solved
-            .cmp(&a.solved)
-            .then_with(|| a.penalty.cmp(&b.penalty))
+        a.rank
+            .cmp(&b.rank)
             .then_with(|| a.username.cmp(&b.username))
     });
-
-    // Assign ranks (ties get same rank)
-    for i in 0..entries.len() {
-        if i > 0
-            && entries[i].solved == entries[i - 1].solved
-            && entries[i].penalty == entries[i - 1].penalty
-        {
-            entries[i].rank = entries[i - 1].rank;
-        } else {
-            entries[i].rank = i + 1;
-        }
-    }
 
     Ok(PluginHttpResponse {
         status: 200,
@@ -1746,6 +1646,9 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
             "can_reveal": fview.can_reveal,
             "penalty_minutes": config.penalty_minutes,
             "problem_labels": problem_labels,
+            // Whether `rows` holds every team, rather than only the viewer's
+            // own row (or nothing, for a viewer with none).
+            "full_board": restricted_user_id.is_none(),
             "rows": entries,
         })),
     })

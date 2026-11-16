@@ -12,7 +12,8 @@ pub struct BeforeSubmissionEvent {
     /// Unique to this submission attempt. The submission the attempt creates
     /// stores it in `submission.attempt_id`, so a hook can tell whether what it
     /// reserved at admission has become a committed submission. An attempt
-    /// rejected by a hook, or whose insert fails, leaves no row with it.
+    /// rejected by a hook, or whose insert fails, leaves no row with it, and
+    /// the host announces it as a [`SubmissionAttemptAbandonedEvent`].
     pub attempt_id: String,
     /// How long, from this dispatch, the attempt can stay unresolved. The host
     /// inserts no submission for it afterwards, so a hook may release what it
@@ -29,6 +30,26 @@ pub struct BeforeSubmissionEvent {
 
 impl HookEvent for BeforeSubmissionEvent {
     const TOPIC: &'static str = "before_submission";
+}
+
+/// A submission attempt that ended without a submission: a later
+/// `before_submission` hook rejected it, its insert failed, or its request
+/// was dropped. Hooks that reserved something for the attempt at admission
+/// release it here. Delivery is best effort, so a reservation still expires
+/// after [`BeforeSubmissionEvent::attempt_timeout_ms`]. A submission with
+/// this attempt id may still have committed when the request was dropped
+/// mid-insert, so a hook that counts committed submissions keeps counting it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmissionAttemptAbandonedEvent {
+    pub attempt_id: String,
+    pub user_id: i32,
+    pub problem_id: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contest_id: Option<i32>,
+}
+
+impl HookEvent for SubmissionAttemptAbandonedEvent {
+    const TOPIC: &'static str = "submission_attempt_abandoned";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -64,7 +64,7 @@ export interface PagedResponse<T> {
 }
 
 export interface ArbitraryJobInput {
-  contest_id?: number;
+  contest_id: number;
   problem_id?: number;
   filename: string;
   language?: string;

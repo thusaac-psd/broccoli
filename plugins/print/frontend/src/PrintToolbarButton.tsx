@@ -70,6 +70,7 @@ export function PrintToolbarButton() {
   };
 
   const submit = async () => {
+    if (contestId === undefined) return;
     if (!source.trim()) {
       setPhase('error');
       setMessage(t('print.dialog.empty'));
@@ -108,6 +109,9 @@ export function PrintToolbarButton() {
       setMessage(getErrorMessage(e, t('print.action.failed')));
     }
   };
+
+  // Pasted code prints only within a contest.
+  if (contestId === undefined) return null;
 
   return (
     <>

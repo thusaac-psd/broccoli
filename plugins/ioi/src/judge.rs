@@ -140,11 +140,7 @@ mod tests {
     }
 
     fn default_ctx(test_cases: Vec<TestCaseRow>) -> JudgeContext {
-        let subtask_defs = if test_cases.is_empty() {
-            vec![]
-        } else {
-            crate::subtasks::build_default_subtasks(&test_cases)
-        };
+        let subtask_defs = crate::subtasks::effective_subtasks(&[], &test_cases);
         JudgeContext {
             contest_config: ContestConfig::schema_defaults(),
             task_config: TaskConfig::schema_defaults(),

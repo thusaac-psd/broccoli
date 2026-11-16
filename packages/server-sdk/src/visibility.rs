@@ -7,6 +7,13 @@
 //! plugin-specific parts - icpc's freeze-hiding, ioi's feedback-level redaction
 //! - stay in their own crates.)
 
+/// The submission field whose hiding withholds the submission's whole
+/// outcome. A visibility decision that redacts this path presents the
+/// submission to that viewer as still running with no result (no verdict,
+/// score, resources or test case results), and a submission list filtered or
+/// sorted by status does not place it, so neither reveals the outcome.
+pub const SUBMISSION_STATUS_PATH: &str = "status";
+
 /// Byte cap for a free-text field echoed back in a submission-detail response,
 /// so a pathological compiler dump / checker output / test-case blob cannot
 /// bloat the API payload. Shared so the bound cannot drift between plugins.

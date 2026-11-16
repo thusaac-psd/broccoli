@@ -15,6 +15,11 @@ topic = "before_submission"
 function = "check_cooldown"
 scope = "resource"
 
+[[server.hooks]]
+topic = "submission_attempt_abandoned"
+function = "release_claim"
+scope = "resource"
+
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/cooldown/contests/{contest_id}/problems/{problem_id}/status"

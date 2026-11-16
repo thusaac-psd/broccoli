@@ -1,9 +1,10 @@
 # print: contest code printing
 
-On-demand printing for ICPC-style contests. Contestants print a submission or
-arbitrary pasted code; staff oversee a live queue; one or more **print
-stations** (near the printers) pick up jobs, render pretty syntax-highlighted
-PDFs, and print them.
+On-demand printing for ICPC-style contests. Contestants print a contest
+submission, or pasted code where the contest allows it (`allow_arbitrary`),
+within a per-contestant job quota (`max_jobs_per_user`); staff oversee a live
+queue; one or more **print stations** (near the printers) pick up jobs, render
+pretty syntax-highlighted PDFs, and print them.
 
 ```
  contestant / staff (web)            print station(s)  (plugins/print/client)
