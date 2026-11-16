@@ -150,12 +150,12 @@ fn report(client: &ServerClient, id: i64, status: &str, pages: Option<u32>, erro
 }
 
 fn tick_server(client: &ServerClient, cfg: &Config, printer_names: &[String]) {
-    if let Err(e) = client.heartbeat(printer_names, cfg.location.as_deref(), 0) {
+    if let Err(e) = client.heartbeat(printer_names, 0) {
         eprintln!("  ! heartbeat to {} failed: {e}", client.label);
     }
 
     let limit = (cfg.printers.len() * 3).max(4);
-    let jobs = match client.fetch_jobs(cfg.location.as_deref(), limit) {
+    let jobs = match client.fetch_jobs(limit) {
         Ok(j) => j,
         Err(e) => {
             eprintln!("  ! fetch from {} failed: {e}", client.label);
@@ -250,8 +250,7 @@ pub fn run(cfg: &Config, once: bool) -> Result<()> {
     let printer_names = cfg.printer_names();
 
     println!(
-        "print-client: station '{}' serving {} printer(s) across {} server(s){}",
-        cfg.station,
+        "print-client: serving {} printer(s) across {} server(s){}",
         cfg.printers.len(),
         clients.len(),
         if once { " (single pass)" } else { "" }

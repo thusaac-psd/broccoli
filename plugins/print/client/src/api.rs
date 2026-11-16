@@ -73,15 +73,9 @@ impl ServerClient {
     }
 
     /// The server names this station after the credential in `auth`.
-    pub fn heartbeat(
-        &self,
-        printers: &[String],
-        location: Option<&str>,
-        queue_seen: i64,
-    ) -> Result<()> {
+    pub fn heartbeat(&self, printers: &[String], queue_seen: i64) -> Result<()> {
         let body = json!({
             "printers": printers,
-            "location": location,
             "version": env!("CARGO_PKG_VERSION"),
             "queue_seen": queue_seen,
         });
@@ -93,16 +87,14 @@ impl ServerClient {
         Ok(())
     }
 
-    pub fn fetch_jobs(&self, location: Option<&str>, limit: usize) -> Result<Vec<Job>> {
-        let mut req = self
+    pub fn fetch_jobs(&self, limit: usize) -> Result<Vec<Job>> {
+        let resp = self
             .agent
             .get(&self.url("/stations/jobs"))
             .set("Authorization", &self.auth)
-            .query("limit", &limit.to_string());
-        if let Some(loc) = location {
-            req = req.query("location", loc);
-        }
-        let resp = req.call().map_err(status_error)?;
+            .query("limit", &limit.to_string())
+            .call()
+            .map_err(status_error)?;
         let parsed: JobsResponse = resp.into_json()?;
         Ok(parsed.data)
     }

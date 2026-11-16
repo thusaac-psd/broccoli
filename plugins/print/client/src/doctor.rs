@@ -21,10 +21,6 @@ int main() {
 
 pub fn run_doctor(cfg: &Config) -> Result<()> {
     println!("\n  print-client doctor\n  ───────────────────");
-    println!("  station: {}", cfg.station);
-    if let Some(loc) = &cfg.location {
-        println!("  location: {loc}");
-    }
 
     println!("\n  Servers:");
     if cfg.servers.is_empty() {
@@ -35,7 +31,7 @@ pub fn run_doctor(cfg: &Config) -> Result<()> {
         print!("    Checking {} ... ", server.url);
         io::stdout().flush().ok();
         let client = ServerClient::new(server);
-        let result = client.heartbeat(&printer_names, cfg.location.as_deref(), 0);
+        let result = client.heartbeat(&printer_names, 0);
         // Wipe the loading line before printing the result.
         print!("\r\x1b[K");
         match result {
@@ -84,7 +80,7 @@ pub fn run_doctor(cfg: &Config) -> Result<()> {
             &DocMeta {
                 banner: cfg.banner.clone(),
                 problem_label: Some("TEST".into()),
-                who: cfg.station.clone(),
+                who: String::new(),
                 filename: "test-page.cpp".into(),
                 when: String::new(),
                 job_id: 0,

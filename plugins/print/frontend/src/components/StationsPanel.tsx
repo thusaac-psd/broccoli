@@ -53,16 +53,9 @@ export function StationsPanel() {
                 className="rounded-xl border border-border bg-card p-4 shadow-sm transition-colors hover:border-foreground/20"
               >
                 <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="truncate font-medium text-foreground">
-                      {s.name}
-                    </p>
-                    {s.location && (
-                      <p className="truncate text-xs text-muted-foreground">
-                        {s.location}
-                      </p>
-                    )}
-                  </div>
+                  <p className="min-w-0 truncate font-medium text-foreground">
+                    {s.name}
+                  </p>
                   <span
                     className={cn(
                       'inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium',

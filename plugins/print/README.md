@@ -73,8 +73,6 @@ print-client run       # poll, claim, render, print
 one load-balanced URL) and **multiple printers** driven by one station:
 
 ```toml
-station  = "room-a-desk-1"
-location = "Room A"
 poll_interval_secs = 3
 max_pages = 10
 paper = "A4"

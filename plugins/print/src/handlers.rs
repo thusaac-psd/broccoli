@@ -468,13 +468,12 @@ pub fn handle_station_jobs(
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
     let auth = auth::authenticate_station(host, req)?;
-    let location = req.query.get("location").map(|s| s.as_str());
     let limit = req
         .query
         .get("limit")
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(20);
-    let jobs = jobs::list_station_jobs(host, auth.contest_filter, location, limit)?;
+    let jobs = jobs::list_station_jobs(host, auth.contest_filter, limit)?;
     ok(serde_json::json!({ "data": jobs }))
 }
 

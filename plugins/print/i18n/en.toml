@@ -84,7 +84,6 @@
 'print.stations.online' = 'Online'
 'print.stations.offline' = 'Offline'
 'print.stations.col.name' = 'Station'
-'print.stations.col.location' = 'Location'
 'print.stations.col.printers' = 'Printers'
 'print.stations.col.queue' = 'Queue seen'
 'print.stations.col.version' = 'Version'

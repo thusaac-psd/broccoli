@@ -38,11 +38,6 @@ pub struct PrinterCfg {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Label printed on this station's output. The server knows the station by
-    /// the name configured next to its token instead.
-    pub station: String,
-    #[serde(default)]
-    pub location: Option<String>,
     #[serde(default = "default_poll")]
     pub poll_interval_secs: u64,
     #[serde(default = "default_max_pages")]
@@ -62,8 +57,6 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            station: "station-1".to_string(),
-            location: None,
             poll_interval_secs: default_poll(),
             max_pages: default_max_pages(),
             paper: default_paper(),
@@ -115,8 +108,6 @@ mod tests {
     #[test]
     fn round_trips_through_toml() {
         let cfg = Config {
-            station: "room-a".into(),
-            location: Some("Room A".into()),
             poll_interval_secs: 5,
             max_pages: 8,
             paper: "Letter".into(),
@@ -134,7 +125,6 @@ mod tests {
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
-        assert_eq!(back.station, "room-a");
         assert_eq!(back.servers.len(), 1);
         assert_eq!(back.printers[0].name, "main");
         assert_eq!(back.poll_interval_secs, 5);
@@ -143,7 +133,6 @@ mod tests {
     #[test]
     fn applies_defaults_for_missing_fields() {
         let text = r#"
-            station = "s"
             [[server]]
             url = "http://x"
             token = "t"
@@ -155,6 +144,5 @@ mod tests {
         assert_eq!(cfg.max_pages, 10);
         assert_eq!(cfg.paper, "A4");
         assert_eq!(cfg.font_size, 9.0);
-        assert!(cfg.location.is_none());
     }
 }

@@ -19,7 +19,6 @@ export interface PrintJob {
   filename: string;
   pages_est: number | null;
   pages: number | null;
-  location: string | null;
   target_printer: string | null;
   status: PrintStatus;
   claimed_by: string | null;
@@ -32,7 +31,6 @@ export interface PrintJob {
 
 export interface PrintStation {
   name: string;
-  location: string | null;
   printers: string[];
   version: string | null;
   queue_seen: number | null;

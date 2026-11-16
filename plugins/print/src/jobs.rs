@@ -12,14 +12,14 @@ use crate::models::{JobRow, StationJob};
 
 // Timestamps come back as epoch seconds.
 const JOB_COLS: &str = "id, contest_id, user_id, username, display_name, problem_label, \
-    submission_id, language, filename, pages_est, pages, location, target_printer, status, \
+    submission_id, language, filename, pages_est, pages, target_printer, status, \
     claimed_by, claimed_printer, error, \
     EXTRACT(EPOCH FROM created_at) AS created_at, \
     EXTRACT(EPOCH FROM claimed_at) AS claimed_at, \
     EXTRACT(EPOCH FROM printed_at) AS printed_at";
 
 const STATION_JOB_COLS: &str = "id, contest_id, username, display_name, problem_label, \
-    language, filename, source, location, target_printer, \
+    language, filename, source, target_printer, \
     EXTRACT(EPOCH FROM created_at) AS created_at";
 
 #[derive(Debug, Clone)]
@@ -320,7 +320,6 @@ pub fn list_admin_jobs(host: &Host, f: &JobFilters) -> Result<(Vec<JobRow>, i64)
 pub fn list_station_jobs(
     host: &Host,
     contest_filter: Option<i32>,
-    location: Option<&str>,
     limit: i64,
 ) -> Result<Vec<StationJob>, SdkError> {
     let mut p = Params::new();
@@ -330,12 +329,6 @@ pub fn list_station_jobs(
     );
     if let Some(cid) = contest_filter {
         sql.push_str(&format!(" AND contest_id = {}", p.bind(cid)));
-    }
-    if let Some(loc) = location.filter(|l| !l.is_empty()) {
-        sql.push_str(&format!(
-            " AND (location IS NULL OR location = {})",
-            p.bind(loc.to_string())
-        ));
     }
     sql.push_str(&format!(
         " ORDER BY created_at ASC LIMIT {}",
@@ -462,7 +455,7 @@ mod tests {
     #[test]
     fn station_listing_offers_exactly_the_claimable_jobs() {
         let host = Host::mock();
-        list_station_jobs(&host, None, None, 10).unwrap();
+        list_station_jobs(&host, None, 10).unwrap();
         let mut p = Params::new();
         let claimable = lifecycle::claimable(&mut p);
         assert!(host.db.queries()[0].sql.contains(&claimable));

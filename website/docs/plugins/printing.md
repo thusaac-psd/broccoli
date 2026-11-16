@@ -108,7 +108,7 @@ print-client setup
 ```
 
 The wizard finds the printers installed on the machine, asks for the server
-address and a station token, lets you name the station and its printers, and
+address and a station token, lets you name its printers, and
 writes a configuration file named `print-client.toml` next to the program. For
 most setups this is all the configuration you need.
 
@@ -119,8 +119,6 @@ shown below. Note that a single station can list several servers and several
 printers.
 
 ```toml
-station  = "room-a-desk-1"   # a name you choose; shown in the volunteer dashboard
-location = "Room A"          # optional; used to route jobs to a specific room
 poll_interval_secs = 3       # how often to check the server for new jobs
 max_pages = 10               # safety cap enforced at the station too
 paper = "A4"                 # or "Letter"

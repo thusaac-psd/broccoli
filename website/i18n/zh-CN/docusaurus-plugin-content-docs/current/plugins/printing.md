@@ -91,7 +91,7 @@ import ThemedImage from '@theme/ThemedImage';
 print-client setup
 ```
 
-向导会找到本机已安装的打印机，询问服务端地址与打印站令牌，让你为打印站及其打印机命名，
+向导会找到本机已安装的打印机，询问服务端地址与打印站令牌，让你为打印机命名，
 并在程序旁写入一个名为 `print-client.toml` 的配置文件。多数场景下，这便是全部所需配置。
 
 ### 配置文件
@@ -100,8 +100,6 @@ print-client setup
 可以列出多个服务端与多台打印机。
 
 ```toml
-station  = "room-a-desk-1"   # 自定义名称，会显示在志愿者面板中
-location = "Room A"          # 可选；用于将任务路由到指定房间
 poll_interval_secs = 3       # 向服务端轮询新任务的间隔
 max_pages = 10               # 打印站侧同样强制执行的安全上限
 paper = "A4"                 # 或 "Letter"
