@@ -286,6 +286,12 @@ impl PluginLifecycle {
         }
     }
 
+    fn set_governs(&self, plugin_id: &str, governs: Governs) {
+        if let Ok(mut map) = self.governs.write() {
+            map.insert(plugin_id.to_string(), governs);
+        }
+    }
+
     /// Drop everything recorded about a plugin the fleet no longer has.
     fn forget(&self, plugin_id: &str) {
         if let Ok(mut d) = self.desired.write() {
@@ -621,9 +627,8 @@ async fn reconcile_locked(
             .governs
             .clone()
             .and_then(|g| serde_json::from_value::<Governs>(g).ok())
-            && let Ok(mut map) = state.plugin_lifecycle.governs.write()
         {
-            map.insert(row.id.clone(), governs);
+            state.plugin_lifecycle.set_governs(&row.id, governs);
         }
         let desired = Desired::of(&row);
         // Record the desired state BEFORE applying it: while an enabled
@@ -794,8 +799,8 @@ async fn apply(
             (local, differs, result)
         }
     };
-    if result.is_ok() {
-        record_governs(state, plugin_id).await;
+    if result.is_ok() && differs.is_none() {
+        record_governs(state, plugin_id, desired.generation).await;
     }
     let entry = match &result {
         Ok(()) => Applied {
@@ -892,10 +897,8 @@ async fn register_new_dirs(state: &AppState) -> Result<bool, DbErr> {
     Ok(!new_ids.is_empty())
 }
 
-/// Record what a plugin that just loaded here governs, if that changed.
-/// Best-effort: a stale record only makes a peer that cannot load the plugin
-/// fail closed for a slightly different scope.
-async fn record_governs(state: &AppState, plugin_id: &str) {
+/// What the plugin loaded here governs.
+async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
     let visibility = state
         .plugins
         .get_registry()
@@ -913,10 +916,21 @@ async fn record_governs(state: &AppState, plugin_id: &str) {
         .map(|(t, _)| t)
         .collect();
     contest_types.sort();
-    let governs = Governs {
+    Governs {
         visibility,
         contest_types,
-    };
+    }
+}
+
+/// Record what the published version of a plugin, just loaded here at
+/// `generation`, governs, if that changed: the first load of a bundled
+/// plugin, which no change published, records it this way. Fenced on the
+/// generation, so a replica applying an older generation never overwrites
+/// what a newer change published with it ([`publish`]). Best-effort: a
+/// stale record only makes a peer that cannot load the plugin fail closed
+/// for a slightly different scope.
+async fn record_governs(state: &AppState, plugin_id: &str, generation: i64) {
+    let governs = loaded_governs(state, plugin_id).await;
     if state.plugin_lifecycle.governs(plugin_id).as_ref() == Some(&governs) {
         return;
     }
@@ -927,16 +941,16 @@ async fn record_governs(state: &AppState, plugin_id: &str) {
         .db
         .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE plugin SET governs = $2 WHERE id = $1 AND governs IS DISTINCT FROM $2",
-            [plugin_id.into(), value.into()],
+            "UPDATE plugin SET governs = $2 \
+              WHERE id = $1 AND generation = $3 AND governs IS DISTINCT FROM $2",
+            [plugin_id.into(), value.into(), generation.into()],
         ))
         .await;
     match result {
-        Ok(_) => {
-            if let Ok(mut map) = state.plugin_lifecycle.governs.write() {
-                map.insert(plugin_id.to_string(), governs);
-            }
+        Ok(done) if done.rows_affected() > 0 => {
+            state.plugin_lifecycle.set_governs(plugin_id, governs)
         }
+        Ok(_) => {}
         Err(e) => tracing::warn!(plugin_id, error = %e, "Failed to record what a plugin governs"),
     }
 }
@@ -978,30 +992,34 @@ enum Change<'a> {
 /// re-applies it. Returns the new generation, or `None` when the change was
 /// refused (see [`Change`]).
 ///
-/// `fingerprint` is what the serving replica loaded from `source`; it
-/// becomes the version every other replica checks its own copy against.
-/// `None` (a disable) keeps the recorded one.
+/// `loaded` is what the serving replica loaded from `source`: its
+/// fingerprint becomes the version every other replica checks its own copy
+/// against, and what it governs is recorded in the same statement, so the
+/// record only ever describes a published version. `None` (a disable, or
+/// publishing a source that is not loaded) keeps the recorded ones.
 async fn publish(
     state: &AppState,
     plugin_id: &str,
     change: Change<'_>,
-    fingerprint: Option<&Fingerprint>,
+    loaded: Loaded<'_>,
     source: &PluginSource,
 ) -> Result<Option<i64>, DbErr> {
-    let version = fingerprint.map(|f| f.version.clone());
-    let hash = fingerprint.map(|f| f.hash.clone());
+    let version = loaded.fingerprint.map(|f| f.version.clone());
+    let hash = loaded.fingerprint.map(|f| f.hash.clone());
+    let governs = loaded.governs.and_then(|g| serde_json::to_value(g).ok());
     let archive = source.archive_hash().map(str::to_string);
     let statement = match change {
         Change::Enable => Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash)
-               VALUES ($1, TRUE, 1, NOW(), $2, $3, $4)
+            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash, governs)
+               VALUES ($1, TRUE, 1, NOW(), $2, $3, $4, $5)
                ON CONFLICT (id) DO UPDATE
                  SET is_enabled = TRUE,
                      generation = plugin.generation + 1,
                      updated_at = NOW(),
                      version = COALESCE(EXCLUDED.version, plugin.version),
-                     content_hash = COALESCE(EXCLUDED.content_hash, plugin.content_hash)
+                     content_hash = COALESCE(EXCLUDED.content_hash, plugin.content_hash),
+                     governs = COALESCE(EXCLUDED.governs, plugin.governs)
                  WHERE plugin.archive_hash IS NOT DISTINCT FROM EXCLUDED.archive_hash
                RETURNING generation"#,
             [
@@ -1009,6 +1027,7 @@ async fn publish(
                 version.into(),
                 hash.into(),
                 archive.into(),
+                governs.into(),
             ],
         ),
         Change::Disable => Statement::from_sql_and_values(
@@ -1025,8 +1044,8 @@ async fn publish(
         // clause decides; without either, nothing is written.
         Change::Upload(replaces) => Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash)
-               SELECT $1, TRUE, 1, NOW(), $2, $3, $4
+            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash, governs)
+               SELECT $1, TRUE, 1, NOW(), $2, $3, $4, $7
                 WHERE $5 OR EXISTS (SELECT 1 FROM plugin WHERE id = $1)
                ON CONFLICT (id) DO UPDATE
                  SET is_enabled = TRUE,
@@ -1034,7 +1053,8 @@ async fn publish(
                      updated_at = NOW(),
                      version = COALESCE(EXCLUDED.version, plugin.version),
                      content_hash = COALESCE(EXCLUDED.content_hash, plugin.content_hash),
-                     archive_hash = EXCLUDED.archive_hash
+                     archive_hash = EXCLUDED.archive_hash,
+                     governs = COALESCE(EXCLUDED.governs, plugin.governs)
                  WHERE NOT $5 AND plugin.archive_hash IS NOT DISTINCT FROM $6
                RETURNING generation"#,
             [
@@ -1047,6 +1067,7 @@ async fn publish(
                     .and_then(PluginSource::archive_hash)
                     .map(str::to_string)
                     .into(),
+                governs.into(),
             ],
         ),
         Change::Reload => Statement::from_sql_and_values(
@@ -1054,7 +1075,8 @@ async fn publish(
             r#"UPDATE plugin
                   SET generation = generation + 1, updated_at = NOW(),
                       version = COALESCE($2, version),
-                      content_hash = COALESCE($3, content_hash)
+                      content_hash = COALESCE($3, content_hash),
+                      governs = COALESCE($5, governs)
                WHERE id = $1 AND is_enabled AND archive_hash IS NOT DISTINCT FROM $4
                RETURNING generation"#,
             [
@@ -1062,6 +1084,7 @@ async fn publish(
                 version.into(),
                 hash.into(),
                 archive.into(),
+                governs.into(),
             ],
         ),
         Change::RemoveUpload(removed) => Statement::from_sql_and_values(
@@ -1069,7 +1092,8 @@ async fn publish(
             r#"UPDATE plugin
                   SET generation = generation + 1, updated_at = NOW(), archive_hash = NULL,
                       version = COALESCE($2, version),
-                      content_hash = COALESCE($3, content_hash)
+                      content_hash = COALESCE($3, content_hash),
+                      governs = COALESCE($5, governs)
                WHERE id = $1 AND archive_hash = $4
                RETURNING generation"#,
             [
@@ -1077,6 +1101,7 @@ async fn publish(
                 version.into(),
                 hash.into(),
                 removed.into(),
+                governs.into(),
             ],
         ),
     };
@@ -1084,6 +1109,13 @@ async fn publish(
         Some(row) => Ok(Some(row.try_get("", "generation")?)),
         None => Ok(None),
     }
+}
+
+/// What the serving replica loaded for a change it publishes.
+#[derive(Debug, Clone, Copy, Default)]
+struct Loaded<'a> {
+    fingerprint: Option<&'a Fingerprint>,
+    governs: Option<&'a Governs>,
 }
 
 /// Why a lifecycle change did not go through.
@@ -1170,8 +1202,12 @@ async fn load_then_publish(
         }
     };
     let fingerprint = plugin_utils::fingerprint(&root).await;
-    record_governs(state, plugin_id).await;
-    let published = match publish(state, plugin_id, change, fingerprint.as_ref(), source).await {
+    let governs = loaded_governs(state, plugin_id).await;
+    let loaded = Loaded {
+        fingerprint: fingerprint.as_ref(),
+        governs: Some(&governs),
+    };
+    let published = match publish(state, plugin_id, change, loaded, source).await {
         Ok(Some(generation)) => Ok(generation),
         Ok(None) => Err(refused(state, plugin_id, change).await),
         Err(e) => Err(ChangeError::Db(e)),
@@ -1193,6 +1229,7 @@ async fn load_then_publish(
             return Err(e);
         }
     };
+    state.plugin_lifecycle.set_governs(plugin_id, governs);
     applied.insert(
         plugin_id.to_string(),
         Applied {
@@ -1338,7 +1375,14 @@ pub async fn disable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
     let plugin_id = id.as_str();
     let result = with_applied(state, async |applied| {
         let source = published_source(state, id).await?;
-        let Some(generation) = publish(state, plugin_id, Change::Disable, None, &source).await?
+        let Some(generation) = publish(
+            state,
+            plugin_id,
+            Change::Disable,
+            Loaded::default(),
+            &source,
+        )
+        .await?
         else {
             return Err(AppError::Conflict(format!(
                 "Plugin '{plugin_id}' is not currently enabled"
@@ -1514,13 +1558,11 @@ pub async fn remove_upload(
             }
             Some(root) => {
                 let fingerprint = plugin_utils::fingerprint(&root).await;
-                let generation = publish(
-                    state,
-                    plugin_id,
-                    change,
-                    fingerprint.as_ref(),
-                    &PluginSource::Bundle,
-                )
+                let loaded = Loaded {
+                    fingerprint: fingerprint.as_ref(),
+                    governs: None,
+                };
+                let generation = publish(state, plugin_id, change, loaded, &PluginSource::Bundle)
                 .await?
                 .ok_or_else(stale)?;
                 let desired = Desired {
