@@ -255,7 +255,7 @@ pub async fn mint_refresh_token<C: ConnectionTrait>(
 struct PresentedToken {
     selector: String,
     user_id: i32,
-    session_id: Option<i64>,
+    session_id: i64,
     state: TokenState,
 }
 
@@ -268,8 +268,7 @@ enum TokenState {
 
 /// How a replay of a rotated token is answered.
 enum Replay {
-    /// Inside the grace window, with exactly one unused successor (or none
-    /// recorded, for rows rotated before successors were linked): issue one
+    /// Inside the grace window, with exactly one unused successor: issue one
     /// sibling.
     Sibling,
     /// Inside the grace window, but a sibling was already issued: refuse
@@ -331,7 +330,7 @@ async fn find_presented<C: ConnectionTrait>(
         let live_children: i64 = row.try_get("", "live_children")?;
         TokenState::Rotated(if !in_grace || live_children < children {
             Replay::Reuse
-        } else if children <= 1 {
+        } else if children == 1 {
             Replay::Sibling
         } else {
             Replay::AlreadyAnswered
@@ -350,21 +349,14 @@ async fn find_presented<C: ConnectionTrait>(
 }
 
 /// The session a presented refresh token belongs to, if the token is genuine
-/// (its validator matches), whatever its state. A token outside any session
-/// is deleted on the way, since it can never be used.
+/// (its validator matches), whatever its state.
 pub async fn session_of_presented(
     db: &DatabaseConnection,
     presented: &str,
 ) -> Result<Option<i64>, AppError> {
-    let Some(token) = find_presented(db, presented, false).await? else {
-        return Ok(None);
-    };
-    if token.session_id.is_none() {
-        refresh_token::Entity::delete_by_id(token.selector)
-            .exec(db)
-            .await?;
-    }
-    Ok(token.session_id)
+    Ok(find_presented(db, presented, false)
+        .await?
+        .map(|token| token.session_id))
 }
 
 /// [`refresh_token::LOCK_OWNER_SQL`], addressed by the presented selector,
@@ -404,13 +396,7 @@ pub async fn rotate_refresh_token(
     let token = find_presented(&txn, presented, true)
         .await?
         .ok_or(AppError::TokenInvalid)?;
-    let Some(session_id) = token.session_id else {
-        refresh_token::Entity::delete_by_id(token.selector)
-            .exec(&txn)
-            .await?;
-        txn.commit().await?;
-        return Err(AppError::TokenInvalid);
-    };
+    let session_id = token.session_id;
 
     match token.state {
         TokenState::Live => {}
