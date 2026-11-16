@@ -1,6 +1,7 @@
 pub mod config;
 pub mod evaluate;
 pub mod persist;
+pub mod refusal;
 pub mod standings;
 
 /// Whether a viewer looking at someone ELSE's submission must have its judged
@@ -1136,8 +1137,9 @@ fn handle_reveal(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRespo
     let info = req.contest()?;
     let contest_id = info.id;
     if !info.phase.has_ended() {
-        return Err(PluginHttpResponse::error(
+        return Err(PluginHttpResponse::refuse(
             409,
+            crate::refusal::Refusal::RevealBeforeEnd,
             "The scoreboard can be revealed only after the contest ends",
         )
         .into());
@@ -1149,8 +1151,9 @@ fn handle_reveal(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRespo
         times.start_epoch_ms,
         times.duration_ms,
     ) else {
-        return Err(PluginHttpResponse::error(
+        return Err(PluginHttpResponse::refuse(
             409,
+            crate::refusal::Refusal::NoFreezeToReveal,
             "This contest has no scoreboard freeze to reveal",
         )
         .into());

@@ -15,6 +15,8 @@ use crate::config::{ContestConfig, round_score};
 use crate::config::FeedbackLevel;
 #[cfg(target_arch = "wasm32")]
 use crate::feedback::viewer_has_token_feedback_for_submission;
+#[cfg(any(target_arch = "wasm32", test))]
+use crate::refusal::Refusal;
 #[cfg(target_arch = "wasm32")]
 use crate::score::load_current_judged_subtasks;
 #[cfg(target_arch = "wasm32")]
@@ -75,24 +77,29 @@ pub(crate) fn handle_use_token(
     let sub_info = host
         .db
         .query_one_with_args::<SubmissionInfo>(&sql, &p.into_args())?
-        .ok_or_else(|| PluginHttpResponse::error(404, "Submission not found"))?;
+        .ok_or_else(|| {
+            PluginHttpResponse::refuse(404, Refusal::SubmissionNotFound, "Submission not found")
+        })?;
     if sub_info.user_id != user_id {
-        return Ok(PluginHttpResponse::error(
+        return Ok(PluginHttpResponse::refuse(
             403,
+            Refusal::NotYourSubmission,
             "Submission does not belong to you",
         ));
     }
     if sub_info.contest_id != Some(contest_id) {
-        return Ok(PluginHttpResponse::error(
+        return Ok(PluginHttpResponse::refuse(
             400,
+            Refusal::SubmissionNotInContest,
             "Submission does not belong to this contest",
         ));
     }
     // A token reveals a judged result; spent on anything else it would buy
     // nothing.
     if sub_info.status != SubmissionStatus::Judged {
-        return Ok(PluginHttpResponse::error(
+        return Ok(PluginHttpResponse::refuse(
             409,
+            Refusal::SubmissionNotJudged,
             "Tokens can only be used on a judged submission",
         ));
     }
@@ -103,8 +110,9 @@ pub(crate) fn handle_use_token(
     // after results were published: `elapsed_minutes` keeps growing past the end
     // so the regenerating budget usually still shows tokens available in "after".
     if info.phase != ContestPhase::Running {
-        return Ok(PluginHttpResponse::error(
+        return Ok(PluginHttpResponse::refuse(
             403,
+            Refusal::ContestNotRunning,
             "Tokens can only be used while the contest is running",
         ));
     }
@@ -112,8 +120,9 @@ pub(crate) fn handle_use_token(
     let contest_config: ContestConfig = contest::load_config(host, contest_id)?;
 
     if !tokens_enabled(&contest_config) {
-        return Ok(PluginHttpResponse::error(
+        return Ok(PluginHttpResponse::refuse(
             400,
+            Refusal::TokensDisabled,
             "Tokens are disabled for this contest",
         ));
     }
@@ -147,11 +156,16 @@ pub(crate) fn handle_use_token(
     let token_state = match token_state {
         Ok(state) => state,
         Err(SdkError::Other(ref msg)) if msg == "NO_TOKENS_AVAILABLE" => {
-            return Ok(PluginHttpResponse::error(400, "No tokens available"));
+            return Ok(PluginHttpResponse::refuse(
+                400,
+                Refusal::NoTokensAvailable,
+                "No tokens available",
+            ));
         }
         Err(SdkError::Other(ref msg)) if msg == "ALREADY_TOKENED" => {
-            return Ok(PluginHttpResponse::error(
+            return Ok(PluginHttpResponse::refuse(
                 400,
+                Refusal::AlreadyTokened,
                 "Submission already has a token",
             ));
         }
@@ -596,8 +610,14 @@ pub(crate) fn handle_scoreboard(
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubtaskScoresAccess {
-    Denied { status: u16, message: &'static str },
-    Allowed { can_view_subtask_scores: bool },
+    Denied {
+        status: u16,
+        code: Refusal,
+        message: &'static str,
+    },
+    Allowed {
+        can_view_subtask_scores: bool,
+    },
 }
 
 /// Pure access-control core of `handle_submission_subtask_scores`, kept out
@@ -631,12 +651,14 @@ pub(crate) fn subtask_scores_access_decision(
             Some(_) => {
                 return SubtaskScoresAccess::Denied {
                     status: 403,
+                    code: Refusal::NotYourSubmission,
                     message: "Cannot view another user's subtask scores",
                 };
             }
             None => {
                 return SubtaskScoresAccess::Denied {
                     status: 403,
+                    code: Refusal::SignInToSeeScores,
                     message: "Sign in to see subtask scores",
                 };
             }
@@ -677,7 +699,9 @@ pub(crate) fn handle_submission_subtask_scores(
     let sub_info = host
         .db
         .query_one_with_args::<SubInfo>(&sql, &p.into_args())?
-        .ok_or_else(|| PluginHttpResponse::error(404, "Submission not found"))?;
+        .ok_or_else(|| {
+            PluginHttpResponse::refuse(404, Refusal::SubmissionNotFound, "Submission not found")
+        })?;
 
     let can_view_all_submissions = req.is_staff();
 
@@ -700,8 +724,12 @@ pub(crate) fn handle_submission_subtask_scores(
     );
 
     let can_view_subtask_scores = match access {
-        SubtaskScoresAccess::Denied { status, message } => {
-            return Ok(PluginHttpResponse::error(status, message));
+        SubtaskScoresAccess::Denied {
+            status,
+            code,
+            message,
+        } => {
+            return Ok(PluginHttpResponse::refuse(status, code, message));
         }
         SubtaskScoresAccess::Allowed {
             can_view_subtask_scores,
@@ -866,6 +894,7 @@ mod subtask_scores_access_tests {
             decision,
             SubtaskScoresAccess::Denied {
                 status: 403,
+                code: Refusal::NotYourSubmission,
                 message: "Cannot view another user's subtask scores",
             }
         );
@@ -879,6 +908,7 @@ mod subtask_scores_access_tests {
             decision,
             SubtaskScoresAccess::Denied {
                 status: 403,
+                code: Refusal::SignInToSeeScores,
                 message: "Sign in to see subtask scores",
             }
         );

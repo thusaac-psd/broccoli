@@ -15,6 +15,7 @@ pub mod judging;
 pub mod machine;
 pub mod model;
 pub mod ordering;
+pub mod refusal;
 pub mod routes;
 pub mod setup;
 pub mod stages;

@@ -36,3 +36,7 @@
 
 # Judge error codes (a judgement records them as `icpc.<CODE>`)
 'icpc.apiError.NO_TEST_CASES' = 'This problem has no test cases, so it cannot be judged. Ask the contest staff to add them.'
+'icpc.apiError.REVEAL_BEFORE_END' = 'The board can be revealed only after the contest ends.'
+'icpc.apiError.NO_FREEZE_TO_REVEAL' = 'This contest has no scoreboard freeze to reveal.'
+'icpc.apiError.INVALID_PATH_PARAMETER' = 'This link is not valid.'
+'icpc.apiError.SIGN_IN_REQUIRED' = 'Sign in to do this.'

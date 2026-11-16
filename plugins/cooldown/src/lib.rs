@@ -1,4 +1,5 @@
 pub mod gate;
+pub mod refusal;
 
 #[cfg(target_arch = "wasm32")]
 mod plugin {
@@ -55,7 +56,7 @@ mod plugin {
 
     fn reject_response(remaining: u64, cooldown: u32) -> FnResult<String> {
         let resp = HookResponse::reject(
-            "COOLDOWN_ACTIVE",
+            crate::refusal::Refusal::CooldownActive,
             format!(
                 "Please wait {} more second{}",
                 remaining,

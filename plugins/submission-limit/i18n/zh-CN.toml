@@ -28,3 +28,5 @@
 'submission-limit.apiError.SUBMISSION_LIMIT_EXCEEDED' = '本题的 {max_submissions} 次提交机会已全部用完。'
 'plugin.submission-limit.name' = '提交次数限制'
 'plugin.submission-limit.description' = '限制选手每道题的提交次数。'
+'submission-limit.apiError.INVALID_PATH_PARAMETER' = '此链接无效。'
+'submission-limit.apiError.SIGN_IN_REQUIRED' = '请先登录。'

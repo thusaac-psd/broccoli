@@ -9,6 +9,7 @@ use crate::config;
 use crate::jobs::{self, JobFilters, NewJob};
 use crate::lifecycle::{Change, JobStatus};
 use crate::models::{self, ArbitraryJobRequest, ClaimRequest, HeartbeatRequest, StatusRequest};
+use crate::refusal::Refusal;
 use crate::stations;
 
 const MAX_FILENAME_LEN: usize = 200;
@@ -28,22 +29,25 @@ fn created(body: serde_json::Value) -> Result<PluginHttpResponse, ApiError> {
 }
 
 fn parse_body<T: DeserializeOwned>(req: &PluginHttpRequest) -> Result<T, ApiError> {
-    let value = req
-        .body
-        .clone()
-        .ok_or_else(|| PluginHttpResponse::error(400, "Missing request body"))?;
-    serde_json::from_value(value)
-        .map_err(|e| PluginHttpResponse::error(400, format!("Invalid request body: {e}")).into())
+    let value = req.body.clone().ok_or_else(|| {
+        PluginHttpResponse::refuse(400, Refusal::InvalidRequestBody, "Missing request body")
+    })?;
+    serde_json::from_value(value).map_err(|e| {
+        PluginHttpResponse::refuse(
+            400,
+            Refusal::InvalidRequestBody,
+            format!("Invalid request body: {e}"),
+        )
+        .into()
+    })
 }
 
 fn path_i32(req: &PluginHttpRequest, name: &str) -> Result<i32, ApiError> {
-    req.param(name)
-        .map_err(|_| PluginHttpResponse::error(400, format!("Invalid {name}")).into())
+    Ok(req.param(name)?)
 }
 
 fn path_i64(req: &PluginHttpRequest, name: &str) -> Result<i64, ApiError> {
-    req.param(name)
-        .map_err(|_| PluginHttpResponse::error(400, format!("Invalid {name}")).into())
+    Ok(req.param(name)?)
 }
 
 fn query_i32(req: &PluginHttpRequest, name: &str) -> Option<i32> {
@@ -93,9 +97,10 @@ fn move_job(
         return ok(serde_json::json!({ "ok": true }));
     }
     match jobs::job_status(host, id, contest_filter)? {
-        None => Err(PluginHttpResponse::error(404, "Job not found").into()),
-        Some(status) => Err(PluginHttpResponse::error(
+        None => Err(PluginHttpResponse::refuse(404, Refusal::JobNotFound, "Job not found").into()),
+        Some(status) => Err(PluginHttpResponse::refuse(
             409,
+            Refusal::JobStateConflict,
             format!(
                 "A {} job cannot be {}",
                 status.as_str(),
@@ -125,16 +130,27 @@ pub fn handle_print_submission(
 
     let cfg = config::load_contest_config(host, contest_id)?;
     if !cfg.enabled {
-        return Err(PluginHttpResponse::error(403, "Printing is disabled for this contest").into());
+        return Err(PluginHttpResponse::refuse(
+            403,
+            Refusal::PrintingDisabled,
+            "Printing is disabled for this contest",
+        )
+        .into());
     }
 
-    let sub = jobs::fetch_submission(host, submission_id)?
-        .ok_or_else(|| PluginHttpResponse::error(404, "Submission not found"))?;
+    let sub = jobs::fetch_submission(host, submission_id)?.ok_or_else(|| {
+        PluginHttpResponse::refuse(404, Refusal::SubmissionNotFound, "Submission not found")
+    })?;
 
     // Someone else's submission is not found, exactly like one that does
     // not exist, so the route cannot tell which ids are taken.
     if (sub.user_id != user_id && !req.is_staff()) || sub.contest_id != Some(contest_id) {
-        return Err(PluginHttpResponse::error(404, "Submission not found").into());
+        return Err(PluginHttpResponse::refuse(
+            404,
+            Refusal::SubmissionNotFound,
+            "Submission not found",
+        )
+        .into());
     }
 
     let label = jobs::fetch_problem_label(host, contest_id, sub.problem_id)?.map(|r| {
@@ -147,23 +163,30 @@ pub fn handle_print_submission(
 
     let files: Vec<SourceFile> = serde_json::from_value(sub.files.clone()).unwrap_or_default();
     if files.is_empty() {
-        return Err(PluginHttpResponse::error(400, "Submission has no files to print").into());
+        return Err(PluginHttpResponse::refuse(
+            400,
+            Refusal::NothingToPrint,
+            "Submission has no files to print",
+        )
+        .into());
     }
 
     // Validate every file up front so we never insert a partial set.
     let mut planned = Vec::with_capacity(files.len());
     for f in &files {
         if f.content.chars().count() > models::MAX_SOURCE_CHARS {
-            return Err(PluginHttpResponse::error(
+            return Err(PluginHttpResponse::refuse(
                 413,
+                Refusal::DocumentTooLarge,
                 format!("{} is too large to print", f.filename),
             )
             .into());
         }
         let pages = models::estimate_pages(&f.content);
         if pages > cfg.max_pages {
-            return Err(PluginHttpResponse::error(
+            return Err(PluginHttpResponse::refuse(
                 413,
+                Refusal::TooManyPages,
                 format!(
                     "{} is too long ({pages} pages, limit {})",
                     f.filename, cfg.max_pages
@@ -210,10 +233,17 @@ pub fn handle_print_arbitrary(
     let body: ArbitraryJobRequest = parse_body(req)?;
 
     if body.source.trim().is_empty() {
-        return Err(PluginHttpResponse::error(400, "Nothing to print").into());
+        return Err(
+            PluginHttpResponse::refuse(400, Refusal::NothingToPrint, "Nothing to print").into(),
+        );
     }
     if body.source.chars().count() > models::MAX_SOURCE_CHARS {
-        return Err(PluginHttpResponse::error(413, "Document is too large to print").into());
+        return Err(PluginHttpResponse::refuse(
+            413,
+            Refusal::DocumentTooLarge,
+            "Document is too large to print",
+        )
+        .into());
     }
 
     // Pasted code prints only inside a contest: the route's contest, checked
@@ -222,25 +252,35 @@ pub fn handle_print_arbitrary(
     let contest_id = contest.id;
     let cfg = config::load_contest_config(host, contest_id)?;
     if !cfg.enabled {
-        return Err(PluginHttpResponse::error(403, "Printing is disabled for this contest").into());
+        return Err(PluginHttpResponse::refuse(
+            403,
+            Refusal::PrintingDisabled,
+            "Printing is disabled for this contest",
+        )
+        .into());
     }
     if !cfg.allow_arbitrary {
-        return Err(PluginHttpResponse::error(
+        return Err(PluginHttpResponse::refuse(
             403,
+            Refusal::PastedCodeDisabled,
             "Printing pasted code is disabled for this contest",
         )
         .into());
     }
     if !req.is_staff() && !contest.participant {
-        return Err(
-            PluginHttpResponse::error(403, "Only contestants can print in this contest").into(),
-        );
+        return Err(PluginHttpResponse::refuse(
+            403,
+            Refusal::NotAContestant,
+            "Only contestants can print in this contest",
+        )
+        .into());
     }
 
     let pages = models::estimate_pages(&body.source);
     if pages > cfg.max_pages {
-        return Err(PluginHttpResponse::error(
+        return Err(PluginHttpResponse::refuse(
             413,
+            Refusal::TooManyPages,
             format!("Too long to print ({pages} pages, limit {})", cfg.max_pages),
         )
         .into());
@@ -308,8 +348,9 @@ fn queue_jobs(
     let counted = cfg.max_jobs_per_user > 0 && !req.is_staff();
     let count = new_jobs.len() as i32;
     if counted && !jobs::claim_quota(host, contest_id, user_id, count, cfg.max_jobs_per_user)? {
-        return Err(PluginHttpResponse::error(
+        return Err(PluginHttpResponse::refuse(
             429,
+            Refusal::PrintLimitReached,
             format!(
                 "Print limit reached ({} jobs per contestant)",
                 cfg.max_jobs_per_user
@@ -354,10 +395,9 @@ pub fn handle_admin_list_jobs(
         .clamp(1, 200);
     let status = match req.query.get("status").map(String::as_str) {
         None | Some("") => None,
-        Some(raw) => Some(
-            JobStatus::parse(raw)
-                .ok_or_else(|| PluginHttpResponse::error(400, "Invalid status filter"))?,
-        ),
+        Some(raw) => Some(JobStatus::parse(raw).ok_or_else(|| {
+            PluginHttpResponse::refuse(400, Refusal::InvalidStatusFilter, "Invalid status filter")
+        })?),
     };
     let filters = JobFilters {
         status,
@@ -434,7 +474,7 @@ pub fn handle_admin_get_job(
     let id = path_i64(req, "id")?;
     match jobs::fetch_job_source(host, id)? {
         Some(j) => ok(serde_json::json!({ "data": j })),
-        None => Err(PluginHttpResponse::error(404, "Job not found").into()),
+        None => Err(PluginHttpResponse::refuse(404, Refusal::JobNotFound, "Job not found").into()),
     }
 }
 

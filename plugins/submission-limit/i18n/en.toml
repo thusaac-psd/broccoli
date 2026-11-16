@@ -28,3 +28,5 @@
 'submission-limit.apiError.SUBMISSION_LIMIT_EXCEEDED' = 'You have used all {max_submissions} submissions for this problem.'
 'plugin.submission-limit.name' = 'Submission limit'
 'plugin.submission-limit.description' = 'Limits how many times a contestant may submit each problem.'
+'submission-limit.apiError.INVALID_PATH_PARAMETER' = 'This link is not valid.'
+'submission-limit.apiError.SIGN_IN_REQUIRED' = 'Sign in to do this.'

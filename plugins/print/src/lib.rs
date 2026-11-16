@@ -7,6 +7,7 @@ pub mod handlers;
 pub mod jobs;
 pub mod lifecycle;
 pub mod models;
+pub mod refusal;
 pub mod schema;
 pub mod stations;
 

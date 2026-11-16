@@ -6,7 +6,7 @@ use crate::types::PluginHttpResponse;
 /// It is one of two things, and only the first ever reaches the caller:
 ///
 /// - a client error, the response the handler built with
-///   [`PluginHttpResponse::error`] (or any other non-5xx response);
+///   [`PluginHttpResponse::refuse`] (or any other non-5xx response);
 /// - an internal error: every [`SdkError`] (a failed query, a host call
 ///   refused, a serialization error) and anything [`ApiError::internal`]
 ///   wraps. Its detail goes to the server log and the caller gets the host's
@@ -117,12 +117,21 @@ mod tests {
 
     #[test]
     fn client_errors_carry_the_host_error_shape() {
-        let resp =
-            ApiError::from(PluginHttpResponse::error(404, "Match not found")).into_response();
+        crate::refusal_codes! {
+            enum Refusal {
+                MatchNotFound = "MATCH_NOT_FOUND",
+            }
+        }
+        let resp = ApiError::from(PluginHttpResponse::refuse(
+            404,
+            Refusal::MatchNotFound,
+            "Match not found",
+        ))
+        .into_response();
         assert_eq!(resp.status, 404);
         assert_eq!(
             resp.body,
-            Some(serde_json::json!({"code": "NOT_FOUND", "message": "Match not found"}))
+            Some(serde_json::json!({"code": "MATCH_NOT_FOUND", "message": "Match not found"}))
         );
     }
 }

@@ -74,7 +74,12 @@ fn handle_submission_status(
     let contest = req.contest()?;
     let problem_id = req.problem_id()?;
     if contest.phase != ContestPhase::Running {
-        return Err(PluginHttpResponse::error(409, "The contest is not running").into());
+        return Err(PluginHttpResponse::refuse(
+            409,
+            Refusal::ContestNotRunning,
+            "The contest is not running",
+        )
+        .into());
     }
     // ...
 }
@@ -84,16 +89,34 @@ fn handle_submission_status(
 
 在未声明 `contest` 的路由上调用 `req.contest()` 属于插件缺陷，请求会以内部错误失败。
 
-其他路径参数（例如对局 ID 或提交 ID）由插件自行通过 `req.param::<T>("name")` 读取。缺失或无法解析的值返回 `400 VALIDATION_ERROR`。
+其他路径参数（例如对局 ID 或提交 ID）由插件自行通过 `req.param::<T>("name")` 读取。缺失或无法解析的值返回 `400 INVALID_PATH_PARAMETER`。
 
 ## 错误
 
 处理函数返回 `Result<PluginHttpResponse, ApiError>`，而 `ApiError` 只有两种：
 
-- 客户端错误，通过 `PluginHttpResponse::error(status, message)` 构造。其响应体采用服务器的错误格式 `{"code": ..., "message": ...}`，错误码对应该状态码（`404` 为 `NOT_FOUND`，`409` 为 `CONFLICT`，依此类推）。当前端需要区分同一状态码下的不同情形时，使用 `PluginHttpResponse::error_with_code(status, code, message)`。
+- 客户端错误，通过 `PluginHttpResponse::refuse(status, code, message)` 构造。其响应体采用服务器的错误格式 `{"code": ..., "message": ...}`。`code` 是插件的拒绝码之一，用 `refusal_codes!` 统一声明（见下文），`message` 是写入日志的英文说明。
 - 内部错误：`?` 转换的所有 `SdkError`（例如查询失败），以及通过 `ApiError::internal(detail)` 包装的任何内容。详情写入服务器日志，调用者收到带通用消息的 `500 INTERNAL_ERROR`，永远不会看到详情。
 
-服务器以插件 ID 为前缀转发客户端错误：`cooldown` 插件的 `COOLDOWN_ACTIVE` 到达调用者时是 `cooldown.COOLDOWN_ACTIVE`，其文本来自翻译包中的 `cooldown.apiError.COOLDOWN_ACTIVE`（见[翻译](./translations.md)）。因此插件的错误码永远不会被当作服务器自己的错误码，例如 Web 客户端会据以行动的 `TOKEN_INVALID` 或 `PLUGIN_UNAVAILABLE`。客户端错误只以 `400`、`403`、`404`、`409`、`413` 或 `429` 发出；其他客户端错误状态码一律以 `400` 发出。调用者是否已登录由服务器判断：请在清单中声明 `access`，而不是返回 `401`。在 `public` 路由上，`req.require_user_id()` 对匿名调用者返回 `403 PERMISSION_DENIED`。
+服务器以插件 ID 为前缀转发客户端错误：`cooldown` 插件的 `COOLDOWN_ACTIVE` 到达调用者时是 `cooldown.COOLDOWN_ACTIVE`，其文本来自翻译包中的 `cooldown.apiError.COOLDOWN_ACTIVE`（见[翻译](./translations.md)）。因此插件的错误码永远不会被当作服务器自己的错误码，例如 Web 客户端会据以行动的 `TOKEN_INVALID` 或 `PLUGIN_UNAVAILABLE`。客户端错误只以 `400`、`403`、`404`、`409`、`413` 或 `429` 发出；其他客户端错误状态码一律以 `400` 发出。调用者是否已登录由服务器判断：请在清单中声明 `access`，而不是返回 `401`。在 `public` 路由上，`req.require_user_id()` 对匿名调用者返回 `403 SIGN_IN_REQUIRED`。
+
+把路由和钩子用到的每个拒绝码声明在一个枚举中，并用一个测试确保每个拒绝码在每个翻译包中都有文本，这样任何拒绝都不会以含义不符的通用提示出现在用户面前：
+
+```rust
+broccoli_server_sdk::refusal_codes! {
+    pub enum Refusal {
+        /// A token is spent while the contest is not running.
+        ContestNotRunning = "CONTEST_NOT_RUNNING",
+    }
+}
+
+#[test]
+fn every_refusal_code_has_a_text_in_every_pack() {
+    broccoli_server_sdk::testing::assert_refusal_codes_translated::<Refusal>();
+}
+```
+
+该测试读取插件的 `plugin.toml` 及其声明的翻译包，并同时检查 SDK 自己对路由作出的拒绝码（`INVALID_PATH_PARAMETER`、`SIGN_IN_REQUIRED`）。
 
 插件路由返回的任何 `5xx` 都由服务器自己作答，因此即使处理函数手工构造了 `500` 响应，数据库或宿主的文本也不会出现在响应体中。既不是成功也不是客户端错误的状态码（例如重定向）同样如此处理。
 

@@ -104,7 +104,7 @@ sends it under your plugin's id, so `SUBMISSION_LIMIT_EXCEEDED` from
 
 ```rust
 HookResponse::reject(
-    "SUBMISSION_LIMIT_EXCEEDED",
+    Refusal::SubmissionLimitExceeded,
     format!("Submission limit reached ({count}/{max})"),
     429,
     Some(serde_json::json!({ "submissions_made": count, "max_submissions": max })),
@@ -115,8 +115,13 @@ HookResponse::reject(
 'submission-limit.apiError.SUBMISSION_LIMIT_EXCEEDED' = 'You have used all {max_submissions} submissions for this problem.'
 ```
 
-A code with no translation falls back to a generic message for its HTTP status
-class, never the host's text for a code of the same name. The same lookup
+The code is one of the plugin's refusal codes, declared once with
+`refusal_codes!`, and the plugin's test
+`broccoli_server_sdk::testing::assert_refusal_codes_translated` fails while any
+of them lacks a text in one of your packs (see
+[Routes](./routes.md#errors)). A code with no translation falls back to a
+generic message for its HTTP status class, never the host's text for a code of
+the same name. The same lookup
 applies to errors from your plugin's own HTTP routes. A rejection goes out as
 `400`, `403`, `404`, `409`, `413` or `429`; any other status is sent as `400`.
 

@@ -19,18 +19,25 @@ use crate::bracket;
 use crate::executor::{self, DriveError};
 use crate::machine::{Event, Rejection};
 use crate::model::{AdjudicationReason, MatchState, Phase, PhaseName, RoundDef, Setup};
+use crate::refusal::Refusal;
 use crate::storage;
 use crate::visibility::{self, VisibilityCtx};
 
 /// Map a failed [`executor::drive`] to its HTTP response.
 fn drive_error(error: DriveError) -> ApiError {
     match error {
-        DriveError::NotFound => PluginHttpResponse::error(404, "Match not found").into(),
-        DriveError::Rejected(rejection @ Rejection::AlreadyDecided) => {
-            PluginHttpResponse::error(409, rejection.to_string()).into()
+        DriveError::NotFound => {
+            PluginHttpResponse::refuse(404, Refusal::MatchNotFound, "Match not found").into()
         }
         DriveError::Rejected(rejection) => {
-            PluginHttpResponse::error(400, rejection.to_string()).into()
+            let (status, code) = match rejection {
+                Rejection::AlreadyDecided => (409, Refusal::MatchDecided),
+                Rejection::NotParticipant(_) => (400, Refusal::NotAPlayer),
+                Rejection::NotAwaitingStart => (400, Refusal::NotAwaitingStart),
+                Rejection::TooManyGames => (400, Refusal::NoGameLeft),
+                Rejection::TimeOverflow(_) => (400, Refusal::TimeOutOfRange),
+            };
+            PluginHttpResponse::refuse(status, code, rejection.to_string()).into()
         }
         DriveError::Sdk(error) => error.into(),
     }
@@ -42,15 +49,31 @@ pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     let contest_id = info.id;
     let match_id: u8 = req.param("match_id")?;
 
-    let setup = storage::load_setup(host, contest_id)?
-        .ok_or_else(|| PluginHttpResponse::error(400, "The bracket has not been set up yet"))?;
-    let current = storage::load_match(host, contest_id, match_id)?
-        .ok_or_else(|| PluginHttpResponse::error(404, "Match not found"))?;
+    let setup = storage::load_setup(host, contest_id)?.ok_or_else(|| {
+        PluginHttpResponse::refuse(
+            400,
+            Refusal::BracketNotSetUp,
+            "The bracket has not been set up yet",
+        )
+    })?;
+    let current = storage::load_match(host, contest_id, match_id)?.ok_or_else(|| {
+        PluginHttpResponse::refuse(404, Refusal::MatchNotFound, "Match not found")
+    })?;
     if info.phase.stage() == "before" {
-        return Err(PluginHttpResponse::error(400, "The contest has not started yet").into());
+        return Err(PluginHttpResponse::refuse(
+            400,
+            Refusal::ContestNotStarted,
+            "The contest has not started yet",
+        )
+        .into());
     }
     if info.phase.stage() == "after" {
-        return Err(PluginHttpResponse::error(400, "The contest has ended").into());
+        return Err(PluginHttpResponse::refuse(
+            400,
+            Refusal::ContestEnded,
+            "The contest has ended",
+        )
+        .into());
     }
     let event = if setup.is_scheduled(current.round) {
         let now = crate::clock::now_ms(host)?;
@@ -59,7 +82,7 @@ pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
             .get(&current.round)
             .is_some_and(|clock| !clock.awaiting_reschedule && now >= clock.starts_at_ms);
         if !ready {
-            return Err(PluginHttpResponse::error(409, "This match follows its shared stage schedule; reschedule the unopened stage instead").into());
+            return Err(PluginHttpResponse::refuse(409, Refusal::FollowsStageSchedule, "This match follows its shared stage schedule; reschedule the unopened stage instead").into());
         }
         Event::Tick
     } else {
@@ -67,10 +90,20 @@ pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
             let matches = storage::load_all_matches(host, contest_id)?;
             let Some(stage_at) = bracket::stage_open_at_ms(&setup, &matches, current.round, 0)
             else {
-                return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
+                return Err(PluginHttpResponse::refuse(
+                    409,
+                    Refusal::StageNotOpen,
+                    "This stage has not opened yet",
+                )
+                .into());
             };
             if crate::clock::now_ms(host)? < stage_at {
-                return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
+                return Err(PluginHttpResponse::refuse(
+                    409,
+                    Refusal::StageNotOpen,
+                    "This stage has not opened yet",
+                )
+                .into());
             }
         }
         Event::Start
@@ -102,8 +135,13 @@ pub fn handle_force_decide(
     let match_id: u8 = req.param("match_id")?;
 
     let body: ForceDecideRequest = match req.body.clone() {
-        Some(v) => serde_json::from_value(v)
-            .map_err(|e| PluginHttpResponse::error(400, format!("Invalid request body: {e}")))?,
+        Some(v) => serde_json::from_value(v).map_err(|e| {
+            PluginHttpResponse::refuse(
+                400,
+                Refusal::InvalidRequestBody,
+                format!("Invalid request body: {e}"),
+            )
+        })?,
         None => ForceDecideRequest::default(),
     };
     let event = match body.winner {
@@ -499,13 +537,19 @@ pub fn handle_get_match(
     let contest_id = req.contest()?.id;
     let match_id: u8 = req.param("match_id")?;
 
-    let setup = storage::load_setup(host, contest_id)?
-        .ok_or_else(|| PluginHttpResponse::error(404, "The bracket has not been set up yet"))?;
-    let m = storage::load_match(host, contest_id, match_id)?
-        .ok_or_else(|| PluginHttpResponse::error(404, "Match not found"))?;
+    let setup = storage::load_setup(host, contest_id)?.ok_or_else(|| {
+        PluginHttpResponse::refuse(
+            404,
+            Refusal::BracketNotSetUp,
+            "The bracket has not been set up yet",
+        )
+    })?;
+    let m = storage::load_match(host, contest_id, match_id)?.ok_or_else(|| {
+        PluginHttpResponse::refuse(404, Refusal::MatchNotFound, "Match not found")
+    })?;
     let round_def = setup
         .round_for_match(m.round, m.pos)
-        .ok_or_else(|| PluginHttpResponse::error(500, "Match references an undefined round"))?;
+        .ok_or_else(|| ApiError::internal("Match references an undefined round"))?;
 
     let viewer = req.user_id();
     let staff = req.is_staff();

@@ -72,7 +72,7 @@ ja = "locales/ja.toml"
 
 ```rust
 HookResponse::reject(
-    "SUBMISSION_LIMIT_EXCEEDED",
+    Refusal::SubmissionLimitExceeded,
     format!("Submission limit reached ({count}/{max})"),
     429,
     Some(serde_json::json!({ "submissions_made": count, "max_submissions": max })),
@@ -83,7 +83,7 @@ HookResponse::reject(
 'submission-limit.apiError.SUBMISSION_LIMIT_EXCEEDED' = 'You have used all {max_submissions} submissions for this problem.'
 ```
 
-没有翻译的代码会退回到其 HTTP 状态类别的通用提示，绝不会显示主机对同名代码的说明。插件自有 HTTP 路由返回的错误使用同样的查找方式。拒绝只以 `400`、`403`、`404`、`409`、`413` 或 `429` 发出；其他状态码一律以 `400` 发出。
+该代码是插件用 `refusal_codes!` 统一声明的拒绝码之一；只要其中任何一个在某个翻译包中缺少文本，插件的测试 `broccoli_server_sdk::testing::assert_refusal_codes_translated` 就会失败（见[路由](./routes.md#错误)）。没有翻译的代码会退回到其 HTTP 状态类别的通用提示，绝不会显示主机对同名代码的说明。插件自有 HTTP 路由返回的错误使用同样的查找方式。拒绝只以 `400`、`403`、`404`、`409`、`413` 或 `429` 发出；其他状态码一律以 `400` 发出。
 
 ## 翻译评测错误
 

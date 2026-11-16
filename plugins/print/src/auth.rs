@@ -4,6 +4,8 @@
 use broccoli_server_sdk::Host;
 use broccoli_server_sdk::prelude::*;
 
+use crate::refusal::Refusal;
+
 use crate::config::{self, StationCredential};
 
 const SCHEME: &str = "PrintStation ";
@@ -59,8 +61,13 @@ fn station_for<'a>(token: &str, stations: &'a [StationCredential]) -> Option<&'a
 /// entry says which contest lists its token, and the client sends it with
 /// every request.
 pub fn authenticate_station(host: &Host, req: &PluginHttpRequest) -> Result<StationAuth, ApiError> {
-    let token = extract_token(req)
-        .ok_or_else(|| PluginHttpResponse::error(403, "Missing print-station token"))?;
+    let token = extract_token(req).ok_or_else(|| {
+        PluginHttpResponse::refuse(
+            403,
+            Refusal::StationTokenMissing,
+            "Missing print-station token",
+        )
+    })?;
 
     let global = config::load_global_config(host)?;
     if let Some(name) = station_for(&token, &global.stations) {
@@ -75,8 +82,9 @@ pub fn authenticate_station(host: &Host, req: &PluginHttpRequest) -> Result<Stat
         .get("contest_id")
         .and_then(|s| s.parse::<i32>().ok())
     else {
-        return Err(PluginHttpResponse::error(
+        return Err(PluginHttpResponse::refuse(
             403,
+            Refusal::StationTokenInvalid,
             "Invalid print-station token: no deployment-wide station has it, \
              and the request names no contest",
         )
@@ -88,8 +96,9 @@ pub fn authenticate_station(host: &Host, req: &PluginHttpRequest) -> Result<Stat
             name: format!("contest-{contest_id}/{name}"),
             contest_filter: Some(contest_id),
         }),
-        None => Err(PluginHttpResponse::error(
+        None => Err(PluginHttpResponse::refuse(
             403,
+            Refusal::StationTokenInvalid,
             format!("Invalid print-station token for contest {contest_id}"),
         )
         .into()),
