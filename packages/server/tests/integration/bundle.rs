@@ -459,3 +459,64 @@ async fn a_bundle_carries_no_plugin_wide_config() {
         .expect("import");
     assert_eq!(plugin_settings(&empty).await, "none");
 }
+
+/// Replacing the target's problems replaces their configs too: no config of
+/// a replaced problem, at the problem scope or in a contest, survives to
+/// configure the imported problem that takes its id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replacing_problems_removes_the_configs_of_the_replaced_ones() {
+    let source = TestApp::spawn().await;
+    let admin = source
+        .create_user_with_role("bundle_replace_admin", "pass1234", "admin")
+        .await;
+    let problem = source.create_problem(&admin, "Fresh").await;
+    let archive = export(
+        &source,
+        ExportOptions {
+            selection: Selection::Problems(vec![problem]),
+            with_secrets: false,
+        },
+    )
+    .await
+    .expect("export");
+
+    let target = TestApp::spawn().await;
+    let admin = target
+        .create_user_with_role("bundle_replace_admin", "pass1234", "admin")
+        .await;
+    let old = target.create_problem(&admin, "Old").await;
+    assert_eq!(old, problem, "the imported problem takes the replaced id");
+    let contest = target.create_contest(&admin, "Old Cup", true, false).await;
+    target.add_problem_to_contest(contest, old, &admin).await;
+    exec(
+        &target,
+        &format!(
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) VALUES \
+             ('problem', '{old}', 'someplugin:old_ns', '{{}}', 0, now()), \
+             ('contest_problem', '{contest}:{old}', 'someplugin:limits', '{{}}', 0, now()), \
+             ('contest', '{contest}', 'someplugin:scoring', '{{}}', 0, now())"
+        ),
+    )
+    .await;
+
+    import(
+        &target,
+        &archive,
+        ImportOptions {
+            replace_problems: true,
+            wipe_dependents: true,
+        },
+    )
+    .await
+    .expect("replace");
+    assert_eq!(
+        text(
+            &target,
+            "SELECT coalesce(string_agg(scope || '/' || namespace, ',' ORDER BY scope), '') AS v \
+             FROM plugin_config"
+        )
+        .await,
+        "contest/someplugin:scoring",
+        "only the contest's own config, which no replaced problem owns, stays"
+    );
+}
