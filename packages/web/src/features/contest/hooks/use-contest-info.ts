@@ -1,16 +1,8 @@
 import { serverNow, useApiClient } from '@broccoli/web-sdk/api';
 import { useAuthReady } from '@broccoli/web-sdk/auth';
-import type { Contest } from '@broccoli/web-sdk/contest';
+import { type Contest, contestPollPace } from '@broccoli/web-sdk/contest';
 import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { useQuery } from '@tanstack/react-query';
-
-import {
-  contestPollPace,
-  PHASE_DUE_SPREAD_MS,
-} from '@/features/contest/utils/status';
-
-/** This seat's place in the spread of asks after a phase change. */
-const SEAT_OFFSET_MS = Math.round(Math.random() * PHASE_DUE_SPREAD_MS);
 
 /** The query key of the contest `contestId`, for refetching it from elsewhere. */
 export const contestQueryKey = (contestId: number) => ['contest', contestId];
@@ -39,7 +31,7 @@ export function useContestInfo(contestId: number) {
       return data;
     },
     refetchInterval: pollInterval<Contest>((contest) =>
-      contest ? contestPollPace(contest, serverNow(), SEAT_OFFSET_MS) : false,
+      contest ? contestPollPace(contest, serverNow()) : false,
     ),
   });
   return {
