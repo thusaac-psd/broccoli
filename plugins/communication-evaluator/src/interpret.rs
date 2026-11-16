@@ -1,10 +1,11 @@
 use broccoli_server_sdk::evaluator::{CompileOutcome, RunOutcome};
 use broccoli_server_sdk::types::{OperationResult, TestCaseVerdict, Verdict};
 
-/// POSIX signal number for SIGPIPE. A contestant terminated by SIGPIPE wrote to
-/// a pipe whose reader (the interactor/manager) had already closed it - i.e. the
-/// interactor finished the interaction first. That is not a contestant fault, so
-/// the verdict defers to the interactor instead of reporting RuntimeError.
+/// POSIX signal number for SIGPIPE: the program wrote to a pipe nobody reads
+/// any more. A contestant killed by it wrote after the manager closed its end,
+/// so the manager finished the interaction and its verdict decides. A manager
+/// killed by it wrote after every contestant left, which the contestants
+/// caused, so it is never the problem's failure.
 const SIGPIPE: i32 = 13;
 
 /// Interpret the communication operation result into a TestCaseVerdict.
@@ -42,27 +43,26 @@ pub fn interpret_result(
         };
     }
 
-    if let Some(compile_mgr) = result.task_results.get("compile_manager")
-        && !compile_mgr.success
-    {
-        return TestCaseVerdict {
-            test_case_id,
-            verdict: Verdict::SystemError,
-            score: 0.0,
-            time_used_ms: None,
-            memory_used_kb: None,
-            message: Some(truncate(
-                &compile_mgr.sandbox_result.stderr,
-                "Manager compilation failed",
-            )),
-            stdout: None,
-            stderr: None,
-            // The problem's manager does not build: every attempt fails alike.
-            problem_failure: Some(truncate(
-                &compile_mgr.sandbox_result.stderr,
-                "Manager compilation failed",
-            )),
-        };
+    if let Some(compile_mgr) = result.task_results.get("compile_manager") {
+        match CompileOutcome::of(compile_mgr) {
+            CompileOutcome::Compiled => {}
+            // The compiler rejected the problem's manager: every attempt
+            // fails alike, so the failure stands.
+            CompileOutcome::Rejected { diagnostics } => {
+                let failure = truncate(&diagnostics, "Manager compilation failed");
+                return TestCaseVerdict {
+                    problem_failure: Some(failure.clone()),
+                    ..without_run(test_case_id, Verdict::SystemError, failure)
+                };
+            }
+            CompileOutcome::Fault { reason } => {
+                return without_run(
+                    test_case_id,
+                    Verdict::SystemError,
+                    format!("Manager: {}", truncate(&reason, "compilation failed")),
+                );
+            }
+        }
     }
 
     for i in 0..num_processes {
@@ -110,6 +110,7 @@ pub fn interpret_result(
         runs.push(run);
     }
 
+    let mut contestants_exited = true;
     for (i, run) in runs.into_iter().enumerate() {
         let sandbox = &run.sandbox_result;
         let (verdict, message) = match RunOutcome::of(run) {
@@ -117,7 +118,10 @@ pub fn interpret_result(
             // SIGPIPE means the contestant wrote after the interactor closed
             // its end: the interactor finished the interaction and decided
             // the verdict, so it is the authority, not the incidental signal.
-            RunOutcome::Signaled(Some(SIGPIPE)) => continue,
+            RunOutcome::Signaled(Some(SIGPIPE)) => {
+                contestants_exited = false;
+                continue;
+            }
             RunOutcome::NotRun => (
                 Verdict::SystemError,
                 format!("Contestant {i} run step was skipped"),
@@ -180,27 +184,77 @@ pub fn interpret_result(
     };
 
     let mgr_sandbox = &run_mgr.sandbox_result;
-
-    if mgr_sandbox.exit_code != Some(0) {
-        return TestCaseVerdict {
+    let manager_failed =
+        |verdict: Verdict, message: String, problem_failure: Option<String>| TestCaseVerdict {
             test_case_id,
-            verdict: Verdict::SystemError,
+            verdict,
             score: 0.0,
             time_used_ms: time_to_ms(total_time_s),
             memory_used_kb: max_memory_kb.map(|m| m as i64),
-            message: Some(format!(
-                "Manager exited with code {} — {}",
-                mgr_sandbox.exit_code.unwrap_or(-1),
-                truncate(&mgr_sandbox.stderr, "manager error")
-            )),
+            message: Some(message),
             stdout: None,
             stderr: opt_nonempty(&mgr_sandbox.stderr),
-            // The problem's manager failed: every attempt fails alike.
-            problem_failure: Some(format!(
-                "Manager exited with code {}",
-                mgr_sandbox.exit_code.unwrap_or(-1)
-            )),
+            problem_failure,
         };
+    let detail = || truncate(&mgr_sandbox.stderr, "manager error");
+    // A manager that ran out of time or memory may have been waiting on or
+    // buffering a contestant's output, and a sandbox fault or a step that
+    // never ran says nothing about the manager: the platform judges these
+    // again.
+    let judged_again =
+        |how: &str| manager_failed(Verdict::SystemError, format!("{how}: {}", detail()), None);
+    match RunOutcome::of(run_mgr) {
+        RunOutcome::Exited => {}
+        // The manager wrote to a pipe no contestant reads any more: every
+        // contestant exited (the loop above returned otherwise, or let a
+        // contestant's own SIGPIPE through) before the interaction was over.
+        // A contestant that left early fails the case; when the contestants
+        // died of SIGPIPE too, each closed on the other and the platform
+        // judges it again.
+        RunOutcome::Signaled(Some(SIGPIPE)) => {
+            return if contestants_exited {
+                manager_failed(
+                    Verdict::WrongAnswer,
+                    "The contestant exited before the interaction was over".into(),
+                    None,
+                )
+            } else {
+                manager_failed(
+                    Verdict::SystemError,
+                    "The manager and the contestants closed their pipes on each other".into(),
+                    None,
+                )
+            };
+        }
+        // The problem's manager failed on its own: every attempt fails alike,
+        // so the failure stands.
+        RunOutcome::NonZeroExit(code) => {
+            let failure = format!("Manager exited with code {code}");
+            return manager_failed(
+                Verdict::SystemError,
+                format!("{failure}: {}", detail()),
+                Some(failure),
+            );
+        }
+        RunOutcome::Signaled(signal) => {
+            let failure = match signal {
+                Some(n) => format!("Manager was terminated by signal {n}"),
+                None => "Manager was terminated by a signal".to_string(),
+            };
+            return manager_failed(
+                Verdict::SystemError,
+                format!("{failure}: {}", detail()),
+                Some(failure),
+            );
+        }
+        RunOutcome::TimedOut => return judged_again("Manager timed out"),
+        RunOutcome::MemoryLimitExceeded => {
+            return judged_again("Manager exceeded its memory limit");
+        }
+        RunOutcome::SandboxFault => {
+            return judged_again("Manager sandbox reported an internal error");
+        }
+        RunOutcome::NotRun => return judged_again("Manager run step was skipped"),
     }
 
     let score_str = mgr_sandbox.stdout.lines().next().unwrap_or("").trim();
@@ -351,44 +405,148 @@ mod tests {
         }
     }
 
-    /// A failure of the problem's own manager stands (`problem_failure`),
-    /// so the host does not judge the submission again; a contestant's or
-    /// the platform's failure does not.
-    #[test]
-    fn only_the_managers_own_failure_is_the_problems_fault() {
-        let ops = |tasks: Vec<(String, TaskExecutionResult)>| OperationResult {
+    fn operation(tasks: Vec<(String, TaskExecutionResult)>) -> OperationResult {
+        OperationResult {
             success: true,
             task_results: HashMap::from_iter(tasks),
             error: None,
-        };
-        let broken_build = ops(vec![task_result(
-            "compile_manager",
-            false,
-            ok_sandbox(1, 1.0, 8192),
-        )]);
-        let verdict = interpret_result(42, &broken_build, 1);
-        assert_eq!(verdict.verdict, Verdict::SystemError);
-        assert!(verdict.problem_failure.is_some(), "{verdict:?}");
+        }
+    }
 
-        let crashed = ops(vec![
+    /// An operation whose manager compile ended as `sandbox`.
+    fn manager_build(success: bool, sandbox: ExecutionResult) -> OperationResult {
+        operation(vec![task_result("compile_manager", success, sandbox)])
+    }
+
+    /// An operation whose contestant exited 0 and whose manager ran as
+    /// `sandbox`.
+    fn manager_run(success: bool, sandbox: ExecutionResult) -> OperationResult {
+        operation(vec![
             task_result("compile_manager", true, ok_sandbox(0, 1.0, 8192)),
             task_result("compile_contestant_0", true, ok_sandbox(0, 1.0, 8192)),
             task_result("run_contestant_0", true, ok_sandbox(0, 0.5, 4096)),
-            task_result(
-                "run_manager",
-                true,
-                ExecutionResult {
-                    exit_code: Some(3),
-                    ..mgr_result("", "assertion failed")
-                },
+            task_result("run_manager", success, sandbox),
+        ])
+    }
+
+    fn ended(
+        sandbox_status: SandboxStatus,
+        exit_code: Option<i32>,
+        stderr: &str,
+    ) -> ExecutionResult {
+        ExecutionResult {
+            exit_code,
+            status: "XX".to_string(),
+            sandbox_status,
+            stderr: stderr.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// The problem is at fault (`problem_failure`, which stands) only for a
+    /// failure every attempt repeats and no contestant can cause: the
+    /// manager's compiler rejecting its source, or the manager exiting
+    /// non-zero or dying of its own signal. A compile or run the platform
+    /// broke (a sandbox fault, a killed or timed-out compiler, a step that
+    /// never ran) is judged again.
+    #[test]
+    fn only_the_managers_own_failure_is_the_problems_fault() {
+        let rejected = manager_build(
+            false,
+            ended(
+                SandboxStatus::NonZeroExit,
+                Some(1),
+                "manager.cpp:3: error: expected ';'",
             ),
-        ]);
-        let verdict = interpret_result(42, &crashed, 1);
+        );
+        let verdict = interpret_result(42, &rejected, 1);
         assert_eq!(verdict.verdict, Verdict::SystemError);
+        assert!(
+            verdict
+                .problem_failure
+                .as_deref()
+                .is_some_and(|f| f.contains("expected ';'")),
+            "{verdict:?}"
+        );
+
+        for (name, success, sandbox) in [
+            (
+                "silent non-zero compile",
+                false,
+                ended(SandboxStatus::NonZeroExit, Some(1), ""),
+            ),
+            (
+                "compile sandbox fault",
+                false,
+                ended(SandboxStatus::InternalError, Some(1), "box clobbered"),
+            ),
+            (
+                "compiler killed",
+                false,
+                ended(SandboxStatus::Signaled, None, ""),
+            ),
+            (
+                "compiler timed out",
+                false,
+                ended(SandboxStatus::TimedOut, None, ""),
+            ),
+            (
+                "compiler could not fork",
+                false,
+                ended(
+                    SandboxStatus::NonZeroExit,
+                    Some(1),
+                    "g++: fatal error: cannot fork: Resource temporarily unavailable",
+                ),
+            ),
+        ] {
+            let verdict = interpret_result(42, &manager_build(success, sandbox), 1);
+            assert_eq!(verdict.verdict, Verdict::SystemError, "{name}");
+            assert_eq!(verdict.problem_failure, None, "{name}: {verdict:?}");
+        }
+
+        let exited = interpret_result(
+            42,
+            &manager_run(
+                false,
+                ended(SandboxStatus::NonZeroExit, Some(3), "assertion failed"),
+            ),
+            1,
+        );
+        assert_eq!(exited.verdict, Verdict::SystemError);
         assert_eq!(
-            verdict.problem_failure.as_deref(),
+            exited.problem_failure.as_deref(),
             Some("Manager exited with code 3")
         );
+
+        let crashed = interpret_result(42, &manager_run(false, signal_sandbox(11)), 1);
+        assert_eq!(crashed.verdict, Verdict::SystemError);
+        assert_eq!(
+            crashed.problem_failure.as_deref(),
+            Some("Manager was terminated by signal 11")
+        );
+
+        for (name, success, sandbox) in [
+            (
+                "run sandbox fault",
+                false,
+                ended(SandboxStatus::InternalError, None, "cgroup gone"),
+            ),
+            (
+                "run timed out",
+                false,
+                ended(SandboxStatus::TimedOut, None, ""),
+            ),
+            (
+                "run never ran",
+                false,
+                ended(SandboxStatus::Unknown, None, ""),
+            ),
+        ] {
+            let verdict = interpret_result(42, &manager_run(success, sandbox), 1);
+            assert_eq!(verdict.verdict, Verdict::SystemError, "{name}");
+            assert_eq!(verdict.problem_failure, None, "{name}: {verdict:?}");
+        }
 
         let lost = OperationResult {
             success: false,
@@ -398,6 +556,34 @@ mod tests {
         let verdict = interpret_result(42, &lost, 1);
         assert_eq!(verdict.verdict, Verdict::SystemError);
         assert_eq!(verdict.problem_failure, None, "the platform's failure");
+    }
+
+    /// A manager killed by SIGPIPE wrote to a contestant that had already
+    /// left: every contestant exited before the interaction was over, which
+    /// is the submission's failure, not the problem's.
+    #[test]
+    fn a_manager_writing_to_a_contestant_that_left_is_the_contestants_failure() {
+        let verdict = interpret_result(42, &manager_run(false, signal_sandbox(SIGPIPE)), 1);
+        assert_eq!(verdict.verdict, Verdict::WrongAnswer, "{verdict:?}");
+        assert_eq!(verdict.score, 0.0);
+        assert_eq!(verdict.problem_failure, None);
+    }
+
+    /// When the contestant died of SIGPIPE too, each closed on the other and
+    /// nobody's fault is known: the platform judges it again.
+    #[test]
+    fn a_manager_and_contestant_both_dying_of_sigpipe_is_judged_again() {
+        let verdict = interpret_result(
+            42,
+            &operation(vec![
+                task_result("compile_contestant_0", true, ok_sandbox(0, 1.0, 8192)),
+                task_result("run_contestant_0", false, signal_sandbox(SIGPIPE)),
+                task_result("run_manager", false, signal_sandbox(SIGPIPE)),
+            ]),
+            1,
+        );
+        assert_eq!(verdict.verdict, Verdict::SystemError, "{verdict:?}");
+        assert_eq!(verdict.problem_failure, None);
     }
 
     #[test]

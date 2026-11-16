@@ -240,8 +240,9 @@ the checker does not compile, was killed by a signal, failed to start, or
 exited with a code testlib gives no meaning); the host records it as the dispatch's fault, so the
 system error carries the code and how the checker failed (staff only, like
 every system-error diagnostic). An evaluator plugin reports a program of the
-problem failing (an interactor or manager that does not build or exits
-non-zero) on the case's verdict (`TestCaseVerdict::problem_failure`, set by the
+problem failing (a manager whose source the compiler rejects, or that
+exits non-zero or dies of a signal of its own; a manager killed by SIGPIPE
+wrote to contestants that had left, which is theirs) on the case's verdict (`TestCaseVerdict::problem_failure`, set by the
 communication evaluator); the host records it the same way, as
 `PROBLEM_FAILED`, where it receives the evaluator's verdict
 (`evaluate_batch::dispatch`), so the system error the contest plugin ends the
