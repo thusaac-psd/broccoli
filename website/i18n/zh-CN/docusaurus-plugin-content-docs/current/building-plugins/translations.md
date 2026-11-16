@@ -88,17 +88,20 @@ HookResponse::reject(
 插件以系统错误结束的评测记录或代码运行可以带上 `error_code`。主机会把它记在插件的 ID 下，因此 `icpc` 给出的 `NO_TEST_CASES` 会存为 `icpc.NO_TEST_CASES`，既不会与其他插件的代码冲突，也不会被当作主机自己的代码。界面只显示词条目录中 `<插件 ID>.apiError.<CODE>` 的翻译：你的词条目录未翻译的代码显示通用的系统错误提示，绝不会显示主机对同名代码的说明。例如：
 
 ```rust
-host.submission.update(&SubmissionUpdate {
-    verdict: Some(Some(Verdict::SystemError)),
-    error_code: Some(Some("NO_TEST_CASES".to_string())),
-    error_message: Some(Some("Problem has no test cases; cannot be judged".to_string())),
-    // ...
-})?;
+host.submission.update(&SubmissionUpdate::standing_system_error(
+    req.submission_id,
+    req.judgement_id,
+    req.judge_epoch,
+    "NO_TEST_CASES",
+    "Problem has no test cases; cannot be judged",
+))?;
 ```
 
 ```toml
 'icpc.apiError.NO_TEST_CASES' = '该题目没有测试点，无法评测。请联系比赛工作人员添加测试点。'
 ```
+
+在提交的系统错误预算用完之前，主机会重新评测系统错误，提交也只在预算用完后才显示它。每次尝试都会重复的失败（例如按当前配置无法评测的题目）应当立即成立：`standing_system_error` 会设置 `SubmissionUpdate::stands`，于是提交立即显示该错误，在题目修改、工作人员重新评测之前不会再被评测。对于之后的尝试可能不会遇到的失败，不要设置 `stands`。不要把这样的提交以 0 分的 `Accepted` 结束：那会被当作通过。
 
 ## 翻译清单和配置模式
 
