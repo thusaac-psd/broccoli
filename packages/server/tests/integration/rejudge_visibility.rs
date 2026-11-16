@@ -403,7 +403,7 @@ async fn seed_live_worker_heartbeat(redis_url: &str, worker_id: &str) {
         arch: None,
         cpu_count: None,
         pid: None,
-        missing_platform_tools: Vec::new(),
+        intake: common::worker::Intake::Accepting,
     };
     let key = NodeRole::Worker.key(&common::config::default_operation_queue_name(), worker_id);
     let value = serde_json::to_string(&heartbeat).expect("serialize heartbeat");

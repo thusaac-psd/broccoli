@@ -229,7 +229,11 @@ A missing platform tool is the worker's fault, never the submission's. A worker
 that lacks one reads no task at all: it stays live, and its heartbeat lists the
 missing tools, so the System page shows it as not taking work. A task reaches
 it only if a tool goes missing while the worker holds it; the attempt is handed
-back for a worker that has the tool. While live workers exist and none of them
+back for a worker that has the tool. A pin never holds work for such a worker:
+an admin cannot name it as a rejudge target, a task pinned to it goes to the
+shared stream, and pinned tasks waiting for it when it stops taking work move
+there within a reclaim tick (see [Message queue](./message-queue.md)). While
+live workers exist and none of them
 takes work, the claim fiber claims nothing, so submissions wait `Queued`
 instead of failing. Work already dispatched when the fleet comes to that is
 handed back the same way: every operation the server waits for fails as

@@ -163,12 +163,15 @@ pub async fn system_overview(
     }))
 }
 
-/// The ids of the live workers. Used by admin endpoints that validate
-/// `target_worker_id` values before they are persisted on submissions.
-pub(crate) async fn live_worker_ids(state: &AppState) -> std::collections::HashSet<String> {
+/// The ids of the live workers that take work, the only workers a task can
+/// be pinned to (see `common::worker::Intake`). Used by admin endpoints that
+/// validate `target_worker_id` values before they are persisted on
+/// submissions.
+pub(crate) async fn accepting_worker_ids(state: &AppState) -> std::collections::HashSet<String> {
     read_workers(state)
         .await
         .into_iter()
+        .filter(|w| w.accepting_work)
         .map(|w| w.id)
         .collect()
 }
@@ -602,7 +605,7 @@ async fn try_read_workers(state: &AppState) -> Result<Vec<WorkerInfo>, String> {
                 arch: p.arch,
                 cpu_count: p.cpu_count,
                 pid: p.pid,
-                missing_platform_tools: p.missing_platform_tools,
+                missing_platform_tools: p.intake.missing_platform_tools().to_vec(),
             })
             .collect(),
     )

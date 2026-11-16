@@ -40,7 +40,7 @@ fn redis_version(info: &str) -> Option<&str> {
         .map(str::trim)
 }
 
-/// Entries one drain step moves out of a dead worker's private stream.
+/// Entries one drain step moves out of a private stream nobody reads.
 const DRAIN_BATCH: usize = 64;
 
 /// Where a published task went.
@@ -224,7 +224,8 @@ impl Mq {
     }
 
     /// Publish an operation task: to `pin`'s private stream when that worker
-    /// is live, else to the shared stream. The task is recorded in its
+    /// is live and takes work (`common::worker::Intake`), else to the shared
+    /// stream. The task is recorded in its
     /// server's outstanding ledger (`task.reply_to`) in the same step.
     pub async fn publish_task(&self, task: &Task, pin: Option<&str>) -> Result<Route, MqError> {
         let payload = serde_json::to_string(task)?;
@@ -392,8 +393,8 @@ impl Mq {
         )
     }
 
-    /// Workers that may have a private stream (live, or dead and not drained
-    /// yet).
+    /// Workers that may have a private stream (live, or dead or refusing work
+    /// and not drained yet).
     pub async fn pinned_workers(&self) -> Result<Vec<String>, MqError> {
         let pinned_set = self.topology.pinned_set();
         Ok(self
@@ -407,9 +408,12 @@ impl Mq {
             .await?)
     }
 
-    /// Move the private streams of dead workers to the shared stream. Live
-    /// workers' streams are left alone. Returns the entries moved.
-    pub async fn drain_dead_private_streams(&self) -> Result<usize, MqError> {
+    /// Move the private streams nobody reads to the shared stream: those of
+    /// dead workers, and of live workers that take no work
+    /// (`common::worker::Intake::Refusing`), less the entries such a worker
+    /// still holds. Streams of workers that take work are left alone. Returns
+    /// the entries moved.
+    pub async fn drain_unread_private_streams(&self) -> Result<usize, MqError> {
         let t = &self.topology;
         let owners = self.pinned_workers().await?;
         let mut moved = 0;

@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use common::liveness::{NodeRole, TTL};
-use common::worker::{Task, TaskReply, TaskResult};
+use common::worker::{Intake, Task, TaskReply, TaskResult};
 use common::{DlqEnvelope, DlqErrorCode, DlqMessageType};
 use mq::{CLAIM_IDLE, Delivery, MAX_DELIVERIES, Mq, ReplyOutcome, Route, Settled};
 use testcontainers::ImageExt;
@@ -57,9 +57,19 @@ fn ids(deliveries: &[Delivery<Task>]) -> BTreeSet<String> {
 }
 
 async fn set_live(conn: &mut redis::aio::MultiplexedConnection, role: NodeRole, id: &str) {
+    set_liveness(conn, role, id, &Intake::Accepting).await;
+}
+
+/// The liveness key of a node whose heartbeat says `intake`.
+async fn set_liveness(
+    conn: &mut redis::aio::MultiplexedConnection,
+    role: NodeRole,
+    id: &str,
+    intake: &Intake,
+) {
     let _: () = redis::cmd("SET")
         .arg(role.key(BASE, id))
-        .arg("{}")
+        .arg(serde_json::json!({ "intake": intake }).to_string())
         .arg("PX")
         .arg(TTL.as_millis() as u64)
         .query_async(conn)
@@ -500,7 +510,7 @@ async fn pinned_tasks_follow_their_worker_and_move_to_the_shared_stream_when_it_
     let taken = w1.reader().read(1).await.unwrap();
     assert_eq!(ids(&taken), BTreeSet::from(["p0".into(), "to-dead".into()]));
     assert_eq!(
-        mq.drain_dead_private_streams().await.unwrap(),
+        mq.drain_unread_private_streams().await.unwrap(),
         0,
         "w1 is live"
     );
@@ -520,7 +530,7 @@ async fn pinned_tasks_follow_their_worker_and_move_to_the_shared_stream_when_it_
         .await
         .unwrap();
 
-    assert_eq!(mq.drain_dead_private_streams().await.unwrap(), 3);
+    assert_eq!(mq.drain_unread_private_streams().await.unwrap(), 3);
     let dlq = mq.dead_letter_consumer("server-1");
     dlq.ensure_groups().await.unwrap();
     let letters = dlq.reader().read(10).await.unwrap();
@@ -570,6 +580,62 @@ async fn pinned_tasks_follow_their_worker_and_move_to_the_shared_stream_when_it_
         .unwrap();
     assert!(pinned.is_empty());
     assert_eq!(xlen(&mut conn, &mq.topology().private("w1")).await, 0);
+}
+
+#[tokio::test]
+async fn a_live_worker_that_takes_no_work_gets_no_pinned_task_and_gives_up_its_unread_ones() {
+    let (_c, url) = redis().await;
+    let mq = Mq::connect(&url, BASE).await.unwrap();
+    let mut conn = admin(&url).await;
+    set_live(&mut conn, NodeRole::Worker, "w1").await;
+    let w1 = mq.task_consumer("w1");
+    w1.ensure_groups().await.unwrap();
+    for id in ["held", "unread-0", "unread-1"] {
+        assert_eq!(
+            mq.publish_task(&task(id), Some("w1")).await.unwrap(),
+            Route::Pinned
+        );
+    }
+    // w1 holds the first one when it stops taking work.
+    let held = w1.reader().read(1).await.unwrap();
+    assert_eq!(ids(&held), BTreeSet::from(["held".into()]));
+    let refusing = Intake::from_missing(vec!["broccoli-compare".into()]);
+    set_liveness(&mut conn, NodeRole::Worker, "w1", &refusing).await;
+
+    assert_eq!(
+        mq.publish_task(&task("after"), Some("w1")).await.unwrap(),
+        Route::Shared,
+        "a worker that takes no work gets no pinned task"
+    );
+    assert_eq!(
+        mq.drain_unread_private_streams().await.unwrap(),
+        2,
+        "the entries w1 never read move; the one it holds stays with it"
+    );
+    let w2 = mq.task_consumer("w2");
+    w2.ensure_groups().await.unwrap();
+    let got = w2.reader().read(10).await.unwrap();
+    assert_eq!(
+        ids(&got),
+        BTreeSet::from(["unread-0".into(), "unread-1".into(), "after".into()])
+    );
+    assert!(got.iter().all(|d| d.deliveries == 1));
+    assert!(
+        w1.refresh(&[held[0].entry.clone()])
+            .await
+            .unwrap()
+            .is_empty(),
+        "w1 still owns the entry it holds"
+    );
+    assert_eq!(mq.drain_unread_private_streams().await.unwrap(), 0);
+
+    // Taking work again, w1 keeps its stream.
+    set_live(&mut conn, NodeRole::Worker, "w1").await;
+    assert_eq!(
+        mq.publish_task(&task("back"), Some("w1")).await.unwrap(),
+        Route::Pinned
+    );
+    assert_eq!(mq.drain_unread_private_streams().await.unwrap(), 0);
 }
 
 #[tokio::test]

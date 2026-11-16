@@ -359,10 +359,12 @@ mod tests {
             arch: None,
             cpu_count: None,
             pid: None,
-            missing_platform_tools: missing_platform_tools
-                .iter()
-                .map(|t| t.to_string())
-                .collect(),
+            intake: common::worker::Intake::from_missing(
+                missing_platform_tools
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect(),
+            ),
         }
     }
 

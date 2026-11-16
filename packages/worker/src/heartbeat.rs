@@ -86,7 +86,7 @@ impl HeartbeatConfig {
             arch: Some(self.system_info.arch.clone()),
             cpu_count: Some(self.system_info.cpu_count),
             pid: Some(self.system_info.pid),
-            missing_platform_tools: self.tools.missing(),
+            intake: common::worker::Intake::from_missing(self.tools.missing()),
         };
         serde_json::to_value(payload).unwrap_or_default()
     }
@@ -152,7 +152,7 @@ mod tests {
             arch: Some("x86_64".into()),
             cpu_count: Some(8),
             pid: Some(4242),
-            missing_platform_tools: Vec::new(),
+            intake: common::worker::Intake::Accepting,
         };
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("\"id\":\"worker-test\""));

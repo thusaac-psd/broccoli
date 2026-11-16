@@ -2362,7 +2362,7 @@ export interface components {
       problem_id: number;
       /**
        * @description Workers to fan out to. One submission is created per worker. Each ID
-       *     must have a live heartbeat. Cannot be empty.
+       *     must be a live worker that takes work. Cannot be empty.
        */
       target_worker_ids: string[];
     };
@@ -2481,8 +2481,8 @@ export interface components {
       submission_ids: number[];
       /**
        * @description When set, every rejudged submission is pinned to this worker. The
-       *     caller must hold `system:admin` and the worker must have a live
-       *     heartbeat. An empty string clears existing pins and also requires
+       *     caller must hold `system:admin` and the worker must be live and take
+       *     work. An empty string clears existing pins and also requires
        *     `system:admin`.
        */
       target_worker_id?: string | null;
@@ -4196,8 +4196,8 @@ export interface components {
        */
       apply_immediately: boolean;
       /**
-       * @description Pin the rejudged submission to a specific worker. Requires
-       *     `system:admin`. An empty string clears an existing pin and also
+       * @description Pin the rejudged submission to a specific worker, which must be live
+       *     and take work. Requires `system:admin`. An empty string clears an existing pin and also
        *     requires `system:admin`. When omitted, the submission is rejudged on the
        *     shared worker pool.
        */
@@ -4535,8 +4535,9 @@ export interface components {
       result?: components['schemas']['JudgeResultResponse'] | null;
       status?: components['schemas']['SubmissionStatus'] | null;
       /**
-       * @description When set, the submission has been pinned to this worker by an admin
-       *     and every operation it produces will run there.
+       * @description When set, the submission has been pinned to this worker by an admin:
+       *     every operation it produces runs there while that worker is live and
+       *     takes work, and on any worker otherwise.
        * @example worker-1
        */
       target_worker_id?: string | null;
@@ -4607,9 +4608,10 @@ export interface components {
       result?: components['schemas']['JudgeResultResponse'] | null;
       status?: components['schemas']['SubmissionStatus'] | null;
       /**
-       * @description When set, the submission has been pinned to this worker by an admin
-       *     and every operation it produces will run there. Shown only to callers
-       *     with `system:view`.
+       * @description When set, the submission has been pinned to this worker by an admin:
+       *     every operation it produces runs there while that worker is live and
+       *     takes work, and on any worker otherwise. Shown only to callers with
+       *     `system:view`.
        * @example worker-1
        */
       target_worker_id?: string | null;

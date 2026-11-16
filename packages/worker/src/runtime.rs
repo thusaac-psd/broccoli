@@ -324,7 +324,8 @@ impl Drop for HeldGuard {
 /// never arrived. It reads from the worker's private and shared streams with one blocking
 /// read for as many tasks as it has free slots, and every
 /// [`mq::REFRESH_INTERVAL`] reclaims tasks other workers abandoned and drains
-/// dead workers' private streams. Entries it reads beyond its free slots wait
+/// the private streams of workers that take no work (dead, or lacking a
+/// platform tool), so a task pinned to such a worker runs elsewhere. Entries it reads beyond its free slots wait
 /// in a local buffer. A task is run by `handle`, which says how to settle it.
 /// Every held entry, running or buffered, is refreshed until it is settled.
 ///
@@ -396,8 +397,8 @@ pub async fn run_consume_loop<F, Fut>(
                 tasks.adopt_own(room, &held.snapshot()).await
             } else if Instant::now() >= next_reclaim {
                 next_reclaim = Instant::now() + mq::REFRESH_INTERVAL;
-                if let Err(e) = mq.drain_dead_private_streams().await {
-                    warn!(error = %e, "Draining dead workers' private streams failed");
+                if let Err(e) = mq.drain_unread_private_streams().await {
+                    warn!(error = %e, "Draining the private streams nobody reads failed");
                 }
                 tasks.reclaim(room).await
             } else {
