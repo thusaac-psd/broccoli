@@ -194,6 +194,114 @@ async fn ioi_feedback_none_withholds_every_score_on_the_scoreboard() {
     assert_eq!(rows[0]["rank"], json!(1), "{}", staff.text);
 }
 
+/// At `feedback_level = "none"` a contestant reads a submission's scores
+/// nowhere until a token unlocks that one submission or the contest ends:
+/// the subtask-scores route and the problem's submission status follow the
+/// same rule.
+#[tokio::test(flavor = "multi_thread")]
+async fn ioi_feedback_none_shows_a_submissions_scores_only_by_token_or_after_the_contest() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_none_scores_admin", "password", "admin")
+        .await;
+    let tokened = app
+        .create_authenticated_user("ioi_none_scores_a", "password")
+        .await;
+    let plain = app
+        .create_authenticated_user("ioi_none_scores_b", "password")
+        .await;
+    let problem_id = app.create_problem(&admin, "IOI None Scores").await;
+    app.create_test_case_with(problem_id, "2\n1 2", "3\n", 100, false, &admin)
+        .await;
+    let contest_id = app
+        .create_typed_contest(&admin, "IOI None Scores", "ioi", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &tokened).await;
+    app.register_for_contest(contest_id, &plain).await;
+    let res = app
+        .put_with_token(
+            &format!("/api/v1/contests/{contest_id}/config/ioi/contest"),
+            &json!({
+                "config": {
+                    "feedback_level": "none",
+                    "tokens": { "mode": "fixed_budget", "initial": 1 }
+                },
+                "enabled": true
+            }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+
+    let mut subs = Vec::new();
+    for who in [&tokened, &plain] {
+        let sub_id = app
+            .create_contest_submission(contest_id, problem_id, who, "cpp", CPP_SUM)
+            .await;
+        let judged = app.wait_for_submission_terminal(sub_id, &admin, 60).await;
+        assert_eq!(judged.body["status"], "Judged", "{}", judged.text);
+        subs.push(sub_id);
+    }
+    app.judging_idle().await;
+
+    let base = format!("/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}");
+    let shown = |who: &str, sub_id: i32| {
+        let app = &app;
+        let base = &base;
+        let who = who.to_string();
+        async move {
+            let scores = app
+                .get_with_token(&format!("{base}/submissions/{sub_id}/subtask-scores"), &who)
+                .await;
+            assert_eq!(scores.status, 200, "{}", scores.text);
+            let status = app
+                .get_with_token(
+                    &format!("{base}/problems/{problem_id}/submission-status"),
+                    &who,
+                )
+                .await;
+            assert_eq!(status.status, 200, "{}", status.text);
+            (
+                !scores.body["subtasks"].is_null(),
+                !status.body["last_submission_score"].is_null(),
+            )
+        }
+    };
+
+    for (who, sub_id) in [(&tokened, subs[0]), (&plain, subs[1])] {
+        assert_eq!(shown(who, sub_id).await, (false, false), "withheld");
+    }
+    let spent = app
+        .post_with_token(
+            &format!("{base}/submissions/{}/token", subs[0]),
+            &json!({}),
+            &tokened,
+        )
+        .await;
+    assert_eq!(spent.status, 200, "{}", spent.text);
+    assert_eq!(shown(&tokened, subs[0]).await, (true, true), "the token");
+    assert_eq!(shown(&plain, subs[1]).await, (false, false), "no token");
+
+    let now = Utc::now();
+    let mut ended: server::entity::contest::ActiveModel =
+        server::entity::contest::Entity::find_by_id(contest_id)
+            .one(&app.db)
+            .await
+            .expect("query contest")
+            .expect("contest exists")
+            .into();
+    ended.start_time = Set(now - Duration::hours(2));
+    ended.end_time = Set(now - Duration::minutes(1));
+    ended.update(&app.db).await.expect("end the contest");
+    assert_eq!(
+        shown(&plain, subs[1]).await,
+        (true, true),
+        "after the contest"
+    );
+}
+
 /// An IOI contest scored by the sum of best subtasks, with one problem of two
 /// cases (40 and 60 points) and one judged correct submission: the admin's
 /// token, the contest and the submission.

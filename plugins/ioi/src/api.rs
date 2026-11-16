@@ -272,7 +272,9 @@ pub(crate) fn handle_submission_status(
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
     let user_id = req.require_user_id()?;
-    let contest_id = req.contest()?.id;
+    let info = req.contest()?;
+    let contest_id = info.id;
+    let phase = info.phase.stage();
     let problem_id = req.problem_id()?;
 
     #[derive(Deserialize)]
@@ -304,21 +306,22 @@ pub(crate) fn handle_submission_status(
 
     let contest_config: ContestConfig = contest::load_config(host, contest_id)?;
 
-    let can_view_full_feedback = req.is_staff()
-        || match last_submission_id {
-            Some(sid) => {
-                tokens_enabled(&contest_config)
-                    && viewer_has_token_feedback_for_submission(host, req, contest_id, sid)?
-            }
-            None => false,
-        };
-
-    let (visible_verdict, visible_score) =
-        if can_view_full_feedback || contest_config.feedback_level.shows_total() {
-            (last_verdict, last_score)
-        } else {
-            (None, None)
-        };
+    let staff = req.is_staff();
+    let tokened = match last_submission_id {
+        Some(sid) if !staff && phase != "after" && tokens_enabled(&contest_config) => {
+            viewer_has_token_feedback_for_submission(host, req, contest_id, sid)?
+        }
+        _ => false,
+    };
+    let (visible_verdict, visible_score) = if contest_config
+        .feedback_level
+        .for_submission_scores(staff, phase, tokened)
+        .shows_total()
+    {
+        (last_verdict, last_score)
+    } else {
+        (None, None)
+    };
 
     Ok(PluginHttpResponse {
         status: 200,
@@ -637,10 +640,9 @@ pub(crate) fn subtask_scores_access_decision(
         }
     }
 
-    let can_view_subtask_scores = tokened_feedback
-        || feedback_level
-            .for_scores(can_view_all_submissions, phase)
-            .shows_subtask_scores();
+    let can_view_subtask_scores = feedback_level
+        .for_submission_scores(can_view_all_submissions, phase, tokened_feedback)
+        .shows_subtask_scores();
 
     SubtaskScoresAccess::Allowed {
         can_view_subtask_scores,
