@@ -34,7 +34,7 @@ These have no setting.
 | What | How |
 | --- | --- |
 | Wall time (contest phases, token expiry, rate limits, `Date`) | The database clock, sampled every 30 to 60 s |
-| Server database pools | Handlers: 4 per CPU, 16 to 40. Plugin SQL: half the evaluator admission, 4 to 16. Plugin writes: a quarter, 2 to 8. Shrunk at boot to the server's share of `max_connections` (see Database connections in the runbook) |
+| Server database pools | Handlers: 4 per CPU, 16 to 40. Plugin SQL: one per plugin CPU token, 4 to 16. Plugin writes: one per two tokens, 2 to 8. Shrunk at boot to the server's share of `max_connections` (see Database connections in the runbook) |
 | Worker database pool | `worker.max_concurrency` + 2 |
 | Claim loop | Notification driven, with a 1 s fallback tick and 32 rows per statement |
 | In-flight cap per server | 8 per live worker slot, at least 256 |
@@ -62,7 +62,6 @@ Leave these alone unless a measurement says otherwise.
 | `lease_ttl_secs`, `lease_refresh_interval_secs`, `steal_scan_interval_secs`, `steal_batch_size` | `60`, `10`, `15`, `8` | Lease recovery timing |
 | `max_dispatch_retries`, `max_system_error_retries` | `5`, `10` | Retry budgets |
 | `cancel_primitive_enabled` | `false` | Redis-backed operation cancellation |
-| `max_blocking_threads` | 16 per CPU, 512 to 8192 | Tokio blocking pool |
 | `claim_fiber_enabled` | `true` | Turn off to stop a server from dispatching while debugging |
 | `plugin_timer_tick_interval_secs`, `plugin_timer_batch`, `plugin_timer_max_attempts` | `1`, `64`, `5` | Plugin timer delivery |
 | `batch_max_age_secs` (top level) | `7200` | Age at which an unfinished evaluate batch is reaped |

@@ -112,13 +112,16 @@ pub const COMPILED_MODULES_ENTRY: &str = ".compiled";
 /// deserializes its module instead of compiling it, wherever the process's
 /// home directory is. `None` (with the reason logged) leaves wasmtime's
 /// default location.
+///
+/// wasmtime's cleanup worker deletes whatever it does not recognise in its
+/// cache directory, so the config file sits beside that directory
+/// (`wasmtime/`), never inside it.
 pub fn compile_cache_config(cache_dir: &std::path::Path) -> Option<PathBuf> {
     let prepare = || -> std::io::Result<PathBuf> {
         let entry = cache_dir.join(COMPILED_MODULES_ENTRY);
-        // wasmtime keeps its modules in a `modules/` directory of its own
-        // under this one.
-        std::fs::create_dir_all(&entry)?;
-        let modules = entry.canonicalize()?;
+        let wasmtime_dir = entry.join("wasmtime");
+        std::fs::create_dir_all(&wasmtime_dir)?;
+        let modules = wasmtime_dir.canonicalize()?;
         let config = entry.join("wasmtime-cache.toml");
         let toml = format!("[cache]\ndirectory = {:?}\n", modules.display().to_string());
         if std::fs::read_to_string(&config).ok().as_deref() != Some(toml.as_str()) {
@@ -220,6 +223,7 @@ mod tests {
             .path()
             .join("cache")
             .join(COMPILED_MODULES_ENTRY)
+            .join("wasmtime")
             .canonicalize()
             .unwrap();
         assert!(

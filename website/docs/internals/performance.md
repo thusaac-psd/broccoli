@@ -18,7 +18,9 @@ Two tools measure judging throughput and where each submission spends its time:
 Use the mock sandbox (`worker.sandbox_backend = "mock"`) to measure platform
 overhead alone. It runs the submission and the checker as plain host processes,
 so `isolate` init, cleanup, cgroups and mounts are not in the numbers. Use
-`isolate` to measure the full cost on a host that can run it.
+`isolate` to measure the full cost on a host that can run it. What the sandbox
+itself adds to each step is measured separately, on
+[Sandbox overhead](./sandbox-overhead.md).
 
 ## Run one point
 

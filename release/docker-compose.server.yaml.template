@@ -24,11 +24,6 @@ services:
       BROCCOLI__PLUGIN__CACHE_DIR: /var/cache/broccoli/plugins
       # false: refuse plugin uploads and run bundled plugin code only.
       BROCCOLI__PLUGIN__UPLOADS_ENABLED: "${BROCCOLI__PLUGIN__UPLOADS_ENABLED:-true}"
-      # Unset unless the env file sets them: the server sizes plugin
-      # execution from its cores and memory limit (docs/operator-runbook.md).
-      BROCCOLI__PLUGIN__MAX_CONCURRENT_CALLS:
-      BROCCOLI__PLUGIN__MEMORY_BUDGET:
-      BROCCOLI__PLUGIN__CALL_TIMEOUT_SECS:
       BROCCOLI__STORAGE__BACKEND: "${BROCCOLI__STORAGE__BACKEND:-object_storage}"
       BROCCOLI__STORAGE__DATA_DIR: /data
       BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET: "${BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET:-broccoli-blobs}"

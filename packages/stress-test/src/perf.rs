@@ -633,10 +633,7 @@ async fn stage_breakdown(db: &sqlx::PgPool, ids: &[i32]) -> anyhow::Result<Value
         Option<f64>,
         Option<f64>,
     );
-    let rows: Vec<Row> = sqlx::query_as(STAGE_SQL)
-        .bind(ids)
-        .fetch_all(db)
-        .await?;
+    let rows: Vec<Row> = sqlx::query_as(STAGE_SQL).bind(ids).fetch_all(db).await?;
     let names = [
         "queued",
         "to_first_result",

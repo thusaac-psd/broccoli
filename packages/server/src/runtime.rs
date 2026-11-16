@@ -81,7 +81,7 @@ impl ServerRuntime {
             boot.conn(),
             &app_config.database.url,
             app_config.database.plugin_url.as_deref(),
-            pools.plugin,
+            &crate::database::plugin_pool_spec(pools.plugin, app_config.plugin.call_timeout()),
             &db_session,
         )
         .await?;
@@ -115,7 +115,10 @@ impl ServerRuntime {
         // `broccoli_plugin` role for the raw `sql` capability (phase 2).
         let privileged_plugin_db = crate::database::init_plugin_db_privileged(
             &app_config.database.url,
-            pools.plugin_privileged,
+            &crate::database::plugin_pool_spec(
+                pools.plugin_privileged,
+                app_config.plugin.call_timeout(),
+            ),
             &db_session,
         )
         .await?;

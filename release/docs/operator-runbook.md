@@ -240,8 +240,11 @@ plugin execution section below); nothing in this formula needs a server setting.
 **Database connections**
 
 Pools size themselves. A server wants at most 66 connections: 16 to 40 for
-handlers (4 per CPU), up to 24 for plugin host functions (from the evaluator
-admission), and 2 of its own (the claim listener and the clock). A worker
+handlers (4 per CPU), up to 24 for plugin host functions (one per plugin CPU
+token for plugin SQL, 4 to 16, and one per two tokens for plugin writes, 2 to
+8), and 2 of its own (the claim listener and the clock). A plugin call that
+finds its pool busy waits for a connection without holding a CPU token, for at
+most `plugin.call_timeout_secs`. A worker
 holds its slots plus 2, so 3 at the default `max_concurrency` of 1.
 
 At boot a server reads `max_connections`, keeps a tenth of it (at least 10)
@@ -324,7 +327,8 @@ There are three settings, and all of them size themselves:
 | `BROCCOLI__PLUGIN__MEMORY_BUDGET`        | 3/4 of the container's memory limit, or 1/4 of the machine's memory without one |
 | `BROCCOLI__PLUGIN__CALL_TIMEOUT_SECS`    | 300                                                                             |
 
-Leave them unset unless a measurement says otherwise. A machine shared with
+Leave them unset unless a measurement says otherwise; an override goes in the
+role's env file. A machine shared with
 Postgres, Redis or a worker without a container memory limit should get an
 explicit `MEMORY_BUDGET` (for example `4GiB`).
 
@@ -343,12 +347,11 @@ current load per plugin, and `broccoli_plugin_instance_evicted_total` how often
 the memory budget dropped instances. Sustained queueing with every token busy is
 CPU exhaustion: add server replicas.
 
-A removed key (`POOL_MAX_INSTANCES`, `EVALUATOR_PARALLELISM`,
-`SERVER__MAX_BLOCKING_THREADS` and others) still set in the server's config file
-or its process environment logs a warning at boot naming each one; the keys are
-ignored. The compose template passes the server only the variables it lists, so
-an old value left in `.env` never reaches the server and logs nothing: delete
-it.
+A key no binary reads (a removed one such as `POOL_MAX_INSTANCES`,
+`EVALUATOR_PARALLELISM` or `SERVER__MAX_BLOCKING_THREADS`, or a typo) still set
+in the server's config file or its process environment is ignored and named in
+one warning at boot. The whole role env file reaches the container, so an old
+value left in `.env.server` shows up in that warning: delete it.
 
 ## Multi-Replica Server Identity
 

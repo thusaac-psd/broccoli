@@ -274,7 +274,7 @@ pub async fn resolve_restricted_plugin_pool(
     privileged: &DatabaseConnection,
     app_url: &str,
     plugin_url: Option<&str>,
-    max_connections: u32,
+    spec: &PgPoolSpec,
     session: &PgSession,
 ) -> Result<RestrictedPluginPool, DbErr> {
     let (primary_url, login) = match plugin_url {
@@ -284,14 +284,8 @@ pub async fn resolve_restricted_plugin_pool(
             provision_restricted_plugin_login(privileged).await,
         ),
     };
-    let mut resolved = connect_restricted_pool_with_fallback(
-        app_url,
-        primary_url,
-        login,
-        max_connections,
-        session,
-    )
-    .await?;
+    let mut resolved =
+        connect_restricted_pool_with_fallback(app_url, primary_url, login, spec, session).await?;
     // An operator-configured `plugin_url` is trusted as-is; otherwise the presence
     // of a dedicated login decides engine isolation vs. an app-role degrade.
     resolved.auth = classify_restricted_auth(
@@ -309,17 +303,10 @@ async fn connect_restricted_pool_with_fallback(
     app_url: &str,
     primary_url: String,
     primary_login: Option<PluginLoginOverride>,
-    max_connections: u32,
+    spec: &PgPoolSpec,
     session: &PgSession,
 ) -> Result<RestrictedPluginPool, DbErr> {
-    match init_plugin_db(
-        &primary_url,
-        max_connections,
-        primary_login.clone(),
-        session,
-    )
-    .await
-    {
+    match init_plugin_db(&primary_url, spec, primary_login.clone(), session).await {
         Ok(pool) => Ok(RestrictedPluginPool {
             pool,
             // Provisional (operator URLs are upgraded to `OperatorUrl` by the
@@ -332,7 +319,7 @@ async fn connect_restricted_pool_with_fallback(
                 "Restricted plugin pool could not connect as the dedicated login role; \
                  falling back to app-role auth (raw plugin SQL will be disabled)"
             );
-            let pool = init_plugin_db(app_url, max_connections, None, session).await?;
+            let pool = init_plugin_db(app_url, spec, None, session).await?;
             Ok(RestrictedPluginPool {
                 pool,
                 auth: RestrictedPluginAuth::AppRoleDegraded,
@@ -379,11 +366,11 @@ async fn connect_restricted_pool_with_fallback(
 /// SQL text guard alone.
 pub async fn init_plugin_db(
     db_url: &str,
-    max_connections: u32,
+    spec: &PgPoolSpec,
     login: Option<PluginLoginOverride>,
     session: &PgSession,
 ) -> Result<DatabaseConnection, DbErr> {
-    let pool_options = PgPoolSpec::new(max_connections, 2)
+    let pool_options = spec
         .pool_options()
         // The unbypassable choke point: every physical connection downshifts to
         // the bounded `broccoli_plugin` role at connect time. `SET ROLE` is
@@ -427,15 +414,20 @@ pub async fn init_plugin_db(
 /// the same database URL; only the effective role differs.
 pub async fn init_plugin_db_privileged(
     db_url: &str,
-    max_connections: u32,
+    spec: &PgPoolSpec,
     session: &PgSession,
 ) -> Result<DatabaseConnection, DbErr> {
-    common::db::connect(
-        db_url,
-        &PgPoolSpec::new(max_connections, 2),
-        &plugin_session(session),
-    )
-    .await
+    common::db::connect(db_url, spec, &plugin_session(session)).await
+}
+
+/// The shape of a plugin pool of `max_connections`: a plugin call waits for a
+/// connection as long as `call_timeout`, the longest it may run (see
+/// [`PoolSizes`]).
+pub fn plugin_pool_spec(max_connections: u32, call_timeout: std::time::Duration) -> PgPoolSpec {
+    PgPoolSpec {
+        acquire_timeout: call_timeout,
+        ..PgPoolSpec::new(max_connections, 2)
+    }
 }
 
 /// Bring the schema up to date (under the boot lock), then open the main pool.
@@ -453,9 +445,22 @@ pub async fn init_db_with_max_connections(
 }
 
 /// How many connections each of a server's three pools may hold: what this
-/// host's CPUs and the plugin evaluator admission want (64 at most together),
-/// fitted at boot to this server's share of the database's
+/// host's CPUs and the plugin executor's CPU tokens want (64 at most
+/// together), fitted at boot to this server's share of the database's
 /// `max_connections`.
+///
+/// The plugin pools follow admission
+/// ([`plugin_core::admission::Capacity`]). Plugin SQL host functions are
+/// parked: a call waiting for a connection or for Postgres holds no CPU token,
+/// so more calls can be in plugin SQL at once than there are tokens, up to
+/// the admitted-call caps, and those run to hundreds. No database has a
+/// connection for each, so the pools are sized from the tokens instead: one
+/// raw-SQL connection per token, one privileged connection per two, so plugin
+/// statements reach Postgres about as concurrently as guests compute. Every
+/// admitted call is still served: a call that finds the pool busy waits,
+/// parked, and the plugin pools wait for a connection as long as
+/// `plugin.call_timeout_secs` (see [`plugin_pool_spec`]), so the pool never
+/// fails a call that its own deadline would have let finish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoolSizes {
     /// Handlers, the dispatcher and background loops.
@@ -500,13 +505,14 @@ pub fn server_share(usable_connections: u32, fleet: Fleet) -> u32 {
 }
 
 impl PoolSizes {
-    /// The pools a host with `cpus` CPUs and this evaluator admission wants.
-    pub fn derive(cpus: usize, evaluator_parallelism: usize) -> Self {
+    /// The pools a host with `cpus` CPUs and `plugin_tokens` plugin CPU
+    /// tokens wants.
+    pub fn derive(cpus: usize, plugin_tokens: usize) -> Self {
         let clamp = |n: usize, lo: u32, hi: u32| u32::try_from(n).unwrap_or(hi).clamp(lo, hi);
         Self {
             main: clamp(cpus.saturating_mul(4), 16, 40),
-            plugin: clamp(evaluator_parallelism / 2, 4, 16),
-            plugin_privileged: clamp(evaluator_parallelism / 4, 2, 8),
+            plugin: clamp(plugin_tokens, 4, 16),
+            plugin_privileged: clamp(plugin_tokens / 2, 2, 8),
         }
     }
 
@@ -547,13 +553,9 @@ impl PoolSizes {
         server_id: &str,
     ) -> Result<Self, DbErr> {
         let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
-        let wanted = Self::derive(
-            cpus,
-            config
-                .plugin
-                .max_concurrent_calls
-                .unwrap_or_else(|| plugin_core::admission::Capacity::for_this_host().tokens),
-        );
+        let tokens =
+            plugin_core::admission::Capacity::for_config(config.plugin.max_concurrent_calls).tokens;
+        let wanted = Self::derive(cpus, tokens);
         let usable = usable_connections(boot).await?;
         let fleet = fleet_at_boot(config, server_id).await;
         let share = server_share(usable, fleet);
@@ -805,8 +807,9 @@ mod pool_size_tests {
 
     #[test]
     fn a_four_core_server_alone_on_a_default_postgres_keeps_full_pools() {
-        // Stock Postgres: 100 connections, 3 for superusers.
-        let wanted = PoolSizes::derive(4, 4);
+        // Stock Postgres: 100 connections, 3 for superusers; four cores give
+        // the plugin executor eight tokens.
+        let wanted = PoolSizes::derive(4, 8);
         let share = server_share(97, Fleet::default());
         assert_eq!(wanted.fit(share), Some(wanted), "share {share}");
     }
@@ -1236,10 +1239,10 @@ mod tests {
         let app = init_db_with_max_connections(&url, 2, &session)
             .await
             .expect("migrate + main pool");
-        let privileged = init_plugin_db_privileged(&url, 1, &session)
+        let privileged = init_plugin_db_privileged(&url, &PgPoolSpec::new(1, 2), &session)
             .await
             .expect("privileged plugin pool");
-        let restricted = init_plugin_db(&url, 1, None, &session)
+        let restricted = init_plugin_db(&url, &PgPoolSpec::new(1, 2), None, &session)
             .await
             .expect("restricted plugin pool");
 
@@ -1304,11 +1307,11 @@ mod tests {
             .expect("app migration + schema sync");
 
         // RESTRICTED pool: every connection `SET ROLE broccoli_plugin`.
-        let restricted = init_plugin_db(&url, 2, None, &test_session())
+        let restricted = init_plugin_db(&url, &PgPoolSpec::new(2, 2), None, &test_session())
             .await
             .expect("restricted plugin pool");
         // PRIVILEGED pool: runs as the app role (no SET ROLE).
-        let privileged = init_plugin_db_privileged(&url, 2, &test_session())
+        let privileged = init_plugin_db_privileged(&url, &PgPoolSpec::new(2, 2), &test_session())
             .await
             .expect("privileged plugin pool");
 
@@ -1451,7 +1454,7 @@ mod tests {
         assert_eq!(login.username, PLUGIN_DB_LOGIN_ROLE);
 
         // Single-connection restricted pool authenticating as the dedicated role.
-        let restricted = init_plugin_db(&url, 1, Some(login), &test_session())
+        let restricted = init_plugin_db(&url, &PgPoolSpec::new(1, 2), Some(login), &test_session())
             .await
             .expect("restricted plugin pool on the dedicated login");
 
@@ -1574,7 +1577,7 @@ mod tests {
             &url,
             url.clone(),
             Some(unusable),
-            2,
+            &PgPoolSpec::new(2, 2),
             &test_session(),
         )
         .await
@@ -1621,7 +1624,7 @@ mod tests {
         let _app = init_db_with_max_connections(&url, 5, &test_session())
             .await
             .expect("app migration + schema sync");
-        let restricted = init_plugin_db(&url, 2, None, &test_session())
+        let restricted = init_plugin_db(&url, &PgPoolSpec::new(2, 2), None, &test_session())
             .await
             .expect("restricted plugin pool");
 
