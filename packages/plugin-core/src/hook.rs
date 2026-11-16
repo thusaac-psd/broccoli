@@ -146,6 +146,10 @@ impl<M: PluginManager + ?Sized> PluginHook<M> {
     pub fn mode(&self) -> &HookMode {
         &self.mode
     }
+
+    pub fn function_name(&self) -> &str {
+        &self.function_name
+    }
 }
 
 #[async_trait]

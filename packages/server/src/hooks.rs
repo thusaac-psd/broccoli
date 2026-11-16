@@ -46,6 +46,9 @@ fn is_unavailable(error: &anyhow::Error) -> bool {
 
 struct HookEntry {
     plugin_id: String,
+    /// The plugin function the hook calls; with the plugin id it names the
+    /// hook, the last tiebreak of the dispatch order.
+    function: String,
     scope: HookScope,
     mode: HookMode,
     hook: Arc<dyn GenericHook<Context = CallOptions>>,
@@ -73,12 +76,14 @@ impl ServerHookRegistry {
         hook: Arc<PluginHook<M>>,
     ) {
         let plugin_id = hook.plugin_id().to_string();
+        let function = hook.function_name().to_string();
         let scope = hook.scope;
         let mode = *hook.mode();
 
         for topic in hook.topics() {
             let entry = HookEntry {
                 plugin_id: plugin_id.clone(),
+                function: function.clone(),
                 scope,
                 mode,
                 hook: hook.clone(),
@@ -483,6 +488,7 @@ async fn dispatch_hooks_inner(
 
     struct DispatchEntry {
         plugin_id: String,
+        function: String,
         position: i32,
         is_global: bool,
         mode: HookMode,
@@ -503,6 +509,7 @@ async fn dispatch_hooks_inner(
                 HookScope::Global => {
                     list.push(DispatchEntry {
                         plugin_id: entry.plugin_id.clone(),
+                        function: entry.function.clone(),
                         position: i32::MIN,
                         is_global: true,
                         mode: entry.mode,
@@ -515,6 +522,7 @@ async fn dispatch_hooks_inner(
                     {
                         list.push(DispatchEntry {
                             plugin_id: entry.plugin_id.clone(),
+                            function: entry.function.clone(),
                             position: pos,
                             is_global: false,
                             mode: entry.mode,
@@ -528,11 +536,18 @@ async fn dispatch_hooks_inner(
         list
     };
 
+    // A total order: blocking before notify, global before resource-scoped,
+    // then by position, and hooks that tie on all of these (every global
+    // hook) by plugin id and function. Every replica runs a topic's hooks in
+    // the same order whatever order it registered them in, so the same
+    // request gets the same first rejection everywhere.
     dispatch_list.sort_by(|a, b| {
         a.mode
             .cmp(&b.mode)
             .then(b.is_global.cmp(&a.is_global))
             .then(a.position.cmp(&b.position))
+            .then_with(|| a.plugin_id.cmp(&b.plugin_id))
+            .then_with(|| a.function.cmp(&b.function))
     });
 
     for entry in &dispatch_list {
@@ -767,6 +782,7 @@ mod tests {
                 .or_default()
                 .push(HookEntry {
                     plugin_id: plugin_id.clone(),
+                    function: "on_event".into(),
                     scope,
                     mode,
                     hook: hook.clone(),
@@ -798,17 +814,17 @@ mod tests {
         let mut admitted = payload.clone();
         admitted["submission_admission"] = serde_json::json!({"opaque":true});
         let mut cases = vec![
-            (Some("owner"), "other", admitted.clone(), true),
-            (Some("owner"), "other", payload.clone(), true),
+            (Some("owner"), "z-other", admitted.clone(), true),
+            (Some("owner"), "z-other", payload.clone(), true),
             (
                 Some("owner"),
-                "other",
+                "z-other",
                 serde_json::json!("invalid event"),
                 false,
             ),
             (
                 Some("owner"),
-                "other",
+                "z-other",
                 serde_json::json!({"submission_admission":null}),
                 false,
             ),
@@ -822,7 +838,7 @@ mod tests {
             ("language", serde_json::json!("python")),
             ("file_count", serde_json::json!(99)),
         ] {
-            for plugin in ["owner", "other"] {
+            for plugin in ["owner", "z-other"] {
                 let mut rewritten = admitted.clone();
                 rewritten[field] = replacement.clone();
                 cases.push((Some("owner"), plugin, rewritten, false));
@@ -841,7 +857,7 @@ mod tests {
                     succeeds,
                 )
             })
-            .chain([(Some("owner"), "other", HookAction::Stop, true)]);
+            .chain([(Some("owner"), "z-other", HookAction::Stop, true)]);
         for (owner, second_plugin, second_action, succeeds) in cases {
             let registry = new_shared_registry();
             let mut hooks = registry.write().await;
@@ -879,7 +895,7 @@ mod tests {
         register_direct(
             &mut *registry.write().await,
             Arc::new(MockHook::new(
-                "other",
+                "z-other",
                 "before_submission",
                 HookAction::Modified(GenericEvent {
                     topic: "before_submission".into(),
@@ -999,6 +1015,40 @@ mod tests {
     /// A plugin's rejection never speaks as the host: a host code and a
     /// status the host owns ("sign in again", "busy, retrying") reach the
     /// client as the plugin's own code on a 400.
+    /// Global hooks tie on everything but their plugin, so the plugin id
+    /// orders them: the same two rejecting gates answer the same way however
+    /// they were registered.
+    #[tokio::test]
+    async fn hooks_that_tie_run_in_plugin_id_order_whatever_the_registration_order() {
+        for order in [["a-gate", "b-gate"], ["b-gate", "a-gate"]] {
+            let registry = new_shared_registry();
+            {
+                let mut r = registry.write().await;
+                for id in order {
+                    let code = format!("{}_SAYS_NO", id.to_uppercase().replace('-', "_"));
+                    let reject = serde_json::json!({"code": code, "status_code": 409});
+                    register_direct(
+                        &mut r,
+                        Arc::new(MockHook::new(
+                            id,
+                            "test",
+                            HookAction::Reject(reject.to_string()),
+                        )),
+                        HookScope::Global,
+                        HookMode::Blocking,
+                    );
+                }
+            }
+            let result = dispatch_global(&registry, "test", serde_json::json!({}))
+                .await
+                .unwrap();
+            let HookOutcome::Rejected(refusal) = result else {
+                panic!("Expected Rejected, got {result:?}");
+            };
+            assert_eq!(refusal.code(), "a-gate.A_GATE_SAYS_NO", "{order:?}");
+        }
+    }
+
     #[tokio::test]
     async fn a_rejection_naming_a_host_condition_is_the_plugins_own() {
         let registry = new_shared_registry();
@@ -1029,7 +1079,7 @@ mod tests {
     #[tokio::test]
     async fn blocking_stop_halts_chain_and_skips_remaining_hooks() {
         let registry = new_shared_registry();
-        let stop = Arc::new(MockHook::new("stopper", "test", HookAction::Stop));
+        let stop = Arc::new(MockHook::new("a-stopper", "test", HookAction::Stop));
         let pass = Arc::new(MockHook::new("passer", "test", HookAction::Pass));
         {
             let mut r = registry.write().await;
@@ -1469,6 +1519,7 @@ mod tests {
             "test".into(),
             vec![HookEntry {
                 plugin_id: "busy".into(),
+                function: "on_event".into(),
                 scope: HookScope::Global,
                 mode: HookMode::Blocking,
                 hook: Arc::new(BusyHook {
@@ -1497,6 +1548,7 @@ mod tests {
             "test".into(),
             vec![HookEntry {
                 plugin_id: "busy".into(),
+                function: "on_event".into(),
                 scope: HookScope::Global,
                 mode: HookMode::Notify,
                 hook: Arc::new(BusyHook {
