@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { PLUGIN_OUTAGE_POLL_MS } from '../hooks/poll.ts';
 import {
   JUDGING_POLL_MS,
   submissionPhase,
   submissionPollPace,
-  WAITING_POLL_MS,
 } from './progress.ts';
 
 const DISABLED = { state: 'disabled', plugin_id: 'icpc' } as const;
@@ -66,14 +66,14 @@ describe('how often a submission is asked for', () => {
     assert.equal(submissionPollPace({ status: 'Running' }), JUDGING_POLL_MS);
     assert.equal(
       submissionPollPace({ status: 'Queued', plugin_outage: DISABLED }),
-      WAITING_POLL_MS,
+      PLUGIN_OUTAGE_POLL_MS,
     );
     assert.equal(
       submissionPollPace({
         status: null,
         withheld: { reason: 'plugin_outage', outage: UNAVAILABLE },
       }),
-      WAITING_POLL_MS,
+      PLUGIN_OUTAGE_POLL_MS,
     );
     assert.equal(
       submissionPollPace({ status: null, withheld: { reason: 'hidden' } }),

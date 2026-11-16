@@ -135,3 +135,26 @@ test('a failing poll waits a jittered backoff, never less than its pace', () => 
     60_000,
   );
 });
+
+test('a failing poll keeps its jittered wait however often it is asked', () => {
+  // TanStack asks for the interval on every render and restarts its timer
+  // whenever the answer changes: a wait drawn anew each time would never end.
+  let draws = 0;
+  const jittered = pollInterval<Data>(1_000, {
+    random: () => [0, 1][draws++ % 2],
+  });
+  const query = polled({
+    data: { done: false },
+    error: serverError,
+    dataUpdateCount: 1,
+    errorUpdateCount: 3,
+  });
+  const first = jittered(query);
+  assert.equal(jittered(query), first);
+  assert.equal(jittered(query), first);
+  // The next failure draws its wait afresh.
+  const drawn = draws;
+  query.state.errorUpdateCount += 1;
+  jittered(query);
+  assert.equal(draws, drawn + 1);
+});

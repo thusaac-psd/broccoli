@@ -1,5 +1,6 @@
 import type { PluginOutage, ShownStatus, Withheld } from '@/submission/types';
 
+import { PLUGIN_OUTAGE_POLL_MS } from '../hooks/poll.ts';
 import { isTerminalStatus } from './utils.ts';
 
 /** What of a submission's response decides where it stands. */
@@ -41,12 +42,6 @@ export function submissionPhase({
 export const JUDGING_POLL_MS = 1_000;
 
 /**
- * How often a submission waiting for its contest's plugin is asked for: it
- * moves only once an administrator acts, so rarely, but never not at all.
- */
-export const WAITING_POLL_MS = 30_000;
-
-/**
  * The pace every poller of a submission or code run follows: `false` once
  * nothing more can change for this viewer.
  */
@@ -56,7 +51,7 @@ export function submissionPollPace(outcome: SubmissionOutcome): number | false {
     case 'judging':
       return JUDGING_POLL_MS;
     case 'waiting':
-      return WAITING_POLL_MS;
+      return PLUGIN_OUTAGE_POLL_MS;
     case 'hidden':
     case 'final':
       return false;
