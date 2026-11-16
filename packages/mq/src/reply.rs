@@ -79,18 +79,14 @@ impl ReplyInbox {
 
     /// Whether every reply up to and including `mark` has been returned by
     /// [`Self::next_batch`]; a mark without an entry is read through at once.
-    /// `None` when the inbox restarted from the beginning since the mark was
-    /// taken: its entry belonged to a stream that is gone, so nothing this
-    /// inbox reads can pass it.
+    /// `None` when the inbox found its stream missing or behind since the
+    /// mark was taken: the mark's entry belonged to a stream that is gone, so
+    /// nothing this inbox reads can pass it.
     pub fn read_through(&self, mark: &ReadMark) -> Option<bool> {
-        if mark.generation != self.generation {
-            return None;
-        }
-        Some(
-            mark.id
-                .as_deref()
-                .is_none_or(|id| parse_id(&self.cursor) >= parse_id(id)),
-        )
+        let Some(id) = mark.id.as_deref() else {
+            return Some(true);
+        };
+        (mark.generation == self.generation).then(|| parse_id(&self.cursor) >= parse_id(id))
     }
 
     /// Wait up to the block time for replies after the cursor and return them
@@ -98,9 +94,11 @@ impl ReplyInbox {
     ///
     /// A stream recreated after it was lost starts its ids from the Redis
     /// clock, which may be behind the cursor. The stream's last generated id
-    /// is read in the same round trip, and a cursor ahead of it (or a missing
-    /// stream) restarts from the beginning, so no reply is skipped; a restart
-    /// starts a new generation (see [`Self::read_through`]).
+    /// is read in the same round trip, and a cursor ahead of it, or a missing
+    /// stream, restarts from the beginning, so no reply is skipped. Either
+    /// starts a new generation, whatever the cursor was, even before the
+    /// first read: a mark taken earlier names an entry of the lost stream (see
+    /// [`Self::read_through`]).
     pub async fn next_batch(&mut self) -> Result<Vec<Result<TaskReply, DecodeError>>, MqError> {
         let key = &self.key;
         let cursor = &self.cursor;
@@ -142,8 +140,7 @@ impl ReplyInbox {
                 self.read.push(entry.id);
             }
         }
-        let behind = last_id.is_none_or(|last| parse_id(&last) < parse_id(&self.cursor));
-        if behind && self.cursor != "0-0" {
+        if last_id.is_none_or(|last| parse_id(&last) < parse_id(&self.cursor)) {
             self.cursor = "0-0".into();
             self.generation += 1;
         }

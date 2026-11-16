@@ -163,7 +163,8 @@ keeps reading replies, and once its reads have passed the noted entry, any
 of those waiters still waiting fails at once with "the operation was lost
 from the queue". The noted entry belongs to the stream as it was: when the
 stream is lost before the reads pass it (recreated with lower ids, or
-missing), the inbox starts reading over and could never pass it, so the
+missing), even before the inbox first read it, the inbox starts reading over
+and could never pass it, so the
 consumer drops what it found and checks the ledger again at once against the
 stream as it is (`ReplyInbox::read_through`). The plugin sees a failed operation, which its judging
 handles like any other; the dispatch records the loss, so the `SystemError`
