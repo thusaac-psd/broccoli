@@ -17,8 +17,6 @@ import {
 export type User = components['schemas']['MeResponse'];
 export type LoginRequest = components['schemas']['LoginRequest'];
 
-export const AUTH_SESSION_EXPIRED_EVENT = 'broccoli:auth:session-expired';
-
 // Permissions that grant some elevated (admin-area) UI access. Curated subset of
 // the catalog -- it intentionally omits self-service permissions like
 // `submission:submit` and the `role:manage` / `system:admin` super-grants; the

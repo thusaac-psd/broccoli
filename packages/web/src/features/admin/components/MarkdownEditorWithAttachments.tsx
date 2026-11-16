@@ -65,7 +65,7 @@ export function MarkdownEditorWithAttachments({
       const ed = editorRef.current;
       if (!ed) return '';
 
-      const placeholderId = `uploading-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const placeholderId = `uploading-${Math.random().toString(36).slice(2, 10)}`;
       const text = isImage
         ? `![Uploading ${name}...](${placeholderId})`
         : `[Uploading ${name}...](${placeholderId})`;

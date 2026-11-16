@@ -1,3 +1,5 @@
+import { serverNow } from '@broccoli/web-sdk/api';
+
 import type { PrintStatus } from '../types';
 
 // Mirrors the server-side page estimate (plugins/print/src/models.rs).
@@ -14,10 +16,13 @@ export function estimatePages(source: string): number {
   return Math.max(1, Math.ceil(Math.max(1, visual) / LINES_PER_PAGE));
 }
 
-/** Compact relative time from an epoch-seconds value (e.g. "2m ago"). */
+/**
+ * Compact relative time from a server epoch-seconds value (e.g. "2m ago"),
+ * measured by the server clock.
+ */
 export function formatRelative(epochSecs: number | null | undefined): string {
   if (!epochSecs) return '—';
-  const deltaSec = Math.max(0, Date.now() / 1000 - epochSecs);
+  const deltaSec = Math.max(0, serverNow() / 1000 - epochSecs);
   if (deltaSec < 5) return 'just now';
   if (deltaSec < 60) return `${Math.floor(deltaSec)}s ago`;
   const min = Math.floor(deltaSec / 60);

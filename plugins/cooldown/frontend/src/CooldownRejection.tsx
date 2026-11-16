@@ -38,11 +38,11 @@ function CooldownCountdown({ details }: { details?: Record<string, unknown> }) {
   const initialSeconds = getCooldownSeconds(details);
   const [remaining, setRemaining] = useState(initialSeconds ?? 0);
   const [expired, setExpired] = useState(initialSeconds === null);
-  const startTimeRef = useRef(Date.now());
+  const startTimeRef = useRef(performance.now());
   const initialRef = useRef(initialSeconds ?? 0);
 
   const tick = useCallback(() => {
-    const elapsed = (Date.now() - startTimeRef.current) / 1000;
+    const elapsed = (performance.now() - startTimeRef.current) / 1000;
     const left = Math.max(0, Math.ceil(initialRef.current - elapsed));
     setRemaining(left);
     if (left <= 0) setExpired(true);
@@ -53,7 +53,7 @@ function CooldownCountdown({ details }: { details?: Record<string, unknown> }) {
       setExpired(true);
       return;
     }
-    startTimeRef.current = Date.now();
+    startTimeRef.current = performance.now();
     initialRef.current = initialSeconds;
     setRemaining(initialSeconds);
     setExpired(false);

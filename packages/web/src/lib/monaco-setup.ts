@@ -8,6 +8,7 @@
  * `<Editor>`; the shared-deps shim for `@monaco-editor/react` imports it too, so
  * plugins get the same offline instance.
  */
+import { retryImport } from '@broccoli/web-sdk/utils';
 import { loader } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
@@ -41,3 +42,57 @@ self.MonacoEnvironment = {
 };
 
 loader.config({ monaco });
+
+// Monaco loads each language's tokenizer and configuration from its own chunk
+// the first time the language is used, and remembers a failed load for good:
+// one dropped request would leave that language unhighlighted until a page
+// reload. So every lazily loaded language gets a loader that retries (see
+// `retryImport`) and, should every retry fail, forgets the failure so the next
+// use of the language tries again.
+interface LazyLanguage {
+  language: monaco.languages.IMonarchLanguage;
+  conf: monaco.languages.LanguageConfiguration;
+}
+
+function retryingLanguageLoader(
+  load: () => Promise<LazyLanguage>,
+): () => Promise<LazyLanguage> {
+  let loaded: Promise<LazyLanguage> | null = null;
+  return () => {
+    loaded ??= retryImport(load).catch((error: unknown) => {
+      loaded = null;
+      throw error;
+    });
+    return loaded;
+  };
+}
+
+function registerTokens(id: string, load: () => Promise<LazyLanguage>) {
+  monaco.languages.registerTokensProviderFactory(id, {
+    create: async () => {
+      try {
+        return (await load()).language;
+      } catch (error) {
+        // Monaco keeps a factory's failure; a fresh one asks again next time.
+        registerTokens(id, load);
+        throw error;
+      }
+    },
+  });
+}
+
+for (const language of monaco.languages.getLanguages()) {
+  const lazy = (language as { loader?: () => Promise<LazyLanguage> }).loader;
+  if (!lazy) continue;
+  const load = retryingLanguageLoader(lazy);
+  // Replaces Monaco's own factory, which would cache a failed load.
+  registerTokens(language.id, load);
+  monaco.languages.onLanguageEncountered(language.id, () => {
+    load().then(
+      ({ conf }) =>
+        monaco.languages.setLanguageConfiguration(language.id, conf),
+      (error) =>
+        console.error(`Failed to load language ${language.id}:`, error),
+    );
+  });
+}

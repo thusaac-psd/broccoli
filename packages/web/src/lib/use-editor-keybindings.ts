@@ -1,3 +1,4 @@
+import { retryImport } from '@broccoli/web-sdk/utils';
 import type * as monacoNs from 'monaco-editor';
 import { type RefObject, useEffect, useRef } from 'react';
 
@@ -32,13 +33,16 @@ export function useEditorKeybindings(
     let cancelled = false;
 
     if (mode === 'vim') {
-      import('monaco-vim').then(({ initVimMode }) => {
-        if (cancelled) return;
-        adapterRef.current = initVimMode(
-          editorInstance,
-          statusBarRef.current ?? undefined,
-        );
-      });
+      retryImport(() => import('monaco-vim')).then(
+        ({ initVimMode }) => {
+          if (cancelled) return;
+          adapterRef.current = initVimMode(
+            editorInstance,
+            statusBarRef.current ?? undefined,
+          );
+        },
+        (error) => console.error('Failed to load vim mode:', error),
+      );
     } else if (mode === 'emacs') {
       adapterRef.current = activateEmacsMode(editorInstance, monacoInstance);
     }

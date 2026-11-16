@@ -168,6 +168,7 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
   const api = useIcpcApi();
   const { t } = useTranslation();
   const [autoRefresh, setAutoRefresh] = useState(true);
+  // eslint-disable-next-line no-restricted-properties -- see the tick below
   const [now, setNow] = useState(Date.now());
   const [revealing, setRevealing] = useState(false);
   const [revealError, setRevealError] = useState<string | null>(null);
@@ -212,6 +213,8 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
   const hasData = dataUpdatedAt > 0;
   useEffect(() => {
     if (!hasData) return;
+    // `dataUpdatedAt` is stamped by this machine's clock, so its age is too.
+    // eslint-disable-next-line no-restricted-properties
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [hasData]);

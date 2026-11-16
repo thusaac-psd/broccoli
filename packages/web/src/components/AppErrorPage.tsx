@@ -1,6 +1,10 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import {
+  isKnownOffline,
+  subscribeToOnlineStatus,
+} from '@broccoli/web-sdk/utils';
+import {
   CloudOff,
   Loader2,
   RotateCcw,
@@ -10,11 +14,7 @@ import {
 } from 'lucide-react';
 import { useSyncExternalStore } from 'react';
 
-import {
-  isKnownOffline,
-  retryPageLoad,
-  subscribeToOnlineStatus,
-} from '@/lib/chunk-reload';
+import { retryPageLoad } from '@/lib/chunk-reload';
 
 interface AppErrorPageProps {
   /** The error was a failure to load code (offline, or a redeploy). */

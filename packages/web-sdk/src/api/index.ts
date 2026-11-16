@@ -10,5 +10,3 @@ export {
 export * from '@/api/types';
 export * from '@/api/use-api-client';
 export * from '@/api/use-api-fetch';
-export * from '@/api/use-refresh-session';
-export * from '@/api/use-set-api-access-token';
