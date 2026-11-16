@@ -56,9 +56,10 @@ version, each with its full dependency closure, and the installer `dpkg -i`s
 them offline. PostgreSQL is the major version the Docker deployments run
 (`POSTGRES_IMAGE` in `.env.infra.example`), from the PostgreSQL project's
 repository; a box that already runs a PostgreSQL server keeps it. Redis 7 comes
-from packages.redis.io, since 22.04's archive ships 6.0. Without a staged set,
-the installer falls back to the system apt (a LAN mirror) and, for Redis, to
-packages.redis.io.
+from packages.redis.io, since 22.04's archive ships 6.0; a box that already runs
+Redis 7 keeps it. The installer never reaches for the network: without a staged
+set for the box's Ubuntu version, and without the package already installed, it
+stops and names the `stage-*.sh` command that stages it.
 
 ### Box 1 — infra + server (Postgres, Redis, SeaweedFS, API)
 
@@ -105,12 +106,13 @@ a time: concurrent runs on one machine share its L2/L3 cache, memory bandwidth
 and SMT siblings, which makes their times unfair even with CPU pinning. Scale by
 adding worker machines; several workers on one machine share those caches too.
 
-Toolchain provisioning (`ensure_toolchain`) tries, in order: a bundled `.deb`
-set matching the box's Ubuntu version (`toolchain/<ver>/`, see live-boot below),
-then `apt` (online or a LAN mirror). It then **compile-tests** `gcc`/`g++` and
-refuses to bring up a worker that can't compile C/C++ — a compiler-less worker
-would wrongly `CE` every C/C++ submission. (Deliberate Python-only pool? re-run
-with `BROCCOLI_ALLOW_NO_CXX=1`.)
+Toolchain provisioning (`ensure_toolchain`) installs the bundled `.deb` set
+matching the box's Ubuntu version (`toolchain/<ver>/`, see live-boot below)
+unless `build-essential` is already installed, and stops with the staging
+command when the bundle has no set for that version. It then **compile-tests**
+`gcc`/`g++` and refuses to bring up a worker that can't compile C/C++ — a
+compiler-less worker would wrongly `CE` every C/C++ submission. (Deliberate
+Python-only pool? re-run with `BROCCOLI_ALLOW_NO_CXX=1`.)
 
 ### Ubuntu live-boot workers (20.04 / 22.04 / 24.04)
 
@@ -129,13 +131,14 @@ The one gap: the Ubuntu **Desktop live ISO ships `python3` but not
   folded into the bundle by `build-native-bundle.sh`. On the live-boot worker
   the installer auto-runs
   `dpkg -i toolchain/$(. /etc/os-release; echo $VERSION_ID)/*.deb`.
-- **apt / LAN mirror (online):**
-  `sudo apt-get install -y build-essential python3`.
-- The installer falls back to apt automatically, then the compile-test gate.
+- **Installed beforehand:** `build-essential` and `python3` already on the box
+  (a persistent image, or a LAN mirror the operator installs from by hand). The
+  installer installs nothing over the network; either way the compile-test gate
+  runs.
 
 > The staged closure is resolved against a minimal base image, so it is a
 > superset of what a full Desktop ISO needs (extras dpkg-skip). Within one LTS
-> this is robust; across point-release skew the apt/mirror path stays correct.
+> this is robust; across point-release skew, restage for the new release.
 
 After installing a worker, get a **go/no-go** for the machine — it checks
 x86_64 + systemd, cgroup-v2 controllers, the isolate **MLE/TLE verdicts** (live

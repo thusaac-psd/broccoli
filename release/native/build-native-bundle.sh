@@ -108,7 +108,7 @@ if [ -d "$HERE/toolchain" ]; then
   cp -a "$HERE/toolchain" "$WORK/toolchain"
   echo "  toolchain sets bundled: $(ls "$WORK/toolchain" 2>/dev/null | tr '\n' ' ')"
 else
-  echo "  NOTE: no pre-staged toolchain/ -- live-boot workers install build-essential via apt/LAN mirror, or run stage-toolchain.sh"
+  echo "  NOTE: no pre-staged toolchain/ -- live-boot workers then need build-essential installed beforehand; run stage-toolchain.sh"
 fi
 # pre-staged offline PostgreSQL and Redis 7 .deb sets for air-gapped infra
 # boxes, if any. install-native.sh (infra) installs the set matching the box's

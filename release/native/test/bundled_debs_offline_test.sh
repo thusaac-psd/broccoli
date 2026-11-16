@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# An air-gapped native infra box gets Redis 7 from the bundle, not the network.
-# stage-redis.sh captures the .deb set, build-native-bundle folds it in, and
-# ensure_redis7 installs from the bundle before any apt or packages.redis.io.
+# An air-gapped native infra box gets PostgreSQL and Redis 7 from the bundle,
+# never the network. stage-redis.sh and stage-postgres.sh capture the .deb
+# sets, build-native-bundle folds them in, and the installer installs from the
+# bundle, keeps what the box already has, and otherwise stops with the
+# staging command.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 native="$here/.."
@@ -47,8 +49,8 @@ grep -q 'for set in postgres redis; do' "$native/build-native-bundle.sh" \
 
 inst="$native/install-native.sh"
 # Run the installer's own functions against stubbed dpkg, apt, Redis and PostgreSQL.
-fns="$(awk '/^install_bundled_set\(\)\{/,/^\}/; /^redis_major\(\)\{/,/\}$/; /^ensure_redis7\(\)\{/,/^\}/; /^ensure_postgres\(\)\{/,/^\}/' "$inst")"
-for f in install_bundled_set ensure_redis7 ensure_postgres; do
+fns="$(awk '/^ubuntu_version\(\)\{/,/\}$/; /^die_unstaged\(\)\{/,/^\}/; /^install_bundled_set\(\)\{/,/^\}/; /^redis_major\(\)\{/,/\}$/; /^ensure_redis7\(\)\{/,/^\}/; /^ensure_postgres\(\)\{/,/^\}/' "$inst")"
+for f in ubuntu_version die_unstaged install_bundled_set ensure_redis7 ensure_postgres; do
   printf '%s\n' "$fns" | grep -q "^$f(){" || fail "$f not found"
 done
 
@@ -56,7 +58,7 @@ ver="$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}")"
 
 # scenario NAME: a fresh state; the stubs read and write files under $T/NAME.
 # Knobs: installed (Redis major now), bundle (1 = a bundled set), dpkg_fails,
-# dpkg_status, bundle_gives, apt_gives, curl_fails.
+# dpkg_status, bundle_gives.
 run() {
   local name="$1"
   shift
@@ -96,9 +98,8 @@ run() {
         *) printf '%s' "$(knob dpkg_status)" ;;
       esac
     }
-    apt_ensure() { calls "apt_ensure $*"; knob apt_gives > "$dir/version"; }
     apt-get() { calls "apt-get $*"; [ "$1" = update ] && return 0; echo 7 > "$dir/version"; }
-    curl() { calls "curl $*"; [ "$(knob curl_fails)" != 1 ]; }
+    curl() { calls "curl $*"; }
     gpg() { cat > /dev/null; }
     die() { echo "DIE: $*"; exit 3; }
     eval "$fns"
@@ -114,15 +115,15 @@ run current installed=7
 [ "$(rc current)" = 0 ] || fail "an installed Redis 7 was not accepted: $(cat "$T/current/out")"
 [ ! -s "$T/current/calls" ] || fail "an installed Redis 7 was reinstalled: $(cat "$T/current/calls")"
 
-run offline installed=6 bundle=1 bundle_gives=7 dpkg_status='install ok installed' apt_gives=6 curl_fails=1
+run offline installed=6 bundle=1 bundle_gives=7 dpkg_status='install ok installed' 
 [ "$(rc offline)" = 0 ] || fail "the bundled set did not install: $(cat "$T/offline/out")"
 called offline '^dpkg -i --skip-same-version' || fail "the bundled set was not given to dpkg"
-! called offline 'apt_ensure\|apt-get\|curl' || fail "an offline install reached for the network: $(cat "$T/offline/calls")"
+! called offline 'apt-get\|curl' || fail "an offline install reached for the network: $(cat "$T/offline/calls")"
 
-run broken installed=6 bundle=1 dpkg_fails=1 apt_gives=7
+run broken installed=6 bundle=1 dpkg_fails=1
 [ "$(rc broken)" = 3 ] || fail "a failing dpkg did not stop the install"
 grep -q 'dependency problems' "$T/broken/out" || fail "dpkg's own error was not shown: $(cat "$T/broken/out")"
-! called broken 'apt_ensure\|apt-get' || fail "a failing bundled set fell through to apt"
+! called broken 'apt-get' || fail "a failing bundled set fell through to apt"
 
 run half installed=6 bundle=1 bundle_gives=7 dpkg_status='install ok half-configured'
 [ "$(rc half)" = 3 ] || fail "a half-configured redis-server was accepted"
@@ -131,33 +132,29 @@ grep -q "half-configured" "$T/half/out" || fail "the dpkg status was not reporte
 run stale installed=6 bundle=1 bundle_gives=6 dpkg_status='install ok installed'
 [ "$(rc stale)" = 3 ] || fail "a bundled Redis 6 was accepted"
 
-run online installed=6 apt_gives=7
-[ "$(rc online)" = 0 ] || fail "the system apt's Redis 7 was not accepted: $(cat "$T/online/out")"
-called online '^apt_ensure redis-server' || fail "without a bundle the system apt was not tried"
-! called online 'curl' || fail "packages.redis.io was tried although apt had Redis 7"
-
-run repo installed=6 apt_gives=6
-[ "$(rc repo)" = 0 ] || fail "packages.redis.io's Redis 7 was not accepted: $(cat "$T/repo/out")"
-called repo 'apt-get install -y -qq redis' || fail "an old system Redis did not reach packages.redis.io"
-
-run airgap installed=6 apt_gives=6 curl_fails=1
-[ "$(rc airgap)" = 3 ] || fail "an air-gapped box without a bundle and with Redis 6 did not stop"
-grep -q 'needs Redis 7' "$T/airgap/out" || fail "the air-gap failure does not say what is needed"
+# Without a bundled set, an old Redis stops the install with the staging
+# command; nothing reaches for apt or packages.redis.io.
+run airgap installed=6
+[ "$(rc airgap)" = 3 ] || fail "a box without a bundle and with Redis 6 did not stop"
+grep -q 'stage-redis.sh' "$T/airgap/out" || fail "the failure does not name the staging command: $(cat "$T/airgap/out")"
+! called airgap 'apt-get\|curl' || fail "a box without a bundle reached for the network: $(cat "$T/airgap/calls")"
 
 ENSURE=ensure_postgres run pg_offline pg_bundle=1 dpkg_status='install ok installed'
 [ "$(rc pg_offline)" = 0 ] || fail "the bundled PostgreSQL set did not install: $(cat "$T/pg_offline/out")"
 called pg_offline '^dpkg -i --skip-same-version' || fail "the bundled PostgreSQL set was not given to dpkg"
 called pg_offline 'dpkg-query -W -f=${Status} postgresql-18' || fail "the PostgreSQL install was not verified"
-! called pg_offline 'apt_ensure\|apt-get' || fail "an offline PostgreSQL install reached for apt"
+! called pg_offline 'apt-get' || fail "an offline PostgreSQL install reached for apt"
 
 ENSURE=ensure_postgres run pg_broken pg_bundle=1 dpkg_fails=1
 [ "$(rc pg_broken)" = 3 ] || fail "a failing bundled PostgreSQL set did not stop the install"
 
 ENSURE=ensure_postgres run pg_present pg_installed=postgresql-14 pg_bundle=1
 [ "$(rc pg_present)" = 0 ] || fail "an installed PostgreSQL server was not kept"
-! called pg_present '^dpkg -i\|apt_ensure' || fail "an installed PostgreSQL server was reinstalled"
+! called pg_present '^dpkg -i\|apt-get' || fail "an installed PostgreSQL server was reinstalled"
 
-ENSURE=ensure_postgres run pg_apt
-called pg_apt '^apt_ensure postgresql postgresql-client' || fail "without a bundle the system apt was not tried"
+ENSURE=ensure_postgres run pg_unstaged
+[ "$(rc pg_unstaged)" = 3 ] || fail "a box without PostgreSQL or a bundled set did not stop"
+grep -q 'stage-postgres.sh' "$T/pg_unstaged/out" || fail "the failure does not name the staging command"
+! called pg_unstaged 'apt-get\|curl' || fail "a box without a bundled PostgreSQL set reached for the network"
 
-echo "PASS: native PostgreSQL and Redis 7 install from the bundle offline, network only as a fallback"
+echo "PASS: native PostgreSQL and Redis 7 install from the bundle or the box, never the network"
