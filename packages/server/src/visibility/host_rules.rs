@@ -95,10 +95,7 @@
 //!   - one query for the clarifications referenced by any `Resource::
 //!     Clarification` in the batch (rule 10) - a `Resource::Clarification`
 //!     only carries an id, so its author/recipient/is_public/contest_id
-//!     aren't in the `Resource` itself, as with submissions;
-//!   - one query for the replies of every clarification resolved above,
-//!     ordered by `created_at`, to find each one's LATEST reply's own
-//!     `is_public` flag (rule 10's `Redact` gate).
+//!     aren't in the `Resource` itself, as with submissions.
 //!
 //! Each query is skipped entirely when its target set is empty. The
 //! `contest_user` query is NOT narrowed to only the contests where
