@@ -12,6 +12,7 @@
 
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use extism::{Error, Plugin};
 use opentelemetry::KeyValue;
@@ -47,6 +48,7 @@ struct State<T> {
 
 struct Shared<T> {
     plugin_id: String,
+    liveness: Liveness,
     state: Mutex<State<T>>,
     source: PluginSource<T>,
     budget: Arc<MemoryBudget>,
@@ -72,6 +74,24 @@ impl<T> Shared<T> {
     }
 }
 
+/// Whether an instance pool still serves its plugin. The pool of a loaded
+/// plugin is live until the plugin is unloaded ([`InstancePool::retire`]);
+/// a call that started on it sees the change at its next host function
+/// (see [`crate::executor::instance_retired`]). Cheap to clone.
+#[derive(Clone, Debug, Default)]
+pub struct Liveness(Arc<AtomicBool>);
+
+impl Liveness {
+    pub fn is_live(&self) -> bool {
+        !self.0.load(Ordering::Acquire)
+    }
+
+    /// Retire the pool this liveness belongs to (see [`InstancePool::retire`]).
+    pub fn retire(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 /// A plugin's pool of instances. Cheap to clone; clones share one pool.
 pub struct InstancePool<T = Plugin> {
     shared: Arc<Shared<T>>,
@@ -94,6 +114,7 @@ impl<T: Send + 'static> InstancePool<T> {
     ) -> Self {
         let shared = Arc::new(Shared {
             plugin_id: plugin_id.to_string(),
+            liveness: Liveness::default(),
             state: Mutex::new(State {
                 free: Vec::new(),
                 leased: 0,
@@ -105,6 +126,17 @@ impl<T: Send + 'static> InstancePool<T> {
         let trimmable: Arc<dyn Trimmable> = shared.clone();
         budget.register(Arc::downgrade(&trimmable));
         Self { shared }
+    }
+
+    /// This pool's liveness: live until [`Self::retire`].
+    pub fn liveness(&self) -> Liveness {
+        self.shared.liveness.clone()
+    }
+
+    /// Stop serving the plugin: the plugin is unloaded. Calls running on the
+    /// pool finish, but none of their host functions runs any more.
+    pub fn retire(&self) {
+        self.shared.liveness.retire();
     }
 
     /// Lease an instance: the most recently returned one, or a new one.

@@ -130,7 +130,10 @@ A plugin removed from the fleet has its role set `NOLOGIN` and its sessions
 ended (`schema::retire`). Its schema and data stay: the plugin id is the
 plugin's identity, so a later install of the same id is the same plugin, and
 provisioning lets its role log in again. Every replica drops its pool for a
-plugin it unloads, so the next load provisions again.
+plugin it unloads, so the next load provisions again. A call still running on
+the unloaded instance never provisions the role again: its leases are
+refused, under the lock provisioning holds, once the instance is retired
+(see [Plugin execution](plugin-execution.md#unloaded-instances)).
 
 ## Pools
 
@@ -208,6 +211,7 @@ harnesses log in as that role too.
 | `failed_provisioning_backs_off` | A failed provisioning is not retried until the back-off passes |
 | `a_returned_connection_drops_its_session_state` | Session locks, listens and settings end when a connection returns |
 | `a_removed_plugin_cannot_log_in_until_it_is_installed_again` | Retirement sets `NOLOGIN`; a reinstall logs in and keeps the data |
+| `a_call_of_an_unloaded_plugin_never_provisions_its_role_again` | A call of a retired instance is refused and the retired role stays `NOLOGIN` |
 
 `plugin_core::manifest` tests reject unknown scopes and scopes without the
 `sql` permission at parse time.

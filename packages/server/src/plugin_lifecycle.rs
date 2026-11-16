@@ -848,7 +848,7 @@ async fn deactivate(state: &AppState, plugin_id: &str) -> Result<(), PluginError
             "Cut the judging sessions of an unloaded plugin"
         );
     }
-    state.plugin_sql.forget(plugin_id);
+    state.plugin_sql.forget(plugin_id).await;
     state.plugins.update_translations();
     Ok(())
 }
@@ -1546,7 +1546,7 @@ pub async fn remove_upload(
                 }
                 forget(state, applied, plugin_id).await;
                 delete_timers(state, plugin_id).await;
-                state.plugin_sql.forget(plugin_id);
+                state.plugin_sql.forget(plugin_id).await;
                 if let Err(e) = crate::plugin_db::schema::retire(&state.db, plugin_id).await {
                     tracing::warn!(plugin_id, error = %e, "Could not retire the plugin's database role");
                 }

@@ -901,7 +901,7 @@ mod tests {
             &session,
         );
         let plugin = plugin_sql
-            .lease("labelled", &[], None)
+            .lease("labelled", &[], &crate::plugin_db::SqlCall::default())
             .await
             .expect("plugin pool")
             .db;

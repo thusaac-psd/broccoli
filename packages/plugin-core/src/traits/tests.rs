@@ -48,6 +48,8 @@ struct Counts {
     max_nest_depth: usize,
     nest_errors: Vec<String>,
     marks: Vec<i64>,
+    /// Whether each `hold` found its instance retired once released.
+    retired: Vec<bool>,
 }
 
 /// What the host functions report to the test, and the gate they wait on.
@@ -144,7 +146,11 @@ fn hold(ctx: &Ctx, _: i64) -> Result<(), extism::Error> {
         c.max_running = c.max_running.max(c.running);
     });
     fixture.wait_released();
-    fixture.update(|c| c.running -= 1);
+    let retired = crate::executor::instance_retired();
+    fixture.update(|c| {
+        c.running -= 1;
+        c.retired.push(retired);
+    });
     Ok(())
 }
 
@@ -596,6 +602,29 @@ async fn a_call_queued_across_a_reload_runs_on_the_new_version() {
         call.await.unwrap().unwrap();
     }
     assert_eq!(h.fixture.read(|c| c.marks.clone()), vec![2]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unload_retires_the_instance_a_running_call_holds() {
+    let h = Harness::new(2);
+    let running = h.spawn("hold", CallOptions::background(later()));
+    until(|| h.fixture.read(|c| c.running) == 1).await;
+    h.manager.unload_plugin(PLUGIN).unwrap();
+    h.fixture.release();
+    running.await.unwrap().unwrap();
+    assert_eq!(h.fixture.read(|c| c.retired.clone()), vec![true]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reload_keeps_the_instance_a_running_call_holds_live() {
+    let h = Harness::new(2);
+    let running = h.spawn("hold", CallOptions::background(later()));
+    until(|| h.fixture.read(|c| c.running) == 1).await;
+    h.write_guest(2);
+    h.manager.reload_plugin(PLUGIN).unwrap();
+    h.fixture.release();
+    running.await.unwrap().unwrap();
+    assert_eq!(h.fixture.read(|c| c.retired.clone()), vec![false]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

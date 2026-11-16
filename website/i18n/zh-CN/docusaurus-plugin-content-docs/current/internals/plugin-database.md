@@ -67,7 +67,7 @@ read = ["submission.files"]
 
 应用角色需要 `LOGIN` 和 `CREATEROLE`，拥有数据库，且不是超级用户；运维配置参考中写明了这一点，每个安装程序也都这样创建它。缺少 `CREATEROLE` 时，m0001 会跳过组角色并记录警告。开通随之失败：插件中执行 SQL 的调用以“暂不可用”失败，调用方以 503 应答；失败只以 error 级别记录一次，下一次尝试要等待 30 秒（`PROVISION_BACKOFF`）。
 
-从集群移除的插件，其角色被设为 `NOLOGIN`，其会话被终止（`schema::retire`）。它的模式和数据保留：插件 id 就是插件的身份，因此日后以同一 id 安装的就是同一个插件，开通会让其角色再次登录。每个副本在卸载插件时丢弃该插件的连接池，因此下一次加载会再次开通。
+从集群移除的插件，其角色被设为 `NOLOGIN`，其会话被终止（`schema::retire`）。它的模式和数据保留：插件 id 就是插件的身份，因此日后以同一 id 安装的就是同一个插件，开通会让其角色再次登录。每个副本在卸载插件时丢弃该插件的连接池，因此下一次加载会再次开通。仍在已卸载实例上运行的调用永远不会再次开通该角色：实例失效后，它的租用在开通所持有的锁之下被拒绝（见[插件执行](plugin-execution.md#unloaded-instances)）。
 
 ## 连接池
 
@@ -114,5 +114,6 @@ read = ["submission.files"]
 | `failed_provisioning_backs_off` | 开通失败后，在退避期结束前不会重试 |
 | `a_returned_connection_drops_its_session_state` | 连接返回时，会话锁、监听和设置随之结束 |
 | `a_removed_plugin_cannot_log_in_until_it_is_installed_again` | 退役后设为 `NOLOGIN`；重新安装后可以登录并保留数据 |
+| `a_call_of_an_unloaded_plugin_never_provisions_its_role_again` | 已失效实例的调用被拒绝，退役的角色保持 `NOLOGIN` |
 
 `plugin_core::manifest` 中的测试在解析时拒绝未知范围以及缺少 `sql` 权限的范围。
