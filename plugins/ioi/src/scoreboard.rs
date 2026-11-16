@@ -13,7 +13,7 @@ use serde::Deserialize;
 // are also used directly by the #[cfg(test)] unit tests, so gate the latter
 // two more broadly.
 #[cfg(target_arch = "wasm32")]
-use crate::case_ratios::CaseRatios;
+use crate::case_ratios::{CaseRatios, JOIN_JUDGED_RATIOS};
 #[cfg(target_arch = "wasm32")]
 use crate::config::{ContestConfig, ScoringMode, SubtaskDef};
 #[cfg(any(target_arch = "wasm32", test))]
@@ -400,7 +400,7 @@ fn load_sum_best_subtask_scoreboard_cells(
          FROM submission s \
          JOIN contest c ON c.id = s.contest_id \
          JOIN submission_judgement sj ON sj.submission_id = s.id \
-         JOIN case_ratio cr ON cr.judgement_id = sj.id \
+         {JOIN_JUDGED_RATIOS} \
          WHERE s.contest_id = {} \
            AND s.user_id IN ({}) \
            AND s.problem_id IN ({}) \

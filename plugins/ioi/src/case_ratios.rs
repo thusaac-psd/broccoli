@@ -34,6 +34,15 @@ pub struct JudgedRatios {
     pub ratios: CaseRatios,
 }
 
+/// The join every scoring query reads a judgement's ratios through: the row
+/// of judgement `sj` that its current attempt stored. An attempt the host
+/// fenced out may have stored ratios the judgement's standing result was
+/// never scored with (a later attempt standing as a system error stores
+/// none), so the row is keyed by the judgement's epoch as well as its id.
+#[cfg(target_arch = "wasm32")]
+pub const JOIN_JUDGED_RATIOS: &str =
+    "JOIN case_ratio cr ON cr.judgement_id = sj.id AND cr.judge_epoch = sj.judge_epoch";
+
 /// The plugin-owned table: one row per judgement, its ratios as a JSON object
 /// keyed by test case id.
 #[cfg(target_arch = "wasm32")]

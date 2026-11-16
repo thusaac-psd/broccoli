@@ -21,7 +21,7 @@ use crate::config::{ContestConfig, TaskConfig};
 #[cfg(any(target_arch = "wasm32", test))]
 use crate::case_ratios::CaseRatios;
 #[cfg(target_arch = "wasm32")]
-use crate::case_ratios::JudgedRatios;
+use crate::case_ratios::{JOIN_JUDGED_RATIOS, JudgedRatios};
 #[cfg(any(target_arch = "wasm32", test))]
 use crate::config::{SubtaskDef, round_score};
 #[cfg(target_arch = "wasm32")]
@@ -82,7 +82,7 @@ pub(crate) fn load_current_submission_ratios(
         "SELECT cr.ratios \
          FROM submission s \
          JOIN submission_judgement sj ON sj.submission_id = s.id \
-         JOIN case_ratio cr ON cr.judgement_id = sj.id \
+         {JOIN_JUDGED_RATIOS} \
          WHERE s.id = {} AND s.contest_id = {} \
            AND sj.is_current = TRUE AND sj.is_finalized = TRUE",
         p.bind(submission_id),
