@@ -269,7 +269,7 @@ fn finalize_code_run(
 
     let max_time = non_skipped.iter().filter_map(|r| r.time_used).max();
     let max_memory = non_skipped.iter().filter_map(|r| r.memory_used).max();
-    let total_score: f64 = non_skipped.iter().map(|r| r.score).sum();
+    let total_score = crate::score::total_score(non_skipped.iter().map(|r| r.score));
 
     let is_ce = verdict == Verdict::CompileError;
     let status = if is_ce {

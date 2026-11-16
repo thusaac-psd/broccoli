@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 use broccoli_server_sdk::types::TestCaseBodyRef;
 use broccoli_server_sdk::types::TestCaseRow;
 
-use crate::config::{SubtaskDef, SubtaskScoringMethod, resolve_tc_label, round_score, total_score};
+use crate::config::{SubtaskDef, SubtaskScoringMethod, resolve_tc_label, round_score};
+use broccoli_server_sdk::score::total_score;
 
 #[derive(Debug, Clone)]
 pub struct SubtaskResult {

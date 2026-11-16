@@ -1,5 +1,6 @@
 pub mod api;
 pub mod contest;
+pub mod score;
 pub mod visibility;
 
 // The wire/domain types and SdkError live in the dependency-light `broccoli-types`

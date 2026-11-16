@@ -9,11 +9,12 @@ use broccoli_server_sdk::types::*;
 use serde::{Deserialize, Serialize};
 
 use crate::case_ratios::{self, judged_ratios};
+use crate::config::round_score;
 use crate::config::{SubtaskDef, SubtaskScoringMethod};
-use crate::config::{round_score, total_score};
 use crate::persist::persist_results;
 use crate::subtasks::MemberIndex;
 use crate::subtasks::score_all_subtasks;
+use broccoli_server_sdk::score::total_score;
 
 /// Per-test-case outcome from evaluation, with raw (0..1) scores.
 #[derive(Debug, Clone, Serialize, Deserialize)]

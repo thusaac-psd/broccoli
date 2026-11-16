@@ -124,13 +124,6 @@ pub fn round_score(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
-/// The sum of `scores`, 0 for none. Every score total goes through this:
-/// `Iterator::sum` over `f64` starts from `-0.0`, which an empty total would
-/// show as `-0`.
-pub fn total_score(scores: impl IntoIterator<Item = f64>) -> f64 {
-    scores.into_iter().fold(0.0, |total, score| total + score)
-}
-
 #[cfg(test)]
 impl ContestConfig {
     /// The config of a contest that stores none: the schema's defaults.
