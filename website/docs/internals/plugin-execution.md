@@ -203,7 +203,9 @@ never cancelled.
 
 The host's long waits end at the call's deadline too:
 `get_next_evaluate_result` and `get_next_operation_result` cut the wait a
-guest asks for at `executor::current_deadline`.
+guest asks for at `executor::current_deadline`, and a plugin's SQL waits for
+a connection permit no longer and has each statement cut there (see
+[Plugin database](plugin-database.md#deadlines)).
 
 A call still queued at its deadline, or cancelled at it, fails with
 `PluginError::Unavailable`.

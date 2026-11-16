@@ -165,14 +165,35 @@ Host functions other than `host.db.*` run on the host function pool
 (`connect_host_fn_pool` in `packages/server/src/database.rs`), as the app
 role, with statements the host builds. No plugin-authored SQL runs there.
 
+## Deadlines
+
+A plugin's SQL runs within the deadline of the call that runs it
+(`executor::current_deadline`, carried in `plugin_db::SqlCall`):
+
+- a lease waits for a permit no longer than the earlier of the deadline and
+  the pool's acquire timeout, then fails the call as unavailable;
+- every statement, in a transaction or not, is cut at the deadline. A
+  transaction records its backend's pid when it begins; a statement of it cut
+  at the deadline is cancelled on the backend (`pg_cancel_backend`, through
+  the app role, which holds every plugin role) and the transaction is rolled
+  back, returning its connection and permit;
+- a transaction lives no longer than the call tree that opened it: one still
+  open when the tree ends (the guest trapped, was cancelled or returned
+  without committing) is rolled back then, from the tree's `CallLocals`;
+- the backend of every statement stays bounded by the host-enforced
+  `statement_timeout`, which no plugin statement can change (see
+  [the SQL guard](#the-sql-guard)), so a statement cut outside a transaction
+  ends there.
+
 ## The SQL guard
 
 `reject_session_escape` in `host_funcs/sql.rs` refuses role changes,
 `set_config`, `ALTER ROLE` and `ALTER USER`, `DISCARD`, `DO`, routine
-definitions and session-level changes to the host-enforced settings. The
-engine confines role changes; the guard keeps a plugin from changing its own
-role's password or defaults, and from leaving its connection unbounded by
-`statement_timeout`.
+definitions, an `UPDATE` of `pg_settings` (which applies a setting as
+`set_config` does) and any `SET` of a host-enforced setting, `SET LOCAL`
+included. The engine confines role changes; the guard keeps a plugin from
+changing its own role's password or defaults, and from lifting
+`statement_timeout` for its connection or its transaction.
 
 ## What the boundary does not cover
 

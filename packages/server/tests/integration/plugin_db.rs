@@ -272,6 +272,24 @@ async fn concurrent_first_uses_on_several_replicas_converge() {
 /// At most `budget` leases hold a connection at once: a lease past the budget
 /// waits until one ends. Transactions pin their connections, so the count is
 /// exact while they are open.
+/// A lease waits for a permit no longer than its call's deadline: a call
+/// past it fails at once, though the pools' acquire timeout is far off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lease_waits_no_longer_than_its_calls_deadline() {
+    let f = Fixture::new().await;
+    let pools = f.pools(1);
+    let held = pools.lease("a", &[], &SqlCall::default()).await.expect("a");
+    let late = SqlCall {
+        deadline: Some(std::time::Instant::now()),
+        ..SqlCall::default()
+    };
+    let refused = tokio::time::timeout(Duration::from_secs(10), pools.lease("b", &[], &late))
+        .await
+        .expect("the lease ends at its call's deadline, not the acquire timeout");
+    assert!(matches!(refused, Err(server::plugin_db::Unavailable::Busy)));
+    drop(held);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_plugin_pools_keep_to_one_budget() {
     let f = Fixture::new().await;
@@ -789,6 +807,7 @@ async fn a_call_of_an_unloaded_plugin_never_provisions_its_role_again() {
     let call = SqlCall {
         locals: None,
         instance: Some(instance.clone()),
+        deadline: None,
     };
     drop(
         pools

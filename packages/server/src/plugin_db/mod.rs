@@ -38,7 +38,7 @@ use common::db::{DatabaseConnection, PgPoolSpec, PgSession};
 use plugin_core::executor::CallLocals;
 use plugin_core::manifest::SqlReadScope;
 use plugin_core::pool::Liveness;
-use sea_orm::DbErr;
+use sea_orm::{ConnectionTrait, DbBackend, DbErr, Statement};
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 /// Every plugin's SQL pool, built on first use. Clones share the pools.
@@ -102,6 +102,8 @@ const PROVISION_BACKOFF: Duration = Duration::from_secs(30);
 pub enum Unavailable {
     #[error("no plugin SQL connection was free within the call's deadline")]
     Busy,
+    #[error("the plugin SQL statement reached the call's deadline and was cancelled")]
+    Deadline,
     #[error("the plugin was unloaded while this call ran")]
     Unloaded,
     #[error("the plugin's database role could not be provisioned: {0}")]
@@ -117,6 +119,9 @@ pub struct SqlCall {
     /// The liveness of the instance the call runs on: a lease never
     /// provisions or opens a pool for a call of an unloaded plugin.
     pub instance: Option<Liveness>,
+    /// The call's deadline: a lease waits for a permit no longer, and the
+    /// host functions cut every statement at it.
+    pub deadline: Option<Instant>,
 }
 
 impl SqlCall {
@@ -125,6 +130,7 @@ impl SqlCall {
         Self {
             locals: plugin_core::executor::call_locals(),
             instance: plugin_core::executor::current_instance(),
+            deadline: plugin_core::executor::current_deadline(),
         }
     }
 
@@ -204,13 +210,14 @@ impl PluginSqlPools {
         let permit = match held {
             Some(permit) => permit,
             None => {
-                let permit = tokio::time::timeout(
-                    self.inner.acquire_timeout,
-                    budget.clone().acquire_owned(),
-                )
-                .await
-                .map_err(|_| Unavailable::Busy)?
-                .map_err(|_| Unavailable::Busy)?;
+                let mut wait = self.inner.acquire_timeout;
+                if let Some(deadline) = call.deadline {
+                    wait = wait.min(deadline.saturating_duration_since(Instant::now()));
+                }
+                let permit = tokio::time::timeout(wait, budget.clone().acquire_owned())
+                    .await
+                    .map_err(|_| Unavailable::Busy)?
+                    .map_err(|_| Unavailable::Busy)?;
                 let permit = Arc::new(permit);
                 if let Some(locals) = locals {
                     locals.with(|held: &mut HeldPermits| held.hold(budget, &permit));
@@ -397,6 +404,19 @@ impl PluginSqlPools {
             tokio::spawn(async move {
                 let _ = db.close().await;
             });
+        }
+    }
+
+    /// Cancel the statement plugin backend `pid` runs, through the app role,
+    /// which holds every plugin role (see [`schema::provision`]).
+    pub async fn cancel_backend(&self, pid: i32) {
+        let cancel = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT pg_cancel_backend($1)",
+            [pid.into()],
+        );
+        if let Err(e) = self.inner.host.execute_raw(cancel).await {
+            tracing::warn!(pid, error = %e, "Could not cancel a plugin statement past its deadline");
         }
     }
 

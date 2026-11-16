@@ -83,7 +83,7 @@ Extism 调用在发起它的线程上一直运行到客体返回，宿主函数�
 
 在 extism 注册调用之前被处理的取消找不到要停止的调用。`deadline::watch` 在 `Plugin::call` 之前运行，extism 在持有实例并替换上一次调用留下的不可用 store 之后才注册调用；这段窗口内不运行客体代码。因此截止时间线程会持续重复调用的取消，间隔从 `CANCEL_RETRY` 起倍增至 `CANCEL_RETRY_MAX`，直到调用返回。清单超时（调用超时加 `TIMEOUT_BACKSTOP_MARGIN`）会结束截止时间线程从未取消的客体。
 
-宿主的长时间等待同样在调用的截止时间结束：`get_next_evaluate_result` 和 `get_next_operation_result` 把客体请求的等待时间截断到 `executor::current_deadline`。
+宿主的长时间等待同样在调用的截止时间结束：`get_next_evaluate_result` 和 `get_next_operation_result` 把客体请求的等待时间截断到 `executor::current_deadline`；插件 SQL 等待连接许可也不超过该时刻，每条语句都在该时刻被截断（见[插件数据库](plugin-database.md#deadlines)）。
 
 在截止时间仍在排队或在截止时间被取消的调用以 `PluginError::Unavailable` 失败。
 

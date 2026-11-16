@@ -370,8 +370,8 @@ fn register_timer_functions(hr: &mut HostFunctionRegistry, host_db: &DatabaseCon
 }
 
 /// The raw `sql` capability: each plugin's statements run on its own pool, as
-/// its own role (see [`crate::plugin_db`]), including explicit transactions
-/// shared across one plugin's calls through `txn_map`.
+/// its own role (see [`crate::plugin_db`]), including explicit transactions,
+/// which `txn_map` holds until the call tree that opened them ends.
 fn register_sql_functions(hr: &mut HostFunctionRegistry, pools: &sql::PluginSql) {
     let cap = "sql";
     let with_pools = || {
