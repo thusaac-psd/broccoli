@@ -20,7 +20,7 @@ use crate::config::{ContestConfig, ScoringMode, TaskConfig};
 // they call directly, and `SubtaskDef` literals they construct); gate the
 // same way so a native (test/clippy) build doesn't see these as unused.
 #[cfg(any(target_arch = "wasm32", test))]
-use crate::config::{SubtaskDef, resolve_tc_label, round_score};
+use crate::config::{SubtaskDef, round_score};
 #[cfg(target_arch = "wasm32")]
 use crate::judge::{JudgeContext, judge_with_context_detached};
 // Only used by the wasm32-gated `compute_official_task_score` below.
@@ -115,19 +115,14 @@ pub(crate) fn score_submission_subtask_details(
     tc_results: &[TcResultRow],
 ) -> Vec<SubtaskScoreDetail> {
     let max_map: HashMap<i32, f64> = test_cases.iter().map(|tc| (tc.id, tc.score)).collect();
-    let id_to_label: HashMap<i32, String> = test_cases
-        .iter()
-        .map(|tc| (tc.id, resolve_tc_label(tc)))
-        .collect();
 
     let mut tc_scores = HashMap::new();
     for row in tc_results {
-        let Some(label) = id_to_label.get(&row.test_case_id) else {
+        let Some(&tc_max) = max_map.get(&row.test_case_id) else {
             continue;
         };
-        let tc_max = max_map.get(&row.test_case_id).copied().unwrap_or(0.0);
         let raw_score = normalized_raw_score(&row.verdict, row.score, tc_max);
-        tc_scores.insert(label.clone(), raw_score);
+        tc_scores.insert(row.test_case_id, raw_score);
     }
 
     score_all_subtasks(subtask_defs, test_cases, &tc_scores)
@@ -239,12 +234,7 @@ fn recompute_sum_best_subtask(
         .map(|t| (t.test_case_id, t.max_score))
         .collect();
 
-    let id_to_label: HashMap<i32, String> = test_cases
-        .iter()
-        .map(|tc| (tc.id, resolve_tc_label(tc)))
-        .collect();
-
-    let mut by_submission: HashMap<i32, HashMap<String, f64>> = HashMap::new();
+    let mut by_submission: HashMap<i32, HashMap<i32, f64>> = HashMap::new();
     for SubmissionTcResult {
         submission_id,
         result: row,
@@ -252,14 +242,10 @@ fn recompute_sum_best_subtask(
     {
         let tc_max = max_map.get(&row.test_case_id).copied().unwrap_or(0.0);
         let raw_score = normalized_raw_score(&row.verdict, row.score, tc_max);
-        let label = id_to_label
-            .get(&row.test_case_id)
-            .cloned()
-            .unwrap_or_else(|| row.test_case_id.to_string());
         by_submission
             .entry(*submission_id)
             .or_default()
-            .insert(label, raw_score);
+            .insert(row.test_case_id, raw_score);
     }
 
     Ok(sum_best_subtask_score(
@@ -285,7 +271,7 @@ fn recompute_sum_best_subtask(
 pub(crate) fn sum_best_subtask_score<'a>(
     subtask_defs: &[SubtaskDef],
     test_cases: &[TestCaseRow],
-    per_submission_scores: impl IntoIterator<Item = &'a HashMap<String, f64>>,
+    per_submission_scores: impl IntoIterator<Item = &'a HashMap<i32, f64>>,
 ) -> f64 {
     let all_subtask_scores: Vec<Vec<f64>> = per_submission_scores
         .into_iter()
@@ -468,12 +454,8 @@ mod tests {
         // Submission 1 aces subtask X and fails Y; submission 2 is the mirror.
         // Values here are per-test-case ratios in [0.0, 1.0], scaled by each
         // test case's own weight - not absolute points.
-        let first: HashMap<String, f64> = [("a".to_string(), 1.0), ("b".to_string(), 0.0)]
-            .into_iter()
-            .collect();
-        let second: HashMap<String, f64> = [("a".to_string(), 0.0), ("b".to_string(), 1.0)]
-            .into_iter()
-            .collect();
+        let first: HashMap<i32, f64> = [(11, 1.0), (12, 0.0)].into_iter().collect();
+        let second: HashMap<i32, f64> = [(11, 0.0), (12, 1.0)].into_iter().collect();
 
         let total = sum_best_subtask_score(&subtasks, &test_cases, [&first, &second]);
 

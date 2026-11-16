@@ -377,15 +377,12 @@ fn load_sum_best_subtask_scoreboard_cells(
     }
 
     let mut problem_subtasks: HashMap<i32, (Vec<TestCaseRow>, Vec<SubtaskDef>)> = HashMap::new();
-    let mut test_case_meta: HashMap<(i32, i32), (String, f64)> = HashMap::new();
+    let mut test_case_max: HashMap<(i32, i32), f64> = HashMap::new();
     for &problem_id in problem_ids {
         let task_config = load_task_config(host, contest_id, problem_id)?;
         let (test_cases, subtask_defs) = load_effective_subtasks(host, problem_id, &task_config)?;
         for test_case in &test_cases {
-            test_case_meta.insert(
-                (problem_id, test_case.id),
-                (resolve_tc_label(test_case), test_case.score),
-            );
+            test_case_max.insert((problem_id, test_case.id), test_case.score);
         }
         problem_subtasks.insert(problem_id, (test_cases, subtask_defs));
     }
@@ -418,10 +415,9 @@ fn load_sum_best_subtask_scoreboard_cells(
     );
     let rows: Vec<ScoreboardTcScoreRow> = host.db.query_with_args(&sql, &p.into_args())?;
 
-    let mut by_submission: HashMap<(i32, i32, i32), (i64, HashMap<String, f64>)> = HashMap::new();
+    let mut by_submission: HashMap<(i32, i32, i32), (i64, HashMap<i32, f64>)> = HashMap::new();
     for row in rows {
-        let Some((label, max_score)) = test_case_meta.get(&(row.problem_id, row.test_case_id))
-        else {
+        let Some(max_score) = test_case_max.get(&(row.problem_id, row.test_case_id)) else {
             continue;
         };
         let raw_score = crate::score::normalized_raw_score(&row.verdict, row.score, *max_score);
@@ -429,10 +425,10 @@ fn load_sum_best_subtask_scoreboard_cells(
             .entry((row.user_id, row.problem_id, row.submission_id))
             .or_insert_with(|| (row.elapsed_seconds, HashMap::new()));
         *elapsed = (*elapsed).min(row.elapsed_seconds);
-        scores.insert(label.clone(), raw_score);
+        scores.insert(row.test_case_id, raw_score);
     }
 
-    let mut submissions_by_cell: HashMap<(i32, i32), Vec<(i64, HashMap<String, f64>)>> =
+    let mut submissions_by_cell: HashMap<(i32, i32), Vec<(i64, HashMap<i32, f64>)>> =
         HashMap::new();
     for ((user_id, problem_id, _submission_id), submission_scores) in by_submission {
         submissions_by_cell
