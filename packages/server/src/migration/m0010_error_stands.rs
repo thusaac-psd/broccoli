@@ -7,16 +7,13 @@ use sea_orm_migration::prelude::*;
 /// `plugin_group_role`, see m0001) may read the new column as it reads every
 /// other column that is not content.
 ///
-/// Every system error decided before the column existed stands: one that
-/// is not current (no retry takes it), and one its submission already shows
-/// as its final result (a terminal status at the judgement's epoch). A
-/// current one whose submission still shows the attempt in flight awaits the
-/// system-error retry's decision and keeps `false`.
+/// A finalized system error that is decided stands: one that is not current
+/// (no retry takes it), and one its submission shows as its final result (a
+/// terminal status at the judgement's epoch). A current one whose submission
+/// shows the attempt in flight awaits the system-error retry's decision and
+/// keeps `false`.
 ///
-/// Rolling-safe: a defaulted column older replicas never read or write. A
-/// system error an older replica writes meanwhile is mirrored onto its
-/// submission at once, which the retry reads as decided
-/// (`judging::unit::awaits_retry_decision`).
+/// Rolling-safe: a defaulted column older replicas never read or write.
 pub struct Migration;
 
 impl MigrationName for Migration {

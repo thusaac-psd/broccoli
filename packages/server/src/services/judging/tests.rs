@@ -783,9 +783,8 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
     assert!(pass.confirmed.is_empty(), "confirmed once");
 }
 
-/// A system error its submission already shows as its final result (written
-/// before `error_stands` existed, or by a build that never set it) was
-/// decided: the retry never reopens it.
+/// A system error whose submission already shows it as its final result at
+/// its epoch is decided: the retry never reopens it.
 #[tokio::test]
 async fn a_system_error_its_submission_already_shows_is_never_reopened() {
     let (_pg, db) = crate::test_support::postgres().await;

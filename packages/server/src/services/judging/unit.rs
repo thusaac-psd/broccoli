@@ -202,8 +202,8 @@ fn system_error(alias: &str) -> String {
 /// SQL: the judgement `j` of submission `s` finished as a system error that
 /// the system-error retry may still re-judge: one that does not stand and
 /// that its submission does not already show as its final result (a terminal
-/// status at the judgement's epoch, which a build that never recorded
-/// `error_stands` mirrored at once). The submission keeps showing the attempt
+/// status at the judgement's epoch): a judgement its submission shows is
+/// decided and never reopened. The submission keeps showing the attempt
 /// in flight instead of a terminal status that the retry would take back:
 /// [`retry_system_errors`], which owns the retry budget, either requeues the
 /// judgement or confirms the error.
