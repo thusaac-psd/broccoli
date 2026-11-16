@@ -1,31 +1,36 @@
 #[cfg(target_arch = "wasm32")]
 use broccoli_server_sdk::prelude::*;
 #[cfg(target_arch = "wasm32")]
-use extism_pdk::{plugin_fn, FnResult};
+use extism_pdk::{FnResult, plugin_fn};
 
+/// Runs once when the server loads the plugin. Register what the plugin
+/// provides here through `host.registry`, for example an evaluator for a
+/// problem type:
+///
+/// ```ignore
+/// host.registry.register_evaluator("my-type", "evaluate_test_case")?;
+/// ```
+///
+/// The shipped plugins under `plugins/` in the Broccoli repository, such as
+/// `batch-evaluator` and `cooldown`, are complete examples.
 #[cfg(target_arch = "wasm32")]
 #[plugin_fn]
 pub fn init() -> FnResult<String> {
-    // Register your plugin's capabilities here. Examples:
-    //
-    //   // Register a contest type (judging strategy):
-    //   host::registry::register_contest_type("my-type", "on_submission", "on_code_run")?;
-    //
-    //   // Register an evaluator (test case execution):
-    //   host::registry::register_evaluator("my-evaluator", "evaluate_test_case")?;
-    //
-    //   // Register an API endpoint:
-    //   host::registry::register_api_endpoint("GET", "/api/plugins/{{plugin_name}}/hello", "api_hello", false)?;
-    //
-    // See existing plugins (ioi-contest, standard-evaluator) for full examples.
-
-    host::logger::log_info("{{plugin_name_pascal}} plugin initialized")?;
+    let host = Host::new();
+    host.log.info("{{plugin_name_pascal}} plugin initialized")?;
     Ok("ok".into())
 }
 
+/// The `GET /api/plugins/{{plugin_name}}/hello` route declared in plugin.toml.
 #[cfg(target_arch = "wasm32")]
 #[plugin_fn]
 pub fn hello(input: String) -> FnResult<String> {
-    host::logger::log_info(&format!("{{plugin_name_pascal}} received: {input}"))?;
-    Ok(format!("Hello from {{plugin_name_pascal}}!"))
+    run_api_handler(&input, |host, _req| {
+        host.log.info("{{plugin_name_pascal}} said hello")?;
+        Ok(PluginHttpResponse {
+            status: 200,
+            headers: None,
+            body: Some(serde_json::json!({ "message": "Hello from {{plugin_name_pascal}}!" })),
+        })
+    })
 }

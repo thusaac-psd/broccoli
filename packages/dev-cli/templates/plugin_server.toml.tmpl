@@ -3,10 +3,9 @@
 entry = "{{plugin_name_snake}}.wasm"
 permissions = ["logger", "plugin:register"]
 
-# Custom API routes exposed by this plugin.
-# Each route maps an HTTP method and path to a handler function in the WASM module.
-# [[server.routes]]
-# method = "GET"
-# path = "/api/plugins/{{plugin_name}}/hello"
-# handler = "api_hello"
+# HTTP routes, each mapping a method and path to an exported function.
+[[server.routes]]
+method = "GET"
+path = "/api/plugins/{{plugin_name}}/hello"
+handler = "hello"
 # permission = "{{plugin_name_snake}}:read"    # omit for public routes

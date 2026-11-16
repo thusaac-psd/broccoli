@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+broccoli-api-types.workspace = true
 broccoli-types = { workspace = true, features = ["utoipa"] }
 common.workspace = true
 extism.workspace = true

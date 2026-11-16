@@ -20,7 +20,6 @@ use broccoli_cli_core::api::clarification::{ClarificationListResponse, Clarifica
 use broccoli_cli_core::api::submission::SubmissionListResponse;
 use broccoli_cli_core::backoff;
 use broccoli_cli_core::client::{Client, ClientError, ClientResult};
-use broccoli_cli_core::config;
 use broccoli_cli_core::fmt;
 use broccoli_cli_core::model::{
     ClarificationKind, StatusDisplay, SubmissionStatus, Verdict, VerdictDisplay,
@@ -56,8 +55,9 @@ impl Drop for TerminalGuard {
 
 #[derive(Args)]
 pub struct WatchArgs {
-    /// Contest ID or name (e.g. 3 or "Spring Round")
-    pub contest_id: String,
+    /// Contest ID or name (e.g. 3 or "Spring Round"); defaults to the
+    /// .broccoli file's, then `contest` in config.toml
+    pub contest_id: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -341,10 +341,13 @@ impl Link {
 }
 
 pub fn run(args: WatchArgs) -> anyhow::Result<()> {
-    let creds = config::resolve_credentials(None, None)?;
+    let creds = crate::commands::credentials()?;
     let client = Client::new(creds);
 
-    let contest_id = broccoli_cli_core::resolve::contest_id(&client, &args.contest_id)?;
+    let contest_id = broccoli_cli_core::resolve::contest_id(
+        &client,
+        &super::context::contest_ref(args.contest_id.as_deref())?,
+    )?;
 
     let contest = client.get_contest(&contest_id)?;
     let problems = client

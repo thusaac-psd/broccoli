@@ -22,7 +22,7 @@ pub struct StatusArgs {
 }
 
 pub fn run(args: StatusArgs) -> anyhow::Result<()> {
-    let creds = config::resolve_credentials(None, None)?;
+    let creds = crate::commands::credentials()?;
     let client = Client::new(creds);
 
     if let Some(id) = args.id {

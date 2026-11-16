@@ -7,23 +7,32 @@ use broccoli_cli_core::{config, resolve};
 
 #[derive(Args)]
 pub struct ProblemsArgs {
-    /// Contest ID or name (e.g. 3 or "Spring Round")
-    #[arg(required = true)]
-    pub contest: String,
+    /// Contest ID or name (e.g. 3 or "Spring Round"); defaults to the
+    /// .broccoli file's, then `contest` in config.toml
+    pub contest: Option<String>,
 
-    /// Problem ID, label, index, or title to download (statement + samples)
+    /// Problem to download (statement + samples): label (A), position (1),
+    /// title ("Two Sum"), or #ID
     #[arg(short = 'p', long)]
     pub problem: Option<String>,
 }
 
 pub fn run(args: ProblemsArgs) -> anyhow::Result<()> {
-    let creds = config::resolve_credentials(None, None)?;
+    let creds = crate::commands::credentials()?;
     let client = Client::new(creds);
-    let cid = resolve::contest_id(&client, &args.contest)?;
+    let cid = resolve::contest_id(
+        &client,
+        &crate::commands::context::contest_ref(args.contest.as_deref())?,
+    )?;
 
     if let Some(ref problem_ref) = args.problem {
-        let pid = resolve::problem_id(&client, &cid, problem_ref)?;
-        return download_problem(&client, &cid, &pid);
+        let problem = resolve::problem(&client, &cid, problem_ref)?;
+        println!(
+            "{}  Problem {}",
+            style("→").blue().bold(),
+            style(&problem).cyan()
+        );
+        return download_problem(&client, &cid, &problem.id.to_string());
     }
 
     println!(

@@ -5,7 +5,9 @@ use clap::Args;
 use console::style;
 
 use broccoli_cli_core::client::Client;
-use broccoli_cli_core::{config, resolve};
+use broccoli_cli_core::resolve;
+
+use super::context::contest_ref as context_contest;
 
 #[derive(Args)]
 pub struct ClarificationsArgs {
@@ -25,34 +27,37 @@ pub enum ClarificationsCommand {
 
 #[derive(Args)]
 pub struct ListArgs {
-    /// Contest ID or name (e.g. 3 or "Spring Round")
-    pub contest: String,
+    /// Contest ID or name (e.g. 3 or "Spring Round"); defaults to the
+    /// .broccoli file's, then `contest` in config.toml
+    pub contest: Option<String>,
 }
 
 #[derive(Args)]
 pub struct AskArgs {
-    /// Contest ID or name (e.g. 3 or "Spring Round")
-    pub contest: String,
     /// The question to ask (prompted interactively if omitted)
     pub message: Option<String>,
+    /// Contest ID or name (e.g. 3 or "Spring Round"); defaults to the
+    /// .broccoli file's, then `contest` in config.toml
+    #[arg(short = 'c', long)]
+    pub contest: Option<String>,
 }
 
 pub fn run(args: ClarificationsArgs) -> anyhow::Result<()> {
-    let creds = config::resolve_credentials(None, None)?;
+    let creds = crate::commands::credentials()?;
     let client = Client::new(creds);
 
     match args.command {
         Some(ClarificationsCommand::List(a)) => {
-            let cid = resolve::contest_id(&client, &a.contest)?;
+            let cid = resolve::contest_id(&client, &context_contest(a.contest.as_deref())?)?;
             list(&client, &cid)
         }
         Some(ClarificationsCommand::Ask(a)) => {
-            let cid = resolve::contest_id(&client, &a.contest)?;
+            let cid = resolve::contest_id(&client, &context_contest(a.contest.as_deref())?)?;
             ask(&client, &cid, a.message)
         }
         None => {
             anyhow::bail!(
-                "Usage: broccoli clarifications list <contest> | ask <contest> [message]"
+                "Usage: broccoli clarifications list [contest] | ask [message] [-c contest]"
             );
         }
     }

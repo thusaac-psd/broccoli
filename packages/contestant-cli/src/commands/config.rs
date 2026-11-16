@@ -1,4 +1,5 @@
-use broccoli_cli_core::config;
+use broccoli_cli_core::config::{ConfigKey, ConfigLayers};
+use broccoli_cli_core::server::ServerUrl;
 use clap::{Args, Subcommand};
 use console::style;
 
@@ -22,78 +23,76 @@ pub enum ConfigCommand {
 
 #[derive(Args)]
 pub struct SetArgs {
-    /// Config key (contest, language, server)
-    pub key: String,
+    /// Config key: contest, language, server or tls
+    pub key: ConfigKey,
     /// Config value
     pub value: String,
 }
 
 #[derive(Args)]
 pub struct UnsetArgs {
-    /// Config key (contest, language, server)
-    pub key: String,
+    /// Config key: contest, language, server or tls
+    pub key: ConfigKey,
 }
 
 pub fn run(args: ConfigArgs) -> anyhow::Result<()> {
+    let mut layers = ConfigLayers::load();
     match args.command.unwrap_or(ConfigCommand::Show) {
-        ConfigCommand::Show => {
-            let cfg = config::load_user_config();
-            println!(
-                "{}  Configuration ({:?}/config.toml):\n",
-                style("→").blue().bold(),
-                config::config_dir()
-            );
-            println!(
-                "  contest  = {}",
-                cfg.contest.as_deref().unwrap_or("(not set)")
-            );
-            println!(
-                "  language = {}",
-                cfg.language.as_deref().unwrap_or("(auto-detect)")
-            );
-            println!(
-                "  server   = {}",
-                cfg.server.as_deref().unwrap_or("(from credentials)")
-            );
-            if !cfg.runtimes.is_empty() {
-                println!("\n  Runtimes:");
-                for (ext, cmd) in &cfg.runtimes {
-                    println!("    {} = \"{}\"", ext, cmd);
-                }
-            }
-        }
+        ConfigCommand::Show => show(&layers),
         ConfigCommand::Set(a) => {
-            let mut cfg = config::load_user_config();
-            match a.key.as_str() {
-                "contest" => cfg.contest = Some(a.value.clone()),
-                "language" => cfg.language = Some(a.value.clone()),
-                "server" => cfg.server = Some(a.value.clone()),
-                _ => {
-                    anyhow::bail!(
-                        "Unknown config key '{}'. Valid keys: contest, language, server",
-                        a.key
-                    );
-                }
+            if a.key == ConfigKey::Server {
+                a.value.parse::<ServerUrl>()?;
             }
-            config::save_user_config(&cfg)?;
-            println!("{}  {} = {}", style("✓").green(), a.key, a.value);
+            layers.set(a.key, a.value.clone())?;
+            println!(
+                "{}  {} = {} (in {})",
+                style("✓").green(),
+                a.key,
+                a.value,
+                layers.user_path().display()
+            );
         }
         ConfigCommand::Unset(a) => {
-            let mut cfg = config::load_user_config();
-            match a.key.as_str() {
-                "contest" => cfg.contest = None,
-                "language" => cfg.language = None,
-                "server" => cfg.server = None,
-                _ => {
-                    anyhow::bail!(
-                        "Unknown config key '{}'. Valid keys: contest, language, server",
-                        a.key
-                    );
-                }
+            let machine = layers.unset(a.key)?.map(str::to_string);
+            println!(
+                "{}  {} unset in {}",
+                style("✓").green(),
+                a.key,
+                layers.user_path().display()
+            );
+            if let Some(value) = machine {
+                println!(
+                    "   {} = {} still applies from {}",
+                    a.key,
+                    value,
+                    layers.system_path().display()
+                );
             }
-            config::save_user_config(&cfg)?;
-            println!("{}  {} unset", style("✓").green(), a.key);
         }
     }
     Ok(())
+}
+
+fn show(layers: &ConfigLayers) {
+    println!(
+        "{}  Configuration ({}, over {}):\n",
+        style("→").blue().bold(),
+        layers.user_path().display(),
+        layers.system_path().display()
+    );
+    for key in ConfigKey::ALL {
+        let shown = match (layers.user.get(key), layers.system.get(key)) {
+            (Some(value), _) => value.to_string(),
+            (None, Some(value)) => format!("{value} (machine)"),
+            (None, None) => "(not set)".to_string(),
+        };
+        println!("  {:<8} = {}", key.name(), shown);
+    }
+    let runtimes = layers.merged().runtimes;
+    if !runtimes.is_empty() {
+        println!("\n  Runtimes:");
+        for (ext, cmd) in &runtimes {
+            println!("    {} = \"{}\"", ext, cmd);
+        }
+    }
 }

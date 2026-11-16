@@ -10,6 +10,7 @@ mod bundle;
 mod claim_in_flight;
 mod claim_wake;
 mod clarification;
+mod cli_client;
 mod code_run;
 mod codelink_bracket;
 mod codelink_bracket_gating;

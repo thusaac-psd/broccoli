@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 use common::storage::ContentHash;
 use plugin_core::error::PluginError;
 
+pub use broccoli_api_types::plugin::PluginSourceKind;
+
 use crate::plugin_archive::{MAX_ARCHIVE_BYTES, PluginArchive};
 use crate::plugin_id::PluginId;
 use crate::state::AppState;
@@ -58,17 +60,6 @@ impl PluginSource {
             PluginSource::Upload(hash) => Some(hash),
         }
     }
-}
-
-/// Where a plugin's files come from, as the admin API reports it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginSourceKind {
-    /// The copy shipped in each node's plugins directory.
-    Bundle,
-    /// An archive uploaded through the admin API, served from the shared
-    /// blob store. Takes precedence over a bundled copy.
-    Upload,
 }
 
 impl PluginSource {

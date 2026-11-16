@@ -37,3 +37,7 @@ pub mod prelude {
     #[cfg(feature = "guest")]
     pub use crate::sdk::*;
 }
+
+/// This SDK's crate version. `broccoli-dev plugin new` pins a plugin made
+/// outside a Broccoli checkout to it.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

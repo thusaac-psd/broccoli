@@ -12,12 +12,16 @@ use super::wasm::copy_wasm_artifact;
 
 #[derive(Args)]
 pub struct BuildPluginArgs {
+    /// Plugin directory (the one holding plugin.toml)
     #[arg(default_value = ".")]
     pub path: PathBuf,
 
+    /// Run the frontend install command (`pnpm install`) even when
+    /// node_modules exists; it runs anyway when node_modules is missing
     #[arg(long)]
     pub install: bool,
 
+    /// Build an optimized WASM module
     #[arg(long)]
     pub release: bool,
 }
@@ -30,11 +34,7 @@ pub fn run(args: BuildPluginArgs) -> anyhow::Result<()> {
 
     let manifest_path = plugin_dir.join("plugin.toml");
     if !manifest_path.exists() {
-        bail!(
-            "Not a broccoli plugin directory: no plugin.toml found in '{}'.\n\
-             Run `broccoli plugin new` to create a new plugin.",
-            plugin_dir.display()
-        );
+        return Err(super::not_a_plugin_dir(&plugin_dir));
     }
 
     let manifest = read_manifest(&manifest_path)?;

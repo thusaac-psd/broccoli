@@ -1,10 +1,9 @@
 use broccoli_cli_core::client::Client;
-use broccoli_cli_core::config;
 use console::style;
 
 /// Show who you're logged in as, and against which server.
 pub fn run() -> anyhow::Result<()> {
-    let creds = config::resolve_credentials(None, None)?;
+    let creds = crate::commands::credentials()?;
     let server = creds.server().to_string();
     let client = Client::new(creds);
     let me = client.me()?;

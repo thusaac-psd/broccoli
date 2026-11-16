@@ -45,10 +45,16 @@ broccoli login                          # browser callback flow
 broccoli login -u alice -p '<password>' # direct username/password (no browser)
 broccoli login --server http://host:3000
 broccoli whoami                         # who am I logged in as? (alias: me)
+broccoli logout                         # forget the saved login (shared machines)
 ```
 
-Credentials are stored in `~/.config/broccoli/credentials.json`. Override per
-command with `BROCCOLI_URL` / `BROCCOLI_TOKEN`, or `--server` / `--token`.
+Credentials are stored in `credentials.json` in the `broccoli` folder of the
+platform's config directory (`~/.config/broccoli` on Linux); `broccoli config`
+prints the folder. The server a command talks to is, in order: `--server` (or
+`BROCCOLI_URL`), the server you logged in to last, then `server` in
+`config.toml`. Override the login per command with `--token` (or
+`BROCCOLI_TOKEN`). Server addresses need `http://` or `https://`; a trailing
+slash makes no difference.
 
 ### The inner loop — `test`, `submit`, `status`
 
@@ -83,9 +89,9 @@ broccoli contest problems <id|name> -p A       # download statement + samples in
 ### Clarifications — `clarifications`
 
 ```bash
-broccoli clarifications list <id|name>
-broccoli clarifications ask <id|name> "Is N ≤ 1e9?"
-broccoli clarifications ask <id|name>          # prompts for the question
+broccoli clarifications list [id|name]
+broccoli clarifications ask "Is N ≤ 1e9?" -c <id|name>
+broccoli clarifications ask                    # prompts for the question
 ```
 
 ### Live dashboard — `watch`
@@ -148,23 +154,34 @@ also work; run `broccoli --help` for the full list.)
 
 - **Contest**: a numeric id, or a (case-insensitive) match of the contest
   **title**.
-- **Problem** (within a contest): the **label** (`A`), the numeric **problem
-  id**, a **1-based index** into the problem list, or the **title**.
+- **Problem** (within a contest): the **label** (`A`), the **1-based position**
+  in the contest (`1`), the **title** (`"Two Sum"`, or a unique part of it), or
+  the problem id written with `#` (`#42`). A reference that two of these read as
+  different problems is refused; the resolved label and title are printed before
+  a test or submit.
 
 `broccoli submit sol.cpp -p A` and `-p 1` and `-p "Two Sum"` all resolve to the
 same problem.
+
+## Exit status
+
+`0` on success, `1` on an error, `2` on a command line that does not parse, and
+`3` when `test` has a failing sample or `submit -w` gets a verdict other than
+Accepted.
 
 ## Configuration & environment
 
 Per-user config lives at `~/.config/broccoli/config.toml`; contest admins can
 pre-seed machine-wide defaults at `/etc/broccoli/config.toml` (user values win).
+`broccoli config set` and `unset` change the user file only; after `unset`, a
+machine-wide value applies again, and the command says so.
 
 ```toml
 # ~/.config/broccoli/config.toml
 contest  = "3"            # default contest when -c is omitted
 language = "cpp"          # default language
 server   = "https://judge.example.com"
-tls      = "webpki"       # webpki (default) | system | insecure  — see TLS
+tls      = "default"      # default | webpki | system | insecure  — see TLS
 
 [runtimes]                # how to run each language locally (for `test --local`)
 python = "python3.12"
@@ -174,8 +191,8 @@ Environment overrides:
 
 | Variable                   | Purpose                                                                         |
 | -------------------------- | ------------------------------------------------------------------------------- |
-| `BROCCOLI_URL`             | Server URL (overrides config / saved credentials)                               |
-| `BROCCOLI_TOKEN`           | Access token (with `BROCCOLI_URL`, skips `login`)                               |
+| `BROCCOLI_URL`             | Server URL, as `--server` (overrides saved credentials and config)              |
+| `BROCCOLI_TOKEN`           | Access token, as `--token` (skips the saved login)                              |
 | `BROCCOLI_TLS`             | TLS trust mode (see below) — overrides the `tls` config key                     |
 | `NO_COLOR` / `FORCE_COLOR` | Disable / force ANSI colors                                                     |
 | `PAGER`                    | Viewer used by `o` in the watch problem overlay (defaults to vim → less → more) |

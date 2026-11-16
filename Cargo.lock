@@ -840,6 +840,7 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "broccoli-cli-core",
+ "broccoli-server-sdk",
  "broccoli-types",
  "clap",
  "console",
@@ -855,6 +856,7 @@ dependencies = [
  "serde_json",
  "shlex 1.3.0",
  "tar",
+ "tempfile",
  "toml 0.9.12+spec-1.1.0",
 ]
 
@@ -4323,6 +4325,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "broccoli-api-types",
  "broccoli-types",
  "common",
  "extism",
@@ -5575,6 +5578,7 @@ dependencies = [
  "axum_typed_multipart",
  "base64 0.22.1",
  "broccoli-api-types",
+ "broccoli-cli-core",
  "broccoli-server-sdk",
  "chrono",
  "clap",

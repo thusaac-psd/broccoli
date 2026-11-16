@@ -1,3 +1,7 @@
+# A plugin crate is its own workspace root, so it builds the same inside
+# another project's workspace (a Broccoli checkout) and on its own.
+[workspace]
+
 [package]
 name = "{{plugin_name}}"
 version = "0.1.0"

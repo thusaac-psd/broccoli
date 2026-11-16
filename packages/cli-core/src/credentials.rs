@@ -1,4 +1,7 @@
-//! `credentials.json`: the access/refresh token pair saved per server.
+//! `credentials.json`: the access/refresh token pair saved per server, keyed
+//! by the server's normalised [`ServerUrl`]. The first entry is the active
+//! server: the one `broccoli login` signed in to last, which commands use when
+//! no server is given.
 //!
 //! A pair is always written whole: there is no way to store an access token
 //! without the refresh token issued with it. Several CLI processes (for
@@ -17,6 +20,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+
+use crate::server::ServerUrl;
 
 /// An access token and the refresh token issued together with it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,23 +75,23 @@ impl CredentialsFile {
     }
 
     /// The pair saved for `server`.
-    pub fn read(&self, server: &str) -> Option<StoredTokens> {
+    pub fn read(&self, server: &ServerUrl) -> Option<StoredTokens> {
         self.load()
             .contents
             .entries
             .into_iter()
-            .find(|e| e.server == server)
+            .find(|e| e.server == server.as_str())
             .map(|e| e.tokens)
     }
 
-    /// The most recently saved server and its pair.
-    pub fn most_recent(&self) -> Option<(String, StoredTokens)> {
+    /// The active server (the last one logged in to) and its pair.
+    pub fn active(&self) -> Option<(ServerUrl, StoredTokens)> {
         self.load()
             .contents
             .entries
             .into_iter()
             .next()
-            .map(|e| (e.server, e.tokens))
+            .and_then(|e| Some((e.server.parse().ok()?, e.tokens)))
     }
 
     /// Why part or all of the file is being ignored, if it is.
@@ -174,10 +179,17 @@ impl CredentialsFile {
             }
         };
         let total = raw.entries.len();
+        // An entry must name its server in normalised form, or no lookup
+        // could ever find it.
         let entries: Vec<Entry> = raw
             .entries
             .into_iter()
-            .filter_map(|value| serde_json::from_value(value).ok())
+            .filter_map(|value| serde_json::from_value::<Entry>(value).ok())
+            .filter(|e| {
+                e.server
+                    .parse::<ServerUrl>()
+                    .is_ok_and(|url| url.as_str() == e.server)
+            })
             .collect();
         let skipped = total - entries.len();
         Loaded {
@@ -213,27 +225,62 @@ fn warn_unlocked(e: &std::io::Error) {
 }
 
 impl CredentialsLock {
-    pub fn read(&self, server: &str) -> Option<StoredTokens> {
+    pub fn read(&self, server: &ServerUrl) -> Option<StoredTokens> {
         self.file.read(server)
     }
 
-    /// Save `tokens` for `server` and make it the most recent server. Other
-    /// servers' valid entries are kept; anything unreadable is replaced.
-    pub fn write(&self, server: &str, tokens: &StoredTokens) -> anyhow::Result<()> {
+    /// Save the pair a login obtained for `server` and make it the active
+    /// server. Other servers' valid entries are kept; anything unreadable is
+    /// replaced.
+    pub fn save_login(&self, server: &ServerUrl, tokens: &StoredTokens) -> anyhow::Result<()> {
         let mut contents = self.file.load().contents;
-        contents.entries.retain(|e| e.server != server);
-        contents.entries.insert(
-            0,
-            Entry {
-                server: server.to_string(),
-                tokens: tokens.clone(),
-            },
-        );
-        let text = serde_json::to_string_pretty(&contents)?;
+        contents.entries.retain(|e| e.server != server.as_str());
+        contents.entries.insert(0, Entry::new(server, tokens));
+        self.replace(&contents)
+    }
 
+    /// Save the pair a refresh rotated `server`'s session to. The active
+    /// server stays what it was: refreshing a session is not logging in.
+    pub fn save_rotation(&self, server: &ServerUrl, tokens: &StoredTokens) -> anyhow::Result<()> {
+        let mut contents = self.file.load().contents;
+        match contents
+            .entries
+            .iter_mut()
+            .find(|e| e.server == server.as_str())
+        {
+            Some(entry) => entry.tokens = tokens.clone(),
+            None => contents.entries.push(Entry::new(server, tokens)),
+        }
+        self.replace(&contents)
+    }
+
+    /// Forget `server`'s pair. Returns whether one was saved. The next saved
+    /// server, if any, becomes the active one.
+    pub fn remove(&self, server: &ServerUrl) -> anyhow::Result<bool> {
+        let mut contents = self.file.load().contents;
+        let before = contents.entries.len();
+        contents.entries.retain(|e| e.server != server.as_str());
+        if contents.entries.len() == before {
+            return Ok(false);
+        }
+        self.replace(&contents)?;
+        Ok(true)
+    }
+
+    fn replace(&self, contents: &FileContents) -> anyhow::Result<()> {
+        let text = serde_json::to_string_pretty(contents)?;
         let tmp = self.file.path.with_extension("json.tmp");
         write_private(&tmp, text.as_bytes())?;
         std::fs::rename(&tmp, &self.file.path).context("Failed to replace credentials file")
+    }
+}
+
+impl Entry {
+    fn new(server: &ServerUrl, tokens: &StoredTokens) -> Self {
+        Self {
+            server: server.to_string(),
+            tokens: tokens.clone(),
+        }
     }
 }
 
@@ -274,20 +321,61 @@ mod tests {
         }
     }
 
+    fn url(s: &str) -> ServerUrl {
+        s.parse().unwrap()
+    }
+
     #[test]
-    fn a_write_replaces_one_server_and_keeps_the_others() {
+    fn a_login_replaces_one_server_and_keeps_the_others() {
         let dir = tempfile::tempdir().unwrap();
         let file = CredentialsFile::at(dir.path().join("credentials.json"));
         let lock = file.lock().unwrap();
-        lock.write("https://a", &pair("a1", "ra1")).unwrap();
-        lock.write("https://b", &pair("b1", "rb1")).unwrap();
-        lock.write("https://a", &pair("a2", "ra2")).unwrap();
+        lock.save_login(&url("https://a"), &pair("a1", "ra1"))
+            .unwrap();
+        lock.save_login(&url("https://b"), &pair("b1", "rb1"))
+            .unwrap();
+        lock.save_login(&url("https://a"), &pair("a2", "ra2"))
+            .unwrap();
         drop(lock);
 
-        assert_eq!(file.read("https://a"), Some(pair("a2", "ra2")));
-        assert_eq!(file.read("https://b"), Some(pair("b1", "rb1")));
-        let (server, _) = file.most_recent().unwrap();
-        assert_eq!(server, "https://a");
+        assert_eq!(file.read(&url("https://a")), Some(pair("a2", "ra2")));
+        assert_eq!(file.read(&url("https://b/")), Some(pair("b1", "rb1")));
+        let (server, _) = file.active().unwrap();
+        assert_eq!(server, url("https://a"));
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_active_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = CredentialsFile::at(dir.path().join("credentials.json"));
+        let lock = file.lock().unwrap();
+        lock.save_login(&url("https://a"), &pair("a1", "ra1"))
+            .unwrap();
+        lock.save_login(&url("https://b"), &pair("b1", "rb1"))
+            .unwrap();
+        lock.save_rotation(&url("https://a"), &pair("a2", "ra2"))
+            .unwrap();
+        drop(lock);
+
+        assert_eq!(file.active().unwrap().0, url("https://b"));
+        assert_eq!(file.read(&url("https://a")), Some(pair("a2", "ra2")));
+    }
+
+    #[test]
+    fn removing_the_active_server_activates_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = CredentialsFile::at(dir.path().join("credentials.json"));
+        let lock = file.lock().unwrap();
+        lock.save_login(&url("https://a"), &pair("a", "ra"))
+            .unwrap();
+        lock.save_login(&url("https://b"), &pair("b", "rb"))
+            .unwrap();
+        assert!(lock.remove(&url("https://b")).unwrap());
+        assert!(!lock.remove(&url("https://b")).unwrap());
+        drop(lock);
+
+        assert_eq!(file.active().unwrap().0, url("https://a"));
+        assert_eq!(file.read(&url("https://b")), None);
     }
 
     #[test]
@@ -301,8 +389,8 @@ mod tests {
         )
         .unwrap();
         let file = CredentialsFile::at(path);
-        assert_eq!(file.read("https://x"), None);
-        assert_eq!(file.read("https://y"), Some(pair("t", "r")));
+        assert_eq!(file.read(&url("https://x")), None);
+        assert_eq!(file.read(&url("https://y")), Some(pair("t", "r")));
         assert!(file.damage().unwrap().contains("1 entry"));
     }
 
@@ -312,14 +400,14 @@ mod tests {
         let path = dir.path().join("credentials.json");
         std::fs::write(&path, "not json at all").unwrap();
         let file = CredentialsFile::at(&path);
-        assert_eq!(file.most_recent(), None);
+        assert_eq!(file.active(), None);
         assert!(file.damage().is_some());
 
         file.lock()
             .unwrap()
-            .write("https://a", &pair("a", "r"))
+            .save_login(&url("https://a"), &pair("a", "r"))
             .unwrap();
-        assert_eq!(file.read("https://a"), Some(pair("a", "r")));
+        assert_eq!(file.read(&url("https://a")), Some(pair("a", "r")));
         assert_eq!(file.damage(), None);
     }
 
@@ -331,7 +419,7 @@ mod tests {
         let file = CredentialsFile::at(dir.path().join("credentials.json"));
         file.lock()
             .unwrap()
-            .write("https://a", &pair("a", "r"))
+            .save_login(&url("https://a"), &pair("a", "r"))
             .unwrap();
         let mode = std::fs::metadata(file.path()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
@@ -360,7 +448,7 @@ mod tests {
 
         file.lock()
             .unwrap()
-            .write("https://a", &pair("a", "r"))
+            .save_login(&url("https://a"), &pair("a", "r"))
             .unwrap();
         let mode = std::fs::metadata(file.path()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);

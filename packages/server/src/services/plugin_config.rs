@@ -289,20 +289,7 @@ pub(crate) async fn delete_config_by_target_pattern<C: ConnectionTrait>(
     Ok(())
 }
 
-/// A stored config that a plugin manifest would no longer accept.
-#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
-pub struct IncompatibleConfig {
-    pub scope: ConfigScope,
-    /// What the config belongs to: the problem id, contest id or
-    /// `contest_id:problem_id`; the plugin id at the plugin scope.
-    #[schema(example = "12")]
-    pub ref_id: String,
-    #[schema(example = "contest")]
-    pub namespace: String,
-    /// Why the manifest refuses it. A namespace the manifest no longer
-    /// declares at this scope has one error with an empty path.
-    pub errors: Vec<config_schema::FieldError>,
-}
+pub use broccoli_api_types::plugin::IncompatibleConfig;
 
 /// Every stored config of `plugin_id` that `manifest` would refuse, so an
 /// admin sees what an upgrade breaks before publishing it.
