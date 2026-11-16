@@ -413,7 +413,11 @@ pub async fn boot(state: &AppState) -> anyhow::Result<Vec<PluginActivationFailur
         reconcile_locked(state, applied).await
     })
     .await?;
-    crate::services::config_issues::recheck_every_problem(&state.db, state.plugins.as_ref()).await;
+    crate::services::config_issues::recheck_every_problem(
+        &state.db,
+        &crate::services::config_issues::ConfigChecker::of(state),
+    )
+    .await;
     Ok(failures)
 }
 
@@ -1356,13 +1360,13 @@ async fn published_source(state: &AppState, id: &PluginId) -> Result<PluginSourc
     }
 }
 
-/// A change to these plugins can change which of the stored configs that
-/// name them their plugins refuse, so it rechecks the problems that have them
-/// (see [`crate::services::config_issues`]).
+/// A change to these plugins can change what their config checks find, so it
+/// rechecks the problems those checks reach (see
+/// [`crate::services::config_issues`]).
 async fn recheck_config_issues(state: &AppState, plugin_ids: &[&str]) {
     crate::services::config_issues::recheck_problems_of_plugins(
         &state.db,
-        state.plugins.as_ref(),
+        &crate::services::config_issues::ConfigChecker::of(state),
         plugin_ids,
     )
     .await;

@@ -195,7 +195,8 @@ pub fn api_submission_subtask_scores(input: String) -> FnResult<String> {
 }
 
 /// The `task` namespace's validate function: refuses subtasks the problem's
-/// current test cases cannot score as written.
+/// current test cases cannot score as written, and reports a problem judging
+/// would refuse ([`validate::check_task`]).
 #[cfg(target_arch = "wasm32")]
 #[plugin_fn]
 pub fn validate_task_config(input: String) -> FnResult<String> {
@@ -206,6 +207,8 @@ pub fn validate_task_config(input: String) -> FnResult<String> {
         .problem_id
         .ok_or_else(|| SdkError::Other("a task config belongs to a problem".into()))?;
     let test_cases = host.submission.query_test_cases(problem_id)?;
-    let errors = validate::task_violations(&task.subtasks, &test_cases);
-    Ok(serde_json::to_string(&ConfigValidateOutput { errors })?)
+    Ok(serde_json::to_string(&validate::check_task(
+        &task.subtasks,
+        &test_cases,
+    ))?)
 }

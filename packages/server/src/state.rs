@@ -40,6 +40,15 @@ impl RegistryState {
             .cloned()
             .collect()
     }
+
+    /// Which plugin provides each type a problem or contest has.
+    pub fn type_providers(&self) -> crate::registry::TypeProviders {
+        crate::registry::TypeProviders::new(
+            self.contest_type_registry.clone(),
+            self.evaluator_registry.clone(),
+            self.checker_stage_registry.clone(),
+        )
+    }
 }
 
 #[derive(Clone)]

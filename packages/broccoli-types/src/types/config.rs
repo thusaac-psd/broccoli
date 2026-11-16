@@ -117,12 +117,19 @@ impl ConfigValidateInput {
     }
 }
 
-/// A `validate` function's answer: the config is accepted when `errors` is
-/// empty.
+/// A `validate` function's answer. `errors` is what is wrong with the config
+/// itself, such as a subtask naming a test case the problem does not have:
+/// the host refuses to store a config with any. `issues` is what the
+/// target's data does not meet yet, such as a problem with no test cases:
+/// the host stores the config and lists each issue on the target's config
+/// issues until the data changes. Both are listed there when a config the
+/// host already holds stops passing.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConfigValidateOutput {
     #[serde(default)]
     pub errors: Vec<ConfigViolation>,
+    #[serde(default)]
+    pub issues: Vec<ConfigViolation>,
 }
 
 /// One reason a `validate` function refuses a config: where, the plugin's

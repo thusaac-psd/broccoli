@@ -6,22 +6,25 @@
 //! [`TestDataEdit`], whose only way to commit checks the problem's stored
 //! configs against the data as the change leaves it, before it commits: the
 //! same schema and `validate` check a config write passes
-//! ([`problem_config_issues`]). A change that would break a config is refused
-//! with [`AppError::ConfigWouldBreak`] unless the caller confirms it. Either
+//! ([`issues_of`]). A change that would leave a config refused is refused
+//! with [`AppError::ConfigWouldBreak`] unless the caller confirms it; a
+//! condition of the data alone, such as no test cases yet, never refuses
+//! one. Either
 //! way the problem's `config_issues` flag records whether any config has
 //! issues, which judging copies onto the judgements it claims.
 
 use std::sync::Arc;
 
 use common::db::{DatabaseConnection, DatabaseTransaction};
-use plugin_core::traits::PluginManager;
 use sea_orm::sea_query::LockType;
 use sea_orm::{QuerySelect, TransactionTrait};
 
 use crate::entity::problem;
 use crate::error::AppError;
-use crate::services::config_issues::set_config_issues;
-use crate::services::plugin_config::{Reads, problem_config_issues};
+use crate::services::config_issues::{
+    ConfigChecker, ConfigIssue, Subject, issues_of, set_config_issues,
+};
+use crate::services::plugin_config::Reads;
 use crate::utils::soft_delete::SoftDeletable;
 
 /// A change to one problem's test data, open in a transaction that holds the
@@ -70,33 +73,30 @@ impl TestDataEdit {
         &self.txn
     }
 
-    /// Commits the change, after checking the problem's stored configs (at
-    /// the problem scope and in every contest) against the test data as it
-    /// leaves them. With [`OnConfigBreak::Refuse`], a change that gives a
-    /// config an issue it did not have is refused with those issues; an issue
-    /// the problem already had never refuses a change.
+    /// Commits the change, after checking the problem's configs (at the
+    /// problem scope and in every contest, stored or the defaults its
+    /// plugins check; see [`crate::services::config_issues`]) against the
+    /// test data as it leaves them. With [`OnConfigBreak::Refuse`], a change
+    /// that gives a config a refusal it did not have, something a write of
+    /// that config would now be refused for, is refused with those
+    /// refusals. A refusal the problem already had never refuses a change,
+    /// and neither does an issue of the data alone (no test cases yet): the
+    /// flag records both.
     pub(crate) async fn commit(
         self,
-        plugins: &dyn PluginManager,
+        checker: &ConfigChecker<'_>,
         on_break: OnConfigBreak,
     ) -> Result<(), AppError> {
         let problem_id = self.problem.id;
-        let after = problem_config_issues(
-            self.db(),
-            plugins,
-            problem_id,
-            true,
-            Reads::Through(&self.txn),
-        )
-        .await?;
-        if on_break == OnConfigBreak::Refuse && !after.is_empty() {
-            let before =
-                problem_config_issues(self.db(), plugins, problem_id, true, Reads::Committed)
-                    .await?;
-            let caused: Vec<_> = after
-                .iter()
-                .filter(|issue| !before.contains(issue))
-                .cloned()
+        let subject = Subject::flag_of(problem_id);
+        let after = issues_of(self.db(), checker, subject, Reads::Through(&self.txn)).await?;
+        let refused_after: Vec<_> = after.iter().filter_map(ConfigIssue::refused).collect();
+        if on_break == OnConfigBreak::Refuse && !refused_after.is_empty() {
+            let before = issues_of(self.db(), checker, subject, Reads::Committed).await?;
+            let refused_before: Vec<_> = before.iter().filter_map(ConfigIssue::refused).collect();
+            let caused: Vec<_> = refused_after
+                .into_iter()
+                .filter(|issue| !refused_before.contains(issue))
                 .collect();
             if !caused.is_empty() {
                 return Err(AppError::ConfigWouldBreak(caused));

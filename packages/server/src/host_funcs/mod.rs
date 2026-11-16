@@ -57,6 +57,12 @@ impl<A, B, C> HostFnContext for (String, A, B, C) {
     }
 }
 
+impl<A, B, C, D> HostFnContext for (String, A, B, C, D) {
+    fn plugin_id(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Wrap a host fn context for `Function::new`.
 ///
 /// extism's `UserData` is an `Arc<Mutex<T>>` shared by every pooled instance of
@@ -606,12 +612,18 @@ fn register_config_functions(
 
     let db = host_db.clone();
     let manager = deps.plugin_manager.clone();
+    let types = crate::registry::TypeProviders::new(
+        deps.system.contest_type_registry.clone(),
+        deps.system.evaluator_registry.clone(),
+        deps.system.checker_stage_registry.clone(),
+    );
     let cache = deps.system.plugin_config_cache.clone();
     hr.register("config:write", move |plugin_id| {
         config::create_config_set_function(
             plugin_id.to_string(),
             db.clone(),
             manager.clone(),
+            types.clone(),
             cache.clone(),
         )
     });

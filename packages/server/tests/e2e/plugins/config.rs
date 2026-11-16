@@ -208,3 +208,80 @@ async fn config_for_nonexistent_problem_returns_404() {
         res.text
     );
 }
+
+/// A contest's own configs are checked again whenever its config issues are
+/// read, against the contest as it is now: a qualifier contest config whose
+/// advancement places fit its problems is accepted, a problem added later
+/// that lets more contestants qualify directly than there are places makes
+/// it an issue there, and writing it again as it stands is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_problem_added_to_a_contest_shows_the_contest_config_it_outgrows() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("cfg_contest_issues_admin", "password", "admin")
+        .await;
+    let contest_id = app
+        .create_typed_contest(&admin, "Qualifier", "codelink-qualifier", true, true)
+        .await;
+    let first = app.create_problem(&admin, "Qualifier A").await;
+    app.add_problem_to_contest_with_label(contest_id, first, "A", &admin)
+        .await;
+    let config_path = format!("/api/v1/contests/{contest_id}/config/codelink-qualifier/contest");
+    let config = json!({ "config": {
+        "expected_problem_count": 0,
+        "slots_per_problem": 2,
+        "solves_to_qualify": 1,
+        "advancement_slots": 2,
+    }});
+    let res = app.put_with_token(&config_path, &config, &admin).await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let issues_path = format!("/api/v1/contests/{contest_id}/config/issues");
+    let issues = app.get_with_token(&issues_path, &admin).await;
+    assert_eq!(issues.status, 200, "{}", issues.text);
+    assert_eq!(issues.body, json!([]), "{}", issues.text);
+
+    let second = app.create_problem(&admin, "Qualifier B").await;
+    app.add_problem_to_contest_with_label(contest_id, second, "B", &admin)
+        .await;
+    let issues = app.get_with_token(&issues_path, &admin).await;
+    assert_eq!(issues.status, 200, "{}", issues.text);
+    let issues = issues.body.as_array().expect("an array").clone();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(issues[0]["plugin_id"], "codelink-qualifier");
+    assert_eq!(issues[0]["scope"], "contest");
+    assert_eq!(issues[0]["ref_id"], contest_id.to_string());
+    assert_eq!(issues[0]["namespace"], "contest");
+    assert_eq!(
+        issues[0]["errors"][0]["key"], "codelink-qualifier.config.placesBelowDirectQualifiers",
+        "{issues:?}"
+    );
+
+    let res = app.put_with_token(&config_path, &config, &admin).await;
+    assert_eq!(res.status, 400, "{}", res.text);
+    assert_eq!(
+        res.body["details"]["fields"][0]["path"],
+        "advancement_slots"
+    );
+}
+
+/// Only staff who manage contests read a contest's config issues.
+#[tokio::test(flavor = "multi_thread")]
+async fn contest_config_issues_need_contest_manage() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("cfg_contest_issues_owner", "password", "admin")
+        .await;
+    let user = app
+        .create_authenticated_user("cfg_contest_issues_user", "password")
+        .await;
+    let contest_id = app
+        .create_typed_contest(&admin, "Qualifier", "codelink-qualifier", true, true)
+        .await;
+    let path = format!("/api/v1/contests/{contest_id}/config/issues");
+    let res = app.get_with_token(&path, &user).await;
+    assert_eq!(res.status, 403, "{}", res.text);
+    let res = app
+        .get_with_token("/api/v1/contests/999999/config/issues", &admin)
+        .await;
+    assert_eq!(res.status, 404, "{}", res.text);
+}

@@ -1,15 +1,19 @@
-//! What the `task` namespace refuses beyond its schema: subtasks that the
-//! scoring in [`crate::subtasks`] would silently score wrong for the
-//! problem's current test data.
+//! What the `task` namespace's validate function says beyond its schema:
+//! subtasks that the scoring in [`crate::subtasks`] would silently score
+//! wrong for the problem's current test data, and a problem judging would
+//! refuse whatever the subtasks say.
 
 use std::collections::HashSet;
 
-use broccoli_server_sdk::types::{ConfigViolation, TestCaseRow};
+use broccoli_server_sdk::types::{ConfigValidateOutput, ConfigViolation, TestCaseRow};
 
 use crate::config::{SubtaskDef, SubtaskScoringMethod};
 use crate::subtasks::{Member, MemberIndex, Unjudgeable, unjudgeable};
 
-/// Every reason `subtasks` cannot score `test_cases` as written:
+/// The validate answer for `subtasks` over `test_cases`.
+///
+/// Its errors, which refuse the config, are every reason `subtasks` cannot
+/// score `test_cases` as written:
 ///
 /// - a member that names no test case, or names several (a label two test
 ///   cases share, or a label that is another test case's id), since scoring
@@ -18,33 +22,41 @@ use crate::subtasks::{Member, MemberIndex, Unjudgeable, unjudgeable};
 ///   twice;
 /// - a subtask with no members, or a `sum` subtask whose members all weigh
 ///   0, which can never score;
-/// - two subtasks with the same name, which contestants cannot tell apart;
-/// - a problem judging would refuse outright ([`unjudgeable`]): one with no
-///   test cases, or none that is judged.
-pub fn task_violations(
-    subtasks: &[SubtaskDef],
-    test_cases: &[TestCaseRow],
-) -> Vec<ConfigViolation> {
-    let index = MemberIndex::new(test_cases);
-
-    let mut violations = Vec::new();
-    match unjudgeable(subtasks, test_cases) {
-        Some(Unjudgeable::NoTestCases) => violations.push(
+/// - two subtasks with the same name, which contestants cannot tell apart.
+///
+/// Its issue, which leaves the config stored and lists the problem on its
+/// config issues, is a problem judging would refuse outright
+/// ([`unjudgeable`]): one with no test cases yet, or none that is judged.
+/// Neither is wrong with the subtasks, and the host checks the defaults
+/// (no subtasks) of every problem in an IOI contest, so it shows before
+/// anyone submits.
+pub fn check_task(subtasks: &[SubtaskDef], test_cases: &[TestCaseRow]) -> ConfigValidateOutput {
+    let issues = match unjudgeable(subtasks, test_cases) {
+        Some(Unjudgeable::NoTestCases) => vec![
             ConfigViolation::new(
                 "subtasks",
                 "the problem has no test cases, so it cannot be judged",
             )
             .key("ioi.config.task.problemHasNoTestCases"),
-        ),
-        Some(Unjudgeable::NothingToScore) => violations.push(
+        ],
+        Some(Unjudgeable::NothingToScore) => vec![
             ConfigViolation::new(
                 "subtasks",
                 "no test case is judged: none is a sample, scores or belongs to a subtask",
             )
             .key("ioi.config.task.nothingToScore"),
-        ),
-        None => {}
+        ],
+        None => Vec::new(),
+    };
+    ConfigValidateOutput {
+        errors: subtask_violations(subtasks, test_cases),
+        issues,
     }
+}
+
+fn subtask_violations(subtasks: &[SubtaskDef], test_cases: &[TestCaseRow]) -> Vec<ConfigViolation> {
+    let index = MemberIndex::new(test_cases);
+    let mut violations = Vec::new();
     let mut names = HashSet::new();
     for (i, subtask) in subtasks.iter().enumerate() {
         if !names.insert(subtask.name.as_str()) {
@@ -162,6 +174,10 @@ mod tests {
         violations.iter().map(|v| v.path.as_str()).collect()
     }
 
+    fn task_violations(subtasks: &[SubtaskDef], cases: &[TestCaseRow]) -> Vec<ConfigViolation> {
+        check_task(subtasks, cases).errors
+    }
+
     fn problem() -> Vec<TestCaseRow> {
         vec![
             tc(11, 10.0, Some("a")),
@@ -231,15 +247,15 @@ mod tests {
         );
     }
 
-    /// A problem judging would refuse is a config issue before anyone
-    /// submits, by the same rule judging reads (`subtasks::unjudgeable`).
+    /// A problem judging would refuse is an issue, never a refusal, by the
+    /// same rule judging reads (`subtasks::unjudgeable`): its test data is
+    /// not ready yet, and nothing in the subtasks is wrong.
     #[test]
-    fn a_problem_with_nothing_to_judge_is_refused_as_judging_would() {
+    fn a_problem_with_nothing_to_judge_is_an_issue_not_a_refusal() {
         let keys = |subtasks: &[SubtaskDef], cases: &[TestCaseRow]| -> Vec<String> {
-            task_violations(subtasks, cases)
-                .into_iter()
-                .filter_map(|v| v.key)
-                .collect()
+            let output = check_task(subtasks, cases);
+            assert_eq!(output.errors, [], "nothing in the subtasks is wrong");
+            output.issues.into_iter().filter_map(|v| v.key).collect()
         };
         assert_eq!(
             keys(&[], &[]),

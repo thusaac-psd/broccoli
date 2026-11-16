@@ -367,6 +367,7 @@ fn problem_config_routes() -> OpenApiRouter<AppState> {
 fn contest_config_routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(handlers::plugin_config::list_contest_config))
+        .routes(routes!(handlers::plugin_config::list_contest_config_issues))
         .routes(routes!(
             handlers::plugin_config::get_contest_config,
             handlers::plugin_config::upsert_contest_config,
