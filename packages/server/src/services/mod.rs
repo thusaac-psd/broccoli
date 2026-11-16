@@ -2,6 +2,7 @@ pub mod auth_tokens;
 pub mod batch_table;
 pub(crate) mod batch_wait;
 pub mod code_run_dispatch;
+pub(crate) mod config_issues;
 pub mod device_auth;
 pub mod evaluate_batch;
 pub mod ip_quota;

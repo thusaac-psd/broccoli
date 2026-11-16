@@ -23,11 +23,13 @@ use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::host_funcs::config::{extract_plugin_id, strip_namespace_prefix};
 use crate::models::plugin_config::{PluginConfigResponse, UpsertPluginConfigRequest};
+use crate::services::config_issues::{
+    clear_resolved_config_issues, recheck_problems_of_contest, recheck_problems_of_plugins,
+};
 use crate::services::plugin_config::{
     ConfigScope, ConfigTarget, IncompatibleConfig, Reads, delete_config, get_config,
     problem_config_issues, upsert_config,
 };
-use crate::services::test_data::clear_resolved_config_issues;
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, find_contest_problem};
 use crate::utils::problem::find_problem;
@@ -249,7 +251,7 @@ pub async fn upsert_plugin_global_config(
     validate_plugin_id(&plugin_id)?;
     validate_namespace(&namespace)?;
     let target = ConfigTarget::plugin(&plugin_id);
-    upsert_config(
+    let result = upsert_config(
         &state.db,
         state.plugins.as_ref(),
         &target,
@@ -259,7 +261,9 @@ pub async fn upsert_plugin_global_config(
         payload.enabled,
         payload.position,
     )
-    .await
+    .await?;
+    recheck_problems_of_plugins(&state.db, state.plugins.as_ref(), &[&plugin_id]).await;
+    Ok(result)
 }
 
 #[utoipa::path(
@@ -291,7 +295,9 @@ pub async fn delete_plugin_global_config(
     validate_plugin_id(&plugin_id)?;
     validate_namespace(&namespace)?;
     let target = ConfigTarget::plugin(&plugin_id);
-    delete_config(&state.db, &target, &plugin_id, &namespace).await
+    let result = delete_config(&state.db, &target, &plugin_id, &namespace).await?;
+    recheck_problems_of_plugins(&state.db, state.plugins.as_ref(), &[&plugin_id]).await;
+    Ok(result)
 }
 
 #[utoipa::path(
@@ -763,6 +769,7 @@ pub async fn upsert_contest_config(
     )
     .await?;
     txn.commit().await?;
+    recheck_problems_of_contest(&state.db, state.plugins.as_ref(), contest_id).await;
     Ok(result)
 }
 
@@ -799,5 +806,6 @@ pub async fn delete_contest_config(
     let target = ConfigTarget::contest(contest_id);
     let result = delete_config(&txn, &target, &plugin_id, &namespace).await?;
     txn.commit().await?;
+    recheck_problems_of_contest(&state.db, state.plugins.as_ref(), contest_id).await;
     Ok(result)
 }
