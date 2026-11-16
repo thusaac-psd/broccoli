@@ -1,10 +1,10 @@
 import { useErrorMessage } from '@broccoli/web-sdk/api';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
-import type {
+import {
   getVerdictBadge,
   type RowOutcome,
-  ShownStatus,
-  SubmissionSummary,
+  type ShownStatus,
+  type SubmissionSummary,
 } from '@broccoli/web-sdk/submission';
 import { Badge, QueryErrorState } from '@broccoli/web-sdk/ui';
 import { formatKibibytes } from '@broccoli/web-sdk/utils';
