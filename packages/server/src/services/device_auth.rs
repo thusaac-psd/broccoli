@@ -98,12 +98,10 @@ pub async fn create(
 /// read `FOR KEY SHARE`, the lock the approval's foreign key takes anyway: a
 /// logout or credential change that ends the session first leaves nothing to
 /// approve with, so nothing is updated; one that ends it after waits and
-/// deletes the approval with the session. The session's user is written to
-/// `authorized_user_id` too, for servers of the previous release polling the
-/// code while a release rolls out (`m0013_device_approval_session`).
+/// deletes the approval with the session.
 const AUTHORIZE_SQL: &str = r#"
-UPDATE device_authorization d SET approved_by = s.id, authorized_user_id = s.user_id
-FROM (SELECT id, user_id FROM auth_session WHERE id = $2 FOR KEY SHARE) s
+UPDATE device_authorization d SET approved_by = s.id
+FROM (SELECT id FROM auth_session WHERE id = $2 FOR KEY SHARE) s
 WHERE d.user_code = $1 AND d.expires_at > now() AND d.approved_by IS NULL
 RETURNING 1 AS approved
 "#;

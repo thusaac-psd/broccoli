@@ -5,15 +5,12 @@ use sea_orm_migration::prelude::*;
 /// logout, a password reset, a role change or the account's deletion ends
 /// the session and deletes the approval before the CLI collects it.
 ///
-/// Approvals recorded by user alone cannot be bound to a session, so they
-/// are deleted; their CLIs see the code expire and start again.
+/// Approvals recorded by user alone (`authorized_user_id`) cannot be bound to
+/// a session, so they are deleted, and the column goes with them; their CLIs
+/// see the code expire and start again.
 ///
-/// Rolling-safe, the expand step of expand/contract (release/docs/upgrade.md):
-/// `authorized_user_id` stays, and this build writes it beside `approved_by`
-/// (`services::device_auth`), so a server of the previous release polling a
-/// code this build approved still finds its user. Ending the approving
-/// session deletes the whole row, so no server can collect an approval whose
-/// session ended. A later release drops the column.
+/// Forward-only like every migration here: it drops a column servers of the
+/// previous release read, so those servers stop before it runs.
 pub struct Migration;
 
 impl MigrationName for Migration {
@@ -24,6 +21,7 @@ impl MigrationName for Migration {
 
 const UP: &str = r#"
 DELETE FROM public.device_authorization WHERE authorized_user_id IS NOT NULL;
+ALTER TABLE public.device_authorization DROP COLUMN authorized_user_id;
 ALTER TABLE public.device_authorization ADD COLUMN approved_by bigint;
 ALTER TABLE public.device_authorization
     ADD CONSTRAINT "fk-device_authorization-approved_by" FOREIGN KEY (approved_by)
@@ -34,6 +32,7 @@ CREATE INDEX "idx-device_authorization-approved_by"
 
 const DOWN: &str = r#"
 ALTER TABLE public.device_authorization DROP COLUMN approved_by;
+ALTER TABLE public.device_authorization ADD COLUMN authorized_user_id integer;
 "#;
 
 #[async_trait::async_trait]
