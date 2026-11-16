@@ -35,7 +35,10 @@ pub fn run_doctor(cfg: &Config) -> Result<()> {
         // Wipe the loading line before printing the result.
         print!("\r\x1b[K");
         match result {
-            Ok(()) => println!("    ✓ {} — reachable, token accepted", server.url),
+            Ok(station) => println!(
+                "    ✓ {} — reachable, token accepted as station '{station}'",
+                server.url
+            ),
             Err(e) => println!("    ✗ {} — {e}", server.url),
         }
     }

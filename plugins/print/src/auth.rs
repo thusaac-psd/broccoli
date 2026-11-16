@@ -54,8 +54,10 @@ fn station_for<'a>(token: &str, stations: &'a [StationCredential]) -> Option<&'a
     found
 }
 
-/// A global credential passes outright. Otherwise the request must name a
-/// `contest_id` whose credentials include the presented token.
+/// A global credential passes outright. A contest's credential passes when the
+/// request names that contest in `contest_id`: the station's `[[server]]`
+/// entry says which contest lists its token, and the client sends it with
+/// every request.
 pub fn authenticate_station(host: &Host, req: &PluginHttpRequest) -> Result<StationAuth, ApiError> {
     let token = extract_token(req)
         .ok_or_else(|| PluginHttpResponse::error(401, "Missing print-station token"))?;
@@ -68,21 +70,30 @@ pub fn authenticate_station(host: &Host, req: &PluginHttpRequest) -> Result<Stat
         });
     }
 
-    if let Some(contest_id) = req
+    let Some(contest_id) = req
         .query
         .get("contest_id")
         .and_then(|s| s.parse::<i32>().ok())
-    {
-        let contest = config::load_contest_config(host, contest_id)?;
-        if let Some(name) = station_for(&token, &contest.stations) {
-            return Ok(StationAuth {
-                name: format!("contest-{contest_id}/{name}"),
-                contest_filter: Some(contest_id),
-            });
-        }
+    else {
+        return Err(PluginHttpResponse::error(
+            403,
+            "Invalid print-station token: no deployment-wide station has it, \
+             and the request names no contest",
+        )
+        .into());
+    };
+    let contest = config::load_contest_config(host, contest_id)?;
+    match station_for(&token, &contest.stations) {
+        Some(name) => Ok(StationAuth {
+            name: format!("contest-{contest_id}/{name}"),
+            contest_filter: Some(contest_id),
+        }),
+        None => Err(PluginHttpResponse::error(
+            403,
+            format!("Invalid print-station token for contest {contest_id}"),
+        )
+        .into()),
     }
-
-    Err(PluginHttpResponse::error(403, "Invalid print-station token").into())
 }
 
 #[cfg(test)]

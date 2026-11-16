@@ -460,7 +460,7 @@ pub fn handle_station_heartbeat(
     let station = auth::authenticate_station(host, req)?;
     let body: HeartbeatRequest = parse_body(req)?;
     stations::heartbeat(host, &station.name, &body)?;
-    ok(serde_json::json!({ "ok": true }))
+    ok(serde_json::json!({ "station": station.name }))
 }
 
 pub fn handle_station_jobs(

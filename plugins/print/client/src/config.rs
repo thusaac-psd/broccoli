@@ -22,6 +22,10 @@ fn default_font_size() -> f32 {
 pub struct ServerCfg {
     pub url: String,
     pub token: String,
+    /// The contest whose Printing section lists this token. None for a token
+    /// listed in the plugin's deployment-wide settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contest: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +120,7 @@ mod tests {
             servers: vec![ServerCfg {
                 url: "http://judge.local:3000".into(),
                 token: "tok".into(),
+                contest: Some(7),
             }],
             printers: vec![PrinterCfg {
                 name: "main".into(),
@@ -126,6 +131,7 @@ mod tests {
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(back.servers.len(), 1);
+        assert_eq!(back.servers[0].contest, Some(7));
         assert_eq!(back.printers[0].name, "main");
         assert_eq!(back.poll_interval_secs, 5);
     }

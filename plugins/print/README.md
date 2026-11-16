@@ -56,7 +56,10 @@ In the contest's admin config, open **Printing**:
 A **plugin-scoped** (global) station serves every contest on the deployment; a
 **contest-scoped** station is limited to that contest. The queue shows a station
 qualified by where it is configured, `global/<name>` or `contest-<id>/<name>`,
-so a contest's station can never act as a global one of the same name.
+so a contest's station can never act as a global one of the same name. A
+contest-scoped station's `[[server]]` entry sets `contest = <id>`, and the
+client sends it as `?contest_id=` on every station request so the server checks
+the token against that contest's list.
 
 ## Run a print station
 
@@ -82,6 +85,7 @@ banner = "Regionals 2026"
 [[server]]
 url   = "http://judge.local:3000"
 token = "PRINTSTATION-xxxxxxxx"
+# contest = 12                    # for a token listed in contest 12's Printing section
 
 [[printer]]
 name  = "main"

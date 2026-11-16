@@ -150,7 +150,7 @@ fn report(client: &ServerClient, id: i64, status: &str, pages: Option<u32>, erro
 }
 
 fn tick_server(client: &ServerClient, cfg: &Config, printer_names: &[String]) {
-    if let Err(e) = client.heartbeat(printer_names, 0) {
+    if let Err(e) = client.heartbeat(printer_names, 0).map(drop) {
         eprintln!("  ! heartbeat to {} failed: {e}", client.label);
     }
 

@@ -6,6 +6,8 @@
 
 mod api;
 mod config;
+#[cfg(test)]
+mod contract_tests;
 mod doctor;
 mod print;
 mod render;

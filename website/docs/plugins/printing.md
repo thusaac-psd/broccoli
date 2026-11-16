@@ -65,7 +65,10 @@ only by the entry whose token it presents.
 There are two kinds of entry.
 
 - A **contest station**, listed in a contest's Printing section, works only for
-  that contest. The queue shows it as `contest-<id>/<name>`.
+  that contest. The queue shows it as `contest-<id>/<name>`. Its station names
+  the contest next to the token, as `contest = <id>` in the
+  [configuration file](#the-configuration-file). The id is the number in the
+  contest's web address, for example `12` in `/contests/12`.
 - A **global station**, listed in the plugin's deployment-wide settings, works
   for every contest on the server. This is convenient when one print desk serves
   a whole event. The queue shows it as `global/<name>`.
@@ -108,7 +111,7 @@ print-client setup
 ```
 
 The wizard finds the printers installed on the machine, asks for the server
-address and a station token, lets you name its printers, and
+address and a station token, and for a contest station the contest's id, lets you name its printers, and
 writes a configuration file named `print-client.toml` next to the program. For
 most setups this is all the configuration you need.
 
@@ -126,8 +129,9 @@ font_size = 9.0
 banner = "Regionals 2026"    # printed at the top of every page
 
 [[server]]
-url   = "http://judge.local:3000"
-token = "the-station-token-you-configured"
+url     = "http://judge.local:3000"
+token   = "the-station-token-you-configured"
+contest = 12                 # only for a contest station: the contest that lists the token
 
 [[printer]]
 name  = "main"                         # a label for this printer
@@ -254,7 +258,7 @@ placeholder box rather than vanishing.
 | Symptom                              | Likely cause and fix                                                                                                       |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
 | `doctor` cannot reach the server     | Wrong server address, or the machine is not on the contest network. Check the `url` in `print-client.toml`.                |
-| `doctor` says the token was rejected | The token is not in the contest's (or the global) **Print stations** list, or it has a typo. Copy it again.                |
+| `doctor` says the token was rejected | The token is not in the contest's (or the global) **Print stations** list, or it has a typo. Copy it again. A contest station also needs `contest = <id>` under its `[[server]]`, naming the contest that lists the token. |
 | A printer is not found               | The `os_id` does not match the operating system's printer name. Run `lpstat -p` (macOS, Linux) or check Printers & scanners (Windows). |
 | Jobs sit at _Awaiting approval_      | **Require approval** is on. Approve them from the Print Queue, or turn the setting off.                                     |
 | A request is rejected as too long    | It is over **Max pages per job**. Raise the limit, or ask the contestant to trim the file.                                 |

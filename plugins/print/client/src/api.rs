@@ -39,6 +39,11 @@ struct JobsResponse {
     data: Vec<Job>,
 }
 
+#[derive(Debug, Deserialize)]
+struct HeartbeatResponse {
+    station: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimOutcome {
     Claimed,
@@ -50,6 +55,9 @@ pub struct ServerClient {
     agent: Agent,
     base: String,
     auth: String,
+    /// The contest whose station list holds the token, sent with every
+    /// request so the server checks the token against that list.
+    contest: Option<String>,
     pub label: String,
 }
 
@@ -64,34 +72,43 @@ impl ServerClient {
             agent,
             base,
             auth: format!("PrintStation {}", server.token),
+            contest: server.contest.map(|id| id.to_string()),
             label: server.url.clone(),
         }
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}{path}", self.base)
+    /// A request to the station route at `path`, carrying this station's
+    /// credential.
+    fn request(&self, method: &str, path: &str) -> ureq::Request {
+        let req = self
+            .agent
+            .request(method, &format!("{}{path}", self.base))
+            .set("Authorization", &self.auth);
+        match &self.contest {
+            Some(id) => req.query("contest_id", id),
+            None => req,
+        }
     }
 
-    /// The server names this station after the credential in `auth`.
-    pub fn heartbeat(&self, printers: &[String], queue_seen: i64) -> Result<()> {
+    /// The server names this station after the credential in `auth`, and
+    /// answers with that name.
+    pub fn heartbeat(&self, printers: &[String], queue_seen: i64) -> Result<String> {
         let body = json!({
             "printers": printers,
             "version": env!("CARGO_PKG_VERSION"),
             "queue_seen": queue_seen,
         });
-        self.agent
-            .post(&self.url("/stations/heartbeat"))
-            .set("Authorization", &self.auth)
+        let resp: HeartbeatResponse = self
+            .request("POST", "/stations/heartbeat")
             .send_json(body)
-            .map_err(status_error)?;
-        Ok(())
+            .map_err(status_error)?
+            .into_json()?;
+        Ok(resp.station)
     }
 
     pub fn fetch_jobs(&self, limit: usize) -> Result<Vec<Job>> {
         let resp = self
-            .agent
-            .get(&self.url("/stations/jobs"))
-            .set("Authorization", &self.auth)
+            .request("GET", "/stations/jobs")
             .query("limit", &limit.to_string())
             .call()
             .map_err(status_error)?;
@@ -103,9 +120,7 @@ impl ServerClient {
     pub fn claim(&self, id: i64, printer: &str) -> Result<ClaimOutcome> {
         let body = json!({ "printer": printer });
         match self
-            .agent
-            .post(&self.url(&format!("/stations/jobs/{id}/claim")))
-            .set("Authorization", &self.auth)
+            .request("POST", &format!("/stations/jobs/{id}/claim"))
             .send_json(body)
         {
             Ok(_) => Ok(ClaimOutcome::Claimed),
@@ -122,9 +137,7 @@ impl ServerClient {
         error: Option<&str>,
     ) -> Result<()> {
         let body = json!({ "status": status, "pages": pages, "error": error });
-        self.agent
-            .post(&self.url(&format!("/stations/jobs/{id}/status")))
-            .set("Authorization", &self.auth)
+        self.request("POST", &format!("/stations/jobs/{id}/status"))
             .send_json(body)
             .map_err(status_error)?;
         Ok(())

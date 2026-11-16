@@ -46,9 +46,21 @@ fn collect_servers() -> Result<Vec<ServerCfg>> {
         let token: String = Input::new()
             .with_prompt("  Station token")
             .interact_text()?;
+        let contest: String = Input::new()
+            .with_prompt("  Contest id, if a contest's Printing section lists the token (blank for a deployment-wide station)")
+            .allow_empty(true)
+            .validate_with(|s: &String| -> Result<(), &str> {
+                match s.trim() {
+                    "" => Ok(()),
+                    id if id.parse::<i32>().is_ok() => Ok(()),
+                    _ => Err("a contest id is a number"),
+                }
+            })
+            .interact_text()?;
         servers.push(ServerCfg {
             url: url.trim().trim_end_matches('/').to_string(),
             token: token.trim().to_string(),
+            contest: contest.trim().parse().ok(),
         });
         if !Confirm::new()
             .with_prompt("  Add another server?")
