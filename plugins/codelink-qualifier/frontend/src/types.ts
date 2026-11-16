@@ -56,5 +56,7 @@ export interface StandingsResponse extends ContestInfoResponse {
     direct_user_ids: number[];
     reserve_user_ids: number[];
     unfilled_slots: number;
+    /** Direct qualifiers beyond the advancement places, for organizers to resolve. */
+    over_capacity: number;
   } | null;
 }

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use broccoli_server_sdk::error::SdkError;
 pub use broccoli_server_sdk::types::UserIdentity as Participant;
+use broccoli_server_sdk::types::{SubmissionLifecycle, Verdict};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ContestConfig, ProblemConfig};
@@ -13,7 +14,7 @@ pub struct Problem {
     pub points: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Submission {
     pub submission_id: i32,
     pub user_id: i32,
@@ -21,7 +22,34 @@ pub struct Submission {
     /// Microseconds from contest start to submission, independent of judge time.
     pub submitted_at_us: i64,
     pub accepted: bool,
+    /// Whether its result may still change, so the standings may too.
     pub pending: bool,
+}
+
+/// A contest submission as `submissions.sql` reads it: the submission row,
+/// the host's projection of its current judgement.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SubmissionRow {
+    pub submission_id: i32,
+    pub user_id: i32,
+    pub problem_id: i32,
+    pub submitted_at_us: i64,
+    pub status: SubmissionLifecycle,
+    pub verdict: Option<Verdict>,
+}
+
+impl From<SubmissionRow> for Submission {
+    fn from(row: SubmissionRow) -> Self {
+        Self {
+            submission_id: row.submission_id,
+            user_id: row.user_id,
+            problem_id: row.problem_id,
+            submitted_at_us: row.submitted_at_us,
+            accepted: row.status == SubmissionLifecycle::Judged
+                && row.verdict == Some(Verdict::Accepted),
+            pending: row.status.result_may_change(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -107,23 +135,24 @@ pub struct Advancement {
     pub reserve_user_ids: Vec<i32>,
     /// Positive when organizers must fill the remaining places, e.g. by a playoff.
     pub unfilled_slots: usize,
+    /// Positive when more contestants qualified directly than there are
+    /// places, a conflict organizers must resolve: every direct qualifier is
+    /// listed, and no reserve advances.
+    pub over_capacity: usize,
 }
 
 impl Standings {
-    pub fn advancement(&self, contest_ended: bool) -> Result<Option<Advancement>, SdkError> {
+    pub fn advancement(&self, contest_ended: bool) -> Option<Advancement> {
         if !contest_ended || self.pending_submissions != 0 {
-            return Ok(None);
+            return None;
         }
 
         let (direct, reserves): (Vec<_>, Vec<_>) = self
             .rows
             .iter()
             .partition(|row| row.score >= self.config.solves_to_qualify);
-        let Some(available) = self.config.advancement_slots.checked_sub(direct.len()) else {
-            return Err(SdkError::Other(
-                "Codelink direct qualifiers exceed the configured advancement places".into(),
-            ));
-        };
+        let places = self.config.advancement_slots;
+        let available = places.saturating_sub(direct.len());
         let mut direct_user_ids: Vec<_> = direct.iter().map(|row| row.user_id).collect();
         direct_user_ids.sort_unstable();
         let mut reserves: Vec<_> = reserves.into_iter().filter(|row| row.score > 0).collect();
@@ -133,11 +162,12 @@ impl Standings {
             .take(available)
             .map(|row| row.user_id)
             .collect();
-        Ok(Some(Advancement {
+        Some(Advancement {
             unfilled_slots: available - reserve_user_ids.len(),
+            over_capacity: direct_user_ids.len().saturating_sub(places),
             direct_user_ids,
             reserve_user_ids,
-        }))
+        })
     }
 }
 

@@ -33,11 +33,11 @@ fn standings_show_global_slot_competition_and_unfinished_judgements() {
         {"user_id": 3, "username": "three", "display_name": null}
     ]));
     host.db.queue_query_result(json!([
-        {"submission_id": 1, "user_id": 1, "problem_id": 1, "submitted_at_us": 1000000, "accepted": true, "pending": false},
-        {"submission_id": 2, "user_id": 2, "problem_id": 1, "submitted_at_us": 2000000, "accepted": true, "pending": false},
-        {"submission_id": 3, "user_id": 3, "problem_id": 1, "submitted_at_us": 3000000, "accepted": true, "pending": false},
-        {"submission_id": 4, "user_id": 1, "problem_id": 2, "submitted_at_us": 4000000, "accepted": true, "pending": false},
-        {"submission_id": 5, "user_id": 3, "problem_id": 2, "submitted_at_us": 5000000, "accepted": false, "pending": true}
+        {"submission_id": 1, "user_id": 1, "problem_id": 1, "submitted_at_us": 1000000, "status": "Judged", "verdict": "Accepted"},
+        {"submission_id": 2, "user_id": 2, "problem_id": 1, "submitted_at_us": 2000000, "status": "Judged", "verdict": "Accepted"},
+        {"submission_id": 3, "user_id": 3, "problem_id": 1, "submitted_at_us": 3000000, "status": "Judged", "verdict": "Accepted"},
+        {"submission_id": 4, "user_id": 1, "problem_id": 2, "submitted_at_us": 4000000, "status": "Judged", "verdict": "Accepted"},
+        {"submission_id": 5, "user_id": 3, "problem_id": 2, "submitted_at_us": 5000000, "status": "Running", "verdict": null}
     ]));
     let response = handle_standings(&host, &request()).unwrap();
     assert_eq!(response.status, 200);
@@ -83,10 +83,10 @@ fn standings_expose_only_pending_or_confirmed_verdicts_and_no_tentative_qualific
         {"user_id": 3, "username": "three"}
     ]));
     host.db.queue_query_result(json!([
-        {"submission_id": 1, "user_id": 1, "problem_id": 1, "submitted_at_us": 1000000, "accepted": false, "pending": true},
-        {"submission_id": 2, "user_id": 2, "problem_id": 1, "submitted_at_us": 2000000, "accepted": true, "pending": false},
-        {"submission_id": 3, "user_id": 3, "problem_id": 1, "submitted_at_us": 3000000, "accepted": true, "pending": false},
-        {"submission_id": 4, "user_id": 3, "problem_id": 2, "submitted_at_us": 4000000, "accepted": true, "pending": false}
+        {"submission_id": 1, "user_id": 1, "problem_id": 1, "submitted_at_us": 1000000, "status": "Running", "verdict": null},
+        {"submission_id": 2, "user_id": 2, "problem_id": 1, "submitted_at_us": 2000000, "status": "Judged", "verdict": "Accepted"},
+        {"submission_id": 3, "user_id": 3, "problem_id": 1, "submitted_at_us": 3000000, "status": "Judged", "verdict": "Accepted"},
+        {"submission_id": 4, "user_id": 3, "problem_id": 2, "submitted_at_us": 4000000, "status": "Judged", "verdict": "Accepted"}
     ]));
     let body = handle_standings(&host, &request()).unwrap().body.unwrap();
     assert_eq!(body["qualified_count"], 0);
@@ -139,7 +139,7 @@ fn rules_and_standings_use_the_same_contest_config_and_actual_problem_count() {
                 .map(|id| {
                     json!({
                         "submission_id": id, "user_id": id, "problem_id": 1,
-                        "submitted_at_us": id * 1000000, "accepted": true, "pending": false
+                        "submitted_at_us": id * 1000000, "status": "Judged", "verdict": "Accepted"
                     })
                 })
                 .collect::<Vec<_>>(),
@@ -187,10 +187,10 @@ fn final_advancement_is_available_only_after_the_contest_and_all_judging_finish(
             {"user_id": 3, "username": "three"}, {"user_id": 4, "username": "four"}
         ]));
         host.db.queue_query_result(json!([
-            {"submission_id": 1, "user_id": 1, "problem_id": 1, "submitted_at_us": 1000000, "accepted": true, "pending": false},
-            {"submission_id": 2, "user_id": 1, "problem_id": 2, "submitted_at_us": 2000000, "accepted": true, "pending": false},
-            {"submission_id": 3, "user_id": 2, "problem_id": 2, "submitted_at_us": 3000000, "accepted": true, "pending": false},
-            {"submission_id": 4, "user_id": 3, "problem_id": 1, "submitted_at_us": 4000000, "accepted": !pending, "pending": pending}
+            {"submission_id": 1, "user_id": 1, "problem_id": 1, "submitted_at_us": 1000000, "status": "Judged", "verdict": "Accepted"},
+            {"submission_id": 2, "user_id": 1, "problem_id": 2, "submitted_at_us": 2000000, "status": "Judged", "verdict": "Accepted"},
+            {"submission_id": 3, "user_id": 2, "problem_id": 2, "submitted_at_us": 3000000, "status": "Judged", "verdict": "Accepted"},
+            {"submission_id": 4, "user_id": 3, "problem_id": 1, "submitted_at_us": 4000000, "status": (if pending { "Running" } else { "Judged" }), "verdict": (if pending { None } else { Some("Accepted") })}
         ]));
         let body = handle_standings(&host, &request_at(phase))
             .unwrap()
@@ -202,7 +202,8 @@ fn final_advancement_is_available_only_after_the_contest_and_all_judging_finish(
             assert_eq!(
                 body["advancement"],
                 json!({
-                    "direct_user_ids": [1], "reserve_user_ids": [2, 3], "unfilled_slots": 13
+                    "direct_user_ids": [1], "reserve_user_ids": [2, 3], "unfilled_slots": 13,
+                    "over_capacity": 0
                 })
             );
             assert_eq!(body["qualified_count"], 1);
@@ -236,4 +237,36 @@ fn rules_endpoint_does_not_mask_bad_configuration() {
         let error = handler(&host, &request()).unwrap_err().into_response();
         assert_eq!(error.status, 500);
     }
+}
+
+/// More direct qualifiers than advancement places is a conflict for the
+/// organizers, which the standings report: the route still answers every
+/// viewer.
+#[test]
+fn standings_report_more_direct_qualifiers_than_places() {
+    let host = Host::mock();
+    host.config.seed(
+        "contest",
+        "7",
+        "contest",
+        json!({ "solves_to_qualify": 1, "advancement_slots": 1 }),
+    );
+    host.db
+        .queue_query_result(json!([{"problem_id": 1, "label": "A"}]));
+    host.db.queue_query_result(json!([
+        {"user_id": 1, "username": "one"}, {"user_id": 2, "username": "two"}
+    ]));
+    host.db.queue_query_result(json!([
+        {"submission_id": 1, "user_id": 1, "problem_id": 1, "submitted_at_us": 1000000, "status": "Judged", "verdict": "Accepted"},
+        {"submission_id": 2, "user_id": 2, "problem_id": 1, "submitted_at_us": 2000000, "status": "Judged", "verdict": "Accepted"}
+    ]));
+    let response = handle_standings(&host, &request_at("ended")).unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.body.unwrap()["advancement"],
+        json!({
+            "direct_user_ids": [1, 2], "reserve_user_ids": [], "unfilled_slots": 0,
+            "over_capacity": 1
+        })
+    );
 }

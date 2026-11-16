@@ -82,19 +82,23 @@ fn hidden_result_mask_fields() -> Vec<String> {
     vec![broccoli_server_sdk::visibility::SUBMISSION_STATUS_PATH.to_string()]
 }
 
+/// Every contest submission whose result is final, read off the submission
+/// row: the host's projection of its current judgement, which keeps a
+/// result that may still change at a status that is not terminal (see
+/// `SubmissionLifecycle::result_may_change`).
 #[cfg(any(target_arch = "wasm32", test))]
 fn current_submissions_sql(contest_id_placeholder: &str, user_filter: &str) -> String {
     format!(
         "SELECT s.id AS submission_id, s.user_id, s.problem_id, \
-                sj.status::text AS status, sj.verdict::text AS verdict, \
+                s.status::text AS status, s.verdict::text AS verdict, \
                 EXTRACT(EPOCH FROM (s.created_at - c.start_time)) * 1000 AS elapsed_ms \
          FROM submission s \
-         JOIN submission_judgement sj ON sj.submission_id = s.id \
-          AND sj.is_current = TRUE AND sj.is_finalized = TRUE \
          JOIN contest c ON c.id = s.contest_id \
          JOIN contest_problem cp ON cp.contest_id = s.contest_id \
           AND cp.problem_id = s.problem_id \
-         WHERE s.contest_id = {contest_id_placeholder}{user_filter}"
+         WHERE s.contest_id = {contest_id_placeholder} \
+           AND s.status IN {final_statuses}{user_filter}",
+        final_statuses = broccoli_server_sdk::types::StatusPhase::Terminal.sql_list(),
     )
 }
 
@@ -735,10 +739,10 @@ mod sql_tests {
 #[cfg(any(target_arch = "wasm32", test))]
 use std::collections::HashMap;
 
-#[cfg(target_arch = "wasm32")]
-use broccoli_server_sdk::permissions as perm;
 #[cfg(any(target_arch = "wasm32", test))]
 use broccoli_server_sdk::prelude::*;
+#[cfg(any(target_arch = "wasm32", test))]
+use broccoli_server_sdk::visibility::{ContestSubmission, decide_contest_submissions};
 #[cfg(target_arch = "wasm32")]
 use extism_pdk::{FnResult, plugin_fn};
 #[cfg(any(target_arch = "wasm32", test))]
@@ -782,11 +786,9 @@ pub fn init() -> FnResult<String> {
 // Invoked by the host's visibility kernel (`[[server.queries]] topic =
 // "visibility"`) for every resource in a query batch, for EVERY plugin
 // registered on that topic - not just ICPC contests, and not just
-// submissions. `decide_visibility_decisions` therefore defaults to Allow for
-// anything it has no opinion about (kind != "submission", no contest_id, or
-// a submission belonging to a non-ICPC contest): Allow is the identity
-// element of the host's `Decision::meet` lattice, so it can never widen what
-// the host or another plugin already decided.
+// submissions. `decide_contest_submissions` owns the rules every contest
+// plugin shares (Allow for what this plugin has no opinion about, fail hidden
+// on a mismatch, one batched read); this plugin decides its own submissions.
 //
 // Enforces on the generic GET /submissions endpoints (list, detail,
 // judgement history) the SAME two scoreboard-integrity rules
@@ -794,14 +796,11 @@ pub fn init() -> FnResult<String> {
 // contest, and the scoreboard freeze - via a `Redact` field mask.
 // `must_hide_other_submission` is the predicate both share.
 
-/// Row shape for the batched freeze/private-standings query below: one row
-/// per submission resource in the batch, keyed by submission id.
+/// This plugin's columns of the batched visibility read: the timing the
+/// freeze and private-standings rules need.
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Debug, Deserialize)]
 struct SubmissionFreezeRow {
-    submission_id: i32,
-    user_id: i32,
-    contest_type: Option<String>,
     start_epoch_ms: Option<f64>,
     duration_ms: Option<f64>,
     now_elapsed_ms: Option<f64>,
@@ -830,151 +829,70 @@ fn decide_visibility_decisions(
     // The host never asks this about staff (`contest:manage` or
     // `submission:view_all`): organizers see the real data by the host's
     // rule, so nothing here decides for them.
-
-    // Resources this plugin has any opinion about at all: `kind ==
-    // "submission"` with a resolvable id and a known contest_id. Everything
-    // else defaults to Allow without touching the database.
-    let by_index: Vec<Option<i32>> = req
-        .resources
-        .iter()
-        .map(|resource| {
-            if resource.kind == "submission" && resource.contest_id.is_some() {
-                resource.id.parse::<i32>().ok()
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let mut submission_ids: Vec<i32> = by_index.iter().filter_map(|id| *id).collect();
-    if submission_ids.is_empty() {
-        return Ok(req
-            .resources
-            .iter()
-            .map(|_| WireDecision::Allow {})
-            .collect());
-    }
-    submission_ids.sort_unstable();
-    submission_ids.dedup();
-
-    // ONE batched query for every submission id in the batch - never one
-    // query per submission, which would reintroduce an N+1 on the
-    // submission-list hot path. `contest_type` is returned (rather than
-    // filtered in the WHERE clause) so a submission belonging to a non-ICPC
-    // contest can be told apart from a genuine contest/submission data
-    // mismatch: the former must Allow (this plugin has no opinion on
-    // non-ICPC contests), the latter fails hidden.
-    let mut p = Params::new();
-    let placeholders: Vec<String> = submission_ids.iter().map(|id| p.bind(*id)).collect();
-    let sql = format!(
-        "SELECT s.id AS submission_id, s.user_id, c.contest_type, \
-                EXTRACT(EPOCH FROM c.start_time) * 1000 AS start_epoch_ms, \
-                EXTRACT(EPOCH FROM (c.end_time - c.start_time)) * 1000 AS duration_ms, \
-                EXTRACT(EPOCH FROM (NOW() - c.start_time)) * 1000 AS now_elapsed_ms, \
-                EXTRACT(EPOCH FROM (s.created_at - c.start_time)) * 1000 AS submission_elapsed_ms \
-         FROM submission s \
-         JOIN contest c ON c.id = s.contest_id \
-         WHERE s.id IN ({})",
-        placeholders.join(","),
-    );
-    let rows: Vec<SubmissionFreezeRow> = host.db.query_with_args(&sql, &p.into_args())?;
-    let rows_by_id: HashMap<i32, SubmissionFreezeRow> =
-        rows.into_iter().map(|r| (r.submission_id, r)).collect();
-
-    // Distinct ICPC contest ids actually present in the batch: config and
-    // the reveal flag are loaded once per DISTINCT contest, never once per
-    // submission.
-    let mut icpc_contest_ids: Vec<i32> = req
-        .resources
-        .iter()
-        .zip(&by_index)
-        .filter_map(|(resource, id)| {
-            let sub_id = (*id)?;
-            let row = rows_by_id.get(&sub_id)?;
-            if row.contest_type.as_deref() == Some("icpc") {
-                resource.contest_id
-            } else {
-                None
-            }
-        })
-        .collect();
-    icpc_contest_ids.sort_unstable();
-    icpc_contest_ids.dedup();
-
-    let mut configs: HashMap<i32, ContestConfig> = HashMap::new();
-    for contest_id in &icpc_contest_ids {
-        configs.insert(*contest_id, contest::load_config(host, *contest_id)?);
-    }
-
-    // Reveal records: ONE batched storage read across every distinct contest
-    // id in the batch, never one host call per contest. A storage read error
-    // is swallowed to an empty map, so every contest in this batch counts as
-    // not revealed: fail frozen, never accidentally unfreeze.
-    let reveal_records: HashMap<i32, String> = if icpc_contest_ids.is_empty() {
-        HashMap::new()
-    } else {
-        let keys: Vec<String> = icpc_contest_ids
-            .iter()
-            .map(|cid| reveal_key(*cid))
-            .collect();
-        let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
-        let mut raw = host.storage.get(&key_refs).ok().unwrap_or_default();
-        icpc_contest_ids
-            .iter()
-            .zip(keys.iter())
-            .filter_map(|(contest_id, key)| raw.remove(key).map(|r| (*contest_id, r)))
-            .collect()
+    let hidden = WireDecision::Redact {
+        fields: hidden_result_mask_fields(),
     };
-
     let viewer_id = req.subject.user_id;
-    let mask_fields = hidden_result_mask_fields();
-
-    let decisions = req
-        .resources
-        .iter()
-        .zip(&by_index)
-        .map(|(resource, id)| {
-            let Some(sub_id) = id else {
-                return WireDecision::Allow {};
-            };
-            let Some(row) = rows_by_id.get(sub_id) else {
-                // Contest/submission mismatch: fail hidden rather than leak.
-                return WireDecision::Redact {
-                    fields: mask_fields.clone(),
-                };
-            };
-            if row.contest_type.as_deref() != Some("icpc") {
-                // Not an ICPC contest: this plugin has no opinion.
-                return WireDecision::Allow {};
+    decide_contest_submissions(
+        host,
+        req,
+        "icpc",
+        "EXTRACT(EPOCH FROM c.start_time) * 1000 AS start_epoch_ms, \
+         EXTRACT(EPOCH FROM (c.end_time - c.start_time)) * 1000 AS duration_ms, \
+         EXTRACT(EPOCH FROM (NOW() - c.start_time)) * 1000 AS now_elapsed_ms, \
+         EXTRACT(EPOCH FROM (s.created_at - c.start_time)) * 1000 AS submission_elapsed_ms",
+        &hidden,
+        |contest_ids| {
+            let mut configs: HashMap<i32, ContestConfig> = HashMap::new();
+            for contest_id in contest_ids {
+                configs.insert(*contest_id, contest::load_config(host, *contest_id)?);
             }
+            // Reveal records: ONE batched storage read across every distinct
+            // contest in the batch. A storage read error is swallowed to an
+            // empty map, so every contest in this batch counts as not
+            // revealed: fail frozen, never accidentally unfreeze.
+            let keys: Vec<String> = contest_ids.iter().map(|cid| reveal_key(*cid)).collect();
+            let reveal_records: HashMap<i32, String> = if keys.is_empty() {
+                HashMap::new()
+            } else {
+                let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+                let mut raw = host.storage.get(&key_refs).ok().unwrap_or_default();
+                contest_ids
+                    .iter()
+                    .zip(keys.iter())
+                    .filter_map(|(contest_id, key)| raw.remove(key).map(|r| (*contest_id, r)))
+                    .collect()
+            };
+            Ok((configs, reveal_records))
+        },
+        |(configs, reveal_records), submission: &ContestSubmission<'_, SubmissionFreezeRow>| {
             // A team always sees its own results, even while frozen.
-            if viewer_id == Some(row.user_id) {
+            if viewer_id == Some(submission.user_id) {
                 return WireDecision::Allow {};
             }
-            let Some(contest_id) = resource.contest_id else {
-                return WireDecision::Allow {};
-            };
             // The host stamps the phase of every contest it resolved; one it
             // did not resolve fails hidden.
-            let Some(phase) = resource.contest_phase else {
-                return WireDecision::Redact {
-                    fields: mask_fields.clone(),
-                };
+            let Some(phase) = submission.resource.contest_phase else {
+                return hidden.clone();
             };
-            let Some(config) = configs.get(&contest_id) else {
+            let Some(config) = configs.get(&submission.contest_id) else {
                 // Every ICPC contest of the batch has its config loaded above;
                 // a contest without one is a mismatch: fail hidden.
-                return WireDecision::Redact {
-                    fields: mask_fields.clone(),
-                };
+                return hidden.clone();
             };
+            let row = submission.row;
             let duration_ms = row.duration_ms.unwrap_or(0.0) as i64;
             let window = FreezeWindow::current(
                 config.freeze_minutes,
                 row.start_epoch_ms.unwrap_or(0.0) as i64,
                 duration_ms,
             );
-            let revealed = is_revealed(reveal_records.get(&contest_id).map(String::as_str), window);
+            let revealed = is_revealed(
+                reveal_records
+                    .get(&submission.contest_id)
+                    .map(String::as_str),
+                window,
+            );
             if must_hide_other_submission(
                 config.public_standings,
                 config.freeze_minutes,
@@ -984,16 +902,12 @@ fn decide_visibility_decisions(
                 row.now_elapsed_ms.unwrap_or(0.0) as i64,
                 row.submission_elapsed_ms.unwrap_or(0.0).max(0.0) as i64,
             ) {
-                WireDecision::Redact {
-                    fields: mask_fields.clone(),
-                }
+                hidden.clone()
             } else {
                 WireDecision::Allow {}
             }
-        })
-        .collect();
-
-    Ok(decisions)
+        },
+    )
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1294,7 +1208,7 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     // Fetch participants (during before/during phase, only fetch the requesting user
     // unless they have contest:manage so organizers can supervise live scoring).
     let phase = info.phase.stage();
-    let can_view_all = req.has_permission(perm::CONTEST_MANAGE);
+    let can_view_all = req.is_staff();
     let restricted_user_id =
         match standings_restriction(phase, can_view_all, config.public_standings, req.user_id()) {
             StandingsRestriction::Unrestricted => None,

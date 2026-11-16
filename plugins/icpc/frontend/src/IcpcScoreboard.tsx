@@ -126,7 +126,7 @@ function ProblemCellView({ cell }: { cell: ProblemCell | undefined }) {
           className={cn(
             'font-mono text-[13px] leading-tight',
             cell.first_solve
-              ? 'font-bold text-emerald-600 dark:text-emerald-400'
+              ? 'font-bold text-emerald-800 dark:text-emerald-400'
               : 'font-semibold text-emerald-700 dark:text-emerald-400',
           )}
         >
@@ -145,14 +145,12 @@ function ProblemCellView({ cell }: { cell: ProblemCell | undefined }) {
   if (cell.pending && cell.pending > 0) {
     return (
       <td className="py-1.5 px-2 text-center border-b border-border bg-amber-500/10">
-        <div className="font-mono text-[13px] font-bold text-amber-600 dark:text-amber-400 leading-tight">
+        <div className="font-mono text-[13px] font-bold text-amber-800 dark:text-amber-400 leading-tight">
           ?
         </div>
         <div className="font-mono text-[10px] text-muted-foreground leading-tight">
           {cell.attempts > 0 && (
-            <span className="text-red-600 dark:text-red-400">
-              -{cell.attempts}{' '}
-            </span>
+            <span className="text-destructive">-{cell.attempts} </span>
           )}
           ({cell.pending})
         </div>
@@ -163,7 +161,7 @@ function ProblemCellView({ cell }: { cell: ProblemCell | undefined }) {
   // Attempted but unsolved
   return (
     <td className="py-1.5 px-2 text-center border-b border-border bg-red-500/8">
-      <div className="font-mono text-[13px] font-semibold text-red-600 dark:text-red-400 leading-tight">
+      <div className="font-mono text-[13px] font-semibold text-destructive leading-tight">
         -{cell.attempts}
       </div>
     </td>

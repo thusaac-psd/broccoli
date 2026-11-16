@@ -12,7 +12,8 @@ import {
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   CONTEST_MANAGE,
-  SUBMISSION_VIEW_ALL,
+  isStaff,
+  SUBMISSION_REJUDGE,
 } from '@broccoli/web-sdk/permissions';
 import { useProblemPresentation } from '@broccoli/web-sdk/problem';
 import {
@@ -138,8 +139,9 @@ function MatchDetail({
   const match = query.data;
 
   const permissions = auth.user?.permissions ?? [];
-  const isStaff = permissions.includes(CONTEST_MANAGE);
-  const canViewAll = permissions.includes(SUBMISSION_VIEW_ALL);
+  const staff = isStaff(permissions);
+  const canManage = permissions.includes(CONTEST_MANAGE);
+  const canRejudge = permissions.includes(SUBMISSION_REJUDGE);
   const orderingLeft = useStartsIn(match?.ordering_deadline_ms ?? null);
 
   if (state.status === 'error') {
@@ -221,7 +223,7 @@ function MatchDetail({
         <AttentionBanner
           match={match}
           contestId={contestId}
-          isStaff={isStaff}
+          canRejudge={canRejudge}
           busy={busy}
           onRejudge={(id) =>
             run(
@@ -274,7 +276,7 @@ function MatchDetail({
           </Section>
         )}
 
-        {canViewAll && !presentation && (
+        {staff && !presentation && (
           <Section title={t('codelink-bracket.section.submissions')}>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <SubmissionFeed
@@ -293,7 +295,7 @@ function MatchDetail({
           </Section>
         )}
 
-        {isStaff && !presentation && (
+        {canManage && !presentation && (
           <StaffControls
             match={match}
             nameA={nameA}
@@ -409,13 +411,13 @@ function Scoreline({
 function AttentionBanner({
   match,
   contestId,
-  isStaff,
+  canRejudge,
   busy,
   onRejudge,
 }: {
   match: MatchView;
   contestId: number;
-  isStaff: boolean;
+  canRejudge: boolean;
   busy: boolean;
   onRejudge: (submissionId: number) => void;
 }) {
@@ -458,7 +460,7 @@ function AttentionBanner({
                 {t('codelink-bracket.match.openSubmission', { id })}
               </Link>
             </Button>
-            {isStaff && (
+            {canRejudge && (
               <ConfirmButton
                 size="sm"
                 variant="outline"

@@ -52,6 +52,16 @@ impl PluginHttpRequest {
             .is_some_and(|auth| auth.permissions.iter().any(|p| p == permission))
     }
 
+    /// Whether the caller is contest staff by the host's rule
+    /// ([`crate::permissions::is_staff`]). A contest plugin shows staff what
+    /// the host shows them, so it decides staff through this and never
+    /// through a single permission.
+    pub fn is_staff(&self) -> bool {
+        self.auth
+            .as_ref()
+            .is_some_and(|auth| crate::permissions::is_staff(&auth.permissions))
+    }
+
     /// The path parameter `name`, parsed. A missing or unparsable value is
     /// the caller's mistake: a 400 `VALIDATION_ERROR` response.
     pub fn param<T: FromStr>(&self, name: &str) -> Result<T, PluginHttpResponse> {

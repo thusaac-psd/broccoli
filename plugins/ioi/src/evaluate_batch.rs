@@ -8,6 +8,7 @@ use broccoli_server_sdk::evaluator::{
 use broccoli_server_sdk::types::*;
 use serde::{Deserialize, Serialize};
 
+use crate::case_ratios::{self, judged_ratios};
 use crate::config::{SubtaskDef, SubtaskScoringMethod};
 use crate::config::{round_score, total_score};
 use crate::persist::persist_results;
@@ -74,14 +75,14 @@ impl ContestJudge for IoiJudge {
     }
 
     fn finalize(&self, host: &Host, progress: &JudgeProgress<'_>) -> Result<(), SdkError> {
-        let tc_scores: HashMap<i32, f64> = progress
-            .outcomes
-            .iter()
-            .filter(|outcome| !outcome.verdict.is_skipped_or_cancelled())
-            .map(|outcome| (outcome.test_case_id, outcome.score))
-            .collect();
-        let subtask_results =
-            score_all_subtasks(&self.subtask_defs, &self.all_test_cases, &tc_scores);
+        let ratios = judged_ratios(progress.outcomes);
+        case_ratios::store(
+            host,
+            progress.submission.judgement_id,
+            progress.submission.judge_epoch,
+            &ratios,
+        )?;
+        let subtask_results = score_all_subtasks(&self.subtask_defs, &self.all_test_cases, &ratios);
         let submission_score = round_score(total_score(
             subtask_results.iter().map(|result| result.score),
         ));
@@ -787,5 +788,109 @@ mod tests {
                 "subtask A case {id} must be skipped via short-circuit"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod stored_ratio_tests {
+    use super::*;
+    use crate::case_ratios::CaseRatios;
+    use crate::config::SubtaskScoringMethod;
+    use crate::score::score_submission_subtask_details;
+
+    /// Judge `results` to completion and return the submission score live
+    /// judging persisted and the ratios it stored beside the judgement.
+    fn judge(
+        host: &Host,
+        tcs: &[TestCaseRow],
+        subtasks: &[SubtaskDef],
+        results: Vec<TestCaseVerdict>,
+    ) -> (f64, CaseRatios) {
+        let req = test_submission(tcs.to_vec());
+        evaluate_all_detached(host, &req, tcs, tcs, req.submission_id, subtasks).unwrap();
+        let mut state = host.eval.detached_windowed_requests()[0].state.clone();
+        let total = results.len();
+        for (i, result) in results.into_iter().enumerate() {
+            state = handle_detached_eval_callback(
+                host,
+                DetachedEvaluateCallbackInput {
+                    session_id: "ioi-detached".into(),
+                    state,
+                    event: DetachedEvaluateCallbackEvent::Result { result },
+                    completed: i + 1,
+                    total,
+                },
+            )
+            .unwrap()
+            .state;
+        }
+        let stored = host
+            .db
+            .executions()
+            .into_iter()
+            .find(|e| e.sql.contains("INSERT INTO case_ratio"))
+            .expect("live judging stores the case ratios");
+        let ratios = serde_json::from_value(stored.args[2].clone()).unwrap();
+        (host.submission.last_update().score.unwrap(), ratios)
+    }
+
+    fn total(details: &[crate::score::SubtaskScoreDetail]) -> f64 {
+        serde_json::to_value(details)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["score"].as_f64().unwrap())
+            .sum()
+    }
+
+    #[test]
+    fn a_zero_point_member_scores_its_judged_ratio_when_subtask_scores_are_read_back() {
+        let host = Host::mock();
+        let mut tcs = vec![test_case(1), test_case(2)];
+        tcs[0].score = 10.0;
+        tcs[1].score = 0.0;
+        let subtasks = [SubtaskDef {
+            name: "Mul".into(),
+            scoring_method: SubtaskScoringMethod::GroupMul,
+            max_score: 100.0,
+            test_cases: vec!["1".into(), "2".into()],
+        }];
+        let half_wrong = TestCaseVerdict {
+            score: 0.5,
+            ..TestCaseVerdict::wrong_answer(2)
+        };
+        let (live, ratios) = judge(
+            &host,
+            &tcs,
+            &subtasks,
+            vec![TestCaseVerdict::accepted(1), half_wrong],
+        );
+
+        assert_eq!(live, 50.0);
+        let details = score_submission_subtask_details(&tcs, &subtasks, &ratios);
+        assert_eq!(total(&details), live);
+    }
+
+    #[test]
+    fn a_partial_ratio_reads_back_unrounded() {
+        let host = Host::mock();
+        let mut tcs = vec![test_case(1)];
+        tcs[0].score = 3.0;
+        let subtasks = [SubtaskDef {
+            name: "Mul".into(),
+            scoring_method: SubtaskScoringMethod::GroupMul,
+            max_score: 100.0,
+            test_cases: vec!["1".into()],
+        }];
+        let partial = TestCaseVerdict {
+            score: 1.0 / 3.0,
+            ..TestCaseVerdict::wrong_answer(1)
+        };
+        let (live, ratios) = judge(&host, &tcs, &subtasks, vec![partial]);
+
+        assert_eq!(live, 33.33);
+        let details = score_submission_subtask_details(&tcs, &subtasks, &ratios);
+        assert_eq!(total(&details), live);
     }
 }

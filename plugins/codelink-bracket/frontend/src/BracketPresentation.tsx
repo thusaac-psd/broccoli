@@ -1,5 +1,5 @@
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { SUBMISSION_VIEW_ALL } from '@broccoli/web-sdk/permissions';
+import { isStaff } from '@broccoli/web-sdk/permissions';
 import {
   isProblemContentQuery,
   useProblemPresentationPolicy,
@@ -14,7 +14,7 @@ export function BracketPresentation({ contestId }: { contestId?: number }) {
   const { user } = useAuth();
   const mine = useMyMatch(contestId);
   const queryClient = useQueryClient();
-  const staff = user?.permissions.includes(SUBMISSION_VIEW_ALL) ?? false;
+  const staff = isStaff(user?.permissions ?? []);
   const view = matchPresentation(mine?.match, mine?.side);
   const ids = JSON.stringify(view.allowedProblemIds);
   const viewerId = user?.id;

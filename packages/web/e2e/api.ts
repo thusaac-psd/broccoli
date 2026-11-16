@@ -352,7 +352,18 @@ export const PLUGIN_ROUTES: [string, RegExp, Handler][] = [
           display_name: 'Alice',
           solved: 1,
           penalty: 23,
-          problems: { A: { attempts: 2, solved: true, time: 3, penalty: 23 } },
+          // A cell of every kind: first solve, attempts, frozen attempts.
+          problems: {
+            A: {
+              attempts: 2,
+              solved: true,
+              time: 3,
+              penalty: 23,
+              first_solve: true,
+            },
+            B: { attempts: 3, solved: false },
+            C: { attempts: 1, solved: false, pending: 2 },
+          },
         },
       ],
     }),

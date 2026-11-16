@@ -88,6 +88,13 @@ The submission view itself hides per test case results at every level below
 
 :::
 
+The scoreboard follows the same level. At `none` it shows a contestant no
+score at all, their own row included, so it lists names only, without ranks.
+At `total_only` it shows totals without the per problem scores. Staff
+(holders of `contest:manage` or `submission:view_all`) see every score, and
+once the contest ends so does every contestant, on the scoreboard and in a
+submission's subtask scores.
+
 ## Tokens
 
 A token unlocks full feedback on one submission regardless of
@@ -115,12 +122,12 @@ the contest is running, and a submission can only be tokened once.
 
 `scoreboard_visibility` decides who sees the full board while the contest is
 running, and it defaults to `admins_only`. Once the contest ends, every
-contestant sees the full board no matter this setting, and contest managers
-always see it.
+contestant sees the full board no matter this setting, and staff (holders of
+`contest:manage` or `submission:view_all`) always see it.
 
 | Value                 | Meaning                                                        |
 | ----------------------- | ----------------------------------------------------------------- |
-| `admins_only`           | only contest managers see the full board while the contest runs, everyone else sees only their own row, without a rank |
+| `admins_only`           | only staff see the full board while the contest runs, everyone else sees only their own row, without a rank |
 | `all_contest_viewers`   | every contest viewer sees the full board while the contest runs |
 
 Each problem carries a score time, the elapsed time from contest start

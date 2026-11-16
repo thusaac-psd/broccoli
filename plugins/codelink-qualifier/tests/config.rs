@@ -125,3 +125,60 @@ fn invalid_problem_points_cannot_silently_change_the_scoring_budget() {
         .is_err()
     );
 }
+
+/// The event's defaults fit exactly: twenty problems, four of them worth two
+/// points, two slots each and three points to qualify let at most sixteen
+/// contestants qualify directly, the sixteen default places.
+#[test]
+fn the_default_places_hold_every_possible_direct_qualifier_of_the_default_event() {
+    let host = Host::mock();
+    let config = ContestConfig::load(&host, 7).unwrap();
+    let points: Vec<usize> = [1; 16].into_iter().chain([2; 4]).collect();
+    assert_eq!(config.most_direct_qualifiers(&points), 16);
+    assert!(config.violations(&points).is_empty());
+}
+
+#[test]
+fn fewer_places_than_possible_direct_qualifiers_are_refused() {
+    let host = Host::mock();
+    host.config.seed(
+        "contest",
+        "7",
+        "contest",
+        json!({"solves_to_qualify": 1, "advancement_slots": 3}),
+    );
+    let config = ContestConfig::load(&host, 7).unwrap();
+    let violations = config.violations(&[1, 1]);
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0].path, "advancement_slots");
+    assert_eq!(
+        violations[0].key.as_deref(),
+        Some("codelink-qualifier.config.placesBelowDirectQualifiers")
+    );
+    assert_eq!(violations[0].params["most"], json!(4));
+    assert_eq!(violations[0].params["places"], json!(3));
+}
+
+#[test]
+fn the_validate_hook_reads_the_contests_problem_points() {
+    let host = Host::mock();
+    host.config
+        .seed("contest_problem", "7:2", "problem", json!({"points": 2}));
+    host.db.queue_query_result(
+        json!([{"problem_id": 1, "label": "A"}, {"problem_id": 2, "label": "B"}]),
+    );
+    let input: broccoli_server_sdk::types::ConfigValidateInput = serde_json::from_value(json!({
+        "namespace": "contest",
+        "scope": "contest",
+        "contest_id": 7,
+        "problem_id": null,
+        "config": {
+            "expected_problem_count": 2, "slots_per_problem": 2, "solves_to_qualify": 1,
+            "advancement_slots": 5, "scoreboard_refresh_seconds": 5
+        }
+    }))
+    .unwrap();
+    let output = codelink_qualifier::api::validate_contest_config(&host, &input).unwrap();
+    assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
+    assert_eq!(output.errors[0].params["most"], json!(6));
+}

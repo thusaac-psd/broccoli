@@ -1,8 +1,6 @@
 #[cfg(any(target_arch = "wasm32", test))]
 use std::collections::HashMap;
 
-#[cfg(target_arch = "wasm32")]
-use broccoli_server_sdk::permissions as perm;
 // Host/PluginHttpRequest/SdkError/WireDecision/VisibilityQueryInput/Params are
 // used by both the wasm32-gated handlers below and the #[cfg(test)] unit
 // tests in `visibility_tests`, which exercise `decide_visibility_decisions`
@@ -10,6 +8,10 @@ use broccoli_server_sdk::permissions as perm;
 // build doesn't see this as unused.
 #[cfg(any(target_arch = "wasm32", test))]
 use broccoli_server_sdk::prelude::*;
+#[cfg(any(target_arch = "wasm32", test))]
+use broccoli_server_sdk::visibility::{ContestSubmission, decide_contest_submissions};
+#[cfg(any(target_arch = "wasm32", test))]
+use serde::de::IgnoredAny;
 
 // ContestConfig/FeedbackLevel are used by `decide_visibility_decisions` and
 // `mask_for_level` (both wasm32-gated production code) and directly by the
@@ -23,11 +25,6 @@ use crate::load_token_state;
 use crate::scoreboard::full_scoreboard_visible_for_phase;
 #[cfg(any(target_arch = "wasm32", test))]
 use crate::tokens::TokenState;
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn can_view_privileged_submission_feedback(req: &PluginHttpRequest) -> bool {
-    req.has_permission(perm::CONTEST_MANAGE) || req.has_permission(perm::SUBMISSION_VIEW_ALL)
-}
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn viewer_has_token_feedback_for_submission(
@@ -54,11 +51,9 @@ pub(crate) fn viewer_has_token_feedback_for_submission(
 // Invoked by the host's visibility kernel (`[[server.queries]] topic =
 // "visibility"`) for every resource in a query batch, for EVERY plugin
 // registered on that topic -- not just IOI contests, and not just
-// submissions. `decide_visibility_decisions` therefore defaults to Allow for
-// anything it has no opinion about (kind != "submission", no contest_id, or a
-// submission belonging to a non-IOI contest): Allow is the identity element
-// of the host's `Decision::meet` lattice, so it can never widen what the host
-// or another plugin already decided.
+// submissions. `decide_contest_submissions` owns the rules every contest
+// plugin shares (Allow for what this plugin has no opinion about, fail hidden
+// on a mismatch, one batched read); this plugin decides its own submissions.
 //
 // Unlike ICPC (binary "hidden or not", so the owner is always unconditional
 // Allow), IOI narrows even the OWNER's own view by `feedback_level` -- a
@@ -138,16 +133,6 @@ fn mask_for_level(level: FeedbackLevel) -> WireDecision {
     }
 }
 
-/// Row shape for the batched query below: one row per submission resource in
-/// the batch, keyed by submission id.
-#[cfg(any(target_arch = "wasm32", test))]
-#[derive(Debug, serde::Deserialize)]
-struct SubmissionVisibilityRow {
-    submission_id: i32,
-    user_id: i32,
-    contest_type: Option<String>,
-}
-
 /// Core decision logic. Exercised directly by tests via `Host::mock()` (no
 /// wasm32 target required). That organisers see unredacted judgements, which
 /// the host rule decides, is pinned end-to-end by
@@ -161,148 +146,71 @@ pub(crate) fn decide_visibility_decisions(
     // The host never asks this about staff (`contest:manage` or
     // `submission:view_all`): organisers see the real data by the host's
     // rule, so nothing here decides for them.
-
-    // Resources this plugin has any opinion about at all: `kind ==
-    // "submission"` with a resolvable id and a known contest_id. Everything
-    // else defaults to Allow without touching the database.
-    let by_index: Vec<Option<i32>> = req
-        .resources
-        .iter()
-        .map(|resource| {
-            if resource.kind == "submission" && resource.contest_id.is_some() {
-                resource.id.parse::<i32>().ok()
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let mut submission_ids: Vec<i32> = by_index.iter().filter_map(|id| *id).collect();
-    if submission_ids.is_empty() {
-        return Ok(req
-            .resources
-            .iter()
-            .map(|_| WireDecision::Allow {})
-            .collect());
-    }
-    submission_ids.sort_unstable();
-    submission_ids.dedup();
-
-    // ONE batched query for every submission id in the batch -- never one
-    // query per submission, which would reintroduce an N+1 on the
-    // submission-list hot path. `contest_type` is returned (rather than
-    // filtered in the WHERE clause) so a submission belonging to a non-IOI
-    // contest can be told apart from a genuine contest/submission data
-    // mismatch: the former must Allow (this plugin has no opinion on
-    // non-IOI contests), the latter fails hidden.
-    let mut p = Params::new();
-    let placeholders: Vec<String> = submission_ids.iter().map(|id| p.bind(*id)).collect();
-    let sql = format!(
-        "SELECT s.id AS submission_id, s.user_id, c.contest_type \
-         FROM submission s \
-         JOIN contest c ON c.id = s.contest_id \
-         WHERE s.id IN ({})",
-        placeholders.join(","),
-    );
-    let rows: Vec<SubmissionVisibilityRow> = host.db.query_with_args(&sql, &p.into_args())?;
-    let rows_by_id: HashMap<i32, SubmissionVisibilityRow> =
-        rows.into_iter().map(|r| (r.submission_id, r)).collect();
-
-    // Distinct IOI contest ids actually present in the batch: config is
-    // loaded once per DISTINCT contest, never once per submission.
-    let mut ioi_contest_ids: Vec<i32> = req
-        .resources
-        .iter()
-        .zip(&by_index)
-        .filter_map(|(resource, id)| {
-            let sub_id = (*id)?;
-            let row = rows_by_id.get(&sub_id)?;
-            if row.contest_type.as_deref() == Some("ioi") {
-                resource.contest_id
-            } else {
-                None
-            }
-        })
-        .collect();
-    ioi_contest_ids.sort_unstable();
-    ioi_contest_ids.dedup();
-
-    let mut configs: HashMap<i32, ContestConfig> = HashMap::new();
-    for contest_id in &ioi_contest_ids {
-        configs.insert(*contest_id, contest::load_config(host, *contest_id)?);
-    }
-
-    // Token state: a query batch always has exactly one subject, so this is
-    // ONE batched storage read across every distinct contest id in the batch
-    // -- never one read per submission.
     let viewer_id = req.subject.user_id;
-    let mut token_states: HashMap<i32, TokenState> = HashMap::new();
-    if let Some(viewer) = viewer_id
-        && !ioi_contest_ids.is_empty()
-    {
-        let keys: Vec<String> = ioi_contest_ids
-            .iter()
-            .map(|cid| format!("tokens:{cid}:{viewer}"))
-            .collect();
-        let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
-        let raw = host.storage.get(&key_refs)?;
-        for (contest_id, key) in ioi_contest_ids.iter().zip(keys.iter()) {
-            if let Some(json) = raw.get(key) {
-                token_states.insert(*contest_id, serde_json::from_str(json).unwrap_or_default());
+    decide_contest_submissions(
+        host,
+        req,
+        "ioi",
+        "",
+        &mask_for_level(FeedbackLevel::None),
+        |contest_ids| {
+            let mut configs: HashMap<i32, ContestConfig> = HashMap::new();
+            for contest_id in contest_ids {
+                configs.insert(*contest_id, contest::load_config(host, *contest_id)?);
             }
-        }
-    }
-
-    let decisions = req
-        .resources
-        .iter()
-        .zip(&by_index)
-        .map(|(resource, id)| {
-            let Some(sub_id) = id else {
-                return WireDecision::Allow {};
-            };
-            let Some(row) = rows_by_id.get(sub_id) else {
-                // Contest/submission mismatch: fail hidden rather than leak.
-                return mask_for_level(FeedbackLevel::None);
-            };
-            if row.contest_type.as_deref() != Some("ioi") {
-                // Not an IOI contest: this plugin has no opinion.
-                return WireDecision::Allow {};
+            // Token state: a query batch always has exactly one subject, so
+            // this is ONE batched storage read across every distinct contest
+            // in the batch.
+            let mut token_states: HashMap<i32, TokenState> = HashMap::new();
+            if let Some(viewer) = viewer_id
+                && !contest_ids.is_empty()
+            {
+                let keys: Vec<String> = contest_ids
+                    .iter()
+                    .map(|cid| format!("tokens:{cid}:{viewer}"))
+                    .collect();
+                let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+                let raw = host.storage.get(&key_refs)?;
+                for (contest_id, key) in contest_ids.iter().zip(keys.iter()) {
+                    if let Some(json) = raw.get(key) {
+                        token_states
+                            .insert(*contest_id, serde_json::from_str(json).unwrap_or_default());
+                    }
+                }
             }
-            let Some(contest_id) = resource.contest_id else {
-                return WireDecision::Allow {};
-            };
-            let Some(config) = configs.get(&contest_id) else {
+            Ok((configs, token_states))
+        },
+        |(configs, token_states), submission: &ContestSubmission<'_, IgnoredAny>| {
+            let Some(config) = configs.get(&submission.contest_id) else {
                 // Every IOI contest of the batch has its config loaded above;
                 // a contest without one is a mismatch: fail hidden.
                 return mask_for_level(FeedbackLevel::None);
             };
 
-            if viewer_id == Some(row.user_id) {
+            if viewer_id == Some(submission.user_id) {
                 // Owner. A spent token unlocks full feedback for this ONE
                 // submission regardless of feedback_level; otherwise the
                 // owner is narrowed by feedback_level exactly like a peer
                 // would be once the scoreboard opens up.
                 let tokened = token_states
-                    .get(&contest_id)
-                    .map(|s| s.tokened_submission_ids.contains(sub_id))
-                    .unwrap_or(false);
+                    .get(&submission.contest_id)
+                    .is_some_and(|s| s.tokened_submission_ids.contains(&submission.submission_id));
                 if tokened {
                     return WireDecision::Allow {};
                 }
                 return mask_for_level(config.feedback_level);
             }
 
-            // Peer: scoreboard-integrity gate. When the full scoreboard is not visible to a
-            // non-owner in this phase -- e.g. the default `admins_only`
-            // during the live contest -- a peer must not read another
-            // contestant's verdict/score/per-test-case results through the
-            // submission endpoint. `feedback_level` alone would leak exactly
-            // the data the scoreboard withholds, so force the None-level
-            // mask regardless of the configured feedback_level.
+            // Peer: scoreboard-integrity gate. When the full scoreboard is
+            // not visible to a non-owner in this phase -- e.g. the default
+            // `admins_only` during the live contest -- a peer must not read
+            // another contestant's verdict/score/per-test-case results
+            // through the submission endpoint. `feedback_level` alone would
+            // leak exactly the data the scoreboard withholds, so force the
+            // None-level mask regardless of the configured feedback_level.
             // The host stamps the phase of every contest it resolved; one it
             // did not resolve fails hidden.
-            let Some(phase) = resource.contest_phase else {
+            let Some(phase) = submission.resource.contest_phase else {
                 return mask_for_level(FeedbackLevel::None);
             };
             if !full_scoreboard_visible_for_phase(
@@ -313,10 +221,8 @@ pub(crate) fn decide_visibility_decisions(
                 return mask_for_level(FeedbackLevel::None);
             }
             mask_for_level(config.feedback_level)
-        })
-        .collect();
-
-    Ok(decisions)
+        },
+    )
 }
 
 #[cfg(test)]

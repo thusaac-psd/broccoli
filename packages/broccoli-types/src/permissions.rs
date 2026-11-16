@@ -61,6 +61,17 @@ permissions! {
     SYSTEM_ADMIN => "system:admin",
 }
 
+/// The permissions that make their holder contest staff. Either one alone
+/// shows a viewer every contestant's submissions as the host stores them: the
+/// host never asks a visibility plugin about staff, and a contest plugin shows
+/// staff what the host does by deciding staff through [`is_staff`].
+pub const STAFF: &[&str] = &[CONTEST_MANAGE, SUBMISSION_VIEW_ALL];
+
+/// Whether a viewer holding `held` is contest staff (see [`STAFF`]).
+pub fn is_staff<S: AsRef<str>>(held: &[S]) -> bool {
+    held.iter().any(|p| STAFF.contains(&p.as_ref()))
+}
+
 /// Returns `true` if `permission` is a known permission identifier.
 pub fn is_valid(permission: &str) -> bool {
     ALL.iter().any(|(_, value)| *value == permission)
@@ -76,10 +87,9 @@ mod tests {
         "/../web-sdk/src/permissions/index.ts"
     );
 
-    /// Canonical TS content generated from [`ALL`]. Kept in sync with the repo
-    /// prettier config (single quotes, trailing commas) so the pre-commit hook
-    /// does not rewrite it; the sync check below is whitespace/quote-agnostic
-    /// regardless.
+    /// Canonical TS content generated from [`ALL`] and [`STAFF`], formatted
+    /// the way the repo's prettier config writes it, so the formatter leaves
+    /// the generated file as it is.
     fn generate_ts() -> String {
         let mut out = String::new();
         out.push_str(
@@ -96,23 +106,24 @@ mod tests {
             out.push_str(&format!("  {name},\n"));
         }
         out.push_str("] as const;\n\n");
-        out.push_str("export type Permission = (typeof ALL_PERMISSIONS)[number];\n");
+        out.push_str("export type Permission = (typeof ALL_PERMISSIONS)[number];\n\n");
+        out.push_str("/** The permissions that make their holder contest staff. */\n");
+        out.push_str("export const STAFF_PERMISSIONS: readonly Permission[] = [\n");
+        for value in STAFF {
+            let (name, _) = ALL
+                .iter()
+                .find(|(_, v)| v == value)
+                .expect("a staff permission is in ALL");
+            out.push_str(&format!("  {name},\n"));
+        }
+        out.push_str("];\n\n");
+        out.push_str(
+            "/** Whether a viewer holding `permissions` is contest staff, by the host's rule. */\n",
+        );
+        out.push_str("export function isStaff(permissions: readonly string[]): boolean {\n");
+        out.push_str("  return STAFF_PERMISSIONS.some((p) => permissions.includes(p));\n");
+        out.push_str("}\n");
         out
-    }
-
-    /// Extract a `(NAME, value)` pair from an `export const NAME = 'value';`
-    /// line, tolerating single or double quotes and any prettier reflow. Lines
-    /// that are not a quoted-string const (the `ALL_PERMISSIONS` array, the
-    /// `type` alias, comments) yield `None`.
-    fn parse_export_const(line: &str) -> Option<(String, String)> {
-        let rest = line.trim().strip_prefix("export const ")?;
-        let (name, value) = rest.split_once(" = ")?;
-        let value = value.trim().trim_end_matches(';').trim();
-        let inner = value
-            .strip_prefix('\'')
-            .and_then(|v| v.strip_suffix('\''))
-            .or_else(|| value.strip_prefix('"').and_then(|v| v.strip_suffix('"')))?;
-        Some((name.trim().to_string(), inner.to_string()))
     }
 
     #[test]
@@ -146,15 +157,9 @@ mod tests {
              `REGEN_PERMISSIONS_TS=1 cargo test -p broccoli-types permissions`",
         );
 
-        let parsed: std::collections::BTreeSet<(String, String)> =
-            contents.lines().filter_map(parse_export_const).collect();
-        let expected: std::collections::BTreeSet<(String, String)> = ALL
-            .iter()
-            .map(|(n, v)| (n.to_string(), v.to_string()))
-            .collect();
-
         assert_eq!(
-            parsed, expected,
+            contents,
+            generate_ts(),
             "packages/web-sdk/src/permissions/index.ts is out of sync with the Rust catalog; \
              regenerate with `REGEN_PERMISSIONS_TS=1 cargo test -p broccoli-types permissions`"
         );

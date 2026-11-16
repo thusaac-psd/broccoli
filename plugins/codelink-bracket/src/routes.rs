@@ -12,7 +12,6 @@
 //! Kept off the WASM ABI, like `setup::handle_setup` and
 //! `ordering::handle_order` -- the `api_*` wrappers in `lib.rs` adapt these.
 
-use broccoli_server_sdk::permissions as perm;
 use broccoli_server_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -276,7 +275,7 @@ fn match_view(
     m: &MatchState,
     round_def: &RoundDef,
     viewer: Option<i32>,
-    can_view_all: bool,
+    staff: bool,
     setup: &Setup,
 ) -> MatchView {
     // The latest 小局, if any. Read once here so the timing fields below
@@ -315,19 +314,19 @@ fn match_view(
         player_b: m.player_b,
         player_a_name: None,
         player_b_name: None,
-        group_a: mask_group(&ctx, &m.group_a, viewer, can_view_all),
-        group_b: mask_group(&ctx, &m.group_b, viewer, can_view_all),
+        group_a: mask_group(&ctx, &m.group_a, viewer, staff),
+        group_b: mask_group(&ctx, &m.group_b, viewer, staff),
         order_a: m
             .order_a
             .as_ref()
-            .map(|o| mask_group(&ctx, o, viewer, can_view_all)),
+            .map(|o| mask_group(&ctx, o, viewer, staff)),
         order_b: m
             .order_b
             .as_ref()
-            .map(|o| mask_group(&ctx, o, viewer, can_view_all)),
+            .map(|o| mask_group(&ctx, o, viewer, staff)),
         tiebreak_problem: ctx
             .tiebreak_problem
-            .and_then(|pid| mask_problem(&ctx, pid, viewer, can_view_all)),
+            .and_then(|pid| mask_problem(&ctx, pid, viewer, staff)),
         wins_to_advance: round_def.win_target(),
         score_a: m.score_a,
         score_b: m.score_b,
@@ -350,9 +349,8 @@ fn match_view(
             .iter()
             .map(|x| {
                 let (a, b) = game_problems(m, round_def, x.index);
-                let mask = |pid: Option<i32>| {
-                    pid.and_then(|pid| mask_problem(&ctx, pid, viewer, can_view_all))
-                };
+                let mask =
+                    |pid: Option<i32>| pid.and_then(|pid| mask_problem(&ctx, pid, viewer, staff));
                 GameView {
                     index: x.index,
                     tiebreak: !m.is_regular_game(x.index),
@@ -469,12 +467,12 @@ pub fn handle_get_bracket(
     let matches = storage::load_all_matches(host, contest_id)?;
 
     let viewer = req.user_id();
-    let can_view_all = req.has_permission(perm::SUBMISSION_VIEW_ALL);
+    let staff = req.is_staff();
     let mut views: Vec<MatchView> = matches
         .iter()
         .filter_map(|(id, m)| {
             let round_def = setup.round_for_match(m.round, m.pos)?;
-            Some(match_view(*id, m, &round_def, viewer, can_view_all, &setup))
+            Some(match_view(*id, m, &round_def, viewer, staff, &setup))
         })
         .collect();
     attach_player_names(host, &mut views);
@@ -510,15 +508,8 @@ pub fn handle_get_match(
         .ok_or_else(|| PluginHttpResponse::error(500, "Match references an undefined round"))?;
 
     let viewer = req.user_id();
-    let can_view_all = req.has_permission(perm::SUBMISSION_VIEW_ALL);
-    let mut view = [match_view(
-        match_id,
-        &m,
-        &round_def,
-        viewer,
-        can_view_all,
-        &setup,
-    )];
+    let staff = req.is_staff();
+    let mut view = [match_view(match_id, &m, &round_def, viewer, staff, &setup)];
     attach_player_names(host, &mut view);
     attach_own_feedback(
         host,
@@ -583,6 +574,7 @@ mod tests {
 
     use super::*;
     use crate::model::XiaojuState;
+    use broccoli_server_sdk::permissions as perm;
 
     fn match_in_ordering() -> MatchState {
         MatchState {
@@ -1046,16 +1038,26 @@ mod tests {
     }
 
     #[test]
-    fn get_match_view_all_sees_everything() {
-        let host = Host::mock();
-        seed_match_in_progress(&host, 7);
+    fn get_match_shows_everything_to_either_staff_permission() {
+        for staff in [perm::SUBMISSION_VIEW_ALL, perm::CONTEST_MANAGE] {
+            let host = Host::mock();
+            seed_match_in_progress(&host, 7);
 
-        let mut auth = player_auth(999);
-        auth.permissions = vec![perm::SUBMISSION_VIEW_ALL.to_string()];
-        let resp = handle_get_match(&host, &get_request(7, 0, Some(auth))).unwrap();
-        let body = resp.body.unwrap();
-        assert_eq!(body["group_a"], serde_json::json!(vec![101, 102, 103]));
-        assert_eq!(body["group_b"], serde_json::json!(vec![201, 202, 203]));
+            let mut auth = player_auth(999);
+            auth.permissions = vec![staff.to_string()];
+            let resp = handle_get_match(&host, &get_request(7, 0, Some(auth))).unwrap();
+            let body = resp.body.unwrap();
+            assert_eq!(
+                body["group_a"],
+                serde_json::json!(vec![101, 102, 103]),
+                "{staff}"
+            );
+            assert_eq!(
+                body["group_b"],
+                serde_json::json!(vec![201, 202, 203]),
+                "{staff}"
+            );
+        }
     }
 
     #[test]

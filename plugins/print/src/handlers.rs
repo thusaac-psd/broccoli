@@ -1,7 +1,6 @@
 //! HTTP handler logic, kept off wasm so it unit-tests on the host. The
 //! `#[plugin_fn]` wrappers in `lib.rs` adapt these to the WASM ABI.
 
-use broccoli_server_sdk::permissions as perm;
 use broccoli_server_sdk::prelude::*;
 use serde::de::DeserializeOwned;
 
@@ -132,7 +131,7 @@ pub fn handle_print_submission(
 
     // Someone else's submission is not found, exactly like one that does
     // not exist, so the route cannot tell which ids are taken.
-    if (sub.user_id != user_id && !is_staff(req)) || sub.contest_id != Some(contest_id) {
+    if (sub.user_id != user_id && !req.is_staff()) || sub.contest_id != Some(contest_id) {
         return Err(PluginHttpResponse::error(404, "Submission not found").into());
     }
 
@@ -230,7 +229,7 @@ pub fn handle_print_arbitrary(
         )
         .into());
     }
-    if !is_staff(req) && !contest.participant {
+    if !req.is_staff() && !contest.participant {
         return Err(
             PluginHttpResponse::error(403, "Only contestants can print in this contest").into(),
         );
@@ -294,11 +293,6 @@ pub fn handle_print_arbitrary(
     created(serde_json::json!({ "ok": true, "jobs": 1, "pages": pages, "status": status.as_str() }))
 }
 
-/// Staff print for others and do not draw on a contestant's quota.
-fn is_staff(req: &PluginHttpRequest) -> bool {
-    req.has_permission(perm::CONTEST_MANAGE) || req.has_permission(perm::SUBMISSION_VIEW_ALL)
-}
-
 /// Queue `new_jobs`, all or none, for `user_id` in `contest_id`, taking them
 /// from the user's quota unless the caller is staff.
 fn queue_jobs(
@@ -309,7 +303,7 @@ fn queue_jobs(
     user_id: i32,
     new_jobs: &[NewJob],
 ) -> Result<(), ApiError> {
-    let counted = cfg.max_jobs_per_user > 0 && !is_staff(req);
+    let counted = cfg.max_jobs_per_user > 0 && !req.is_staff();
     let count = new_jobs.len() as i32;
     if counted && !jobs::claim_quota(host, contest_id, user_id, count, cfg.max_jobs_per_user)? {
         return Err(PluginHttpResponse::error(

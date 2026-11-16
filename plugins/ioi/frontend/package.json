@@ -55,6 +55,7 @@
     "@tailwindcss/postcss": "catalog:",
     "@tanstack/react-query": "catalog:",
     "@tsdown/css": "catalog:",
+    "@types/node": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
     "lucide-react": "^1.7.0",

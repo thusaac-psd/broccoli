@@ -38,3 +38,14 @@ export const ALL_PERMISSIONS = [
 ] as const;
 
 export type Permission = (typeof ALL_PERMISSIONS)[number];
+
+/** The permissions that make their holder contest staff. */
+export const STAFF_PERMISSIONS: readonly Permission[] = [
+  CONTEST_MANAGE,
+  SUBMISSION_VIEW_ALL,
+];
+
+/** Whether a viewer holding `permissions` is contest staff, by the host's rule. */
+export function isStaff(permissions: readonly string[]): boolean {
+  return STAFF_PERMISSIONS.some((p) => permissions.includes(p));
+}

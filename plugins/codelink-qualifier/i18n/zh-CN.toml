@@ -43,6 +43,8 @@
 'codelink-qualifier.reserveCount' = "补位晋级 {count} 人"
 'codelink-qualifier.advancementCount' = "合计晋级 {count}/{total} 人"
 'codelink-qualifier.unfilledSlots' = "仍空缺 {count} 席，需按已公布的加赛或其他选拔方式补足。"
+'codelink-qualifier.config.placesBelowDirectQualifiers' = "按本场比赛的题目，最多可有 {most} 人直接晋级，超过了 {places} 个晋级名额。请增加名额、提高晋级所需分数，或减少每题的得分名额。"
+'codelink-qualifier.overCapacity' = "直接晋级的人数比晋级名额多 {count} 人，需由组织者决定晋级人选。"
 'codelink-qualifier.table.score' = "总积分"
 'codelink-qualifier.creditedProblems' = "{count} 道计分题"
 'codelink-qualifier.status.reserve' = "补位晋级"

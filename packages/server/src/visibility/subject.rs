@@ -56,16 +56,13 @@ impl Subject {
         }
     }
 
-    /// Whether visibility plugins narrow what this subject sees. Staff - a
-    /// holder of `contest:manage` or `submission:view_all` - see contests as
+    /// Whether visibility plugins narrow what this subject sees. Staff (see
+    /// `broccoli_server_sdk::permissions::STAFF`) see contests as
     /// the host rules show them, so plugins are never consulted for them and
     /// a plugin that cannot decide takes nothing from their view. Plugin
     /// authors rely on this: a visibility query is never asked about staff.
     pub fn narrowed_by_plugins(&self) -> bool {
-        use broccoli_server_sdk::permissions as perm;
-        !self.admin_override
-            && !self.has_permission(perm::CONTEST_MANAGE)
-            && !self.has_permission(perm::SUBMISSION_VIEW_ALL)
+        !self.admin_override && !broccoli_server_sdk::permissions::is_staff(&self.permissions)
     }
 
     pub fn is_admin_override(&self) -> bool {

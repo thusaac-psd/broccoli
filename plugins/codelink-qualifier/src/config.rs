@@ -1,3 +1,4 @@
+use broccoli_server_sdk::types::ConfigViolation;
 use broccoli_server_sdk::{Host, error::SdkError};
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +52,41 @@ impl ContestConfig {
             }
         }
         Ok(())
+    }
+
+    /// The most contestants who can qualify directly in a contest whose
+    /// problems are worth `problem_points`: a problem credits its points to
+    /// at most `slots_per_problem` contestants, and a direct qualifier holds
+    /// at least `solves_to_qualify` credited points.
+    pub fn most_direct_qualifiers(&self, problem_points: &[usize]) -> usize {
+        let credit: usize = problem_points
+            .iter()
+            .map(|points| points * self.slots_per_problem)
+            .sum();
+        credit / self.solves_to_qualify
+    }
+
+    /// What the `contest` namespace refuses beyond its schema, for a contest
+    /// whose problems are worth `problem_points`: fewer advancement places
+    /// than contestants who can qualify directly, since every direct
+    /// qualifier is promised a place.
+    pub fn violations(&self, problem_points: &[usize]) -> Vec<ConfigViolation> {
+        let most = self.most_direct_qualifiers(problem_points);
+        if self.advancement_slots >= most {
+            return Vec::new();
+        }
+        vec![
+            ConfigViolation::new(
+                "advancement_slots",
+                format!(
+                    "up to {most} contestants can qualify directly, more than the {} advancement places",
+                    self.advancement_slots
+                ),
+            )
+            .key("codelink-qualifier.config.placesBelowDirectQualifiers")
+            .param("most", most)
+            .param("places", self.advancement_slots),
+        ]
     }
 }
 

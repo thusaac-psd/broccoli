@@ -1,3 +1,4 @@
+use broccoli_server_sdk::types::{SubmissionLifecycle, Verdict};
 use codelink_qualifier::config::ContestConfig;
 use codelink_qualifier::standings::*;
 
@@ -728,13 +729,14 @@ fn reserves_are_selected_by_score_then_last_scoring_submission() {
         ac(20, 2, 3),
     ]);
     result.config.advancement_slots = 3;
-    assert!(result.advancement(false).unwrap().is_none());
+    assert!(result.advancement(false).is_none());
     assert_eq!(
-        result.advancement(true).unwrap().unwrap(),
+        result.advancement(true).unwrap(),
         Advancement {
             direct_user_ids: vec![1],
             reserve_user_ids: vec![3, 2],
             unfilled_slots: 0,
+            over_capacity: 0,
         }
     );
     // Selection never changes the scoring snapshot or turns reserves into
@@ -758,7 +760,7 @@ fn reserve_ties_use_microseconds_then_id_and_ignore_non_scoring_submissions() {
         CreditStatus::SlotsFull
     );
     assert_eq!(
-        result.advancement(true).unwrap().unwrap().reserve_user_ids,
+        result.advancement(true).unwrap().reserve_user_ids,
         vec![1, 3]
     );
 }
@@ -782,11 +784,12 @@ fn all_forty_slots_can_require_one_point_reserves_to_fill_sixteen_places() {
     assert_eq!(result.rows.iter().map(|r| r.score).sum::<usize>(), 48);
     assert!(result.problems.iter().all(|p| p.awards.len() == 2));
     assert_eq!(
-        result.advancement(true).unwrap().unwrap(),
+        result.advancement(true).unwrap(),
         Advancement {
             direct_user_ids: (1..=14).collect(),
             reserve_user_ids: vec![15, 16],
             unfilled_slots: 0,
+            over_capacity: 0,
         }
     );
 }
@@ -795,7 +798,7 @@ fn all_forty_slots_can_require_one_point_reserves_to_fill_sixteen_places() {
 fn unfinished_judging_blocks_reserve_selection_until_replayed() {
     let submissions = vec![pending(1, 1, 17), ac(2, 2, 17), ac(3, 3, 17)];
     let waiting = weighted_board(submissions.clone());
-    assert!(waiting.advancement(true).unwrap().is_none());
+    assert!(waiting.advancement(true).is_none());
 
     for accepted in [false, true] {
         let mut resolved = submissions.clone();
@@ -803,7 +806,7 @@ fn unfinished_judging_blocks_reserve_selection_until_replayed() {
         resolved[0].accepted = accepted;
         let result = weighted_board(resolved);
         assert_eq!(
-            result.advancement(true).unwrap().unwrap().reserve_user_ids,
+            result.advancement(true).unwrap().reserve_user_ids,
             if accepted { vec![1, 2] } else { vec![2, 3] }
         );
     }
@@ -813,18 +816,61 @@ fn unfinished_judging_blocks_reserve_selection_until_replayed() {
 fn insufficient_scorers_leave_places_for_organizers_instead_of_selecting_zero_scores() {
     let result = weighted_board(vec![ac(1, 1, 17), ac(2, 2, 1)]);
     assert_eq!(
-        result.advancement(true).unwrap().unwrap(),
+        result.advancement(true).unwrap(),
         Advancement {
             direct_user_ids: vec![],
             reserve_user_ids: vec![1, 2],
             unfilled_slots: 14,
+            over_capacity: 0,
         }
     );
 }
 
 #[test]
-fn invalid_capacity_never_silently_excludes_a_direct_qualifier() {
+fn more_direct_qualifiers_than_places_is_reported_without_excluding_one() {
     let mut result = weighted_board(vec![ac(1, 1, 17), ac(2, 1, 1), ac(3, 2, 18), ac(4, 2, 2)]);
     result.config.advancement_slots = 1;
-    assert!(result.advancement(true).is_err());
+    assert_eq!(
+        result.advancement(true).unwrap(),
+        Advancement {
+            direct_user_ids: vec![1, 2],
+            reserve_user_ids: vec![],
+            unfilled_slots: 0,
+            over_capacity: 1,
+        }
+    );
+}
+
+fn projected(status: SubmissionLifecycle, verdict: Option<Verdict>) -> Submission {
+    Submission::from(SubmissionRow {
+        submission_id: 1,
+        user_id: 1,
+        problem_id: 1,
+        submitted_at_us: 0,
+        status,
+        verdict,
+    })
+}
+
+/// A submission is pending exactly while the host's projection of it is not
+/// terminal. A system error the host may still retry keeps showing the
+/// attempt in flight, so it is pending even though its judgement finished.
+#[test]
+fn a_submission_is_pending_until_the_host_shows_a_terminal_status() {
+    use SubmissionLifecycle::*;
+    for status in [Queued, Pending, Compiling, Running] {
+        let s = projected(status, None);
+        assert!(s.pending && !s.accepted, "{status:?}");
+    }
+    let accepted = projected(Judged, Some(Verdict::Accepted));
+    assert!(accepted.accepted && !accepted.pending);
+    for (status, verdict) in [
+        (Judged, Some(Verdict::WrongAnswer)),
+        (Judged, Some(Verdict::SystemError)),
+        (CompilationError, None),
+        (SystemError, Some(Verdict::SystemError)),
+    ] {
+        let s = projected(status, verdict.clone());
+        assert!(!s.pending && !s.accepted, "{status:?} {verdict:?}");
+    }
 }
