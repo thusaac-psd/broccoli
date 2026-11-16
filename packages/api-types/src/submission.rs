@@ -19,7 +19,7 @@ pub struct CreateSubmissionRequest {
     pub files: Vec<SubmissionFileDto>,
     #[schema(example = "cpp")]
     pub language: String,
-    #[schema(example = "ioi")]
+    #[schema(example = "my-contest-type")]
     pub contest_type: Option<String>,
 }
 
@@ -42,7 +42,7 @@ pub struct SubmissionResponse {
     pub problem_title: String,
     #[schema(example = 1)]
     pub contest_id: Option<i32>,
-    #[schema(example = "ioi")]
+    #[schema(example = "my-contest-type")]
     pub contest_type: String,
     #[schema(example = 0)]
     pub judge_epoch: i32,
@@ -83,7 +83,7 @@ pub struct SubmissionListItem {
     #[schema(example = "Two Sum")]
     pub problem_title: String,
     pub contest_id: Option<i32>,
-    #[schema(example = "ioi")]
+    #[schema(example = "my-contest-type")]
     pub contest_type: String,
     #[schema(example = 0)]
     pub judge_epoch: i32,

@@ -1,6 +1,6 @@
 //! Changes to a problem's test data, and the stored configs that refer to it.
 //!
-//! A config can name test data (an IOI subtask lists test case labels), so a
+//! A config can name test data (a subtask lists test case labels), so a
 //! change to the test data can leave a config its plugin refuses, and judging
 //! would score with it. Every change therefore goes through a
 //! [`TestDataEdit`], whose only way to commit checks the problem's stored

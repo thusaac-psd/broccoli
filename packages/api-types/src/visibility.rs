@@ -9,7 +9,7 @@ pub enum PluginOutage {
     /// An administrator disabled the plugin. Nothing changes until it is
     /// enabled again.
     Disabled {
-        #[schema(example = "ioi")]
+        #[schema(example = "my-plugin")]
         plugin_id: String,
     },
     /// The plugin is enabled but cannot answer on this server right now (it

@@ -14,7 +14,7 @@ pub struct RunningContestRef {
     pub id: i32,
     #[schema(example = "Spring Contest")]
     pub title: String,
-    #[schema(example = "icpc")]
+    #[schema(example = "my-contest-type")]
     pub contest_type: String,
     pub end_time: chrono::DateTime<chrono::Utc>,
 }

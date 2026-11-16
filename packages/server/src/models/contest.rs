@@ -39,7 +39,7 @@ pub struct UpdateContestRequest {
     #[schema(example = true)]
     pub show_participants_list: Option<bool>,
     /// Omit to keep the current type. A contest type cannot be removed.
-    #[schema(example = "icpc")]
+    #[schema(example = "my-contest-type")]
     pub contest_type: Option<String>,
 }
 

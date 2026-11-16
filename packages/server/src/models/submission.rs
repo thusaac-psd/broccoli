@@ -112,7 +112,7 @@ pub struct SubmissionResponseAfterMutation {
     pub problem_title: Option<String>,
     #[schema(example = 1)]
     pub contest_id: Option<i32>,
-    #[schema(example = "ioi")]
+    #[schema(example = "my-contest-type")]
     pub contest_type: Option<String>,
     #[schema(example = 0)]
     pub judge_epoch: Option<i32>,
@@ -235,7 +235,7 @@ pub struct AdminFanOutSubmissionRequest {
     /// For a practice submission, the contest type that judges it instead of
     /// the problem's default. A contest submission is judged under its
     /// contest's type; naming another is a validation error.
-    #[schema(example = "ioi")]
+    #[schema(example = "my-contest-type")]
     #[serde(default)]
     pub contest_type: Option<String>,
     /// Workers to fan out to. One submission is created per worker. Each ID

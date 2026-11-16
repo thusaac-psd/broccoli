@@ -433,8 +433,8 @@ const MAX_MASK_PATH_BYTES: usize = 256;
 ///    mitigation.
 ///
 /// Bounds total per-decision validation/allocation work independently of any
-/// one path's shape. The largest legitimate `Redact` today (an IOI feedback
-/// level) masks a handful of fields; 64 leaves generous headroom without
+/// one path's shape. A legitimate `Redact` (a feedback level) masks a handful
+/// of fields; 64 leaves generous headroom without
 /// letting a plugin attach an unbounded `Vec<String>` to one decision.
 const MAX_MASK_FIELDS: usize = 64;
 
