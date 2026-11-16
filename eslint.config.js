@@ -292,6 +292,15 @@ export default defineConfig([
             'Poll through pollInterval() from @broccoli/web-sdk/hooks, which backs off while polls fail.',
         },
         {
+          // A timer that calls refetch() polls beside the query: every
+          // component that mounts it starts its own, each refetch cancels
+          // the one still in flight, and nothing backs off or spreads seats.
+          selector:
+            "CallExpression[callee.name=/^set(Interval|Timeout)$/] CallExpression:matches([callee.name='refetch'], [callee.property.name='refetch'])",
+          message:
+            "Poll through the query's own refetchInterval with pollInterval() from @broccoli/web-sdk/hooks, never a timer that calls refetch().",
+        },
+        {
           // A server's `message` is English detail for logs; what the user
           // reads comes from useErrorMessage(), which translates by code.
           selector:

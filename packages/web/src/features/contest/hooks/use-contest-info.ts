@@ -1,43 +1,47 @@
-import { useApiClient, useServerTimeReached } from '@broccoli/web-sdk/api';
+import { serverNow, useApiClient } from '@broccoli/web-sdk/api';
 import { useAuthReady } from '@broccoli/web-sdk/auth';
+import type { Contest } from '@broccoli/web-sdk/contest';
+import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { useQuery } from '@tanstack/react-query';
-import { useEffect } from 'react';
 
-import { nextPhaseChange } from '@/features/contest/utils/status';
+import {
+  contestPollPace,
+  PHASE_DUE_SPREAD_MS,
+} from '@/features/contest/utils/status';
 
-/** How often a contest whose phase is due to change is asked for it again. */
-const PHASE_DUE_POLL_MS = 1_000;
+/** This seat's place in the spread of asks after a phase change. */
+const SEAT_OFFSET_MS = Math.round(Math.random() * PHASE_DUE_SPREAD_MS);
+
+/** The query key of the contest `contestId`, for refetching it from elsewhere. */
+export const contestQueryKey = (contestId: number) => ['contest', contestId];
 
 /**
- * The contest `contestId`, with the phase the server reports. When the
- * server clock passes the instant the phase next changes, the contest is
- * fetched again until the server reports the new phase, so every view of it
- * moves on together and on the server's word.
+ * The contest `contestId`, with the phase and plugin outage the server
+ * reports. The query polls itself (`contestPollPace`): once the server clock
+ * passes the instant the phase next changes, until the server reports the
+ * new phase, and slowly while the contest's plugin is out, until it is back.
+ * Every view of the contest shares this one query, so they move on together
+ * and on the server's word, and a poll still in flight is never cancelled
+ * for the next.
  */
 export function useContestInfo(contestId: number) {
   const apiClient = useApiClient();
   const authReady = useAuthReady();
   const query = useQuery({
-    queryKey: ['contest', contestId],
+    queryKey: contestQueryKey(contestId),
     enabled: authReady && Number.isFinite(contestId),
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const { data, error } = await apiClient.GET('/contests/{id}', {
         params: { path: { id: contestId } },
+        signal,
       });
       if (error) throw error;
       return data;
     },
+    refetchInterval: pollInterval<Contest>((contest) =>
+      contest ? contestPollPace(contest, serverNow(), SEAT_OFFSET_MS) : false,
+    ),
   });
-  const phaseDue = useServerTimeReached(
-    query.data ? nextPhaseChange(query.data) : null,
-  );
-  const { refetch } = query;
-  useEffect(() => {
-    if (!phaseDue) return;
-    void refetch();
-    const timer = setInterval(() => void refetch(), PHASE_DUE_POLL_MS);
-    return () => clearInterval(timer);
-  }, [phaseDue, refetch]);
   return {
     contest: query.data,
     isLoading: query.isLoading,
