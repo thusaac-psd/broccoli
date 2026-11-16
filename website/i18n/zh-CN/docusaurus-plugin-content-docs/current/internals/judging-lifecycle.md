@@ -51,6 +51,22 @@ sidebar_position: 2
 
 两种定稿都经由 `fail_dispatch`，以评测记录的纪元及其尚未定稿为栅栏，因此插件已写入的判定保持不变。两者之后都会触发评测后钩子。当提供某竞赛类型的插件被禁用时，提交到其竞赛的请求以 `503 CONTEST_TYPE_DISABLED` 拒绝，且不带 `Retry-After`；`CONTEST_TYPE_UNAVAILABLE`（带 `Retry-After`）只表示当前副本尚未加载该插件。
 
+## 被禁用的竞赛插件让其工作暂停等待
+
+当记录了某竞赛类型的所有插件（`plugin.governs`）都在整个集群中被禁用时，该类型处于暂停状态；
+`contest_type_open` 用 SQL 表述这一规则，`PluginLifecycle::disabled_provider` 用 Rust 表述。
+暂停类型的工作以 `Queued` 等待，重新启用任一提供者后继续：
+
+- 领取语句不领取暂停类型的评测记录或代码运行，因此不会把工作分发给不存在的插件。
+- 类型暂停期间失败的评测记录（插件离开时其会话中止，或没有可分发到的处理器）一律记为
+  `PLUGIN_DISABLED`，无论失败原因是什么。这属于交还：回收器立即将其重新入队，不消耗预算，
+  提交随之变为 `Queued`。
+- 回收器不重试暂停类型的其他系统错误，因此预算不会花在无人能评测的尝试上；卡住任务检测器
+  交还暂停类型中租约过期的工作时也不消耗分发重试次数。
+
+插件管辖其提交的查看者会看到结果因竞赛的 `plugin_outage` 而被隐藏；管理人员看到它处于
+`Queued`。插件重新启用后，下一轮领取（最多晚于领取协程 1 秒的兜底周期）会取走暂停的工作。
+
 ## 提交行是缓存
 
 `submission.status`、`judge_epoch`、`target_worker_id` 以及评测输出列是当前评测记录的投影。当前评测记录的每一次转换都会在同一条语句或同一个事务中重写它们。插件写入结果是一条同时写入评测记录与提交的语句。
@@ -75,7 +91,7 @@ sidebar_position: 2
 - `submission_judgement.dispatch_retries` 与 `code_run.dispatch_retries` 统计分发被放弃后的重新入队次数，预算为 `server.max_dispatch_retries`。租约窃取与卡死任务检测器共享该预算。
 - `submission.system_error_retries` 统计自上次重新评测以来的系统错误重试次数，预算为 `server.max_system_error_retries`。每次这类重试都让评测记录获得全新的分发预算。重新评测会将其清零。
 
-只有评测该提交本身的失败才会消耗系统错误预算。为同一次分发工作的一切（插件调用、它们的操作、评测批次和分离会话）共享一个 `DispatchFaults`，遇到平台故障的一方把故障记在那里：队列拒绝了发布（`QUEUE_UNREACHABLE`）、队列丢失了操作（`OPERATION_LOST`）、评测机缺少平台工具（`PLATFORM_TOOL_MISSING`）。此后该分发以系统错误结束时，无论插件报告了什么，都带上这个错误码，回收器按其类别（`SystemErrorClass`）处理：交还类（队列相关的错误码）重新入队且不消耗任何预算；确定性故障（缺少平台工具）在一次尝试后即成定局并进入死信队列；其他错误码在预算内重试。
+只有评测该提交本身的失败才会消耗系统错误预算。为同一次分发工作的一切（插件调用、它们的操作、评测批次和分离会话）共享一个 `DispatchFaults`，遇到平台故障的一方把故障记在那里：队列拒绝了发布（`QUEUE_UNREACHABLE`）、队列丢失了操作（`OPERATION_LOST`）、评测机缺少平台工具（`PLATFORM_TOOL_MISSING`）。此后该分发以系统错误结束时，无论插件报告了什么，都带上这个错误码，回收器按其类别（`SystemErrorClass`）处理：交还类（队列相关的错误码以及 `PLUGIN_DISABLED`）重新入队且不消耗任何预算；确定性故障（缺少平台工具）在一次尝试后即成定局并进入死信队列；其他错误码在预算内重试。
 
 ## 死信
 
