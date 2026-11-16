@@ -236,6 +236,8 @@ pub fn call_locals() -> Option<Arc<CallLocals>> {
 /// What the thread running a guest knows about its call.
 struct CallScope {
     admission: Option<Admission>,
+    /// The liveness of the instance pool the guest runs on.
+    instance: crate::pool::Liveness,
     class: Option<CallClass>,
     deadline: Instant,
     depth: u8,
@@ -270,6 +272,19 @@ pub(crate) fn current_parent() -> Option<Parent> {
     })
 }
 
+/// Whether the instance the call running on this thread runs on was retired
+/// since the call started: its plugin was unloaded. The host refuses every
+/// host function such a call makes. `false` outside a plugin call.
+pub fn instance_retired() -> bool {
+    current_instance().is_some_and(|instance| !instance.is_live())
+}
+
+/// The liveness of the instance the call running on this thread runs on;
+/// `None` outside a plugin call.
+pub fn current_instance() -> Option<crate::pool::Liveness> {
+    SCOPE.with(|scope| scope.borrow().as_ref().map(|s| s.instance.clone()))
+}
+
 /// The deadline of the call running on this thread, if any. The host's result
 /// waits (`get_next_evaluate_result`, `get_next_operation_result`) end at it;
 /// its database waits are bounded by the statement timeout.
@@ -285,6 +300,7 @@ pub(crate) struct ScopeGuard {
 
 pub(crate) struct NewScope {
     pub admission: Option<Admission>,
+    pub instance: crate::pool::Liveness,
     pub class: Option<CallClass>,
     pub deadline: Instant,
     pub depth: u8,
@@ -296,6 +312,7 @@ impl ScopeGuard {
     pub(crate) fn enter(new: NewScope) -> Self {
         let scope = CallScope {
             admission: new.admission,
+            instance: new.instance,
             class: new.class,
             deadline: new.deadline,
             depth: new.depth,
@@ -428,6 +445,7 @@ mod tests {
     fn scope(locals: Arc<CallLocals>, depth: u8) -> ScopeGuard {
         ScopeGuard::enter(NewScope {
             admission: None,
+            instance: Default::default(),
             class: None,
             deadline: Instant::now() + Duration::from_secs(60),
             depth,

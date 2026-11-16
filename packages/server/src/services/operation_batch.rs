@@ -182,7 +182,7 @@ pub async fn start_operation_batch(
             }
             deps.operation_waiters.insert(
                 correlation_id.clone(),
-                OperationWaiter::new(op_tx, evaluate_case, deps.faults.clone()),
+                OperationWaiter::new(op_tx, evaluate_case, deps.faults().cloned()),
             );
             spawn_waiter_forwarder(correlation_id.clone(), op_rx, batch_tx);
             // Checked once the waiter is in: a fleet that stops taking work
@@ -190,7 +190,7 @@ pub async fn start_operation_batch(
             // `consumers::operation_result::hand_back_while_none_accepting`)
             // or is seen here.
             if deps.worker_slots.none_accepting() {
-                if let Some(faults) = &deps.faults {
+                if let Some(faults) = deps.faults() {
                     faults.record(
                         common::worker::OperationFault::NoCapableWorker,
                         crate::consumers::operation_result::NONE_ACCEPTING,
@@ -251,7 +251,7 @@ pub async fn start_operation_batch(
                 },
                 publish_start,
             );
-            if let (Err(e), Some(faults)) = (&publish_result, &deps.faults) {
+            if let (Err(e), Some(faults)) = (&publish_result, deps.faults()) {
                 faults.record(
                     common::worker::OperationFault::QueueUnreachable,
                     format!("the message queue refused operation {correlation_id}: {e}"),
@@ -670,7 +670,7 @@ mod tests {
             metrics: None,
             evaluate_batches,
             judgement: None,
-            faults: None,
+            dispatch: None,
             worker_slots: Default::default(),
         }
     }

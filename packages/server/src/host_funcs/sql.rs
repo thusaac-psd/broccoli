@@ -29,15 +29,15 @@ impl PluginSql {
     async fn lease(
         &self,
         plugin_id: &str,
-        call: Option<&plugin_core::executor::CallLocals>,
+        call: &crate::plugin_db::SqlCall,
     ) -> Result<crate::plugin_db::Lease, crate::plugin_db::Unavailable> {
         let read = self.read_scopes(plugin_id);
         self.pools.lease(plugin_id, &read, call).await
     }
 }
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex, TryLockError, Weak};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::time::Instant;
 
 use extism::host_fn;
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
@@ -48,34 +48,33 @@ use uuid::Uuid;
 
 /// A plugin-opened DB transaction plus the bookkeeping needed to keep it from
 /// leaking or being hijacked: the owning plugin (txn ids are only usable by the
-/// plugin that opened them) and, behind the transaction's own lock, the
-/// transaction itself and the last time the plugin touched it (drives the
-/// idle-TTL reaper).
+/// plugin that opened them), the backend running it (to cancel a statement
+/// past its call's deadline) and, behind the transaction's own lock, the
+/// transaction itself.
 #[derive(Debug)]
 pub struct PluginTransaction {
     plugin_id: String,
-    state: StdMutex<TxnState>,
+    /// The Postgres backend the transaction's connection is attached to.
+    pid: i32,
+    /// `None` once commit, rollback or its end has taken the transaction; a
+    /// statement that looked the entry up just before that sees it as gone.
+    txn: StdMutex<Option<DatabaseTransaction>>,
     /// The opening call's permit from the plugin SQL budget, held until the
     /// transaction ends and this entry is dropped.
     _permit: Arc<OwnedSemaphorePermit>,
 }
 
-#[derive(Debug)]
-struct TxnState {
-    /// `None` once commit, rollback or the reaper has taken the transaction;
-    /// a statement that looked the entry up just before that sees it as gone.
-    txn: Option<DatabaseTransaction>,
-    last_used: Instant,
-}
-
 impl PluginTransaction {
-    fn new(txn: DatabaseTransaction, plugin_id: String, permit: Arc<OwnedSemaphorePermit>) -> Self {
+    fn new(
+        txn: DatabaseTransaction,
+        plugin_id: String,
+        pid: i32,
+        permit: Arc<OwnedSemaphorePermit>,
+    ) -> Self {
         Self {
             plugin_id,
-            state: StdMutex::new(TxnState {
-                txn: Some(txn),
-                last_used: Instant::now(),
-            }),
+            pid,
+            txn: StdMutex::new(Some(txn)),
             _permit: permit,
         }
     }
@@ -83,9 +82,27 @@ impl PluginTransaction {
     /// Take the transaction out for commit or rollback, waiting for any
     /// in-flight statement on it to finish first.
     fn take(&self) -> Option<DatabaseTransaction> {
-        match self.state.lock() {
-            Ok(mut state) => state.txn.take(),
-            Err(poisoned) => poisoned.into_inner().txn.take(),
+        match self.txn.lock() {
+            Ok(mut txn) => txn.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        }
+    }
+
+    /// End the transaction without committing: roll it back in the
+    /// background, returning its connection and, once the entry is dropped,
+    /// its permit.
+    fn discard(&self) {
+        let Some(txn) = self.take() else { return };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    if let Err(e) = txn.rollback().await {
+                        error!("Failed to roll back an ended plugin DB transaction: {e}");
+                    }
+                });
+            }
+            // Dropping it rolls it back when its connection is next used.
+            Err(_) => drop(txn),
         }
     }
 }
@@ -95,86 +112,49 @@ impl PluginTransaction {
 /// lock, so plugins' transactions never wait on each other.
 pub type TransactionMap = Arc<StdMutex<HashMap<String, Arc<PluginTransaction>>>>;
 
-/// How long an open plugin transaction may sit untouched before the reaper
-/// rolls it back and returns its pooled connection. Every db_query_in /
-/// db_execute_in refreshes the timestamp, so a live transaction is only at
-/// risk if the guest goes silent for the whole window. Sized at 2x the default
-/// plugin `call_timeout_secs` (300s): a transaction legitimately held across a
-/// call can idle for at most one call timeout, so anything past this is an
-/// orphan from a trapped/killed guest (WASM OOM, host timeout, panic) whose
-/// commit/rollback will never arrive.
-const TXN_IDLE_TTL: Duration = Duration::from_secs(600);
-
-/// How often each per-transaction reaper task re-checks its transaction.
-const TXN_REAP_INTERVAL: Duration = Duration::from_secs(30);
-
-/// Maximum transactions a single plugin may hold open concurrently. Bounds the
-/// damage between reaper sweeps: without a cap, one misbehaving plugin that
-/// traps after `db_begin` in a loop can check out the entire plugin DB pool
-/// (20 connections by default) and starve every other plugin's DB access.
+/// Maximum transactions a single plugin may hold open concurrently: each pins
+/// one connection of the plugin pools, so without a cap one plugin could take
+/// them all from every other plugin.
 pub(crate) const MAX_OPEN_TXNS_PER_PLUGIN: usize = 8;
 
-/// Watchdog for one plugin transaction: once the transaction has been idle for
-/// [`TXN_IDLE_TTL`] it is removed from the map and rolled back, returning its
-/// pooled connection. This is the only cleanup path when a guest traps between
-/// `db_begin` and `db_commit`/`db_rollback` - the host_fn-side commit/rollback
-/// removals never run for a dead guest, and a leaked `DatabaseTransaction`
-/// pins a plugin-pool connection forever. The task exits as soon as the
-/// transaction is committed/rolled back (entry gone) or reaped.
-fn spawn_txn_reaper(txn_map: TransactionMap, txn_id: String) {
-    spawn_txn_reaper_with(txn_map, txn_id, TXN_IDLE_TTL, TXN_REAP_INTERVAL)
-}
+/// The transactions a plugin call tree opened, kept in its call locals. A
+/// transaction lives no longer than the call tree that opened it: whatever
+/// is still open when the tree ends (the guest trapped, was cancelled at its
+/// deadline, or returned without committing) is rolled back then, so it never
+/// holds its connection and permit past its call.
+#[derive(Default)]
+struct OpenTxns(Vec<(TransactionMap, String)>);
 
-/// Inner helper split out from [`spawn_txn_reaper`] so the reaping behaviour
-/// is testable with short timings instead of the production 10-minute TTL.
-fn spawn_txn_reaper_with(
-    txn_map: TransactionMap,
-    txn_id: String,
-    idle_ttl: Duration,
-    reap_interval: Duration,
-) {
-    tokio::runtime::Handle::current().spawn(async move {
-        loop {
-            tokio::time::sleep(reap_interval).await;
-            let orphaned = {
-                // The map lock is only ever held for a lookup or an
-                // insert/remove, never across a DB call. A poisoned map is
-                // still a valid HashMap at every await-free point, and its
-                // transactions still need reaping.
-                let mut map = txn_map.lock().unwrap_or_else(|p| p.into_inner());
-                // Committed or rolled back through the normal path.
-                let Some(entry) = map.get(&txn_id).cloned() else {
-                    return;
-                };
-                // try_lock: a held transaction lock means a statement is
-                // running on it right now, so it is not idle. Skip the tick
-                // instead of parking a runtime worker on a std mutex.
-                let mut state = match entry.state.try_lock() {
-                    Ok(state) => state,
-                    Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-                    Err(TryLockError::WouldBlock) => continue,
-                };
-                if state.last_used.elapsed() < idle_ttl {
-                    None
-                } else {
-                    map.remove(&txn_id);
-                    state.txn.take().map(|txn| (entry.plugin_id.clone(), txn))
-                }
-            };
-            if let Some((plugin_id, txn)) = orphaned {
+impl Drop for OpenTxns {
+    fn drop(&mut self) {
+        for (txn_map, txn_id) in self.0.drain(..) {
+            let entry = txn_map
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&txn_id);
+            if let Some(entry) = entry {
                 tracing::warn!(
-                    plugin_id = %plugin_id,
+                    plugin_id = %entry.plugin_id,
                     txn_id = %txn_id,
-                    idle_ttl_secs = idle_ttl.as_secs(),
-                    "Rolling back orphaned plugin DB transaction (guest never committed or rolled back; likely trapped)"
+                    "Rolling back a plugin DB transaction its call left open"
                 );
-                if let Err(e) = txn.rollback().await {
-                    error!(txn_id = %txn_id, "Failed to roll back orphaned plugin DB transaction: {}", e);
-                }
-                return;
+                entry.discard();
             }
         }
-    });
+    }
+}
+
+/// `statement`, cut at `deadline` (the plugin call's).
+async fn by_deadline<T>(
+    deadline: Option<Instant>,
+    statement: impl std::future::Future<Output = T>,
+) -> Result<T, crate::plugin_db::Unavailable> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline.into(), statement)
+            .await
+            .map_err(|_| crate::plugin_db::Unavailable::Deadline),
+        None => Ok(statement.await),
+    }
 }
 
 /// Fail the running call as unavailable: the plugin's SQL cannot run right
@@ -218,16 +198,20 @@ fn lookup_owned_txn<'a>(
     }
 }
 
-/// Run `statement` inside the plugin's own transaction `txn_id`. The map lock
-/// is held only for the ownership lookup; the statement runs under the
-/// transaction's own lock, which serializes statements on that one
-/// transaction (they share one connection) and nothing else.
+/// Run `statement` inside the plugin's own transaction `txn_id`, cut at the
+/// call's `deadline`. The map lock is held only for the ownership lookup;
+/// the statement runs under the transaction's own lock, which serializes
+/// statements on that one transaction (they share one connection) and
+/// nothing else. A statement cut at the deadline is cancelled on its backend
+/// and its transaction ends: the call that ran it is over.
 fn with_owned_txn<R>(
+    sql: &PluginSql,
     txn_map: &TransactionMap,
     txn_id: &str,
     plugin_id: &str,
     host_fn: &str,
-    statement: impl FnOnce(&DatabaseTransaction) -> R,
+    deadline: Option<Instant>,
+    statement: impl AsyncFnOnce(&DatabaseTransaction) -> R,
 ) -> Result<R, extism::Error> {
     let entry = {
         let map = txn_map
@@ -235,19 +219,27 @@ fn with_owned_txn<R>(
             .map_err(|_| extism::Error::msg("Transaction map lock poisoned"))?;
         lookup_owned_txn(&map, txn_id, plugin_id, host_fn)?.clone()
     };
-    let mut guard = entry
-        .state
+    let guard = entry
+        .txn
         .lock()
         .map_err(|_| extism::Error::msg("Transaction lock poisoned"))?;
-    let state = &mut *guard;
-    state.last_used = Instant::now();
-    let txn = state
-        .txn
+    let txn = guard
         .as_ref()
         .ok_or_else(|| extism::Error::msg(format!("Transaction not found: {txn_id}")))?;
-    let result = statement(txn);
-    state.last_used = Instant::now();
-    Ok(result)
+    let runtime = tokio::runtime::Handle::current();
+    match runtime.block_on(by_deadline(deadline, statement(txn))) {
+        Ok(result) => Ok(result),
+        Err(cut) => {
+            drop(guard);
+            runtime.block_on(sql.pools.cancel_backend(entry.pid));
+            txn_map
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(txn_id);
+            entry.discard();
+            Err(unavailable(cut))
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -477,11 +469,12 @@ fn scrub_sql_for_guard(sql: &str) -> Result<String, ()> {
 }
 
 /// Reject a raw plugin-`sql`-capability statement that changes the session role
-/// or authorization, runs an anonymous code block, or lifts a host-enforced
-/// session bound ([`common::db::ENFORCED_SESSION_SETTINGS`]) for the rest of the
-/// session. A session-level `SET statement_timeout = 0` would otherwise outlive
-/// the call on the pooled connection and unbound every later plugin call that
-/// reuses it; the transaction-scoped `SET LOCAL` form stays allowed. Role
+/// or authorization, runs an anonymous code block, or changes a host-enforced
+/// session bound ([`common::db::ENFORCED_SESSION_SETTINGS`]) in any scope,
+/// through `SET`, `SET LOCAL`, `set_config` or an `UPDATE` of `pg_settings`.
+/// A session-level `SET statement_timeout = 0` would outlive the call on the
+/// pooled connection and unbound every later plugin call that reuses it, and
+/// a `SET LOCAL` one would leave the rest of its transaction unbounded. Role
 /// changes are refused too. The engine already confines them: a plugin's pool
 /// logs in as the plugin's own role (see [`crate::plugin_db`]), so `RESET ROLE`
 /// lands on that role and `SET ROLE` reaches only its group role, which holds
@@ -513,7 +506,7 @@ fn reject_session_escape(plugin_id: &str, sql: &str) -> Result<(), extism::Error
             "Rejected a role/session change on the plugin SQL path",
         );
         return Err(extism::Error::msg(
-            "not permitted on the plugin SQL capability: SET/RESET ROLE, SET SESSION AUTHORIZATION, set_config, ALTER ROLE/USER, DISCARD, anonymous code blocks, and session-level SET of host-enforced settings (statement_timeout, tcp_keepalives_*; use SET LOCAL) are forbidden",
+            "not permitted on the plugin SQL capability: SET/RESET ROLE, SET SESSION AUTHORIZATION, set_config, ALTER ROLE/USER, DISCARD, anonymous code blocks, and changes to host-enforced settings (statement_timeout, tcp_keepalives_*) in any scope are forbidden",
         ));
     }
     Ok(())
@@ -580,6 +573,11 @@ fn statement_escapes_session(stmt: &str) -> bool {
     {
         return true;
     }
+    // `UPDATE pg_settings SET setting = ..` is `set_config` by another name:
+    // the view's update rule applies it to the session.
+    if tokens.contains(&"pg_settings") && tokens.contains(&"update") {
+        return true;
+    }
     // A SET/RESET changes the role or session authorization when, allowing an
     // optional SESSION/LOCAL scope keyword first, its command is ROLE, ALL
     // (RESET ALL), or the two-word SESSION AUTHORIZATION. Matching the target
@@ -587,7 +585,7 @@ fn statement_escapes_session(stmt: &str) -> bool {
     // (SET ROLE needs only role membership, not superuser -- a live escalation)
     // AND `SET LOCAL SESSION AUTHORIZATION` (whose command word SESSION collides
     // with the scope word), while leaving `SET role_id = $1` (target `role_id`,
-    // a distinct token) and `SET LOCAL statement_timeout = 5` untouched.
+    // a distinct token) untouched.
     tokens.iter().enumerate().any(|(i, &t)| {
         if t != "set" && t != "reset" {
             return false;
@@ -605,10 +603,10 @@ fn statement_escapes_session(stmt: &str) -> bool {
         } else {
             after.first().copied()
         };
-        // A session-scoped SET (plain or SESSION, not LOCAL) of a setting the
-        // host enforces at connect time would persist on the pooled connection.
+        // A SET of a setting the host enforces at connect time, in any scope:
+        // a session one would persist on the pooled connection, and a LOCAL
+        // one would lift the bound for the rest of the transaction.
         let lifts_bound = t == "set"
-            && after.first() != Some(&"local")
             && target.is_some_and(|t| common::db::ENFORCED_SESSION_SETTINGS.contains(&t));
         let changes = session_auth
             || lifts_bound
@@ -684,10 +682,10 @@ host_fn!(pub db_execute(user_data: Arc<(String, PluginSql)>; sql: String, args: 
     let values = parse_args(&args)?;
     let stmt = plugin_statement(&sql, values);
 
-    let call = plugin_core::executor::call_locals();
+    let call = crate::plugin_db::SqlCall::current();
     let exec_result = tokio::runtime::Handle::current().block_on(async {
-        let lease = pools.lease(plugin_id, call.as_deref()).await;
-        Ok(lease?.db.execute_raw(stmt).await)
+        let lease = pools.lease(plugin_id, &call).await?;
+        by_deadline(call.deadline, lease.db.execute_raw(stmt)).await
     }).map_err(unavailable)?;
 
     match exec_result {
@@ -713,10 +711,10 @@ host_fn!(pub db_query(user_data: Arc<(String, PluginSql)>; sql: String, args: St
     );
     let stmt = plugin_statement(&wrapped_sql, values);
 
-    let call = plugin_core::executor::call_locals();
+    let call = crate::plugin_db::SqlCall::current();
     let query_result = tokio::runtime::Handle::current().block_on(async {
-        let lease = pools.lease(plugin_id, call.as_deref()).await;
-        Ok(lease?.db.query_one_raw(stmt).await)
+        let lease = pools.lease(plugin_id, &call).await?;
+        by_deadline(call.deadline, lease.db.query_one_raw(stmt)).await
     }).map_err(unavailable)?;
 
     match query_result {
@@ -758,31 +756,43 @@ host_fn!(pub db_begin(user_data: Arc<(String, PluginSql, TransactionMap)>; _inpu
         }
     }
 
-    let call = plugin_core::executor::call_locals();
-    let lease = tokio::runtime::Handle::current()
-        .block_on(pools.lease(plugin_id, call.as_deref()))
-        .map_err(unavailable)?;
-    let txn = tokio::runtime::Handle::current()
-        .block_on(lease.db.begin())
-        .map_err(|e| {
-            error!("DB begin error: {}", e);
-            extism::Error::msg(e.to_string())
-        })?;
-    let permit = lease.permit;
+    let call = crate::plugin_db::SqlCall::current();
+    let opened = tokio::runtime::Handle::current().block_on(async {
+        let lease = pools.lease(plugin_id, &call).await?;
+        let begun = by_deadline(call.deadline, async {
+            let txn = lease.db.begin().await?;
+            // The backend, so a statement past its deadline can be cancelled.
+            let pid = txn
+                .query_one_raw(Statement::from_string(DbBackend::Postgres, "SELECT pg_backend_pid()"))
+                .await?
+                .ok_or_else(|| sea_orm::DbErr::Custom("pg_backend_pid returned no row".into()))?
+                .try_get_by_index::<i32>(0)?;
+            Ok::<_, sea_orm::DbErr>((txn, pid))
+        })
+        .await?;
+        Ok::<_, crate::plugin_db::Unavailable>(begun.map(|(txn, pid)| (txn, pid, lease.permit)))
+    }).map_err(unavailable)?;
+    let (txn, pid, permit) = opened.map_err(|e| {
+        error!("DB begin error: {}", e);
+        extism::Error::msg(e.to_string())
+    })?;
 
     let txn_id = Uuid::new_v4().to_string();
     txn_map.lock()
         .map_err(|_| extism::Error::msg("Transaction map lock poisoned"))?
-        .insert(txn_id.clone(), Arc::new(PluginTransaction::new(txn, plugin_id.clone(), permit)));
-    // Guarantees cleanup if the guest traps before commit/rollback.
-    spawn_txn_reaper(txn_map.clone(), txn_id.clone());
+        .insert(txn_id.clone(), Arc::new(PluginTransaction::new(txn, plugin_id.clone(), pid, permit)));
+    // The transaction ends with the call tree that opened it.
+    match &call.locals {
+        Some(locals) => locals.with(|open: &mut OpenTxns| open.0.push((txn_map.clone(), txn_id.clone()))),
+        None => tracing::warn!(plugin_id = %plugin_id, "db_begin outside a plugin call"),
+    }
 
     HostDbResponse::ok(serde_json::json!({"txn_id": txn_id})).to_json_string()
 });
 
 host_fn!(pub db_query_in(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_id: String, sql: String, args: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_query_in")?;
-    let (plugin_id, _, txn_map) = &*call;
+    let (plugin_id, pools, txn_map) = &*call;
 
     reject_session_escape(plugin_id, &sql)?;
     let values = parse_args(&args)?;
@@ -792,8 +802,9 @@ host_fn!(pub db_query_in(user_data: Arc<(String, PluginSql, TransactionMap)>; tx
     );
     let stmt = plugin_statement(&wrapped_sql, values);
 
-    let query_result = with_owned_txn(txn_map, &txn_id, plugin_id, "db_query_in", |txn| {
-        tokio::runtime::Handle::current().block_on(txn.query_one_raw(stmt))
+    let deadline = plugin_core::executor::current_deadline();
+    let query_result = with_owned_txn(pools, txn_map, &txn_id, plugin_id, "db_query_in", deadline, async |txn| {
+        txn.query_one_raw(stmt).await
     })?;
 
     match query_result {
@@ -812,14 +823,15 @@ host_fn!(pub db_query_in(user_data: Arc<(String, PluginSql, TransactionMap)>; tx
 
 host_fn!(pub db_execute_in(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_id: String, sql: String, args: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_execute_in")?;
-    let (plugin_id, _, txn_map) = &*call;
+    let (plugin_id, pools, txn_map) = &*call;
 
     reject_session_escape(plugin_id, &sql)?;
     let values = parse_args(&args)?;
     let stmt = plugin_statement(&sql, values);
 
-    let exec_result = with_owned_txn(txn_map, &txn_id, plugin_id, "db_execute_in", |txn| {
-        tokio::runtime::Handle::current().block_on(txn.execute_raw(stmt))
+    let deadline = plugin_core::executor::current_deadline();
+    let exec_result = with_owned_txn(pools, txn_map, &txn_id, plugin_id, "db_execute_in", deadline, async |txn| {
+        txn.execute_raw(stmt).await
     })?;
 
     match exec_result {
@@ -996,6 +1008,8 @@ pub(super) fn query_on_pool(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use sea_orm::{ConnectOptions, Database};
 
     use super::*;
@@ -1012,9 +1026,13 @@ mod tests {
     fn role_escalation_guard_blocks_every_escape_vector() {
         for sql in [
             "RESET ROLE",
-            // session-level SET of a host-enforced bound would persist on the
-            // pooled connection (`SET LOCAL` is allowed, see the allow list)
+            // a SET of a host-enforced bound, in any scope, lifts it: for the
+            // session on the pooled connection, or for the transaction
             "SET statement_timeout = 0",
+            "SET LOCAL statement_timeout = 0",
+            "SET LOCAL statement_timeout TO 5000",
+            "UPDATE pg_settings SET setting = '0' WHERE name = 'statement_timeout'",
+            "update pg_catalog.pg_settings set setting = '0'",
             "SET SESSION statement_timeout TO 0",
             "set statement_timeout to default",
             "SELECT 1; SET tcp_keepalives_idle = 0",
@@ -1130,8 +1148,10 @@ mod tests {
             // a column named like an enforced setting is DML, not a SET command
             "UPDATE t SET statement_timeout = 5 WHERE id = 1",
             "RESET statement_timeout",
+            // reading the settings changes nothing
+            "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
             // scope keyword before a NON-role parameter must stay allowed
-            "SET LOCAL statement_timeout = 5000",
+            "SET LOCAL lock_timeout = 5000",
             "SET SESSION search_path TO my_schema",
             "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
             // role keywords or ';' that appear INSIDE a string literal are data,
@@ -1171,13 +1191,13 @@ mod tests {
         }
     }
 
-    /// A transaction orphaned by a trapped guest (never committed or rolled
-    /// back) must be rolled back by the reaper and its pooled connection
-    /// returned. The pool is sized at ONE connection, so the second `begin`
-    /// can only succeed if the reaper actually released the orphan's
-    /// connection back to the pool.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn orphaned_transaction_is_reaped_and_returns_its_pool_connection() {
+    /// A Postgres container, and a pool of one connection on it, so a
+    /// transaction that keeps its connection blocks every other use of it.
+    async fn one_connection() -> (
+        testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
+        String,
+        DatabaseConnection,
+    ) {
         use testcontainers::ImageExt;
         use testcontainers::runners::AsyncRunner;
         use testcontainers_modules::postgres::Postgres;
@@ -1192,43 +1212,111 @@ mod tests {
             .await
             .expect("postgres host port");
         let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-
-        let mut opt = ConnectOptions::new(url);
+        let mut opt = ConnectOptions::new(url.clone());
         opt.max_connections(1)
             .min_connections(1)
             .sqlx_logging(false);
         let db: DatabaseConnection = Database::connect(opt).await.expect("connect").into();
+        (container, url, db)
+    }
 
-        let txn = db.begin().await.expect("begin orphan txn");
-        let txn_map: TransactionMap = Arc::new(StdMutex::new(HashMap::new()));
-        let txn_id = "orphan-txn".to_string();
+    /// The plugin pools of the database at `url`, provisioning through a
+    /// connection of their own.
+    async fn plugin_sql(url: &str) -> PluginSql {
+        let host: DatabaseConnection = Database::connect(url).await.expect("connect").into();
+        PluginSql {
+            pools: PluginSqlPools::new(
+                host,
+                url,
+                2,
+                Duration::from_secs(20),
+                &crate::database::app_session(&crate::config::DatabaseConfig::default()),
+            ),
+            registry: Default::default(),
+        }
+    }
+
+    /// A transaction on `db` as `db_begin` records it, under `txn_id`.
+    async fn open(db: &DatabaseConnection, txn_map: &TransactionMap, txn_id: &str, owner: &str) {
+        let txn = db.begin().await.expect("begin");
+        let pid = txn
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT pg_backend_pid()",
+            ))
+            .await
+            .expect("pid")
+            .expect("row")
+            .try_get_by_index::<i32>(0)
+            .expect("int");
         txn_map.lock().unwrap().insert(
-            txn_id.clone(),
+            txn_id.to_string(),
             Arc::new(PluginTransaction::new(
                 txn,
-                "trapped-plugin".to_string(),
+                owner.to_string(),
+                pid,
                 permit(),
             )),
         );
+    }
 
-        spawn_txn_reaper_with(
-            txn_map.clone(),
-            txn_id,
-            Duration::ZERO,
-            Duration::from_millis(50),
-        );
+    /// A statement still running at its call's deadline is cut there, its
+    /// backend cancelled and its transaction ended, so the connection is free
+    /// again long before the statement would have finished.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_statement_past_its_calls_deadline_is_cancelled_and_ends_its_transaction() {
+        let (_container, url, db) = one_connection().await;
+        let sql = plugin_sql(&url).await;
+        let txn_map: TransactionMap = Arc::new(StdMutex::new(HashMap::new()));
+        open(&db, &txn_map, "slow", "p").await;
 
-        // The pool's only connection is pinned by the orphan until the reaper
-        // rolls it back; this begin succeeding proves it was returned.
-        let reclaimed = tokio::time::timeout(Duration::from_secs(20), db.begin())
+        let started = Instant::now();
+        let cut = tokio::task::spawn_blocking({
+            let txn_map = txn_map.clone();
+            move || {
+                let deadline = Some(Instant::now() + Duration::from_millis(300));
+                with_owned_txn(
+                    &sql,
+                    &txn_map,
+                    "slow",
+                    "p",
+                    "db_execute_in",
+                    deadline,
+                    async |txn| txn.execute_unprepared("SELECT pg_sleep(600)").await,
+                )
+                .map(drop)
+            }
+        })
+        .await
+        .expect("join");
+        assert!(cut.is_err(), "the statement is cut at the deadline");
+        assert!(started.elapsed() < Duration::from_secs(60));
+        assert!(txn_map.lock().unwrap().is_empty(), "the transaction ended");
+        let reclaimed = tokio::time::timeout(Duration::from_secs(60), db.begin())
             .await
-            .expect("reaper should return the orphaned connection to the pool")
-            .expect("begin after reap");
+            .expect("the cancelled statement returns the connection")
+            .expect("begin");
         reclaimed.rollback().await.expect("rollback");
-        assert!(
-            txn_map.lock().unwrap().is_empty(),
-            "reaper should remove the orphaned entry from the map"
-        );
+    }
+
+    /// A transaction lives no longer than the call tree that opened it: one
+    /// left open when the tree ends is rolled back, and its connection freed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_transaction_ends_with_the_call_that_opened_it() {
+        let (_container, _url, db) = one_connection().await;
+        let txn_map: TransactionMap = Arc::new(StdMutex::new(HashMap::new()));
+        open(&db, &txn_map, "left-open", "p").await;
+        let call = Arc::<plugin_core::executor::CallLocals>::default();
+        call.with(|open: &mut OpenTxns| open.0.push((txn_map.clone(), "left-open".into())));
+
+        assert_eq!(txn_map.lock().unwrap().len(), 1, "open while the call runs");
+        drop(call);
+        assert!(txn_map.lock().unwrap().is_empty(), "ended with its call");
+        let reclaimed = tokio::time::timeout(Duration::from_secs(60), db.begin())
+            .await
+            .expect("the rolled-back transaction returns its connection")
+            .expect("begin");
+        reclaimed.rollback().await.expect("rollback");
     }
 
     /// A txn id owned by another plugin must be rejected exactly like a
@@ -1255,7 +1343,12 @@ mod tests {
         let mut map: HashMap<String, Arc<PluginTransaction>> = HashMap::new();
         map.insert(
             "txn-1".to_string(),
-            Arc::new(PluginTransaction::new(txn, "owner".to_string(), permit())),
+            Arc::new(PluginTransaction::new(
+                txn,
+                "owner".to_string(),
+                0,
+                permit(),
+            )),
         );
 
         let foreign = lookup_owned_txn(&map, "txn-1", "intruder", "db_query_in")
@@ -1298,26 +1391,35 @@ mod tests {
             .await
             .expect("postgres host port");
         let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-        let db: DatabaseConnection = Database::connect(url).await.expect("connect").into();
+        let db: DatabaseConnection = Database::connect(url.clone())
+            .await
+            .expect("connect")
+            .into();
 
         let txn_map: TransactionMap = Arc::new(StdMutex::new(HashMap::new()));
         for (id, owner) in [("slow", "plugin-a"), ("fast", "plugin-b")] {
             let txn = db.begin().await.expect("begin");
             txn_map.lock().unwrap().insert(
                 id.to_string(),
-                Arc::new(PluginTransaction::new(txn, owner.to_string(), permit())),
+                Arc::new(PluginTransaction::new(txn, owner.to_string(), 0, permit())),
             );
         }
 
+        let plugin_sql = Arc::new(plugin_sql(&url).await);
         // Host fns run on blocking threads and block_on the runtime.
         let run =
             |txn_map: TransactionMap, id: &'static str, owner: &'static str, sql: &'static str| {
+                let plugin_sql = plugin_sql.clone();
                 tokio::task::spawn_blocking(move || {
-                    with_owned_txn(&txn_map, id, owner, "db_execute_in", |txn| {
-                        tokio::runtime::Handle::current()
-                            .block_on(txn.execute_unprepared(sql))
-                            .expect("statement")
-                    })
+                    with_owned_txn(
+                        &plugin_sql,
+                        &txn_map,
+                        id,
+                        owner,
+                        "db_execute_in",
+                        None,
+                        async |txn| txn.execute_unprepared(sql).await.expect("statement"),
+                    )
                     .expect("owned transaction")
                 })
             };

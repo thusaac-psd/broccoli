@@ -1582,12 +1582,12 @@ async fn a_failed_code_run_is_handed_back_or_finalized_by_the_judgements_rule() 
     let (_pg, db) = crate::test_support::postgres().await;
     provider(&db, true).await;
     let claim = |db: DatabaseConnection| async move {
-        let mut runs = claim_code_runs(&db, "srv", 10, NO_TYPES)
+        let mut runs = claim_code_runs(&db, "srv", TEN, NO_TYPES)
             .await
             .unwrap()
             .units;
         assert_eq!(runs.len(), 1, "exactly one code run is claimable");
-        runs.remove(0)
+        runs.remove(0).unit
     };
     let run = new_code_run(&db).await;
     let lost = DispatchFailure::from(super::fault::Recorded {

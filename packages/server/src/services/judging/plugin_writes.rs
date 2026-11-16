@@ -132,12 +132,14 @@ pub(crate) fn as_recorded<W: PluginWrite>(
     Some(update)
 }
 
-/// The write fence every plugin write to a judgement goes through: the row
-/// (`alias`) is the judgement the caller names, of the submission it names,
-/// at the epoch the caller was dispatched with, and not finalized. Epochs are
-/// unique per submission and a judgement is finalized when it is superseded
-/// or requeued under a new epoch, so only the dispatch that owns an epoch can
-/// write, whether its judgement is current or a deferred rejudge.
+/// The database fence every plugin write to a judgement goes through, after
+/// the host checked that the judgement is the one the calling plugin's call
+/// was dispatched with ([`super::Dispatch::owned`]): the row (`alias`) is
+/// that judgement, of its submission, at the epoch of the dispatch, and not
+/// finalized. Epochs are unique per submission and a judgement is finalized
+/// when it is superseded or requeued under a new epoch, so a dispatch whose
+/// epoch has passed writes nothing, whether its judgement is current or a
+/// deferred rejudge.
 ///
 /// A statement that only reads the fenced row (a result insert or delete)
 /// must lock it `FOR SHARE`: the lock waits out a concurrent requeue and
@@ -201,8 +203,9 @@ pub(crate) fn judgement_write<P: SqlBindSink>(
     ))
 }
 
-/// The write fence every plugin write to a code run goes through: the run
-/// (`alias`) the caller names, at the epoch it was dispatched with, still in
+/// The database fence every plugin write to a code run goes through, after
+/// the host checked that the run is the one the calling plugin's call was
+/// dispatched with: the run (`alias`) at the epoch of the dispatch, still in
 /// flight. A requeue gives the run a new epoch, so a lost dispatch cannot
 /// write. A result insert locks the run `FOR SHARE`, as for [`write_fence`].
 pub(crate) fn code_run_write_fence(alias: &str, code_run: &str, epoch: &str) -> String {

@@ -8,8 +8,8 @@ use std::time::Duration;
 use common::db::DatabaseConnection;
 use futures::FutureExt;
 use sea_orm::{ConnectionTrait, DbBackend, DbErr, Statement};
-use server::plugin_db::PluginSqlPools;
 use server::plugin_db::schema::PluginDbNames;
+use server::plugin_db::{PluginSqlPools, SqlCall};
 use test_support::TestDatabase;
 
 struct Fixture {
@@ -47,7 +47,7 @@ impl Fixture {
 /// Run `sql` as `plugin`.
 async fn exec(pools: &PluginSqlPools, plugin: &str, sql: &str) -> Result<(), DbErr> {
     let lease = pools
-        .lease(plugin, &[], None)
+        .lease(plugin, &[], &SqlCall::default())
         .await
         .map_err(|e| DbErr::Custom(e.to_string()))?;
     lease.db.execute_unprepared(sql).await.map(drop)
@@ -55,7 +55,10 @@ async fn exec(pools: &PluginSqlPools, plugin: &str, sql: &str) -> Result<(), DbE
 
 /// The single text value `sql` returns, run as `plugin`.
 async fn text(pools: &PluginSqlPools, plugin: &str, sql: &str) -> String {
-    let lease = pools.lease(plugin, &[], None).await.expect("lease");
+    let lease = pools
+        .lease(plugin, &[], &SqlCall::default())
+        .await
+        .expect("lease");
     lease
         .db
         .query_one_raw(Statement::from_string(DbBackend::Postgres, sql))
@@ -187,7 +190,10 @@ async fn a_role_escape_lands_on_the_plugins_own_role() {
     // way back to the pool puts it back on the plugin's own role. Driven on
     // one held connection, so the reset runs on the connection that stepped
     // down rather than whichever the next lease happens to get.
-    let lease = pools.lease("print", &[], None).await.expect("lease");
+    let lease = pools
+        .lease("print", &[], &SqlCall::default())
+        .await
+        .expect("lease");
     let mut conn = lease
         .db
         .as_sea_orm()
@@ -266,21 +272,40 @@ async fn concurrent_first_uses_on_several_replicas_converge() {
 /// At most `budget` leases hold a connection at once: a lease past the budget
 /// waits until one ends. Transactions pin their connections, so the count is
 /// exact while they are open.
+/// A lease waits for a permit no longer than its call's deadline: a call
+/// past it fails at once, though the pools' acquire timeout is far off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lease_waits_no_longer_than_its_calls_deadline() {
+    let f = Fixture::new().await;
+    let pools = f.pools(1);
+    let held = pools.lease("a", &[], &SqlCall::default()).await.expect("a");
+    let late = SqlCall {
+        deadline: Some(std::time::Instant::now()),
+        ..SqlCall::default()
+    };
+    let refused = tokio::time::timeout(Duration::from_secs(10), pools.lease("b", &[], &late))
+        .await
+        .expect("the lease ends at its call's deadline, not the acquire timeout");
+    assert!(matches!(refused, Err(server::plugin_db::Unavailable::Busy)));
+    drop(held);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_plugin_pools_keep_to_one_budget() {
     let f = Fixture::new().await;
     let pools = f.pools(2);
-    let a = pools.lease("a", &[], None).await.expect("a");
+    let a = pools.lease("a", &[], &SqlCall::default()).await.expect("a");
     let a_txn = sea_orm::TransactionTrait::begin(&a.db)
         .await
         .expect("a begins");
-    let b = pools.lease("b", &[], None).await.expect("b");
+    let b = pools.lease("b", &[], &SqlCall::default()).await.expect("b");
     let b_txn = sea_orm::TransactionTrait::begin(&b.db)
         .await
         .expect("b begins");
     assert_eq!(pools.open_connections(), 2);
 
-    let third = pools.lease("c", &[], None);
+    let no_call = SqlCall::default();
+    let third = pools.lease("c", &[], &no_call);
     tokio::pin!(third);
     assert!(
         (&mut third).now_or_never().is_none(),
@@ -316,7 +341,10 @@ mod grants {
             read: &[SqlReadScope],
             sql: &str,
         ) -> Result<(), DbErr> {
-            let lease = pools.lease("print", read, None).await.expect("lease");
+            let lease = pools
+                .lease("print", read, &SqlCall::default())
+                .await
+                .expect("lease");
             lease.db.execute_unprepared(sql).await.map(drop)
         }
         run(&pools, &files, "SELECT files FROM submission")
@@ -499,6 +527,29 @@ mod grants {
         }
     }
 
+    /// The diagnostics of a failed submission, judgement or code run are
+    /// shown to staff only, so a plugin reads them only by declaring them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_plugin_reads_failure_diagnostics_only_when_it_declares_them() {
+        let f = Fixture::new().await;
+        let pools = f.pools(1);
+        for relation in ["submission", "submission_judgement", "code_run"] {
+            let sql = format!("SELECT error_message FROM public.\"{relation}\"");
+            denied(&pools, "icpc", &sql).await;
+            let scope =
+                plugin_core::manifest::SqlReadScope::parse(&format!("{relation}.error_message"))
+                    .expect("a grantable scope");
+            pools
+                .lease("print", &[scope], &SqlCall::default())
+                .await
+                .expect("lease")
+                .db
+                .execute_unprepared(&sql)
+                .await
+                .unwrap_or_else(|e| panic!("a declared scope is readable: {e}"));
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_plugin_reads_contest_data_but_no_secret() {
         let f = Fixture::new().await;
@@ -581,12 +632,12 @@ async fn a_call_reuses_its_permit_at_a_full_budget() {
     use sea_orm::TransactionTrait;
     let f = Fixture::new().await;
     let pools = f.pools(1);
-    let call = std::sync::Arc::new(CallLocals::default());
+    let call = SqlCall {
+        locals: Some(std::sync::Arc::new(CallLocals::default())),
+        ..SqlCall::default()
+    };
 
-    let lease = pools
-        .lease("icpc", &[], Some(&call))
-        .await
-        .expect("first lease");
+    let lease = pools.lease("icpc", &[], &call).await.expect("first lease");
     let txn = lease
         .db
         .begin()
@@ -597,7 +648,7 @@ async fn a_call_reuses_its_permit_at_a_full_budget() {
 
     // A lease that needed a second permit would wait out the acquire
     // timeout and fail; this one reuses the call's.
-    let statement = pools.lease("icpc", &[], Some(&call)).await.expect("lease");
+    let statement = pools.lease("icpc", &[], &call).await.expect("lease");
     assert!(std::sync::Arc::ptr_eq(&statement.permit, &held));
     statement
         .db
@@ -606,12 +657,15 @@ async fn a_call_reuses_its_permit_at_a_full_budget() {
         .expect("statement beside the transaction");
     drop(statement);
     // A nested call shares its parent's call locals.
-    let nested = pools.lease("ioi", &[], Some(&call)).await.expect("lease");
+    let nested = pools.lease("ioi", &[], &call).await.expect("lease");
     assert!(std::sync::Arc::ptr_eq(&nested.permit, &held));
     let nested_txn = nested.db.begin().await.expect("nested transaction");
 
-    let other = std::sync::Arc::new(CallLocals::default());
-    let waiting = pools.lease("icpc", &[], Some(&other));
+    let other = SqlCall {
+        locals: Some(std::sync::Arc::new(CallLocals::default())),
+        ..SqlCall::default()
+    };
+    let waiting = pools.lease("icpc", &[], &other);
     tokio::pin!(waiting);
     assert!(
         (&mut waiting).now_or_never().is_none(),
@@ -640,7 +694,7 @@ async fn failed_provisioning_backs_off() {
         .await
         .expect("hide the group");
     let first = pools
-        .lease("print", &[], None)
+        .lease("print", &[], &SqlCall::default())
         .await
         .err()
         .expect("unprovisionable");
@@ -653,7 +707,7 @@ async fn failed_provisioning_backs_off() {
         .await
         .expect("restore the group");
     let again = pools
-        .lease("print", &[], None)
+        .lease("print", &[], &SqlCall::default())
         .await
         .err()
         .expect("still backing off");
@@ -674,7 +728,10 @@ async fn failed_provisioning_backs_off() {
 async fn a_returned_connection_drops_its_session_state() {
     let f = Fixture::new().await;
     let pools = f.pools(1);
-    let lease = pools.lease("print", &[], None).await.expect("lease");
+    let lease = pools
+        .lease("print", &[], &SqlCall::default())
+        .await
+        .expect("lease");
     // One held connection, so the reset runs on the connection that holds the
     // state rather than whichever the next lease happens to get.
     let mut conn = lease
@@ -748,7 +805,7 @@ async fn a_removed_plugin_cannot_log_in_until_it_is_installed_again() {
             .expect("bool")
     };
 
-    pools.forget("print");
+    pools.forget("print").await;
     server::plugin_db::schema::retire(&f.app, "print")
         .await
         .expect("retire");
@@ -760,4 +817,52 @@ async fn a_removed_plugin_cannot_log_in_until_it_is_installed_again() {
         "the reinstalled plugin logs in and finds its data"
     );
     assert!(can_login().await);
+}
+
+/// A call still running on an unloaded plugin's instance never provisions
+/// its role again: once its pool is forgotten and its role retired, the
+/// call's leases are refused and the role stays unable to log in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_of_an_unloaded_plugin_never_provisions_its_role_again() {
+    let f = Fixture::new().await;
+    let pools = f.pools(1);
+    let instance = plugin_core::pool::Liveness::default();
+    let call = SqlCall {
+        locals: None,
+        instance: Some(instance.clone()),
+        deadline: None,
+    };
+    drop(
+        pools
+            .lease("print", &[], &call)
+            .await
+            .expect("a live call leases"),
+    );
+    let role = f.names("print").role;
+
+    // The unload: the instance is retired, then the pool forgotten and the
+    // role retired.
+    instance.retire();
+    pools.forget("print").await;
+    server::plugin_db::schema::retire(&f.app, "print")
+        .await
+        .expect("retire");
+
+    let refused = pools.lease("print", &[], &call).await;
+    assert!(
+        matches!(refused, Err(server::plugin_db::Unavailable::Unloaded)),
+        "the stale call is refused"
+    );
+    let can_login = f
+        .app
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            format!("SELECT rolcanlogin FROM pg_roles WHERE rolname = '{role}'"),
+        ))
+        .await
+        .expect("query")
+        .expect("the role stays")
+        .try_get_by_index::<bool>(0)
+        .expect("bool");
+    assert!(!can_login, "the retired role stays unable to log in");
 }

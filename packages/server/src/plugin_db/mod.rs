@@ -37,7 +37,8 @@ use std::time::{Duration, Instant};
 use common::db::{DatabaseConnection, PgPoolSpec, PgSession};
 use plugin_core::executor::CallLocals;
 use plugin_core::manifest::SqlReadScope;
-use sea_orm::DbErr;
+use plugin_core::pool::Liveness;
+use sea_orm::{ConnectionTrait, DbBackend, DbErr, Statement};
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 /// Every plugin's SQL pool, built on first use. Clones share the pools.
@@ -101,8 +102,41 @@ const PROVISION_BACKOFF: Duration = Duration::from_secs(30);
 pub enum Unavailable {
     #[error("no plugin SQL connection was free within the call's deadline")]
     Busy,
+    #[error("the plugin SQL statement reached the call's deadline and was cancelled")]
+    Deadline,
+    #[error("the plugin was unloaded while this call ran")]
+    Unloaded,
     #[error("the plugin's database role could not be provisioned: {0}")]
     Unprovisioned(String),
+}
+
+/// The plugin call a lease is for.
+#[derive(Clone, Default)]
+pub struct SqlCall {
+    /// The call tree's [`plugin_core::executor::call_locals`], which hold the
+    /// permit it already has.
+    pub locals: Option<Arc<CallLocals>>,
+    /// The liveness of the instance the call runs on: a lease never
+    /// provisions or opens a pool for a call of an unloaded plugin.
+    pub instance: Option<Liveness>,
+    /// The call's deadline: a lease waits for a permit no longer, and the
+    /// host functions cut every statement at it.
+    pub deadline: Option<Instant>,
+}
+
+impl SqlCall {
+    /// The plugin call running on this thread.
+    pub fn current() -> Self {
+        Self {
+            locals: plugin_core::executor::call_locals(),
+            instance: plugin_core::executor::current_instance(),
+            deadline: plugin_core::executor::current_deadline(),
+        }
+    }
+
+    fn unloaded(&self) -> bool {
+        self.instance.as_ref().is_some_and(|i| !i.is_live())
+    }
 }
 
 /// The right to run on a plugin's pool: the pool and the call's permit from
@@ -157,37 +191,41 @@ impl PluginSqlPools {
         }
     }
 
-    /// A lease on `plugin_id`'s pool for the call tree `call` (the running
-    /// plugin call's [`plugin_core::executor::call_locals`]), provisioning the
-    /// plugin's role and schema and building its pool on first use. `read` is
-    /// the content columns the plugin's manifest declares; a change from what
-    /// the role was granted provisions it again.
+    /// A lease on `plugin_id`'s pool for `call`, provisioning the plugin's
+    /// role and schema and building its pool on first use. `read` is the
+    /// content columns the plugin's manifest declares; a change from what the
+    /// role was granted provisions it again.
     pub async fn lease(
         &self,
         plugin_id: &str,
         read: &[SqlReadScope],
-        call: Option<&CallLocals>,
+        call: &SqlCall,
     ) -> Result<Lease, Unavailable> {
+        if call.unloaded() {
+            return Err(Unavailable::Unloaded);
+        }
         let budget = &self.inner.leases;
-        let held = call.and_then(|c| c.with(|held: &mut HeldPermits| held.live(budget)));
+        let locals = call.locals.as_deref();
+        let held = locals.and_then(|c| c.with(|held: &mut HeldPermits| held.live(budget)));
         let permit = match held {
             Some(permit) => permit,
             None => {
-                let permit = tokio::time::timeout(
-                    self.inner.acquire_timeout,
-                    budget.clone().acquire_owned(),
-                )
-                .await
-                .map_err(|_| Unavailable::Busy)?
-                .map_err(|_| Unavailable::Busy)?;
+                let mut wait = self.inner.acquire_timeout;
+                if let Some(deadline) = call.deadline {
+                    wait = wait.min(deadline.saturating_duration_since(Instant::now()));
+                }
+                let permit = tokio::time::timeout(wait, budget.clone().acquire_owned())
+                    .await
+                    .map_err(|_| Unavailable::Busy)?
+                    .map_err(|_| Unavailable::Busy)?;
                 let permit = Arc::new(permit);
-                if let Some(call) = call {
-                    call.with(|held: &mut HeldPermits| held.hold(budget, &permit));
+                if let Some(locals) = locals {
+                    locals.with(|held: &mut HeldPermits| held.hold(budget, &permit));
                 }
                 permit
             }
         };
-        let db = self.pool(plugin_id, read).await?;
+        let db = self.pool(plugin_id, read, call).await?;
         self.inner.make_room(plugin_id).await;
         Ok(Lease { db, permit })
     }
@@ -199,6 +237,7 @@ impl PluginSqlPools {
         &self,
         plugin_id: &str,
         read: &[SqlReadScope],
+        call: &SqlCall,
     ) -> Result<DatabaseConnection, Unavailable> {
         let slot = self
             .inner
@@ -210,7 +249,7 @@ impl PluginSqlPools {
             .clone();
         if let Some(db) = slot.pool.get() {
             return self
-                .regrant(plugin_id, &slot, read)
+                .regrant(plugin_id, &slot, read, call)
                 .await
                 .map(|()| db.clone());
         }
@@ -222,16 +261,17 @@ impl PluginSqlPools {
         }
         match slot
             .pool
-            .get_or_try_init(|| self.open(plugin_id, &slot, read))
+            .get_or_try_init(|| self.open(plugin_id, &slot, read, call))
             .await
         {
             Ok(db) => {
                 *slot.failed.lock().unwrap_or_else(|p| p.into_inner()) = None;
-                self.regrant(plugin_id, &slot, read)
+                self.regrant(plugin_id, &slot, read, call)
                     .await
                     .map(|()| db.clone())
             }
-            Err(e) => {
+            Err(Opened::Unloaded) => Err(Unavailable::Unloaded),
+            Err(Opened::Failed(e)) => {
                 let first = slot
                     .failed
                     .lock()
@@ -261,8 +301,14 @@ impl PluginSqlPools {
         plugin_id: &str,
         slot: &Slot,
         read: &[SqlReadScope],
+        call: &SqlCall,
     ) -> Result<(), Unavailable> {
         let mut granted = slot.granted.lock().await;
+        // Under the lock `forget` waits on: a call of an unloaded plugin
+        // never provisions its role again.
+        if call.unloaded() {
+            return Err(Unavailable::Unloaded);
+        }
         if granted.as_slice() == read {
             return Ok(());
         }
@@ -283,9 +329,17 @@ impl PluginSqlPools {
         plugin_id: &str,
         slot: &Slot,
         read: &[SqlReadScope],
-    ) -> Result<DatabaseConnection, DbErr> {
+        call: &SqlCall,
+    ) -> Result<DatabaseConnection, Opened> {
+        let mut granted = slot.granted.lock().await;
+        // Under the lock `forget` waits on: a call of an unloaded plugin
+        // never provisions its role again.
+        if call.unloaded() {
+            return Err(Opened::Unloaded);
+        }
         let login = schema::provision(&self.inner.host, plugin_id, read).await?;
-        *slot.granted.lock().await = read.to_vec();
+        *granted = read.to_vec();
+        drop(granted);
         let connect = common::db::pg_connect_options(&self.inner.url, &self.inner.session)?
             .username(&login.names.role)
             .password(&login.password);
@@ -319,22 +373,50 @@ impl PluginSqlPools {
     }
 }
 
+/// Why a pool was not opened.
+enum Opened {
+    Unloaded,
+    Failed(DbErr),
+}
+
+impl From<DbErr> for Opened {
+    fn from(e: DbErr) -> Self {
+        Self::Failed(e)
+    }
+}
+
 impl PluginSqlPools {
-    /// Drop `plugin_id`'s pool when the plugin is unloaded here, so its next
-    /// load provisions its role again.
-    pub fn forget(&self, plugin_id: &str) {
+    /// Drop `plugin_id`'s pool once the plugin is unloaded here, so its next
+    /// load provisions its role again. Returns once no provisioning of the
+    /// old pool is in flight: one that started before the unload has
+    /// finished, and every later one sees the call's instance retired and
+    /// refuses, so a [`schema::retire`] after this stays in force.
+    pub async fn forget(&self, plugin_id: &str) {
         let slot = self
             .inner
             .pools
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(plugin_id);
-        if let Some(db) = slot.and_then(|slot| slot.pool.get().cloned())
-            && let Ok(runtime) = tokio::runtime::Handle::try_current()
-        {
-            runtime.spawn(async move {
+        let Some(slot) = slot else { return };
+        drop(slot.granted.lock().await);
+        if let Some(db) = slot.pool.get().cloned() {
+            tokio::spawn(async move {
                 let _ = db.close().await;
             });
+        }
+    }
+
+    /// Cancel the statement plugin backend `pid` runs, through the app role,
+    /// which holds every plugin role (see [`schema::provision`]).
+    pub async fn cancel_backend(&self, pid: i32) {
+        let cancel = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT pg_cancel_backend($1)",
+            [pid.into()],
+        );
+        if let Err(e) = self.inner.host.execute_raw(cancel).await {
+            tracing::warn!(pid, error = %e, "Could not cancel a plugin statement past its deadline");
         }
     }
 

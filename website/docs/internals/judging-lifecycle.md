@@ -186,9 +186,16 @@ are keyed on it.
 - A judgement that stops being current while still in flight is finalized as
   a `SystemError` with `SUPERSEDED` that stands: it never got a verdict, and
   no retry takes it for a failed attempt, even when an admin applies it back.
-- The plugin write fence (`write_fence`) admits a write only to the named
-  judgement, of the named submission, at the dispatched epoch, while it is not
-  finalized.
+- A plugin writes only the unit its own call was dispatched with. The
+  dispatch (`judging::Dispatch`: the plugin it went to, the judgement or code
+  run at its epoch, and its faults) rides in the call locals of the dispatch
+  call, the calls nested in it and the detached callbacks it starts; every
+  `host.submission.*` and `host.code_run.*` write, and a detached session
+  that names a judgement to finish, is refused unless the caller owns that
+  dispatch and names its unit. A write from a route, a timer, a checker or an
+  evaluator of the same call tree is refused before it reaches the database.
+- The database fence (`write_fence`) then admits the write only while that
+  judgement is not finalized at the dispatched epoch.
 
 ## Retry budgets
 
@@ -205,7 +212,8 @@ are keyed on it.
 
 Only a failure of judging the submission spends the system-error budget.
 Everything that works for one dispatch (its plugin calls, their operations,
-evaluate batches and detached sessions) shares one `DispatchFaults`, and
+evaluate batches and detached sessions) shares the `DispatchFaults` of its
+`Dispatch`, and
 whatever meets a platform fault records it there: a publish the queue
 refused (`QUEUE_UNREACHABLE`), an operation the queue lost
 (`OPERATION_LOST`), a worker without a platform tool

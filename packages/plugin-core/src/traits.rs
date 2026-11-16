@@ -272,6 +272,7 @@ fn run_guest(
     let locals = resolved.locals.clone();
     let _scope = ScopeGuard::enter(NewScope {
         admission: Some(admission),
+        instance: pool.liveness(),
         class: resolved.class,
         deadline: resolved.deadline,
         depth: resolved.depth,
@@ -285,6 +286,10 @@ fn run_guest(
     };
     if std::time::Instant::now() >= resolved.deadline {
         return Err(unavailable());
+    }
+    // Unloaded since the call looked its pool up.
+    if !pool.liveness().is_live() {
+        return Err(PluginError::NotLoaded(plugin_id));
     }
     let mut plugin = pool.get().map_err(|e| PluginError::InstanceBuild {
         plugin_id: plugin_id.clone(),
@@ -504,7 +509,11 @@ pub trait PluginManager: PluginInvoker {
             .get_mut(plugin_id)
             .ok_or_else(|| PluginError::NotFound(plugin_id.to_string()))?;
 
-        plugin_entry.runtime = None;
+        // Calls still running on the old instances keep running, but their
+        // host functions are refused from now on.
+        if let Some(pool) = plugin_entry.runtime.take() {
+            pool.retire();
+        }
         plugin_entry.status = PluginStatus::Unloaded;
 
         info!("Plugin {} unloaded successfully", plugin_entry.manifest);

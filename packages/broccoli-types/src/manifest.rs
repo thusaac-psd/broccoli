@@ -111,7 +111,9 @@ pub struct ServerConfig {
 
 /// Host content columns, as `table.column`, that a plugin's SQL reads only
 /// when its manifest declares them under `[server.sql] read`: contestant
-/// source, test data, program output and message bodies. The other columns
+/// source, test data, program output, message bodies and the diagnostics of
+/// a failed judgement or run (`error_message`, which the host shows only to
+/// staff with `system:view`). The other columns
 /// of a plugin-readable host table are readable to every plugin with the
 /// `sql` permission. Credentials are in no table a plugin can read and are
 /// never grantable.
@@ -120,14 +122,17 @@ pub const SQL_READ_SCOPES: &[&str] = &[
     "clarification_reply.content",
     "code_run.compile_output",
     "code_run.custom_test_cases",
+    "code_run.error_message",
     "code_run.files",
     "code_run_result.checker_output",
     "code_run_result.stderr",
     "code_run_result.stdout",
     "problem.content",
     "submission.compile_output",
+    "submission.error_message",
     "submission.files",
     "submission_judgement.compile_output",
+    "submission_judgement.error_message",
     "test_case.expected_output",
     "test_case.expected_output_blob_hash",
     "test_case.expected_output_preview",

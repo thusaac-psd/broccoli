@@ -83,10 +83,16 @@ Extism 调用在发起它的线程上一直运行到客体返回，宿主函数�
 
 在 extism 注册调用之前被处理的取消找不到要停止的调用。`deadline::watch` 在 `Plugin::call` 之前运行，extism 在持有实例并替换上一次调用留下的不可用 store 之后才注册调用；这段窗口内不运行客体代码。因此截止时间线程会持续重复调用的取消，间隔从 `CANCEL_RETRY` 起倍增至 `CANCEL_RETRY_MAX`，直到调用返回。清单超时（调用超时加 `TIMEOUT_BACKSTOP_MARGIN`）会结束截止时间线程从未取消的客体。
 
-宿主的长时间等待同样在调用的截止时间结束：`get_next_evaluate_result` 和 `get_next_operation_result` 把客体请求的等待时间截断到 `executor::current_deadline`。
+宿主的长时间等待同样在调用的截止时间结束：`get_next_evaluate_result` 和 `get_next_operation_result` 把客体请求的等待时间截断到 `executor::current_deadline`；插件 SQL 等待连接许可也不超过该时刻，每条语句都在该时刻被截断（见[插件数据库](plugin-database.md#截止时间)）。
 
 在截止时间仍在排队或在截止时间被取消的调用以 `PluginError::Unavailable` 失败。
 
+
+## 已卸载的实例
+
+每个已加载插件的实例池都带有一个 `pool::Liveness`，在插件被卸载之前一直有效（`unload_plugin` 使其失效）。重新加载会替换实例池但不让旧池失效，因此跨越重新加载的调用会在它开始时的版本上完成。每一次卸载，无论是禁用还是集群遗忘该插件，都经过 `plugin_lifecycle::deactivate`，它同时切断该插件的评测会话并丢弃其 SQL 连接池。
+
+插件被卸载时已在运行的调用会保留其实例直到客体返回，但它再也无法访问宿主：调用作用域携带实例的有效性，构建每个宿主函数的 `host_funcs::host_function` 拒绝已失效实例的每个宿主函数调用（`executor::instance_retired`），并使该调用以不可用失败。已查到实例池但尚未租用实例的调用以 `PluginError::NotLoaded` 失败。它的插件 SQL 也以同样方式被拒绝，而且是在开通所持有的锁之下，因此过期的调用永远不会重新开通被卸载流程停用的角色。
 ## Unavailable 永远不是一个决定
 
 `PluginError::is_unavailable` 对表示插件此刻无法回答、而与请求本身无关的错误为真：`Unavailable`（截止时间）、`ShuttingDown`（服务器正在排空）、`NotLoaded`（插件未在本机加载）和 `InstanceBuild`（无法构建实例）。

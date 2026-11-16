@@ -84,9 +84,9 @@ pub struct OperationHostDeps {
     /// any; each task carries it (see `common::worker::Task::judgement`).
     pub judgement: Option<common::worker::JudgementRef>,
     /// The dispatch these operations work for, which records the platform
-    /// faults they meet (see `services::judging::DispatchFaults`); `None`
-    /// outside a dispatch.
-    pub faults: Option<crate::services::judging::DispatchFaults>,
+    /// faults they meet (see `services::judging::Dispatch`); `None` outside
+    /// a dispatch.
+    pub dispatch: Option<crate::services::judging::Dispatch>,
     /// The live workers: an operation is published only while one takes
     /// work.
     pub worker_slots: crate::dispatcher::fanout::WorkerSlots,
@@ -97,9 +97,14 @@ impl OperationHostDeps {
     /// operations meet is recorded for its dispatch.
     pub fn for_current_call(&self) -> Self {
         Self {
-            faults: crate::services::judging::DispatchFaults::of_current_call(),
+            dispatch: crate::services::judging::Dispatch::of_current_call(),
             ..self.clone()
         }
+    }
+
+    /// The faults of the dispatch these operations work for.
+    pub fn faults(&self) -> Option<&crate::services::judging::DispatchFaults> {
+        self.dispatch.as_ref().map(|d| d.faults())
     }
 
     /// `options` for a plugin call made for the same dispatch as these deps.
@@ -107,8 +112,8 @@ impl OperationHostDeps {
         &self,
         options: plugin_core::executor::CallOptions,
     ) -> plugin_core::executor::CallOptions {
-        match &self.faults {
-            Some(faults) => options.with_locals(faults.call_locals()),
+        match &self.dispatch {
+            Some(dispatch) => options.with_locals(dispatch.call_locals()),
             None => options,
         }
     }
@@ -168,7 +173,7 @@ impl HostFunctionSystemDeps {
             metrics: self.metrics.clone(),
             evaluate_batches: self.evaluate_batches.clone(),
             judgement: None,
-            faults: None,
+            dispatch: None,
             worker_slots: self.worker_slots.clone(),
         }
     }

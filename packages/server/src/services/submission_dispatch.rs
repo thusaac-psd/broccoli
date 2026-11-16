@@ -10,7 +10,9 @@ use tracing::{Instrument, error, info, instrument, warn};
 
 use crate::entity::{problem, submission, submission_judgement, test_case};
 use crate::hooks;
-use crate::services::judging::{self, ClaimedJudgement, DispatchFailure, DispatchFaults, Unit};
+use crate::services::judging::{
+    self, ClaimedJudgement, Dispatch, DispatchFailure, DispatchFaults, DispatchedUnit, Unit,
+};
 use crate::state::AppState;
 use crate::utils::judging::files_log_summary;
 use crate::utils::test_case_body::{
@@ -535,6 +537,17 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
 
     let plugin_id = handler.plugin_id.clone();
     let function_name = handler.submission_fn.clone();
+    // The judgement goes to its contest type's plugin, which alone may write
+    // it, through this call and the sessions it starts.
+    let dispatch = Dispatch::new(
+        &plugin_id,
+        DispatchedUnit::Judgement {
+            submission_id: judgement_ref.submission_id,
+            judgement_id: judgement_ref.id,
+            judge_epoch: judgement_ref.judge_epoch,
+        },
+        faults.clone(),
+    );
     let plugins = state.plugins.clone();
     let hook_registry = state.registries.hook_registry.clone();
     let contest_types = state.registries.contest_type_registry.clone();
@@ -576,7 +589,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                     plugins
                         .get_config()
                         .judging_call()
-                        .with_locals(faults.call_locals()),
+                        .with_locals(dispatch.call_locals()),
                 )
                 .await;
 

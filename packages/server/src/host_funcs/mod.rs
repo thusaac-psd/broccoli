@@ -81,8 +81,26 @@ pub(crate) enum Waits {
     Returns,
 }
 
+/// Refuse a host function of a call whose instance was retired: its plugin
+/// was unloaded while the call ran, so nothing it asks of the host may land.
+/// The call fails as unavailable.
+fn refuse_retired(name: &'static str) -> Result<(), extism::Error> {
+    if !plugin_core::executor::instance_retired() {
+        return Ok(());
+    }
+    tracing::info!(
+        host_fn = name,
+        "Refused a host function of an unloaded plugin's call"
+    );
+    plugin_core::executor::fail_unavailable();
+    Err(extism::Error::msg(
+        "the plugin was unloaded while this call ran; the host refuses its requests",
+    ))
+}
+
 /// Build host function `name`, parking its call around the body when it
-/// [`Waits::Blocks`].
+/// [`Waits::Blocks`]. Every host function is built here, so every one
+/// refuses a call of an unloaded plugin ([`refuse_retired`]).
 pub(crate) fn host_function<T, F>(
     name: &'static str,
     params: impl IntoIterator<Item = ValType>,
@@ -98,18 +116,19 @@ where
         + Sync
         + 'static,
 {
-    match waits {
-        Waits::Blocks => Function::new(
-            name,
-            params,
-            results,
-            user_data,
-            move |plugin: &mut CurrentPlugin, inputs: &[Val], outputs: &mut [Val], data| {
-                plugin_core::executor::parked(|| f(plugin, inputs, outputs, data))
-            },
-        ),
-        Waits::Returns => Function::new(name, params, results, user_data, f),
-    }
+    Function::new(
+        name,
+        params,
+        results,
+        user_data,
+        move |plugin: &mut CurrentPlugin, inputs: &[Val], outputs: &mut [Val], data| {
+            refuse_retired(name)?;
+            match waits {
+                Waits::Blocks => plugin_core::executor::parked(|| f(plugin, inputs, outputs, data)),
+                Waits::Returns => f(plugin, inputs, outputs, data),
+            }
+        },
+    )
 }
 
 /// An in-flight host fn call: the snapshot of its context plus the entered
@@ -351,8 +370,8 @@ fn register_timer_functions(hr: &mut HostFunctionRegistry, host_db: &DatabaseCon
 }
 
 /// The raw `sql` capability: each plugin's statements run on its own pool, as
-/// its own role (see [`crate::plugin_db`]), including explicit transactions
-/// shared across one plugin's calls through `txn_map`.
+/// its own role (see [`crate::plugin_db`]), including explicit transactions,
+/// which `txn_map` holds until the call tree that opened them ends.
 fn register_sql_functions(hr: &mut HostFunctionRegistry, pools: &sql::PluginSql) {
     let cap = "sql";
     let with_pools = || {

@@ -46,8 +46,10 @@ functions. None of the shipped plugins writes a host table directly.
 content columns, as `table.column`: contestant source (`submission.files`,
 `code_run.files`), compiler and program output, test data
 (`test_case.input`, `expected_output`, their previews and blob hashes),
-checker output, custom tests, problem statements and clarification bodies. No
-plugin reads them by default. Evaluators get test data through
+checker output, custom tests, problem statements, clarification bodies and
+the `error_message` diagnostics of a failed submission, judgement or code run,
+which the host shows only to staff with `system:view`. No plugin reads them by
+default. Evaluators get test data through
 `host.submission.query_test_cases`, which runs on the host function pool.
 
 A plugin that needs one declares it:
@@ -130,7 +132,10 @@ A plugin removed from the fleet has its role set `NOLOGIN` and its sessions
 ended (`schema::retire`). Its schema and data stay: the plugin id is the
 plugin's identity, so a later install of the same id is the same plugin, and
 provisioning lets its role log in again. Every replica drops its pool for a
-plugin it unloads, so the next load provisions again.
+plugin it unloads, so the next load provisions again. A call still running on
+the unloaded instance never provisions the role again: its leases are
+refused, under the lock provisioning holds, once the instance is retired
+(see [Plugin execution](plugin-execution.md#unloaded-instances)).
 
 ## Pools
 
@@ -162,14 +167,35 @@ Host functions other than `host.db.*` run on the host function pool
 (`connect_host_fn_pool` in `packages/server/src/database.rs`), as the app
 role, with statements the host builds. No plugin-authored SQL runs there.
 
+## Deadlines
+
+A plugin's SQL runs within the deadline of the call that runs it
+(`executor::current_deadline`, carried in `plugin_db::SqlCall`):
+
+- a lease waits for a permit no longer than the earlier of the deadline and
+  the pool's acquire timeout, then fails the call as unavailable;
+- every statement, in a transaction or not, is cut at the deadline. A
+  transaction records its backend's pid when it begins; a statement of it cut
+  at the deadline is cancelled on the backend (`pg_cancel_backend`, through
+  the app role, which holds every plugin role) and the transaction is rolled
+  back, returning its connection and permit;
+- a transaction lives no longer than the call tree that opened it: one still
+  open when the tree ends (the guest trapped, was cancelled or returned
+  without committing) is rolled back then, from the tree's `CallLocals`;
+- the backend of every statement stays bounded by the host-enforced
+  `statement_timeout`, which no plugin statement can change (see
+  [the SQL guard](#the-sql-guard)), so a statement cut outside a transaction
+  ends there.
+
 ## The SQL guard
 
 `reject_session_escape` in `host_funcs/sql.rs` refuses role changes,
 `set_config`, `ALTER ROLE` and `ALTER USER`, `DISCARD`, `DO`, routine
-definitions and session-level changes to the host-enforced settings. The
-engine confines role changes; the guard keeps a plugin from changing its own
-role's password or defaults, and from leaving its connection unbounded by
-`statement_timeout`.
+definitions, an `UPDATE` of `pg_settings` (which applies a setting as
+`set_config` does) and any `SET` of a host-enforced setting, `SET LOCAL`
+included. The engine confines role changes; the guard keeps a plugin from
+changing its own role's password or defaults, and from lifting
+`statement_timeout` for its connection or its transaction.
 
 ## What the boundary does not cover
 
@@ -208,6 +234,7 @@ harnesses log in as that role too.
 | `failed_provisioning_backs_off` | A failed provisioning is not retried until the back-off passes |
 | `a_returned_connection_drops_its_session_state` | Session locks, listens and settings end when a connection returns |
 | `a_removed_plugin_cannot_log_in_until_it_is_installed_again` | Retirement sets `NOLOGIN`; a reinstall logs in and keeps the data |
+| `a_call_of_an_unloaded_plugin_never_provisions_its_role_again` | A call of a retired instance is refused and the retired role stays `NOLOGIN` |
 
 `plugin_core::manifest` tests reject unknown scopes and scopes without the
 `sql` permission at parse time.

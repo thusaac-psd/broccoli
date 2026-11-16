@@ -203,10 +203,31 @@ never cancelled.
 
 The host's long waits end at the call's deadline too:
 `get_next_evaluate_result` and `get_next_operation_result` cut the wait a
-guest asks for at `executor::current_deadline`.
+guest asks for at `executor::current_deadline`, and a plugin's SQL waits for
+a connection permit no longer and has each statement cut there (see
+[Plugin database](plugin-database.md#deadlines)).
 
 A call still queued at its deadline, or cancelled at it, fails with
 `PluginError::Unavailable`.
+
+## Unloaded instances
+
+Each loaded plugin's instance pool carries a `pool::Liveness`, live until the
+plugin is unloaded (`unload_plugin` retires it). A reload replaces the pool
+without retiring the old one, so a call made across a reload finishes on the
+version it started on. Every unload, a disable or the fleet forgetting the
+plugin, goes through `plugin_lifecycle::deactivate`, which also cuts the
+plugin's judging sessions and drops its SQL pool.
+
+A call already running when its plugin is unloaded keeps its instance until
+its guest returns, but it can no longer reach the host: the call scope
+carries the instance's liveness, and `host_funcs::host_function`, which
+builds every host function, refuses each host function of a retired
+instance (`executor::instance_retired`) and fails the call as unavailable.
+A call that had looked the pool up but not yet leased an instance fails with
+`PluginError::NotLoaded`. Its plugin SQL is refused the same way, under the
+lock provisioning holds, so a stale call never provisions a role the unload
+retired.
 
 ## Unavailable is never a decision
 
