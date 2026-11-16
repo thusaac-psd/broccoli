@@ -287,7 +287,7 @@ pub fn validate_bulk_add_participants(req: &BulkAddParticipantsRequest) -> Resul
 
     let mut seen = std::collections::HashSet::new();
     for name in &req.usernames {
-        let trimmed = name.trim().to_lowercase();
+        let trimmed = crate::entity::user::username_key(name);
         if trimmed.is_empty() {
             return Err(AppError::Validation("Username must not be empty".into()));
         }
@@ -299,7 +299,7 @@ pub fn validate_bulk_add_participants(req: &BulkAddParticipantsRequest) -> Resul
         }
     }
     for entry in &req.create_users {
-        let trimmed = entry.username.trim().to_lowercase();
+        let trimmed = crate::entity::user::username_key(&entry.username);
         if trimmed.is_empty() {
             return Err(AppError::Validation("Username must not be empty".into()));
         }
