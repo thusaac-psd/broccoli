@@ -455,6 +455,12 @@ itself, by one rule, and `broccoli-server --node-id` or
   starting Docker leaves the id alone.
 - With no machine id, the hostname alone is used; with neither, a random id, and
   the process warns at boot.
+- A container on a bridge network sees no physical card, so its id is
+  `ROLE-HASH` of the machine id alone: disk clones that share a machine id get
+  the same id there. The installers record the id they ask the image for in the
+  host's network, where the card counts; an id left blank in a container relies
+  on the machine id alone, so give cloned machines distinct machine ids
+  (`systemd-machine-id-setup` after clearing `/etc/machine-id`) or set the id.
 
 The installers never derive an id. A container's hostname and network change
 whenever it is recreated, so `install.sh server` and `install.sh worker` (and

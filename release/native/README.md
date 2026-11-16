@@ -55,11 +55,12 @@ neither comes from the network. The bundle ships the `.deb` sets
 version, each with its full dependency closure, and the installer `dpkg -i`s
 them offline. PostgreSQL is the major version the Docker deployments run
 (`POSTGRES_IMAGE` in `.env.infra.example`), from the PostgreSQL project's
-repository; a box that already runs a PostgreSQL server keeps it. Redis 7 comes
-from packages.redis.io, since 22.04's archive ships 6.0; a box that already runs
-Redis 7 keeps it. The installer never reaches for the network: without a staged
-set for the box's Ubuntu version, and without the package already installed, it
-stops and names the `stage-*.sh` command that stages it.
+repository; a box that already runs a PostgreSQL server keeps it.
+`./stage-redis.sh` fetches Redis 7 from packages.redis.io when it stages the
+set, since 22.04's archive ships 6.0; a box that already runs Redis 7 keeps it.
+The installer never reaches for the network: without a staged set for the box's
+Ubuntu version, and without the package already installed, it stops and names
+the `stage-*.sh` command that stages it.
 
 ### Box 1 — infra + server (Postgres, Redis, SeaweedFS, API)
 
