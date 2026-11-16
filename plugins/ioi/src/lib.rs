@@ -1,4 +1,5 @@
 pub mod api;
+pub mod case_ratios;
 pub mod config;
 pub mod evaluate_batch;
 pub mod feedback;
@@ -69,6 +70,7 @@ pub(crate) fn load_token_state(
 #[plugin_fn]
 pub fn init() -> FnResult<String> {
     let host = Host::new();
+    case_ratios::create_tables(&host)?;
     host.registry
         .register_contest_type("ioi", "handle_ioi_submission", "handle_ioi_code_run")?;
     host.log.info("IOI contest plugin registered")?;

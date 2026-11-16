@@ -215,6 +215,8 @@ pub struct RecordedQuery {
 #[derive(Debug, Clone)]
 pub struct RecordedExecution {
     pub sql: String,
+    /// The bound arguments, serialized as they would cross to the host.
+    pub args: Vec<JsonValue>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -328,22 +330,26 @@ impl Db {
     }
 
     pub fn execute(&self, sql: &str) -> Result<u64, SdkError> {
-        self.inner
-            .executions
-            .borrow_mut()
-            .push(RecordedExecution { sql: sql.into() });
-        if let Some(result) = self.inner.execute_results.borrow_mut().pop_front() {
-            return result;
-        }
-        Ok(0)
+        self.execute_with_args(sql, &[] as &[JsonValue])
     }
 
     pub fn execute_with_args(
         &self,
         sql: &str,
-        _args: &[impl serde::Serialize],
+        args: &[impl serde::Serialize],
     ) -> Result<u64, SdkError> {
-        self.execute(sql)
+        let args = args
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.inner.executions.borrow_mut().push(RecordedExecution {
+            sql: sql.into(),
+            args,
+        });
+        if let Some(result) = self.inner.execute_results.borrow_mut().pop_front() {
+            return result;
+        }
+        Ok(0)
     }
 
     pub fn begin(&self) -> Result<Transaction, SdkError> {

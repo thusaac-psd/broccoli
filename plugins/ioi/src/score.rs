@@ -8,8 +8,10 @@ use std::collections::HashMap;
 
 #[cfg(any(target_arch = "wasm32", test))]
 use broccoli_server_sdk::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use serde::Deserialize;
 #[cfg(any(target_arch = "wasm32", test))]
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 // Only reachable from the wasm32-gated `run_judge`/`compute_official_task_score`
 // below; this file has no #[cfg(test)] use of these three.
@@ -19,6 +21,10 @@ use crate::config::{ContestConfig, ScoringMode, TaskConfig};
 // #[cfg(test)] unit tests below (`score_submission_subtask_details`, which
 // they call directly, and `SubtaskDef` literals they construct); gate the
 // same way so a native (test/clippy) build doesn't see these as unused.
+#[cfg(any(target_arch = "wasm32", test))]
+use crate::case_ratios::CaseRatios;
+#[cfg(target_arch = "wasm32")]
+use crate::case_ratios::JudgedRatios;
 #[cfg(any(target_arch = "wasm32", test))]
 use crate::config::{SubtaskDef, round_score};
 #[cfg(target_arch = "wasm32")]
@@ -48,38 +54,6 @@ struct MaxScore {
     max_score: Option<f64>,
 }
 
-// Constructed by the wasm32-gated `load_current_submission_test_case_results`/
-// `recompute_sum_best_subtask` below AND directly by the #[cfg(test)] unit
-// tests, which build rows by hand instead of querying a mock DB.
-#[cfg(any(target_arch = "wasm32", test))]
-#[derive(Deserialize)]
-pub(crate) struct TcResultRow {
-    test_case_id: i32,
-    score: f64,
-    verdict: Verdict,
-}
-
-/// Normalize a persisted per-test result back to a 0..1 raw score for subtask
-/// RECOMPUTE. The stored `score` is the point-WEIGHTED value `round(raw * tc_max)`,
-/// which is LOSSY: a passing zero-point member (`tc_max == 0`) stores 0, and a
-/// non-2-decimal weight rounds a full pass slightly below 1.0. Re-deriving raw as
-/// `score / tc_max` would therefore wrongly FAIL a GroupMin/GroupMul subtask that
-/// actually passed (those methods gate on `raw >= 1.0`), diverging from the live
-/// judging path (which scores from the true `outcome.score`). Use the persisted
-/// verdict for the full-pass signal so recompute matches live scoring.
-// Called from the wasm32-gated `recompute_sum_best_subtask` below AND from
-// `score_submission_subtask_details` (wasm32+test); gate the same way.
-#[cfg(any(target_arch = "wasm32", test))]
-pub(crate) fn normalized_raw_score(verdict: &Verdict, score: f64, tc_max: f64) -> f64 {
-    if verdict.is_accepted() {
-        1.0
-    } else if tc_max > 0.0 {
-        (score / tc_max).clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
-}
-
 // Only constructed inside `score_submission_subtask_details` below
 // (wasm32+test); gate the same way.
 #[cfg(any(target_arch = "wasm32", test))]
@@ -88,14 +62,6 @@ pub(crate) struct SubtaskScoreDetail {
     name: String,
     scoring_method: crate::config::SubtaskScoringMethod,
     score: f64,
-    max_score: f64,
-}
-
-// Only constructed by the wasm32-gated `recompute_sum_best_subtask` below.
-#[cfg(target_arch = "wasm32")]
-#[derive(Deserialize)]
-struct TcMaxScore {
-    test_case_id: i32,
     max_score: f64,
 }
 
@@ -112,20 +78,9 @@ struct SubmissionScore {
 pub(crate) fn score_submission_subtask_details(
     test_cases: &[TestCaseRow],
     subtask_defs: &[SubtaskDef],
-    tc_results: &[TcResultRow],
+    ratios: &CaseRatios,
 ) -> Vec<SubtaskScoreDetail> {
-    let max_map: HashMap<i32, f64> = test_cases.iter().map(|tc| (tc.id, tc.score)).collect();
-
-    let mut tc_scores = HashMap::new();
-    for row in tc_results {
-        let Some(&tc_max) = max_map.get(&row.test_case_id) else {
-            continue;
-        };
-        let raw_score = normalized_raw_score(&row.verdict, row.score, tc_max);
-        tc_scores.insert(row.test_case_id, raw_score);
-    }
-
-    score_all_subtasks(subtask_defs, test_cases, &tc_scores)
+    score_all_subtasks(subtask_defs, test_cases, ratios)
         .into_iter()
         .zip(subtask_defs.iter())
         .map(|(score, def)| SubtaskScoreDetail {
@@ -137,29 +92,28 @@ pub(crate) fn score_submission_subtask_details(
         .collect()
 }
 
+/// The ratios of a submission's current judgement, once it is finalized.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn load_current_submission_test_case_results(
+pub(crate) fn load_current_submission_ratios(
     host: &Host,
     contest_id: i32,
     submission_id: i32,
-) -> Result<Vec<TcResultRow>, SdkError> {
+) -> Result<Option<CaseRatios>, SdkError> {
     let mut p = Params::new();
     let sql = format!(
-        "SELECT tcr.test_case_id, tcr.score, tcr.verdict \
-         FROM test_case_result tcr \
-         JOIN submission s ON s.id = tcr.submission_id \
-         JOIN submission_judgement sj \
-           ON sj.id = tcr.judgement_id \
-          AND sj.submission_id = tcr.submission_id \
-          AND sj.judge_epoch = tcr.judge_epoch \
-         WHERE tcr.submission_id = {} \
-           AND s.contest_id = {} \
-           AND tcr.test_case_id IS NOT NULL \
+        "SELECT cr.ratios \
+         FROM submission s \
+         JOIN submission_judgement sj ON sj.submission_id = s.id \
+         JOIN case_ratio cr ON cr.judgement_id = sj.id \
+         WHERE s.id = {} AND s.contest_id = {} \
            AND sj.is_current = TRUE AND sj.is_finalized = TRUE",
         p.bind(submission_id),
         p.bind(contest_id)
     );
-    host.db.query_with_args(&sql, &p.into_args())
+    Ok(host
+        .db
+        .query_one_with_args::<JudgedRatios>(&sql, &p.into_args())?
+        .map(|row| row.ratios))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -200,67 +154,31 @@ fn recompute_sum_best_subtask(
 ) -> Result<f64, SdkError> {
     let mut p = Params::new();
     let sql = format!(
-        "SELECT tcr.submission_id, tcr.test_case_id, tcr.score, tcr.verdict \
-         FROM test_case_result tcr \
-         JOIN submission s ON s.id = tcr.submission_id \
-         JOIN submission_judgement sj \
-           ON sj.id = tcr.judgement_id \
-          AND sj.submission_id = tcr.submission_id \
-          AND sj.judge_epoch = tcr.judge_epoch \
+        "SELECT cr.ratios \
+         FROM submission s \
+         JOIN submission_judgement sj ON sj.submission_id = s.id \
+         JOIN case_ratio cr ON cr.judgement_id = sj.id \
          WHERE s.user_id = {} AND s.problem_id = {} AND s.contest_id = {} \
-         AND tcr.test_case_id IS NOT NULL \
-         AND sj.is_current = TRUE AND sj.is_finalized = TRUE",
+           AND sj.is_current = TRUE AND sj.is_finalized = TRUE",
         p.bind(user_id),
         p.bind(problem_id),
         p.bind(contest_id)
     );
-    #[derive(Deserialize)]
-    struct SubmissionTcResult {
-        submission_id: i32,
-        #[serde(flatten)]
-        result: TcResultRow,
-    }
-    let tc_results: Vec<SubmissionTcResult> = host.db.query_with_args(&sql, &p.into_args())?;
-
-    let mut p = Params::new();
-    let sql = format!(
-        "SELECT id as test_case_id, score as max_score \
-         FROM test_case WHERE problem_id = {}",
-        p.bind(problem_id)
-    );
-    let tc_maxes: Vec<TcMaxScore> = host.db.query_with_args(&sql, &p.into_args())?;
-    let max_map: HashMap<i32, f64> = tc_maxes
-        .iter()
-        .map(|t| (t.test_case_id, t.max_score))
-        .collect();
-
-    let mut by_submission: HashMap<i32, HashMap<i32, f64>> = HashMap::new();
-    for SubmissionTcResult {
-        submission_id,
-        result: row,
-    } in &tc_results
-    {
-        let tc_max = max_map.get(&row.test_case_id).copied().unwrap_or(0.0);
-        let raw_score = normalized_raw_score(&row.verdict, row.score, tc_max);
-        by_submission
-            .entry(*submission_id)
-            .or_default()
-            .insert(row.test_case_id, raw_score);
-    }
+    let judged: Vec<JudgedRatios> = host.db.query_with_args(&sql, &p.into_args())?;
 
     Ok(sum_best_subtask_score(
         subtask_defs,
         test_cases,
-        by_submission.values(),
+        judged.iter().map(|row| &row.ratios),
     ))
 }
 
 /// The SumBestSubtask score: for each of the user's submissions, score every
-/// subtask from its normalized per-test-case scores, then for each subtask take
+/// subtask from its judged case ratios, then for each subtask take
 /// the best across submissions and sum. Single source of truth for both the
 /// official task score ([`recompute_sum_best_subtask`]) and the scoreboard cell
-/// (`crate::scoreboard`), which differ only in how they fetch + normalize the
-/// rows - so the two cannot diverge on the value.
+/// (`crate::scoreboard`), which differ only in which submissions they fetch,
+/// so the two cannot diverge on the value.
 // Called from the wasm32-gated `recompute_sum_best_subtask` above, from
 // `scoreboard.rs`'s wasm32-gated sum-best-subtask cell loader, AND directly by
 // the #[cfg(test)] unit tests below; gate the same way. The doc comment above
@@ -472,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn subtask_detail_scores_are_derived_from_current_test_case_results() {
+    fn subtask_detail_scores_are_derived_from_the_judged_ratios() {
         let test_cases = vec![
             TestCaseRow {
                 id: 11,
@@ -503,20 +421,9 @@ mod tests {
             max_score: 100.0,
             test_cases: vec!["a".into(), "b".into()],
         }];
-        let current_rows = vec![
-            TcResultRow {
-                test_case_id: 11,
-                score: 50.0,
-                verdict: Verdict::Accepted,
-            },
-            TcResultRow {
-                test_case_id: 12,
-                score: 0.0,
-                verdict: Verdict::WrongAnswer,
-            },
-        ];
+        let ratios: CaseRatios = [(11, 1.0), (12, 0.0)].into_iter().collect();
 
-        let scores = score_submission_subtask_details(&test_cases, &subtasks, &current_rows);
+        let scores = score_submission_subtask_details(&test_cases, &subtasks, &ratios);
 
         assert_eq!(scores.len(), 1);
         assert_eq!(scores[0].name, "Current");
@@ -551,99 +458,13 @@ mod tests {
             },
         ];
         let subtasks = effective_subtasks(&[], &test_cases);
-        let current_rows = vec![
-            TcResultRow {
-                test_case_id: 11,
-                score: 10.0,
-                verdict: Verdict::Accepted,
-            },
-            TcResultRow {
-                test_case_id: 12,
-                score: 0.0,
-                verdict: Verdict::WrongAnswer,
-            },
-        ];
+        let ratios: CaseRatios = [(11, 1.0), (12, 0.0)].into_iter().collect();
 
-        let scores = score_submission_subtask_details(&test_cases, &subtasks, &current_rows);
+        let scores = score_submission_subtask_details(&test_cases, &subtasks, &ratios);
 
         assert_eq!(scores.len(), 1);
         assert_eq!(scores[0].name, "All Tests");
         assert_eq!(scores[0].score, 10.0);
         assert_eq!(scores[0].max_score, 100.0);
-    }
-
-    /// A fully-passing GroupMin subtask whose member test cases carry
-    /// ZERO points must score its full max on RECOMPUTE. The persisted per-test
-    /// score is `round(raw * tc.score) = round(1.0 * 0) = 0`, so re-deriving raw as
-    /// `score / tc_max` (tc_max=0 -> 0.0) would fail the subtask; the verdict
-    /// (Accepted) is the authoritative full-pass signal.
-    #[test]
-    fn zero_point_group_min_member_full_pass_scores_full_on_recompute() {
-        let test_cases = vec![
-            TestCaseRow {
-                id: 11,
-                score: 0.0,
-                is_sample: false,
-                position: 1,
-                description: None,
-                label: Some("m1".into()),
-                input: TestCaseBodyRef::inline(""),
-                expected_output: TestCaseBodyRef::inline(""),
-                is_custom: false,
-            },
-            TestCaseRow {
-                id: 12,
-                score: 0.0,
-                is_sample: false,
-                position: 2,
-                description: None,
-                label: Some("m2".into()),
-                input: TestCaseBodyRef::inline(""),
-                expected_output: TestCaseBodyRef::inline(""),
-                is_custom: false,
-            },
-        ];
-        let subtasks = vec![SubtaskDef {
-            name: "S".into(),
-            scoring_method: crate::config::SubtaskScoringMethod::GroupMin,
-            max_score: 30.0,
-            test_cases: vec!["m1".into(), "m2".into()],
-        }];
-        // Both members passed (Accepted), persisted score 0 because point value 0.
-        let current_rows = vec![
-            TcResultRow {
-                test_case_id: 11,
-                score: 0.0,
-                verdict: Verdict::Accepted,
-            },
-            TcResultRow {
-                test_case_id: 12,
-                score: 0.0,
-                verdict: Verdict::Accepted,
-            },
-        ];
-
-        let scores = score_submission_subtask_details(&test_cases, &subtasks, &current_rows);
-        assert_eq!(scores.len(), 1);
-        assert_eq!(
-            scores[0].score, 30.0,
-            "fully-passing zero-point GroupMin subtask must score its full max, not 0"
-        );
-
-        // And a FAILED member (not Accepted) must still zero the GroupMin subtask.
-        let failed_rows = vec![
-            TcResultRow {
-                test_case_id: 11,
-                score: 0.0,
-                verdict: Verdict::Accepted,
-            },
-            TcResultRow {
-                test_case_id: 12,
-                score: 0.0,
-                verdict: Verdict::WrongAnswer,
-            },
-        ];
-        let failed = score_submission_subtask_details(&test_cases, &subtasks, &failed_rows);
-        assert_eq!(failed[0].score, 0.0, "a failed member must zero GroupMin");
     }
 }

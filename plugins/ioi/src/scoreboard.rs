@@ -13,6 +13,8 @@ use serde::Deserialize;
 // are also used directly by the #[cfg(test)] unit tests, so gate the latter
 // two more broadly.
 #[cfg(target_arch = "wasm32")]
+use crate::case_ratios::CaseRatios;
+#[cfg(target_arch = "wasm32")]
 use crate::config::{ContestConfig, ScoringMode, SubtaskDef};
 #[cfg(any(target_arch = "wasm32", test))]
 use crate::config::{ScoreboardTiebreaker, ScoreboardVisibility};
@@ -134,13 +136,10 @@ struct ScoreboardSubmissionRow {
 // below.
 #[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
-struct ScoreboardTcScoreRow {
+struct ScoreboardRatiosRow {
     user_id: i32,
     problem_id: i32,
-    submission_id: i32,
-    test_case_id: i32,
-    score: f64,
-    verdict: Verdict,
+    ratios: CaseRatios,
     elapsed_seconds: i64,
 }
 
@@ -368,7 +367,7 @@ fn load_best_tokened_or_last_scoreboard_cells(
 /// One submission's earliest elapsed seconds and its raw score per test case
 /// id, the unit `load_sum_best_subtask_scoreboard_cells` picks the best of.
 #[cfg(target_arch = "wasm32")]
-type SubmissionScores = (i64, HashMap<i32, f64>);
+type SubmissionScores = (i64, CaseRatios);
 
 #[cfg(target_arch = "wasm32")]
 fn load_sum_best_subtask_scoreboard_cells(
@@ -382,14 +381,12 @@ fn load_sum_best_subtask_scoreboard_cells(
     }
 
     let mut problem_subtasks: HashMap<i32, (Vec<TestCaseRow>, Vec<SubtaskDef>)> = HashMap::new();
-    let mut test_case_max: HashMap<(i32, i32), f64> = HashMap::new();
     for &problem_id in problem_ids {
         let task_config = load_task_config(host, contest_id, problem_id)?;
-        let (test_cases, subtask_defs) = load_effective_subtasks(host, problem_id, &task_config)?;
-        for test_case in &test_cases {
-            test_case_max.insert((problem_id, test_case.id), test_case.score);
-        }
-        problem_subtasks.insert(problem_id, (test_cases, subtask_defs));
+        problem_subtasks.insert(
+            problem_id,
+            load_effective_subtasks(host, problem_id, &task_config)?,
+        );
     }
 
     let mut p = Params::new();
@@ -397,48 +394,30 @@ fn load_sum_best_subtask_scoreboard_cells(
     let user_placeholders: Vec<String> = user_ids.iter().map(|id| p.bind(*id)).collect();
     let problem_placeholders: Vec<String> = problem_ids.iter().map(|id| p.bind(*id)).collect();
     let sql = format!(
-        "SELECT s.user_id, s.problem_id, s.id as submission_id, \
-                tcr.test_case_id, tcr.score, tcr.verdict, \
+        "SELECT s.user_id, s.problem_id, cr.ratios, \
                 GREATEST(EXTRACT(EPOCH FROM (s.created_at - c.start_time))::bigint, 0) \
                   as elapsed_seconds \
          FROM submission s \
          JOIN contest c ON c.id = s.contest_id \
-         JOIN test_case_result tcr ON tcr.submission_id = s.id \
-         JOIN submission_judgement sj \
-           ON sj.id = tcr.judgement_id \
-          AND sj.submission_id = tcr.submission_id \
-          AND sj.judge_epoch = tcr.judge_epoch \
+         JOIN submission_judgement sj ON sj.submission_id = s.id \
+         JOIN case_ratio cr ON cr.judgement_id = sj.id \
          WHERE s.contest_id = {} \
            AND s.user_id IN ({}) \
            AND s.problem_id IN ({}) \
-           AND tcr.test_case_id IS NOT NULL \
            AND sj.is_current = TRUE AND sj.is_finalized = TRUE \
          ORDER BY s.created_at ASC",
         contest_placeholder,
         user_placeholders.join(","),
         problem_placeholders.join(","),
     );
-    let rows: Vec<ScoreboardTcScoreRow> = host.db.query_with_args(&sql, &p.into_args())?;
-
-    let mut by_submission: HashMap<(i32, i32, i32), SubmissionScores> = HashMap::new();
-    for row in rows {
-        let Some(max_score) = test_case_max.get(&(row.problem_id, row.test_case_id)) else {
-            continue;
-        };
-        let raw_score = crate::score::normalized_raw_score(&row.verdict, row.score, *max_score);
-        let (elapsed, scores) = by_submission
-            .entry((row.user_id, row.problem_id, row.submission_id))
-            .or_insert_with(|| (row.elapsed_seconds, HashMap::new()));
-        *elapsed = (*elapsed).min(row.elapsed_seconds);
-        scores.insert(row.test_case_id, raw_score);
-    }
+    let rows: Vec<ScoreboardRatiosRow> = host.db.query_with_args(&sql, &p.into_args())?;
 
     let mut submissions_by_cell: HashMap<(i32, i32), Vec<SubmissionScores>> = HashMap::new();
-    for ((user_id, problem_id, _submission_id), submission_scores) in by_submission {
+    for row in rows {
         submissions_by_cell
-            .entry((user_id, problem_id))
+            .entry((row.user_id, row.problem_id))
             .or_default()
-            .push(submission_scores);
+            .push((row.elapsed_seconds, row.ratios));
     }
 
     let mut cells = HashMap::new();

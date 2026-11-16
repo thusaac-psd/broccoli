@@ -22,7 +22,7 @@ use crate::feedback::{
 #[cfg(target_arch = "wasm32")]
 use crate::score::score_submission_subtask_details;
 #[cfg(target_arch = "wasm32")]
-use crate::score::{compute_official_task_score, load_current_submission_test_case_results};
+use crate::score::{compute_official_task_score, load_current_submission_ratios};
 #[cfg(target_arch = "wasm32")]
 use crate::scoreboard::load_scoreboard_cells;
 #[cfg(target_arch = "wasm32")]
@@ -714,16 +714,13 @@ pub(crate) fn handle_submission_subtask_scores(
     let subtasks = if can_view_subtask_scores {
         let task_config = load_task_config(host, contest_id, problem_id)?;
         let (test_cases, subtask_defs) = load_effective_subtasks(host, problem_id, &task_config)?;
-        let tc_results =
-            load_current_submission_test_case_results(host, contest_id, submission_id)?;
-        if tc_results.is_empty() {
-            serde_json::Value::Null
-        } else {
-            serde_json::to_value(score_submission_subtask_details(
+        match load_current_submission_ratios(host, contest_id, submission_id)? {
+            Some(ratios) => serde_json::to_value(score_submission_subtask_details(
                 &test_cases,
                 &subtask_defs,
-                &tc_results,
-            ))?
+                &ratios,
+            ))?,
+            None => serde_json::Value::Null,
         }
     } else {
         serde_json::Value::Null
