@@ -240,3 +240,47 @@ test("a judge error a plugin raised shows in the language of that plugin's pack"
     ),
   ).toBeVisible();
 });
+
+test('an IOI submission that failed to judge shows the server message once, as the host labels it', async ({
+  page,
+}) => {
+  await mockApi(page, 'contestant', { plugins: ['ioi'] });
+  await page.route(
+    '**/api/v1/p/ioi/api/plugins/ioi/contests/4/problems/3/config',
+    (route) =>
+      route.fulfill({
+        json: {
+          scoring_mode: 'sum_best_subtask',
+          feedback_level: 'none',
+          subtasks: [],
+        },
+      }),
+  );
+  await page.route('**/api/v1/p/ioi/api/plugins/ioi/contests/4/info', (route) =>
+    route.fulfill({
+      json: {
+        scoring_mode: 'sum_best_subtask',
+        feedback_level: 'none',
+        scoreboard_visibility: 'all_contest_viewers',
+        scoreboard_tiebreaker: 'equal_rank',
+        token_mode: 'none',
+      },
+    }),
+  );
+  await page.route(/\/api\/v1\/submissions\/5$/, (route) =>
+    route.fulfill({
+      json: { ...SYSTEM_ERROR_DETAIL, contest_id: 4, contest_type: 'ioi' },
+    }),
+  );
+  await page.goto('/contests/4/submissions/5');
+  await expect(
+    page.getByText('Results are not visible for this contest.'),
+  ).toBeVisible();
+  await expect(page.getByText('System Message', { exact: true })).toHaveCount(
+    1,
+  );
+  await expect(page.getByText('Details from the server')).toBeVisible();
+  await expect(
+    page.getByText('sandbox: cgroup memory controller unavailable'),
+  ).toHaveCount(1);
+});
