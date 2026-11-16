@@ -5,6 +5,7 @@ import type {
   Submission,
   SubmissionSummary,
 } from '@broccoli/web-sdk/submission';
+import { getVerdictBadge } from '@broccoli/web-sdk/submission';
 import { Badge, Button, QueryView } from '@broccoli/web-sdk/ui';
 import { formatKibibytes, getUserDisplayName } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
@@ -24,7 +25,6 @@ import {
   useRestoreSubmissionScroll,
   useSubmissionNavigation,
 } from '@/features/submission/hooks/use-submission-navigation';
-import { getVerdictBadge } from '@/features/submission/utils/verdict';
 import type { MessageKey } from '@/lib/i18n/catalog';
 
 import { SubmissionResult } from './SubmissionResult';

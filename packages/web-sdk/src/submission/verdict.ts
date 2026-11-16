@@ -1,13 +1,12 @@
-import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
-import {
-  getStatusLabel,
-  type PluginOutage,
-  type ShownStatus,
-  type Verdict,
-  type Withheld,
-  withheldLabel,
-} from '@broccoli/web-sdk/submission';
-import type { BadgeProps } from '@broccoli/web-sdk/ui';
+import type { I18nContextValue } from '@/i18n';
+import type {
+  PluginOutage,
+  ShownStatus,
+  Verdict,
+  Withheld,
+} from '@/submission/types';
+import { getStatusLabel, withheldLabel } from '@/submission/utils';
+import type { BadgeProps } from '@/ui/badge';
 
 type BadgeVariant = NonNullable<BadgeProps['variant']>;
 

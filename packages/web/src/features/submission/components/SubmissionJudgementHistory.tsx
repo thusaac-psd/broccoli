@@ -10,6 +10,7 @@ import {
   SYSTEM_ADMIN,
 } from '@broccoli/web-sdk/permissions';
 import type { SubmissionJudgement } from '@broccoli/web-sdk/submission';
+import { getVerdictBadge } from '@broccoli/web-sdk/submission';
 import {
   Badge,
   Button,
@@ -31,7 +32,6 @@ import { toast } from 'sonner';
 
 import { useSystemOverview } from '@/features/system/hooks/useSystemOverview';
 
-import { getVerdictBadge } from '../utils/verdict';
 import { SubmissionTestCases } from './SubmissionTestCases';
 import { testCaseDiffStatus } from './testCaseDiff';
 
