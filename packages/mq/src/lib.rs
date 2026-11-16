@@ -26,7 +26,7 @@ pub use group::{
     REFRESH_INTERVAL, Settled,
 };
 pub use keys::{SERVERS_GROUP, StreamRole, Topology, WORKERS_GROUP};
-pub use reply::{REPLY_BATCH, ReplyInbox};
+pub use reply::{REPLY_BATCH, ReadMark, ReplyInbox};
 
 use common::redis_conn::{COMMAND_TIMEOUT, Conn};
 

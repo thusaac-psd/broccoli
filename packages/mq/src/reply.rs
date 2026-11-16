@@ -37,8 +37,20 @@ pub struct ReplyInbox {
     conn: Conn,
     /// Id of the last entry read; the next read returns what follows it.
     cursor: String,
+    /// How many times the cursor restarted from the beginning: the stream
+    /// went missing or came back with ids behind the cursor. An entry id
+    /// names an entry only within one generation.
+    generation: u64,
     /// Entries returned by the last read, deleted by the next one.
     read: Vec<String>,
+}
+
+/// A position in a reply stream as one [`ReplyInbox`] reads it: an entry id
+/// and the inbox generation the id belongs to (see [`ReplyInbox::mark`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadMark {
+    generation: u64,
+    id: Option<String>,
 }
 
 impl ReplyInbox {
@@ -47,6 +59,7 @@ impl ReplyInbox {
             key,
             conn: Conn::new(client, BLOCK + COMMAND_TIMEOUT),
             cursor: "0-0".into(),
+            generation: 0,
             read: Vec::new(),
         }
     }
@@ -55,11 +68,29 @@ impl ReplyInbox {
         &self.key
     }
 
-    /// Whether every reply up to and including entry `id` has been returned
-    /// by [`Self::next_batch`]. `None` (the stream had no entry) is read
-    /// through at once.
-    pub fn has_read_through(&self, id: Option<&str>) -> bool {
-        id.is_none_or(|id| parse_id(&self.cursor) >= parse_id(id))
+    /// A mark at entry `id` of the stream as this inbox reads it now; `None`
+    /// for a stream that had no entry.
+    pub fn mark(&self, id: Option<String>) -> ReadMark {
+        ReadMark {
+            generation: self.generation,
+            id,
+        }
+    }
+
+    /// Whether every reply up to and including `mark` has been returned by
+    /// [`Self::next_batch`]; a mark without an entry is read through at once.
+    /// `None` when the inbox restarted from the beginning since the mark was
+    /// taken: its entry belonged to a stream that is gone, so nothing this
+    /// inbox reads can pass it.
+    pub fn read_through(&self, mark: &ReadMark) -> Option<bool> {
+        if mark.generation != self.generation {
+            return None;
+        }
+        Some(
+            mark.id
+                .as_deref()
+                .is_none_or(|id| parse_id(&self.cursor) >= parse_id(id)),
+        )
     }
 
     /// Wait up to the block time for replies after the cursor and return them
@@ -68,7 +99,8 @@ impl ReplyInbox {
     /// A stream recreated after it was lost starts its ids from the Redis
     /// clock, which may be behind the cursor. The stream's last generated id
     /// is read in the same round trip, and a cursor ahead of it (or a missing
-    /// stream) restarts from the beginning, so no reply is skipped.
+    /// stream) restarts from the beginning, so no reply is skipped; a restart
+    /// starts a new generation (see [`Self::read_through`]).
     pub async fn next_batch(&mut self) -> Result<Vec<Result<TaskReply, DecodeError>>, MqError> {
         let key = &self.key;
         let cursor = &self.cursor;
@@ -111,8 +143,9 @@ impl ReplyInbox {
             }
         }
         let behind = last_id.is_none_or(|last| parse_id(&last) < parse_id(&self.cursor));
-        if behind {
+        if behind && self.cursor != "0-0" {
             self.cursor = "0-0".into();
+            self.generation += 1;
         }
         Ok(out)
     }
@@ -129,17 +162,22 @@ mod tests {
     use super::{ReplyInbox, parse_id};
 
     #[test]
-    fn an_inbox_has_read_through_an_entry_once_its_cursor_reaches_it() {
+    fn an_inbox_has_read_through_a_mark_once_its_cursor_reaches_it() {
         let mut inbox = ReplyInbox::new(
             redis::Client::open("redis://127.0.0.1:1").unwrap(),
             "r".into(),
         );
-        assert!(inbox.has_read_through(None), "an empty stream is read");
-        assert!(!inbox.has_read_through(Some("5-0")));
+        let mark = |inbox: &ReplyInbox, id: &str| inbox.mark(Some(id.into()));
+        assert_eq!(
+            inbox.read_through(&inbox.mark(None)),
+            Some(true),
+            "an empty stream is read"
+        );
+        assert_eq!(inbox.read_through(&mark(&inbox, "5-0")), Some(false));
         inbox.cursor = "5-0".into();
-        assert!(inbox.has_read_through(Some("5-0")));
-        assert!(inbox.has_read_through(Some("4-9")));
-        assert!(!inbox.has_read_through(Some("5-1")));
+        assert_eq!(inbox.read_through(&mark(&inbox, "5-0")), Some(true));
+        assert_eq!(inbox.read_through(&mark(&inbox, "4-9")), Some(true));
+        assert_eq!(inbox.read_through(&mark(&inbox, "5-1")), Some(false));
     }
 
     #[test]

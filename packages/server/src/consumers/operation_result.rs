@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use crate::registry::{EvaluateBatches, OperationWaiters};
 use common::metrics::Metrics;
 use common::worker::{OperationFault, TaskReply, TaskResult};
-use mq::{Mq, ReplyInbox};
+use mq::{Mq, ReadMark, ReplyInbox};
 use opentelemetry::KeyValue;
 use tracing::{debug, error, info, warn};
 
@@ -31,7 +31,10 @@ pub const NONE_ACCEPTING: &str =
 /// snapshot. Every `interval` the consumer checks all published waiters in one
 /// round trip per [`mq::CHECK_CHUNK`] ids and notes the reply stream's last id;
 /// once its reads have passed that id, any of them still waiting has no reply
-/// coming and fails at once, into the plugin's normal failure handling.
+/// coming and fails at once, into the plugin's normal failure handling. A
+/// reply stream lost before the reads pass that id takes the id with it
+/// ([`ReplyInbox::read_through`]): the check runs again at once against the
+/// stream as it is.
 pub struct OutstandingCheck {
     pub mq: Mq,
     pub server_id: String,
@@ -42,7 +45,8 @@ pub struct OutstandingCheck {
 /// past every reply that could still answer them.
 struct Suspects {
     ids: Vec<String>,
-    replies_through: Option<String>,
+    /// The reply stream's last entry when the ledger was read.
+    replies_through: ReadMark,
 }
 
 /// Deliver this server's replies to their waiters, for the life of the
@@ -79,29 +83,40 @@ pub async fn consume_operation_results(
                 Err(e) => error!(error = %e, "Dropping an undecodable reply"),
             }
         }
-        if let Some(found) =
-            suspects.take_if(|s| inbox.has_read_through(s.replies_through.as_deref()))
-        {
-            let failed = found
-                .ids
-                .iter()
-                .filter(|id| {
-                    fail_waiter(&waiters, id, OperationFault::OperationLost, OPERATION_LOST)
-                })
-                .count();
-            if failed > 0 {
-                error!(failed, "Failed operations the queue lost");
+        if let Some(found) = suspects.take() {
+            match inbox.read_through(&found.replies_through) {
+                Some(true) => {
+                    let failed = found
+                        .ids
+                        .iter()
+                        .filter(|id| {
+                            fail_waiter(&waiters, id, OperationFault::OperationLost, OPERATION_LOST)
+                        })
+                        .count();
+                    if failed > 0 {
+                        error!(failed, "Failed operations the queue lost");
+                    }
+                }
+                Some(false) => suspects = Some(found),
+                // The reply stream was lost or recreated since the check:
+                // its mark can never be passed, so check again now against
+                // the stream as it is.
+                None => next_check = Instant::now(),
             }
         }
         if suspects.is_none() && Instant::now() >= next_check {
             next_check = Instant::now() + check.interval;
-            suspects = find_missing(&check, &waiters).await;
+            suspects = find_missing(&check, &waiters, &inbox).await;
         }
     }
 }
 
 /// The published operations the ledger no longer holds, if any.
-async fn find_missing(check: &OutstandingCheck, waiters: &OperationWaiters) -> Option<Suspects> {
+async fn find_missing(
+    check: &OutstandingCheck,
+    waiters: &OperationWaiters,
+    inbox: &ReplyInbox,
+) -> Option<Suspects> {
     let published: Vec<String> = waiters
         .iter()
         .filter(|w| w.published)
@@ -115,7 +130,7 @@ async fn find_missing(check: &OutstandingCheck, waiters: &OperationWaiters) -> O
         Ok(found) if found.missing.is_empty() => None,
         Ok(found) => Some(Suspects {
             ids: found.missing,
-            replies_through: found.replies_through,
+            replies_through: inbox.mark(found.replies_through),
         }),
         Err(e) => {
             warn!(error = %e, "Checking outstanding operations failed; retrying next interval");

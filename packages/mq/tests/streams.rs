@@ -482,6 +482,68 @@ async fn the_reply_inbox_deletes_what_it_read_and_survives_a_recreated_stream() 
     );
 }
 
+/// A mark names an entry of the stream as it was when the mark was taken.
+/// Once the stream is lost (and recreated with ids from the Redis clock, or
+/// left missing), the inbox starts over and the mark can never be passed:
+/// it reads as stale instead of as not reached yet.
+#[tokio::test]
+async fn a_reply_mark_from_before_the_stream_was_lost_reads_as_stale() {
+    let (_c, url) = redis().await;
+    let mq = Mq::connect(&url, BASE).await.unwrap();
+    let mut conn = admin(&url).await;
+    let key = mq.topology().reply("s1");
+    let mut inbox = mq.reply_inbox("s1");
+    let mut add = async |id: &str, reply: TaskReply| {
+        let _: String = redis::cmd("XADD")
+            .arg(&key)
+            .arg(id)
+            .arg("p")
+            .arg(serde_json::to_string(&reply).unwrap())
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+    };
+    add("5000-0", completed("r0")).await;
+    assert_eq!(task_ids(inbox.next_batch().await.unwrap()), ["r0"]);
+    // A check sees an entry the inbox has not read yet.
+    add("5000-1", completed("r1")).await;
+    let before = inbox.mark(Some("5000-1".into()));
+    assert_eq!(inbox.read_through(&before), Some(false));
+
+    // The stream is lost before the inbox reads that entry, and comes back
+    // with lower ids.
+    let _: () = redis::cmd("DEL")
+        .arg(&key)
+        .query_async(&mut admin(&url).await)
+        .await
+        .unwrap();
+    add("10-0", completed("after-recreate")).await;
+    let mut got = Vec::new();
+    while got.is_empty() {
+        got = task_ids(inbox.next_batch().await.unwrap());
+    }
+    assert_eq!(got, ["after-recreate"]);
+    assert_eq!(inbox.read_through(&before), None, "the old mark is stale");
+    let after = inbox.mark(Some("10-0".into()));
+    assert_eq!(inbox.read_through(&after), Some(true));
+
+    // A missing stream starts the inbox over too.
+    let _: () = redis::cmd("DEL")
+        .arg(&key)
+        .query_async(&mut admin(&url).await)
+        .await
+        .unwrap();
+    assert!(inbox.next_batch().await.unwrap().is_empty());
+    assert_eq!(inbox.read_through(&after), None);
+    let missing = inbox.mark(None);
+    assert!(inbox.next_batch().await.unwrap().is_empty());
+    assert_eq!(
+        inbox.read_through(&missing),
+        Some(true),
+        "a stream that stays missing does not start over again"
+    );
+}
+
 #[tokio::test]
 async fn pinned_tasks_follow_their_worker_and_move_to_the_shared_stream_when_it_dies() {
     let (_c, url) = redis().await;
