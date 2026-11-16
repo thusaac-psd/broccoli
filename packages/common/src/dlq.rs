@@ -16,14 +16,19 @@ pub enum DlqErrorCode {
 }
 
 impl DlqErrorCode {
-    pub fn as_str(&self) -> &'static str {
+    /// The host code this dead letter is recorded under.
+    pub fn code(&self) -> HostCode {
         match self {
-            Self::MaxRetriesExceeded => "MAX_RETRIES_EXCEEDED",
-            Self::RedeliveryExhausted => "REDELIVERY_EXHAUSTED",
-            Self::DeserializationError => "DESERIALIZATION_ERROR",
-            Self::StuckJob => HostCode::StuckJob.as_str(),
-            Self::DispatchRetryExhausted => HostCode::DispatchRetryExhausted.as_str(),
+            Self::MaxRetriesExceeded => HostCode::MaxRetriesExceeded,
+            Self::RedeliveryExhausted => HostCode::RedeliveryExhausted,
+            Self::DeserializationError => HostCode::DeserializationError,
+            Self::StuckJob => HostCode::StuckJob,
+            Self::DispatchRetryExhausted => HostCode::DispatchRetryExhausted,
         }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        self.code().as_str()
     }
 }
 

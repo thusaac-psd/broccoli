@@ -162,6 +162,14 @@ host_codes! {
     /// A judgement still in flight when a newer judgement replaced it as
     /// current (rejudge, DLQ retry, applying another judgement).
     Superseded = "SUPERSEDED";
+    // Dead letters: why a message or a stuck unit was dead-lettered.
+    /// An operation task failed past its retry budget.
+    MaxRetriesExceeded = "MAX_RETRIES_EXCEEDED";
+    /// The queue handed a task out past its delivery limit: every worker it
+    /// reached died or wedged while holding it.
+    RedeliveryExhausted = "REDELIVERY_EXHAUSTED";
+    /// A queued message could not be read.
+    DeserializationError = "DESERIALIZATION_ERROR";
 }
 
 impl std::fmt::Display for HostCode {

@@ -247,7 +247,7 @@ for _, e in ipairs(entries) do
     else
       local envelope = '{{"message_id":"' .. id .. '","message_type":"operation_task",'
         .. '"submission_id":null,"payload":{{"stream":"' .. KEYS[2] .. '"}},'
-        .. '"error_code":"DESERIALIZATION_ERROR","error_message":"entry has no payload field",'
+        .. '"error_code":"{unreadable}","error_message":"entry has no payload field",'
         .. '"retry_history":[]}}'
       redis.call('XADD', KEYS[5], 'MAXLEN', '~', ARGV[4], '*', 'p', envelope)
     end
@@ -260,7 +260,8 @@ if redis.call('XLEN', KEYS[2]) == 0 then
   redis.call('SREM', KEYS[4], ARGV[1])
 end
 return moved
-"#
+"#,
+        unreadable = common::DlqErrorCode::DeserializationError.as_str(),
     ))
 });
 
