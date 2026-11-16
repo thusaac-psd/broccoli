@@ -43,7 +43,7 @@ contain `:`, so every key below parses one way.
 | Key | Type | Group | Lifetime |
 | --- | --- | --- | --- |
 | `<q>` | stream | `workers` | permanent |
-| `<q>:worker:<worker_id>` | stream | `workers` | until drained after its worker dies |
+| `<q>:worker:<worker_id>` | stream | `workers` | until drained once its worker dies or stops taking work |
 | `<q>:pinned` | set of worker ids | | members removed when drained |
 | `<q>:reply:<server_id>` | stream | none | TTL of the server's liveness key |
 | `<q>:outstanding:<server_id>` | sorted set of task ids | | 10 minutes after the server's last publish or check |
@@ -51,7 +51,7 @@ contain `:`, so every key below parses one way.
 | `<q>:heartbeat:<role>:<id>` | string | | liveness TTL, 15 s (see Liveness) |
 
 Every entry has one field, `p`, holding the JSON payload. An entry moved from a
-dead worker's private stream also carries `n`, the deliveries it already had.
+private stream also carries `n`, the deliveries it already had.
 
 ### Work streams and consumer groups
 
@@ -73,21 +73,31 @@ is needed, and trimming a work stream would drop unread tasks.
 
 ### Pinned tasks
 
-An admin rejudge can pin a submission to a worker (`target_worker_id`). The
-server publishes a pinned task with one script that checks the worker's
-liveness key and then either adds the task to `<q>:worker:<id>` and the worker
-id to `<q>:pinned`, or adds it to the shared stream. The liveness check and the
-write are one atomic step, so a task is never routed to a worker that is
-already known dead, and the publish costs one round trip whether it was pinned
-or not.
+An admin rejudge can pin a submission to a worker (`target_worker_id`), and a
+plugin can name one as a cache-locality hint. A task can be pinned only to a
+worker that takes work: one that is live and whose heartbeat says it accepts
+work (`common::worker::Intake`). A worker that lacks a platform tool stays live
+but reads no task, not even one pinned to it, so a pin to it would wait for
+nobody. The admin endpoints refuse to pin to such a worker, and the server
+publishes a pinned task with one script that reads the worker's liveness key
+and then either adds the task to `<q>:worker:<id>` and the worker id to
+`<q>:pinned` (the worker takes work), or adds it to the shared stream. The
+check and the write are one atomic step, so a task is never routed to a worker
+already known to be dead or refusing work, and the publish costs one round trip
+whether it was pinned or not.
 
-When a pinned worker dies after the publish, its private stream is drained by
-whichever live worker runs the drain script next (every reclaim tick, below).
-The script returns at once if the owner's liveness key exists; otherwise it
-moves up to 64 entries to the shared stream, carrying their delivery counts in
-`n`, and deletes the private stream and its `<q>:pinned` member once it is
-empty. A worker that stalled past its liveness TTL and comes back finds its
-private stream gone, gets `NOGROUP` on the next read, and recreates the group.
+When a pinned worker dies or stops taking work after the publish, its private
+stream is drained by whichever worker that takes work runs the drain script next
+(every reclaim tick, below). The script returns at once while the owner takes
+work; otherwise it moves up to 64 entries to the shared stream, carrying their
+delivery counts in `n`, and deletes the private stream and its `<q>:pinned`
+member once it is empty. A live owner keeps the entries it holds (read and not
+yet settled): it is still running them or giving them back. A worker that
+stalled past its liveness TTL and comes back finds its private stream gone,
+gets `NOGROUP` on the next read, and recreates the group. When no live worker
+takes work at all, nothing drains and nothing could run the task anyway: the
+server hands every operation it waits for back as `NO_CAPABLE_WORKER` (see
+[Judging lifecycle](./judging-lifecycle.md)).
 
 ### Reply streams
 
@@ -151,7 +161,11 @@ notes the id of the reply stream's last entry in the same script. A missing
 task either has its reply at or before that entry, or was lost. The consumer
 keeps reading replies, and once its reads have passed the noted entry, any
 of those waiters still waiting fails at once with "the operation was lost
-from the queue". The plugin sees a failed operation, which its judging
+from the queue". The noted entry belongs to the stream as it was: when the
+stream is lost before the reads pass it (recreated with lower ids, or
+missing), the inbox starts reading over and could never pass it, so the
+consumer drops what it found and checks the ledger again at once against the
+stream as it is (`ReplyInbox::read_through`). The plugin sees a failed operation, which its judging
 handles like any other; the dispatch records the loss, so the `SystemError`
 it ends with carries `OPERATION_LOST` and goes back to the queue without
 spending a retry (see the judging lifecycle). A
@@ -311,7 +325,9 @@ sharing a Redis under different names never see each other's nodes). The key has
 a 15 s TTL that the node renews every 3 s with a 5 s deadline per renewal, so a
 few slow renewals never expire it; it doubles as the node's ID claim. The system
 dashboard, the pin routing script and the private stream drain script all ask
-that one question of that one key. A worker's in flight tasks do not use it at
+that one question of that one key; the two scripts also read the worker's
+`intake` from it, the one record of whether the worker takes work, which the
+claim gate and the system overview read too. A worker's in flight tasks do not use it at
 all: their PEL idle time answers whether their owner is alive. Replies do not
 use it either: the reply stream outlives the liveness key on purpose.
 

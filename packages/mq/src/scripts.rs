@@ -30,16 +30,32 @@ redis.call('XADD', KEYS[2], '*', 'p', ARGV[3])
     ))
 });
 
-/// Publish a pinned task: to the worker's private stream if the worker is
-/// live, else to the shared stream. Records it as outstanding either way.
+/// Defines `takes_work(key)`: whether the worker whose liveness key is `key`
+/// is live and takes work, the `intake` its heartbeat carries
+/// (`common::worker::Intake`). A live worker that takes no work reads no
+/// task, not even one pinned to it.
+const TAKES_WORK: &str = r#"
+local function takes_work(key)
+  local value = redis.call('GET', key)
+  if not value then
+    return false
+  end
+  local ok, doc = pcall(cjson.decode, value)
+  return ok and type(doc) == 'table' and type(doc.intake) == 'table'
+    and doc.intake.state == 'accepting'
+end
+"#;
+
+/// Publish a pinned task: to the worker's private stream if the worker takes
+/// work, else to the shared stream. Records it as outstanding either way.
 ///
 /// KEYS: outstanding ledger, worker liveness key, private stream, shared
 /// stream, pinned set. ARGV: task id, ledger TTL ms, payload, worker id.
 /// Returns 1 when pinned, 0 when shared.
 pub(crate) static PUBLISH_PINNED: LazyLock<Script> = LazyLock::new(|| {
     Script::new(&format!(
-        r#"{RECORD_OUTSTANDING}
-if redis.call('EXISTS', KEYS[2]) == 1 then
+        r#"{RECORD_OUTSTANDING}{TAKES_WORK}
+if takes_work(KEYS[2]) then
   redis.call('SADD', KEYS[5], ARGV[4])
   redis.call('XADD', KEYS[3], '*', 'p', ARGV[3])
   return 1
@@ -181,22 +197,35 @@ return lost
     )
 });
 
-/// Move a dead worker's private stream to the shared stream, keeping each
-/// entry's delivery count in `n`. Does nothing while the worker is live.
+/// Move the private stream of a worker that takes no work (dead, or live
+/// and refusing it) to the shared stream, keeping each entry's delivery count
+/// in `n`. Does nothing while the worker takes work. A dead worker's entries
+/// all move; a live worker keeps the entries it holds (read and not settled),
+/// since it is still running or giving them back.
 ///
 /// An entry without a payload cannot be run anywhere: it becomes a
 /// `DESERIALIZATION_ERROR` dead letter (a `common::DlqEnvelope`) instead.
 ///
 /// KEYS: worker liveness key, private stream, shared stream, pinned set,
 /// dead-letter stream. ARGV: worker id, group, batch size, dead-letter length
-/// cap. Returns the entries moved, or -1 when the worker is live.
+/// cap. Returns the entries moved, or -1 when the worker takes work.
 pub(crate) static DRAIN_PRIVATE: LazyLock<Script> = LazyLock::new(|| {
-    Script::new(
-        r#"
-if redis.call('EXISTS', KEYS[1]) == 1 then
+    Script::new(&format!(
+        r#"{TAKES_WORK}
+if takes_work(KEYS[1]) then
   return -1
 end
-local entries = redis.call('XRANGE', KEYS[2], '-', '+', 'COUNT', ARGV[3])
+local live = redis.call('EXISTS', KEYS[1]) == 1
+-- A live worker's held entries are skipped, so read past them.
+local held = 0
+if live then
+  local ok, summary = pcall(redis.call, 'XPENDING', KEYS[2], ARGV[2])
+  if ok then
+    held = summary[1]
+  end
+end
+local entries = redis.call('XRANGE', KEYS[2], '-', '+', 'COUNT', ARGV[3] + held)
+local moved = 0
 for _, e in ipairs(entries) do
   local id, fields = e[1], e[2]
   local payload, prior = nil, 0
@@ -208,27 +237,31 @@ for _, e in ipairs(entries) do
     end
   end
   local ok, p = pcall(redis.call, 'XPENDING', KEYS[2], ARGV[2], id, id, 1)
-  if ok and #p == 1 then
-    prior = prior + p[1][4]
+  local pending = ok and #p == 1
+  if not (live and pending) then
+    if pending then
+      prior = prior + p[1][4]
+    end
+    if payload then
+      redis.call('XADD', KEYS[3], '*', 'p', payload, 'n', prior)
+    else
+      local envelope = '{{"message_id":"' .. id .. '","message_type":"operation_task",'
+        .. '"submission_id":null,"payload":{{"stream":"' .. KEYS[2] .. '"}},'
+        .. '"error_code":"DESERIALIZATION_ERROR","error_message":"entry has no payload field",'
+        .. '"retry_history":[]}}'
+      redis.call('XADD', KEYS[5], 'MAXLEN', '~', ARGV[4], '*', 'p', envelope)
+    end
+    redis.call('XDEL', KEYS[2], id)
+    moved = moved + 1
   end
-  if payload then
-    redis.call('XADD', KEYS[3], '*', 'p', payload, 'n', prior)
-  else
-    local envelope = '{"message_id":"' .. id .. '","message_type":"operation_task",'
-      .. '"submission_id":null,"payload":{"stream":"' .. KEYS[2] .. '"},'
-      .. '"error_code":"DESERIALIZATION_ERROR","error_message":"entry has no payload field",'
-      .. '"retry_history":[]}'
-    redis.call('XADD', KEYS[5], 'MAXLEN', '~', ARGV[4], '*', 'p', envelope)
-  end
-  redis.call('XDEL', KEYS[2], id)
 end
 if redis.call('XLEN', KEYS[2]) == 0 then
   redis.call('DEL', KEYS[2])
   redis.call('SREM', KEYS[4], ARGV[1])
 end
-return #entries
-"#,
-    )
+return moved
+"#
+    ))
 });
 
 /// Settle an entry, but only if this consumer still owns it: a consumer

@@ -46,8 +46,9 @@ pub struct SubmissionResponse {
     pub contest_type: String,
     #[schema(example = 0)]
     pub judge_epoch: i32,
-    /// When set, the submission has been pinned to this worker by an admin
-    /// and every operation it produces will run there.
+    /// When set, the submission has been pinned to this worker by an admin:
+    /// every operation it produces runs there while that worker is live and
+    /// takes work, and on any worker otherwise.
     #[schema(example = "worker-1")]
     pub target_worker_id: Option<String>,
     #[schema(example = "2025-10-01T14:30:00Z")]

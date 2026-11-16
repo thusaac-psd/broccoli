@@ -12,36 +12,22 @@
 //! a server from dispatching new work during incident response;
 //! production should always run with the fiber enabled.
 
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
 use common::SubmissionStatus;
 use opentelemetry::KeyValue;
 use sea_orm::sqlx::postgres::PgListener;
 
 use crate::services::plugin_config_cache::PluginConfigCache;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tokio::sync::{Notify, watch};
 use tracing::{error, info, warn};
 
 use crate::dispatcher::permits::DispatcherReservation;
-use crate::entity::problem;
-use crate::services::judging::{self, ClaimedCodeRun, ClaimedJudgement};
+use crate::services::judging;
 use crate::state::AppState;
-
-fn transition_duration_seconds(created_at: DateTime<Utc>, transitioned_at: DateTime<Utc>) -> f64 {
-    std::cmp::max(
-        transitioned_at
-            .signed_duration_since(created_at)
-            .num_milliseconds(),
-        0,
-    ) as f64
-        / 1_000.0
-}
 
 fn record_submission_state_transition(
     metrics: &common::metrics::Metrics,
@@ -295,6 +281,10 @@ impl ClaimPass {
 /// Errors are returned to the caller so the fiber loop can log; whatever is
 /// still `Queued` is claimed by the next pass.
 ///
+/// Each kind is claimed by one statement that returns everything its
+/// dispatch needs, and the dispatch starts right after it with nothing
+/// fallible in between (see `start_claimed`).
+///
 /// **Crash-recovery contract:** dispatch runs detached after the claim
 /// committed. If this server crashes in between, the claimed rows stay in
 /// flight owned by a dead server. They are requeued when this `server_id`
@@ -315,87 +305,126 @@ pub async fn claim_once(
     if state.worker_slots.none_accepting() || !state.mq.check_reachable().await {
         return Ok(ClaimPass::CANNOT_RUN);
     }
-    let in_flight = if max_in_flight == 0 {
-        0
-    } else {
-        judging::count_in_flight(&state.db, server_id).await?
-    };
     // The contest types this replica can judge right now; see
     // `dispatcher::prefer_local_handler`.
     let contest_types = super::local_contest_types(state).await;
+    let in_flight_cap = (max_in_flight > 0).then_some(max_in_flight);
 
     // Judgements and code runs share the in-flight cap; judgements go first.
-    let budget = claim_budget(batch_size, max_in_flight, in_flight);
-    let mut held_back = budget < batch_size;
-    let slots = reserve_slots(state, budget);
-    held_back |= (slots.len() as u32) < budget;
-    let judgement_room = slots.len() as u32;
-    let mut claimed_judgements = 0;
-    if !slots.is_empty() {
-        let claimed =
-            judging::claim_judgements(&state.db, server_id, judgement_room, &contest_types).await?;
-        // Before any claimed unit is judged: config committed before its
-        // submission is then visible (see `services::plugin_config_cache`).
-        if let Some(epoch) = claimed.plugin_config_epoch {
-            state.plugin_config_cache.observe_epoch(epoch);
-        }
-        let claimed = claimed.units;
-        claimed_judgements = claimed.len() as u32;
-        record_judgement_claim_transitions(state, &claimed, state.clock.now()).await;
-        if !claimed.is_empty() {
-            info!(
-                server_id,
-                claimed = claimed.len(),
-                "Claimed queued judgements"
-            );
-        }
-        for (claimed, slot) in claimed.into_iter().zip(slots) {
-            let state = state.clone();
-            slot.spawn("dispatch_judgement", async move {
-                crate::services::submission_dispatch::dispatch_judgement(state, claimed).await;
-            });
-        }
+    // The judgement claim applies the cap, counting what is in flight in the
+    // same statement, and says what room the cap left.
+    let slots = reserve_slots(state, batch_size);
+    let mut held_back = (slots.len() as u32) < batch_size;
+    if slots.is_empty() {
+        return Ok(ClaimPass {
+            judgements: (0, 0),
+            code_runs: (0, 0),
+            held_back,
+        });
     }
+    let claimed = judging::claim_judgements(
+        &state.db,
+        server_id,
+        judging::ClaimLimit {
+            rows: slots.len() as u32,
+            in_flight_cap,
+        },
+        &contest_types,
+    )
+    .await?;
+    // The room the cap left for this whole pass.
+    let budget = claimed
+        .cap_room
+        .map_or(batch_size, |room| room.min(batch_size));
+    held_back |= budget < batch_size;
+    let judgement_room = budget.min(slots.len() as u32);
+    let claimed_judgements = claimed.units.len() as u32;
+    start_claimed(
+        state,
+        server_id,
+        "dispatch_judgement",
+        claimed,
+        slots,
+        crate::services::submission_dispatch::dispatch_judgement,
+    );
 
-    let code_run_budget = if max_in_flight == 0 {
-        batch_size
-    } else {
-        budget.saturating_sub(claimed_judgements)
+    // Without a cap each kind has a batch of its own.
+    let code_run_budget = match in_flight_cap {
+        Some(_) => budget.saturating_sub(claimed_judgements),
+        None => batch_size,
     };
     let slots = reserve_slots(state, code_run_budget);
     held_back |= (slots.len() as u32) < code_run_budget;
     let code_run_room = slots.len() as u32;
-    let mut claimed_code_runs = 0;
-    if !slots.is_empty() {
-        let claimed =
-            judging::claim_code_runs(&state.db, server_id, code_run_room, &contest_types).await?;
-        if let Some(epoch) = claimed.plugin_config_epoch {
-            state.plugin_config_cache.observe_epoch(epoch);
-        }
-        let claimed = claimed.units;
-        claimed_code_runs = claimed.len() as u32;
-        record_code_run_claim_transitions(state, &claimed, state.clock.now()).await;
-        if !claimed.is_empty() {
-            info!(
-                server_id,
-                claimed = claimed.len(),
-                "Claimed queued code runs"
-            );
-        }
-        for (code_run, slot) in claimed.into_iter().zip(slots) {
-            let state = state.clone();
-            slot.spawn("dispatch_code_run", async move {
-                crate::services::code_run_dispatch::dispatch_code_run_to_plugin(state, code_run)
-                    .await;
-            });
-        }
-    }
+    let claimed = judging::claim_code_runs(
+        &state.db,
+        server_id,
+        judging::ClaimLimit {
+            rows: code_run_room,
+            // Counted by the judgement claim: `code_run_budget` is in it.
+            in_flight_cap: None,
+        },
+        &contest_types,
+    )
+    .await?;
+    let claimed_code_runs = claimed.units.len() as u32;
+    start_claimed(
+        state,
+        server_id,
+        "dispatch_code_run",
+        claimed,
+        slots,
+        crate::services::code_run_dispatch::dispatch_code_run_to_plugin,
+    );
 
     Ok(ClaimPass {
         judgements: (claimed_judgements, judgement_room),
         code_runs: (claimed_code_runs, code_run_room),
         held_back,
     })
+}
+
+/// Starts the dispatch of every unit of a claim, each on one of `slots`
+/// (the claim took no more units than there are slots), after recording the
+/// claim's metrics. Nothing here can fail or wait: the claim committed, and
+/// every unit it took must reach its dispatch.
+fn start_claimed<T, F, Fut>(
+    state: &AppState,
+    server_id: &str,
+    label: &'static str,
+    claimed: judging::Claimed<T>,
+    slots: Vec<DispatcherReservation>,
+    dispatch: F,
+) where
+    T: Send + 'static,
+    F: Fn(AppState, T) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    // Before any claimed unit is judged: config committed before its
+    // submission is then visible (see `services::plugin_config_cache`).
+    if let Some(epoch) = claimed.plugin_config_epoch {
+        state.plugin_config_cache.observe_epoch(epoch);
+    }
+    if claimed.units.is_empty() {
+        return;
+    }
+    info!(
+        server_id,
+        label,
+        claimed = claimed.units.len(),
+        "Claimed queued work"
+    );
+    debug_assert!(claimed.units.len() <= slots.len());
+    for (claim, slot) in claimed.units.into_iter().zip(slots) {
+        record_submission_state_transition(
+            &state.metrics,
+            &SubmissionStatus::Queued,
+            &SubmissionStatus::Pending,
+            &claim.problem_type,
+            claim.queued_secs,
+        );
+        slot.spawn(label, dispatch(state.clone(), claim.unit));
+    }
 }
 
 /// Up to `n` dispatcher admission slots; fewer when the dispatcher queue is
@@ -453,109 +482,10 @@ fn effective_cap(live_worker_slots: u64, live_servers: u64) -> u32 {
     u32::try_from(std::cmp::max(scaled, IN_FLIGHT_FLOOR)).unwrap_or(u32::MAX)
 }
 
-/// Rows to claim this tick: the batch size, but never past the server's
-/// in-flight cap. `max_in_flight == 0` means no cap.
-fn claim_budget(batch_size: u32, max_in_flight: u32, in_flight: u64) -> u32 {
-    if max_in_flight == 0 {
-        return batch_size;
-    }
-    let room = u64::from(max_in_flight).saturating_sub(in_flight);
-    std::cmp::min(batch_size, u32::try_from(room).unwrap_or(u32::MAX))
-}
-
-async fn problem_types_by_problem_id(
-    state: &AppState,
-    problem_ids: impl IntoIterator<Item = i32>,
-) -> HashMap<i32, String> {
-    let mut ids: Vec<i32> = problem_ids.into_iter().collect();
-    ids.sort_unstable();
-    ids.dedup();
-    if ids.is_empty() {
-        return HashMap::new();
-    }
-
-    match problem::Entity::find()
-        .filter(problem::Column::Id.is_in(ids))
-        .all(&state.db)
-        .await
-    {
-        Ok(problems) => problems
-            .into_iter()
-            .map(|problem| (problem.id, problem.problem_type))
-            .collect(),
-        Err(e) => {
-            warn!(error = %e, "Failed to load problem types for submission transition metrics");
-            HashMap::new()
-        }
-    }
-}
-
-async fn record_code_run_claim_transitions(
-    state: &AppState,
-    models: &[ClaimedCodeRun],
-    transitioned_at: DateTime<Utc>,
-) {
-    let problem_types =
-        problem_types_by_problem_id(state, models.iter().map(|model| model.problem_id)).await;
-
-    for model in models {
-        let problem_type = problem_types
-            .get(&model.problem_id)
-            .map(String::as_str)
-            .unwrap_or("unknown");
-        record_submission_state_transition(
-            &state.metrics,
-            &SubmissionStatus::Queued,
-            &SubmissionStatus::Pending,
-            problem_type,
-            transition_duration_seconds(model.created_at, transitioned_at),
-        );
-    }
-}
-
-async fn record_judgement_claim_transitions(
-    state: &AppState,
-    claimed: &[ClaimedJudgement],
-    transitioned_at: DateTime<Utc>,
-) {
-    if claimed.is_empty() {
-        return;
-    }
-    let problem_types =
-        problem_types_by_problem_id(state, claimed.iter().map(|c| c.submission.problem_id)).await;
-
-    for c in claimed {
-        let problem_type = problem_types
-            .get(&c.submission.problem_id)
-            .map(String::as_str)
-            .unwrap_or("unknown");
-        record_submission_state_transition(
-            &state.metrics,
-            &SubmissionStatus::Queued,
-            &SubmissionStatus::Pending,
-            problem_type,
-            transition_duration_seconds(c.judgement.created_at, transitioned_at),
-        );
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // Fixtures are stamped with real time.
 mod tests {
     use super::*;
-
-    #[test]
-    fn claim_budget_fills_up_to_the_in_flight_cap_and_no_further() {
-        // Plenty of room: the batch size is the limit.
-        assert_eq!(claim_budget(32, 256, 0), 32);
-        // Close to the cap: only the room that is left.
-        assert_eq!(claim_budget(32, 256, 250), 6);
-        // At or past the cap (e.g. after a steal): claim nothing.
-        assert_eq!(claim_budget(32, 256, 256), 0);
-        assert_eq!(claim_budget(32, 256, 300), 0);
-        // 0 means no cap.
-        assert_eq!(claim_budget(32, 0, 10_000), 32);
-    }
 
     #[test]
     fn a_pass_repeats_while_it_fills_its_room_and_waits_for_room_when_held_back() {
@@ -595,14 +525,6 @@ mod tests {
         assert_eq!(effective_cap(800, 4), 1_600);
         // The floor is per server.
         assert_eq!(effective_cap(40, 4), 256);
-    }
-
-    #[test]
-    fn transition_duration_clamps_future_created_at_to_zero() {
-        let now = chrono::Utc::now();
-        let created_at = now + chrono::Duration::seconds(5);
-
-        assert_eq!(transition_duration_seconds(created_at, now), 0.0);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::common::{SpawnOptions, TestApp};
+use crate::common::{SpawnOptions, TestApp, routes};
 use broccoli_server_sdk::types::OperationTask;
 use common::SubmissionStatus;
 use common::liveness::NodeRole;
@@ -99,10 +99,12 @@ fn heartbeat(missing_platform_tools: &[&str]) -> common::worker::HeartbeatPayloa
         arch: None,
         cpu_count: None,
         pid: None,
-        missing_platform_tools: missing_platform_tools
-            .iter()
-            .map(|t| t.to_string())
-            .collect(),
+        intake: common::worker::Intake::from_missing(
+            missing_platform_tools
+                .iter()
+                .map(|t| t.to_string())
+                .collect(),
+        ),
     }
 }
 
@@ -281,4 +283,62 @@ async fn work_at_the_queue_is_handed_back_when_no_worker_takes_work() {
     );
     assert!(deps.operation_waiters.is_empty());
     hand_back.abort();
+}
+
+/// A task can be pinned only to a worker that takes work: an admin naming a
+/// live worker that lacks a platform tool is refused, as for one that is not
+/// live, instead of persisting a pin its tasks could never run under.
+#[tokio::test]
+async fn a_worker_that_takes_no_work_cannot_be_named_as_a_rejudge_target() {
+    use redis::AsyncCommands;
+    let url = format!(
+        "redis://127.0.0.1:{}",
+        test_support::shared_redis_port().await
+    );
+    let app = TestApp::spawn_with_options(SpawnOptions {
+        redis_url: Some(url.clone()),
+        disable_claim_fiber: true,
+        ..Default::default()
+    })
+    .await;
+    let mut conn = redis::Client::open(url.as_str())
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let namespace = common::config::default_operation_queue_name();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let (refusing, accepting) = (format!("refusing-{suffix}"), format!("accepting-{suffix}"));
+    for (id, missing) in [
+        (&refusing, &["broccoli-compare"][..]),
+        (&accepting, &[][..]),
+    ] {
+        let _: () = conn
+            .set_ex(
+                NodeRole::Worker.key(&namespace, id),
+                payload(missing).to_string(),
+                common::liveness::TTL.as_secs(),
+            )
+            .await
+            .unwrap();
+    }
+    let admin = app
+        .create_user_with_role("pin_refusing_admin", "password123", "admin")
+        .await;
+    let problem_id = app.create_problem(&admin, "Pin refusing").await;
+    let submission_id = app
+        .create_submission(problem_id, &admin, "cpp", "int main() {}")
+        .await;
+    let route = routes::submission_rejudge(submission_id);
+    let rejudge = async |target: &str| {
+        let body = serde_json::json!({ "target_worker_id": target });
+        app.post_with_token(&route, &body, &admin).await
+    };
+
+    let res = rejudge(&refusing).await;
+    assert_eq!(res.status, 400, "{}", res.text);
+    assert_eq!(res.body["code"], "VALIDATION_ERROR", "{}", res.text);
+
+    let res = rejudge(&accepting).await;
+    assert!(res.status < 300, "{}", res.text);
 }

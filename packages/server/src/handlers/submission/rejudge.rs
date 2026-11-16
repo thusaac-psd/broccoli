@@ -226,10 +226,10 @@ pub async fn rejudge_submission(
         Some(raw) => {
             auth_user.require_permission(perm::SYSTEM_ADMIN)?;
             validate_worker_id_format(raw)?;
-            let live = crate::handlers::system::live_worker_ids(&state).await;
-            if !live.contains(raw) {
+            let accepting = crate::handlers::system::accepting_worker_ids(&state).await;
+            if !accepting.contains(raw) {
                 return Err(AppError::Validation(format!(
-                    "Worker '{raw}' has no live heartbeat"
+                    "Worker '{raw}' is not live or takes no work"
                 )));
             }
             Some(Some(raw.to_string()))
@@ -341,10 +341,10 @@ pub async fn bulk_rejudge_submissions(
         }
         Some(raw) => {
             auth_user.require_permission(perm::SYSTEM_ADMIN)?;
-            let live = crate::handlers::system::live_worker_ids(&state).await;
-            if !live.contains(raw) {
+            let accepting = crate::handlers::system::accepting_worker_ids(&state).await;
+            if !accepting.contains(raw) {
                 return Err(AppError::Validation(format!(
-                    "Worker '{raw}' has no live heartbeat"
+                    "Worker '{raw}' is not live or takes no work"
                 )));
             }
             Some(Some(raw.to_string()))
@@ -445,17 +445,17 @@ pub async fn admin_fan_out_submission(
     // observe the bumped depth and back off.
     enforce_queue_depth_admission(&state).await?;
 
-    let live_workers = crate::handlers::system::live_worker_ids(&state).await;
+    let accepting = crate::handlers::system::accepting_worker_ids(&state).await;
     let mut offline: Vec<&str> = payload
         .target_worker_ids
         .iter()
-        .filter(|id| !live_workers.contains(*id))
+        .filter(|id| !accepting.contains(*id))
         .map(String::as_str)
         .collect();
     offline.sort();
     if !offline.is_empty() {
         return Err(AppError::Validation(format!(
-            "target_worker_ids contains worker(s) without a live heartbeat: {}",
+            "target_worker_ids contains worker(s) that are not live or take no work: {}",
             offline.join(", ")
         )));
     }

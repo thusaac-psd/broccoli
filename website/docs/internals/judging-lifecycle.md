@@ -65,7 +65,14 @@ queues work can forget it:
   admission acts on it.
 
 A woken fiber claims a batch, and repeats while each pass fills its batch and
-room is left. Wakes that arrive during a pass fold into one more pass, at
+room is left. A pass is one statement per kind of unit, judgements first: it
+counts what the server has in flight against its in-flight cap, takes the
+`Queued` rows that fit, marks them `Pending` and returns each with everything
+its dispatch and the claim's metrics read (the submission's fixed columns, the
+problem type, the time it waited). The dispatch starts right after the
+statement, with nothing fallible in between, so a claimed unit never waits in
+flight without a dispatch; a claim whose rows cannot be read is handed back to
+`Queued` spending nothing (`release_claimed`). Wakes that arrive during a pass fold into one more pass, at
 least 10 ms after the last one, so a burst is claimed in batches. Every
 replica wakes on the same notification; `SKIP LOCKED` in the claim splits the
 work. A one-second fallback tick covers notifications lost while the
@@ -227,9 +234,15 @@ plugin's code from that plugin's pack only.
 
 A missing platform tool is the worker's fault, never the submission's. A worker
 that lacks one reads no task at all: it stays live, and its heartbeat lists the
-missing tools, so the System page shows it as not taking work. A task reaches
+missing tools, so the System page shows it as not taking work and does not
+count it among the workers taking work; while no live worker takes work, the
+page says so, and its queued count shows the backlog waiting for one. A task reaches
 it only if a tool goes missing while the worker holds it; the attempt is handed
-back for a worker that has the tool. While live workers exist and none of them
+back for a worker that has the tool. A pin never holds work for such a worker:
+an admin cannot name it as a rejudge target, a task pinned to it goes to the
+shared stream, and pinned tasks waiting for it when it stops taking work move
+there within a reclaim tick (see [Message queue](./message-queue.md)). While
+live workers exist and none of them
 takes work, the claim fiber claims nothing, so submissions wait `Queued`
 instead of failing. Work already dispatched when the fleet comes to that is
 handed back the same way: every operation the server waits for fails as

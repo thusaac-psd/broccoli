@@ -1,8 +1,7 @@
 use crate::common::{TestApp, routes};
 
-/// `system:view` is the sole gate on `handlers/system.rs`'s three endpoints -
-/// this pins that gate for the guard test's
-/// `visibility-bypass-audited` comment above that file's entity import.
+/// `system:view` is the sole gate on `handlers/system.rs`'s three endpoints:
+/// this pins that gate.
 mod system_view_permission {
     use super::*;
 
@@ -117,7 +116,7 @@ mod worker_liveness {
             arch: None,
             cpu_count: None,
             pid: None,
-            missing_platform_tools: Vec::new(),
+            intake: common::worker::Intake::Accepting,
         };
         let _: () = conn
             .set_ex(
@@ -216,5 +215,108 @@ mod worker_liveness {
         assert_eq!(res.body["queue_state"], "unreachable", "{}", res.text);
         assert_eq!(res.body["workers_stale"], true, "{}", res.text);
         assert_eq!(res.body["workers"][0]["id"], "w1", "{}", res.text);
+    }
+}
+
+/// The overview tells a queued backlog from work in flight and from work
+/// parked behind a disabled contest type, and says when no live worker takes
+/// work, the state in which the claim gate claims nothing.
+mod backlog {
+    use super::*;
+    use crate::common::SpawnOptions;
+    use common::SubmissionStatus;
+    use common::worker::{HeartbeatPayload, Intake};
+    use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
+    use server::entity::{submission, user};
+
+    fn heartbeat(intake: Intake) -> HeartbeatPayload {
+        HeartbeatPayload {
+            id: "w".into(),
+            started_at: chrono::Utc::now(),
+            last_seen: chrono::Utc::now(),
+            in_flight: 0,
+            max_concurrency: Some(1),
+            fairness_mode: "unknown".into(),
+            sandbox_backend: "test".into(),
+            version: "test".into(),
+            hostname: None,
+            ip_addresses: Vec::new(),
+            os: None,
+            arch: None,
+            cpu_count: None,
+            pid: None,
+            intake,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_overview_counts_queued_parked_and_in_flight_work_and_a_fleet_that_takes_none() {
+        let app = TestApp::spawn_with_options(SpawnOptions {
+            disable_claim_fiber: true,
+            ..Default::default()
+        })
+        .await;
+        let admin = app
+            .create_user_with_role("backlog_admin", "pass1234", "admin")
+            .await;
+        let problem_id = app.create_problem(&admin, "Backlog").await;
+        let user_id = user::Entity::find()
+            .filter(user::Column::Username.eq("backlog_admin"))
+            .one(&app.db)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        app.db
+            .execute_unprepared(
+                "INSERT INTO plugin (id, is_enabled, governs) VALUES \
+                 ('backlog-parked', false, '{\"visibility\": false, \"contest_types\": [\"parked-x\"]}')",
+            )
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        for contest_type in ["standard", "standard", "standard", "parked-x"] {
+            let row = app
+                .insert_submission(submission::ActiveModel {
+                    files: Set(serde_json::json!([])),
+                    language: Set("cpp".into()),
+                    user_id: Set(user_id),
+                    problem_id: Set(problem_id),
+                    contest_id: Set(None),
+                    contest_type: Set(contest_type.into()),
+                    status: Set(SubmissionStatus::Queued),
+                    judge_epoch: Set(0),
+                    created_at: Set(chrono::Utc::now()),
+                    ..Default::default()
+                })
+                .await;
+            ids.push(row.id);
+        }
+        app.put_in_flight(ids[0], SubmissionStatus::Running, "srv", None, None)
+            .await;
+        let overview = async || {
+            let res = app.get_with_token(routes::SYSTEM_OVERVIEW, &admin).await;
+            assert_eq!(res.status, 200, "{}", res.text);
+            res
+        };
+
+        let res = overview().await;
+        assert_eq!(res.body["intake"], "no_workers", "{}", res.text);
+        assert_eq!(res.body["submissions_queued"], 2, "{}", res.text);
+        assert_eq!(res.body["submissions_parked"], 1, "{}", res.text);
+        assert_eq!(res.body["submissions_in_progress"], 1, "{}", res.text);
+
+        let refusing = Intake::from_missing(vec!["broccoli-compare".into()]);
+        app.state
+            .worker_slots
+            .observe(&[heartbeat(refusing.clone())], 1);
+        let res = overview().await;
+        assert_eq!(res.body["intake"], "none_accepting", "{}", res.text);
+
+        app.state
+            .worker_slots
+            .observe(&[heartbeat(refusing), heartbeat(Intake::Accepting)], 1);
+        let res = overview().await;
+        assert_eq!(res.body["intake"], "accepting", "{}", res.text);
     }
 }

@@ -99,10 +99,34 @@ pub struct SystemOverviewResponse {
     pub workers_stale: bool,
     /// Queue depths; empty while the queue is unreachable.
     pub queues: Vec<QueueInfo>,
-    /// Submissions currently in a non-terminal state (Pending, Compiling, Running).
+    /// Whether the fleet takes work, as this server's claim gate sees it.
+    pub intake: FleetIntake,
+    /// Submissions being judged: claimed and not finished (Pending,
+    /// Compiling, Running).
     #[schema(example = 0)]
     pub submissions_in_progress: u64,
+    /// Submissions waiting `Queued` for a server to claim them. While
+    /// `intake` is `none_accepting`, none is claimed.
+    #[schema(example = 0)]
+    pub submissions_queued: u64,
+    /// Submissions waiting `Queued` whose contest type has no enabled
+    /// provider: no server claims them until one is enabled again.
+    #[schema(example = 0)]
+    pub submissions_parked: u64,
     /// DLQ messages with `resolved = false`.
     #[schema(example = 0)]
     pub dlq_unresolved_count: u64,
+}
+
+/// Whether the live workers take work, as the claim gate decides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetIntake {
+    /// At least one live worker takes work.
+    Accepting,
+    /// Live workers exist and none takes work (each lacks a platform tool):
+    /// nothing is claimed, and submissions wait `Queued`.
+    NoneAccepting,
+    /// No live worker is known.
+    NoWorkers,
 }

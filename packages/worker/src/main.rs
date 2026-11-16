@@ -160,7 +160,7 @@ mod tests {
             arch: None,
             cpu_count: None,
             pid: None,
-            missing_platform_tools: Vec::new(),
+            intake: common::worker::Intake::Accepting,
         })
         .unwrap();
         let client = redis::Client::open(url).unwrap();

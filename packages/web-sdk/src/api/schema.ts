@@ -296,7 +296,7 @@ export interface paths {
     };
     /**
      * Aggregated system health
-     * @description Returns workers, queue depths, in-progress submissions, and unresolved DLQ count in a single response. While the message queue is unreachable, `queue_state` is `unreachable`, `queues` is empty and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.
+     * @description Returns workers, queue depths, whether the fleet takes work (`intake`), submissions in flight, queued and parked behind a disabled contest type, and the unresolved DLQ count in a single response. While the message queue is unreachable, `queue_state` is `unreachable`, `queues` is empty and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.
      */
     get: operations['getSystemOverview'];
     put?: never;
@@ -2362,7 +2362,7 @@ export interface components {
       problem_id: number;
       /**
        * @description Workers to fan out to. One submission is created per worker. Each ID
-       *     must have a live heartbeat. Cannot be empty.
+       *     must be a live worker that takes work. Cannot be empty.
        */
       target_worker_ids: string[];
     };
@@ -2481,8 +2481,8 @@ export interface components {
       submission_ids: number[];
       /**
        * @description When set, every rejudged submission is pinned to this worker. The
-       *     caller must hold `system:admin` and the worker must have a live
-       *     heartbeat. An empty string clears existing pins and also requires
+       *     caller must hold `system:admin` and the worker must be live and take
+       *     work. An empty string clears existing pins and also requires
        *     `system:admin`.
        */
       target_worker_id?: string | null;
@@ -3429,6 +3429,11 @@ export interface components {
           };
         };
     /**
+     * @description Whether the live workers take work, as the claim gate decides it.
+     * @enum {string}
+     */
+    FleetIntake: 'accepting' | 'none_accepting' | 'no_workers';
+    /**
      * @description Fleet-wide state of one plugin.
      * @enum {string}
      */
@@ -4196,8 +4201,8 @@ export interface components {
        */
       apply_immediately: boolean;
       /**
-       * @description Pin the rejudged submission to a specific worker. Requires
-       *     `system:admin`. An empty string clears an existing pin and also
+       * @description Pin the rejudged submission to a specific worker, which must be live
+       *     and take work. Requires `system:admin`. An empty string clears an existing pin and also
        *     requires `system:admin`. When omitted, the submission is rejudged on the
        *     shared worker pool.
        */
@@ -4535,8 +4540,9 @@ export interface components {
       result?: components['schemas']['JudgeResultResponse'] | null;
       status?: components['schemas']['SubmissionStatus'] | null;
       /**
-       * @description When set, the submission has been pinned to this worker by an admin
-       *     and every operation it produces will run there.
+       * @description When set, the submission has been pinned to this worker by an admin:
+       *     every operation it produces runs there while that worker is live and
+       *     takes work, and on any worker otherwise.
        * @example worker-1
        */
       target_worker_id?: string | null;
@@ -4607,9 +4613,10 @@ export interface components {
       result?: components['schemas']['JudgeResultResponse'] | null;
       status?: components['schemas']['SubmissionStatus'] | null;
       /**
-       * @description When set, the submission has been pinned to this worker by an admin
-       *     and every operation it produces will run there. Shown only to callers
-       *     with `system:view`.
+       * @description When set, the submission has been pinned to this worker by an admin:
+       *     every operation it produces runs there while that worker is live and
+       *     takes work, and on any worker otherwise. Shown only to callers with
+       *     `system:view`.
        * @example worker-1
        */
       target_worker_id?: string | null;
@@ -4640,16 +4647,33 @@ export interface components {
        * @example 0
        */
       dlq_unresolved_count: number;
+      /** @description Whether the fleet takes work, as this server's claim gate sees it. */
+      intake: components['schemas']['FleetIntake'];
       /** @description Whether the worker list and queue depths below were read just now. */
       queue_state: components['schemas']['QueueState'];
       /** @description Queue depths; empty while the queue is unreachable. */
       queues: components['schemas']['QueueInfo'][];
       /**
        * Format: int64
-       * @description Submissions currently in a non-terminal state (Pending, Compiling, Running).
+       * @description Submissions being judged: claimed and not finished (Pending,
+       *     Compiling, Running).
        * @example 0
        */
       submissions_in_progress: number;
+      /**
+       * Format: int64
+       * @description Submissions waiting `Queued` whose contest type has no enabled
+       *     provider: no server claims them until one is enabled again.
+       * @example 0
+       */
+      submissions_parked: number;
+      /**
+       * Format: int64
+       * @description Submissions waiting `Queued` for a server to claim them. While
+       *     `intake` is `none_accepting`, none is claimed.
+       * @example 0
+       */
+      submissions_queued: number;
       /**
        * @description The live workers. While the queue is unreachable: the list this server
        *     last read, and `workers_stale` is true.

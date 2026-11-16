@@ -117,8 +117,8 @@ pub(crate) use plugin_writes::{
     SqlBindSink, as_recorded, code_run_write, code_run_write_fence, judgement_write, write_fence,
 };
 pub(crate) use unit::{
-    Abandoned, ClaimedCodeRun, ClaimedJudgement, claim_code_runs, claim_judgements, fail_dispatch,
-    reclaim_abandoned, refresh_leases, resolve_if_settled, retry_system_errors,
+    Abandoned, ClaimLimit, Claimed, ClaimedJudgement, claim_code_runs, claim_judgements,
+    fail_dispatch, reclaim_abandoned, refresh_leases, resolve_if_settled, retry_system_errors,
 };
 pub(crate) use unit::{DispatchFailed, SystemErrorPass};
-pub use unit::{Unit, UnitCounts, count_in_flight, release_leases};
+pub use unit::{Unit, UnitCounts, release_leases};

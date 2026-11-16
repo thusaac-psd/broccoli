@@ -49,16 +49,53 @@ pub struct HeartbeatPayload {
     pub arch: Option<String>,
     pub cpu_count: Option<u32>,
     pub pid: Option<u32>,
-    /// The platform tools missing from this worker as of this heartbeat.
-    /// While any is, the worker takes no work ([`Self::accepts_work`]).
-    pub missing_platform_tools: Vec<String>,
+    /// Whether the worker takes work, as of this heartbeat.
+    pub intake: Intake,
+}
+
+/// Whether a worker takes work. Every reader of the fleet reads this one
+/// decision: the claim gate and fan-out ([`HeartbeatPayload::accepts_work`]),
+/// pin validation, the system overview, and the queue's scripts that route a
+/// pinned task and drain a private stream (they read `intake.state` from the
+/// liveness key, see `mq`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Intake {
+    /// The worker has every platform tool and reads tasks.
+    Accepting,
+    /// The worker lacks platform tools: it stays live and reads no task, not
+    /// even one pinned to it, until it has them.
+    Refusing { missing_platform_tools: Vec<String> },
+}
+
+impl Intake {
+    /// The intake of a worker missing `missing_platform_tools`: it takes work
+    /// only when it misses none.
+    pub fn from_missing(missing_platform_tools: Vec<String>) -> Self {
+        if missing_platform_tools.is_empty() {
+            Self::Accepting
+        } else {
+            Self::Refusing {
+                missing_platform_tools,
+            }
+        }
+    }
+
+    /// The platform tools the worker lacks; empty while it accepts work.
+    pub fn missing_platform_tools(&self) -> &[String] {
+        match self {
+            Self::Accepting => &[],
+            Self::Refusing {
+                missing_platform_tools,
+            } => missing_platform_tools,
+        }
+    }
 }
 
 impl HeartbeatPayload {
-    /// Whether the worker takes work: it has every platform tool. A worker
-    /// that does not stays live and reads no task until it does.
+    /// Whether the worker takes work (see [`Intake`]).
     pub fn accepts_work(&self) -> bool {
-        self.missing_platform_tools.is_empty()
+        matches!(self.intake, Intake::Accepting)
     }
 
     /// What a server's view of the fleet's capacity reads from this

@@ -116,9 +116,10 @@ pub struct SubmissionResponseAfterMutation {
     pub contest_type: Option<String>,
     #[schema(example = 0)]
     pub judge_epoch: Option<i32>,
-    /// When set, the submission has been pinned to this worker by an admin
-    /// and every operation it produces will run there. Shown only to callers
-    /// with `system:view`.
+    /// When set, the submission has been pinned to this worker by an admin:
+    /// every operation it produces runs there while that worker is live and
+    /// takes work, and on any worker otherwise. Shown only to callers with
+    /// `system:view`.
     #[schema(example = "worker-1")]
     pub target_worker_id: Option<String>,
     #[schema(example = "2025-10-01T14:30:00Z")]
@@ -186,8 +187,8 @@ pub struct BulkRejudgeRequest {
     #[schema(default = true)]
     pub apply_immediately: bool,
     /// When set, every rejudged submission is pinned to this worker. The
-    /// caller must hold `system:admin` and the worker must have a live
-    /// heartbeat. An empty string clears existing pins and also requires
+    /// caller must hold `system:admin` and the worker must be live and take
+    /// work. An empty string clears existing pins and also requires
     /// `system:admin`.
     #[serde(default)]
     pub target_worker_id: Option<String>,
@@ -201,8 +202,8 @@ pub struct RejudgeRequest {
     #[serde(default = "default_true")]
     #[schema(default = true)]
     pub apply_immediately: bool,
-    /// Pin the rejudged submission to a specific worker. Requires
-    /// `system:admin`. An empty string clears an existing pin and also
+    /// Pin the rejudged submission to a specific worker, which must be live
+    /// and take work. Requires `system:admin`. An empty string clears an existing pin and also
     /// requires `system:admin`. When omitted, the submission is rejudged on the
     /// shared worker pool.
     #[serde(default)]
@@ -239,7 +240,7 @@ pub struct AdminFanOutSubmissionRequest {
     #[serde(default)]
     pub contest_type: Option<String>,
     /// Workers to fan out to. One submission is created per worker. Each ID
-    /// must have a live heartbeat. Cannot be empty.
+    /// must be a live worker that takes work. Cannot be empty.
     pub target_worker_ids: Vec<String>,
 }
 
