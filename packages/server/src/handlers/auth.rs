@@ -291,7 +291,6 @@ pub async fn me(auth_user: FreshAuthUser) -> Json<MeResponse> {
 
 const USER_CODE_CHARSET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 const USER_CODE_LEN: usize = 8;
-const DEVICE_CODE_EXPIRY_SECS: u64 = 900;
 const POLL_INTERVAL_SECS: u64 = 5;
 
 fn generate_device_code() -> String {
@@ -422,7 +421,7 @@ fn host_header(headers: &HeaderMap) -> Option<String> {
     request_body = DeviceCodeRequest,
     responses(
         (status = 200, description = "Device code generated", body = DeviceCodeResponse),
-        (status = 429, description = "Too many device codes requested from this address (30 a minute) or pending (RATE_LIMITED). Includes Retry-After.", body = ErrorBody),
+        (status = 429, description = "Too many device codes requested from this address (30 a minute) or pending for it (RATE_LIMITED). Includes Retry-After.", body = ErrorBody),
     ),
 )]
 #[instrument(skip(state, headers, forwarded))]
@@ -436,7 +435,7 @@ pub async fn request_device_code(
     ip_quota::DEVICE_CODE.admit(&state.mq, client_ip).await?;
     let (device_code, user_code) = device_auth::create(
         &state.db,
-        DEVICE_CODE_EXPIRY_SECS,
+        client_ip,
         || (generate_device_code(), generate_user_code()),
         normalize_user_code,
     )
@@ -452,7 +451,7 @@ pub async fn request_device_code(
         device_code,
         user_code,
         verification_url: format!("{}/auth/device", origin),
-        expires_in: DEVICE_CODE_EXPIRY_SECS,
+        expires_in: device_auth::CODE_TTL_SECS,
         interval: POLL_INTERVAL_SECS,
     }))
 }

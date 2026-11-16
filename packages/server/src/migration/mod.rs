@@ -32,6 +32,7 @@ mod m0008_user_password_not_blank;
 mod m0009_config_issues;
 mod m0010_refresh_token_session_required;
 mod m0011_device_approval_session;
+mod m0012_device_code_client_addr;
 
 pub use m0001_baseline::{PLUGIN_READABLE, PLUGIN_READABLE_COLUMNS};
 
@@ -174,6 +175,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0009_config_issues::Migration),
             Box::new(m0010_refresh_token_session_required::Migration),
             Box::new(m0011_device_approval_session::Migration),
+            Box::new(m0012_device_code_client_addr::Migration),
         ]
     }
 }

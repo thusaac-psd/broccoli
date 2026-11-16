@@ -3,43 +3,57 @@
 //! land on a different server replica. Every expiry and poll-interval
 //! comparison uses the DB clock.
 
+use std::net::IpAddr;
+
 use common::db::DatabaseConnection;
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 
 use crate::error::AppError;
 use crate::services::auth_tokens::{SignIn, issue_access_token, open_session};
+use crate::services::ip_quota;
 use crate::utils::hash;
 
-/// Most pending codes held fleet-wide; past it, new requests get 429.
-const MAX_PENDING: i64 = 1000;
+/// Most pending codes one client address holds; past it, its new requests
+/// get 429. It is what [`ip_quota::DEVICE_CODE`] admits from one address
+/// within a code's lifetime, so it never refuses a request the quota let
+/// through, and it still bounds the table while Redis, which counts the
+/// quota, cannot answer. Requests from other addresses are never affected,
+/// so no source can lock the fleet's CLI sign-ins out.
+pub const MAX_PENDING_PER_ADDRESS: i64 = ip_quota::DEVICE_CODE.limit as i64
+    * (CODE_TTL_SECS / ip_quota::DEVICE_CODE.window.as_secs()) as i64;
+/// How long a device code stays valid.
+pub const CODE_TTL_SECS: u64 = 900;
 /// Retries on a user-code collision (20^8 codes, so effectively never).
 const MAX_ATTEMPTS: usize = 10;
 
-/// Insert a pending code unless the fleet-wide cap is reached. Expired rows
-/// are purged in the same statement, which is what bounds the table.
+/// Insert a pending code for client address `$5` unless that address holds
+/// `$4` pending codes. Expired rows are purged in the same statement, which
+/// is what bounds the table.
 const CREATE_SQL: &str = r#"
 WITH purged AS (
     DELETE FROM device_authorization WHERE expires_at <= now()
 )
 INSERT INTO device_authorization
-    (device_code_hash, user_code, approved_by, created_at, expires_at, last_poll_at)
-SELECT $1, $2, NULL, now(), now() + make_interval(secs => $3::int), NULL
-WHERE (SELECT count(*) FROM device_authorization WHERE expires_at > now()) < $4
+    (device_code_hash, user_code, approved_by, client_addr, created_at, expires_at, last_poll_at)
+SELECT $1, $2, NULL, $5, now(), now() + make_interval(secs => $3::int), NULL
+WHERE (SELECT count(*) FROM device_authorization
+       WHERE client_addr IS NOT DISTINCT FROM $5 AND expires_at > now()) < $4
 ON CONFLICT DO NOTHING
 RETURNING 1 AS created
 "#;
 
-const PENDING_COUNT_SQL: &str =
-    "SELECT count(*) AS pending FROM device_authorization WHERE expires_at > now()";
+const PENDING_COUNT_SQL: &str = "SELECT count(*) AS pending FROM device_authorization \
+     WHERE client_addr IS NOT DISTINCT FROM $1 AND expires_at > now()";
 
-/// Store a new pending code. `generate` yields `(device_code, user_code)`
-/// candidates; the user code is stored normalized.
+/// Store a new pending code requested from `client`. `generate` yields
+/// `(device_code, user_code)` candidates; the user code is stored normalized.
 pub async fn create(
     db: &DatabaseConnection,
-    ttl_secs: u64,
+    client: Option<IpAddr>,
     mut generate: impl FnMut() -> (String, String),
     normalize: impl Fn(&str) -> String,
 ) -> Result<(String, String), AppError> {
+    let client = client.map(|ip| ip.to_string());
     for _ in 0..MAX_ATTEMPTS {
         let (device_code, user_code) = generate();
         let created = db
@@ -49,25 +63,27 @@ pub async fn create(
                 [
                     hash::sha256_hex(&device_code).into(),
                     normalize(&user_code).into(),
-                    (ttl_secs as i32).into(),
-                    MAX_PENDING.into(),
+                    (CODE_TTL_SECS as i32).into(),
+                    MAX_PENDING_PER_ADDRESS.into(),
+                    client.clone().into(),
                 ],
             ))
             .await?;
         if created.is_some() {
             return Ok((device_code, user_code));
         }
-        // Nothing inserted: either the cap or a user-code collision.
+        // Nothing inserted: either the address's cap or a user-code collision.
         let pending: i64 = db
-            .query_one_raw(Statement::from_string(
+            .query_one_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 PENDING_COUNT_SQL,
+                [client.clone().into()],
             ))
             .await?
             .map(|row| row.try_get("", "pending"))
             .transpose()?
             .unwrap_or(0);
-        if pending >= MAX_PENDING {
+        if pending >= MAX_PENDING_PER_ADDRESS {
             return Err(AppError::RateLimited { retry_after: 60 });
         }
     }

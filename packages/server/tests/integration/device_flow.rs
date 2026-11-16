@@ -5,6 +5,7 @@
 use sea_orm::{ConnectionTrait, EntityTrait};
 use serde_json::json;
 use server::entity::device_authorization;
+use server::services::device_auth::MAX_PENDING_PER_ADDRESS;
 
 use crate::common::{TestApp, routes};
 
@@ -226,4 +227,37 @@ async fn an_approval_ends_with_the_session_that_approved_it() {
             "{end:?}: the approval is deleted with its session"
         );
     }
+}
+
+/// Fill the table with `n` pending codes requested from `addr`.
+async fn hold_pending(app: &TestApp, addr: &str, n: i64) {
+    app.db
+        .execute_unprepared(&format!(
+            "INSERT INTO device_authorization \
+               (device_code_hash, user_code, client_addr, created_at, expires_at) \
+             SELECT '{addr}-' || g, '{addr}-' || g, '{addr}', now(), now() + interval '15 minutes' \
+             FROM generate_series(1, {n}) g"
+        ))
+        .await
+        .unwrap();
+}
+
+/// Pending codes are bounded per client address: a source holding its whole
+/// allowance cannot keep any other address from starting a CLI sign-in.
+#[tokio::test]
+async fn pending_codes_are_bounded_per_client_address() {
+    let app = TestApp::spawn().await;
+    // Far more pending codes than any one address may hold, from others.
+    for i in 0..4 {
+        hold_pending(&app, &format!("10.0.0.{i}"), MAX_PENDING_PER_ADDRESS).await;
+    }
+    start(&app).await;
+
+    // This client (the test's loopback address) at its own cap is refused.
+    hold_pending(&app, "127.0.0.1", MAX_PENDING_PER_ADDRESS - 1).await;
+    let res = app
+        .post_without_token(routes::DEVICE_CODE, &json!({}))
+        .await;
+    assert_eq!(res.status, 429, "{}", res.text);
+    assert_eq!(res.body["code"], "RATE_LIMITED");
 }

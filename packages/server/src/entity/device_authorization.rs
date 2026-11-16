@@ -27,6 +27,11 @@ pub struct Model {
     #[sea_orm(nullable, indexed)]
     pub approved_by: Option<i64>,
 
+    /// The client address that requested the code, `None` when the server
+    /// could not tell it. Pending codes are bounded per address.
+    #[sea_orm(nullable, indexed)]
+    pub client_addr: Option<String>,
+
     pub created_at: DateTimeUtc,
     pub expires_at: DateTimeUtc,
     pub last_poll_at: Option<DateTimeUtc>,

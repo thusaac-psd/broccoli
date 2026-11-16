@@ -6415,7 +6415,7 @@ export interface operations {
           'application/json': components['schemas']['DeviceCodeResponse'];
         };
       };
-      /** @description Too many device codes requested from this address (30 a minute) or pending (RATE_LIMITED). Includes Retry-After. */
+      /** @description Too many device codes requested from this address (30 a minute) or pending for it (RATE_LIMITED). Includes Retry-After. */
       429: {
         headers: {
           [name: string]: unknown;
