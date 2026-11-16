@@ -41,7 +41,8 @@ A manifest that combines these keys in a way the server cannot enforce does not
 load, and `broccoli-dev plugin build` reports it: a `public` route that names a
 contest, a problem or a permission, `participant` without `contest`,
 `contest_type` without `contest`, a parameter missing from `path`, or an unknown
-key.
+key. A manifest that declares the same `method` and `path` twice does not load
+either, so a route's access is never replaced by a later declaration.
 
 ## Who may call it
 

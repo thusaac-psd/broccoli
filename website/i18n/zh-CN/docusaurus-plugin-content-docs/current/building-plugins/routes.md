@@ -32,7 +32,7 @@ contest_type = "ioi"
 | `problem` | 指明题目的路径参数：路由声明了 `contest` 时为该比赛中的题目，否则为独立题目。 |
 | `contest_type` | 路由唯一服务的比赛类型。需要同时声明 `contest`。 |
 
-如果清单中这些键的组合是服务器无法执行的，插件不会加载，`broccoli-dev plugin build` 也会报告错误：`public` 路由指定了比赛、题目或权限，`participant` 未声明 `contest`，`contest_type` 未声明 `contest`，参数不在 `path` 中，或出现未知的键。
+如果清单中这些键的组合是服务器无法执行的，插件不会加载，`broccoli-dev plugin build` 也会报告错误：`public` 路由指定了比赛、题目或权限，`participant` 未声明 `contest`，`contest_type` 未声明 `contest`，参数不在 `path` 中，或出现未知的键。同一 `method` 和 `path` 声明两次的清单同样不会加载，因此路由的访问规则永远不会被后面的声明替换。
 
 ## 谁可以调用
 

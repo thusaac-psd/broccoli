@@ -95,8 +95,17 @@ impl PluginEntry {
                         route.method, route.path, id, e
                     ))
                 })?;
+                // A second declaration of a route would silently replace the
+                // first one's handler and access, so it fails the load.
+                let method = route.method.to_uppercase();
+                if info.methods.contains_key(&method) {
+                    return Err(PluginError::LoadFailed(format!(
+                        "Plugin '{id}' declares route {method} {} more than once",
+                        route.path
+                    )));
+                }
                 info.methods.insert(
-                    route.method.to_uppercase(),
+                    method,
                     RouteMetaData {
                         handler: route.handler.clone(),
                         access,
@@ -251,6 +260,43 @@ function = "second"
             error
                 .to_string()
                 .contains("more than one server timer callback")
+        );
+    }
+
+    #[test]
+    fn a_route_declared_twice_fails_the_load() {
+        let manifest: PluginManifest = toml::from_str(
+            r#"
+name = "test"
+version = "0.1.0"
+
+[server]
+entry = "test.wasm"
+
+[[server.routes]]
+method = "GET"
+path = "/contests/{contest_id}/secret"
+access = "participant"
+contest = "{contest_id}"
+handler = "secret"
+
+[[server.routes]]
+method = "get"
+path = "/contests/{contest_id}/secret"
+access = "public"
+handler = "secret"
+"#,
+        )
+        .unwrap();
+
+        let error = PluginEntry::new("test".into(), ".".into(), manifest)
+            .err()
+            .expect("a duplicate route must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("GET /contests/{contest_id}/secret more than once"),
+            "{error}"
         );
     }
 
