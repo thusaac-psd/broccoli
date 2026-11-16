@@ -9,6 +9,9 @@ use sea_orm::{
     QueryFilter, Set, Statement, TransactionTrait,
 };
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use super::unit::Reclaimed;
 use super::*;
 use crate::entity::{
@@ -16,6 +19,49 @@ use crate::entity::{
 };
 
 const NO_TYPES: &[String] = &[];
+
+/// Ten rows, no in-flight cap.
+const TEN: ClaimLimit = ClaimLimit {
+    rows: 10,
+    in_flight_cap: None,
+};
+
+/// The units `server` has in flight.
+async fn in_flight(db: &DatabaseConnection, server: &str) -> i64 {
+    let count = |table: &str| {
+        format!(
+            "(SELECT COUNT(*) FROM {table} WHERE owner_server_id = $1 AND status IN {})",
+            common::StatusPhase::InFlight.sql_list()
+        )
+    };
+    let row = db
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!(
+                "SELECT ({} + {})::bigint AS n",
+                count("submission_judgement"),
+                count("code_run")
+            ),
+            [server.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    row.try_get("", "n").unwrap()
+}
+
+/// A handle on `db`'s pool that counts the statements run through it.
+fn counting(db: &DatabaseConnection) -> (DatabaseConnection, Arc<AtomicUsize>) {
+    let statements = Arc::new(AtomicUsize::new(0));
+    let mut counted = sea_orm::SqlxPostgresConnector::from_sqlx_postgres_pool(
+        db.as_sea_orm().get_postgres_connection_pool().clone(),
+    );
+    let seen = Arc::clone(&statements);
+    counted.set_metric_callback(move |_| {
+        seen.fetch_add(1, Ordering::Relaxed);
+    });
+    (counted.into(), statements)
+}
 
 /// The test user and problem, seeded on first use.
 async fn owner_ids(db: &DatabaseConnection) -> (i32, i32) {
@@ -75,12 +121,12 @@ async fn exec(db: &DatabaseConnection, sql: &str) {
 }
 
 async fn claim_one(db: &DatabaseConnection, server: &str) -> ClaimedJudgement {
-    let mut claimed = claim_judgements(db, server, 10, NO_TYPES)
+    let mut claimed = claim_judgements(db, server, TEN, NO_TYPES)
         .await
         .unwrap()
         .units;
     assert_eq!(claimed.len(), 1, "exactly one judgement is claimable");
-    claimed.remove(0)
+    claimed.remove(0).unit
 }
 
 async fn add_result(db: &DatabaseConnection, j: &submission_judgement::Model) {
@@ -164,16 +210,127 @@ async fn claiming_puts_the_judgement_in_flight_and_the_submission_follows() {
     assert_eq!(claimed.judgement.owner_server_id.as_deref(), Some("srv-a"));
     assert!(claimed.judgement.lease_heartbeat_at.is_some());
     assert!(claimed.judgement.leased_at.is_some());
-    assert_eq!(claimed.submission.status, SubmissionStatus::Pending);
+    assert_eq!(sub(&db, s.id).await.status, SubmissionStatus::Pending);
     assert!(
-        claim_judgements(&db, "srv-b", 10, NO_TYPES)
+        claim_judgements(&db, "srv-b", TEN, NO_TYPES)
             .await
             .unwrap()
             .units
             .is_empty(),
         "a claimed judgement is not claimed again"
     );
-    assert_eq!(count_in_flight(&db, "srv-a").await.unwrap(), 1);
+    assert_eq!(in_flight(&db, "srv-a").await, 1);
+}
+
+/// A claim is one statement: it returns each judgement with what its
+/// dispatch reads of the submission and what the claim's metrics record, so
+/// no second statement can fail between the claim committing and the
+/// dispatch starting.
+#[tokio::test]
+async fn a_claim_is_one_statement_that_returns_what_dispatch_needs() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (s, j) = new_submission(&db).await;
+    let (counted, statements) = counting(&db);
+
+    let claimed = claim_judgements(&counted, "srv", TEN, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(statements.load(Ordering::Relaxed), 1);
+    let [claim] = &claimed.units[..] else {
+        panic!("one judgement claimed: {claimed:?}");
+    };
+    assert_eq!(claim.unit.judgement.id, j.id);
+    assert_eq!(claim.unit.submission.id, s.id);
+    assert_eq!(claim.unit.submission.problem_id, s.problem_id);
+    assert_eq!(claim.unit.submission.language, "cpp");
+    assert_eq!(claim.unit.submission.contest_type, "standard");
+    assert_eq!(claim.problem_type, "standard");
+    assert!(claim.queued_secs >= 0.0);
+    assert!(claimed.plugin_config_epoch.is_some());
+
+    let (counted, statements) = counting(&db);
+    let none = claim_judgements(&counted, "srv", TEN, NO_TYPES)
+        .await
+        .unwrap();
+    assert!(none.units.is_empty() && none.plugin_config_epoch.is_none());
+    assert_eq!(statements.load(Ordering::Relaxed), 1);
+}
+
+/// Under an in-flight cap the claim counts what the server has in flight in
+/// the same statement, takes no more than the room left, and says what room
+/// that was.
+#[tokio::test]
+async fn a_capped_claim_takes_only_the_room_the_cap_leaves() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    for _ in 0..3 {
+        new_submission(&db).await;
+    }
+    new_code_run(&db).await;
+    let capped = |cap| ClaimLimit {
+        rows: 10,
+        in_flight_cap: Some(cap),
+    };
+    assert_eq!(
+        claim_code_runs(&db, "srv", TEN, NO_TYPES)
+            .await
+            .unwrap()
+            .units
+            .len(),
+        1
+    );
+
+    let claimed = claim_judgements(&db, "srv", capped(3), NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(claimed.cap_room, Some(2), "the code run counts");
+    assert_eq!(claimed.units.len(), 2);
+    let full = claim_judgements(&db, "srv", capped(3), NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(full.cap_room, Some(0));
+    assert!(full.units.is_empty());
+    assert_eq!(
+        claim_judgements(&db, "other", capped(3), NO_TYPES)
+            .await
+            .unwrap()
+            .cap_room,
+        Some(3),
+        "another server's work does not count"
+    );
+}
+
+/// A claim whose dispatch never starts goes back to `Queued` spending no
+/// retry, and only the given rows this server owns move.
+#[tokio::test]
+async fn a_claim_that_never_dispatched_is_handed_back_without_spending_a_retry() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (s, _) = new_submission(&db).await;
+    let claimed = claim_one(&db, "srv").await;
+    new_submission(&db).await;
+    let other = claim_one(&db, "srv").await;
+
+    assert_eq!(
+        super::unit::release_claimed(&db, Unit::Judgement, "elsewhere", &[claimed.judgement.id])
+            .await
+            .unwrap(),
+        0,
+        "another server's claim is not released"
+    );
+    assert_eq!(
+        super::unit::release_claimed(&db, Unit::Judgement, "srv", &[claimed.judgement.id])
+            .await
+            .unwrap(),
+        1
+    );
+    let j = judgement(&db, claimed.judgement.id).await;
+    assert_eq!(j.status, SubmissionStatus::Queued);
+    assert_eq!(j.owner_server_id, None);
+    assert_eq!(j.dispatch_retries, claimed.judgement.dispatch_retries);
+    assert_eq!(sub(&db, s.id).await.status, SubmissionStatus::Queued);
+    assert_eq!(
+        judgement(&db, other.judgement.id).await.status,
+        SubmissionStatus::Pending
+    );
 }
 
 #[tokio::test]
@@ -189,7 +346,7 @@ async fn a_deferred_rejudge_is_claimed_without_touching_the_submission() {
     assert_ne!(deferred.judge_epoch, j1.judge_epoch, "epochs are unique");
     let claimed = claim_one(&db, "srv-a").await;
     assert_eq!(claimed.judgement.id, deferred.id);
-    assert_eq!(claimed.submission.status, SubmissionStatus::Judged);
+    assert_eq!(sub(&db, s.id).await.status, SubmissionStatus::Judged);
 }
 
 /// Rewrites the submission cache from its current judgement, as every
@@ -327,7 +484,7 @@ async fn one_reclaim_takes_over_every_lapsed_unit_whatever_the_batch_size() {
     for _ in 0..7 {
         new_submission(&db).await;
     }
-    claim_judgements(&db, "dead", 10, NO_TYPES).await.unwrap();
+    claim_judgements(&db, "dead", TEN, NO_TYPES).await.unwrap();
     exec(
         &db,
         "UPDATE submission_judgement SET lease_heartbeat_at = NOW() - INTERVAL '2 minutes'",
@@ -348,7 +505,7 @@ async fn one_reclaim_takes_over_every_lapsed_unit_whatever_the_batch_size() {
         reclaimed.requeued, 7,
         "batches repeat until one comes back short"
     );
-    assert_eq!(count_in_flight(&db, "dead").await.unwrap(), 0);
+    assert_eq!(in_flight(&db, "dead").await, 0);
 }
 
 #[tokio::test]
@@ -663,13 +820,13 @@ async fn new_code_run(db: &DatabaseConnection) -> code_run::Model {
 async fn a_code_run_follows_the_same_claim_and_requeue_rules() {
     let (_pg, db) = crate::test_support::postgres().await;
     let run = new_code_run(&db).await;
-    let claimed = claim_code_runs(&db, "dead", 10, NO_TYPES)
+    let claimed = claim_code_runs(&db, "dead", TEN, NO_TYPES)
         .await
         .unwrap()
         .units;
     assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].status, SubmissionStatus::Pending);
-    assert_eq!(claimed[0].owner_server_id.as_deref(), Some("dead"));
+    assert_eq!(claimed[0].unit.status, SubmissionStatus::Pending);
+    assert_eq!(claimed[0].unit.owner_server_id.as_deref(), Some("dead"));
     exec(
         &db,
         "UPDATE code_run SET lease_heartbeat_at = NOW() - INTERVAL '2 minutes'",
@@ -793,7 +950,7 @@ async fn a_rejudge_serializes_with_another_rejudge_and_a_claim() {
     let first = rejudge_in(db.begin().await.unwrap()).await;
     // While the first rejudge is open, a claim passes over the submission.
     assert!(
-        claim_judgements(&db, "srv", 10, NO_TYPES)
+        claim_judgements(&db, "srv", TEN, NO_TYPES)
             .await
             .unwrap()
             .units
@@ -895,14 +1052,14 @@ async fn the_in_flight_cap_counts_judgements_and_code_runs() {
     claim_one(&db, "srv").await;
     new_code_run(&db).await;
     assert_eq!(
-        claim_code_runs(&db, "srv", 10, NO_TYPES)
+        claim_code_runs(&db, "srv", TEN, NO_TYPES)
             .await
             .unwrap()
             .units
             .len(),
         1
     );
-    assert_eq!(count_in_flight(&db, "srv").await.unwrap(), 2);
+    assert_eq!(in_flight(&db, "srv").await, 2);
 }
 
 #[tokio::test]
@@ -1236,7 +1393,7 @@ async fn provider(db: &DatabaseConnection, enabled: bool) {
 }
 
 async fn claimable(db: &DatabaseConnection) -> usize {
-    claim_judgements(db, "srv", 10, NO_TYPES)
+    claim_judgements(db, "srv", TEN, NO_TYPES)
         .await
         .unwrap()
         .units

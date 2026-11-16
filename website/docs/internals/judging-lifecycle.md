@@ -65,7 +65,14 @@ queues work can forget it:
   admission acts on it.
 
 A woken fiber claims a batch, and repeats while each pass fills its batch and
-room is left. Wakes that arrive during a pass fold into one more pass, at
+room is left. A pass is one statement per kind of unit, judgements first: it
+counts what the server has in flight against its in-flight cap, takes the
+`Queued` rows that fit, marks them `Pending` and returns each with everything
+its dispatch and the claim's metrics read (the submission's fixed columns, the
+problem type, the time it waited). The dispatch starts right after the
+statement, with nothing fallible in between, so a claimed unit never waits in
+flight without a dispatch; a claim whose rows cannot be read is handed back to
+`Queued` spending nothing (`release_claimed`). Wakes that arrive during a pass fold into one more pass, at
 least 10 ms after the last one, so a burst is claimed in batches. Every
 replica wakes on the same notification; `SKIP LOCKED` in the claim splits the
 work. A one-second fallback tick covers notifications lost while the

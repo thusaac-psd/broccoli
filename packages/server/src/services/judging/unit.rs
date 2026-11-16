@@ -3,10 +3,7 @@
 
 use common::db::{DatabaseConnection, DatabaseTransaction};
 use common::{DlqErrorCode, StatusPhase, SubmissionDlqErrorCode, SubmissionStatus};
-use sea_orm::{
-    ColumnTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, QueryFilter, Statement,
-    TransactionTrait, Value,
-};
+use sea_orm::{ConnectionTrait, DbBackend, DbErr, EntityTrait, Statement, TransactionTrait, Value};
 
 use super::RetryBudget;
 use super::SystemErrorClass;
@@ -261,46 +258,134 @@ impl Binds {
     }
 }
 
+/// What dispatch reads from a claimed judgement's submission: the columns
+/// that never change once it is created.
+#[derive(Debug, Clone, sea_orm::FromQueryResult)]
+pub(crate) struct ClaimedSubmission {
+    pub id: i32,
+    pub user_id: i32,
+    pub problem_id: i32,
+    pub contest_id: Option<i32>,
+    pub contest_type: String,
+    pub language: String,
+    pub files: serde_json::Value,
+}
+
+impl ClaimedSubmission {
+    /// Its columns in a claim's result, each `s.<column> AS sub_<column>`.
+    const COLUMNS: &'static str = "s.id AS sub_id, s.user_id AS sub_user_id, \
+         s.problem_id AS sub_problem_id, s.contest_id AS sub_contest_id, \
+         s.contest_type AS sub_contest_type, s.language AS sub_language, \
+         s.files AS sub_files";
+    const PREFIX: &'static str = "sub_";
+}
+
 /// A judgement the claim fiber took, with its submission.
 #[derive(Debug, Clone)]
 pub(crate) struct ClaimedJudgement {
-    pub submission: submission::Model,
+    pub submission: ClaimedSubmission,
     pub judgement: submission_judgement::Model,
 }
 
-/// A code run the claim fiber took.
-pub(crate) type ClaimedCodeRun = code_run::Model;
+/// One unit a claim took, with what the claim's metrics record.
+#[derive(Debug, Clone)]
+pub(crate) struct Claim<T> {
+    pub unit: T,
+    /// Its problem's type (`problem.problem_type`).
+    pub problem_type: String,
+    /// Seconds from its creation to the claim, on the database clock.
+    pub queued_secs: f64,
+}
 
 /// What one claim statement took.
 #[derive(Debug, Clone)]
 pub(crate) struct Claimed<T> {
-    pub units: Vec<T>,
+    pub units: Vec<Claim<T>>,
     /// The `plugin_config` change counter, read by the claiming statement
     /// itself (see [`crate::services::plugin_config_cache`]); `None` when it
     /// claimed nothing.
     pub plugin_config_epoch: Option<i64>,
+    /// Under an in-flight cap: the room the cap left before this claim (the
+    /// cap less the units the server had in flight, at least 0).
+    pub cap_room: Option<u32>,
 }
 
-/// `UPDATE` that claims the `Queued` rows picked by `picked` for
-/// `server_id`, mirrors current judgements, and returns the claimed rows,
-/// each with the `plugin_config` change counter.
-fn claim_statement(unit: Unit, server_id: &str, limit: u32, local: &[String]) -> Statement {
+/// How many rows one claim statement may take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClaimLimit {
+    /// At most this many rows.
+    pub rows: u32,
+    /// And no more than leave the server with this many units (judgements
+    /// and code runs) in flight; `None` for no cap.
+    pub in_flight_cap: Option<u32>,
+}
+
+/// SQL: the units (judgements and code runs) the server bound at `owner`
+/// has in flight, what an in-flight cap counts.
+fn in_flight_count(owner: &str) -> String {
+    let count = |unit: Unit| {
+        format!(
+            "(SELECT COUNT(*) FROM {table} WHERE owner_server_id = {owner} AND status IN {in_flight})",
+            table = unit.table(),
+            in_flight = StatusPhase::InFlight.sql_list(),
+        )
+    };
+    format!("({} + {})", count(Unit::Judgement), count(Unit::CodeRun))
+}
+
+/// The one statement of a claim: within `limit`, `UPDATE`s the `Queued` rows
+/// it picks to `Pending` owned by `server_id` with a fresh lease, mirrors
+/// current judgements, and returns every row dispatch and the claim's
+/// metrics need, so nothing fallible runs between the claim committing and
+/// its dispatch starting. The result always has a first row with the room
+/// the cap left (`claim_room`) and the `plugin_config` change counter
+/// (`claim_epoch`); with nothing claimed it is that row alone, its unit
+/// columns NULL.
+fn claim_statement(unit: Unit, server_id: &str, limit: ClaimLimit, local: &[String]) -> Statement {
     let mut b = Binds::default();
-    let limit = b.bind(i64::from(limit));
+    let rows = b.bind(i64::from(limit.rows));
     let owner = b.bind(server_id);
     let local = b.bind(local.to_vec());
+    let (room, take) = match limit.in_flight_cap {
+        Some(cap) => (
+            format!(
+                "GREATEST({cap} - {count}, 0)",
+                cap = b.bind(i64::from(cap)),
+                count = in_flight_count(&owner),
+            ),
+            format!("LEAST({rows}, (SELECT n FROM room))"),
+        ),
+        None => ("NULL".to_string(), rows),
+    };
     let order = match unit {
         // Live submissions and immediate rejudges go before deferred ones.
         Unit::Judgement => "u.is_current DESC, u.created_at",
         Unit::CodeRun => "u.created_at",
     };
+    let (columns, joins) = match unit {
+        Unit::Judgement => (
+            format!(", {}", ClaimedSubmission::COLUMNS),
+            "LEFT JOIN submission s ON s.id = moved.submission_id \
+             LEFT JOIN problem p ON p.id = s.problem_id",
+        ),
+        Unit::CodeRun => (
+            String::new(),
+            "LEFT JOIN problem p ON p.id = moved.problem_id",
+        ),
+    };
     b.statement(format!(
-        "WITH picked AS (SELECT u.id FROM {from} WHERE u.{queued} AND {handled} AND {open} \
-                         ORDER BY {order} LIMIT {limit} {lock}), \
+        "WITH room AS (SELECT ({room})::bigint AS n), \
+              picked AS (SELECT u.id FROM {from} WHERE u.{queued} AND {handled} AND {open} \
+                         ORDER BY {order} LIMIT {take} {lock}), \
               moved AS (UPDATE {table} t SET status = '{pending}', owner_server_id = {owner}, \
                             lease_heartbeat_at = NOW(), leased_at = NOW(){claim_sets} \
                         FROM picked WHERE t.id = picked.id RETURNING t.*){mirror} \
-         SELECT moved.*, (SELECT last_value FROM {epoch}) AS plugin_config_epoch FROM moved",
+         SELECT room.n AS claim_room, (SELECT last_value FROM {epoch}) AS claim_epoch, \
+                p.problem_type AS claim_problem_type, \
+                GREATEST(EXTRACT(EPOCH FROM NOW() - moved.created_at), 0)::float8 \
+                    AS claim_queued_secs, \
+                moved.*{columns} \
+         FROM room LEFT JOIN moved ON TRUE {joins}",
         from = unit.scan_from(),
         queued = crate::dispatcher::QUEUED_PREDICATE,
         handled = prefer_local_handler(unit.contest_type(), &local),
@@ -314,115 +399,101 @@ fn claim_statement(unit: Unit, server_id: &str, limit: u32, local: &[String]) ->
     ))
 }
 
-/// Runs a claim statement, parsing each row as `M` and reading the counter.
-async fn run_claim<M: sea_orm::FromQueryResult>(
+/// Runs a claim statement of `unit`, parsing each claimed row with `parse`.
+/// A row that fails to parse hands every row of the claim back to `Queued`,
+/// spending no retry, before the error is returned: the claim committed, and
+/// nothing would dispatch them.
+async fn run_claim<T>(
     db: &DatabaseConnection,
-    stmt: Statement,
-) -> Result<Claimed<M>, DbErr> {
-    let rows = db.query_all_raw(stmt).await?;
-    let plugin_config_epoch = rows
-        .first()
-        .map(|row| row.try_get::<i64>("", "plugin_config_epoch"))
-        .transpose()?;
-    let units = rows
+    unit: Unit,
+    server_id: &str,
+    limit: ClaimLimit,
+    local: &[String],
+    parse: impl Fn(&sea_orm::QueryResult) -> Result<T, DbErr>,
+) -> Result<Claimed<T>, DbErr> {
+    let none = Claimed {
+        units: Vec::new(),
+        plugin_config_epoch: None,
+        cap_room: None,
+    };
+    if limit.rows == 0 {
+        return Ok(none);
+    }
+    let rows = db
+        .query_all_raw(claim_statement(unit, server_id, limit, local))
+        .await?;
+    let ids: Vec<i32> = rows
         .iter()
-        .map(|row| M::from_query_result(row, ""))
-        .collect::<Result<_, _>>()?;
-    Ok(Claimed {
-        units,
-        plugin_config_epoch,
-    })
+        .filter_map(|row| row.try_get::<Option<i32>>("", "id").ok().flatten())
+        .collect();
+    let parsed = (|| -> Result<Claimed<T>, DbErr> {
+        let Some(first) = rows.first() else {
+            return Ok(none);
+        };
+        let cap_room = first
+            .try_get::<Option<i64>>("", "claim_room")?
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+        if ids.is_empty() {
+            return Ok(Claimed { cap_room, ..none });
+        }
+        let units = rows
+            .iter()
+            .map(|row| {
+                Ok(Claim {
+                    unit: parse(row)?,
+                    problem_type: row
+                        .try_get::<Option<String>>("", "claim_problem_type")?
+                        .unwrap_or_else(|| "unknown".into()),
+                    queued_secs: row.try_get("", "claim_queued_secs")?,
+                })
+            })
+            .collect::<Result<_, DbErr>>()?;
+        Ok(Claimed {
+            units,
+            plugin_config_epoch: Some(first.try_get("", "claim_epoch")?),
+            cap_room,
+        })
+    })();
+    if parsed.is_err()
+        && let Err(e) = release_claimed(db, unit, server_id, &ids).await
+    {
+        tracing::error!(error = %e, ?unit, ?ids, "Handing back a claim that failed to parse failed");
+    }
+    parsed
 }
 
-/// Claims up to `limit` queued judgements for `server_id`: `Queued` →
+/// Claims queued judgements for `server_id` within `limit`: `Queued` →
 /// `Pending`, owned, with a fresh lease. `local` is the contest types this
 /// replica handles (see [`crate::dispatcher::prefer_local_handler`]).
 pub(crate) async fn claim_judgements(
     db: &DatabaseConnection,
     server_id: &str,
-    limit: u32,
+    limit: ClaimLimit,
     local: &[String],
 ) -> Result<Claimed<ClaimedJudgement>, DbErr> {
-    let nothing = Claimed {
-        units: Vec::new(),
-        plugin_config_epoch: None,
-    };
-    if limit == 0 {
-        return Ok(nothing);
-    }
-    let Claimed {
-        units: judgements,
-        plugin_config_epoch,
-    } = run_claim::<submission_judgement::Model>(
-        db,
-        claim_statement(Unit::Judgement, server_id, limit, local),
-    )
-    .await?;
-    if judgements.is_empty() {
-        return Ok(nothing);
-    }
-    let ids: Vec<i32> = judgements.iter().map(|j| j.submission_id).collect();
-    let submissions: std::collections::HashMap<i32, submission::Model> = submission::Entity::find()
-        .filter(submission::Column::Id.is_in(ids))
-        .all(db)
-        .await?
-        .into_iter()
-        .map(|s| (s.id, s))
-        .collect();
-    Ok(Claimed {
-        units: judgements
-            .into_iter()
-            .filter_map(|judgement| {
-                Some(ClaimedJudgement {
-                    submission: submissions.get(&judgement.submission_id)?.clone(),
-                    judgement,
-                })
-            })
-            .collect(),
-        plugin_config_epoch,
+    use sea_orm::FromQueryResult;
+    run_claim(db, Unit::Judgement, server_id, limit, local, |row| {
+        Ok(ClaimedJudgement {
+            submission: ClaimedSubmission::from_query_result(row, ClaimedSubmission::PREFIX)?,
+            judgement: submission_judgement::Model::from_query_result(row, "")?,
+        })
     })
+    .await
 }
 
-/// Claims up to `limit` queued code runs for `server_id`, as
+/// Claims queued code runs for `server_id` within `limit`, as
 /// [`claim_judgements`] does.
 pub(crate) async fn claim_code_runs(
     db: &DatabaseConnection,
     server_id: &str,
-    limit: u32,
+    limit: ClaimLimit,
     local: &[String],
-) -> Result<Claimed<ClaimedCodeRun>, DbErr> {
-    if limit == 0 {
-        return Ok(Claimed {
-            units: Vec::new(),
-            plugin_config_epoch: None,
-        });
-    }
-    run_claim(db, claim_statement(Unit::CodeRun, server_id, limit, local)).await
-}
-
-/// Units (judgements and code runs) `server_id` owns that are in flight:
-/// what the claim fiber's in-flight cap counts.
-pub async fn count_in_flight(db: &DatabaseConnection, server_id: &str) -> Result<u64, DbErr> {
-    let count = |unit: Unit| {
-        format!(
-            "(SELECT COUNT(*) FROM {table} WHERE owner_server_id = $1 AND status IN {in_flight})",
-            table = unit.table(),
-            in_flight = StatusPhase::InFlight.sql_list(),
-        )
-    };
-    let row = db
-        .query_one_raw(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            format!(
-                "SELECT ({} + {})::bigint AS n",
-                count(Unit::Judgement),
-                count(Unit::CodeRun)
-            ),
-            [server_id.into()],
-        ))
-        .await?;
-    let n: i64 = row.map(|r| r.try_get("", "n")).transpose()?.unwrap_or(0);
-    Ok(u64::try_from(n).unwrap_or(0))
+) -> Result<Claimed<code_run::Model>, DbErr> {
+    use sea_orm::FromQueryResult;
+    run_claim(db, Unit::CodeRun, server_id, limit, local, |row| {
+        code_run::Model::from_query_result(row, "")
+    })
+    .await
 }
 
 /// Rows of each unit a lease operation touched.
@@ -631,18 +702,7 @@ pub async fn release_leases(db: &DatabaseConnection, server_id: &str) -> Result<
     let txn = db.begin().await?;
     let mut counts = UnitCounts::default();
     for unit in [Unit::Judgement, Unit::CodeRun] {
-        let mut b = Binds::default();
-        let filter = format!(
-            "u.owner_server_id = {} AND u.status IN {}",
-            b.bind(server_id),
-            StatusPhase::InFlight.sql_list()
-        );
-        let ids: Vec<i32> = pick(&txn, unit, b, filter, None)
-            .await?
-            .into_iter()
-            .map(|p| p.id)
-            .collect();
-        let n = requeue(&txn, unit, &ids, Requeue::HandedBack).await?;
+        let n = release(&txn, unit, server_id, None).await?;
         match unit {
             Unit::Judgement => counts.judgements = n,
             Unit::CodeRun => counts.code_runs = n,
@@ -650,6 +710,48 @@ pub async fn release_leases(db: &DatabaseConnection, server_id: &str) -> Result<
     }
     txn.commit().await?;
     Ok(counts)
+}
+
+/// Requeues the in-flight units of `ids` that `server_id` owns, spending no
+/// retry: a claim whose dispatch never started.
+pub(crate) async fn release_claimed(
+    db: &DatabaseConnection,
+    unit: Unit,
+    server_id: &str,
+    ids: &[i32],
+) -> Result<u64, DbErr> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let txn = db.begin().await?;
+    let n = release(&txn, unit, server_id, Some(ids)).await?;
+    txn.commit().await?;
+    Ok(n)
+}
+
+/// Requeues the in-flight units of `unit` that `server_id` owns (only those
+/// of `ids` when given) without spending a retry.
+async fn release(
+    txn: &DatabaseTransaction,
+    unit: Unit,
+    server_id: &str,
+    ids: Option<&[i32]>,
+) -> Result<u64, DbErr> {
+    let mut b = Binds::default();
+    let mut filter = format!(
+        "u.owner_server_id = {} AND u.status IN {}",
+        b.bind(server_id),
+        StatusPhase::InFlight.sql_list()
+    );
+    if let Some(ids) = ids {
+        filter.push_str(&format!(" AND u.id = ANY({})", b.bind(ids.to_vec())));
+    }
+    let ids: Vec<i32> = pick(txn, unit, b, filter, None)
+        .await?
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    requeue(txn, unit, &ids, Requeue::HandedBack).await
 }
 
 /// How a detector decides that an in-flight unit's owner no longer drives
