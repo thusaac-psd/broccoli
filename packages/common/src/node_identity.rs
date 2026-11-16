@@ -109,9 +109,11 @@ pub const HOST_MACHINE_ID_MOUNT: &str = "/run/broccoli/host/machine-id";
 /// not) and a non-zero address, the first by interface name. The machine ID
 /// is read from [`HOST_MACHINE_ID_MOUNT`] when it is mounted, else, outside a
 /// container (an image can bake one in), from `/etc/machine-id` or
-/// `/var/lib/dbus/machine-id`. With neither a machine ID nor a card, the
-/// hostname stands in (inside a container, its own ID), and with none of
-/// them, a random ID. Duplicates that slip through are still caught by
+/// `/var/lib/dbus/machine-id`. `host` is the hostname's first label, except
+/// inside a container with a network of its own, whose hostname is its own
+/// and changes whenever it is recreated: there the ID is `{role}-{hash}`.
+/// With neither a machine ID nor a card, the hostname stands in (inside a
+/// container, its own ID), and with none of them, a random ID. Duplicates that slip through are still caught by
 /// [`NodeClaim::claim_at_boot`].
 pub fn default_node_id(role: NodeRole) -> String {
     let in_container = ["/.dockerenv", "/run/.containerenv"]
@@ -131,9 +133,13 @@ pub fn default_node_id(role: NodeRole) -> String {
         .find_map(|path| std::fs::read_to_string(path).ok())
         .filter(|id| !id.trim().is_empty());
     let mac = first_physical_mac(std::path::Path::new("/sys/class/net"));
-    let hostname = hostname::get()
-        .ok()
-        .map(|h| h.to_string_lossy().into_owned());
+    let hostname = id_hostname(
+        in_container && mac.is_none(),
+        machine_id.is_some(),
+        hostname::get()
+            .ok()
+            .map(|h| h.to_string_lossy().into_owned()),
+    );
     let (id, source) = derive_default_node_id(
         role,
         machine_id.as_deref(),
@@ -159,6 +165,19 @@ pub fn default_node_id(role: NodeRole) -> String {
         ),
     }
     id
+}
+
+/// The hostname a default ID may carry. A container with a network of its
+/// own (it sees no physical card) has a hostname of its own too, which
+/// changes whenever the container is recreated, so it is left out of an ID
+/// the machine ID already makes unique; with no machine ID it is still the
+/// fallback.
+fn id_hostname(
+    own_network: bool,
+    has_machine_id: bool,
+    hostname: Option<String>,
+) -> Option<String> {
+    hostname.filter(|_| !(own_network && has_machine_id))
 }
 
 /// The MAC address of the first physical network card under `net_dir` (a
@@ -746,6 +765,27 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use testcontainers::runners::AsyncRunner;
     use testcontainers_modules::redis::Redis;
+
+    #[test]
+    fn a_container_on_its_own_network_leaves_its_hostname_out_of_a_machine_id() {
+        let host = || Some("3f2a9c1b7e0d".to_string());
+        // Recreated, the container has a new hostname: the ID stays.
+        let id = |hostname| {
+            derive_default_node_id(
+                NodeRole::Worker,
+                Some("aaaa"),
+                None,
+                id_hostname(true, true, hostname).as_deref(),
+            )
+            .0
+        };
+        assert_eq!(id(host()), id(Some("9b8c7d6e5f4a".into())));
+        assert!(!id(host()).contains("3f2a9c1b7e0d"));
+        // On the host's network, or outside a container, it is the machine's.
+        assert_eq!(id_hostname(false, true, host()), host());
+        // Without a machine ID it is the only stable thing left.
+        assert_eq!(id_hostname(true, false, host()), host());
+    }
 
     #[test]
     fn a_default_id_is_stable_per_machine_and_tells_machines_apart() {

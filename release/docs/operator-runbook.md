@@ -381,7 +381,11 @@ itself, by one rule, and `broccoli-server --node-id` or
   `sha256("broccoli-node-id:" + MACHINE_ID + ":" + MAC)`.
 - `MACHINE_ID` is `/etc/machine-id` (or `/var/lib/dbus/machine-id`). Inside a
   container it is read only from `/run/broccoli/host/machine-id`, the host's
-  file mounted there, since an image can bake one in.
+  file mounted there, since an image can bake one in. The server and worker
+  compose templates mount it.
+- A container with a network of its own also has a hostname of its own, which
+  changes whenever it is recreated, so there the id is `ROLE-HASH`, without the
+  hostname.
 - `MAC` is the address of the first physical network card, by interface name.
   Virtual interfaces (bridges, veths) do not count, so disk-cloned or live-boot
   machines that share a machine id and a hostname still get distinct ids, and

@@ -38,6 +38,16 @@ services:
       - ./plugins:/plugins:ro
       - plugin_cache:/var/cache/broccoli/plugins
       - server_data:/data
+      # The host's identity: a blank node id is derived from it, so the id
+      # survives recreating the container. Every systemd host has the file;
+      # without one the container does not start, rather than mounting an
+      # empty directory there.
+      - type: bind
+        source: /etc/machine-id
+        target: /run/broccoli/host/machine-id
+        read_only: true
+        bind:
+          create_host_path: false
     healthcheck:
       test: ["CMD", "/usr/local/bin/broccoli-server", "--healthcheck"]
       interval: 10s
