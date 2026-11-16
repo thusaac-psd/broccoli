@@ -666,6 +666,101 @@ async fn a_disabled_visibility_plugin_fails_closed_for_its_contest_types() {
     assert_eq!(res.status, 200, "outside the plugin's scope: {}", res.text);
 }
 
+/// A contest type stays served while any plugin that provides it is enabled,
+/// by one rule for submissions, the claim and reads: a disabled visibility
+/// plugin of the type withholds nothing once another provider is enabled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_type_another_enabled_plugin_provides_is_not_withheld_by_a_disabled_one() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    let outsider = a.create_authenticated_user("outsider", "pass1234").await;
+    let governed = a.create_contest(&token, "Governed", true, true).await;
+    let problem_id: i32 =
+        a.db.query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "INSERT INTO problem (title, content, time_limit, memory_limit, problem_type, \
+             default_contest_type, checker_format, is_public, show_test_details, created_at, updated_at) \
+             VALUES ('p', 'c', 1000, 262144, 'standard', 'standard', 'exact', TRUE, FALSE, NOW(), NOW()) \
+             RETURNING id",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "id")
+        .unwrap();
+    a.add_problem_to_contest(governed, problem_id, &token).await;
+    let res = a
+        .post_with_token(&routes::admin_plugin_disable(PLUGIN), &json!({}), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    for sql in [
+        format!(
+            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"]}}' \
+             WHERE id = '{PLUGIN}'"
+        ),
+        // Another plugin provides the same type and is enabled.
+        "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
+         ('second-provider', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [\"fleet-only\"]}')"
+            .to_string(),
+        format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {governed}"),
+    ] {
+        a.db.execute_raw(Statement::from_string(DbBackend::Postgres, sql))
+            .await
+            .unwrap();
+    }
+    // ...and serves it on this replica.
+    a.state
+        .registries
+        .contest_type_registry
+        .write()
+        .await
+        .insert(
+            "fleet-only".into(),
+            server::registry::ContestTypeHandlers {
+                plugin_id: "second-provider".into(),
+                submission_fn: "noop".into(),
+                code_run_fn: "noop".into(),
+                submission_admission: false,
+            },
+        );
+    plugin_lifecycle::reconcile(&a.state).await.unwrap();
+
+    assert_eq!(
+        a.state.plugin_lifecycle.disabled_provider("fleet-only"),
+        None
+    );
+    let res = a
+        .get_with_token(&routes::contest(governed), &outsider)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(
+        res.body["plugin_outage"].is_null(),
+        "nothing withheld: {}",
+        res.text
+    );
+    let res = a
+        .get_with_token(&routes::contest_problem(governed, problem_id), &outsider)
+        .await;
+    assert_eq!(res.status, 200, "readable, not withheld: {}", res.text);
+    let res = a
+        .post_with_token(
+            &routes::contest_problem_submissions(governed, problem_id),
+            &json!({
+                "files": [{"filename": "main.cpp", "content": "int main() {}"}],
+                "language": "cpp",
+            }),
+            &outsider,
+        )
+        .await;
+    assert_ne!(
+        res.body["code"], "CONTEST_TYPE_DISABLED",
+        "the type is open: {}",
+        res.text
+    );
+}
+
 /// What depends on a plugin comes from the contest types it recorded fleet-wide
 /// when it last loaded, so the answer is the same whether it is enabled or
 /// disabled.
