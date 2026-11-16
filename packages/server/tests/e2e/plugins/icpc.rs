@@ -1107,12 +1107,12 @@ int main() {
 // on_icpc_eval_result callback -> the shared driver's record/finalize ->
 // terminal submission verdict.
 
-/// Correct: prints the sum of the n integers (the default test case expects "15").
+/// Correct: prints the sum of the n integers (the default test case expects "15\n").
 const CPP_SUM_AC: &str = r#"#include <iostream>
 int main() { int n; std::cin >> n; long long s = 0, x; for (int i = 0; i < n; i++) { std::cin >> x; s += x; } std::cout << s << std::endl; return 0; }
 "#;
 
-/// Wrong: prints sum + 1 (yields "16", expected "15").
+/// Wrong: prints sum + 1 (yields "16\n", expected "15\n").
 const CPP_SUM_WA: &str = r#"#include <iostream>
 int main() { int n; std::cin >> n; long long s = 0, x; for (int i = 0; i < n; i++) { std::cin >> x; s += x; } std::cout << (s + 1) << std::endl; return 0; }
 "#;
