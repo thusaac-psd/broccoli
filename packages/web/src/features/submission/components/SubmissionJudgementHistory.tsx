@@ -1,5 +1,5 @@
 import {
-  judgeErrorText,
+  errorCodeText,
   useApiClient,
   useErrorMessage,
 } from '@broccoli/web-sdk/api';
@@ -288,8 +288,8 @@ function JudgementRow({
   const { label, variant } = getVerdictBadge(judgement, t);
 
   // The code's translation, when the packs have one.
-  const errorCodeText = judgement.error_code
-    ? judgeErrorText(judgement.error_code, { lookup })
+  const errorText = judgement.error_code
+    ? errorCodeText(judgement.error_code, { lookup })
     : undefined;
 
   const detailsVisible =
@@ -404,7 +404,7 @@ function JudgementRow({
               {judgement.error_code && (
                 <div className="text-xs text-muted-foreground">
                   {t('submissionDetail.errorCode')}: {judgement.error_code}
-                  {errorCodeText && <> ({errorCodeText})</>}
+                  {errorText && <> ({errorText})</>}
                 </div>
               )}
               {judgement.error_message && (

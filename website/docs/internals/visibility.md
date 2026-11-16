@@ -61,15 +61,26 @@ and calls `services::plugin_route_access::authorize` with the route's checked
   with the declared problem in one `decide_batch`. Registration comes from the
   same batch (`participates`), and `participant` routes apply
   `participant_gate`, the rule `require_contest_participant` uses.
+- A route that declares a problem of the contest applies
+  `require_contest_started` between the contest's decision and the problem's,
+  the sequence `handlers::problem::require_problem_part_reachable` gives every
+  core problem part route, so before the start both answer `400` whether or
+  not the problem is in the contest.
 
 `RouteAccess` is built from the manifest by `ServerRouteConfig::access`, which
 refuses every combination of keys the proxy cannot enforce, so a route either
 loads with a rule the proxy enforces or does not load.
 
-A plugin response with a `5xx` status becomes `AppError::Internal`: the server
-logs the body and answers `500 INTERNAL_ERROR` without it. The guest SDK sends
-every `SdkError` down this path by failing the call (`run_api_handler`), so
-internal text never reaches a caller.
+What the plugin answers goes through `plugin_answer`: the host sends only its
+status and JSON body and writes every header itself. A `2xx` is the body as
+`application/json`. A client error is a `services::plugin_output::PluginRefusal`,
+the plugin's code as `<plugin_id>.<CODE>` with one of the statuses a plugin
+may refuse with, the same type a blocking hook's rejection becomes. Any other
+status becomes `AppError::Internal`: the server logs the body and answers
+`500 INTERNAL_ERROR` without it. The guest SDK sends every `SdkError` down this
+path by failing the call (`run_api_handler`), so internal text never reaches a
+caller. Every `/api` response carries `X-Content-Type-Options: nosniff` and a
+`Content-Security-Policy` that lets nothing run.
 
 ## When a visibility plugin is missing
 

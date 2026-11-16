@@ -180,39 +180,30 @@ export interface ErrorTranslator {
   ) => string | undefined;
 }
 
-/** The catalog key that translates the error code `code`. */
+/**
+ * The catalog key that translates the error code `code`. The host sends a
+ * plugin's code as `<plugin id>.<CODE>` (a plugin id holds no `.`), whether a
+ * plugin route or hook refused the request or a judgement or code run
+ * records it: its translation is `<plugin id>.apiError.<CODE>` in that
+ * plugin's pack, and only there, so a plugin's code never reads as the
+ * host's condition of the same name. A code without a plugin id is the
+ * host's own, translated by `apiError.<CODE>`.
+ */
 export function errorCodeKey(code: string): string {
-  return `apiError.${code}`;
-}
-
-/**
- * The catalog keys that translate the error code a judgement or code run
- * records. The host records a plugin's code as `<plugin id>.<CODE>` (a plugin
- * id holds no `.`): its translation is `<plugin id>.apiError.<CODE>` in that
- * plugin's pack, and only there, so a plugin's code never reads as the host's
- * fault of the same name. A code without a plugin id is the host's own,
- * translated by `apiError.<CODE>`.
- */
-export function judgeErrorCodeKeys(code: string): string[] {
   const dot = code.indexOf('.');
-  if (dot <= 0) return [errorCodeKey(code)];
-  return [`${code.slice(0, dot)}.${errorCodeKey(code.slice(dot + 1))}`];
+  if (dot <= 0) return `apiError.${code}`;
+  return `${code.slice(0, dot)}.apiError.${code.slice(dot + 1)}`;
 }
 
 /**
- * The translation of the error code a judgement or code run records
- * (`judgeErrorCodeKeys`), or `undefined` when no pack has one, for the
- * caller's generic message.
+ * The translation of the error code `code` (`errorCodeKey`), or `undefined`
+ * when no pack has one, for the caller's generic message.
  */
-export function judgeErrorText(
+export function errorCodeText(
   code: string,
   { lookup }: ErrorTranslator,
 ): string | undefined {
-  for (const key of judgeErrorCodeKeys(code)) {
-    const text = lookup(key);
-    if (text) return text;
-  }
-  return undefined;
+  return lookup(errorCodeKey(code)) || undefined;
 }
 
 /** The catalog key of the generic message for an `ErrorKind`. */
@@ -252,9 +243,9 @@ export interface ErrorDescription {
  * Describe `err` for the user, in their language, never in the server's
  * English:
  *
- * 1. The translation of its code (`apiError.<CODE>`), from the host catalog
- *    or the pack of the plugin that sent it, with the error's `details` as
- *    parameters.
+ * 1. The translation of its code (`errorCodeKey`): a host code from the
+ *    host catalog, a plugin's only from that plugin's pack, with the error's
+ *    `details` as parameters.
  * 2. For a refusal without one (`invalid`, `conflict`), `failure`: what the
  *    caller was doing went wrong ("Could not save the problem"), followed by
  *    the server's own text as detail, which helps whoever set things up.

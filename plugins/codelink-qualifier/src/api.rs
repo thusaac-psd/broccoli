@@ -28,7 +28,6 @@ pub fn handle_contest_info(
     body["problem_count"] = serde_json::json!(problem_count);
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(body),
     })
 }
@@ -91,7 +90,6 @@ pub fn handle_standings(
 
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(body),
     })
 }

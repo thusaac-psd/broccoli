@@ -1154,7 +1154,6 @@ fn handle_contest_info(
 
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(serde_json::json!({
             "penalty_minutes": config.penalty_minutes,
             "count_compile_error": config.count_compile_error,
@@ -1247,7 +1246,6 @@ fn handle_reveal(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRespo
         .set(&[(reveal_key(contest_id).as_str(), record.as_str())])?;
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(serde_json::json!({ "revealed": true })),
     })
 }
@@ -1304,7 +1302,6 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
             StandingsRestriction::RestrictedAnonymous => {
                 return Ok(PluginHttpResponse {
                     status: 200,
-                    headers: None,
                     body: Some(serde_json::json!({
                         "phase": phase,
                         "penalty_minutes": config.penalty_minutes,
@@ -1541,7 +1538,6 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
 
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(serde_json::json!({
             "phase": phase,
             "frozen": frozen,

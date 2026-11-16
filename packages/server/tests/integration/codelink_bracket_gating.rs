@@ -412,7 +412,7 @@ async fn standalone_submission_cannot_bypass_bracket_admission() {
                 if hidden {
                     "NOT_FOUND"
                 } else {
-                    "CONTEST_SUBMISSION_REQUIRED"
+                    "codelink-bracket.CONTEST_SUBMISSION_REQUIRED"
                 },
                 "{}",
                 res.text
@@ -531,7 +531,7 @@ async fn submitting_during_ordering_phase_is_rejected_as_match_not_started() {
         res.text
     );
     assert_eq!(
-        res.body["code"], "MATCH_NOT_STARTED",
+        res.body["code"], "codelink-bracket.MATCH_NOT_STARTED",
         "ordering-phase submission must carry its own distinct code, got: {}",
         res.text
     );

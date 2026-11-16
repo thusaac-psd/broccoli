@@ -95,8 +95,17 @@ impl PluginEntry {
                         route.method, route.path, id, e
                     ))
                 })?;
+                // A second declaration of a route would silently replace the
+                // first one's handler and access, so it fails the load.
+                let method = route.method.to_uppercase();
+                if info.methods.contains_key(&method) {
+                    return Err(PluginError::LoadFailed(format!(
+                        "Plugin '{id}' declares route {method} {} more than once",
+                        route.path
+                    )));
+                }
                 info.methods.insert(
-                    route.method.to_uppercase(),
+                    method,
                     RouteMetaData {
                         handler: route.handler.clone(),
                         access,
@@ -147,7 +156,7 @@ impl PluginEntry {
         resolve_schema_includes(&mut manifest, plugin_dir)?;
 
         let mut entry = Self::new(id, plugin_dir.to_path_buf(), manifest)?;
-        entry.translations = read_translations(plugin_dir, &entry.manifest)?;
+        entry.translations = read_translations(plugin_dir, &entry.id, &entry.manifest)?;
         Ok(entry)
     }
 
@@ -179,9 +188,12 @@ impl PluginEntry {
     }
 }
 
-/// Every translation file `manifest` declares, read from `root`.
+/// Every translation file `manifest` declares, read from `root`. A file
+/// with a key the plugin may not provide (see [`crate::i18n::foreign_keys`])
+/// fails the load, naming the keys.
 fn read_translations(
     root: &Path,
+    plugin_id: &str,
     manifest: &PluginManifest,
 ) -> Result<Vec<(String, TranslationMap)>, PluginError> {
     manifest
@@ -201,6 +213,17 @@ fn read_translations(
                     path.display()
                 ))
             })?;
+            let foreign = crate::i18n::foreign_keys(plugin_id, manifest, &map);
+            if !foreign.is_empty() {
+                return Err(PluginError::LoadFailed(format!(
+                    "Translation file '{}' has keys outside plugin '{plugin_id}': {}. \
+                     A plugin's keys start with '{plugin_id}.', or are its manifest text \
+                     ('plugin.{plugin_id}.', 'config.{plugin_id}.') or the name of an \
+                     identifier it registers ('identifier.<contestType|problemType|checker>.')",
+                    path.display(),
+                    foreign.join(", ")
+                )));
+            }
             Ok((lang.clone(), map))
         })
         .collect()
@@ -240,6 +263,43 @@ function = "second"
         );
     }
 
+    #[test]
+    fn a_route_declared_twice_fails_the_load() {
+        let manifest: PluginManifest = toml::from_str(
+            r#"
+name = "test"
+version = "0.1.0"
+
+[server]
+entry = "test.wasm"
+
+[[server.routes]]
+method = "GET"
+path = "/contests/{contest_id}/secret"
+access = "participant"
+contest = "{contest_id}"
+handler = "secret"
+
+[[server.routes]]
+method = "get"
+path = "/contests/{contest_id}/secret"
+access = "public"
+handler = "secret"
+"#,
+        )
+        .unwrap();
+
+        let error = PluginEntry::new("test".into(), ".".into(), manifest)
+            .err()
+            .expect("a duplicate route must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("GET /contests/{contest_id}/secret more than once"),
+            "{error}"
+        );
+    }
+
     fn web_plugin(root: &std::path::Path) -> PluginEntry {
         let manifest: PluginManifest = toml::from_str(
             r#"
@@ -253,6 +313,33 @@ entry = "index.js"
         )
         .unwrap();
         PluginEntry::new("web".into(), root.to_path_buf(), manifest).unwrap()
+    }
+
+    #[test]
+    fn a_translation_key_outside_the_plugin_fails_the_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("cooldown");
+        std::fs::create_dir_all(root.join("i18n")).unwrap();
+        std::fs::write(
+            root.join("plugin.toml"),
+            "name = \"cooldown\"\nversion = \"0.1.0\"\n\n[web]\nroot = \"dist\"\nentry = \"index.js\"\n\n[translations]\nen = \"i18n/en.toml\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("i18n/en.toml"),
+            "'cooldown.ready' = 'Ready'\n'apiError.TOKEN_INVALID' = 'Signed out'\n",
+        )
+        .unwrap();
+        let error = PluginEntry::from_dir(&root)
+            .err()
+            .expect("a key outside the plugin must fail the load")
+            .to_string();
+        assert!(error.contains("apiError.TOKEN_INVALID"), "{error}");
+        assert!(!error.contains("cooldown.ready"), "{error}");
+
+        std::fs::write(root.join("i18n/en.toml"), "'cooldown.ready' = 'Ready'\n").unwrap();
+        let entry = PluginEntry::from_dir(&root).unwrap();
+        assert_eq!(entry.translations.len(), 1);
     }
 
     #[test]

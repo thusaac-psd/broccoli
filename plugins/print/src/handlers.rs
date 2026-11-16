@@ -17,7 +17,6 @@ const MAX_FILENAME_LEN: usize = 200;
 fn ok(body: serde_json::Value) -> Result<PluginHttpResponse, ApiError> {
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(body),
     })
 }
@@ -25,7 +24,6 @@ fn ok(body: serde_json::Value) -> Result<PluginHttpResponse, ApiError> {
 fn created(body: serde_json::Value) -> Result<PluginHttpResponse, ApiError> {
     Ok(PluginHttpResponse {
         status: 201,
-        headers: None,
         body: Some(body),
     })
 }
@@ -54,8 +52,7 @@ fn query_i32(req: &PluginHttpRequest, name: &str) -> Option<i32> {
 }
 
 fn require_login(req: &PluginHttpRequest) -> Result<i32, ApiError> {
-    req.require_user_id()
-        .map_err(|_| PluginHttpResponse::error(401, "Authentication required").into())
+    req.require_user_id().map_err(ApiError::from)
 }
 
 fn caller_username(req: &PluginHttpRequest) -> String {
@@ -550,7 +547,7 @@ mod tests {
     fn my_jobs_requires_login() {
         let host = Host::mock();
         let err = handle_my_jobs(&host, &request()).unwrap_err();
-        assert_eq!(err.into_response().status, 401);
+        assert_eq!(err.into_response().status, 403);
     }
 
     #[test]
@@ -666,7 +663,7 @@ mod tests {
     fn station_endpoints_require_token() {
         let host = Host::mock();
         let err = handle_station_jobs(&host, &request()).unwrap_err();
-        assert_eq!(err.into_response().status, 401);
+        assert_eq!(err.into_response().status, 403);
     }
 
     #[test]

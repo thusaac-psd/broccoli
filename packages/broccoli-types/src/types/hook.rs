@@ -54,6 +54,8 @@ impl HookResponse {
         HookResponse::Pass
     }
 
+    /// Accept the event and skip this plugin's later hooks for it. Every
+    /// other plugin's hooks still run: a plugin cannot switch off another's.
     pub fn stop() -> Self {
         HookResponse::Stop
     }

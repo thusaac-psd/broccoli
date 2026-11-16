@@ -79,7 +79,6 @@ pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     let updated = executor::drive(host, contest_id, match_id, event).map_err(drive_error)?;
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(serde_json::json!({ "state": updated.phase_name() })),
     })
 }
@@ -115,7 +114,6 @@ pub fn handle_force_decide(
     let updated = executor::drive(host, contest_id, match_id, event).map_err(drive_error)?;
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(serde_json::json!({
             "state": updated.phase_name(),
             "winner": updated.winner(),
@@ -465,7 +463,6 @@ pub fn handle_get_bracket(
         // configured the contest should see "nothing yet", not a 404.
         return Ok(PluginHttpResponse {
             status: 200,
-            headers: None,
             body: Some(serde_json::json!({ "matches": [], "player_count": 0 })),
         });
     };
@@ -488,7 +485,6 @@ pub fn handle_get_bracket(
 
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(
             serde_json::json!({ "matches": views, "contest_end_ms": contest_end_ms, "player_count": setup.player_count(), "third_place_enabled": setup.third_place.is_some(), "total_matches": setup.total_matches(), "stages": stages }),
         ),
@@ -540,7 +536,6 @@ pub fn handle_get_match(
 
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(serde_json::to_value(view)?),
     })
 }

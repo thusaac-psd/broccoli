@@ -28,10 +28,10 @@ export function CollapsibleWrapper({ children }: CollapsibleWrapperProps) {
           className="text-[11px] opacity-70 hover:opacity-100"
         >
           {collapsed
-            ? t('configUiTest.collapsible.expand')
-            : t('configUiTest.collapsible.collapse')}
+            ? t('config-ui-test.collapsible.expand')
+            : t('config-ui-test.collapsible.collapse')}
           <span className="ml-1 text-[10px] text-amber-600">
-            {t('configUiTest.pluginBadge')}
+            {t('config-ui-test.pluginBadge')}
           </span>
         </Button>
       </div>
@@ -47,7 +47,7 @@ export function CollapsibleWrapper({ children }: CollapsibleWrapperProps) {
       </div>
       {collapsed && (
         <div className="rounded-lg border border-dashed border-muted-foreground p-4 text-center text-xs opacity-50">
-          {t('configUiTest.collapsible.collapsedHint')}
+          {t('config-ui-test.collapsible.collapsedHint')}
         </div>
       )}
     </div>

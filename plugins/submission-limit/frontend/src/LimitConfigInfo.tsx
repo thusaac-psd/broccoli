@@ -26,18 +26,20 @@ export function LimitConfigInfo(props: Props) {
         props.scope as Parameters<typeof ConfigInheritanceInfo>[0]['scope']
       }
       fieldKey="max_submissions"
-      formatValue={(v) => (v === 0 ? t('limit.unlimited') : String(v))}
+      formatValue={(v) =>
+        v === 0 ? t('submission-limit.unlimited') : String(v)
+      }
       labels={{
-        contest: t('limit.sourceContest'),
-        problem: t('limit.sourceProblem'),
-        contestHint: t('limit.contestHint'),
+        contest: t('submission-limit.sourceContest'),
+        problem: t('submission-limit.sourceProblem'),
+        contestHint: t('submission-limit.contestHint'),
         inheritInfo: (value, source) =>
-          t('limit.inheritInfo', { value, source }),
-        overrideInfo: t('limit.overrideInfo'),
-        notSet: t('limit.notSet'),
+          t('submission-limit.inheritInfo', { value, source }),
+        overrideInfo: t('submission-limit.overrideInfo'),
+        notSet: t('submission-limit.notSet'),
         notSetWithDefault: (def) =>
-          t('limit.notSetWithDefault', { default: def }),
-        active: t('limit.active'),
+          t('submission-limit.notSetWithDefault', { default: def }),
+        active: t('submission-limit.active'),
       }}
     />
   );

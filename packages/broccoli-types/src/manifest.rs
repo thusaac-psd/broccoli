@@ -36,6 +36,16 @@ impl PluginManifest {
         !self.translations.is_empty()
     }
 
+    /// Whether this is a language pack: a plugin that declares only
+    /// translations. Language packs carry the host's own strings, so their
+    /// keys are not confined to the plugin's id.
+    pub fn is_language_pack(&self) -> bool {
+        self.has_translations()
+            && self.server.is_none()
+            && self.web.is_none()
+            && self.config.is_empty()
+    }
+
     /// Paths, relative to the plugin directory, of the files and
     /// directories the host loads for this plugin besides `plugin.toml`: the
     /// server entry point, the web root, translation files and

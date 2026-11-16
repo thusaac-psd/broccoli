@@ -217,7 +217,6 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
 
     Ok(PluginHttpResponse {
         status: 200,
-        headers: None,
         body: Some(serde_json::json!({
             "order_a": updated.order_a,
             "order_b": updated.order_b,

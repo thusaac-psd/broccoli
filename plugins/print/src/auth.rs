@@ -58,7 +58,7 @@ fn station_for<'a>(token: &str, stations: &'a [StationCredential]) -> Option<&'a
 /// `contest_id` whose credentials include the presented token.
 pub fn authenticate_station(host: &Host, req: &PluginHttpRequest) -> Result<StationAuth, ApiError> {
     let token = extract_token(req)
-        .ok_or_else(|| PluginHttpResponse::error(401, "Missing print-station token"))?;
+        .ok_or_else(|| PluginHttpResponse::error(403, "Missing print-station token"))?;
 
     let global = config::load_global_config(host)?;
     if let Some(name) = station_for(&token, &global.stations) {
@@ -192,11 +192,11 @@ mod tests {
     }
 
     #[test]
-    fn missing_token_is_unauthorized() {
+    fn missing_token_is_refused() {
         let host = Host::mock();
         let req = req_with_auth(None, None);
         let err = authenticate_station(&host, &req).unwrap_err();
-        assert_eq!(err.into_response().status, 401);
+        assert_eq!(err.into_response().status, 403);
     }
 
     #[test]

@@ -15,19 +15,19 @@ import { cn } from '@broccoli/web-sdk/utils';
 const MODE_INFO: Record<string, { icon: string; descriptionKey: string }> = {
   fast: {
     icon: '\u26A1',
-    descriptionKey: 'configUiTest.modeCard.fast.description',
+    descriptionKey: 'config-ui-test.modeCard.fast.description',
   },
   balanced: {
     icon: '\u2696\uFE0F',
-    descriptionKey: 'configUiTest.modeCard.balanced.description',
+    descriptionKey: 'config-ui-test.modeCard.balanced.description',
   },
   thorough: {
     icon: '\uD83D\uDD0D',
-    descriptionKey: 'configUiTest.modeCard.thorough.description',
+    descriptionKey: 'config-ui-test.modeCard.thorough.description',
   },
   experimental: {
     icon: '\uD83E\uDDEA',
-    descriptionKey: 'configUiTest.modeCard.experimental.description',
+    descriptionKey: 'config-ui-test.modeCard.experimental.description',
   },
 };
 
@@ -60,9 +60,9 @@ export function ModeCardSelector({
     <div className="flex flex-col gap-1.5 col-span-2">
       <div className="flex items-center gap-2">
         <Label className="text-[11px] font-medium uppercase tracking-wide opacity-60">
-          {schema.title ?? t('configUiTest.modeCard.defaultTitle')}
+          {schema.title ?? t('config-ui-test.modeCard.defaultTitle')}
           <span className="ml-1.5 text-[10px] font-normal normal-case tracking-normal text-amber-600">
-            {t('configUiTest.pluginOverrideBadge')}
+            {t('config-ui-test.pluginOverrideBadge')}
           </span>
         </Label>
         {showAsPlaceholder && inheritedSource && (

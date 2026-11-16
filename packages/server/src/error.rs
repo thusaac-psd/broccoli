@@ -21,6 +21,37 @@ pub const PLUGIN_RETRY_AFTER_SECS: u64 = 2;
 /// The `Retry-After` of a `STORAGE_UNAVAILABLE` answer.
 pub const STORAGE_RETRY_AFTER_SECS: u64 = 5;
 
+/// Why the host refused a submission its contest plugin admitted. Each is a
+/// 409: the client refreshes what it shows and sends again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionRefused {
+    /// The admission's submission slot changed or holds another submission.
+    SlotInFlight,
+    /// The plugin storage the admission was checked against changed.
+    StateChanged,
+    /// The admission's arrival window closed before the insert.
+    TooLate,
+}
+
+impl AdmissionRefused {
+    fn code_and_message(self) -> (&'static str, &'static str) {
+        match self {
+            Self::SlotInFlight => (
+                "SUBMISSION_IN_FLIGHT",
+                "Submission slot changed; refresh and retry.",
+            ),
+            Self::StateChanged => (
+                "SUBMISSION_STATE_CHANGED",
+                "Admission state changed; refresh and retry.",
+            ),
+            Self::TooLate => (
+                "SUBMISSION_TOO_LATE",
+                "Submission admission window has closed.",
+            ),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum AppError {
     Validation(String),
@@ -91,12 +122,12 @@ pub enum AppError {
     /// Blob storage did not answer through its retries: an outage, retried
     /// by the client after [`STORAGE_RETRY_AFTER_SECS`].
     StorageUnavailable,
-    PluginRejection {
-        code: String,
-        message: String,
-        status_code: u16,
-        details: Option<serde_json::Value>,
-    },
+    /// A plugin refused the request (a route's client error or a hook's
+    /// rejection), confined to the plugin's namespace.
+    PluginRefusal(crate::services::plugin_output::PluginRefusal),
+    /// The host refused a submission its contest plugin admitted: what the
+    /// admission was checked against changed before the insert.
+    AdmissionRefused(AdmissionRefused),
     IdempotencyKeyInProgress,
     IdempotencyKeyMismatch(String),
     /// Idempotent response was too large to cache and cannot be replayed.
@@ -311,24 +342,10 @@ impl AppError {
                     ),
                 ),
             ),
-            AppError::PluginRejection {
-                code,
-                message,
-                status_code,
-                details,
-            } => {
-                let status = StatusCode::from_u16(status_code)
-                    .ok()
-                    .filter(|s| s.is_client_error())
-                    .unwrap_or(StatusCode::BAD_REQUEST);
-                (
-                    status,
-                    ErrorBody {
-                        code,
-                        message,
-                        details,
-                    },
-                )
+            AppError::PluginRefusal(refusal) => refusal.into_parts(),
+            AppError::AdmissionRefused(refused) => {
+                let (code, message) = refused.code_and_message();
+                (StatusCode::CONFLICT, simple(code, message.into()))
             }
             AppError::IdempotencyKeyInProgress => (
                 StatusCode::CONFLICT,

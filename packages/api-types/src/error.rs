@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 /// API, the same whatever `Accept-Language` says. A client shows the user its
 /// own text for `code` (the web app's `apiError.<code>` keys) and, for a
 /// refused config, for each `details.fields[]` entry (its `kind` and
-/// parameters, or the plugin's translation `key`).
+/// parameters, or the plugin's translation `key`). A code a plugin sent (a
+/// plugin route's client error, a hook's rejection) is `<plugin id>.<CODE>`,
+/// translated only by `<plugin id>.apiError.<CODE>` in that plugin's pack; a
+/// code without a plugin id is the server's own.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ErrorBody {
     /// Machine-readable error code. Any POST sent with an `Idempotency-Key`

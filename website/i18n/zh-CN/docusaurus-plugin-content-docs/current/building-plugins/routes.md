@@ -32,7 +32,7 @@ contest_type = "ioi"
 | `problem` | 指明题目的路径参数：路由声明了 `contest` 时为该比赛中的题目，否则为独立题目。 |
 | `contest_type` | 路由唯一服务的比赛类型。需要同时声明 `contest`。 |
 
-如果清单中这些键的组合是服务器无法执行的，插件不会加载，`broccoli-dev plugin build` 也会报告错误：`public` 路由指定了比赛、题目或权限，`participant` 未声明 `contest`，`contest_type` 未声明 `contest`，参数不在 `path` 中，或出现未知的键。
+如果清单中这些键的组合是服务器无法执行的，插件不会加载，`broccoli-dev plugin build` 也会报告错误：`public` 路由指定了比赛、题目或权限，`participant` 未声明 `contest`，`contest_type` 未声明 `contest`，参数不在 `path` 中，或出现未知的键。同一 `method` 和 `path` 声明两次的清单同样不会加载，因此路由的访问规则永远不会被后面的声明替换。
 
 ## 谁可以调用
 
@@ -50,7 +50,7 @@ contest_type = "ioi"
 
 | 状态码 | 错误码 | 情形 |
 | --- | --- | --- |
-| `400` | `VALIDATION_ERROR` | 声明的 `contest` 或 `problem` 参数不是 ID。 |
+| `400` | `VALIDATION_ERROR` | 声明的 `contest` 或 `problem` 参数不是 ID，或路由声明了尚未开始的比赛中的题目（无论题目是否在比赛中都如此回答；持有 `contest:manage` 的用户可以提前读取）。 |
 | `401` | `TOKEN_MISSING`、`TOKEN_INVALID` | 需要令牌的路由未携带令牌，或令牌无效、已失效。 |
 | `403` | `PERMISSION_DENIED` | 调用者缺少 `permission`，或在 `participant` 路由上不是公开比赛的参赛者。 |
 | `404` | `NOT_FOUND` | 调用者无法读取该比赛或题目、资源不存在、题目不属于该比赛，或比赛属于其他 `contest_type`。 |
@@ -90,9 +90,13 @@ fn handle_submission_status(
 
 处理函数返回 `Result<PluginHttpResponse, ApiError>`，而 `ApiError` 只有两种：
 
-- 客户端错误，通过 `PluginHttpResponse::error(status, message)` 构造。其响应体采用服务器的错误格式 `{"code": ..., "message": ...}`，错误码为服务器对该状态码使用的错误码（`404` 为 `NOT_FOUND`，`409` 为 `CONFLICT`，依此类推）。当前端需要区分同一状态码下的不同情形时，使用 `PluginHttpResponse::error_with_code(status, code, message)`。
+- 客户端错误，通过 `PluginHttpResponse::error(status, message)` 构造。其响应体采用服务器的错误格式 `{"code": ..., "message": ...}`，错误码对应该状态码（`404` 为 `NOT_FOUND`，`409` 为 `CONFLICT`，依此类推）。当前端需要区分同一状态码下的不同情形时，使用 `PluginHttpResponse::error_with_code(status, code, message)`。
 - 内部错误：`?` 转换的所有 `SdkError`（例如查询失败），以及通过 `ApiError::internal(detail)` 包装的任何内容。详情写入服务器日志，调用者收到带通用消息的 `500 INTERNAL_ERROR`，永远不会看到详情。
 
-插件路由返回的任何 `5xx` 都由服务器自己作答，因此即使处理函数手工构造了 `500` 响应，数据库或宿主的文本也不会出现在响应体中。
+服务器以插件 ID 为前缀转发客户端错误：`cooldown` 插件的 `COOLDOWN_ACTIVE` 到达调用者时是 `cooldown.COOLDOWN_ACTIVE`，其文本来自翻译包中的 `cooldown.apiError.COOLDOWN_ACTIVE`（见[翻译](./translations.md)）。因此插件的错误码永远不会被当作服务器自己的错误码，例如 Web 客户端会据以行动的 `TOKEN_INVALID` 或 `PLUGIN_UNAVAILABLE`。客户端错误只以 `400`、`403`、`404`、`409`、`413` 或 `429` 发出；其他客户端错误状态码一律以 `400` 发出。调用者是否已登录由服务器判断：请在清单中声明 `access`，而不是返回 `401`。在 `public` 路由上，`req.require_user_id()` 对匿名调用者返回 `403 PERMISSION_DENIED`。
+
+插件路由返回的任何 `5xx` 都由服务器自己作答，因此即使处理函数手工构造了 `500` 响应，数据库或宿主的文本也不会出现在响应体中。既不是成功也不是客户端错误的状态码（例如重定向）同样如此处理。
+
+响应只有状态码和 JSON 响应体：所有响应头都由服务器自己写入。响应体总是以 `application/json` 发送，并带有 `X-Content-Type-Options: nosniff` 和不允许运行任何内容的 `Content-Security-Policy`，因此路由永远无法在服务器的源上设置 Cookie、重定向或提供页面。
 
 对于调用者无权查看的资源，返回与不存在的资源相同的 `404`，使路由不会向调用者透露哪些 ID 已被使用。

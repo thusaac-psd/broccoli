@@ -3,9 +3,9 @@ import { test } from 'node:test';
 
 import {
   describeError,
+  errorCodeText,
   errorKind,
   isTemporaryApiError,
-  judgeErrorText,
   RequestError,
   TranslatedError,
 } from './errors.ts';
@@ -130,7 +130,7 @@ test('an already translated error is shown as it is', () => {
   );
 });
 
-test("a judge error code a plugin raised reads only from that plugin's pack", () => {
+test("an error code a plugin raised reads only from that plugin's pack", () => {
   const catalog: Record<string, string> = {
     'icpc.apiError.NO_TEST_CASES': 'ICPC: no test cases',
     'apiError.NO_TEST_CASES': 'Host: no test cases',
@@ -139,24 +139,51 @@ test("a judge error code a plugin raised reads only from that plugin's pack", ()
   };
   const translator = { lookup: (key: string) => catalog[key] };
   assert.equal(
-    judgeErrorText('icpc.NO_TEST_CASES', translator),
+    errorCodeText('icpc.NO_TEST_CASES', translator),
     'ICPC: no test cases',
   );
   // Another plugin raising the same code without its own text reads neither
   // the first plugin's text nor the host's: the caller's generic message.
   assert.equal(
-    judgeErrorText('codelink-bracket.NO_TEST_CASES', translator),
+    errorCodeText('codelink-bracket.NO_TEST_CASES', translator),
     undefined,
   );
-  assert.equal(judgeErrorText('ioi.SHARED', translator), undefined);
+  assert.equal(errorCodeText('ioi.SHARED', translator), undefined);
   // A plugin's code named like a host fault never reads as that fault.
-  assert.equal(judgeErrorText('ioi.OPERATION_LOST', translator), undefined);
+  assert.equal(errorCodeText('ioi.OPERATION_LOST', translator), undefined);
   // A host code carries no plugin id.
   assert.equal(
-    judgeErrorText('OPERATION_LOST', translator),
+    errorCodeText('OPERATION_LOST', translator),
     'Host: operation lost',
   );
   // No translation anywhere: the caller shows its generic message.
-  assert.equal(judgeErrorText('icpc.UNKNOWN', translator), undefined);
-  assert.equal(judgeErrorText('UNKNOWN', translator), undefined);
+  assert.equal(errorCodeText('icpc.UNKNOWN', translator), undefined);
+  assert.equal(errorCodeText('UNKNOWN', translator), undefined);
+});
+
+test("a plugin's refusal is described from that plugin's pack only", () => {
+  const catalog: Record<string, string> = {
+    'cooldown.apiError.COOLDOWN_ACTIVE': 'Wait {seconds}s',
+    'apiError.COOLDOWN_ACTIVE': 'Host text',
+    'apiError.PLUGIN_UNAVAILABLE': 'Busy, retrying',
+    'apiError.kind.forbidden': 'Not allowed',
+  };
+  const translator = {
+    lookup: (key: string, params?: Record<string, string | number>) =>
+      catalog[key]?.replace(/\{(\w+)\}/g, (_, name) => String(params?.[name])),
+  };
+  const refusal = new RequestError(429, 'cooldown.COOLDOWN_ACTIVE', 'wait', {
+    seconds: 5,
+  });
+  assert.deepEqual(describeError(refusal, 'Failed', translator), {
+    kind: 'rateLimited',
+    message: 'Wait 5s',
+  });
+  // A plugin sending a host code gets neither the host's text nor its kind.
+  const spoof = new RequestError(403, 'evil.PLUGIN_UNAVAILABLE', 'busy');
+  assert.ok(!isTemporaryApiError(spoof));
+  assert.deepEqual(describeError(spoof, 'Failed', translator), {
+    kind: 'forbidden',
+    message: 'Not allowed',
+  });
 });

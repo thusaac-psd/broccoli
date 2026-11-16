@@ -33,10 +33,11 @@ DTO 只能经由 `Visible::into_masked_json` 进入响应体，该函数应用�
 - 持有者令牌经过 `extractors::auth::fresh_user`，与每个会修改状态的核心请求使用同一项新鲜度检查，因此失效的令牌在这里同样返回 401，读请求也不例外。
 - `permission` 依据令牌中的权限检查。
 - 声明的比赛只读取一次（`find_contest`），对照路由的 `contest_type` 检查，通过 `know_contest` 交给内核，并与声明的题目在同一次 `decide_batch` 中决策。报名情况来自同一批次（`participates`），`participant` 路由应用 `participant_gate`，即 `require_contest_participant` 使用的规则。
+- 声明了比赛中题目的路由在比赛的决策与题目的决策之间应用 `require_contest_started`，这与 `handlers::problem::require_problem_part_reachable` 对每个核心题目部分路由采用的顺序相同，因此在比赛开始前，无论题目是否在比赛中，两者都返回 `400`。
 
 `RouteAccess` 由 `ServerRouteConfig::access` 根据清单构建，它拒绝代理无法执行的任何键组合，因此一条路由要么带着代理能执行的规则加载，要么不加载。
 
-插件返回的 `5xx` 响应会变为 `AppError::Internal`：服务器记录响应体，并返回不含该内容的 `500 INTERNAL_ERROR`。客户机 SDK 通过让调用失败（`run_api_handler`）把所有 `SdkError` 送入这条路径，因此内部文本永远不会到达调用者。
+插件的应答经过 `plugin_answer`：宿主只发送其状态码和 JSON 响应体，所有响应头都由宿主自己写入。`2xx` 以 `application/json` 发送响应体。客户端错误成为 `services::plugin_output::PluginRefusal`，即以 `<plugin_id>.<CODE>` 表示的插件错误码，并带有插件可用于拒绝的状态码之一，与阻塞钩子的拒绝成为的类型相同。其他任何状态码都会变为 `AppError::Internal`：服务器记录响应体，并返回不含该内容的 `500 INTERNAL_ERROR`。客户机 SDK 通过让调用失败（`run_api_handler`）把所有 `SdkError` 送入这条路径，因此内部文本永远不会到达调用者。每个 `/api` 响应都带有 `X-Content-Type-Options: nosniff` 和不允许运行任何内容的 `Content-Security-Policy`。
 
 ## 可见性插件缺失时
 

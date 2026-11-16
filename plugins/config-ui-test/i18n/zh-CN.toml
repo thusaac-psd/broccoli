@@ -1,21 +1,21 @@
 # Shared badges
-'configUiTest.pluginBadge' = '（插件）'
-'configUiTest.pluginOverrideBadge' = '（插件覆盖）'
+'config-ui-test.pluginBadge' = '（插件）'
+'config-ui-test.pluginOverrideBadge' = '（插件覆盖）'
 
 # CollapsibleWrapper
-'configUiTest.collapsible.expand' = '展开'
-'configUiTest.collapsible.collapse' = '折叠'
-'configUiTest.collapsible.collapsedHint' = '评分设置已折叠 — 点击“展开”进行配置'
+'config-ui-test.collapsible.expand' = '展开'
+'config-ui-test.collapsible.collapse' = '折叠'
+'config-ui-test.collapsible.collapsedHint' = '评分设置已折叠 — 点击“展开”进行配置'
 
 # ColorPickerField
-'configUiTest.colorPicker.defaultTitle' = '颜色'
-'configUiTest.colorPicker.preview' = '预览'
+'config-ui-test.colorPicker.defaultTitle' = '颜色'
+'config-ui-test.colorPicker.preview' = '预览'
 
 # ModeCardSelector
-'configUiTest.modeCard.defaultTitle' = '模式'
-'configUiTest.modeCard.fast.description' = '快速检查，最少校验'
-'configUiTest.modeCard.balanced.description' = '在速度与覆盖面之间取得平衡'
-'configUiTest.modeCard.thorough.description' = '完整校验，较慢但更全面'
-'configUiTest.modeCard.experimental.description' = '前沿功能，可能不稳定'
+'config-ui-test.modeCard.defaultTitle' = '模式'
+'config-ui-test.modeCard.fast.description' = '快速检查，最少校验'
+'config-ui-test.modeCard.balanced.description' = '在速度与覆盖面之间取得平衡'
+'config-ui-test.modeCard.thorough.description' = '完整校验，较慢但更全面'
+'config-ui-test.modeCard.experimental.description' = '前沿功能，可能不稳定'
 'plugin.config-ui-test.name' = '配置界面测试'
 'plugin.config-ui-test.description' = '用于检验各类配置字段的插件。'

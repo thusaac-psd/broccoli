@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::time::Duration;
 
-use axum::http::header::AUTHORIZATION;
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::{
     body::{Body, to_bytes},
     extract::State,
-    http::{HeaderMap, Method, Response},
+    http::{HeaderMap, Method, Response, StatusCode},
     response::{
         IntoResponse, Sse,
         sse::{Event, KeepAlive},
@@ -19,6 +19,7 @@ use tracing::{info, instrument, warn};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, fresh_user};
 use crate::extractors::path::AppPath;
+use crate::services::plugin_output::PluginRefusal;
 use crate::services::plugin_route_access::authorize;
 use crate::state::AppState;
 use crate::utils::jwt;
@@ -173,35 +174,49 @@ async fn handle_plugin_request_impl(
         .plugins
         .call_raw(&plugin_id, &handler_name, request, crate::route_call())
         .await?;
-    let response: PluginHttpResponse =
-        serde_json::from_slice(&response).map_err(plugin_core::error::PluginError::from)?;
-    // A plugin answers client errors; a server error is the host's to
-    // answer, with its generic body, so no internal detail a plugin put in
-    // the body reaches the caller.
-    if response.status >= 500 {
+    let response: PluginHttpResponse = serde_json::from_slice(&response).map_err(|e| {
+        AppError::Internal(format!(
+            "plugin '{plugin_id}' handler '{handler_name}' answered a malformed response: {e}"
+        ))
+    })?;
+    plugin_answer(&plugin_id, &handler_name, response)
+}
+
+/// The host's response for what a plugin route handler answered. A plugin
+/// sends only a status and a JSON body: the host writes every header, so a
+/// plugin can neither set a cookie, redirect, widen CORS nor serve a page on
+/// the host's origin. A success is the body as JSON; a client error is a
+/// [`PluginRefusal`], the plugin's code under its id with a status a plugin
+/// may refuse with; anything else, a server error included, is the host's
+/// generic 500, so no internal detail a plugin put in the body reaches the
+/// caller.
+fn plugin_answer(
+    plugin_id: &str,
+    handler_name: &str,
+    response: PluginHttpResponse,
+) -> Result<Response<Body>, AppError> {
+    let status = StatusCode::from_u16(response.status).ok();
+    if status.is_some_and(|status| status.is_client_error()) {
+        return Err(
+            PluginRefusal::from_route_body(plugin_id, response.status, response.body).into(),
+        );
+    }
+    let Some(status) = status.filter(|status| status.is_success()) else {
         return Err(AppError::Internal(format!(
             "plugin '{plugin_id}' handler '{handler_name}' answered {}: {}",
             response.status,
             response.body.unwrap_or_default()
         )));
-    }
-
-    let mut builder = Response::builder().status(response.status);
-
-    if let Some(h) = response.headers {
-        for (k, v) in h {
-            builder = builder.header(k, v);
-        }
-    }
-
-    let resp_body = serde_json::to_string(&response.body.unwrap_or(serde_json::Value::Null))
-        .map_err(|e| {
-            AppError::Internal(format!("Failed to serialize plugin response body: {}", e))
+    };
+    let body =
+        serde_json::to_vec(&response.body.unwrap_or(serde_json::Value::Null)).map_err(|e| {
+            AppError::Internal(format!("Failed to serialize plugin response body: {e}"))
         })?;
-
-    builder
-        .body(Body::from(resp_body))
-        .map_err(|e| AppError::Internal(format!("Failed to build plugin response: {}", e)))
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .map_err(|e| AppError::Internal(format!("Failed to build plugin response: {e}")))
 }
 
 /// Stream changed snapshots of an existing GET route. Every read goes through
@@ -281,7 +296,7 @@ macro_rules! proxy_handler {
             tag = "Plugins",
             operation_id = $op_id,
             summary = $summary,
-            description = "Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.",
+            description = "Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. The plugin answers only a status and a JSON body; the host writes every header. Errors use the host error shape: a plugin's client error carries the plugin's code as `<plugin_id>.<CODE>` with status 400, 403, 404, 409, 413 or 429, and a plugin failure is a 500 INTERNAL_ERROR without detail.",
             params(
                 ("plugin_id" = String, Path, description = "The unique identifier of the plugin"),
                 ("path" = String, Path, description = "The sub-path defined in plugin's manifest")
@@ -289,11 +304,14 @@ macro_rules! proxy_handler {
             request_body = $body_type,
             responses(
                 (status = 200, description = "Success", body = serde_json::Value),
-                (status = 400, description = "A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request", body = ErrorBody),
+                (status = 400, description = "A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
                 (status = 401, description = "Unauthorized: no token, or an invalid or stale one (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
-                (status = 403, description = "Forbidden", body = ErrorBody),
-                (status = 404, description = "Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND)", body = ErrorBody),
+                (status = 403, description = "The caller lacks the route's permission (PERMISSION_DENIED), is not registered for its contest (CONTEST_NOT_REGISTERED), or the plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
+                (status = 404, description = "Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND), or the plugin found nothing (`<plugin_id>.<CODE>`)", body = ErrorBody),
                 (status = 405, description = "Method Not Allowed", body = ErrorBody),
+                (status = 409, description = "The plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
+                (status = 413, description = "The plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
+                (status = 429, description = "The plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
                 (status = 500, description = "The plugin failed (INTERNAL_ERROR); the detail is logged, never returned", body = ErrorBody),
                 (status = 503, description = "The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After)", body = ErrorBody),
             ),
@@ -319,18 +337,21 @@ macro_rules! proxy_handler {
             tag = "Plugins",
             operation_id = $op_id,
             summary = $summary,
-            description = "Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. Errors use the host error shape; a plugin failure is a 500 INTERNAL_ERROR without detail.",
+            description = "Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes. The plugin answers only a status and a JSON body; the host writes every header. Errors use the host error shape: a plugin's client error carries the plugin's code as `<plugin_id>.<CODE>` with status 400, 403, 404, 409, 413 or 429, and a plugin failure is a 500 INTERNAL_ERROR without detail.",
             params(
                 ("plugin_id" = String, Path, description = "The unique identifier of the plugin"),
                 ("path" = String, Path, description = "The sub-path defined in plugin's manifest")
             ),
             responses(
                 (status = 200, description = "Success", body = serde_json::Value),
-                (status = 400, description = "A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin rejected the request", body = ErrorBody),
+                (status = 400, description = "A path parameter the route declares as an id is not one (VALIDATION_ERROR), or the plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
                 (status = 401, description = "Unauthorized: no token, or an invalid or stale one (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
-                (status = 403, description = "Forbidden", body = ErrorBody),
-                (status = 404, description = "Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND)", body = ErrorBody),
+                (status = 403, description = "The caller lacks the route's permission (PERMISSION_DENIED), is not registered for its contest (CONTEST_NOT_REGISTERED), or the plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
+                (status = 404, description = "Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND), or the plugin found nothing (`<plugin_id>.<CODE>`)", body = ErrorBody),
                 (status = 405, description = "Method Not Allowed", body = ErrorBody),
+                (status = 409, description = "The plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
+                (status = 413, description = "The plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
+                (status = 429, description = "The plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
                 (status = 500, description = "The plugin failed (INTERNAL_ERROR); the detail is logged, never returned", body = ErrorBody),
                 (status = 503, description = "The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After)", body = ErrorBody),
             ),

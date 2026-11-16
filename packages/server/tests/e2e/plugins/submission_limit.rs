@@ -112,7 +112,7 @@ async fn limit_rejects_after_max_submissions() {
     );
     assert_eq!(
         sub3_res.body["code"].as_str().unwrap_or(""),
-        "SUBMISSION_LIMIT_EXCEEDED",
+        "submission-limit.SUBMISSION_LIMIT_EXCEEDED",
         "Error code should be SUBMISSION_LIMIT_EXCEEDED"
     );
 }
@@ -305,7 +305,7 @@ async fn different_problems_have_independent_limits() {
     );
     assert_eq!(
         sub_a2.body["code"].as_str().unwrap_or(""),
-        "SUBMISSION_LIMIT_EXCEEDED"
+        "submission-limit.SUBMISSION_LIMIT_EXCEEDED"
     );
 
     // Problem B has its own counter, so a real POST there is still accepted
@@ -461,7 +461,7 @@ async fn limit_rejects_concurrent_submissions_race() {
             429 => {
                 assert_eq!(
                     code.as_deref(),
-                    Some("SUBMISSION_LIMIT_EXCEEDED"),
+                    Some("submission-limit.SUBMISSION_LIMIT_EXCEEDED"),
                     "429 must carry SUBMISSION_LIMIT_EXCEEDED, got: {text}"
                 );
                 rejected += 1;
@@ -667,7 +667,7 @@ async fn an_attempt_a_later_hook_rejects_releases_its_slot() {
     let rejected = app.post_with_token(&sub_path, &body, &contestant).await;
     assert_eq!(rejected.status, 429, "{}", rejected.text);
     assert_eq!(
-        rejected.body["code"], "COOLDOWN_ACTIVE",
+        rejected.body["code"], "cooldown.COOLDOWN_ACTIVE",
         "{}",
         rejected.text
     );

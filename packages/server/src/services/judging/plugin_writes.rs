@@ -9,17 +9,7 @@ use common::StatusPhase;
 
 use super::fault::{Recorded, SystemErrorClass};
 use super::unit::{Unit, cascade};
-
-/// A plugin's error code as the host records it on a judgement or code run:
-/// `<plugin_id>.<code>`. A plugin id holds no `.`, so the UI reads the raising
-/// plugin off the code and looks its translation up in that plugin's pack
-/// (`<plugin_id>.apiError.<code>`), and two plugins' codes never collide. A
-/// recorded code without a plugin id is the host's own: a plugin never writes
-/// one, so it cannot pass for a platform fault or a code that stands (see
-/// [`super::fault`]).
-pub(crate) fn plugin_error_code(plugin_id: &str, code: &str) -> String {
-    format!("{plugin_id}.{code}")
-}
+use crate::services::plugin_output::plugin_code;
 
 /// A plugin's write to the unit it was dispatched with: the parts of it
 /// [`as_recorded`] rules on, alike for a judgement and a code run.
@@ -91,7 +81,7 @@ impl PluginWrite for CodeRunUpdate {
 /// `update` from `plugin_id` as the host records it, the one rule for every
 /// error code a judgement or code run write carries:
 ///
-/// - the plugin's own code is recorded under its id ([`plugin_error_code`]);
+/// - the plugin's own code is recorded under its id ([`plugin_code`]);
 /// - the plugin's word that its system error stands
 ///   ([`SubmissionUpdate::stands`]) counts only on the update that ends the
 ///   unit in one;
@@ -114,7 +104,7 @@ pub(crate) fn as_recorded<W: PluginWrite>(
     let code = update.error_code();
     *code = code
         .take()
-        .map(|code| code.map(|code| plugin_error_code(plugin_id, &code)));
+        .map(|code| code.map(|code| plugin_code(plugin_id, &code)));
     let ends_in_system_error = update.ends_in_system_error();
     update.set_stands(update.stands() && ends_in_system_error);
     let Some(fault) = fault else {

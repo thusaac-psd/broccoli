@@ -41,7 +41,8 @@ A manifest that combines these keys in a way the server cannot enforce does not
 load, and `broccoli-dev plugin build` reports it: a `public` route that names a
 contest, a problem or a permission, `participant` without `contest`,
 `contest_type` without `contest`, a parameter missing from `path`, or an unknown
-key.
+key. A manifest that declares the same `method` and `path` twice does not load
+either, so a route's access is never replaced by a later declaration.
 
 ## Who may call it
 
@@ -64,7 +65,7 @@ endpoint for the same resource:
 
 | Status | Code | When |
 | --- | --- | --- |
-| `400` | `VALIDATION_ERROR` | A declared `contest` or `problem` parameter is not an id. |
+| `400` | `VALIDATION_ERROR` | A declared `contest` or `problem` parameter is not an id, or the route declares a problem of a contest that has not started (answered whether or not the problem is in the contest; `contest:manage` reads it early). |
 | `401` | `TOKEN_MISSING`, `TOKEN_INVALID` | No token on a route that needs one, or a token that is invalid or stale. |
 | `403` | `PERMISSION_DENIED` | The caller lacks `permission`, or is not a participant of a public contest on a `participant` route. |
 | `404` | `NOT_FOUND` | The caller cannot read the contest or problem, it does not exist, the problem is not in the contest, or the contest has another `contest_type`. |
@@ -122,18 +123,36 @@ A handler returns `Result<PluginHttpResponse, ApiError>`, and an `ApiError` is
 one of two things:
 
 - A client error, built with `PluginHttpResponse::error(status, message)`. Its
-  body is the server's error shape, `{"code": ..., "message": ...}`, with the
-  server's code for the status (`404` is `NOT_FOUND`, `409` is `CONFLICT`, and so
-  on). Use `PluginHttpResponse::error_with_code(status, code, message)` when your
+  body is the server's error shape, `{"code": ..., "message": ...}`, with a
+  code for the status (`404` is `NOT_FOUND`, `409` is `CONFLICT`, and so on).
+  Use `PluginHttpResponse::error_with_code(status, code, message)` when your
   frontend needs to tell one condition apart from others with the same status.
 - An internal error: every `SdkError` that `?` converts, such as a failed
   query, and anything you wrap with `ApiError::internal(detail)`. The detail
   goes to the server log. The caller receives `500 INTERNAL_ERROR` with a
   generic message, never the detail.
 
+The server sends a client error on under your plugin's id: a `COOLDOWN_ACTIVE`
+from the `cooldown` plugin reaches the caller as `cooldown.COOLDOWN_ACTIVE`,
+and its text comes from `cooldown.apiError.COOLDOWN_ACTIVE` in your
+translation pack (see [Translations](./translations.md)). A plugin's code
+therefore never reads as one of the server's own, such as `TOKEN_INVALID` or
+`PLUGIN_UNAVAILABLE`, which the web client acts on. A client error goes out as
+`400`, `403`, `404`, `409`, `413` or `429`; any other client error status is
+sent as `400`. Whether the caller is signed in is the server's to say: declare
+`access` in the manifest rather than answering `401`. `req.require_user_id()`
+on a `public` route answers an anonymous caller `403 PERMISSION_DENIED`.
+
 The server answers every `5xx` from a plugin route itself, so database or host
 text can never reach a response body, even from a handler that builds a `500`
-response by hand.
+response by hand. A status that is neither a success nor a client error, such
+as a redirect, is answered the same way.
+
+A response is a status and a JSON body, nothing else: the server writes every
+header itself. The body is always sent as `application/json`, with
+`X-Content-Type-Options: nosniff` and a `Content-Security-Policy` that lets
+nothing run, so a route can never set a cookie, redirect or serve a page on the
+server's origin.
 
 Answer `404` for a resource the caller may not see, the same as for one that
 does not exist, so a route never tells a caller which ids are taken.

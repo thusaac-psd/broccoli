@@ -155,7 +155,6 @@ mod plugin {
         if !eff.is_enabled {
             return Ok(PluginHttpResponse {
                 status: 200,
-                headers: None,
                 body: Some(serde_json::to_value(CooldownStatusResponse {
                     enabled: false,
                     cooldown_seconds: 0,
@@ -181,7 +180,6 @@ mod plugin {
 
         Ok(PluginHttpResponse {
             status: 200,
-            headers: None,
             body: Some(serde_json::to_value(CooldownStatusResponse {
                 enabled: true,
                 cooldown_seconds: cooldown,

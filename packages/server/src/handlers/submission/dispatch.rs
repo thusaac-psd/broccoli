@@ -104,18 +104,7 @@ pub(super) async fn dispatch_before_submission_hooks(
             .map(serde_json::from_value)
             .transpose()
             .map_err(|e| AppError::Internal(format!("Invalid submission admission: {e}"))),
-        HookOutcome::Stopped => Ok(None),
-        HookOutcome::Rejected {
-            code,
-            message,
-            status_code,
-            details,
-        } => Err(AppError::PluginRejection {
-            code,
-            message,
-            status_code,
-            details,
-        }),
+        HookOutcome::Rejected(refusal) => Err(AppError::PluginRefusal(refusal)),
     }
 }
 

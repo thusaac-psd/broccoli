@@ -426,6 +426,20 @@ pub fn build_router(state: AppState) -> anyhow::Result<axum::Router> {
         middleware::idempotency_middleware,
     ));
     let router = router.layer(axum::middleware::from_fn(middleware::reject_nul_in_uri));
+    // An API response is data, never a page: a browser that opens one (a
+    // link to a plugin route, a download) must not sniff it into a type that
+    // runs, run anything in it, or frame it, so no handler, a plugin's
+    // included, can serve script on the host's origin.
+    let router = router
+        .fallback(api_not_found)
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'; sandbox"),
+        ));
 
     #[cfg(feature = "bundled-stress-test")]
     let state_for_downloads = state.clone();
@@ -440,7 +454,7 @@ pub fn build_router(state: AppState) -> anyhow::Result<axum::Router> {
     // `/livez` is the shallow liveness probe for load balancers (no dependency
     // calls); `/healthz` is the deep readiness check (DB + Redis).
     let app = axum::Router::new()
-        .nest("/api", router.fallback(api_not_found))
+        .nest("/api", router)
         .route("/metrics", axum::routing::get(metrics_handler))
         .route("/healthz", axum::routing::get(handlers::health::healthz))
         .route("/livez", axum::routing::get(handlers::health::livez))
