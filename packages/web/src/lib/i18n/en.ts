@@ -308,6 +308,9 @@ export const en: Record<string, string> = {
   'contests.startTime': 'Start',
   'contests.endTime': 'End',
   'contests.searchPlaceholder': 'Search contests...',
+  'contests.draft': 'Draft (not activated)',
+  'contests.scheduled': 'Scheduled',
+  'contests.deactivated': 'Deactivated',
   'contests.upcoming': 'Upcoming',
   'contests.running': 'Running',
   'contests.ended': 'Ended',
@@ -665,6 +668,12 @@ export const en: Record<string, string> = {
   'admin.contest.titlePlaceholder': 'Weekly Contest #42',
   'admin.contest.descriptionPlaceholder':
     'Contest description (Markdown supported)',
+  'admin.contest.activateNow': 'Activate now',
+  'admin.contest.notActivated': 'Not activated (draft)',
+  'admin.contest.activateTimeHelp':
+    'Contestants see the contest only from its activate time on. Without one the contest stays a draft that only contest managers see.',
+  'admin.contest.contestTypeLocked':
+    'Fixed: the contest has submissions, and all of them are judged under one contest type.',
 
   // Additional Files (admin)
   'admin.additionalFiles.title': 'Additional Files',
@@ -936,6 +945,7 @@ export const en: Record<string, string> = {
   'plugins.config.loading': 'Loading…',
   'plugins.config.saveSuccess': 'Configuration saved.',
   'plugins.config.saveError': 'Failed to save configuration.',
+  'plugins.config.serverFieldError': 'Refused by the server: {message}',
   'plugins.config.loadError': 'Failed to load configuration.',
   'plugins.config.deleteSuccess': 'Configuration reset to defaults.',
   'plugins.config.deleteError': 'Failed to delete configuration.',

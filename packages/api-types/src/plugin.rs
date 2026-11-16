@@ -23,8 +23,13 @@ pub struct RegistriesResponse {
     #[schema(example = json!(["batch", "interactive"]))]
     pub problem_types: Vec<String>,
 
-    #[schema(example = json!(["exact", "tokens"]))]
+    #[schema(example = json!(["exact", "lines", "tokens"]))]
     pub checker_formats: Vec<String>,
+
+    /// The checker format a problem gets when it names none, for a form to
+    /// preselect.
+    #[schema(example = "lines")]
+    pub default_checker_format: String,
 
     #[schema(example = json!(["icpc", "ioi"]))]
     pub contest_types: Vec<String>,

@@ -5,13 +5,12 @@
 #[cfg(feature = "guest")]
 use crate::error::SdkError;
 
+/// The contest's `contest` config namespace as the plugin's config type, with
+/// the schema's defaults filled in by the host.
 #[cfg(feature = "guest")]
-pub fn load_config<T: serde::de::DeserializeOwned + Default>(
+pub fn load_config<T: serde::de::DeserializeOwned>(
     host: &crate::sdk::Host,
     contest_id: i32,
 ) -> Result<T, SdkError> {
-    Ok(
-        serde_json::from_value(host.config.get_contest(contest_id, "contest")?.config)
-            .unwrap_or_default(),
-    )
+    host.config.get_contest(contest_id, "contest")?.parse()
 }

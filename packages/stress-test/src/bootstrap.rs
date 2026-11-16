@@ -351,6 +351,7 @@ mod tests {
         let registries = RegistriesResponse {
             problem_types: types(&["communication", "batch"]),
             checker_formats: vec![],
+            default_checker_format: "lines".into(),
             contest_types: vec![],
             languages: vec![],
             evaluators: vec![],
@@ -365,6 +366,7 @@ mod tests {
         let registries = RegistriesResponse {
             problem_types: types(&["communication", "interactive"]),
             checker_formats: vec![],
+            default_checker_format: "lines".into(),
             contest_types: vec![],
             languages: vec![],
             evaluators: vec![],
@@ -493,6 +495,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "problem_types": ["batch"],
                 "checker_formats": ["exact", "tokens-case-insensitive"],
+                "default_checker_format": "lines",
                 "contest_types": ["icpc"],
                 "languages": [],
                 "evaluators": [],
@@ -575,6 +578,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "problem_types": ["batch", "interactive"],
                 "checker_formats": ["exact"],
+                "default_checker_format": "lines",
                 "contest_types": ["icpc", "ioi"],
                 "languages": [],
                 "evaluators": [],
@@ -625,6 +629,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "problem_types": ["batch"],
                 "checker_formats": ["exact"],
+                "default_checker_format": "lines",
                 "contest_types": ["icpc"],
                 "languages": [],
                 "evaluators": [],
@@ -728,6 +733,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "problem_types": [],
                 "checker_formats": [],
+                "default_checker_format": "lines",
                 "contest_types": [],
                 "languages": [],
                 "evaluators": [],

@@ -21,6 +21,7 @@ import {
   hasOwnDescendantValue,
   hasOwnValueAtPath,
   resolveInheritedValue,
+  serverFieldErrors,
   setAtPath,
   validateAll,
 } from './utils';
@@ -184,6 +185,7 @@ function ConfigFormFields({
 
     setLoading(false);
     if (error) {
+      setErrors(serverFieldErrors(error));
       setMessage({ type: 'error', text: t('plugins.config.saveError') });
     } else {
       setStoredValues(payload);

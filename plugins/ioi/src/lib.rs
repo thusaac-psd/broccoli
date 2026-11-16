@@ -34,12 +34,9 @@ pub(crate) fn load_task_config(
     contest_id: i32,
     problem_id: i32,
 ) -> Result<TaskConfig, SdkError> {
-    Ok(serde_json::from_value(
-        host.config
-            .get_contest_problem(contest_id, problem_id, "task")?
-            .config,
-    )
-    .unwrap_or_default())
+    host.config
+        .get_contest_problem(contest_id, problem_id, "task")?
+        .parse()
 }
 
 #[cfg(target_arch = "wasm32")]

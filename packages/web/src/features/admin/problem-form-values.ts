@@ -20,7 +20,7 @@ export const NEW_PROBLEM: ProblemFormData = {
   timeLimit: 1000,
   memoryLimit: 262144,
   problemType: '',
-  // Chosen from the registered checker formats once they load.
+  // The server's default once the registries load (see checkerFormatFor).
   checkerFormat: '',
   defaultContestType: '',
   showTestDetails: false,
@@ -41,6 +41,21 @@ export function problemFormValues(problem: Problem): ProblemFormData {
     isPublic: problem.is_public,
     submissionFormat: problem.submission_format ?? {},
   };
+}
+
+/**
+ * The checker format the form shows: the chosen one while it is registered,
+ * otherwise the server's default (`default_checker_format` of the
+ * registries), otherwise the first registered format.
+ */
+export function checkerFormatFor(
+  current: string,
+  registered: readonly string[],
+  serverDefault: string | undefined,
+): string {
+  if (registered.includes(current)) return current;
+  if (serverDefault && registered.includes(serverDefault)) return serverDefault;
+  return registered[0] ?? '';
 }
 
 /** The i18n key of the first problem with `data`, or null when it is valid. */

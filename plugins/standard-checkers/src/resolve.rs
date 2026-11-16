@@ -52,11 +52,26 @@ const ANSWER_FILE: &str = "answer.txt";
 const PREVIEW_FILE: &str = "output_preview.txt";
 const MESSAGE_FILE: &str = "check_msg.txt";
 
-/// `tokens-float` tolerance defaults, identical to broccoli-compare's own
-/// `tokens-float` defaults (`abs_tol = 1e-9`, `rel_tol = 1e-6`) so fused
-/// verdicts stay byte-identical to an unfused broccoli-compare run.
-const DEFAULT_ABS_TOL: f64 = 1e-9;
-const DEFAULT_REL_TOL: f64 = 1e-6;
+/// The `checker` config namespace: the `tokens-float` tolerances of a
+/// problem. Their defaults live in the namespace's schema in `plugin.toml`;
+/// the host fills them in, so both are always present.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+pub struct FloatTolerance {
+    pub abs_tol: f64,
+    pub rel_tol: f64,
+}
+
+impl FloatTolerance {
+    /// The tolerances configured for `problem_id`.
+    pub fn load(host: &broccoli_server_sdk::Host, problem_id: Option<i32>) -> Result<Self, String> {
+        let problem_id = problem_id
+            .ok_or_else(|| "tokens-float needs a problem_id to load its tolerances".to_string())?;
+        host.config
+            .get_problem(problem_id, "checker")
+            .and_then(|c| c.parse())
+            .map_err(|e| format!("tokens-float tolerances: {e}"))
+    }
+}
 
 /// Map a built-in checker format to its broccoli-compare `--mode` value. The
 /// native comparator's mode strings are identical to the checker format strings
@@ -76,8 +91,13 @@ pub fn builtin_compare_mode(format: &str) -> Option<&'static str> {
 /// Resolve a built-in comparison format into a single-step Stream checker stage
 /// driven by the native broccoli-compare binary. The solution output arrives on
 /// the checker's **stdin** via a FIFO channel; the answer lives only in the
-/// checker env. Tolerances for `tokens-float` map to `--epsilon`/`--rel-epsilon`.
-pub fn resolve_builtin(format: &str, input: &ResolveCheckerInput) -> Result<CheckerStage, String> {
+/// checker env. `tokens-float` needs the problem's `tolerance`, which maps to
+/// `--epsilon`/`--rel-epsilon`; the other formats ignore it.
+pub fn resolve_builtin(
+    format: &str,
+    input: &ResolveCheckerInput,
+    tolerance: Option<FloatTolerance>,
+) -> Result<CheckerStage, String> {
     let mode = builtin_compare_mode(format)
         .ok_or_else(|| format!("'{format}' is not a built-in comparison format"))?;
 
@@ -102,11 +122,12 @@ pub fn resolve_builtin(format: &str, input: &ResolveCheckerInput) -> Result<Chec
     // Float identity: map config tolerances to BOTH flags so a custom rel_tol
     // never flips AC<->WA once fused (broccoli-compare's combined rule needs both).
     if format == "tokens-float" {
-        let (abs_tol, rel_tol) = float_tolerances(input.config.as_ref())?;
+        let tolerance =
+            tolerance.ok_or_else(|| "tokens-float needs the problem's tolerances".to_string())?;
         argv.push("--epsilon".to_string());
-        argv.push(format_tol(abs_tol));
+        argv.push(format_tol(tolerance.abs_tol));
         argv.push("--rel-epsilon".to_string());
-        argv.push(format_tol(rel_tol));
+        argv.push(format_tol(tolerance.rel_tol));
     }
 
     let check = Step {
@@ -395,26 +416,6 @@ pub(crate) fn judge_file_to_session_file(file: &JudgeFile) -> SessionFile {
     }
 }
 
-/// Parse `{ abs_tol, rel_tol }` from the checker config. A missing (or null)
-/// field falls back to the WASM default; a field that is present but not a
-/// number is a configuration error rather than a silent fallback to the tight
-/// default, which would otherwise turn a mistyped tolerance (e.g. the string
-/// `"1e-3"`) into spurious WrongAnswers with no error surfaced.
-fn float_tolerances(config: Option<&serde_json::Value>) -> Result<(f64, f64), String> {
-    let one = |key: &str, default: f64| -> Result<f64, String> {
-        match config.and_then(|c| c.get(key)) {
-            None | Some(serde_json::Value::Null) => Ok(default),
-            Some(v) => v
-                .as_f64()
-                .ok_or_else(|| format!("checker config `{key}` must be a number, got {v}")),
-        }
-    };
-    Ok((
-        one("abs_tol", DEFAULT_ABS_TOL)?,
-        one("rel_tol", DEFAULT_REL_TOL)?,
-    ))
-}
-
 /// Render an f64 tolerance for the broccoli-compare argv. Rust's f64 `Display`
 /// never uses exponent notation, so the value round-trips through the binary's
 /// `f64::from_str`.
@@ -457,7 +458,13 @@ fn load_checker_source(host: &Host, problem_id: Option<i32>) -> Result<Vec<Sourc
 #[cfg(target_arch = "wasm32")]
 fn resolve_stage(host: &Host, req: &ResolveCheckerInput) -> Result<CheckerStage, String> {
     if builtin_compare_mode(&req.format).is_some() {
-        resolve_builtin(&req.format, req)
+        // Only tokens-float reads config: the other formats cost no host call.
+        let tolerance = if req.format == "tokens-float" {
+            Some(FloatTolerance::load(host, req.problem_id)?)
+        } else {
+            None
+        };
+        resolve_builtin(&req.format, req, tolerance)
     } else if req.format == "testlib" {
         let checker_source = load_checker_source(host, req.problem_id)?;
         let (resolved, config) =
@@ -514,7 +521,6 @@ mod tests {
             answer: JudgeFile::inline("3 1 4\n"),
             test_input: JudgeFile::inline("3\n"),
             problem_id: None,
-            config: None,
             output_binding: OutputMode::Stream {
                 channel: channel.to_string(),
             },
@@ -524,7 +530,7 @@ mod tests {
     #[test]
     fn resolve_builtin_tokens_builds_stream_stage() {
         let input = tokens_resolve_input("sol_out");
-        let stage = resolve_builtin("tokens", &input).expect("tokens should resolve");
+        let stage = resolve_builtin("tokens", &input, None).expect("tokens should resolve");
 
         // Single check step, Stream output, result points at it.
         assert_eq!(stage.steps.len(), 1);
@@ -592,46 +598,71 @@ mod tests {
         }
     }
 
+    fn argv_value<'a>(argv: &'a [String], flag: &str) -> &'a str {
+        let at = argv.iter().position(|a| a == flag).expect(flag);
+        &argv[at + 1]
+    }
+
     #[test]
     fn resolve_builtin_tokens_float_maps_both_tolerances() {
         let mut input = tokens_resolve_input("sol_out");
         input.format = "tokens-float".to_string();
-        input.config = Some(serde_json::json!({ "abs_tol": 1e-4, "rel_tol": 1e-3 }));
+        let tolerance = FloatTolerance {
+            abs_tol: 1e-4,
+            rel_tol: 1e-3,
+        };
 
-        let stage = resolve_builtin("tokens-float", &input).expect("tokens-float resolves");
+        let stage = resolve_builtin("tokens-float", &input, Some(tolerance))
+            .expect("tokens-float resolves");
         let argv = &stage.steps[0].argv;
 
         // --epsilon <abs_tol> and --rel-epsilon <rel_tol> must BOTH be present.
-        let eps = argv
-            .iter()
-            .position(|a| a == "--epsilon")
-            .expect("--epsilon");
-        assert_eq!(argv[eps + 1], "0.0001");
-        let rel = argv
-            .iter()
-            .position(|a| a == "--rel-epsilon")
-            .expect("--rel-epsilon");
-        assert_eq!(argv[rel + 1], "0.001");
+        assert_eq!(argv_value(argv, "--epsilon"), "0.0001");
+        assert_eq!(argv_value(argv, "--rel-epsilon"), "0.001");
+    }
+
+    /// The problem's `checker` namespace sets the tolerances; what it leaves
+    /// out comes from the schema (`abs_tol = 1e-9`, `rel_tol = 1e-6`).
+    #[test]
+    fn tokens_float_tolerances_come_from_the_problem_checker_config() {
+        let host = broccoli_server_sdk::Host::mock();
+        assert_eq!(
+            FloatTolerance::load(&host, Some(5)).unwrap(),
+            FloatTolerance {
+                abs_tol: 1e-9,
+                rel_tol: 1e-6
+            }
+        );
+        host.config.seed(
+            "problem",
+            "5",
+            "checker",
+            serde_json::json!({"abs_tol": 0.01}),
+        );
+        let tolerance = FloatTolerance::load(&host, Some(5)).unwrap();
+        assert_eq!(tolerance.abs_tol, 0.01);
+        assert_eq!(tolerance.rel_tol, 1e-6);
+
+        let mut input = tokens_resolve_input("sol_out");
+        input.format = "tokens-float".to_string();
+        let stage = resolve_builtin("tokens-float", &input, Some(tolerance)).unwrap();
+        let argv = &stage.steps[0].argv;
+        assert_eq!(argv_value(argv, "--epsilon"), "0.01");
+        assert_eq!(argv_value(argv, "--rel-epsilon"), "0.000001"); // no exponent notation
     }
 
     #[test]
-    fn resolve_builtin_tokens_float_defaults_when_no_config() {
+    fn tokens_float_without_tolerances_is_an_error() {
         let mut input = tokens_resolve_input("sol_out");
         input.format = "tokens-float".to_string();
-        input.config = None;
-
-        let stage = resolve_builtin("tokens-float", &input).unwrap();
-        let argv = &stage.steps[0].argv;
-        let eps = argv.iter().position(|a| a == "--epsilon").unwrap();
-        assert_eq!(argv[eps + 1], "0.000000001"); // 1e-9, no exponent notation
-        let rel = argv.iter().position(|a| a == "--rel-epsilon").unwrap();
-        assert_eq!(argv[rel + 1], "0.000001"); // 1e-6
+        assert!(resolve_builtin("tokens-float", &input, None).is_err());
+        assert!(FloatTolerance::load(&broccoli_server_sdk::Host::mock(), None).is_err());
     }
 
     #[test]
     fn resolve_builtin_rejects_non_builtin_format() {
         let input = tokens_resolve_input("sol_out");
-        assert!(resolve_builtin("testlib", &input).is_err());
+        assert!(resolve_builtin("testlib", &input, None).is_err());
     }
 
     #[test]
@@ -640,7 +671,7 @@ mod tests {
         input.output_binding = OutputMode::File {
             name: "output.txt".to_string(),
         };
-        assert!(resolve_builtin("tokens", &input).is_err());
+        assert!(resolve_builtin("tokens", &input, None).is_err());
     }
 
     fn small(exit_code: Option<i32>, stderr: &str, status: Option<&str>) -> CheckerRunOutcome {
@@ -751,7 +782,7 @@ mod tests {
             &JudgeFile::inline("3\n"),
             &JudgeFile::inline("3 1 4\n"),
             &resolved_with_compile(),
-            &crate::checkers::testlib::TestlibConfig::default(),
+            &crate::checkers::testlib::TestlibConfig::schema_defaults(),
             &OutputMode::File {
                 name: "output.txt".to_string(),
             },
@@ -847,7 +878,7 @@ mod tests {
             &JudgeFile::inline("3\n"),
             &JudgeFile::inline("3 1 4\n"),
             &resolved_with_compile(),
-            &crate::checkers::testlib::TestlibConfig::default(),
+            &crate::checkers::testlib::TestlibConfig::schema_defaults(),
             &OutputMode::Stream {
                 channel: "sol_out".to_string(),
             },

@@ -9,10 +9,12 @@ mod plugin {
 
     use crate::reservation::{self, LimitKey};
 
-    #[derive(Debug, Default, Deserialize)]
+    /// The `limits` config namespace, with the schema's defaults filled in
+    /// by the host.
+    #[derive(Debug, Deserialize)]
     struct LimitsConfig {
-        #[serde(default)]
-        max_submissions: Option<u32>,
+        /// 0 = unlimited.
+        max_submissions: u32,
     }
 
     #[derive(Deserialize)]
@@ -60,22 +62,21 @@ mod plugin {
     }
 
     /// The configured cap, `None` when the gate is off for this resource
-    /// (disabled, unlimited, or unresolvable config).
-    fn active_cap(host: &Host, problem_id: i32, contest_id: Option<i32>) -> Option<u32> {
-        let eff = match host.config.get_effective("limits", problem_id, contest_id) {
-            Ok(e) => e,
-            Err(e) => {
-                let _ = host.log.info(&format!(
-                    "[submission-limit] Failed to resolve config: {e}, using default (unlimited)"
-                ));
-                return None;
-            }
-        };
+    /// (disabled or unlimited). A config that cannot be read is an error, so
+    /// the submission fails instead of slipping past the limit.
+    fn active_cap(
+        host: &Host,
+        problem_id: i32,
+        contest_id: Option<i32>,
+    ) -> Result<Option<u32>, SdkError> {
+        let eff = host
+            .config
+            .get_effective("limits", problem_id, contest_id)?;
         if !eff.is_enabled {
-            return None;
+            return Ok(None);
         }
-        let config: LimitsConfig = eff.parse_config().unwrap_or_default();
-        config.max_submissions.filter(|&max| max > 0)
+        let config: LimitsConfig = eff.parse_config()?;
+        Ok(Some(config.max_submissions).filter(|&max| max > 0))
     }
 
     /// Reserve a slot for this attempt, or reject once the cap is reached.
@@ -83,7 +84,7 @@ mod plugin {
     pub fn check_limit(input: String) -> FnResult<String> {
         let host = Host::new();
         let event: BeforeSubmissionEvent = serde_json::from_str(&input)?;
-        let Some(max) = active_cap(&host, event.problem_id, event.contest_id) else {
+        let Some(max) = active_cap(&host, event.problem_id, event.contest_id)? else {
             return Ok(serde_json::to_string(&HookResponse::pass())?);
         };
         let key = LimitKey {
@@ -161,8 +162,8 @@ mod plugin {
             });
         }
 
-        let config: LimitsConfig = eff.parse_config().unwrap_or_default();
-        let max = config.max_submissions.unwrap_or(0);
+        let config: LimitsConfig = eff.parse_config()?;
+        let max = config.max_submissions;
         let unlimited = max == 0;
 
         let count = held_count(

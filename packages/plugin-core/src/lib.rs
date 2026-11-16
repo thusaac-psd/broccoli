@@ -1,6 +1,7 @@
 pub mod admission;
 pub mod call_gate;
 pub mod config;
+pub mod config_schema;
 mod deadline;
 pub mod error;
 pub mod executor;

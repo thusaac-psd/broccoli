@@ -97,8 +97,7 @@ mod role_permission_grant {
     }
 
     /// The ceiling is not specific to `system:admin`: any permission the caller
-    /// lacks is refused, on any role, including custom permission strings that
-    /// plugins check.
+    /// lacks is refused, on any role.
     #[tokio::test]
     async fn role_manager_cannot_grant_any_permission_it_lacks() {
         let app = TestApp::spawn().await;
@@ -109,7 +108,6 @@ mod role_permission_grant {
         for (role, permission) in [
             ("lacker_role", "user:manage"),
             ("contestant", "problem:create"),
-            ("contestant", "experimental:feature"),
         ] {
             let res = app
                 .post_with_token(
@@ -151,6 +149,28 @@ mod role_permission_grant {
             role_grants(&app, "contestant").await,
             ["problem:create", "submission:submit"]
         );
+    }
+
+    /// Only a permission the host or an installed plugin checks can be
+    /// granted: anything else would authorize nothing and still invalidate
+    /// every holder's tokens.
+    #[tokio::test]
+    async fn granting_an_unknown_permission_is_a_validation_error() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_permissions("root", PASSWORD, &["role:manage", "system:admin"])
+            .await;
+
+        let res = app
+            .post_with_token(
+                &routes::role_permissions("contestant"),
+                &json!({"permission": "bogus:perm"}),
+                &token,
+            )
+            .await;
+        assert_eq!(res.status, 400, "{}", res.text);
+        assert_eq!(res.body["code"], "VALIDATION_ERROR", "{}", res.text);
+        assert_eq!(role_grants(&app, "contestant").await, ["submission:submit"]);
     }
 
     /// `system:admin` is the one root-equivalent grant, so it bypasses the

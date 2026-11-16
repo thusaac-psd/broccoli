@@ -1,25 +1,8 @@
 use broccoli_server_sdk::types::{EvaluationTimeoutBudget, ResourceLimits, seconds_from_ms};
-use serde::{Deserialize, Deserializer, de};
+use serde::Deserialize;
 
-fn default_num_processes() -> u32 {
-    1
-}
-
-fn default_max_processes() -> u32 {
-    64
-}
-
-fn default_fifo_buffer_size() -> u32 {
-    8192
-}
-
-fn deserialize_nonzero_u32<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
-    let v = u32::deserialize(deserializer)?;
-    if v == 0 {
-        return Err(de::Error::custom("num_processes must be >= 1"));
-    }
-    Ok(v)
-}
+/// Kernel pipe buffer size requested for each contestant FIFO, in bytes.
+pub const FIFO_BUFFER_SIZE: usize = 8192;
 
 /// A single manager source file entry (filename + content hash).
 #[derive(Debug, Clone, Deserialize)]
@@ -28,47 +11,42 @@ pub struct ManagerSourceEntry {
     pub hash: String,
 }
 
-/// Per-problem communication config (from `[config.communication]`).
+/// Per-problem communication config: the `communication` config namespace.
+/// Its defaults and bounds (`num_processes` from 1 to 10, for one) live in the
+/// namespace's schema in `plugin.toml`; the host fills the defaults in, so
+/// every field is present here.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
 pub struct CommConfig {
-    #[serde(
-        deserialize_with = "deserialize_nonzero_u32",
-        default = "default_num_processes"
-    )]
     pub num_processes: u32,
-    #[serde(default = "default_max_processes")]
-    pub max_processes: u32,
-    #[serde(default = "default_fifo_buffer_size")]
-    pub fifo_buffer_size: u32,
     pub communication_mode: CommunicationMode,
     pub manager_language: String,
     /// Manager source files. Each entry maps a filename to a blob hash.
     /// The first entry is the primary source file used for language resolution.
-    #[serde(default)]
     pub manager_sources: Vec<ManagerSourceEntry>,
     pub manager_time_limit_s: f64,
     pub manager_memory_limit_kb: u32,
 }
 
-impl Default for CommConfig {
-    fn default() -> Self {
-        Self {
-            num_processes: 1,
-            max_processes: 64,
-            fifo_buffer_size: 8192,
-            communication_mode: CommunicationMode::Redirect,
-            manager_language: "cpp".to_string(),
-            manager_sources: vec![],
-            manager_time_limit_s: 30.0,
-            manager_memory_limit_kb: 524_288,
-        }
-    }
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// The configs with nothing stored: the schema's defaults.
+    pub(crate) fn default_sandbox() -> SandboxConfig {
+        broccoli_server_sdk::Host::mock()
+            .config
+            .get_global("sandbox")
+            .and_then(|c| c.parse())
+            .unwrap()
+    }
+
+    pub(crate) fn default_comm() -> CommConfig {
+        broccoli_server_sdk::Host::mock()
+            .config
+            .get_problem(1, "communication")
+            .and_then(|c| c.parse())
+            .unwrap()
+    }
 
     #[test]
     fn result_timeout_accounts_for_compile_run_and_manager_budget() {
@@ -76,7 +54,7 @@ mod tests {
             compile_time_limit_s: 120.0,
             compile_wall_time_multiplier: 3.0,
             exec_wall_time_multiplier: 5.0,
-            ..SandboxConfig::default()
+            ..crate::config::tests::default_sandbox()
         };
 
         assert!(config.result_timeout_ms_for(300_000, 3, 120.0) > config.result_timeout_ms);
@@ -86,24 +64,23 @@ mod tests {
     fn result_timeout_uses_configured_value_as_floor() {
         let config = SandboxConfig {
             result_timeout_ms: 1_500_000,
-            ..SandboxConfig::default()
+            ..crate::config::tests::default_sandbox()
         };
 
         assert_eq!(config.result_timeout_ms_for(1000, 1, 30.0), 1_500_000);
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CommunicationMode {
-    #[default]
     Redirect,
     FifoArgs,
 }
 
-/// Sandbox resource limits (from `[config.sandbox]`).
+/// Sandbox resource limits: the global `sandbox` config namespace,
+/// schema-filled like [`CommConfig`].
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
 pub struct SandboxConfig {
     pub compile_time_limit_s: f64,
     pub compile_extra_time_s: f64,
@@ -118,27 +95,6 @@ pub struct SandboxConfig {
     pub exec_open_files_limit: u32,
     pub exec_file_size_limit_kb: u32,
     pub result_timeout_ms: u64,
-}
-
-impl Default for SandboxConfig {
-    fn default() -> Self {
-        Self {
-            compile_time_limit_s: 30.0,
-            compile_extra_time_s: 0.0,
-            compile_wall_time_multiplier: 2.0,
-            compile_memory_limit_kb: 524_288,
-            compile_process_limit: 32,
-            compile_open_files_limit: 256,
-            compile_file_size_limit_kb: 524_288,
-            exec_extra_time_s: 0.0,
-            exec_wall_time_multiplier: 5.0,
-            exec_process_limit: 1,
-            exec_open_files_limit: 64,
-            exec_file_size_limit_kb: 65_536,
-            result_timeout_ms: EvaluationTimeoutBudget::default_for_time_limit_ms(0)
-                .minimum_timeout_ms,
-        }
-    }
 }
 
 impl SandboxConfig {
@@ -188,8 +144,7 @@ impl SandboxConfig {
         //
         // The fd limit MUST scale with num_processes: the manager wires 2*N FIFOs
         // (m_to_c / c_to_m) plus a handful of standard/input fds, so a fixed floor
-        // (64) exhausts once num_processes exceeds ~30 (max_processes defaults to
-        // 64), and open() returns EMFILE -> the manager errors -> every submission
+        // (64) exhausts once num_processes exceeds ~30, and open() returns EMFILE -> the manager errors -> every submission
         // on that problem is a SystemError.
         let fd_floor = 2 * num_processes + 8;
         ResourceLimits {

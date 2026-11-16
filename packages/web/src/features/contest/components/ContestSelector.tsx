@@ -21,11 +21,7 @@ export function ContestSelector({ contests }: { contests: ContestSummary[] }) {
       </p>
       <div className="space-y-2">
         {contests.map((contest) => {
-          const { label, variant } = getContestStatus(
-            contest.start_time,
-            contest.end_time,
-            t,
-          );
+          const { label, variant } = getContestStatus(contest, t);
           return (
             <button
               key={contest.id}

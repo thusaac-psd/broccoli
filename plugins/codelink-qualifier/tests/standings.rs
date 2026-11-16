@@ -24,11 +24,16 @@ fn board(submissions: Vec<Submission>) -> Standings {
     board_with_config(submissions, &legacy_config())
 }
 
+/// The config of a contest that stores none: the schema's defaults.
+fn default_config() -> ContestConfig {
+    ContestConfig::load(&broccoli_server_sdk::Host::mock(), 1).unwrap()
+}
+
 fn legacy_config() -> ContestConfig {
     ContestConfig {
         expected_problem_count: 16,
         solves_to_qualify: 2,
-        ..Default::default()
+        ..default_config()
     }
 }
 
@@ -39,7 +44,7 @@ fn board_with_config(submissions: Vec<Submission>, config: &ContestConfig) -> St
 fn weighted_board(submissions: Vec<Submission>) -> Standings {
     board_with_points(
         submissions,
-        &ContestConfig::default(),
+        &default_config(),
         &[vec![1; 16], vec![2; 4]].concat(),
     )
 }
@@ -339,7 +344,7 @@ fn problem_ids_keep_duplicate_labels_independent_and_empty_contest_is_valid() {
         Some(QualificationVerdict::Qualified)
     );
     assert_eq!(result.rows[0].problems.len(), 2);
-    let empty = calculate(vec![], vec![], vec![], &ContestConfig::default()).unwrap();
+    let empty = calculate(vec![], vec![], vec![], &default_config()).unwrap();
     assert_eq!(empty.qualified_count, 0);
     assert!(empty.rows.is_empty());
 }
@@ -351,7 +356,7 @@ fn custom_slots_and_qualification_threshold_control_allocation() {
         slots_per_problem: 3,
         solves_to_qualify: 3,
         scoreboard_refresh_seconds: 12,
-        ..Default::default()
+        ..default_config()
     };
     let submissions = vec![
         ac(1, 1, 1),
@@ -390,7 +395,7 @@ fn one_slot_and_one_credit_qualifies_immediately_without_taking_later_slots() {
     let config = ContestConfig {
         slots_per_problem: 1,
         solves_to_qualify: 1,
-        ..Default::default()
+        ..default_config()
     };
     let result = board_with_config(
         vec![ac(1, 1, 1), ac(2, 2, 1), ac(3, 1, 2), ac(4, 2, 2)],
@@ -539,7 +544,7 @@ fn confirmation_is_sound_for_every_pending_outcome_in_generated_small_histories(
         let config = ContestConfig {
             slots_per_problem: 1 + history % 3,
             solves_to_qualify: 1 + (history / 3) % 3,
-            ..Default::default()
+            ..default_config()
         };
         let mut submissions = Vec::new();
         let mut pending_indices = Vec::new();

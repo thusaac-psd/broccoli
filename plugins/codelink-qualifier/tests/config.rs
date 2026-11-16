@@ -9,8 +9,8 @@ use serde_json::json;
 fn missing_fields_keep_defaults_and_contests_have_independent_settings() {
     let host = Host::mock();
     let defaults = ContestConfig::load(&host, 7).unwrap();
-    assert_eq!(defaults, ContestConfig::default());
     assert_eq!(defaults.expected_problem_count, 20);
+    assert_eq!(defaults.slots_per_problem, 2);
     assert_eq!(defaults.solves_to_qualify, 3);
     assert_eq!(defaults.advancement_slots, 16);
     host.config
@@ -70,7 +70,7 @@ fn malformed_or_out_of_range_settings_never_silently_revert_to_defaults() {
     }
     let invalid = ContestConfig {
         slots_per_problem: 0,
-        ..Default::default()
+        ..ContestConfig::load(&Host::mock(), 7).unwrap()
     };
     assert!(calculate(vec![], vec![], vec![], &invalid).is_err());
 }
@@ -120,7 +120,7 @@ fn invalid_problem_points_cannot_silently_change_the_scoring_budget() {
                 points: 3
             }],
             vec![],
-            &ContestConfig::default(),
+            &ContestConfig::load(&Host::mock(), 7).unwrap(),
         )
         .is_err()
     );

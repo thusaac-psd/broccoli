@@ -1,17 +1,9 @@
 //! Config in the `print` namespace at contest and plugin (global) scope.
 
-use broccoli_server_sdk::Host;
+use broccoli_server_sdk::{Host, error::SdkError};
 use serde::Deserialize;
 
 pub const NAMESPACE: &str = "print";
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_max_pages() -> i32 {
-    10
-}
 
 /// One print station's credential. The station is known by `name` to
 /// everything it does with `token`.
@@ -21,45 +13,24 @@ pub struct StationCredential {
     pub token: String,
 }
 
+/// The `print` config namespace. Its defaults and bounds live in the
+/// namespace's schema in `plugin.toml`; the host fills the defaults in, so
+/// every field is present here.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrintConfig {
-    #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default)]
     pub require_approval: bool,
-    #[serde(default = "default_max_pages")]
     pub max_pages: i32,
-    #[serde(default)]
     pub banner: String,
-    #[serde(default)]
     pub stations: Vec<StationCredential>,
 }
 
-impl Default for PrintConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            require_approval: false,
-            max_pages: default_max_pages(),
-            banner: String::new(),
-            stations: Vec::new(),
-        }
-    }
+pub fn load_contest_config(host: &Host, contest_id: i32) -> Result<PrintConfig, SdkError> {
+    host.config.get_contest(contest_id, NAMESPACE)?.parse()
 }
 
-/// Missing or unparseable config falls back to defaults.
-pub fn load_contest_config(host: &Host, contest_id: i32) -> PrintConfig {
-    match host.config.get_contest(contest_id, NAMESPACE) {
-        Ok(result) => serde_json::from_value(result.config).unwrap_or_default(),
-        Err(_) => PrintConfig::default(),
-    }
-}
-
-pub fn load_global_config(host: &Host) -> PrintConfig {
-    match host.config.get_global(NAMESPACE) {
-        Ok(result) => serde_json::from_value(result.config).unwrap_or_default(),
-        Err(_) => PrintConfig::default(),
-    }
+pub fn load_global_config(host: &Host) -> Result<PrintConfig, SdkError> {
+    host.config.get_global(NAMESPACE)?.parse()
 }
 
 #[cfg(test)]
@@ -69,7 +40,7 @@ mod tests {
 
     #[test]
     fn defaults_enable_printing_without_approval() {
-        let cfg = PrintConfig::default();
+        let cfg = load_global_config(&Host::mock()).unwrap();
         assert!(cfg.enabled);
         assert!(!cfg.require_approval);
         assert_eq!(cfg.max_pages, 10);
@@ -78,8 +49,15 @@ mod tests {
 
     #[test]
     fn partial_config_keeps_other_defaults() {
-        let cfg: PrintConfig = serde_json::from_value(json!({ "require_approval": true })).unwrap();
-        assert!(cfg.enabled); // still defaults to true
+        let host = Host::mock();
+        host.config.seed(
+            "contest",
+            "5",
+            NAMESPACE,
+            json!({ "require_approval": true }),
+        );
+        let cfg = load_contest_config(&host, 5).unwrap();
+        assert!(cfg.enabled);
         assert!(cfg.require_approval);
         assert_eq!(cfg.max_pages, 10);
     }
@@ -97,7 +75,7 @@ mod tests {
                 "stations": [{ "name": "room-a", "token": "t1" }],
             }),
         );
-        let cfg = load_contest_config(&host, 5);
+        let cfg = load_contest_config(&host, 5).unwrap();
         assert!(cfg.require_approval);
         assert_eq!(cfg.max_pages, 3);
         assert_eq!(cfg.stations[0].name, "room-a");
@@ -107,7 +85,7 @@ mod tests {
     #[test]
     fn missing_contest_config_is_default() {
         let host = Host::mock();
-        let cfg = load_contest_config(&host, 9);
+        let cfg = load_contest_config(&host, 9).unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.max_pages, 10);
     }

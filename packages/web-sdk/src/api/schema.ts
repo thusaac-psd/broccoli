@@ -79,7 +79,7 @@ export interface paths {
     put?: never;
     /**
      * Check a plugin archive without publishing it
-     * @description Validates a tar.gz plugin archive exactly as an upload would and reports what it would publish: the plugin id, version, the host permissions it requests, and what the fleet runs under that id now. Publishes nothing. Requires `plugin:manage` permission.
+     * @description Validates a tar.gz plugin archive exactly as an upload would and reports what it would publish: the plugin id, version, the host permissions it requests, what the fleet runs under that id now, and the stored configs of the plugin that the archive's config schemas would refuse. Publishes nothing. Requires `plugin:manage` permission.
      */
     post: operations['inspectPluginArchive'];
     delete?: never;
@@ -134,7 +134,10 @@ export interface paths {
     };
     /** Get config for a specific namespace on a plugin */
     get: operations['getPluginGlobalConfig'];
-    /** Create or update config for a namespace on a plugin */
+    /**
+     * Create or update config for a namespace on a plugin
+     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope.
+     */
     put: operations['upsertPluginGlobalConfig'];
     post?: never;
     /** Delete config for a namespace on a plugin */
@@ -706,7 +709,10 @@ export interface paths {
     };
     /** Get config for a specific namespace on a contest */
     get: operations['getContestConfig'];
-    /** Create or update config for a namespace on a contest */
+    /**
+     * Create or update config for a namespace on a contest
+     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope.
+     */
     put: operations['upsertContestConfig'];
     post?: never;
     /** Delete config for a namespace on a contest */
@@ -1012,7 +1018,10 @@ export interface paths {
     };
     /** Get config for a specific namespace on a contest-problem */
     get: operations['getContestProblemConfig'];
-    /** Create or update config for a namespace on a contest-problem */
+    /**
+     * Create or update config for a namespace on a contest-problem
+     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope.
+     */
     put: operations['upsertContestProblemConfig'];
     post?: never;
     /** Delete config for a namespace on a contest-problem */
@@ -1620,7 +1629,10 @@ export interface paths {
     };
     /** Get config for a specific namespace on a problem */
     get: operations['getProblemConfig'];
-    /** Create or update config for a namespace on a problem */
+    /**
+     * Create or update config for a namespace on a problem
+     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope.
+     */
     put: operations['upsertProblemConfig'];
     post?: never;
     /** Delete config for a namespace on a problem */
@@ -1797,7 +1809,7 @@ export interface paths {
     put?: never;
     /**
      * Grant a permission to a role
-     * @description Grants a permission to a role. Requires `role:manage` permission, and, unless it holds `system:admin`, the caller must itself hold the permission being granted and every permission the role already has.
+     * @description Grants a permission to a role: one from the host catalog or one an installed plugin's route requires. Requires `role:manage` permission, and, unless it holds `system:admin`, the caller must itself hold the permission being granted and every permission the role already has.
      */
     post: operations['grantPermissionToRole'];
     delete?: never;
@@ -2253,7 +2265,12 @@ export interface components {
        * @example 1
        */
       contest_id?: number | null;
-      /** @example ioi */
+      /**
+       * @description For a practice submission, the contest type that judges it instead of
+       *     the problem's default. A contest submission is judged under its
+       *     contest's type; naming another is a validation error.
+       * @example ioi
+       */
       contest_type?: string | null;
       files: components['schemas']['SubmissionFileDto'][];
       /** @example cpp */
@@ -2633,8 +2650,13 @@ export interface components {
       json_schema: unknown;
       /** @example testlib */
       namespace: string;
-      scopes: string[];
+      scopes: components['schemas']['ConfigScope'][];
     };
+    /**
+     * @description What a stored plugin config belongs to.
+     * @enum {string}
+     */
+    ConfigScope: 'plugin' | 'problem' | 'contest' | 'contest_problem';
     /** @description One contest in a contest list. */
     ContestListItem: {
       /**
@@ -2882,7 +2904,11 @@ export interface components {
       title: string;
     };
     CreateProblemRequest: {
-      /** @example exact */
+      /**
+       * @description How a solution's output is compared with the expected output.
+       *     Defaults to `lines`.
+       * @example lines
+       */
       checker_format?: string;
       /** @example Given an array of integers `nums` and an integer `target`... */
       content: string;
@@ -3197,6 +3223,15 @@ export interface components {
        */
       problem_type: string;
     };
+    /** @description One way a config value breaks its schema. */
+    FieldError: {
+      message: string;
+      /**
+       * @description Where the value is, as `field.nested[2].leaf`; empty for the config
+       *     object itself.
+       */
+      path: string;
+    };
     /**
      * @description Fleet-wide state of one plugin.
      * @enum {string}
@@ -3266,6 +3301,23 @@ export interface components {
        * @example submission.created
        */
       topic: string;
+    };
+    /** @description A stored config that a plugin manifest would no longer accept. */
+    IncompatibleConfig: {
+      /**
+       * @description Why the manifest refuses it. A namespace the manifest no longer
+       *     declares at this scope has one error with an empty path.
+       */
+      errors: components['schemas']['FieldError'][];
+      /** @example contest */
+      namespace: string;
+      /**
+       * @description What the config belongs to: the problem id, contest id or
+       *     `contest_id:problem_id`; the plugin id at the plugin scope.
+       * @example 12
+       */
+      ref_id: string;
+      scope: components['schemas']['ConfigScope'];
     };
     JudgeResultResponse: {
       compile_output?: string | null;
@@ -3485,6 +3537,12 @@ export interface components {
       has_web: boolean;
       /** @example my-plugin */
       id: string;
+      /**
+       * @description Stored configs of this plugin that the archive's config schemas
+       *     refuse. Publishing it leaves them in place, and the plugin reports an
+       *     error wherever it reads one, so fix or delete them.
+       */
+      incompatible_configs: components['schemas']['IncompatibleConfig'][];
       /** @example My Plugin */
       name: string;
       /**
@@ -3663,6 +3721,11 @@ export interface components {
     };
     PluginUploadResponse: {
       archive_hash: string;
+      /**
+       * @description Stored configs of this plugin that the published version's config
+       *     schemas refuse, as inspecting the archive reports them.
+       */
+      incompatible_configs: components['schemas']['IncompatibleConfig'][];
       message: string;
       /** @example my-plugin */
       plugin_id: string;
@@ -3693,7 +3756,7 @@ export interface components {
     };
     /** @description One problem in a problem list. */
     ProblemListItem: {
-      /** @example exact */
+      /** @example lines */
       checker_format: string;
       /**
        * Format: date-time
@@ -3736,7 +3799,7 @@ export interface components {
       pagination: components['schemas']['Pagination'];
     };
     ProblemResponse: {
-      /** @example exact */
+      /** @example lines */
       checker_format: string;
       /** @example Given an array of integers... */
       content: string;
@@ -3850,6 +3913,7 @@ export interface components {
       /**
        * @example [
        *       "exact",
+       *       "lines",
        *       "tokens"
        *     ]
        */
@@ -3862,6 +3926,12 @@ export interface components {
        *     ]
        */
       contest_types: string[];
+      /**
+       * @description The checker format a problem gets when it names none, for a form to
+       *     preselect.
+       * @example lines
+       */
+      default_checker_format: string;
       evaluators: components['schemas']['EvaluatorEntry'][];
       hooks: components['schemas']['HookEntryInfo'][];
       languages: components['schemas']['LanguageRegistryItem'][];
@@ -5247,7 +5317,7 @@ export interface operations {
           'application/json': components['schemas']['PluginConfigResponse'];
         };
       };
-      /** @description Validation error (VALIDATION_ERROR) */
+      /** @description Validation error (VALIDATION_ERROR): the config breaks the namespace's schema; `details.fields` lists each broken field as `{path, message}` */
       400: {
         headers: {
           [name: string]: unknown;
@@ -5267,6 +5337,15 @@ export interface operations {
       };
       /** @description Forbidden (PERMISSION_DENIED) */
       403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND) */
+      404: {
         headers: {
           [name: string]: unknown;
         };
@@ -6484,6 +6563,15 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
+      /** @description The contest type cannot change once the contest has a submission (CONTEST_TYPE_LOCKED) */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
     };
   };
   listClarifications: {
@@ -6946,6 +7034,15 @@ export interface operations {
           'application/json': components['schemas']['PluginConfigResponse'];
         };
       };
+      /** @description Validation error (VALIDATION_ERROR): the config breaks the namespace's schema; `details.fields` lists each broken field as `{path, message}` */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
       401: {
         headers: {
@@ -6964,7 +7061,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Contest not found (NOT_FOUND) */
+      /** @description Contest not found (NOT_FOUND), or the plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -8194,6 +8291,15 @@ export interface operations {
           'application/json': components['schemas']['PluginConfigResponse'];
         };
       };
+      /** @description Validation error (VALIDATION_ERROR): the config breaks the namespace's schema; `details.fields` lists each broken field as `{path, message}` */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
       401: {
         headers: {
@@ -8212,7 +8318,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Contest problem not found (NOT_FOUND) */
+      /** @description Contest problem not found (NOT_FOUND), or the plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -10965,6 +11071,15 @@ export interface operations {
           'application/json': components['schemas']['PluginConfigResponse'];
         };
       };
+      /** @description Validation error (VALIDATION_ERROR): the config breaks the namespace's schema; `details.fields` lists each broken field as `{path, message}` */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
       401: {
         headers: {
@@ -10983,7 +11098,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Problem not found (NOT_FOUND) */
+      /** @description Problem not found (NOT_FOUND), or the plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND) */
       404: {
         headers: {
           [name: string]: unknown;
@@ -11741,7 +11856,7 @@ export interface operations {
         };
         content?: never;
       };
-      /** @description Validation error */
+      /** @description Validation error (VALIDATION_ERROR): the permission is unknown, or already granted */
       400: {
         headers: {
           [name: string]: unknown;

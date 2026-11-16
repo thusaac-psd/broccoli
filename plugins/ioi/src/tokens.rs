@@ -82,7 +82,9 @@ mod tests {
     fn none_unlimited() {
         let config = TokenConfig {
             mode: TokenMode::None,
-            ..Default::default()
+            initial: 0,
+            max: 0,
+            regen_interval_min: 1,
         };
         let state = TokenState::default();
         assert_eq!(available_tokens(&config, &state, 0), u32::MAX);
@@ -137,7 +139,9 @@ mod tests {
     fn next_regen_none_mode() {
         let config = TokenConfig {
             mode: TokenMode::None,
-            ..Default::default()
+            initial: 0,
+            max: 0,
+            regen_interval_min: 1,
         };
         assert_eq!(next_regen_elapsed_min(&config, 0), None);
     }

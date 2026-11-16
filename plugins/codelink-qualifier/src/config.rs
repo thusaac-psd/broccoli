@@ -1,8 +1,11 @@
 use broccoli_server_sdk::{Host, error::SdkError};
 use serde::{Deserialize, Serialize};
 
+/// The `contest` config namespace. Its defaults and bounds live in the
+/// namespace's schema in `plugin.toml`; the host fills the defaults in, so
+/// every field is present here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ContestConfig {
     /// Zero disables the setup notice. The actual problem list comes from the contest.
     pub expected_problem_count: usize,
@@ -14,24 +17,11 @@ pub struct ContestConfig {
     pub scoreboard_refresh_seconds: u32,
 }
 
-impl Default for ContestConfig {
-    fn default() -> Self {
-        Self {
-            expected_problem_count: 20,
-            slots_per_problem: 2,
-            solves_to_qualify: 3,
-            advancement_slots: 16,
-            scoreboard_refresh_seconds: 5,
-        }
-    }
-}
-
 impl ContestConfig {
     pub fn load(host: &Host, contest_id: i32) -> Result<Self, SdkError> {
-        let value = host.config.get_contest(contest_id, "contest")?.config;
-        // Missing fields use defaults. Invalid stored values must not silently
-        // revert a live contest to different qualification rules.
-        let config: Self = serde_json::from_value(value)?;
+        // Invalid stored values must not silently revert a live contest to
+        // different qualification rules.
+        let config: Self = host.config.get_contest(contest_id, "contest")?.parse()?;
         config.validate()?;
         Ok(config)
     }
@@ -64,25 +54,19 @@ impl ContestConfig {
     }
 }
 
+/// The `problem` config namespace, schema-filled like [`ContestConfig`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ProblemConfig {
     pub points: usize,
 }
 
-impl Default for ProblemConfig {
-    fn default() -> Self {
-        Self { points: 1 }
-    }
-}
-
 impl ProblemConfig {
     pub fn load(host: &Host, contest_id: i32, problem_id: i32) -> Result<Self, SdkError> {
-        let value = host
+        let config: Self = host
             .config
             .get_contest_problem(contest_id, problem_id, "problem")?
-            .config;
-        let config: Self = serde_json::from_value(value)?;
+            .parse()?;
         config.validate()?;
         Ok(config)
     }

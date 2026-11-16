@@ -29,6 +29,7 @@ dependencies = [
  "extism-pdk",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

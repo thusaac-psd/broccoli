@@ -60,7 +60,7 @@ pub fn authenticate_station(host: &Host, req: &PluginHttpRequest) -> Result<Stat
     let token = extract_token(req)
         .ok_or_else(|| PluginHttpResponse::error(401, "Missing print-station token"))?;
 
-    let global = config::load_global_config(host);
+    let global = config::load_global_config(host)?;
     if let Some(name) = station_for(&token, &global.stations) {
         return Ok(StationAuth {
             name: format!("global/{name}"),
@@ -73,7 +73,7 @@ pub fn authenticate_station(host: &Host, req: &PluginHttpRequest) -> Result<Stat
         .get("contest_id")
         .and_then(|s| s.parse::<i32>().ok())
     {
-        let contest = config::load_contest_config(host, contest_id);
+        let contest = config::load_contest_config(host, contest_id)?;
         if let Some(name) = station_for(&token, &contest.stations) {
             return Ok(StationAuth {
                 name: format!("contest-{contest_id}/{name}"),

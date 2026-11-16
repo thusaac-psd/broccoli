@@ -84,18 +84,43 @@ pub async fn list_role_permissions(
     Ok(Json(permissions))
 }
 
+/// Refuses a permission that neither the host nor an installed plugin checks:
+/// granting it would authorize nothing, yet still invalidate the tokens of
+/// everyone holding the role.
+fn require_known_permission(state: &AppState, permission: &str) -> Result<(), AppError> {
+    if perm::is_valid(permission) {
+        return Ok(());
+    }
+    let registry = state
+        .plugins
+        .get_registry()
+        .read()
+        .map_err(|_| AppError::Internal("plugin registry lock poisoned".into()))?;
+    if registry.values().any(|entry| {
+        entry
+            .manifest
+            .declared_permissions()
+            .any(|p| p == permission)
+    }) {
+        return Ok(());
+    }
+    Err(AppError::Validation(format!(
+        "Unknown permission '{permission}'"
+    )))
+}
+
 #[utoipa::path(
     post,
     path = "/{role}/permissions",
     tag = "Roles",
     operation_id = "grantPermissionToRole",
     summary = "Grant a permission to a role",
-    description = "Grants a permission to a role. Requires `role:manage` permission, and, unless it holds `system:admin`, the caller must itself hold the permission being granted and every permission the role already has.",
+    description = "Grants a permission to a role: one from the host catalog or one an installed plugin's route requires. Requires `role:manage` permission, and, unless it holds `system:admin`, the caller must itself hold the permission being granted and every permission the role already has.",
     params(("role" = String, Path, description = "Role name")),
     request_body = PermissionGrantRequest,
     responses(
         (status = 201, description = "Permission granted successfully"),
-        (status = 400, description = "Validation error", body = ErrorBody),
+        (status = 400, description = "Validation error (VALIDATION_ERROR): the permission is unknown, or already granted", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission or role is above the caller's ceiling", body = ErrorBody),
         (status = 404, description = "Role not found (NOT_FOUND)", body = ErrorBody),
@@ -127,6 +152,7 @@ pub async fn grant_permission_to_role(
     {
         return Err(AppError::NotFound("Role not found".into()));
     }
+    require_known_permission(&state, &req.permission)?;
 
     // `role:manage` is not root-equivalent; without the ceiling its holder
     // could grant `system:admin` to its own role.

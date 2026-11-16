@@ -2812,6 +2812,40 @@ mod zip_upload_interplay {
 mod submission_format_normalisation {
     use super::*;
 
+    /// A problem that names no checker format compares line by line,
+    /// ignoring trailing whitespace and trailing blank lines, so an expected
+    /// output typed as `3` matches `print(3)`. The registries offer the same
+    /// default to the problem form.
+    #[tokio::test]
+    async fn a_problem_without_a_checker_format_compares_lines() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("cf_admin", "password123", "admin")
+            .await;
+        let res = app
+            .post_with_token(
+                routes::PROBLEMS,
+                &json!({
+                    "title": "Default checker",
+                    "content": "x",
+                    "time_limit": 1000,
+                    "memory_limit": 262144,
+                    "problem_type": "standard",
+                    "default_contest_type": "standard",
+                }),
+                &token,
+            )
+            .await;
+        assert_eq!(res.status, 201, "{}", res.text);
+        assert_eq!(res.body["checker_format"], "lines", "{}", res.text);
+
+        let registries = app
+            .get_with_token("/api/v1/plugins/registries", &token)
+            .await;
+        assert_eq!(registries.status, 200, "{}", registries.text);
+        assert_eq!(registries.body["default_checker_format"], "lines");
+    }
+
     /// A submission format with padded filenames is either rejected or stored
     /// trimmed, so a submission matching the validated format is accepted.
     #[tokio::test]

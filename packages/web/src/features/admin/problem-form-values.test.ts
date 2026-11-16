@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  checkerFormatFor,
   NEW_PROBLEM,
   problemFormProblem,
   problemRequestBody,
@@ -51,4 +52,13 @@ test('problemRequestBody sends no submission format when none is set', () => {
       .submission_format,
     files,
   );
+});
+
+test('checkerFormatFor starts a new problem on the server default', () => {
+  const registered = ['exact', 'lines', 'tokens'];
+  assert.equal(checkerFormatFor('', registered, 'lines'), 'lines');
+  assert.equal(checkerFormatFor('tokens', registered, 'lines'), 'tokens');
+  assert.equal(checkerFormatFor('gone', registered, 'lines'), 'lines');
+  assert.equal(checkerFormatFor('', ['exact', 'none'], 'lines'), 'exact');
+  assert.equal(checkerFormatFor('', [], 'lines'), '');
 });

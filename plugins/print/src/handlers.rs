@@ -125,7 +125,7 @@ pub fn handle_print_submission(
     let submission_id = path_i32(req, "submission_id")?;
     let user_id = require_login(req)?;
 
-    let cfg = config::load_contest_config(host, contest_id);
+    let cfg = config::load_contest_config(host, contest_id)?;
     if !cfg.enabled {
         return Err(PluginHttpResponse::error(403, "Printing is disabled for this contest").into());
     }
@@ -225,8 +225,8 @@ pub fn handle_print_arbitrary(
     // contest use the global config.
     let contest_id = req.contest.as_ref().map(|c| c.id);
     let cfg = match contest_id {
-        Some(cid) => config::load_contest_config(host, cid),
-        None => config::load_global_config(host),
+        Some(cid) => config::load_contest_config(host, cid)?,
+        None => config::load_global_config(host)?,
     };
     if !cfg.enabled {
         return Err(PluginHttpResponse::error(403, "Printing is disabled for this contest").into());

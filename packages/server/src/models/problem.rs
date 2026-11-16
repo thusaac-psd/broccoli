@@ -61,7 +61,7 @@ pub struct ProblemListItem {
     pub memory_limit: i32,
     #[schema(example = "batch")]
     pub problem_type: String,
-    #[schema(example = "exact")]
+    #[schema(example = "lines")]
     pub checker_format: String,
     #[schema(example = "ioi")]
     pub default_contest_type: String,

@@ -23,7 +23,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { MarkdownEditor } from '@/components/MarkdownEditor';
 import { MarkdownEditorWithAttachments } from '@/features/admin/components/MarkdownEditorWithAttachments';
 import { SwitchField } from '@/features/admin/components/SwitchField';
-import type { ProblemFormData } from '@/features/admin/problem-form-values';
+import {
+  checkerFormatFor,
+  type ProblemFormData,
+} from '@/features/admin/problem-form-values';
 import type { Attachment } from '@/features/problem/api/attachments';
 import { fetchSupportedLanguages } from '@/features/problem/api/fetch-supported-languages';
 
@@ -75,13 +78,15 @@ export function ProblemForm({
       newData.problemType = '';
       changed = true;
     }
-    // A new problem starts with the first registered checker format.
-    if (!checkerFormats.includes(data.checkerFormat)) {
-      const first = checkerFormats[0] ?? '';
-      if (data.checkerFormat !== first) {
-        newData.checkerFormat = first;
-        changed = true;
-      }
+    // A new problem starts with the server's default checker format.
+    const checkerFormat = checkerFormatFor(
+      data.checkerFormat,
+      checkerFormats,
+      registries?.default_checker_format,
+    );
+    if (data.checkerFormat !== checkerFormat) {
+      newData.checkerFormat = checkerFormat;
+      changed = true;
     }
     // Deliberately no auto-pick for the contest type: it decides who judges
     // practice submissions, so the admin must choose it. An unknown value is
@@ -97,7 +102,7 @@ export function ProblemForm({
     if (changed) {
       onChange(newData);
     }
-  }, [data, problemTypes, checkerFormats, contestTypes, onChange]);
+  }, [data, problemTypes, checkerFormats, registries, contestTypes, onChange]);
 
   const handleTitleChange = (title: string) => {
     onChange({ ...data, title });

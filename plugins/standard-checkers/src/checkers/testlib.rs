@@ -8,24 +8,17 @@ use broccoli_server_sdk::Host;
 
 /// Compiler configuration for checker binaries (`standard-languages` plugin).
 #[derive(Deserialize, Clone)]
-#[serde(default)]
 pub struct CheckerCompilerConfig {
     pub compiler: String,
     pub flags: Vec<String>,
 }
 
-impl Default for CheckerCompilerConfig {
-    fn default() -> Self {
-        Self {
-            compiler: "/usr/bin/g++".into(),
-            flags: vec!["-O2".into(), "-std=c++17".into()],
-        }
-    }
-}
-
-/// Testlib checker configuration, loaded from plugin global config.
+/// Testlib checker configuration: the global `testlib` config namespace. Its
+/// defaults live in the namespace's schema in `plugin.toml`; the host fills
+/// them in, so every field is present here. A checker reads BOTH the output
+/// and the answer, so its working set scales with output size: the default
+/// run limits are far above a solution's.
 #[derive(Deserialize, Clone)]
-#[serde(default)]
 pub struct TestlibConfig {
     pub cpp: CheckerCompilerConfig,
     pub c: CheckerCompilerConfig,
@@ -35,31 +28,15 @@ pub struct TestlibConfig {
     pub run_memory_limit_kb: u32,
 }
 
-impl Default for TestlibConfig {
-    fn default() -> Self {
-        Self {
-            cpp: CheckerCompilerConfig {
-                compiler: "/usr/bin/g++".into(),
-                flags: vec!["-O2".into(), "-std=c++17".into()],
-            },
-            c: CheckerCompilerConfig {
-                compiler: "/usr/bin/gcc".into(),
-                flags: vec!["-O2".into(), "-std=c11".into()],
-            },
-            compile_time_limit_s: 10.0,
-            compile_memory_limit_kb: 512 * 1024,
-            // Checkers process BOTH the solution output and the answer, so their
-            // working set scales with output size. Give them far more headroom than
-            // a solution: a stingy limit kills the checker on large-output problems
-            // (-> opaque SystemError), not the contestant's code.
-            // Fallback only: the EFFECTIVE limits come from plugin.toml's
-            // [config.testlib] schema defaults (get_global("testlib")). Keep these
-            // in sync with plugin.toml. A checker reads BOTH the output and the
-            // answer, so its working set scales with output size -- 256 MB was too
-            // small and OOM-killed the checker on large-output problems.
-            run_time_limit_s: 20.0,
-            run_memory_limit_kb: 1024 * 1024, // 1 GiB (match plugin.toml)
-        }
+#[cfg(test)]
+impl TestlibConfig {
+    /// The config with nothing stored: the schema's defaults.
+    pub(crate) fn schema_defaults() -> Self {
+        broccoli_server_sdk::Host::mock()
+            .config
+            .get_global("testlib")
+            .and_then(|c| c.parse())
+            .expect("the schema defaults are a complete testlib config")
     }
 }
 
@@ -134,11 +111,11 @@ pub fn extend_cache_inputs_with_bundle(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn load_testlib_config(host: &Host) -> TestlibConfig {
-    match host.config.get_global("testlib") {
-        Ok(r) => serde_json::from_value(r.config).unwrap_or_default(),
-        Err(_) => TestlibConfig::default(),
-    }
+fn load_testlib_config(host: &Host) -> Result<TestlibConfig, String> {
+    host.config
+        .get_global("testlib")
+        .and_then(|c| c.parse())
+        .map_err(|e| format!("testlib config: {e}"))
 }
 
 /// Pure interpretation of testlib exit codes.
@@ -310,7 +287,7 @@ pub(crate) fn resolve_testlib_compile(
     // must not drive language detection.
     let (sources, _headers) = partition_checker_sources(&filenames)?;
     let lang_id = checker_language_id(&sources[0])?;
-    let config = load_testlib_config(host);
+    let config = load_testlib_config(host)?;
     let checker_compiler = match lang_id {
         "cpp" => &config.cpp,
         "c" => &config.c,

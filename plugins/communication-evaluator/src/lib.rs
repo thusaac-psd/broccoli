@@ -10,19 +10,15 @@ pub mod interpret;
 pub mod operation;
 
 #[cfg(target_arch = "wasm32")]
-fn load_sandbox_config(host: &Host) -> config::SandboxConfig {
-    match host.config.get_global("sandbox") {
-        Ok(r) => serde_json::from_value(r.config).unwrap_or_default(),
-        Err(_) => config::SandboxConfig::default(),
-    }
+fn load_sandbox_config(host: &Host) -> Result<config::SandboxConfig, SdkError> {
+    host.config.get_global("sandbox")?.parse()
 }
 
 #[cfg(target_arch = "wasm32")]
-fn load_comm_config(host: &Host, problem_id: i32) -> config::CommConfig {
-    match host.config.get_problem(problem_id, "communication") {
-        Ok(r) => serde_json::from_value(r.config).unwrap_or_default(),
-        Err(_) => config::CommConfig::default(),
-    }
+fn load_comm_config(host: &Host, problem_id: i32) -> Result<config::CommConfig, SdkError> {
+    host.config
+        .get_problem(problem_id, "communication")?
+        .parse()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -43,8 +39,8 @@ pub fn evaluate_communication(input: String) -> FnResult<String> {
     let tc_id = req.test_case_id;
     let problem_id = req.problem_id;
 
-    let sandbox_config = load_sandbox_config(&host);
-    let comm_config = load_comm_config(&host, problem_id);
+    let sandbox_config = load_sandbox_config(&host)?;
+    let comm_config = load_comm_config(&host, problem_id)?;
 
     let additional_filenames: std::collections::HashSet<&str> = req
         .additional_file_refs

@@ -33,7 +33,7 @@ pub async fn start_evaluate_batch(
     .ok_or_else(|| anyhow!("No evaluator registered for problem type: {}", problem_type))?;
 
     let batch_id = Uuid::new_v4().to_string();
-    let resolved_inputs = resolve_inputs(&caller_plugin_id, &deps, input, &batch_id).await?;
+    let resolved_inputs = resolve_inputs(&deps, input, &batch_id).await?;
     let test_case_count = resolved_inputs.len();
 
     let batch_tx = deps.evaluate_batches.open(
@@ -425,7 +425,6 @@ async fn call_interpret(
 }
 
 async fn resolve_inputs(
-    caller_plugin_id: &str,
     deps: &EvaluateHostDeps,
     input: StartEvaluateBatchInput,
     evaluate_batch_id: &str,
@@ -439,13 +438,6 @@ async fn resolve_inputs(
         .await
         .with_context(|| "Failed to query problem")?
         .ok_or_else(|| anyhow!("Problem {} not found", problem_id))?;
-
-    let checker_ns = format!("{}:checker", caller_plugin_id);
-    let checker_config_model = deps
-        .plugin_config_cache
-        .get(&deps.db, "problem", &problem_id.to_string(), &checker_ns)
-        .await
-        .with_context(|| "Failed to query checker config")?;
 
     let af_models = additional_file::Entity::find()
         .filter(additional_file::Column::ProblemId.eq(problem_id))
@@ -464,12 +456,9 @@ async fn resolve_inputs(
         })
         .collect();
 
-    let checker_format = Some(problem_model.checker_format.clone());
+    let checker_format = problem_model.checker_format.clone();
     // The host does not inline the checker source: checker plugins read it
     // from their own per-problem config (e.g. `standard-checkers:checker_source`).
-
-    let checker_config_value: Option<serde_json::Value> =
-        checker_config_model.map(|pc| pc.config.clone());
 
     let test_cases = input.test_cases;
     let db_needed_ids: Vec<i32> = test_cases
@@ -534,7 +523,7 @@ async fn resolve_inputs(
         let tc_checker_format = if expected_output.present {
             checker_format.clone()
         } else {
-            Some("none".to_string())
+            "none".to_string()
         };
 
         resolved.push(BuildEvalOpsInput {
@@ -549,7 +538,6 @@ async fn resolve_inputs(
             test_input: test_input.file,
             expected_output: expected_output.file,
             checker_format: tc_checker_format,
-            checker_config: checker_config_value.clone(),
             additional_file_refs: additional_file_refs.clone(),
             target_worker_id: tc.target_worker_id,
         });

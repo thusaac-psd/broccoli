@@ -11,11 +11,8 @@ use extism_pdk::{FnResult, plugin_fn};
 pub mod batch;
 
 #[cfg(target_arch = "wasm32")]
-fn load_sandbox_config(host: &Host) -> batch::SandboxConfig {
-    match host.config.get_global("sandbox") {
-        Ok(r) => serde_json::from_value(r.config).unwrap_or_default(),
-        Err(_) => batch::SandboxConfig::default(),
-    }
+fn load_sandbox_config(host: &Host) -> Result<batch::SandboxConfig, SdkError> {
+    host.config.get_global("sandbox")?.parse()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -63,7 +60,7 @@ fn prepare_case(
     host: &Host,
     req: &BuildEvalOpsInput,
 ) -> Result<PreparedEvaluateCase, extism_pdk::Error> {
-    let sandbox_config = load_sandbox_config(host);
+    let sandbox_config = load_sandbox_config(host)?;
 
     let additional_filenames: std::collections::HashSet<&str> = req
         .additional_file_refs
@@ -92,7 +89,7 @@ fn prepare_case(
     // solution output is checked worker-side. `none` schedules NO checker stage
     // (no comparison; the solution output is captured normally for display) and
     // is interpreted inline by the fused interpret path.
-    let checker_format = checker_format_of(req);
+    let checker_format = req.checker_format.as_str();
     let checker_stage = if checker_format == "none" {
         None
     } else {
@@ -103,7 +100,6 @@ fn prepare_case(
                 answer: req.expected_output.clone(),
                 test_input: req.test_input.clone(),
                 problem_id: Some(req.problem_id),
-                config: req.checker_config.clone(),
                 output_binding: checker_output_binding(checker_format),
             })
             .map_err(|e| extism_pdk::Error::msg(format!("checker resolve failed: {e}")))?;
@@ -127,11 +123,6 @@ fn prepare_case(
         operations,
         result_timeout_ms,
     })
-}
-
-#[cfg(target_arch = "wasm32")]
-fn checker_format_of(req: &BuildEvalOpsInput) -> &str {
-    req.checker_format.as_deref().unwrap_or("exact")
 }
 
 /// The proposed output binding for a checker format. Mirrors standard-checkers'
@@ -158,7 +149,7 @@ fn interpret_case_result(
     result: &OperationResult,
 ) -> Result<TestCaseVerdict, extism_pdk::Error> {
     let tc_id = req.test_case_id;
-    let checker_format = checker_format_of(req);
+    let checker_format = req.checker_format.as_str();
 
     // Every format interprets via the fused path. Comparison formats read the
     // worker-side `check` step's small result; `none` schedules no check step and

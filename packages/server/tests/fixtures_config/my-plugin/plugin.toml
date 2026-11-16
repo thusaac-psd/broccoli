@@ -1,0 +1,29 @@
+name = "my-plugin"
+version = "0.1.0"
+description = "Config schema fixture: namespaces at the plugin scope"
+
+[web]
+root = "app"
+entry = "index.js"
+
+[config.settings]
+scopes = ["plugin"]
+
+[config.settings.properties.v]
+type = "integer"
+
+[config.settings.properties.k]
+type = "string"
+
+[config.settings.properties.a]
+type = "integer"
+
+[config.settings.properties.compiler]
+type = "string"
+default = "/usr/bin/g++"
+
+[config.features]
+scopes = ["plugin"]
+
+[config.features.properties.b]
+type = "integer"
