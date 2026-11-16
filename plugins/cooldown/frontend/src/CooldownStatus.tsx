@@ -2,11 +2,16 @@
  * Shows cooldown timer status on the problem detail sidebar.
  */
 import { usePluginApi } from '@broccoli/web-sdk/api';
-import { useAuth } from '@broccoli/web-sdk/auth';
+import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
+import { pollInterval, useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useSubmitGate } from '@broccoli/web-sdk/submission';
+import { QueryErrorState, RefreshFailedNotice } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef } from 'react';
+
+import { useSecondsLeft } from './lib/countdown';
 
 interface Props {
   submission?: { id: number; status: string } | null;
@@ -14,92 +19,81 @@ interface Props {
   problemId?: number;
 }
 
+/** The status route's answer. */
 interface CooldownStatusData {
-  enabled?: boolean;
+  enabled: boolean;
   cooldown_seconds: number;
-  seconds_since_last: number | null;
-  can_submit: boolean;
+  /** Seconds until the gate lets a submission pass, by the gate's own rule. */
+  wait_seconds: number;
   source?: string;
+}
+
+/** The answer, with the monotonic clock reading it arrived at. */
+interface CooldownStatusRead extends CooldownStatusData {
+  receivedAt: number;
 }
 
 const ROUTES = '/api/plugins/cooldown';
 
 export function CooldownStatus({ submission, contestId, problemId }: Props) {
   const api = usePluginApi('cooldown');
-  const { accessToken } = useAuth();
+  const { user } = useAuth();
+  const authReady = useAuthReady();
   const { t } = useTranslation();
-  const [data, setData] = useState<CooldownStatusData | null>(null);
-  const [remaining, setRemaining] = useState<number>(0);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const queryClient = useQueryClient();
 
+  const viewerKey = viewerCacheKey(user);
+  const query = useQuery({
+    queryKey: ['cooldown-status', contestId ?? null, problemId, viewerKey],
+    enabled: authReady && !!user && problemId !== undefined,
+    queryFn: async (): Promise<CooldownStatusRead> => {
+      const path = contestId
+        ? `${ROUTES}/contests/${contestId}/problems/${problemId}/status`
+        : `${ROUTES}/problems/${problemId}/status`;
+      const status = await api.get<CooldownStatusData>(path);
+      return { ...status, receivedAt: performance.now() };
+    },
+    // Ask again once the wait is over, so the server confirms it.
+    refetchInterval: pollInterval<CooldownStatusRead>((status) =>
+      status && status.wait_seconds > 0 ? status.wait_seconds * 1000 : false,
+    ),
+  });
+
+  const view = useQueryState(query);
+  const { data } = query;
+
+  // A new submission of this problem starts a new wait.
   const submissionId = submission?.id;
-
-  const fetchStatus = useCallback(async () => {
-    if (!problemId) return;
-    const path = contestId
-      ? `${ROUTES}/contests/${contestId}/problems/${problemId}/status`
-      : `${ROUTES}/problems/${problemId}/status`;
-    try {
-      const d = await api.get<CooldownStatusData>(path);
-      setData(d);
-
-      // Compute initial remaining seconds
-      if (d.cooldown_seconds === 0 || d.can_submit) {
-        setRemaining(0);
-      } else if (d.seconds_since_last !== null) {
-        setRemaining(
-          Math.max(0, d.cooldown_seconds - Math.max(0, d.seconds_since_last)),
-        );
-      } else {
-        setRemaining(0);
-      }
-    } catch {
-      // silent
-    }
-  }, [api, contestId, problemId]);
-
-  // Fetch on mount, when submission changes, and when auth token becomes available
+  const seenSubmission = useRef(submissionId);
   useEffect(() => {
-    if (!problemId || !accessToken) return;
+    if (seenSubmission.current === submissionId) return;
+    seenSubmission.current = submissionId;
+    void queryClient.invalidateQueries({
+      queryKey: ['cooldown-status', contestId ?? null, problemId, viewerKey],
+    });
+  }, [queryClient, submissionId, contestId, problemId, viewerKey]);
 
-    let cancelled = false;
-
-    (async () => {
-      await fetchStatus();
-      if (cancelled) return;
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [contestId, problemId, submissionId, accessToken, fetchStatus]);
-
-  const isCounting = remaining > 0;
-  useEffect(() => {
-    if (timerRef.current) clearInterval(timerRef.current);
-
-    if (isCounting) {
-      timerRef.current = setInterval(() => {
-        setRemaining((prev) => {
-          if (prev <= 1) {
-            if (timerRef.current) clearInterval(timerRef.current);
-            fetchStatus();
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    }
-
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, [fetchStatus, isCounting]);
+  const remaining = useSecondsLeft(
+    data?.wait_seconds ?? 0,
+    data?.receivedAt ?? 0,
+  );
 
   const isCooldownBlocked = data?.enabled === true && remaining > 0;
   useSubmitGate('cooldown', isCooldownBlocked, t('cooldown.cooldownActive'));
 
-  if (!problemId || !data) return null;
+  if (!problemId) return null;
+  if (view.status === 'error') {
+    return (
+      <div className="rounded-lg border border-border bg-card p-4">
+        <QueryErrorState
+          error={view.error}
+          retry={view.retry}
+          retrying={view.retrying}
+        />
+      </div>
+    );
+  }
+  if (!data) return null;
 
   if (data.enabled === false || data.cooldown_seconds === 0) return null;
 
@@ -151,6 +145,9 @@ export function CooldownStatus({ submission, contestId, problemId }: Props) {
           </span>
         )}
       </div>
+      {view.status === 'data' && view.refreshError != null && (
+        <RefreshFailedNotice retry={view.retry} className="mt-2" />
+      )}
     </div>
   );
 }

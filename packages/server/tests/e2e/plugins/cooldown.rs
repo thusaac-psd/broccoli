@@ -139,7 +139,7 @@ async fn cooldown_allows_submission_when_disabled() {
     );
     assert_eq!(res.body["enabled"].as_bool(), Some(true));
     assert_eq!(res.body["cooldown_seconds"].as_u64(), Some(0));
-    assert_eq!(res.body["can_submit"].as_bool(), Some(true));
+    assert_eq!(res.body["wait_seconds"].as_u64(), Some(0));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -182,11 +182,8 @@ async fn cooldown_status_endpoint_returns_data() {
     );
     assert_eq!(res.body["enabled"].as_bool(), Some(true));
     assert_eq!(res.body["cooldown_seconds"].as_u64(), Some(60));
-    assert_eq!(res.body["can_submit"].as_bool(), Some(false));
-    assert!(
-        res.body["seconds_since_last"].is_number(),
-        "seconds_since_last should be a number"
-    );
+    let wait = res.body["wait_seconds"].as_u64().expect("wait_seconds");
+    assert!((55..=60).contains(&wait), "waits out the cooldown: {wait}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -274,5 +271,78 @@ async fn different_users_have_independent_cooldowns() {
     );
     let res = app.get_with_token(&status_path, &user_b).await;
     assert_eq!(res.status, 200, "User B status failed: {}", res.text);
-    assert_eq!(res.body["can_submit"].as_bool(), Some(true));
+    assert_eq!(res.body["wait_seconds"].as_u64(), Some(0));
+}
+
+/// A submission in flight holds the slot before its row exists; the status
+/// route reports the wait it imposes, as the gate would reject with.
+#[tokio::test(flavor = "multi_thread")]
+async fn cooldown_status_reports_the_wait_of_an_in_flight_claim() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("cd_admin6", "password", "admin")
+        .await;
+    let contestant = app.create_authenticated_user("cd_user6", "password").await;
+    let problem_id = app.create_problem(&admin, "Cooldown Problem 6").await;
+    let contest_id = app
+        .create_typed_contest(&admin, "Cooldown Contest 6", "icpc", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &contestant).await;
+    let config_path =
+        format!("/api/v1/contests/{contest_id}/problems/{problem_id}/config/cooldown/cooldown");
+    app.put_with_token(
+        &config_path,
+        &json!({ "config": { "cooldown_seconds": 60 }, "enabled": true }),
+        &admin,
+    )
+    .await;
+
+    let status_path = format!(
+        "/api/v1/p/cooldown/api/plugins/cooldown/contests/{contest_id}/problems/{problem_id}/status"
+    );
+    // The plugin creates its table on load; reading the status first makes
+    // sure it is there.
+    let res = app.get_with_token(&status_path, &contestant).await;
+    assert_eq!(res.body["wait_seconds"].as_u64(), Some(0), "{}", res.text);
+
+    let user_id = user::Entity::find()
+        .filter(user::Column::Username.eq("cd_user6"))
+        .one(&app.db)
+        .await
+        .expect("query user")
+        .expect("user should exist")
+        .id;
+    app.db
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            format!(
+                "INSERT INTO plugin_cooldown.cooldown_claim \
+                   (user_id, problem_id, contest_id, blocked_until, attempt_id) \
+                 VALUES ({user_id}, {problem_id}, {contest_id}, \
+                   NOW() + INTERVAL '30 seconds', gen_random_uuid())"
+            ),
+        ))
+        .await
+        .expect("insert claim");
+
+    let res = app.get_with_token(&status_path, &contestant).await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let wait = res.body["wait_seconds"].as_u64().expect("wait_seconds");
+    assert!((25..=30).contains(&wait), "waits out the claim: {wait}");
+
+    let sub = app
+        .post_with_token(
+            &format!("/api/v1/contests/{contest_id}/problems/{problem_id}/submissions"),
+            &json!({
+                "files": [{"filename": "main.cpp", "content": "int main() { return 0; }"}],
+                "language": "cpp",
+            }),
+            &contestant,
+        )
+        .await;
+    assert_eq!(sub.status, 429, "the gate agrees: {}", sub.text);
 }

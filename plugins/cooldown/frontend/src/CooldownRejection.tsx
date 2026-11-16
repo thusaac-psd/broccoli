@@ -3,13 +3,9 @@
  */
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Badge } from '@broccoli/web-sdk/ui';
-import {
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from 'react';
+import { type ReactNode, useState } from 'react';
+
+import { useSecondsLeft } from './lib/countdown';
 
 interface Props {
   error?: { code: string; message: string; details?: Record<string, unknown> };
@@ -35,34 +31,19 @@ export function CooldownRejection({ error, children }: Props) {
 
 function CooldownCountdown({ details }: { details?: Record<string, unknown> }) {
   const { t } = useTranslation();
-  const initialSeconds = getCooldownSeconds(details);
-  const [remaining, setRemaining] = useState(initialSeconds ?? 0);
-  const [expired, setExpired] = useState(initialSeconds === null);
-  const startTimeRef = useRef(performance.now());
-  const initialRef = useRef(initialSeconds ?? 0);
+  const initialSeconds = getCooldownSeconds(details) ?? 0;
+  // The wait counts from when the rejection arrived.
+  const [anchor, setAnchor] = useState(() => ({
+    details,
+    at: performance.now(),
+  }));
+  if (anchor.details !== details) {
+    setAnchor({ details, at: performance.now() });
+  }
+  const remaining = useSecondsLeft(initialSeconds, anchor.at);
+  const expired = remaining <= 0;
 
-  const tick = useCallback(() => {
-    const elapsed = (performance.now() - startTimeRef.current) / 1000;
-    const left = Math.max(0, Math.ceil(initialRef.current - elapsed));
-    setRemaining(left);
-    if (left <= 0) setExpired(true);
-  }, []);
-
-  useEffect(() => {
-    if (initialSeconds === null || initialSeconds <= 0) {
-      setExpired(true);
-      return;
-    }
-    startTimeRef.current = performance.now();
-    initialRef.current = initialSeconds;
-    setRemaining(initialSeconds);
-    setExpired(false);
-
-    const id = setInterval(tick, 200);
-    return () => clearInterval(id);
-  }, [initialSeconds, tick]);
-
-  const progress = initialRef.current > 0 ? remaining / initialRef.current : 0;
+  const progress = initialSeconds > 0 ? remaining / initialSeconds : 0;
   const dashOffset = RING_CIRCUMFERENCE * (1 - progress);
   const pct = (1 - progress) * 100;
 
@@ -148,7 +129,7 @@ function CooldownCountdown({ details }: { details?: Record<string, unknown> }) {
         </div>
 
         {/* Progress bar */}
-        {!expired && initialRef.current > 0 && (
+        {!expired && initialSeconds > 0 && (
           <div className="w-full max-w-[200px]">
             <div className="h-1 rounded-sm bg-muted overflow-hidden">
               <div

@@ -121,8 +121,9 @@ mod plugin {
         /// Whether the cooldown plugin is enabled for this resource.
         enabled: bool,
         cooldown_seconds: u32,
-        seconds_since_last: Option<i64>,
-        can_submit: bool,
+        /// Whole seconds until the gate lets a submission pass, by the same
+        /// rule the gate applies (both clocks, the in-flight claim included).
+        wait_seconds: u64,
         source: ConfigSource,
     }
 
@@ -159,8 +160,7 @@ mod plugin {
                 body: Some(serde_json::to_value(CooldownStatusResponse {
                     enabled: false,
                     cooldown_seconds: 0,
-                    seconds_since_last: None,
-                    can_submit: true,
+                    wait_seconds: 0,
                     source: eff.source,
                 })?),
             });
@@ -176,8 +176,7 @@ mod plugin {
                 contest_id,
             },
         )?;
-        let seconds_since_last = clocks.since_submission.map(|s| s.max(0.0) as i64);
-        let can_submit = clocks.wait_secs(cooldown) == 0;
+        let wait_seconds = clocks.wait_secs(cooldown);
 
         Ok(PluginHttpResponse {
             status: 200,
@@ -185,8 +184,7 @@ mod plugin {
             body: Some(serde_json::to_value(CooldownStatusResponse {
                 enabled: true,
                 cooldown_seconds: cooldown,
-                seconds_since_last,
-                can_submit,
+                wait_seconds,
                 source: eff.source,
             })?),
         })
