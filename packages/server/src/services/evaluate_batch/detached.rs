@@ -285,8 +285,9 @@ pub const SESSION_ENDED_WITHOUT_VERDICT: &str = "PLUGIN_NO_VERDICT";
 
 /// Leave the judgement a session judged terminal: finalize it as
 /// `SystemError` if the plugin did not (a no-op when it did, or when the
-/// judgement was since requeued or superseded), then fire its after-judging
-/// hooks. A platform fault the session's operations met decides the error
+/// judgement was since requeued or superseded), or hand it back when its
+/// contest type is parked (`fail_dispatch`), then fire its after-judging
+/// hooks, which fire only for a terminal judgement. A platform fault the session's operations met decides the error
 /// code, as for a failed dispatch (`submission_dispatch::record_dispatch_failure`).
 async fn finish_judgement(
     deps: &EvaluateHostDeps,
@@ -303,6 +304,7 @@ async fn finish_judgement(
         Some(fault) => (fault.fault.code(), fault.message.as_str()),
         None => (error_code, error_message),
     };
+    use crate::services::judging::DispatchFailed;
     match crate::services::judging::fail_dispatch(
         &deps.db,
         crate::services::judging::Unit::Judgement,
@@ -313,13 +315,19 @@ async fn finish_judgement(
     )
     .await
     {
-        Ok(true) => tracing::warn!(
+        Ok(DispatchFailed::SystemError) => tracing::warn!(
             submission_id = completion.submission_id,
             judgement_id = completion.judgement_id,
             error_code,
             "Judging session ended without a verdict; finalized as SystemError"
         ),
-        Ok(false) => {}
+        Ok(DispatchFailed::HandedBack) => tracing::info!(
+            submission_id = completion.submission_id,
+            judgement_id = completion.judgement_id,
+            error_code,
+            "Judging session ended while its contest type is parked; handed back"
+        ),
+        Ok(DispatchFailed::Stale) => {}
         Err(e) => tracing::error!(
             submission_id = completion.submission_id,
             judgement_id = completion.judgement_id,

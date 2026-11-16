@@ -151,6 +151,9 @@ pub struct E2eTestApp {
     /// The in-process server's detached judging sessions (see
     /// [`E2eTestApp::judging_idle`]). `None` against an external server.
     judging_sessions: Option<server::services::judging_sessions::JudgingSessions>,
+    /// The in-process server's state (see [`E2eTestApp::reconcile_plugins`]).
+    /// `None` against an external server.
+    state: Option<AppState>,
     /// A contest type this server actually registers, for problem creation
     /// (which requires one): `icpc` from the real plugins, or the stub
     /// `standard` a plugin-less server registers instead.
@@ -296,6 +299,20 @@ impl E2eTestApp {
             .await;
     }
 
+    /// Converges this server onto the fleet's plugin table now, as its
+    /// periodic reconcile does: what a change another replica published does
+    /// here.
+    pub async fn reconcile_plugins(&self) {
+        let state = self
+            .state
+            .as_ref()
+            .expect("reconcile_plugins needs the in-process server");
+        let failures = server::plugin_lifecycle::reconcile(state)
+            .await
+            .expect("reconcile the plugin table");
+        assert!(failures.is_empty(), "reconcile failed to apply a plugin");
+    }
+
     /// Default app DB pool size. Small on purpose: e2e runs many isolated test
     /// databases and Postgres backend slots are finite.
     const DEFAULT_DB_MAX_CONNECTIONS: u32 = 3;
@@ -413,6 +430,7 @@ impl E2eTestApp {
             _plugin_cache: None,
             _database: None,
             judging_sessions: None,
+            state: None,
             // An external server runs with the real plugins.
             contest_type: "icpc",
         }
@@ -742,7 +760,7 @@ impl E2eTestApp {
             );
         }
 
-        let app = server::build_router(state).expect("router");
+        let app = server::build_router(state.clone()).expect("router");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("Failed to bind to random port");
@@ -780,6 +798,7 @@ impl E2eTestApp {
             _plugin_cache: Some(plugin_cache),
             _database: Some(database),
             judging_sessions: Some(judging_sessions),
+            state: Some(state),
             contest_type: if load_plugins { "icpc" } else { "standard" },
         }
     }

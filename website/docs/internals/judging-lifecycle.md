@@ -106,10 +106,13 @@ is disabled fleet-wide; `contest_type_open` states that in SQL and
 - The claim statement takes no judgement or code run of a parked type, so
   nothing is dispatched to a plugin that is not there.
 - A judgement that fails while its type is parked (its session aborted when
-  the plugin went away, or nothing was registered to dispatch it to) is
-  recorded under `PLUGIN_DISABLED`, whatever the failure said. That is a
-  hand-back: the reaper requeues it at once, spending no budget, and the
-  submission follows it to `Queued`.
+  the plugin went away, or nothing was registered to dispatch it to) goes
+  straight back to `Queued` under a fresh epoch, whatever the failure said
+  (`judging::fail_dispatch`): it is never finalized as a `SystemError`, spends
+  no budget, and the submission follows it in the same statement. The
+  decision reads the fleet-wide `plugin` table, so the replica that made the
+  disable and a replica that applied it through its reconcile hand the work
+  back the same way.
 - The reaper retries no other system error of a parked type, so the budget
   is not spent on attempts nothing can judge, and the stuck-job detector hands
   back lapsed work of a parked type without spending a dispatch retry.
@@ -183,9 +186,8 @@ refused (`QUEUE_UNREACHABLE`), an operation the queue lost
 (`PLATFORM_TOOL_MISSING`), a fleet with no live worker that takes work
 (`NO_CAPABLE_WORKER`). A system error the dispatch then ends with carries that
 code, whatever the plugin reported, and the reaper treats it by its class
-(`SystemErrorClass`): a hand-back (the four fault codes, and
-`PLUGIN_DISABLED`) is requeued spending nothing, and any other code is retried
-within the budget.
+(`SystemErrorClass`): a hand-back (the four fault codes) is requeued spending
+nothing, and any other code is retried within the budget.
 
 A missing platform tool is the worker's fault, never the submission's. A worker
 that lacks one reads no task at all: it stays live, and its heartbeat lists the

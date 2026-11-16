@@ -1002,14 +1002,107 @@ async fn ioi_scoreboard_uses_time_taken_as_score_tiebreaker() {
 
 /// Disabling the contest-type plugin while one of its submissions is being
 /// judged hands that judgement back instead of failing it: it waits queued,
-/// spending neither retry budget, while the contestant sees its outcome
-/// withheld for the disabled plugin, and the operator sees why it waits. A new
-/// submission or code run of the type, to the contest or as practice, is
-/// refused with `CONTEST_TYPE_DISABLED`, which is not a retry-later answer,
-/// and the problem names the outage. Enabling the plugin again judges the
-/// parked submission to its verdict.
+/// spending neither retry budget and never showing a `SystemError`, while the
+/// contestant sees its outcome withheld for the disabled plugin, and the
+/// operator sees why it waits. A new submission or code run of the type, to
+/// the contest or as practice, is refused with `CONTEST_TYPE_DISABLED`, which
+/// is not a retry-later answer, and the problem names the outage. Enabling the
+/// plugin again judges the parked submission to its verdict.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_submission_cut_by_disabling_its_contest_plugin_waits_and_is_judged_once_enabled() {
+    cut_by_a_disable(Change::Local).await;
+}
+
+/// The same, on the replica judging the submission, when the disable and the
+/// enable were published by another replica: this one applies them through
+/// its fleet reconcile, as its periodic poll does, and hands the judgement
+/// back exactly as the replica that made the change does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_submission_cut_by_a_disable_another_replica_published_is_handed_back_the_same_way() {
+    cut_by_a_disable(Change::Peer).await;
+}
+
+/// Where a plugin change comes from.
+#[derive(Clone, Copy)]
+enum Change {
+    /// An admin asks this replica.
+    Local,
+    /// Another replica published it: its write to the plugin table, which
+    /// this replica applies when it reconciles.
+    Peer,
+}
+
+impl Change {
+    async fn set_enabled(self, app: &E2eTestApp, admin: &str, enabled: bool) {
+        match self {
+            Change::Local => {
+                let verb = if enabled { "enable" } else { "disable" };
+                let res = app
+                    .post_with_token(
+                        &format!("/api/v1/admin/plugins/ioi/{verb}"),
+                        &json!({}),
+                        admin,
+                    )
+                    .await;
+                assert!(res.status < 300, "{verb} failed: {}", res.text);
+            }
+            Change::Peer => {
+                exec(
+                    app,
+                    &format!(
+                        "UPDATE plugin SET is_enabled = {enabled}, generation = generation + 1 \
+                         WHERE id = 'ioi'"
+                    ),
+                )
+                .await;
+                app.reconcile_plugins().await;
+            }
+        }
+    }
+}
+
+async fn exec(app: &E2eTestApp, sql: &str) {
+    use sea_orm::ConnectionTrait;
+    app.db.execute_unprepared(sql).await.expect(sql);
+}
+
+/// Records every status a submission or judgement row takes, in order, so a
+/// test sees a transient status no poll would catch.
+async fn log_statuses(app: &E2eTestApp) {
+    exec(
+        app,
+        "CREATE TABLE status_log (seq BIGSERIAL PRIMARY KEY, tbl TEXT NOT NULL, status TEXT NOT NULL); \
+         CREATE FUNCTION log_status() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN INSERT INTO status_log (tbl, status) VALUES (TG_TABLE_NAME, NEW.status::text); \
+         RETURN NEW; END $$; \
+         CREATE TRIGGER log_submission_status AFTER INSERT OR UPDATE OF status ON submission \
+         FOR EACH ROW EXECUTE FUNCTION log_status(); \
+         CREATE TRIGGER log_judgement_status AFTER INSERT OR UPDATE OF status ON submission_judgement \
+         FOR EACH ROW EXECUTE FUNCTION log_status();",
+    )
+    .await;
+}
+
+async fn logged_statuses(app: &E2eTestApp) -> Vec<(String, String)> {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    app.db
+        .query_all_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT tbl, status FROM status_log ORDER BY seq",
+        ))
+        .await
+        .expect("read the status log")
+        .iter()
+        .map(|r| {
+            (
+                r.try_get("", "tbl").unwrap(),
+                r.try_get("", "status").unwrap(),
+            )
+        })
+        .collect()
+}
+
+async fn cut_by_a_disable(change: Change) {
     let app = E2eTestApp::spawn().await;
     let admin = app
         .create_user_with_role("ioi_disable_admin", "password", "admin")
@@ -1038,6 +1131,7 @@ async fn a_submission_cut_by_disabling_its_contest_plugin_waits_and_is_judged_on
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
 
+    log_statuses(&app).await;
     // Hold every operation in the queue, so the judging session is started
     // and waiting for its first result when the plugin goes away.
     app.pause_worker();
@@ -1058,10 +1152,7 @@ async fn a_submission_cut_by_disabling_its_contest_plugin_waits_and_is_judged_on
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     };
 
-    let res = app
-        .post_with_token("/api/v1/admin/plugins/ioi/disable", &json!({}), &admin)
-        .await;
-    assert!(res.status < 300, "disable failed: {}", res.text);
+    change.set_enabled(&app, &admin, false).await;
     app.resume_worker();
 
     // The cut judgement goes back to the queue under a fresh epoch and stays
@@ -1164,10 +1255,15 @@ async fn a_submission_cut_by_disabling_its_contest_plugin_waits_and_is_judged_on
         .await;
     assert_eq!(res.body["plugin_outage"], outage, "{}", res.text);
 
-    let res = app
-        .post_with_token("/api/v1/admin/plugins/ioi/enable", &json!({}), &admin)
-        .await;
-    assert!(res.status < 300, "enable failed: {}", res.text);
+    let cut_statuses = logged_statuses(&app).await;
+    assert!(
+        !cut_statuses
+            .iter()
+            .any(|(_, status)| status == "SystemError"),
+        "the cut judgement showed a SystemError on its way back: {cut_statuses:?}"
+    );
+
+    change.set_enabled(&app, &admin, true).await;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
     let shown = loop {
         let shown = submission::Entity::find_by_id(sub_id)

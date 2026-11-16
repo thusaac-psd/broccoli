@@ -37,6 +37,9 @@ repo disagree, trust the repo (`Cargo.toml`, the package manifests, the
   commit SHAs, no task, review or plan labels.
 - Worker concurrency stays 1 (`worker.max_concurrency`) so every submission is
   judged under the same load, for fairness. Scale by adding workers.
+- A node's default id has one rule, in the binary
+  (`common::node_identity::default_node_id`, printed by `--node-id`). Installers
+  never derive one: they ask the role's image and record its answer.
 
 ## Repo shape
 
@@ -251,12 +254,17 @@ binaries warn about every key they do not read.
   not failed: the claim, the system-error retry and the stuck detector all skip
   or hand it back through one predicate (`plugin_lifecycle::contest_type_open`),
   and it resumes when a provider is enabled. A new scan that hands out or
-  retries judging work uses that predicate too.
+  retries judging work uses that predicate too. A judgement whose session the
+  disable cut goes straight back to `Queued` (`judging::fail_dispatch`), never
+  through `SystemError`, on every replica alike, since the decision reads the
+  fleet-wide `plugin` table.
 - A worker that lacks a platform tool takes no work
   (`HeartbeatPayload::accepts_work`): it stays live, its heartbeat lists what is
   missing, and while no live worker takes work the claim claims nothing
   (`ClaimPass::CANNOT_RUN`), so submissions wait `Queued` instead of failing. A
-  missing tool is the worker's fault, a hand-back that spends no retry.
+  missing tool is the worker's fault, a hand-back that spends no retry; work
+  already dispatched when the last capable worker stops taking work is handed
+  back under `NO_CAPABLE_WORKER`.
 - Every submit path (practice and contest submissions, code runs) accepts work
   through one rule, `plugin_lifecycle::accepting_handler`, which refuses a
   contest type no provider can judge now; a new submit path calls it too.
@@ -326,7 +334,13 @@ on host and guest and nothing notices. Rules:
   Docker; plugin-loading tests need `just build-plugins` first. The e2e harness
   builds the worker's platform tools (`broccoli-compare`) into
   `target/e2e-tools` itself, so `E2E_SANDBOX_BACKEND=mock` is all a mock run
-  needs.
+  needs. A submission reads `Judged` before its after-judging hooks run, so an
+  e2e test that counts or inspects what judging did waits for
+  `E2eTestApp::judging_idle`; `pause_worker` holds operations queued, and
+  `reconcile_plugins` applies a change another replica published.
+- Release shell tests (`release/test`, `release/*/test`) put `release/test/bin`
+  first on `PATH`: its `docker` answers an image's `--node-id` question and
+  passes everything else to the real engine.
 - For frontend changes, run `pnpm lint`, `pnpm test` and the affected package's
   build or `pnpm typecheck`.
 - For plugin changes, run `just test-plugins` (or
