@@ -4535,19 +4535,31 @@ export interface components {
       created_at: string;
       /** @example Basic case */
       description?: string | null;
-      /** @example 0 1 */
+      /**
+       * @description The whole expected output; empty when [`Self::expected_output_is_binary`].
+       * @example 0 1
+       */
       expected_output: string;
+      /** @description The expected output is binary, like [`Self::input_is_binary`]. */
+      expected_output_is_binary: boolean;
       /**
        * Format: int32
        * @example 1
        */
       id: number;
       /**
+       * @description The whole input; empty when [`Self::input_is_binary`].
        * @example 4
        *     2 7 11 15
        *     9
        */
       input: string;
+      /**
+       * @description The input is binary (not UTF-8, or holds a NUL): it is judged byte for
+       *     byte but has no text form, so it is not sent, and an editor leaves it
+       *     as it is.
+       */
+      input_is_binary: boolean;
       /**
        * @example 4
        *     2 7 11 15
@@ -11094,6 +11106,15 @@ export interface operations {
       };
       /** @description Problem not found */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin providing the problem's checker format declares no checker source (CHECKER_SOURCE_UNSUPPORTED) */
+      409: {
         headers: {
           [name: string]: unknown;
         };

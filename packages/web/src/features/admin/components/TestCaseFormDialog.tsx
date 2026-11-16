@@ -121,6 +121,12 @@ export function TestCaseFormDialog({
                 problemId={problemId}
                 testCaseId={testCaseId}
                 initial={testCaseFormValues(testCase)}
+                binary={{
+                  input: testCase.input_is_binary ? testCase.input_size : null,
+                  expectedOutput: testCase.expected_output_is_binary
+                    ? testCase.output_size
+                    : null,
+                }}
                 dialog={dialog}
               />
             )}
@@ -141,12 +147,18 @@ function TestCaseForm({
   problemId,
   testCaseId,
   initial,
+  binary,
   dialog,
 }: {
   problemId: number;
   /** The test case being edited; creates a new one when absent. */
   testCaseId?: number;
   initial: TestCaseFormValues;
+  /**
+   * The size in bytes of each body that is binary: the server sends no text
+   * for it, and the form leaves it as it is (it is never sent back).
+   */
+  binary?: { input: number | null; expectedOutput: number | null };
   dialog: ReturnType<typeof useAsyncDialog>;
 }) {
   const { t } = useTranslation();
@@ -217,6 +229,7 @@ function TestCaseForm({
           value={values.input}
           onChange={set('input')}
           placeholder={t('admin.testCases.inputPlaceholder')}
+          binarySize={binary?.input ?? null}
         />
         <TestDataField
           id="tc-expected-output"
@@ -224,6 +237,7 @@ function TestCaseForm({
           value={values.expectedOutput}
           onChange={set('expectedOutput')}
           placeholder={t('admin.testCases.outputPlaceholder')}
+          binarySize={binary?.expectedOutput ?? null}
         />
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
@@ -307,16 +321,30 @@ function TestDataField({
   value,
   onChange,
   placeholder,
+  binarySize,
 }: {
   id: string;
   label: string;
   value: string;
   onChange: (value: string) => void;
   placeholder: string;
+  /** Set for a binary body: its size; it is shown, not edited. */
+  binarySize: number | null;
 }) {
   const { t } = useTranslation();
   const fileRef = useRef<HTMLInputElement>(null);
   const [uploaded, setUploaded] = useState(false);
+
+  if (binarySize !== null) {
+    return (
+      <div className="space-y-2">
+        <p className="text-sm font-medium">{label}</p>
+        <p className="rounded-md border px-3 py-2 text-sm text-muted-foreground">
+          {t('admin.testCases.binaryBody', { size: binarySize })}
+        </p>
+      </div>
+    );
+  }
 
   const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const inputEl = e.currentTarget;

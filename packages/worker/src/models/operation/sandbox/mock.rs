@@ -190,6 +190,20 @@ impl MockSandboxManager {
         }
     }
 
+    /// Where absolute path `arg` lands in the mock box when it lies under the
+    /// inside path of one of `rules`, which the mock maps into the box (see
+    /// [`Self::apply_directory_rule`]).
+    fn mapped_path(sandbox_path: &Path, rules: &[DirectoryRule], arg: &str) -> Option<PathBuf> {
+        let arg = Path::new(arg);
+        if !arg.is_absolute() {
+            return None;
+        }
+        rules
+            .iter()
+            .find(|rule| arg.starts_with(&rule.inside_path))
+            .and_then(|_| Self::resolve_inside_path(sandbox_path, arg).ok())
+    }
+
     fn resolve_inside_path(base: &Path, inside: &Path) -> Result<PathBuf, SandboxError> {
         let mut resolved = base.to_path_buf();
         for component in inside.components() {
@@ -417,6 +431,12 @@ impl SandboxManager for MockSandboxManager {
                     sandbox_path.join(rest).to_string_lossy().into_owned()
                 } else if arg == "/box" {
                     sandbox_path.to_string_lossy().into_owned()
+                } else if let Some(mapped) =
+                    Self::mapped_path(&sandbox_path, &run_options.directory_rules, arg)
+                {
+                    // A path under a directory rule (a platform tool's
+                    // `/tools/<name>`, say): the rule's mapping in the box.
+                    mapped.to_string_lossy().into_owned()
                 } else {
                     arg.clone()
                 }

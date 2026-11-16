@@ -99,10 +99,18 @@ pub struct CreateTestCaseRequest {
 pub struct TestCaseResponse {
     #[schema(example = 1)]
     pub id: i32,
+    /// The whole input; empty when [`Self::input_is_binary`].
     #[schema(example = "4\n2 7 11 15\n9")]
     pub input: String,
+    /// The whole expected output; empty when [`Self::expected_output_is_binary`].
     #[schema(example = "0 1")]
     pub expected_output: String,
+    /// The input is binary (not UTF-8, or holds a NUL): it is judged byte for
+    /// byte but has no text form, so it is not sent, and an editor leaves it
+    /// as it is.
+    pub input_is_binary: bool,
+    /// The expected output is binary, like [`Self::input_is_binary`].
+    pub expected_output_is_binary: bool,
     #[schema(example = 12)]
     pub input_size: usize,
     #[schema(example = 4)]

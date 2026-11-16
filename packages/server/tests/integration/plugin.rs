@@ -744,7 +744,7 @@ mod route_access {
 
         let res = app.get_with_token(&mine(problem), &user).await;
         assert_eq!(res.status, 403, "non-participant: {}", res.text);
-        assert_eq!(res.body["code"], "PERMISSION_DENIED");
+        assert_eq!(res.body["code"], "CONTEST_NOT_REGISTERED");
 
         app.register_for_contest(contest, &user).await;
         let res = app.get_with_token(&mine(problem), &user).await;

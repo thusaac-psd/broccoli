@@ -91,18 +91,22 @@ fn plugins_dir() -> PathBuf {
     )
 }
 
-/// Worker platform-tools dir (`broccoli-compare`, ...) for real-sandbox judging.
-/// Judging fuses a `check` step that mounts `broccoli-compare` as a
-/// `MountSource::PlatformTool`, so a real-isolate run rejects the job without
-/// it. Resolution: `BROCCOLI_WORKER_TOOLS_DIR` if set, else the conventional
-/// deployment path when present. `None` for mock-sandbox runs, which never
-/// resolve a platform tool.
+/// Worker platform-tools dir (`broccoli-compare`, ...). Judging fuses a
+/// `check` step that runs `broccoli-compare` as a `MountSource::PlatformTool`,
+/// in the mock sandbox as in isolate, so a worker without it fails the job.
+/// Resolution: `BROCCOLI_WORKER_TOOLS_DIR` if set; else, for the mock sandbox,
+/// the cargo target dir holding the built `broccoli-compare` (`cargo build -p
+/// broccoli-compare`); else the conventional deployment path when present.
 fn worker_tools_dir() -> Option<PathBuf> {
-    if mock_sandbox() {
-        return None;
-    }
     if let Ok(dir) = std::env::var("BROCCOLI_WORKER_TOOLS_DIR") {
         return Some(PathBuf::from(dir));
+    }
+    if mock_sandbox() {
+        let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        return ["debug", "release"]
+            .into_iter()
+            .map(|profile| target.join(profile))
+            .find(|dir| dir.join("broccoli-compare").is_file());
     }
     let default = PathBuf::from("/opt/broccoli/tools");
     default.is_dir().then_some(default)

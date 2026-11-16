@@ -83,7 +83,9 @@ pub async fn prepare_test_case_body(
         .map_err(|_| AppError::Validation("Test case body is too large".into()))?;
     let preview = preview_of(body.as_bytes());
 
-    if body.len() < INLINE_TEST_CASE_BODY_THRESHOLD_BYTES {
+    // Postgres text holds no NUL, so a body with one is kept as a blob, byte
+    // for byte, like any large body.
+    if body.len() < INLINE_TEST_CASE_BODY_THRESHOLD_BYTES && !body.contains('\0') {
         return Ok(PreparedTestCaseBody {
             inline_text: body,
             blob_hash: None,
@@ -199,13 +201,16 @@ fn preview_of(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// The whole body as text, or `None` for binary test data (bytes that are
+/// not UTF-8, or a NUL): it has no text form an editor could show and save
+/// back without changing it.
 pub async fn read_test_case_body(
     inline_text: &str,
     blob_hash: Option<&str>,
     blob_store: &dyn BlobStore,
-) -> Result<String, AppError> {
+) -> Result<Option<String>, AppError> {
     let Some(hash) = blob_hash else {
-        return Ok(inline_text.to_string());
+        return Ok(Some(inline_text.to_string()));
     };
 
     let hash = ContentHash::from_hex(hash)
@@ -214,12 +219,9 @@ pub async fn read_test_case_body(
         .get(&hash)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to read test case body blob: {e}")))?;
-    // Binary test data (stored only as a blob) reads as text with U+FFFD for
-    // the bytes that are not UTF-8.
-    Ok(match String::from_utf8(bytes) {
-        Ok(text) => text,
-        Err(binary) => String::from_utf8_lossy(binary.as_bytes()).into_owned(),
-    })
+    Ok(String::from_utf8(bytes)
+        .ok()
+        .filter(|text| !text.contains('\0')))
 }
 
 /// Maximum bytes of a test-case `input`/`expected_output` body to inline into an
@@ -342,7 +344,24 @@ mod tests {
         let hash = prepared.blob_hash.expect("blob hash");
         assert_eq!(
             read_test_case_body("", Some(&hash), &*store).await.unwrap(),
-            body
+            Some(body)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_small_body_with_a_nul_is_kept_as_a_blob_and_reads_as_binary() {
+        let store = blob_store().await;
+        let body = "a\0b".to_string();
+        let prepared = prepare_test_case_body(body.clone(), store.clone())
+            .await
+            .unwrap();
+        assert!(prepared.inline_text.is_empty());
+        let hash = prepared.blob_hash.expect("blob hash");
+        let hex = ContentHash::from_hex(&hash).unwrap();
+        assert_eq!(store.get(&hex).await.unwrap(), body.as_bytes());
+        assert_eq!(
+            read_test_case_body("", Some(&hash), &*store).await.unwrap(),
+            None
         );
     }
 

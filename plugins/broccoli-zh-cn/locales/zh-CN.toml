@@ -719,6 +719,7 @@
 'admin.testCases.edit' = "编辑测试点"
 'admin.testCases.uploadFile' = "上传文件"
 'admin.testCases.fileReadError' = "读取文件失败。"
+'admin.testCases.binaryBody' = "二进制数据，{size, number} 字节。评测时逐字节比较，无法在此编辑；如需替换，请以 ZIP 上传测试用例。"
 'admin.testCases.uploadedHidden' = "文件已上传，内容已隐藏。长度：{length} 个字符。点击清除。"
 'admin.testCases.descriptionPlaceholder' = "对此样例的说明（支持 Markdown）"
 'admin.testCases.sample' = "样例"
