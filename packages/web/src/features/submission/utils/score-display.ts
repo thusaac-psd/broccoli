@@ -1,7 +1,8 @@
 import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
-import type { PluginOutage, ShownStatus } from '@broccoli/web-sdk/submission';
-
-import { submissionPhase } from './phase.ts';
+import {
+  type SubmissionOutcome,
+  submissionPhase,
+} from '@broccoli/web-sdk/submission';
 
 type Translate = I18nContextValue['t'];
 
@@ -25,7 +26,7 @@ export function formatScoreValue(value: number): string {
  * contest's plugin or its outcome is withheld.
  */
 export function getSubmissionScoreDisplay(
-  outcome: { status?: ShownStatus; plugin_outage?: PluginOutage | null },
+  outcome: SubmissionOutcome,
   score: number | null | undefined,
   t: Translate,
 ): SubmissionScoreDisplay {

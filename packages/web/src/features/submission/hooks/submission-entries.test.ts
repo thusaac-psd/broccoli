@@ -6,6 +6,7 @@ import type { Submission } from '@broccoli/web-sdk/submission';
 import {
   entriesReducer,
   type EntryAction,
+  entryInProgress,
   type EntryResult,
   pollEntry,
   type PollResponse,
@@ -17,9 +18,16 @@ function entry(id: number, status: SubmissionEntry['status']): SubmissionEntry {
   return { id, submission: null, codeRun: null, status, error: null };
 }
 
-function result(status: string, terminal: boolean): EntryResult {
-  return { submission: { id: 41, status } as unknown as Submission, terminal };
+function result(
+  status: string | null,
+  extra: Partial<Submission> = {},
+): EntryResult {
+  return {
+    submission: { id: 41, status, ...extra } as unknown as Submission,
+  };
 }
+
+const DISABLED = { state: 'disabled', plugin_id: 'icpc' } as const;
 
 const error = { code: 'NOT_FOUND', message: 'gone' };
 
@@ -31,13 +39,13 @@ test('an accepted submission is polled until a final result settles it', () => {
   entries = entriesReducer(entries, {
     type: 'accepted',
     id: 1,
-    result: result('Pending', false),
+    result: result('Pending'),
   });
   assert.equal(entries[0].status, 'polling');
   entries = entriesReducer(entries, {
     type: 'polled',
     id: 1,
-    result: result('Judged', true),
+    result: result('Judged'),
   });
   assert.equal(entries[0].status, 'done');
   assert.equal(entries[0].submission?.status, 'Judged');
@@ -51,11 +59,15 @@ test('a submission accepted by id alone is polled by that id', () => {
   });
   assert.equal(entries[0].status, 'polling');
   assert.equal(entries[0].submission, null);
-  assert.deepEqual(pollTarget(entries[0]), { kind: 'submission', id: 41 });
+  assert.deepEqual(pollTarget(entries[0]), {
+    kind: 'submission',
+    id: 41,
+    pace: 1_000,
+  });
   entries = entriesReducer(entries, {
     type: 'polled',
     id: 1,
-    result: result('Judged', true),
+    result: result('Judged'),
   });
   assert.equal(entries[0].status, 'done');
   assert.equal(entries[0].submission?.status, 'Judged');
@@ -73,12 +85,12 @@ test('an accept by id moves only a submitting entry', () => {
 
 test('a late non-final poll cannot move a done entry back to polling', () => {
   const done = [
-    { ...entry(1, 'done'), submission: result('Judged', true).submission! },
+    { ...entry(1, 'done'), submission: result('Judged').submission! },
   ];
   const next = entriesReducer(done, {
     type: 'polled',
     id: 1,
-    result: result('Running', false),
+    result: result('Running'),
   });
   assert.equal(next, done);
 });
@@ -86,8 +98,8 @@ test('a late non-final poll cannot move a done entry back to polling', () => {
 test('an entry that failed stays failed', () => {
   const failed = [entry(1, 'error')];
   for (const action of [
-    { type: 'accepted', id: 1, result: result('Pending', false) },
-    { type: 'polled', id: 1, result: result('Judged', true) },
+    { type: 'accepted', id: 1, result: result('Pending') },
+    { type: 'polled', id: 1, result: result('Judged') },
     { type: 'failed', id: 1, error },
   ] satisfies EntryAction[]) {
     assert.equal(entriesReducer(failed, action), failed);
@@ -105,8 +117,8 @@ test('a refused submit is a rejection, never a submission being judged', () => {
   assert.equal(pollTarget(rejected[0]), null);
   // Nothing the server says later turns it into a submission.
   for (const action of [
-    { type: 'accepted', id: 1, result: result('Pending', false) },
-    { type: 'polled', id: 1, result: result('Judged', true) },
+    { type: 'accepted', id: 1, result: result('Pending') },
+    { type: 'polled', id: 1, result: result('Judged') },
     { type: 'failed', id: 1, error },
   ] satisfies EntryAction[]) {
     assert.equal(entriesReducer(rejected, action), rejected);
@@ -143,7 +155,7 @@ test('a submit that settles after the entries were reset changes nothing', () =>
     entriesReducer(entries, {
       type: 'accepted',
       id: 1,
-      result: result('Pending', false),
+      result: result('Pending'),
     }),
     [],
   );
@@ -155,18 +167,22 @@ test('a run result lands in the code run, not the submission', () => {
   const next = entriesReducer(run, {
     type: 'accepted',
     id: 1,
-    result: { codeRun, terminal: false },
+    result: { codeRun },
   });
   assert.equal(next[0].codeRun, codeRun);
   assert.equal(next[0].submission, null);
 });
 
-function poller(responses: PollResponse[], signedOut = false) {
+function poller(
+  responses: PollResponse[],
+  signedOut = false,
+  random = () => 1,
+) {
   const actions: EntryAction[] = [];
   const sleeps: number[] = [];
   const controller = new AbortController();
   let fetches = 0;
-  const run = pollEntry(1, controller.signal, {
+  const run = pollEntry(1, 1_000, controller.signal, {
     fetch: async () => {
       fetches += 1;
       const next = responses.shift();
@@ -181,15 +197,16 @@ function poller(responses: PollResponse[], signedOut = false) {
     },
     dispatch: (action) => actions.push(action),
     isSignedOut: () => signedOut,
+    random,
   });
   return { run, actions, sleeps, fetches: () => fetches };
 }
 
 test('polling stops at the first final result', async () => {
   const p = poller([
-    { ok: true, result: result('Running', false) },
-    { ok: true, result: result('Judged', true) },
-    { ok: true, result: result('Judged', true) },
+    { ok: true, result: result('Running') },
+    { ok: true, result: result('Judged') },
+    { ok: true, result: result('Judged') },
   ]);
   await p.run;
   assert.equal(p.fetches(), 2);
@@ -208,7 +225,7 @@ for (const [status, signedOut] of [
     const p = poller(
       [
         { ok: false, status, error },
-        { ok: true, result: result('Judged', true) },
+        { ok: true, result: result('Judged') },
       ],
       signedOut,
     );
@@ -221,7 +238,7 @@ for (const [status, signedOut] of [
 test('a 401 while the session is renewing its token keeps polling', async () => {
   const p = poller([
     { ok: false, status: 401, error: {} },
-    { ok: true, result: result('Judged', true) },
+    { ok: true, result: result('Judged') },
   ]);
   await p.run;
   assert.deepEqual(
@@ -234,8 +251,8 @@ test('transient failures back off and polling resumes its pace after', async () 
   const p = poller([
     { ok: false, status: 502, error: {} },
     { ok: false, status: null, error: new TypeError('offline') },
-    { ok: true, result: result('Running', false) },
-    { ok: true, result: result('Judged', true) },
+    { ok: true, result: result('Running') },
+    { ok: true, result: result('Judged') },
   ]);
   await p.run;
   assert.deepEqual(p.sleeps, [1_000, 2_000, 4_000, 1_000]);
@@ -246,14 +263,99 @@ test('an aborted poller sends nothing more', async () => {
   const controller = new AbortController();
   controller.abort();
   let fetches = 0;
-  await pollEntry(1, controller.signal, {
+  await pollEntry(1, 1_000, controller.signal, {
     fetch: async () => {
       fetches += 1;
-      return { ok: true, result: result('Judged', true) };
+      return { ok: true, result: result('Judged') };
     },
     sleep: async () => {},
     dispatch: () => assert.fail('dispatched after abort'),
     isSignedOut: () => false,
   });
   assert.equal(fetches, 0);
+});
+
+test('a submission its contest plugin parks keeps polling, at the waiting pace', async () => {
+  const p = poller([
+    { ok: true, result: result('Queued', { plugin_outage: DISABLED }) },
+    {
+      ok: true,
+      result: result(null, {
+        withheld: { reason: 'plugin_outage', outage: DISABLED },
+      }),
+    },
+    { ok: true, result: result('Compiling') },
+    { ok: true, result: result('Judged') },
+  ]);
+  await p.run;
+  assert.equal(p.fetches(), 4);
+  assert.deepEqual(p.sleeps, [1_000, 30_000, 30_000, 1_000]);
+});
+
+test('an entry whose outcome a plugin outage withholds is not done', () => {
+  const entries = entriesReducer([entry(1, 'polling')], {
+    type: 'polled',
+    id: 1,
+    result: result(null, {
+      withheld: { reason: 'plugin_outage', outage: { state: 'unavailable' } },
+    }),
+  });
+  assert.equal(entries[0].status, 'polling');
+  assert.equal(pollTarget(entries[0])?.pace, 30_000);
+});
+
+test('an entry whose outcome the contest hides is done, and polling stops', async () => {
+  const hidden = result(null, { withheld: { reason: 'hidden' } });
+  const entries = entriesReducer([entry(1, 'polling')], {
+    type: 'polled',
+    id: 1,
+    result: hidden,
+  });
+  assert.equal(entries[0].status, 'done');
+  const p = poller([
+    { ok: true, result: hidden },
+    { ok: true, result: result('Judged') },
+  ]);
+  await p.run;
+  assert.equal(p.fetches(), 1);
+});
+
+test('failing polls back off with jitter', async () => {
+  const p = poller(
+    [
+      { ok: false, status: 502, error: {} },
+      { ok: false, status: 502, error: {} },
+      { ok: true, result: result('Judged') },
+    ],
+    false,
+    () => 0,
+  );
+  await p.run;
+  // Equal jitter at its low end: half of each doubled wait, never below the pace.
+  assert.deepEqual(p.sleeps, [1_000, 1_000, 2_000]);
+});
+
+test('an entry is in progress only while sent or judged, not while its plugin parks it', () => {
+  const polled = (r: EntryResult): SubmissionEntry => ({
+    ...entry(1, 'polling'),
+    submission: r.submission ?? null,
+  });
+  assert.equal(entryInProgress(entry(1, 'submitting')), true);
+  assert.equal(entryInProgress(entry(1, 'polling')), true);
+  assert.equal(entryInProgress(polled(result('Running'))), true);
+  assert.equal(
+    entryInProgress(polled(result('Queued', { plugin_outage: DISABLED }))),
+    false,
+  );
+  assert.equal(
+    entryInProgress(
+      polled(
+        result(null, {
+          withheld: { reason: 'plugin_outage', outage: DISABLED },
+        }),
+      ),
+    ),
+    false,
+  );
+  assert.equal(entryInProgress(entry(1, 'done')), false);
 });

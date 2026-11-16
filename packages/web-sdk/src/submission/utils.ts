@@ -1,26 +1,22 @@
 import type { I18nContextValue } from '@/i18n';
 import type {
-  ShownStatus,
   SubmissionError,
   SubmissionStatus,
   SubmissionStatusFilterValue,
   Withheld,
 } from '@/submission/types';
 
-/**
- * Statuses after which a submission or code run will never change again.
- * Pollers should stop once one of these is reached.
- */
+/** Statuses after which a submission or code run will never change again. */
 export const TERMINAL_STATUSES: ReadonlySet<SubmissionStatus> =
   new Set<SubmissionStatus>(['Judged', 'CompilationError', 'SystemError']);
 
 /**
- * Whether a status will never change again for this viewer. A withheld
- * status is: the server says when it is released, and asking again in the
- * meantime only shows it withheld again, so pollers stop.
+ * Whether a status will never change again. It takes a status the server
+ * showed: whether a withheld one (`null`) can still change depends on why it
+ * is withheld, which `submissionPhase` decides.
  */
-export function isTerminalStatus(status: ShownStatus): boolean {
-  return status == null || TERMINAL_STATUSES.has(status);
+export function isTerminalStatus(status: SubmissionStatus): boolean {
+  return TERMINAL_STATUSES.has(status);
 }
 
 /** What a submission whose outcome is withheld shows in place of it. */

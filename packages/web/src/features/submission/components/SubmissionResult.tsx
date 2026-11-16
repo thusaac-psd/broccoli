@@ -8,12 +8,12 @@ import { Slot } from '@broccoli/web-sdk/slot';
 import {
   parseSubmissionError,
   type Submission,
+  submissionPhase,
   withheldLabel,
 } from '@broccoli/web-sdk/submission';
 import { TextPreview } from '@broccoli/web-sdk/ui';
 import { Timer, XCircle } from 'lucide-react';
 
-import { submissionPhase } from '../utils/phase';
 import { ReadOnlyCodeViewer } from './ReadOnlyCodeViewer';
 import { SubmissionTestCases } from './SubmissionTestCases';
 

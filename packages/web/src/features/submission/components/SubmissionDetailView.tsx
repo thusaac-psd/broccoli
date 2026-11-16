@@ -1,5 +1,6 @@
 import { useLanguageName, useQueryState } from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
+import { submissionPhase } from '@broccoli/web-sdk/submission';
 import {
   Badge,
   QueryErrorState,
@@ -19,7 +20,6 @@ import {
   submissionReturnState,
   type SubmissionReturnTarget,
 } from '@/features/submission/utils/navigation';
-import { submissionPhase } from '@/features/submission/utils/phase';
 import { getSubmissionScoreDisplay } from '@/features/submission/utils/score-display';
 import { getVerdictBadge } from '@/features/submission/utils/verdict';
 

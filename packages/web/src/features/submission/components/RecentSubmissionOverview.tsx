@@ -3,8 +3,6 @@ import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import type {
   ShownStatus,
   SubmissionSummary,
-  Verdict,
-  Withheld,
 } from '@broccoli/web-sdk/submission';
 import { Badge, QueryErrorState } from '@broccoli/web-sdk/ui';
 import { formatKibibytes } from '@broccoli/web-sdk/utils';
@@ -13,7 +11,7 @@ import { useSubmissionNavigation } from '@/features/submission/hooks/use-submiss
 import type { SubmissionEntry } from '@/features/submission/hooks/use-submissions';
 
 import { getSubmissionScoreDisplay } from '../utils/score-display';
-import { getVerdictBadge } from '../utils/verdict';
+import { getVerdictBadge, type RowOutcome } from '../utils/verdict';
 import { PinnedSubmissionGroup } from './PinnedSubmissionGroup';
 import { SubmissionRejection } from './SubmissionResult';
 
@@ -33,9 +31,7 @@ interface OverviewRow {
   key: string;
   submissionId: number | null;
   pendingOrder: number;
-  status: ShownStatus;
-  withheld: Withheld | null;
-  verdict: Verdict | null;
+  outcome: RowOutcome;
   score: number | null;
   createdAt: string | null;
   timeUsed: number | null;
@@ -116,9 +112,12 @@ export function RecentSubmissionOverview({
       key: `history-${item.id}`,
       submissionId: item.id,
       pendingOrder: 0,
-      status: item.status,
-      withheld: item.withheld ?? null,
-      verdict: (item.verdict as Verdict | null) ?? null,
+      outcome: {
+        status: item.status,
+        withheld: item.withheld ?? null,
+        plugin_outage: item.plugin_outage ?? null,
+        verdict: item.verdict ?? null,
+      },
       score: item.score ?? null,
       createdAt: item.created_at,
       timeUsed: item.time_used ?? null,
@@ -157,9 +156,12 @@ export function RecentSubmissionOverview({
         key: `entry-${entry.id}`,
         submissionId: null,
         pendingOrder: entry.id,
-        status: getEntryStatus(entry),
-        withheld: null,
-        verdict: null,
+        outcome: {
+          status: getEntryStatus(entry),
+          withheld: null,
+          plugin_outage: null,
+          verdict: null,
+        },
         score: null,
         createdAt: null,
         timeUsed: null,
@@ -173,9 +175,12 @@ export function RecentSubmissionOverview({
       key: `submission-${sub.id}`,
       submissionId: sub.id,
       pendingOrder: 0,
-      status: sub.status,
-      withheld: sub.withheld ?? null,
-      verdict: sub.result?.verdict ?? null,
+      outcome: {
+        status: sub.status,
+        withheld: sub.withheld ?? null,
+        plugin_outage: sub.plugin_outage ?? null,
+        verdict: sub.result?.verdict ?? null,
+      },
       score: sub.result?.score ?? null,
       createdAt: sub.created_at,
       timeUsed: sub.result?.time_used ?? null,
@@ -242,9 +247,13 @@ export function RecentSubmissionOverview({
           />
         ))}
         {mergedRows.map((row) => {
-          const { label, variant } = getVerdictBadge(row, t);
+          const { label, variant } = getVerdictBadge(row.outcome, t);
           const scoreToneClass = getScoreToneClass(variant);
-          const scoreDisplay = getSubmissionScoreDisplay(row, row.score, t);
+          const scoreDisplay = getSubmissionScoreDisplay(
+            row.outcome,
+            row.score,
+            t,
+          );
           const canOpen = row.submissionId != null && !!linkBuilder;
 
           return (

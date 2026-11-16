@@ -1,3 +1,4 @@
+export * from '@/submission/progress';
 export * from '@/submission/submit-gating';
 export * from '@/submission/test-case-output';
 export * from '@/submission/types';

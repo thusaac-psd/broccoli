@@ -1,10 +1,8 @@
 import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
 import {
   getStatusLabel,
-  type PluginOutage,
-  type ShownStatus,
+  type SubmissionOutcome,
   type Verdict,
-  type Withheld,
   withheldLabel,
 } from '@broccoli/web-sdk/submission';
 import type { BadgeProps } from '@broccoli/web-sdk/ui';
@@ -58,13 +56,18 @@ function getVerdictVariant(verdict: Verdict): BadgeVariant {
 }
 
 /** What decides the badge of a submission's outcome, as its responses carry it. */
-export interface VerdictOutcome {
+export interface VerdictOutcome extends SubmissionOutcome {
   verdict?: Verdict | null;
-  status?: ShownStatus;
-  withheld?: Withheld | null;
-  /** Set while the submission waits for its contest type's provider. */
-  plugin_outage?: PluginOutage | null;
 }
+
+/**
+ * A `VerdictOutcome` copied into a row of a list: every field is required, so
+ * a row built from a response cannot leave one out (and show a parked or
+ * withheld submission as being judged).
+ */
+export type RowOutcome = {
+  [K in keyof Required<VerdictOutcome>]: VerdictOutcome[K];
+};
 
 /**
  * The badge of a submission's outcome. A withheld outcome (`status` `null`)

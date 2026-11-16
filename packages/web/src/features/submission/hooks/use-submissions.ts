@@ -6,11 +6,7 @@ import {
 import { useSessionView } from '@broccoli/web-sdk/auth';
 import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import {
-  type CodeRun,
-  isTerminalStatus,
-  type Submission,
-} from '@broccoli/web-sdk/submission';
+import { type CodeRun, type Submission } from '@broccoli/web-sdk/submission';
 import { sleep } from '@broccoli/web-sdk/utils';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
@@ -19,6 +15,7 @@ import { toast } from 'sonner';
 import { pairFanOutSubmissions } from '@/features/submission/hooks/fan-out-response';
 import {
   entriesReducer,
+  entryInProgress,
   type EntryResult,
   pollEntry,
   type PollResponse,
@@ -31,13 +28,9 @@ export type { SubmissionEntry } from '@/features/submission/hooks/submission-ent
 
 const submissionResult = (submission: Submission): EntryResult => ({
   submission,
-  terminal: isTerminalStatus(submission.status),
 });
 
-const codeRunResult = (codeRun: CodeRun): EntryResult => ({
-  codeRun,
-  terminal: isTerminalStatus(codeRun.status),
-});
+const codeRunResult = (codeRun: CodeRun): EntryResult => ({ codeRun });
 
 interface SubmissionFile {
   filename: string;
@@ -135,7 +128,7 @@ export function useSubmissions({
           ? { ok: false, status: res.response.status, error: res.error }
           : { ok: true, result: submissionResult(res.data) };
       };
-      void pollEntry(entryId, poller.signal, {
+      void pollEntry(entryId, target.pace, poller.signal, {
         fetch: fetchOnce,
         sleep,
         dispatch,
@@ -455,9 +448,7 @@ export function useSubmissions({
   const submissionEntries = entries.filter((e) => !e.isRun);
   const latestRun = entries.find((e) => e.isRun) ?? null;
 
-  const isAnySubmitting = entries.some(
-    (e) => e.status === 'submitting' || e.status === 'polling',
-  );
+  const isAnySubmitting = entries.some(entryInProgress);
 
   // A new problem starts with no entries; their pollers stop with them.
   useEffect(() => {

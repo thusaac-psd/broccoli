@@ -41,6 +41,24 @@ function failuresInARow(query: PolledQuery<unknown>): number {
 }
 
 /**
+ * The wait before the next poll at `pace` after `failures` failed polls in a
+ * row: the pace while polls succeed; while they fail, a doubling backoff up
+ * to `POLL_BACKOFF_MAX_MS`, spread by jitter so seats that failed together
+ * do not ask again at the same instant, and never shorter than the pace.
+ * Every poller, a TanStack query (`pollInterval`) or a hand-run loop, waits
+ * this.
+ */
+export function nextPollDelay(
+  pace: number,
+  failures: number,
+  random: () => number = Math.random,
+): number {
+  if (failures === 0) return pace;
+  const policy = { baseMs: pace, maxMs: Math.max(pace, POLL_BACKOFF_MAX_MS) };
+  return Math.max(pace, backoffDelay(failures, policy, random));
+}
+
+/**
  * The `refetchInterval` of every query that polls. `every` is the pace, or
  * the pace for the data at hand (`false` stops: a final verdict, an ended
  * contest).
@@ -68,7 +86,6 @@ export function pollInterval<T>(
     if (pace === false || state.error == null) return pace;
     const kind = errorKind(state.error);
     if (kind === 'forbidden' || kind === 'notFound') return false;
-    const policy = { baseMs: pace, maxMs: Math.max(pace, POLL_BACKOFF_MAX_MS) };
-    return Math.max(pace, backoffDelay(failures, policy, random));
+    return nextPollDelay(pace, failures, random);
   };
 }

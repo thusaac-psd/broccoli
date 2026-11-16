@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { RequestError } from '../api/errors.ts';
-import { POLL_BACKOFF_MAX_MS, pollInterval } from './poll.ts';
+import { nextPollDelay, POLL_BACKOFF_MAX_MS, pollInterval } from './poll.ts';
 
 interface Data {
   done: boolean;
@@ -106,4 +106,32 @@ test('a failure asking again cannot change stops polling, loaded or not', () => 
     );
     assert.equal(every(polled({ error, errorUpdateCount: 1 })), false);
   }
+});
+
+test('a failing poll waits a jittered backoff, never less than its pace', () => {
+  assert.equal(
+    nextPollDelay(1_000, 0, () => 0),
+    1_000,
+  );
+  // Equal jitter: somewhere in the upper half of the doubled wait.
+  assert.equal(
+    nextPollDelay(1_000, 3, () => 0),
+    4_000,
+  );
+  assert.equal(
+    nextPollDelay(1_000, 3, () => 1),
+    8_000,
+  );
+  assert.equal(
+    nextPollDelay(1_000, 20, () => 1),
+    POLL_BACKOFF_MAX_MS,
+  );
+  assert.equal(
+    nextPollDelay(1_000, 20, () => 0),
+    POLL_BACKOFF_MAX_MS / 2,
+  );
+  assert.equal(
+    nextPollDelay(60_000, 5, () => 0),
+    60_000,
+  );
 });

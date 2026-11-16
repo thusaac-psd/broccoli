@@ -1,12 +1,11 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { POLL_BACKOFF_MAX_MS, pollInterval } from '@broccoli/web-sdk/hooks';
+import { pollInterval } from '@broccoli/web-sdk/hooks';
 import {
-  isTerminalStatus,
+  JUDGING_POLL_MS,
   type Submission,
+  submissionPollPace,
 } from '@broccoli/web-sdk/submission';
 import { useQuery } from '@tanstack/react-query';
-
-import { POLL_INTERVAL_MS } from '@/features/submission/hooks/submission-entries';
 
 export function useSubmissionDetail(submissionId: number) {
   const apiClient = useApiClient();
@@ -20,16 +19,11 @@ export function useSubmissionDetail(submissionId: number) {
       if (error) throw error;
       return data;
     },
-    // Polls until the verdict is final for this viewer (a withheld one is,
-    // `isTerminalStatus(null)`), slower while polls fail; a hidden or gone
-    // submission (403, 404) stops it. One waiting for its contest's plugin
-    // changes only once an administrator acts, so it is asked for rarely.
+    // Polls at the submission's pace (`submissionPollPace`) until nothing
+    // more can change for this viewer, slower while polls fail; a hidden or
+    // gone submission (403, 404) stops it.
     refetchInterval: pollInterval<Submission>((submission) =>
-      submission && isTerminalStatus(submission.status)
-        ? false
-        : submission?.plugin_outage
-          ? POLL_BACKOFF_MAX_MS
-          : POLL_INTERVAL_MS,
+      submission ? submissionPollPace(submission) : JUDGING_POLL_MS,
     ),
   });
 }
