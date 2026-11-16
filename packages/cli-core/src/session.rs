@@ -48,7 +48,8 @@ pub enum SessionState {
 pub enum SessionError {
     /// The session ended; the user must log in again.
     Rejected,
-    /// The server could not be reached to refresh the session.
+    /// The server could not be reached, or could not serve, to refresh the
+    /// session. The session itself is kept: it is the server that is down.
     Unavailable { retry_at: Instant, cause: String },
     /// The session was refreshed and stays usable in this process, but the new
     /// pair could not be saved, so other commands still hold the spent one.
@@ -62,7 +63,12 @@ impl std::fmt::Display for SessionError {
                 f.write_str("Session expired. Run `broccoli login` to re-authenticate.")
             }
             Self::Unavailable { cause, .. } => {
-                write!(f, "Could not refresh the session: {cause}")
+                let cause = cause.trim_end().trim_end_matches('.');
+                write!(
+                    f,
+                    "The server is unavailable right now ({cause}). \
+                     You are still logged in; try again shortly."
+                )
             }
             Self::NotSaved { cause } => write!(
                 f,
@@ -548,6 +554,19 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(err, SessionError::Unavailable { retry_at, .. } if retry_at == t + Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn a_server_that_cannot_refresh_reads_as_unavailable_not_as_a_lost_session() {
+        let err = SessionError::Unavailable {
+            retry_at: Instant::now(),
+            cause: "The server's database is not answering; retry in 5 seconds".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "The server is unavailable right now (The server's database is not answering; \
+             retry in 5 seconds). You are still logged in; try again shortly."
         );
     }
 
