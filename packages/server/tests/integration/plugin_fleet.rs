@@ -1152,3 +1152,46 @@ async fn a_nested_plugin_call_is_admitted_while_shutdown_drains() {
         .await;
     assert!(matches!(fresh, Err(PluginError::ShuttingDown)), "{fresh:?}");
 }
+
+/// The heartbeat keeps a replica's row live without rewriting its report,
+/// and never brings back a row shutdown retired.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_heartbeat_touches_only_the_rows_liveness() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    let a = TestApp::spawn().await;
+    let id = a.state.config.server.id.clone();
+    plugin_lifecycle::reconcile(&a.state).await.unwrap();
+    a.db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE plugin_replica SET heartbeat_at = NOW() - INTERVAL '1 hour', \
+                state_at = NOW() - INTERVAL '1 hour' WHERE server_id = $1",
+        [id.clone().into()],
+    ))
+    .await
+    .unwrap();
+    let ages = || async {
+        let row =
+            a.db.query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT heartbeat_at > NOW() - INTERVAL '1 minute' AS live, \
+                        state_at > NOW() - INTERVAL '1 minute' AS state_fresh \
+                   FROM plugin_replica WHERE server_id = $1",
+                [id.clone().into()],
+            ))
+            .await
+            .unwrap()?;
+        Some((
+            row.try_get::<bool>("", "live").unwrap(),
+            row.try_get::<bool>("", "state_fresh").unwrap(),
+        ))
+    };
+    assert_eq!(ages().await, Some((false, false)));
+
+    server::plugin_fleet::heartbeat(&a.db, &id).await.unwrap();
+    assert_eq!(ages().await, Some((true, false)), "live, report untouched");
+
+    server::plugin_fleet::retire(&a.db, &id).await.unwrap();
+    server::plugin_fleet::heartbeat(&a.db, &id).await.unwrap();
+    assert_eq!(ages().await, None, "a retired row stays retired");
+}

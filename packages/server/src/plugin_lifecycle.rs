@@ -68,9 +68,8 @@ pub struct PluginLifecycle {
     /// The desired `is_enabled` per plugin as of the last apply. Read on hot
     /// paths (visibility, health), so it is a plain lock over a small map.
     desired: RwLock<HashMap<String, bool>>,
-    /// This replica's latest report (also read by [`not_ready`]), and when it
-    /// was last written to the `plugin_replica` row, so an unchanged report
-    /// is only re-touched every [`plugin_fleet::TOUCH_INTERVAL`].
+    /// This replica's latest report (also read by [`not_ready`]), and
+    /// whether it reached the `plugin_replica` row.
     reported: std::sync::Mutex<Option<Reported>>,
     /// The recorded [`Governs`] per plugin, as of the last reconcile.
     governs: RwLock<HashMap<String, Governs>>,
@@ -81,8 +80,8 @@ pub struct PluginLifecycle {
 struct Reported {
     report: ReplicaReport,
     contest_types: Vec<String>,
-    /// `None` until a write of an equal report succeeds.
-    written_at: Option<Instant>,
+    /// Whether a write of an equal report succeeded.
+    written: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -492,14 +491,13 @@ fn build_report(
         .collect()
 }
 
-/// Record the report in memory, and write it if it changed or touch it if
-/// the last write is getting old. Best-effort: a failed write only makes the
-/// admin view stale.
+/// Record the report in memory, and write it if it changed. Best-effort: a
+/// failed write only makes the admin view stale, and is retried on the next
+/// pass. The row's heartbeat is [`heartbeat`]'s.
 async fn write_report(state: &AppState, applied: &HashMap<String, Applied>) {
-    let now = Instant::now();
-    let report = build_report(state, applied, now);
+    let report = build_report(state, applied, Instant::now());
     let contest_types = crate::dispatcher::local_contest_types(state).await;
-    if !record_report(state, &report, &contest_types, now) {
+    if !record_report(state, &report, &contest_types) {
         return;
     }
     match plugin_fleet::report(&state.db, &state.config.server.id, &report, &contest_types).await {
@@ -508,7 +506,7 @@ async fn write_report(state: &AppState, applied: &HashMap<String, Applied>) {
                 && let Some(last) = reported.as_mut()
                 && same_report(&last.report, &report)
             {
-                last.written_at = Some(now);
+                last.written = true;
             }
         }
         Err(e) => tracing::warn!(error = %e, "Failed to write this replica's plugin report"),
@@ -516,27 +514,21 @@ async fn write_report(state: &AppState, applied: &HashMap<String, Applied>) {
 }
 
 /// Keep `report` as this replica's latest, and say whether it is due to be
-/// written: it changed, its last write is getting old, or no write of it has
-/// succeeded yet. Never due once [`stop`] ran.
-fn record_report(
-    state: &AppState,
-    report: &ReplicaReport,
-    contest_types: &[String],
-    now: Instant,
-) -> bool {
+/// written: it changed, or no write of it has succeeded yet. Never due once
+/// [`stop`] ran.
+fn record_report(state: &AppState, report: &ReplicaReport, contest_types: &[String]) -> bool {
     let Ok(mut reported) = state.plugin_lifecycle.reported.lock() else {
         return false;
     };
-    let unchanged_at = reported
-        .as_ref()
-        .filter(|last| same_report(&last.report, report) && last.contest_types == contest_types)
-        .and_then(|last| last.written_at);
+    let written = reported.as_ref().is_some_and(|last| {
+        last.written && same_report(&last.report, report) && last.contest_types == contest_types
+    });
     *reported = Some(Reported {
         report: report.clone(),
         contest_types: contest_types.to_vec(),
-        written_at: unchanged_at,
+        written,
     });
-    unchanged_at.is_none_or(|at| now.duration_since(at) >= plugin_fleet::TOUCH_INTERVAL)
+    !written
         && !state
             .plugin_lifecycle
             .stopped
@@ -569,6 +561,28 @@ pub async fn stop(state: &AppState) {
     // Every write happens under this lock (`with_applied`): taking it waits
     // out one already under way.
     drop(state.plugin_lifecycle.applied.lock().await);
+}
+
+/// This replica's heartbeat loop: touches its `plugin_replica` row every
+/// [`plugin_fleet::HEARTBEAT_INTERVAL`] until [`stop`]. It never takes the
+/// lifecycle's lock, so a long load or reload here does not make peers
+/// treat this replica as dead and take the contest types it judges.
+pub async fn heartbeat(state: AppState) {
+    let mut interval = tokio::time::interval(plugin_fleet::HEARTBEAT_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        if state
+            .plugin_lifecycle
+            .stopped
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        if let Err(e) = plugin_fleet::heartbeat(&state.db, &state.config.server.id).await {
+            tracing::warn!(error = %e, "Failed to touch this replica's heartbeat");
+        }
+    }
 }
 
 /// The per-replica reconcile loop. Runs until [`stop`].

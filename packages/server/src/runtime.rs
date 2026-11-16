@@ -355,6 +355,7 @@ impl ServerRuntime {
         // Converge onto plugin lifecycle changes made through any replica,
         // and retry plugins that failed to load here.
         tokio::spawn(crate::plugin_lifecycle::run(state.clone()));
+        tokio::spawn(crate::plugin_lifecycle::heartbeat(state.clone()));
 
         // Boot-time orphan recovery: a restart leaves this server's in-flight
         // submissions/judgements/code-runs tagged with our own `server_id`,
