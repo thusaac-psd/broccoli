@@ -238,48 +238,11 @@ require_json_safe() {
   done
 }
 
-# Each role is its own Compose project (COMPOSE_PROJECT_NAME, written into
-# new env files), so roles installed from one directory get separate networks
-# and never treat each other's containers as orphans. Env files written before
-# that have no project name and run under Compose's default, the directory
-# name; guard_unpinned_project_name stops one from starting on empty volumes
-# after it was copied into a new bundle directory.
+# Each role is its own Compose project (COMPOSE_PROJECT_NAME, broccoli-<role>
+# unless the env file names another), so roles installed from one directory
+# get separate networks and never treat each other's containers as orphans.
 compose() {
-  if [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then
-    docker compose -p "$COMPOSE_PROJECT_NAME" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
-  else
-    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
-  fi
-}
-
-# The volume holding each role's data, named as in its compose template.
-role_data_volume() {
-  case "$ROLE" in
-    infra|single-host) echo postgres_data ;;
-    server) echo server_data ;;
-    worker) echo worker_data ;;
-  esac
-}
-
-# An env file without COMPOSE_PROJECT_NAME takes the directory name as its
-# project, as Compose normalizes it. Bundle directories are versioned
-# (broccoli-platform-v0.2.0), so copying such a file into a new release's
-# directory would start the role on new, empty volumes, for infra an empty
-# database. Refuse when this role's data volume exists only under another
-# project, and say which name to pin.
-guard_unpinned_project_name() {
-  local volume current projects
-  [ -z "${COMPOSE_PROJECT_NAME:-}" ] || return 0
-  volume="$(role_data_volume)"
-  [ -n "$volume" ] || return 0
-  command -v docker >/dev/null 2>&1 || return 0
-  current="$(basename "$PWD" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_-' | sed 's/^[_-]*//')"
-  projects="$(docker volume ls --filter "label=com.docker.compose.volume=$volume" \
-    --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null | sort -u)" || return 0
-  [ -n "$projects" ] || return 0
-  printf '%s\n' "$projects" | grep -qx "$current" && return 0
-  die "$ENV_FILE sets no COMPOSE_PROJECT_NAME, so this directory would run as project '$current' with new, empty volumes, but this host keeps '$volume' for: $(printf '%s\n' "$projects" | tr '\n' ' ')
-Add COMPOSE_PROJECT_NAME='<the project to keep>' to $ENV_FILE to keep that data (or a new name to start empty), then re-run."
+  docker compose -p "$COMPOSE_PROJECT_NAME" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
 # Re-running a role from a newer bundle keeps its env file, which still names
@@ -1175,7 +1138,7 @@ if [ -n "${BROCCOLI_ROLE:-}" ] && [ "$BROCCOLI_ROLE" != "$ROLE" ]; then
   die "$ENV_FILE was created for role '$BROCCOLI_ROLE'; use the matching role or remove $ENV_FILE"
 fi
 validate_role_env
-guard_unpinned_project_name
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-broccoli-$ROLE}"
 
 populate_connection_defaults
 
@@ -1268,6 +1231,6 @@ cat <<EOF
 Broccoli role '$ROLE' is running.
 Compose file: $COMPOSE_FILE
 Env file: $ENV_FILE
-Logs: docker compose ${COMPOSE_PROJECT_NAME:+-p $COMPOSE_PROJECT_NAME }--env-file $ENV_FILE -f $COMPOSE_FILE logs -f
+Logs: docker compose -p $COMPOSE_PROJECT_NAME --env-file $ENV_FILE -f $COMPOSE_FILE logs -f
 Runbook: docs/operator-runbook.md
 EOF

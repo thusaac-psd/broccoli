@@ -1,56 +1,60 @@
-//! Versioned, tracked schema migrations for the supplementary DDL that the
-//! entity `sync()` in [`crate::database`] does not cover: extensions, legacy
-//! constraint drops, column evolutions on existing tables, one data backfill,
-//! and the `broccoli_plugin` least-privilege role + read-narrowing grants/views.
-//!
-//! These previously ran as an ad-hoc, per-boot block of `execute_unprepared`
-//! (several with a silent `let _ =`). Running them through `sea_orm_migration`'s
-//! [`MigratorTrait`] records each in the `seaql_migrations` table, so they apply
-//! exactly once and their failures surface instead of being swallowed. Every
-//! step is idempotent (`IF [NOT] EXISTS` / exception-guarded `DO` blocks), so an
-//! EXISTING deployment whose schema is already fully applied simply records the
-//! migrations as no-ops on first run.
-//!
-//! `sync()` still creates/updates the core tables from the entities; the
-//! migrator runs AFTER it (see [`crate::database::BootSession::migrate`]).
+//! Versioned schema migrations for what the entity `sync()` in
+//! [`crate::database`] cannot express. The entity sync creates the tables
+//! first; the migrator then runs each step once, recorded in
+//! `seaql_migrations` (see [`crate::database::BootSession::migrate`]).
 
+use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use sea_orm_migration::prelude::*;
 
-mod m0001_supplementary_ddl;
-mod m0002_user_credentials_changed_at;
-mod m0003_remove_plugin_read_denylist;
-mod m0004_grant_plugin_writes;
-mod m0005_leased_at;
-mod m0006_plugin_timer_index;
-mod m0007_contest_problem_problem_id_index;
-mod m0008_submission_feedback;
-mod m0009_retired_submission_feedback;
-mod m0010_plugin_submission_feedback;
-mod m0011_user_display_name;
-mod m0012_max_judge_epoch;
-mod m0013_idempotency_purge_credentials;
+mod m0001_supplementary_schema;
 
-pub(crate) use m0011_user_display_name::prepare_column as prepare_user_display_name;
+/// Fail before any schema change when the database records a migration this
+/// build does not define: it was created by a different build, and this one
+/// only ever starts from an empty database.
+pub(crate) async fn refuse_unknown_migrations(db: &DatabaseConnection) -> Result<(), DbErr> {
+    let known: Vec<String> = Migrator::migrations()
+        .iter()
+        .map(|m| m.name().to_owned())
+        .collect();
+    let backend = db.get_database_backend();
+    let recorded = db
+        .query_one_raw(Statement::from_string(
+            backend,
+            "SELECT to_regclass('seaql_migrations') IS NOT NULL AS present",
+        ))
+        .await?
+        .map(|row| row.try_get::<bool>("", "present"))
+        .transpose()?
+        .unwrap_or(false);
+    if !recorded {
+        return Ok(());
+    }
+    let unknown: Vec<String> = db
+        .query_all_raw(Statement::from_sql_and_values(
+            backend,
+            "SELECT version FROM seaql_migrations WHERE NOT (version = ANY($1)) ORDER BY version",
+            [known.into()],
+        ))
+        .await?
+        .into_iter()
+        .map(|row| row.try_get::<String>("", "version"))
+        .collect::<Result<_, _>>()?;
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(DbErr::Custom(format!(
+        "this database was created by a different build (it records migrations {}, which this \
+         build does not define) and cannot be upgraded; drop the volume or point \
+         database.url at an empty database",
+        unknown.join(", ")
+    )))
+}
 
 pub struct Migrator;
 
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![
-            Box::new(m0001_supplementary_ddl::Migration),
-            Box::new(m0002_user_credentials_changed_at::Migration),
-            Box::new(m0003_remove_plugin_read_denylist::Migration),
-            Box::new(m0004_grant_plugin_writes::Migration),
-            Box::new(m0005_leased_at::Migration),
-            Box::new(m0006_plugin_timer_index::Migration),
-            Box::new(m0007_contest_problem_problem_id_index::Migration),
-            Box::new(m0008_submission_feedback::Migration),
-            Box::new(m0009_retired_submission_feedback::Migration),
-            Box::new(m0010_plugin_submission_feedback::Migration),
-            Box::new(m0011_user_display_name::Migration),
-            Box::new(m0012_max_judge_epoch::Migration),
-            Box::new(m0013_idempotency_purge_credentials::Migration),
-        ]
+        vec![Box::new(m0001_supplementary_schema::Migration)]
     }
 }

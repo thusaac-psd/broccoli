@@ -56,8 +56,8 @@ pub struct OnSubmissionOutput {
     /// `false` marks a failure as deterministic: the same submission would
     /// fail the same way every time (for example the contest type cannot
     /// judge a submission made outside a contest). The host records it as a
-    /// terminal `SystemError` and never re-judges it automatically. Absent in
-    /// older plugins' output, which reads as `true`.
+    /// terminal `SystemError` and never re-judges it automatically. Omitted on
+    /// the wire when `true`.
     #[serde(default = "retryable_by_default", skip_serializing_if = "is_retryable")]
     pub retryable: bool,
 }

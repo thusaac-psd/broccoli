@@ -92,9 +92,8 @@ pub async fn mark_submission_system_error_with_epoch<C: ConnectionTrait>(
     .await?;
 
     // Mirror the system-error onto the submission's current judgement so
-    // the versioned row stays in sync with the denormalized cache. Best
-    // effort: a missing judgement (legacy submissions before backfill)
-    // simply matches zero rows. The epoch guard mirrors the submission
+    // the versioned row stays in sync with the denormalized cache. The
+    // epoch guard mirrors the submission
     // update so a stale call from a retried worker does not flip a
     // judgement that has already been re-dispatched.
     let safe_code = sanitize_text_field(error_code);

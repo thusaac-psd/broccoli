@@ -2438,15 +2438,7 @@ export interface components {
       /** Format: int32 */
       recipient_id?: number | null;
       recipient_name?: string | null;
-      /** Format: date-time */
-      replied_at?: string | null;
       replies: components['schemas']['ClarificationReplyResponse'][];
-      /** Format: int32 */
-      reply_author_id?: number | null;
-      reply_author_name?: string | null;
-      reply_content?: string | null;
-      /** @example false */
-      reply_is_public: boolean;
       resolved: boolean;
       /** Format: date-time */
       resolved_at?: string | null;

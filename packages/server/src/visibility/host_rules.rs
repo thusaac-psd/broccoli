@@ -1,14 +1,7 @@
 //! Host-side (non-plugin) reachability rules for the contest / problem /
 //! submission surface.
 //!
-//! Ported **verbatim** from the pre-kernel access-control helpers so that a
-//! later task can drop `host_decide` in behind those call sites without
-//! changing what they allow. Nothing here is simplified, reordered, or
-//! "cleaned up" relative to the source, including logic that looks
-//! redundant or asymmetric - see the task report for a rule-by-rule
-//! file:line mapping.
-//!
-//! Rules ported (numbering matches the task brief):
+//! Rules:
 //!   1. `perm::CONTEST_MANAGE` short-circuits to `Allow`.
 //!   2. Contest activation window: `activate_time.is_none_or(|at| at > now)
 //!      || deactivate_time.is_some_and(|dt| dt <= now)` -> `Deny`. This
@@ -47,28 +40,17 @@
 //!      Rule 9 widens READ only: under `Action::Submit` a standalone
 //!      decision stops after rule 8, so a hidden problem is denied there
 //!      even when one of its contests would admit reading it - see
-//!      [`standalone_reachable_via_contest`]. This is a deliberate departure
-//!      from the verbatim port.
-//!  10. `Resource::Clarification`, ported from `list_clarifications`
-//!      (`handlers/clarification.rs:58-208`) - see [`decide_clarification`]
-//!      for the full mapping. A missing clarification, or one where the
+//!      [`standalone_reachable_via_contest`].
+//!  10. `Resource::Clarification` - see [`decide_clarification`]. A
+//!      missing clarification, or one where the
 //!      subject is neither `contest:manage`, the author, the recipient, nor
 //!      looking at a public row, -> `Deny`. A participant (admin/author/
-//!      recipient) -> `Allow` unconditionally. A non-participant looking at
-//!      a public row can see the question itself, but the legacy
-//!      `reply_content`/`reply_author_id`/`reply_author_name`/`replied_at`
-//!      fields are additionally gated on the LATEST reply's own `is_public`
-//!      flag (not the parent's aggregate `reply_is_public` column - see
-//!      `clarification.rs:147-154`'s own comment for why), expressed as
-//!      `Decision::Redact` when that latest reply is not public.
-//!      `create_clarification`'s reachability gate (`handlers/
-//!      clarification.rs:238`) is a DIFFERENT rule, not this one: there is
-//!      no clarification row yet to decide about, so it reuses
-//!      `Resource::Contest`/rules 1-4 verbatim (via `Action::Clarify`) - see
-//!      the task report for why that degenerates to no new host-rule code.
+//!      recipient), or anyone looking at a public row, -> `Allow`.
+//!      `create_clarification`'s reachability gate is a different rule:
+//!      there is no clarification row yet to decide about, so it reuses
+//!      `Resource::Contest`/rules 1-4 (via `Action::Clarify`).
 //!
-//! Deliberately **not** ported here (out of scope for this task - not in
-//! the source list the task brief named):
+//! Deliberately **not** decided here:
 //!   - `require_contest_started`'s `now < contest.start_time` check. That
 //!     raises a distinct `400 VALIDATION_ERROR` business rule, not a
 //!     reachability outcome, so it has no representation in `Decision`
@@ -121,10 +103,7 @@
 //!   - one query for the clarifications referenced by any `Resource::
 //!     Clarification` in the batch (rule 10) - a `Resource::Clarification`
 //!     only carries an id, so its author/recipient/is_public/contest_id
-//!     aren't in the `Resource` itself, mirroring Query 0 for submissions;
-//!   - one query for the replies of every clarification resolved above,
-//!     ordered by `created_at`, to find each one's LATEST reply's own
-//!     `is_public` flag (rule 10's `Redact` gate).
+//!     aren't in the `Resource` itself, mirroring Query 0 for submissions.
 //!
 //! Each query is skipped entirely when its target set is empty. The
 //! `contest_user` query is intentionally NOT narrowed to only the contests
@@ -132,21 +111,18 @@
 //! public contests) - rule 6's participation check is unconditional
 //! (independent of `is_public`), so narrowing the fetch to
 //! `check_contest_access`'s needs would silently break peer-submission
-//! visibility on public contests. See the task report for the exact query
-//! count this achieves per scenario.
+//! visibility on public contests.
 
 use std::collections::{HashMap, HashSet};
 
 use broccoli_server_sdk::permissions as perm;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-use crate::entity::{
-    clarification, clarification_reply, contest, contest_problem, contest_user, problem, submission,
-};
+use crate::entity::{clarification, contest, contest_problem, contest_user, problem, submission};
 use crate::error::AppError;
 use crate::utils::soft_delete::SoftDeletable;
 
-use super::{Action, Decision, FieldMask, Resource, Subject};
+use super::{Action, Decision, Resource, Subject};
 
 /// See the module docs for the rule -> source mapping and the batching
 /// strategy. Returns one [`Decision`] per entry of `resources`, in the same
@@ -158,9 +134,7 @@ use super::{Action, Decision, FieldMask, Resource, Subject};
 /// contest-less submission) once that submission has been resolved by Query
 /// 0 below. This surfaces a mapping `host_decide` already builds for its own
 /// rule 6 check, rather than resolving it a second time - see
-/// `VisibilityKernel::decide_batch`'s CRITICAL fix note
-/// (`packages/server/src/visibility/mod.rs`, Task 7) for why the caller
-/// needs it: a `Resource::Submission`'s contest is otherwise unknowable
+/// `VisibilityKernel::decide_batch` for why the caller needs it: a `Resource::Submission`'s contest is otherwise unknowable
 /// outside this function, and losing it produces a confidently wrong (not
 /// merely ambiguous) `QueryResource.contest_id` for plugins. Left untouched
 /// (and callers pass an empty map) on the `admin_override` early return
@@ -168,7 +142,7 @@ use super::{Action, Decision, FieldMask, Resource, Subject};
 /// never reach a plugin anyway.
 ///
 /// `clarification_contest_ids` is the analogous out-param for `Resource::
-/// Clarification` (Task 12): `clarification_id -> clarification.contest_id`,
+/// Clarification`: `clarification_id -> clarification.contest_id`,
 /// populated once Query C below resolves it. Unlike a submission's, a
 /// clarification's `contest_id` column is never null - every clarification
 /// belongs to exactly one contest - so this map's value is a plain `i32`,
@@ -180,8 +154,7 @@ use super::{Action, Decision, FieldMask, Resource, Subject};
 /// [`standalone_reachable_via_contest`]). Every other rule is the same for
 /// every action.
 ///
-/// Called from `VisibilityKernel::decide_batch`
-/// (`packages/server/src/visibility/mod.rs`, Task 7), which sends it every
+/// Called from `VisibilityKernel::decide_batch`, which sends it every
 /// deduped, not-yet-memoized resource in a batch before any plugin is
 /// consulted.
 pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
@@ -303,33 +276,6 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     };
     clarification_contest_ids.extend(clarifications.values().map(|c| (c.id, c.contest_id)));
 
-    // Query D: every reply of every clarification resolved above, ordered by
-    // `created_at` ascending. Ported from `list_clarifications`'
-    // `latest_reply_public` (`handlers/clarification.rs:154`): the LAST
-    // reply by `created_at`, NOT the parent's aggregate `reply_is_public`
-    // column (see that line's own comment for why the aggregate would leak
-    // an older public reply's visibility onto separately-hidden new
-    // content). Folding an ascending-ordered iterator into a `HashMap` via
-    // repeated `insert` leaves the LAST (i.e. latest) row's value standing
-    // for each key, which is exactly "the latest reply's own `is_public`".
-    let latest_reply_public: HashMap<i32, bool> = if clarifications.is_empty() {
-        HashMap::new()
-    } else {
-        let mut map: HashMap<i32, bool> = HashMap::new();
-        for reply in clarification_reply::Entity::find()
-            .filter(
-                clarification_reply::Column::ClarificationId
-                    .is_in(clarifications.keys().copied().collect::<Vec<_>>()),
-            )
-            .order_by_asc(clarification_reply::Column::CreatedAt)
-            .all(db)
-            .await?
-        {
-            map.insert(reply.clarification_id, reply.is_public);
-        }
-        map
-    };
-
     // Query 1: contests referenced by the batch - directly (`Resource::
     // Contest`), via a problem part's `contest_id`, or via a fetched
     // submission's `contest_id` (only when that submission will actually
@@ -433,7 +379,6 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
                 &problems,
                 &problem_contest_ids,
                 &clarifications,
-                &latest_reply_public,
             )
         })
         .collect())
@@ -452,7 +397,6 @@ fn decide_one(
     problems: &HashMap<i32, problem::Model>,
     problem_contest_ids: &HashMap<i32, Vec<i32>>,
     clarifications: &HashMap<i32, clarification::Model>,
-    latest_reply_public: &HashMap<i32, bool>,
 ) -> Decision {
     match resource {
         Resource::Contest(id) => decide_contest(subject, now, *id, contests, member_of),
@@ -483,9 +427,7 @@ fn decide_one(
         Resource::Submission(id) => {
             decide_submission(subject, now, *id, contests, member_of, submissions)
         }
-        Resource::Clarification(id) => {
-            decide_clarification(subject, *id, clarifications, latest_reply_public)
-        }
+        Resource::Clarification(id) => decide_clarification(subject, *id, clarifications),
     }
 }
 
@@ -744,7 +686,7 @@ fn decide_submission(
     if subject.user_id == Some(sub.user_id) {
         // Owner bypass: the source skips the contest lookup ENTIRELY here,
         // so this stays Allow even if the parent contest has since been
-        // soft-deleted. Preserved verbatim - see the task report.
+        // soft-deleted.
         return Decision::Allow;
     }
     let Some(cid) = sub.contest_id else {
@@ -764,85 +706,34 @@ fn decide_submission(
     }
 }
 
-/// Rule 10. Ported from `list_clarifications` (`handlers/
-/// clarification.rs:58-208`): the row-visibility predicate that appears
-/// TWICE, verbatim, in the source - once as the SQL prefilter
-/// (`clarification.rs:76-83`, applied only when `!is_admin`) and once again
-/// as the in-memory `is_participant`/`show_question` computation
-/// (`clarification.rs:141-144`) - both express the exact same "author,
-/// recipient, admin, or public" condition, ported here as ONE predicate,
-/// not two.
-///
-/// A missing clarification -> `Deny`, mirroring `reply_clarification`'s /
-/// `resolve_clarification`'s own `find_by_id(...).ok_or(NotFound)` shape for
-/// this table (there is no dedicated "get one clarification" handler this
-/// task was asked to port, but every other handler that loads one 404s the
-/// same way on a miss).
-///
-/// A participant (`contest:manage`, the author, or the recipient) sees
-/// everything, full stop - `Allow`, matching `show_question = true` AND
-/// `show_reply = true` for every such row in the source, regardless of
-/// `is_public` or the latest reply's own visibility.
-///
-/// A non-participant with `is_public == false` never reaches the source's
-/// per-row logic at all - the SQL prefilter excludes the row outright - so
-/// this is `Deny` too, NOT some partial view.
-///
-/// A non-participant with `is_public == true` sees the question
-/// (`show_question` is `is_participant || r.is_public`, and `is_public` is
-/// `true` here, so it is always `true` too) but the legacy `reply_content`/
-/// `reply_author_id`/`reply_author_name`/`replied_at` fields
-/// (`clarification.rs:191-195`) are additionally gated on `show_reply =
-/// is_participant || latest_reply_public` - since `is_participant` is
-/// `false` on this branch, that reduces to `latest_reply_public` alone. A
-/// `false` there is expressed as `Decision::Redact` over exactly those four
-/// paths; a `true` is `Allow` (nothing left to hide).
+/// Rule 10: a clarification row is visible to a participant
+/// (`contest:manage`, the author, or the recipient) and, when it is public,
+/// to everyone else. A missing clarification -> `Deny`, matching the
+/// `NotFound` every handler that loads one returns on a miss.
 ///
 /// The `replies: Vec<ClarificationReplyResponse>` array's own per-element
-/// filter (`clarification.rs:157-171`) is deliberately NOT folded in here -
-/// see the module docs' "Deliberately not ported" section.
+/// filter is deliberately NOT folded in here - see the module docs'
+/// "Deliberately not ported" section.
 fn decide_clarification(
     subject: &Subject,
     id: i32,
     clarifications: &HashMap<i32, clarification::Model>,
-    latest_reply_public: &HashMap<i32, bool>,
 ) -> Decision {
     let Some(c) = clarifications.get(&id) else {
         return Decision::Deny;
     };
 
-    // `clarification.rs:141-144`'s `is_participant`. `subject.user_id.
-    // is_some() &&` guards the recipient comparison so an unauthenticated
-    // `Subject` (never possible for the source's `AuthUser`-gated handler,
-    // but possible for this shared kernel) can't spuriously match a `None
-    // == None` on a DM-less row; it changes nothing for any authenticated
-    // subject, which is the only kind the source ever sees.
+    // `subject.user_id.is_some() &&` guards the recipient comparison so an
+    // unauthenticated `Subject` can't spuriously match a `None == None` on a
+    // DM-less row.
     let is_participant = subject.has_permission(perm::CONTEST_MANAGE)
         || subject.user_id == Some(c.author_id)
         || (subject.user_id.is_some() && c.recipient_id == subject.user_id);
 
-    // `clarification.rs:76-83` (SQL prefilter) / `:144` (`show_question`):
-    // reachable at all only if a participant or the row is public.
-    if !is_participant && !c.is_public {
-        return Decision::Deny;
-    }
-    if is_participant {
-        return Decision::Allow;
-    }
-
-    // Non-participant, public row: `clarification.rs:154-155`'s
-    // `show_reply`, reduced to its `latest_reply_public` disjunct since
-    // `is_participant` is `false` here.
-    let latest_public = latest_reply_public.get(&id).copied().unwrap_or(false);
-    if latest_public {
+    if is_participant || c.is_public {
         Decision::Allow
     } else {
-        Decision::Redact(FieldMask::new([
-            "reply_content".to_string(),
-            "reply_author_id".to_string(),
-            "reply_author_name".to_string(),
-            "replied_at".to_string(),
-        ]))
+        Decision::Deny
     }
 }
 
@@ -1346,34 +1237,11 @@ mod tests {
             clarification_type: "question".into(),
             recipient_id,
             is_public,
-            reply_content: None,
-            reply_author_id: None,
-            reply_is_public: false,
-            replied_at: None,
             resolved: false,
             resolved_at: None,
             resolved_by: None,
             created_at: now,
             updated_at: now,
-        }
-    }
-
-    /// `hours_ago` orders replies for the `order_by_asc(created_at)` query -
-    /// a larger value sorts EARLIER.
-    fn clarification_reply_row(
-        id: i32,
-        clarification_id: i32,
-        author_id: i32,
-        is_public: bool,
-        hours_ago: i64,
-    ) -> clarification_reply::Model {
-        clarification_reply::Model {
-            id,
-            clarification_id,
-            author_id,
-            content: "reply".into(),
-            is_public,
-            created_at: chrono::Utc::now() - chrono::Duration::hours(hours_ago),
         }
     }
 
@@ -1399,7 +1267,6 @@ mod tests {
     async fn clarification_non_participant_non_public_denies() {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![clarification_row(3, 7, 99, None, false)]])
-            .append_query_results([Vec::<clarification_reply::Model>::new()])
             .into_connection();
         let decisions = host_decide(
             &db,
@@ -1418,7 +1285,6 @@ mod tests {
     async fn clarification_author_sees_own_private_question() {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![clarification_row(3, 7, 1, None, false)]])
-            .append_query_results([Vec::<clarification_reply::Model>::new()])
             .into_connection();
         let decisions = host_decide(
             &db,
@@ -1437,7 +1303,6 @@ mod tests {
     async fn clarification_recipient_sees_own_private_dm() {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![clarification_row(3, 7, 99, Some(1), false)]])
-            .append_query_results([Vec::<clarification_reply::Model>::new()])
             .into_connection();
         let decisions = host_decide(
             &db,
@@ -1456,7 +1321,6 @@ mod tests {
     async fn clarification_contest_manage_sees_any_private_row() {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![clarification_row(3, 7, 99, None, false)]])
-            .append_query_results([Vec::<clarification_reply::Model>::new()])
             .into_connection();
         let decisions = host_decide(
             &db,
@@ -1472,99 +1336,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clarification_non_participant_public_with_no_replies_redacts_reply_fields() {
-        // No reply exists to confirm as public - `latest_reply_public`
-        // defaults to `false`, hiding the (already-empty) legacy reply
-        // fields from a non-participant, exactly like the source comment
-        // "if there is no reply to confirm ... hide it from
-        // non-participants" (`clarification.rs:152-153`).
+    async fn clarification_non_participant_sees_public_row() {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![clarification_row(3, 7, 99, None, true)]])
-            .append_query_results([Vec::<clarification_reply::Model>::new()])
-            .into_connection();
-        let decisions = host_decide(
-            &db,
-            &subject(1, &[]),
-            Action::Read,
-            &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            decisions,
-            vec![Decision::Redact(FieldMask::new([
-                "reply_content".to_string(),
-                "reply_author_id".to_string(),
-                "reply_author_name".to_string(),
-                "replied_at".to_string(),
-            ]))]
-        );
-    }
-
-    #[tokio::test]
-    async fn clarification_non_participant_public_with_public_latest_reply_allows() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([vec![clarification_row(3, 7, 99, None, true)]])
-            .append_query_results([vec![clarification_reply_row(1, 3, 99, true, 1)]])
-            .into_connection();
-        let decisions = host_decide(
-            &db,
-            &subject(1, &[]),
-            Action::Read,
-            &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(decisions, vec![Decision::Allow]);
-    }
-
-    #[tokio::test]
-    async fn clarification_gates_on_latest_reply_not_the_aggregate_any_public() {
-        // An OLDER reply is public, but the LATEST one is not. The parent's
-        // `reply_is_public` aggregate ("ANY reply is public") would say
-        // `true` here; the correct answer, ported from
-        // `clarification.rs:147-154`, looks at the latest reply alone and
-        // must Redact.
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([vec![clarification_row(3, 7, 99, None, true)]])
-            .append_query_results([vec![
-                clarification_reply_row(1, 3, 99, true, 2), // older, public
-                clarification_reply_row(2, 3, 99, false, 1), // latest, private
-            ]])
-            .into_connection();
-        let decisions = host_decide(
-            &db,
-            &subject(1, &[]),
-            Action::Read,
-            &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            decisions,
-            vec![Decision::Redact(FieldMask::new([
-                "reply_content".to_string(),
-                "reply_author_id".to_string(),
-                "reply_author_name".to_string(),
-                "replied_at".to_string(),
-            ]))]
-        );
-    }
-
-    #[tokio::test]
-    async fn clarification_allows_when_latest_reply_is_public_even_if_an_older_one_is_not() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([vec![clarification_row(3, 7, 99, None, true)]])
-            .append_query_results([vec![
-                clarification_reply_row(1, 3, 99, false, 2), // older, private
-                clarification_reply_row(2, 3, 99, true, 1),  // latest, public
-            ]])
             .into_connection();
         let decisions = host_decide(
             &db,
@@ -2063,69 +1837,48 @@ mod tests {
 
     #[tokio::test]
     async fn decisions_are_positional_matching_resources() {
-        // M15: the original version of this test asserted
-        // `[Decision::Deny, Decision::Allow, Decision::Allow]` for
-        // `[Contest(1), Contest(2), Submission(3)]` - a swap between the
-        // Contest(2) and Submission(3) POSITIONS (i.e. a bug that handed
-        // Submission(3)'s decision to slot 1 and Contest(2)'s to slot 2)
-        // would have produced that exact same vector, so this test could
-        // not actually have caught a positional-mapping bug between those
-        // two resources despite exercising three genuinely different rule
-        // paths. Every expected value below is now pairwise distinct (Deny
-        // / Redact / Allow), so ANY positional swap among the three
-        // resources changes the asserted vector, while still exercising
-        // rule 4 (private contest denies a non-member), rule 10 (a
-        // non-participant sees a public clarification's question but not
-        // its reply fields when there is no reply to confirm public), and
-        // rule 6 (an owner always sees their own submission).
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            // Query 0: submissions.
-            .append_query_results([vec![submission_row(3, 1, None)]])
-            // Query C: clarifications. `contest_id` (5) is deliberately NOT
-            // shared with `Resource::Contest(1)` below - `decide_clarification`
-            // never consults `contests`, so this also proves that
-            // independently.
-            .append_query_results([vec![clarification_row(9, 5, 99, None, true)]])
-            // Query D: no replies -> `latest_reply_public` defaults to
-            // `false`, same setup as
-            // `clarification_non_participant_public_with_no_replies_redacts_reply_fields`
-            // above.
-            .append_query_results([Vec::<clarification_reply::Model>::new()])
-            // Query 1: contest 1 only (private, denies) - submission 3 is
-            // owned by the subject so its contest was never added to the
-            // fetch set, and a clarification's `contest_id` is never added
-            // to it either (see the Query C comment above).
-            .append_query_results([vec![contest_row(1, false, Some(-1), None, true)]])
-            // Query 2: membership - empty (not a member of contest 1).
-            .append_query_results([Vec::<contest_user::Model>::new()])
-            .into_connection();
+        // The same batch decided in both orders: a decision that followed
+        // the resource's kind instead of its position would come back in the
+        // same order both times. Exercises rule 4 (private contest denies a
+        // non-member), rule 10 (a public clarification is visible) and rule
+        // 6 (an owner always sees their own submission).
+        async fn decide(resources: &[Resource]) -> Vec<Decision> {
+            let db = MockDatabase::new(DatabaseBackend::Postgres)
+                // Query 0: submissions.
+                .append_query_results([vec![submission_row(3, 1, None)]])
+                // Query C: clarifications. Its `contest_id` (5) is never
+                // added to the contest fetch below.
+                .append_query_results([vec![clarification_row(9, 5, 99, None, true)]])
+                // Query 1: contest 1 only (private, denies) - submission 3
+                // is owned by the subject so its contest is never fetched.
+                .append_query_results([vec![contest_row(1, false, Some(-1), None, true)]])
+                // Query 2: membership - empty (not a member of contest 1).
+                .append_query_results([Vec::<contest_user::Model>::new()])
+                .into_connection();
+            host_decide(
+                &db,
+                &subject(1, &[]),
+                Action::Read,
+                resources,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+            )
+            .await
+            .unwrap()
+        }
         let resources = vec![
             Resource::Contest(1),
             Resource::Clarification(9),
             Resource::Submission(3),
         ];
-        let decisions = host_decide(
-            &db,
-            &subject(1, &[]),
-            Action::Read,
-            &resources,
-            &mut HashMap::new(),
-            &mut HashMap::new(),
-        )
-        .await
-        .unwrap();
         assert_eq!(
-            decisions,
-            vec![
-                Decision::Deny,
-                Decision::Redact(FieldMask::new([
-                    "reply_content".to_string(),
-                    "reply_author_id".to_string(),
-                    "reply_author_name".to_string(),
-                    "replied_at".to_string(),
-                ])),
-                Decision::Allow,
-            ]
+            decide(&resources).await,
+            vec![Decision::Deny, Decision::Allow, Decision::Allow]
+        );
+        let reversed: Vec<Resource> = resources.into_iter().rev().collect();
+        assert_eq!(
+            decide(&reversed).await,
+            vec![Decision::Allow, Decision::Allow, Decision::Deny]
         );
     }
 }

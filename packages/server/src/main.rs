@@ -84,19 +84,8 @@ fn main() -> anyhow::Result<()> {
 ///
 /// Used by the Docker `HEALTHCHECK` directive in `Dockerfile.server`. Skips
 /// observability initialization so the probe stays fast and silent.
-///
-/// Prefers the port of `server.healthz_listen` (the dedicated runtime)
-/// when configured, so the in-container probe gets the same isolation
-/// benefits as external probes. Falls back to the main listener port
-/// otherwise.
 async fn run_healthcheck(app_config: &AppConfig) -> i32 {
-    let port = app_config
-        .server
-        .healthz_listen
-        .as_deref()
-        .and_then(parse_port_from_listen_addr)
-        .unwrap_or(app_config.server.port);
-    let url = format!("http://127.0.0.1:{}/healthz", port);
+    let url = format!("http://127.0.0.1:{}/healthz", app_config.server.port);
 
     let client = match reqwest::Client::builder()
         .no_proxy()
@@ -120,40 +109,5 @@ async fn run_healthcheck(app_config: &AppConfig) -> i32 {
             eprintln!("healthcheck failed: {e}");
             1
         }
-    }
-}
-
-/// Extracts the port from a `host:port` listen string. Requires a full,
-/// well-formed `SocketAddr` - `0.0.0.0:9091`, `[::]:9091`, `[::1]:8080`. An
-/// unbracketed IPv6 like `"::1"` is rejected (returns `None`) so the caller
-/// falls back to the main listener port rather than silently probing port 1.
-fn parse_port_from_listen_addr(addr: &str) -> Option<u16> {
-    addr.parse::<std::net::SocketAddr>().ok().map(|s| s.port())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_port_from_listen_addr;
-
-    #[test]
-    fn parses_ipv4_listen_addr() {
-        assert_eq!(parse_port_from_listen_addr("0.0.0.0:9091"), Some(9091));
-        assert_eq!(parse_port_from_listen_addr("127.0.0.1:1234"), Some(1234));
-    }
-
-    #[test]
-    fn parses_ipv6_listen_addr() {
-        assert_eq!(parse_port_from_listen_addr("[::]:9091"), Some(9091));
-        assert_eq!(parse_port_from_listen_addr("[::1]:8080"), Some(8080));
-    }
-
-    #[test]
-    fn rejects_invalid_input() {
-        assert_eq!(parse_port_from_listen_addr("not-an-addr"), None);
-        assert_eq!(parse_port_from_listen_addr("host:not-a-port"), None);
-        // Unbracketed IPv6 - would previously yield Some(1), now correctly None.
-        assert_eq!(parse_port_from_listen_addr("::1"), None);
-        // Bare host with no port.
-        assert_eq!(parse_port_from_listen_addr("127.0.0.1"), None);
     }
 }

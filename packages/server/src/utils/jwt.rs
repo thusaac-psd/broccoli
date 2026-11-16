@@ -13,11 +13,8 @@ pub struct Claims {
     pub roles: Vec<String>,
     pub permissions: Vec<String>,
     pub exp: u64,
-    /// Issued-at (unix seconds). `#[serde(default)]` so tokens minted before
-    /// this claim existed still decode (as `iat = 0`) on the stateless path;
-    /// the `FreshAuthUser` extractor treats such a token as predating any
-    /// credential change and re-authenticates it.
-    #[serde(default)]
+    /// Issued-at (unix seconds), compared against the user's
+    /// `credentials_changed_at` by the `FreshAuthUser` extractor.
     pub iat: u64,
 }
 

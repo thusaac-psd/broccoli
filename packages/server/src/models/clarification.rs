@@ -74,13 +74,6 @@ pub struct ClarificationResponse {
     #[schema(example = false)]
     pub is_public: bool,
 
-    pub reply_content: Option<String>,
-    pub reply_author_id: Option<i32>,
-    pub reply_author_name: Option<String>,
-    #[schema(example = false)]
-    pub reply_is_public: bool,
-    pub replied_at: Option<DateTime<Utc>>,
-
     pub replies: Vec<ClarificationReplyResponse>,
 
     pub resolved: bool,

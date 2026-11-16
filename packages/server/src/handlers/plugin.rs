@@ -40,8 +40,7 @@ pub async fn list_registries(
     problem_types.sort();
 
     // Selectable checker formats come from the fused checker-stage registry
-    // (exact/lines/tokens*/testlib/none) - the legacy checker_format_registry was
-    // removed with checker fusion.
+    // (exact/lines/tokens*/testlib/none).
     let mut checker_formats: Vec<String> = {
         let reg = state.registries.checker_stage_registry.read().await;
         reg.keys().cloned().collect()

@@ -76,9 +76,9 @@ if envgen_write "$tmp/.env.infra.q" "$tmp/.env.server.q" \
   "$rel/.env.infra.example" "$rel/.env.server.example" admin "it's" 2>/dev/null; then
   echo "FAIL: a single quote in the admin password was accepted"; exit 1
 fi
-# Bundles before this change wrote unquoted values with '$' doubled.
-printf 'OLD=Secret$$var99\n' > "$tmp/.env.old"
-[ "$(env_get "$tmp/.env.old" OLD)" = 'Secret$var99' ] || { echo "FAIL: legacy \$\$ value misread"; exit 1; }
+# An unquoted value reads as Compose reads it, with '$' doubled.
+printf 'PLAIN=Secret$$var99\n' > "$tmp/.env.plain"
+[ "$(env_get "$tmp/.env.plain" PLAIN)" = 'Secret$var99' ] || { echo "FAIL: unquoted \$\$ value misread"; exit 1; }
 # A password holding URL delimiters is percent-encoded into the URLs.
 url_infra="$tmp/.env.infra.url"; url_server="$tmp/.env.server.url"
 cp "$rel/.env.infra.example" "$url_infra"

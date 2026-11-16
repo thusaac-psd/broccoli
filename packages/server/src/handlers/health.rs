@@ -193,12 +193,6 @@ pub async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
 /// answering while shared infrastructure is down and costs next to nothing at a
 /// 5 s probe interval. This is what a load balancer should probe; `/healthz`
 /// is the deep check for readiness and monitoring.
-///
-/// Served on the main router and on the dedicated `server.healthz_listen`
-/// runtime. The dedicated runtime also answers `/healthz` with this handler (as
-/// it always has): pinging the DB or Redis from there would run through pool
-/// driver tasks on the *main* runtime and stall with it, defeating the point of
-/// the dedicated listener.
 pub async fn livez() -> impl IntoResponse {
     (
         StatusCode::OK,

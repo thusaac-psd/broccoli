@@ -754,7 +754,7 @@ async fn icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organiz
     // field ([] vs non-empty) is meaningful rather than a no-op.
     test_case_result::ActiveModel {
         submission_id: Set(sub_id),
-        judgement_id: Set(Some(judgement_model.id)),
+        judgement_id: Set(judgement_model.id),
         test_case_id: Set(None),
         verdict: Set(Verdict::Accepted),
         score: Set(1.0),

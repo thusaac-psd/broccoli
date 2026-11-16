@@ -86,20 +86,11 @@ pub async fn list_clarifications(
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
 
     // Fail fast, before reading any clarification rows below, on a contest
-    // the kernel already knows is unreachable. Folds in what `find_contest`
-    // + `check_contest_access` used to check here (existence, the
-    // activation window, `is_public`, `contest_user` membership) - see
-    // `visibility::host_rules::decide_contest`. Both of that pair's `Err`
-    // branches already returned exactly this same `AppError::NotFound`
-    // message, so this is not a behavioural change.
-    //
-    // NOTE: this is a pure reachability gate - `is_denied()` treats a
-    // hypothetical `Redact` on this `Resource::Contest` decision the same
-    // as `Allow`, and the contest itself is never rendered from this
-    // decision (only used to decide whether to proceed), so `Redact`
-    // degenerates to `Allow` here. No plugin currently returns `Redact` for
-    // `Resource::Contest`, so this is a documented no-op today, not a live
-    // bug - see Task 20 Item 6.
+    // the kernel knows is unreachable (missing, outside its activation
+    // window, or private to a non-member - see
+    // `visibility::host_rules::decide_contest`). This is a pure
+    // reachability gate: the contest itself is never rendered from this
+    // decision, so a `Redact` counts as `Allow` here.
     if kernel
         .decide(Action::Read, Resource::Contest(contest_id))
         .await?
@@ -117,12 +108,12 @@ pub async fn list_clarifications(
         select = select.filter(clarification::Column::ClarificationType.eq(type_filter.as_str()));
     }
 
-    // The author/is_public/recipient prefilter that used to live here is now
-    // the kernel's job (`visibility::host_rules::decide_clarification`,
-    // rule 10): every row for this contest (matching the optional type
-    // filter) is fetched, and a row this viewer may not see comes back
-    // `Deny` from `fetch_visible_batch` below and is dropped from `data`,
-    // never rendered as a placeholder.
+    // Which rows this viewer may see is the kernel's job
+    // (`visibility::host_rules::decide_clarification`, rule 10): every row
+    // for this contest (matching the optional type filter) is fetched, and a
+    // row this viewer may not see comes back `Deny` from
+    // `fetch_visible_batch` below and is dropped from `data`, never rendered
+    // as a placeholder.
     let rows = select
         .order_by_desc(clarification::Column::CreatedAt)
         .all(&state.db)
@@ -156,9 +147,6 @@ pub async fn list_clarifications(
         if let Some(rid) = r.recipient_id {
             user_ids.insert(rid);
         }
-        if let Some(raid) = r.reply_author_id {
-            user_ids.insert(raid);
-        }
         if let Some(rb) = r.resolved_by {
             user_ids.insert(rb);
         }
@@ -174,22 +162,14 @@ pub async fn list_clarifications(
                 .cloned()
                 .unwrap_or_else(|| "[Deleted]".into());
             let recipient_name = r.recipient_id.and_then(|rid| user_map.get(&rid).cloned());
-            let reply_author_name = r
-                .reply_author_id
-                .and_then(|raid| user_map.get(&raid).cloned());
             let resolved_by_name = r.resolved_by.and_then(|uid| user_map.get(&uid).cloned());
 
-            // Still needed for the `replies` array's own per-element filter
-            // below (`clarification.rs:157-171`'s original predicate, kept
-            // verbatim) - a `FieldMask` can blank a field uniformly across
-            // every array element but cannot omit only SOME elements by a
-            // per-element predicate, so that part stays handler-side (see
-            // `visibility::host_rules`'s module docs, "Deliberately not
-            // ported"). Whether THIS ROW is shown at all, and whether its own
-            // legacy `reply_*` fields are redacted, is now entirely the
-            // kernel's job via `Resource::Clarification` below - the
-            // `show_question`/`show_reply` locals this used to compute for
-            // that are gone.
+            // The `replies` array's per-element filter stays handler-side: a
+            // `FieldMask` can blank a field uniformly across every array
+            // element but cannot omit only SOME elements by a per-element
+            // predicate (see `visibility::host_rules`'s module docs,
+            // "Deliberately not ported"). Whether THIS ROW is shown at all is
+            // the kernel's job via `Resource::Clarification` below.
             let is_participant = is_admin
                 || r.author_id == auth_user.user_id
                 || r.recipient_id == Some(auth_user.user_id);
@@ -222,11 +202,6 @@ pub async fn list_clarifications(
                 recipient_id: r.recipient_id,
                 recipient_name,
                 is_public: r.is_public,
-                reply_content: r.reply_content,
-                reply_author_id: r.reply_author_id,
-                reply_author_name,
-                reply_is_public: r.reply_is_public,
-                replied_at: r.replied_at,
                 replies,
                 resolved: r.resolved,
                 resolved_at: r.resolved_at,
@@ -243,9 +218,7 @@ pub async fn list_clarifications(
     // question this viewer is neither the author, the recipient, nor
     // `contest:manage` for) is omitted from `data` outright via `.flatten()`
     // - never rendered as a placeholder, which would itself confirm the row
-    // exists. A `Redact` decision blanks exactly the legacy `reply_content`/
-    // `reply_author_id`/`reply_author_name`/`replied_at` fields once
-    // serialized - see `visibility::host_rules::decide_clarification`.
+    // exists - see `visibility::host_rules::decide_clarification`.
     let visible = kernel.fetch_visible_batch(Action::Read, items).await?;
     let data: Vec<serde_json::Value> = visible
         .into_iter()
@@ -290,20 +263,10 @@ pub async fn create_clarification(
     // the kernel already knows is unreachable. There is no clarification row
     // yet to decide about at POST time, only "can this subject reach this
     // contest at all" - so this reuses `Resource::Contest`/rules 1-4
-    // verbatim via `Action::Clarify` (`host_decide` does not branch on
-    // `Action` for `Resource::Contest`, so this is byte-identical to the
-    // `Action::Read` gate above it in `list_clarifications`). Both of the
-    // `find_contest` + `check_contest_access` pair's `Err` branches already
-    // returned exactly this same `AppError::NotFound` message, so this is
-    // not a behavioural change. See `visibility::host_rules`'s module docs
-    // for why this needs no new host-rule code.
-    //
-    // NOTE: as in `list_clarifications` above, this is a pure reachability
-    // gate - `is_denied()` treats a hypothetical `Redact` here the same as
-    // `Allow`, and this decision's `Resource::Contest` is never rendered
-    // from here, so `Redact` degenerates to `Allow`. No plugin currently
-    // returns `Redact` for `Resource::Contest`, so this is a documented
-    // no-op today, not a live bug - see Task 20 Item 6.
+    // via `Action::Clarify` (`host_decide` does not branch on `Action` for
+    // `Resource::Contest`, so this matches the `Action::Read` gate in
+    // `list_clarifications`). As there, this is a pure reachability gate, so
+    // a `Redact` counts as `Allow`.
     if kernel
         .decide(Action::Clarify, Resource::Contest(contest_id))
         .await?
@@ -351,7 +314,6 @@ pub async fn create_clarification(
         clarification_type: Set(payload.clarification_type.clone()),
         recipient_id: Set(recipient_id),
         is_public: Set(is_public),
-        reply_is_public: Set(false),
         created_at: Set(now),
         updated_at: Set(now),
         ..Default::default()
@@ -369,11 +331,6 @@ pub async fn create_clarification(
         recipient_id: model.recipient_id,
         recipient_name,
         is_public: model.is_public,
-        reply_content: model.reply_content,
-        reply_author_id: model.reply_author_id,
-        reply_author_name: None,
-        reply_is_public: model.reply_is_public,
-        replied_at: model.replied_at,
         replies: vec![],
         resolved: model.resolved,
         resolved_at: model.resolved_at,
@@ -475,22 +432,7 @@ pub async fn reply_clarification(
     };
     new_reply.insert(&txn).await?;
 
-    // The parent `reply_is_public` is the "ANY reply is public" aggregate
-    // (see toggle_reply_public), not the latest reply's own flag. Recompute it
-    // across every reply - including the one just inserted - instead of clobbering
-    // it to false, which would drop an already-public earlier reply's aggregate.
-    let any_reply_public = clarification_reply::Entity::find()
-        .filter(clarification_reply::Column::ClarificationId.eq(clarification_id))
-        .filter(clarification_reply::Column::IsPublic.eq(true))
-        .count(&txn)
-        .await?
-        > 0;
-
     let mut active: clarification::ActiveModel = existing.into();
-    active.reply_content = Set(Some(sanitize_db_text(payload.content.trim())));
-    active.reply_author_id = Set(Some(auth_user.user_id));
-    active.reply_is_public = Set(any_reply_public);
-    active.replied_at = Set(Some(now));
     active.updated_at = Set(now);
     let model = active.update(&txn).await?;
 
@@ -506,9 +448,6 @@ pub async fn reply_clarification(
     user_ids.insert(model.author_id);
     if let Some(rid) = model.recipient_id {
         user_ids.insert(rid);
-    }
-    if let Some(raid) = model.reply_author_id {
-        user_ids.insert(raid);
     }
     if let Some(rb) = model.resolved_by {
         user_ids.insert(rb);
@@ -526,9 +465,6 @@ pub async fn reply_clarification(
     let recipient_name = model
         .recipient_id
         .and_then(|rid| user_map.get(&rid).cloned());
-    let reply_author_name = model
-        .reply_author_id
-        .and_then(|raid| user_map.get(&raid).cloned());
     let resolved_by_name = model
         .resolved_by
         .and_then(|uid| user_map.get(&uid).cloned());
@@ -558,11 +494,6 @@ pub async fn reply_clarification(
         recipient_id: model.recipient_id,
         recipient_name,
         is_public: model.is_public,
-        reply_content: model.reply_content,
-        reply_author_id: model.reply_author_id,
-        reply_author_name,
-        reply_is_public: model.reply_is_public,
-        replied_at: model.replied_at,
         replies,
         resolved: model.resolved,
         resolved_at: model.resolved_at,
@@ -625,20 +556,11 @@ pub async fn toggle_reply_public(
     active.is_public = Set(new_is_public);
     let updated = active.update(&txn).await?;
 
-    let any_public = clarification_reply::Entity::find()
-        .filter(clarification_reply::Column::ClarificationId.eq(clarification_id))
-        .filter(clarification_reply::Column::IsPublic.eq(true))
-        .count(&txn)
-        .await?
-        > 0;
-
-    let mut parent_active: clarification::ActiveModel = parent.into();
-    parent_active.reply_is_public = Set(any_public);
-
-    if new_is_public && query.include_question.unwrap_or(false) {
+    if new_is_public && query.include_question.unwrap_or(false) && !parent.is_public {
+        let mut parent_active: clarification::ActiveModel = parent.into();
         parent_active.is_public = Set(true);
+        parent_active.update(&txn).await?;
     }
-    parent_active.update(&txn).await?;
 
     txn.commit().await?;
 
@@ -740,9 +662,6 @@ pub async fn resolve_clarification(
     if let Some(rid) = model.recipient_id {
         user_ids.insert(rid);
     }
-    if let Some(raid) = model.reply_author_id {
-        user_ids.insert(raid);
-    }
     if let Some(rb) = model.resolved_by {
         user_ids.insert(rb);
     }
@@ -759,9 +678,6 @@ pub async fn resolve_clarification(
     let recipient_name = model
         .recipient_id
         .and_then(|rid| user_map.get(&rid).cloned());
-    let reply_author_name = model
-        .reply_author_id
-        .and_then(|raid| user_map.get(&raid).cloned());
     let resolved_by_name = model
         .resolved_by
         .and_then(|uid| user_map.get(&uid).cloned());
@@ -791,11 +707,6 @@ pub async fn resolve_clarification(
         recipient_id: model.recipient_id,
         recipient_name,
         is_public: model.is_public,
-        reply_content: model.reply_content,
-        reply_author_id: model.reply_author_id,
-        reply_author_name,
-        reply_is_public: model.reply_is_public,
-        replied_at: model.replied_at,
         replies,
         resolved: model.resolved,
         resolved_at: model.resolved_at,

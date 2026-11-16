@@ -468,8 +468,7 @@ mod clarification_reply_publishing {
     use super::*;
 
     /// An admin replying with `is_public: true` publishes the reply in one call -
-    /// no separate toggle-public round-trip. The per-reply flag and the parent
-    /// `reply_is_public` aggregate must both reflect it immediately.
+    /// no separate toggle-public round-trip.
     #[tokio::test]
     async fn admin_reply_publishes_without_a_separate_toggle() {
         let app = TestApp::spawn().await;
@@ -508,10 +507,6 @@ mod clarification_reply_publishing {
         assert_eq!(
             rep_res.body["replies"][0]["is_public"], true,
             "admin reply with is_public:true must be public at reply time"
-        );
-        assert_eq!(
-            rep_res.body["reply_is_public"], true,
-            "parent aggregate must reflect the now-public reply"
         );
     }
 
@@ -557,6 +552,5 @@ mod clarification_reply_publishing {
             rep_res.body["replies"][0]["is_public"], false,
             "a non-admin's reply is_public:true must be forced private"
         );
-        assert_eq!(rep_res.body["reply_is_public"], false);
     }
 }

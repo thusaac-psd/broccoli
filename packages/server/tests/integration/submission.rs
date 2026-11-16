@@ -910,7 +910,7 @@ mod judgement_history {
         ] {
             test_case_result::ActiveModel {
                 submission_id: Set(submission_id),
-                judgement_id: Set(Some(judgement_id)),
+                judgement_id: Set(judgement_id),
                 test_case_id: Set(Some(test_case.id)),
                 run_index: Set(None),
                 verdict: Set(verdict),
@@ -993,7 +993,7 @@ mod judgement_history {
         .expect("insert added test case");
         test_case_result::ActiveModel {
             submission_id: Set(submission_id),
-            judgement_id: Set(Some(current_judgement_id)),
+            judgement_id: Set(current_judgement_id),
             test_case_id: Set(Some(added_case.id)),
             run_index: Set(None),
             verdict: Set(Verdict::Accepted),
@@ -1072,7 +1072,7 @@ mod judgement_history {
             .unwrap();
             let result = test_case_result::ActiveModel {
                 submission_id: Set(submission_id),
-                judgement_id: Set(Some(current_id)),
+                judgement_id: Set(current_id),
                 test_case_id: Set(Some(tc.id)),
                 verdict: Set(Verdict::Accepted),
                 score: Set(1.0),
@@ -2949,7 +2949,7 @@ mod rejudge_lifecycle {
         for _ in 0..2 {
             test_case_result::ActiveModel {
                 submission_id: Set(sid),
-                judgement_id: Set(Some(j2.id)),
+                judgement_id: Set(j2.id),
                 judge_epoch: Set(j2.judge_epoch),
                 verdict: Set(Verdict::Accepted),
                 score: Set(50.0),

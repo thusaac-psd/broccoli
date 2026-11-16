@@ -153,8 +153,7 @@ struct RequestIdentity {
 }
 
 impl RequestIdentity {
-    /// Describe how `existing` differs from this request, if it does. Rows
-    /// stored before fingerprints existed (`None`) match on method and path.
+    /// Describe how `existing` differs from this request, if it does.
     fn mismatch(&self, existing: &idempotency_key::Model) -> Option<String> {
         if existing.request_path != self.path || existing.request_method != self.method {
             return Some(format!(
@@ -162,11 +161,7 @@ impl RequestIdentity {
                 existing.request_method, existing.request_path, self.method, self.path
             ));
         }
-        if existing
-            .request_fingerprint
-            .as_deref()
-            .is_some_and(|fp| fp != self.fingerprint)
-        {
+        if existing.request_fingerprint != self.fingerprint {
             return Some("This key was used with a different request body".into());
         }
         None

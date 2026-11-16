@@ -29,9 +29,9 @@ env_line() {
   printf '%s=%s\n' "$1" "$quoted"
 }
 
-# env_unquote RAW: the value an env-file right-hand side stands for. Reads the
-# single-quoted form written above, and also older unquoted values: those had
-# `$` doubled for Compose and may carry a trailing ` # comment`.
+# env_unquote RAW: the value an env-file right-hand side stands for, as
+# Compose reads it. Reads the single-quoted form written above, and unquoted
+# values, in which `$` is doubled and a trailing ` # comment` is dropped.
 env_unquote() {
   local raw="$1"
   case "$raw" in
