@@ -4,8 +4,8 @@ use tracing::info;
 
 use crate::client::Client;
 use crate::dto::{
-    AddContestProblemRequest, CreateContestRequest, CreateProblemRequest, CreateTestCaseRequest,
-    RegistriesResponse,
+    AddContestProblemRequest, ContestResponse, CreateContestRequest, CreateProblemRequest,
+    CreateTestCaseRequest, RegistriesResponse,
 };
 use crate::error::{StressError, StressResult};
 use crate::scenarios::Scenario;
@@ -40,9 +40,7 @@ pub async fn bootstrap(
         "stress-test bootstrap resolved registry types",
     );
 
-    let contest = client
-        .create_contest(&build_create_contest_request(&contest_type))
-        .await?;
+    let contest = create_scratch_contest(client, &contest_type).await?;
     info!(contest_id = contest.id, "bootstrap created scratch contest",);
 
     let mut problem_ids_by_scenario = HashMap::with_capacity(scenarios.len());
@@ -163,8 +161,23 @@ pub async fn load_existing_contest(
     })
 }
 
-pub(crate) fn build_create_contest_request(contest_type: &str) -> CreateContestRequest {
-    let now = chrono::Utc::now();
+/// Create a scratch contest of `contest_type` that is open from a minute ago
+/// for a day, on the server's clock ([`Client::server_now`]), so a host whose
+/// clock runs ahead of the server's still gets a contest that has started.
+pub(crate) async fn create_scratch_contest(
+    client: &Client,
+    contest_type: &str,
+) -> StressResult<ContestResponse> {
+    let now = client.server_now().await?;
+    client
+        .create_contest(&build_create_contest_request(contest_type, now))
+        .await
+}
+
+pub(crate) fn build_create_contest_request(
+    contest_type: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> CreateContestRequest {
     let suffix = now.timestamp();
     CreateContestRequest {
         title: format!("stress-test-{suffix}"),
