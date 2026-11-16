@@ -17,10 +17,10 @@
 //! would be `SystemError`, not a clean Accepted/WrongAnswer -- so these
 //! assertions genuinely fail if the path regresses.
 //!
-//! Judges in a real isolate sandbox with a C++ toolchain, like the other
-//! judging verdict tests; `common::require_real_sandbox` says how to run it.
+//! The checker and the solutions compile with the host's C++ toolchain, so the
+//! verdicts are real under the mock sandbox as well as under isolate.
 
-use crate::common::{E2eTestApp, require_real_sandbox};
+use crate::common::E2eTestApp;
 
 /// The canonical testlib `wcmp` checker: compare the jury answer (`ans`) and the
 /// contestant output (`ouf`) as sequences of whitespace-separated tokens; AC iff
@@ -62,7 +62,7 @@ int main(int argc, char* argv[]) {
 /// Real, unmodified `testlib.h` (github.com/MikeMirzayanov/testlib), vendored as
 /// a fixture so the checker genuinely compiles in the sandbox. `include_str!`
 /// keeps the test hermetic (no network at judge time).
-const TESTLIB_H: &str = include_str!("../../fixtures/testlib/testlib.h");
+pub(super) const TESTLIB_H: &str = include_str!("../../fixtures/testlib/testlib.h");
 
 /// Sums `n` integers -> for input "5\n1 2 3 4 5" prints "15": the checker
 /// accepts it (tokens equal the answer "15").
@@ -186,10 +186,7 @@ async fn a_checker_source_lives_in_the_namespace_its_checker_plugin_declares() {
 /// rejecting solution correctly, end to end, entirely through the checker
 /// plugin's problem-scoped config.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
 async fn testlib_checker_judges_via_problem_config() {
-    require_real_sandbox();
-
     let app = E2eTestApp::spawn().await;
     let admin = app
         .create_user_with_role("v_testlib_admin", "pass1234", "admin")

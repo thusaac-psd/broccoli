@@ -23,10 +23,17 @@ pub enum PluginError {
         func_name: String,
     },
 
-    #[error("Failed to call function '{func_name}' on plugin '{plugin_id}': {message}")]
+    /// The guest failed: it returned an error, trapped, or a host function
+    /// it called failed. `message` is the reason, with the reason of every
+    /// nested call that failed under it; `depth` is the call's nesting depth
+    /// (1 for a top-level call).
+    #[error(
+        "Failed to call function '{func_name}' on plugin '{plugin_id}' at call depth {depth}: {message}"
+    )]
     ExecutionFailed {
         plugin_id: String,
         func_name: String,
+        depth: u8,
         message: String,
     },
 

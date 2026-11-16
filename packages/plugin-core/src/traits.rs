@@ -296,15 +296,41 @@ fn run_guest(
     let marked = locals.with(|m: &mut crate::executor::MarkedUnavailable| m.0);
     outcome.map_err(|e| {
         if cancelled || marked {
-            unavailable()
-        } else {
-            PluginError::ExecutionFailed {
-                plugin_id: plugin_id.clone(),
-                func_name: func_name.clone(),
-                message: e.to_string(),
-            }
+            return unavailable();
+        }
+        let message = failure_reason(&e);
+        warn!(
+            plugin_id = %plugin_id,
+            func_name = %func_name,
+            depth = resolved.depth,
+            reason = %message,
+            "Plugin call failed"
+        );
+        PluginError::ExecutionFailed {
+            plugin_id: plugin_id.clone(),
+            func_name: func_name.clone(),
+            depth: resolved.depth,
+            message,
         }
     })
+}
+
+/// Why a guest call failed: every cause in `error`'s chain, outermost first,
+/// without the wasm backtrace wasmtime wraps a trap or a failed host function
+/// in. The backtrace's `Display` is only its frames, which would hide the
+/// reason (a host function's error, a nested call's failure, the trap).
+fn failure_reason(error: &extism::Error) -> String {
+    // wasmtime attaches the backtrace as context, which the chain yields as
+    // a wrapper of its own, so it is recognised by what it renders.
+    let backtrace = error
+        .downcast_ref::<wasmtime::WasmBacktrace>()
+        .map(ToString::to_string);
+    error
+        .chain()
+        .map(ToString::to_string)
+        .filter(|cause| Some(cause) != backtrace.as_ref())
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 /// Full plugin-management surface: discovery, the load / unload lifecycle,

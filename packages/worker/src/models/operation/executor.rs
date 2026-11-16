@@ -317,6 +317,7 @@ impl OperationTaskExecutor {
     pub async fn new_with_sandbox_manager_and_blob_store(
         sandbox_manager: Box<dyn SandboxManager + Send + Sync>,
         blob_store: Arc<dyn common::storage::BlobStore>,
+        db: common::db::DatabaseConnection,
         cache_dir: PathBuf,
         metrics: common::metrics::Metrics,
         tools_dir: Option<PathBuf>,
@@ -328,7 +329,7 @@ impl OperationTaskExecutor {
             operation_executor: OperationHandler::new(
                 sandbox_manager,
                 Box::new(file_cacher),
-                Box::new(NoopTaskCacheStore),
+                task_cache_store(db),
                 toolchain_fingerprint::ToolchainFingerprint::Known(String::new()),
                 metrics,
             )
@@ -434,14 +435,16 @@ impl OperationTaskExecutor {
             }
         };
 
-        // The server's migrations create `task_cache`. Until a server has
-        // migrated a fresh database, a lookup fails and the step simply runs.
-        let task_cache: Box<dyn TaskCacheStore> = Box::new(MemoizedTaskCacheStore::new(
-            DatabaseTaskCacheStore::new(db_for_cache),
-        ));
-
-        Ok((file_cacher, task_cache))
+        Ok((file_cacher, task_cache_store(db_for_cache)))
     }
+}
+
+/// The step cache a worker keeps compiled outputs in: the database's
+/// `task_cache`, memoized in process. The server's migrations create
+/// `task_cache`; until a server has migrated a fresh database, a lookup fails
+/// and the step simply runs.
+fn task_cache_store(db: common::db::DatabaseConnection) -> Box<dyn TaskCacheStore> {
+    Box::new(MemoizedTaskCacheStore::new(DatabaseTaskCacheStore::new(db)))
 }
 
 #[async_trait]
