@@ -1481,6 +1481,34 @@ async fn a_failed_code_run_is_handed_back_or_finalized_by_the_judgements_rule() 
     assert_eq!(after.error_code.as_deref(), Some("PLUGIN_ERROR"));
 }
 
+/// A judgement superseded before it finished never got a verdict: it ends
+/// as a `SUPERSEDED` system error that stands, a decided outcome no retry
+/// takes for a failed attempt. Applied back, the submission shows it as it
+/// is instead of judging it again.
+#[tokio::test]
+async fn a_judgement_superseded_unfinished_stands_as_superseded() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (s, first) = new_submission(&db).await;
+    claim_one(&db, "srv").await;
+    rejudge(&db, s.id, true).await;
+    let superseded = judgement(&db, first.id).await;
+    assert_eq!(superseded.status, SubmissionStatus::SystemError);
+    assert_eq!(superseded.error_code.as_deref(), Some("SUPERSEDED"));
+    assert!(superseded.is_finalized && superseded.error_stands);
+
+    let txn = db.begin().await.unwrap();
+    let ApplyJudgement::Applied(applied) = apply_judgement(&txn, s.id, first.id).await.unwrap()
+    else {
+        panic!("applied");
+    };
+    txn.commit().await.unwrap();
+    assert_eq!(applied.status, SubmissionStatus::SystemError);
+    let pass = retry_system_errors(&db, RetryBudget::new(5), 10, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!(pass, SystemErrorPass::default(), "nothing to re-judge");
+}
+
 /// In-flight work of a parked type whose owner was lost goes back without
 /// spending a dispatch retry, even with the budget spent.
 #[tokio::test]
