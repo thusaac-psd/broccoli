@@ -1,5 +1,8 @@
+import { serverNow } from '@broccoli/web-sdk/api';
+import { contestPollPace } from '@broccoli/web-sdk/contest';
 import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { formatRelativeSeconds, useTranslation } from '@broccoli/web-sdk/i18n';
+import { useContestSlotContext } from '@broccoli/web-sdk/slot';
 import { Label, QueryView, Switch } from '@broccoli/web-sdk/ui';
 import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
@@ -7,6 +10,9 @@ import { useEffect, useRef, useState } from 'react';
 
 import { useIoiApi } from './hooks/useIoiApi';
 import type { ScoreboardEntry, ScoreboardResponse } from './types';
+
+/** How often a live board asks for new results. */
+const LIVE_BOARD_POLL_MS = 30_000;
 
 interface IoiScoreboardProps {
   contestId?: number;
@@ -168,6 +174,7 @@ function ScoreCell({ score, max }: { score: number; max: number }) {
 // Mounted only on IOI contests: the slot declares `contest_type = "ioi"`.
 export function IoiScoreboard({ contestId }: IoiScoreboardProps) {
   const api = useIoiApi();
+  const contest = useContestSlotContext()?.contest ?? null;
   const { t, locale } = useTranslation();
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [phaseBanner, setPhaseBanner] = useState<'started' | 'ended' | null>(
@@ -182,13 +189,15 @@ export function IoiScoreboard({ contestId }: IoiScoreboardProps) {
     enabled: contestId !== undefined,
     queryFn: () => api.getScoreboard(contestId!),
     retry: 2,
-    // Poll until the contest is over: a board opened before the start
-    // learns from the server that it has started.
-    refetchInterval: pollInterval<ScoreboardResponse>((scoreboard) =>
-      autoRefresh && scoreboard !== undefined && scoreboard.phase !== 'after'
-        ? 30000
-        : false,
-    ),
+    // A live board refreshes for new results, and every board turns over
+    // when the contest's phase does (`contestPollPace`): one opened before
+    // the start asks again as it starts, one that ended stops.
+    refetchInterval: pollInterval<ScoreboardResponse>((scoreboard) => {
+      if (!autoRefresh || scoreboard === undefined) return false;
+      const pace = contest ? contestPollPace(contest, serverNow()) : false;
+      if (scoreboard.phase !== 'during') return pace;
+      return Math.min(LIVE_BOARD_POLL_MS, pace === false ? Infinity : pace);
+    }),
   });
   const { data: scoreboard, dataUpdatedAt } = query;
 

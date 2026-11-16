@@ -1,5 +1,8 @@
+import { serverNow } from '@broccoli/web-sdk/api';
+import { contestPollPace } from '@broccoli/web-sdk/contest';
 import { pollInterval, unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { formatRelativeSeconds, useTranslation } from '@broccoli/web-sdk/i18n';
+import { useContestSlotContext } from '@broccoli/web-sdk/slot';
 import {
   Label,
   QueryView,
@@ -12,6 +15,9 @@ import { type ReactNode, useEffect, useState } from 'react';
 
 import { useIcpcApi } from './hooks/useIcpcApi';
 import type { ProblemCell, StandingsEntry, StandingsResponse } from './types';
+
+/** How often a live board asks for new results. */
+const LIVE_BOARD_POLL_MS = 30_000;
 
 interface IcpcScoreboardProps {
   contestId?: number;
@@ -171,6 +177,7 @@ function ProblemCellView({ cell }: { cell: ProblemCell | undefined }) {
 // Mounted only on ICPC contests: the slot declares `contest_type = "icpc"`.
 export function IcpcScoreboard({ contestId }: IcpcScoreboardProps) {
   const api = useIcpcApi();
+  const contest = useContestSlotContext()?.contest ?? null;
   const { t, locale } = useTranslation();
   const [autoRefresh, setAutoRefresh] = useState(true);
   // eslint-disable-next-line no-restricted-properties -- see the tick below
@@ -183,13 +190,18 @@ export function IcpcScoreboard({ contestId }: IcpcScoreboardProps) {
     queryFn: () => api.getStandings(contestId!),
     retry: 2,
     refetchInterval: pollInterval<StandingsResponse>((d) => {
-      // Poll until the contest is over (a board opened before the start
-      // learns from the server that it has started), and also while a frozen
-      // board awaits its reveal, so the reveal reaches viewers who leave the
-      // tab open.
+      // A live board refreshes for new results, as does a frozen board
+      // awaiting its reveal, so the reveal reaches viewers who leave the tab
+      // open; every board turns over when the contest's phase does
+      // (`contestPollPace`): one opened before the start asks again as it
+      // starts.
+      if (!autoRefresh || d === undefined) return false;
+      const pace = contest ? contestPollPace(contest, serverNow()) : false;
       const live =
-        d !== undefined && (d.phase !== 'after' || (!!d.frozen && !d.revealed));
-      return autoRefresh && live ? 30000 : false;
+        d.phase === 'during' ||
+        (d.phase === 'after' && !!d.frozen && !d.revealed);
+      if (!live) return pace;
+      return Math.min(LIVE_BOARD_POLL_MS, pace === false ? Infinity : pace);
     }),
   });
   const { dataUpdatedAt, refetch } = query;

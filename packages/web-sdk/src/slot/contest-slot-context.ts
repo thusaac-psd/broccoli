@@ -1,5 +1,7 @@
 import { createContext, use } from 'react';
 
+import type { Contest } from '@/contest/types';
+
 export interface ContestSlotContextValue {
   /** Numeric id of the current contest. */
   contestId: number;
@@ -9,6 +11,12 @@ export interface ContestSlotContextValue {
    * matches.
    */
   contestType: string | null;
+  /**
+   * The contest as the host's own query reads it, `null` while it loads. The
+   * host polls it at the contest's phase pace (`contestPollPace`), so a
+   * plugin view of the contest paces itself on the same phase and outage.
+   */
+  contest: Contest | null;
 }
 
 /**

@@ -9,9 +9,10 @@ interface ContestSlotProviderProps {
 }
 
 /**
- * Populates the ContestSlotContext with the current contest's id and type so
- * the SDK's <Slot> component can filter plugin slot entries declared with a
- * `contest_type` (e.g. only render IOI slots on IOI contests).
+ * Populates the ContestSlotContext with the current contest's id, type and
+ * contest record, so the SDK's <Slot> component can filter plugin slot entries
+ * declared with a `contest_type` (e.g. only render IOI slots on IOI contests),
+ * and a plugin view of the contest can pace itself on the contest's phase.
  *
  * While the contest info is still loading, we render children with a null
  * contestType - slots with a non-empty contest_type will be skipped until the
@@ -28,8 +29,9 @@ export function ContestSlotProvider({
     () => ({
       contestId,
       contestType: contest?.contest_type ?? null,
+      contest: contest ?? null,
     }),
-    [contestId, contest?.contest_type],
+    [contestId, contest],
   );
 
   return <ContestSlotContext value={value}>{children}</ContestSlotContext>;
