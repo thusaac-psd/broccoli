@@ -18,6 +18,31 @@ pub enum FeedbackLevel {
     None,
 }
 
+impl FeedbackLevel {
+    /// The level a viewer reads scores at outside a submission's own view
+    /// (its subtask scores, the scoreboard): staff see every score, and so
+    /// does everyone once the contest has ended (`phase` is the contest's
+    /// stage); before that the configured level holds.
+    pub fn for_scores(self, staff: bool, phase: &str) -> Self {
+        if staff || phase == "after" {
+            Self::Full
+        } else {
+            self
+        }
+    }
+
+    /// Whether this level shows a total score.
+    pub fn shows_total(self) -> bool {
+        self != Self::None
+    }
+
+    /// Whether this level shows scores below the total: each subtask's, and
+    /// each problem's on the scoreboard.
+    pub fn shows_subtask_scores(self) -> bool {
+        matches!(self, Self::Full | Self::SubtaskScores)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScoreboardVisibility {

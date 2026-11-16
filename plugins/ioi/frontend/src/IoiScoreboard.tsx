@@ -14,6 +14,9 @@ interface IoiScoreboardProps {
 
 const MEDAL_COLORS = ['#D4AF37', '#A8A8A8', '#CD7F32'] as const;
 
+/** What a cell shows for a score the viewer's feedback level withholds. */
+const WITHHELD = '—';
+
 function scoreColor(score: number, maxPossible: number): string {
   if (maxPossible <= 0) return 'transparent';
   const frac = score / maxPossible;
@@ -439,17 +442,25 @@ function RankRow({
       })}
       {showTimeTiebreaker && (
         <td className="py-1.5 px-3 text-center font-mono tabular-nums text-[13px] border-b border-border text-muted-foreground whitespace-nowrap">
-          {formatElapsedTime(entry.total_time_seconds)}
+          {entry.total_time_seconds === undefined
+            ? WITHHELD
+            : formatElapsedTime(entry.total_time_seconds)}
         </td>
       )}
-      <td
-        className="py-1.5 px-3 text-center font-bold font-mono tabular-nums border-b border-border"
-        style={{ background: scoreColor(entry.total_score, maxTotal) }}
-      >
-        {entry.total_score.toFixed(
-          entry.total_score === Math.floor(entry.total_score) ? 0 : 2,
-        )}
-      </td>
+      {entry.total_score === undefined ? (
+        <td className="py-1.5 px-3 text-center font-mono border-b border-border text-muted-foreground">
+          {WITHHELD}
+        </td>
+      ) : (
+        <td
+          className="py-1.5 px-3 text-center font-bold font-mono tabular-nums border-b border-border"
+          style={{ background: scoreColor(entry.total_score, maxTotal) }}
+        >
+          {entry.total_score.toFixed(
+            entry.total_score === Math.floor(entry.total_score) ? 0 : 2,
+          )}
+        </td>
+      )}
     </tr>
   );
 }

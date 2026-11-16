@@ -63,21 +63,6 @@ async fn seed_accepted_ioi_submission(
     .await
     .expect("insert IOI judgement");
 
-    plugin_storage::ActiveModel {
-        plugin_id: Set("ioi".into()),
-        collection: Set("default".into()),
-        revision: Set(0),
-        key: Set(format!(
-            "task_score:{contest_id}:{problem_id}:{}",
-            user_model.id
-        )),
-        data: Set(json!(score.to_string())),
-        created_at: Set(now),
-    }
-    .insert(&app.db)
-    .await
-    .expect("insert IOI task score");
-
     submission.id
 }
 
@@ -129,6 +114,84 @@ async fn ioi_scoreboard_reflects_judged_submission() {
         rankings_arr[0]["username"].is_string(),
         "Row should have a username"
     );
+}
+
+/// At `feedback_level = "none"` a contestant reads no score off the
+/// scoreboard, their own row included: no totals, no score times, and no
+/// ranks or score order to read them from. Staff still see every score.
+#[tokio::test(flavor = "multi_thread")]
+async fn ioi_feedback_none_withholds_every_score_on_the_scoreboard() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_none_board_admin", "password", "admin")
+        .await;
+    let low = app
+        .create_authenticated_user("ioi_none_board_a", "password")
+        .await;
+    let high = app
+        .create_authenticated_user("ioi_none_board_b", "password")
+        .await;
+    let problem_id = app.create_problem(&admin, "IOI None Board").await;
+    let contest_id = app
+        .create_typed_contest(&admin, "IOI None Board", "ioi", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &low).await;
+    app.register_for_contest(contest_id, &high).await;
+    let res = app
+        .put_with_token(
+            &format!("/api/v1/contests/{contest_id}/config/ioi/contest"),
+            &json!({
+                "config": {
+                    "feedback_level": "none",
+                    "scoreboard_visibility": "all_contest_viewers"
+                },
+                "enabled": true
+            }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    seed_accepted_ioi_submission(&app, "ioi_none_board_a", problem_id, contest_id, 10.0).await;
+    seed_accepted_ioi_submission(&app, "ioi_none_board_b", problem_id, contest_id, 90.0).await;
+
+    let path = format!("/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}/scoreboard");
+    let board = app.get_with_token(&path, &low).await;
+    assert_eq!(board.status, 200, "{}", board.text);
+    let rows = board.body["rankings"].as_array().expect("rankings");
+    let names: Vec<&str> = rows
+        .iter()
+        .map(|r| r["username"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        ["ioi_none_board_a", "ioi_none_board_b"],
+        "{}",
+        board.text
+    );
+    for row in rows {
+        for field in ["total_score", "total_time_seconds", "problems"] {
+            assert!(
+                row.get(field).is_none(),
+                "{field} is withheld: {}",
+                board.text
+            );
+        }
+        assert_eq!(row["rank"], json!(null), "{}", board.text);
+    }
+
+    let staff = app.get_with_token(&path, &admin).await;
+    assert_eq!(staff.status, 200, "{}", staff.text);
+    let rows = staff.body["rankings"].as_array().expect("rankings");
+    assert_eq!(rows[0]["username"], "ioi_none_board_b", "{}", staff.text);
+    assert_eq!(
+        rows[0]["total_score"].as_f64(),
+        Some(90.0),
+        "{}",
+        staff.text
+    );
+    assert_eq!(rows[0]["rank"], json!(1), "{}", staff.text);
 }
 
 /// A judged submission's subtask scores, read back by the subtask-scores

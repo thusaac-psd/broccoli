@@ -37,7 +37,6 @@ export interface TokenStatusResponse {
 
 export interface UseTokenResponse {
   remaining_tokens: number;
-  task_score: number;
 }
 
 export interface SubtaskScoreEntry {
@@ -57,11 +56,12 @@ export interface ScoreboardProblemScore {
 }
 
 export interface ScoreboardEntry extends UserDisplayIdentity {
-  /** `null` when the board shows only the viewer's own row. */
+  /** `null` when the board shows only the viewer's own row, or no scores. */
   rank: number | null;
   user_id: number;
-  total_score: number;
-  total_time_seconds: number;
+  /** Absent, with `total_time_seconds`, when the viewer's feedback level shows no score. */
+  total_score?: number;
+  total_time_seconds?: number;
   problems?: ScoreboardProblemScore[];
 }
 

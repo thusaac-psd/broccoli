@@ -88,6 +88,13 @@ The submission view itself hides per test case results at every level below
 
 :::
 
+The scoreboard follows the same level. At `none` it shows a contestant no
+score at all, their own row included, so it lists names only, without ranks.
+At `total_only` it shows totals without the per problem scores. Staff
+(holders of `contest:manage` or `submission:view_all`) see every score, and
+once the contest ends so does every contestant, on the scoreboard and in a
+submission's subtask scores.
+
 ## Tokens
 
 A token unlocks full feedback on one submission regardless of

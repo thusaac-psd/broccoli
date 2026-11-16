@@ -16,9 +16,9 @@ use crate::config::FeedbackLevel;
 #[cfg(target_arch = "wasm32")]
 use crate::feedback::viewer_has_token_feedback_for_submission;
 #[cfg(target_arch = "wasm32")]
-use crate::score::score_submission_subtask_details;
+use crate::score::load_current_submission_ratios;
 #[cfg(target_arch = "wasm32")]
-use crate::score::{compute_official_task_score, load_current_submission_ratios};
+use crate::score::score_submission_subtask_details;
 #[cfg(target_arch = "wasm32")]
 use crate::scoreboard::load_scoreboard_cells;
 #[cfg(target_arch = "wasm32")]
@@ -66,13 +66,12 @@ pub(crate) fn handle_use_token(
     #[derive(Deserialize)]
     struct SubmissionInfo {
         user_id: i32,
-        problem_id: i32,
         contest_id: Option<i32>,
         status: SubmissionStatus,
     }
     let mut p = Params::new();
     let sql = format!(
-        "SELECT user_id, problem_id, contest_id, status FROM submission WHERE id = {}",
+        "SELECT user_id, contest_id, status FROM submission WHERE id = {}",
         p.bind(submission_id)
     );
     let sub_info = host
@@ -99,7 +98,6 @@ pub(crate) fn handle_use_token(
             "Tokens can only be used on a judged submission",
         ));
     }
-    let problem_id = sub_info.problem_id;
 
     // Tokens may only be spent WHILE the contest is running. Without this gate a
     // participant could POST to this endpoint after the contest ends and, under
@@ -162,16 +160,6 @@ pub(crate) fn handle_use_token(
         Err(e) => return Err(e.into()),
     };
 
-    let task_score = compute_official_task_score(
-        host,
-        &contest_config,
-        contest_id,
-        problem_id,
-        user_id,
-        None,
-        None,
-    )?;
-
     let remaining = available_tokens(&contest_config.tokens, &token_state, elapsed_min);
 
     Ok(PluginHttpResponse {
@@ -179,7 +167,6 @@ pub(crate) fn handle_use_token(
         headers: None,
         body: Some(serde_json::json!({
             "remaining_tokens": remaining,
-            "task_score": round_score(task_score),
         })),
     })
 }
@@ -328,15 +315,12 @@ pub(crate) fn handle_submission_status(
             None => false,
         };
 
-    let (visible_verdict, visible_score) = if can_view_full_feedback {
-        (last_verdict, last_score)
-    } else {
-        match contest_config.feedback_level {
-            FeedbackLevel::Full => (last_verdict, last_score),
-            FeedbackLevel::SubtaskScores | FeedbackLevel::TotalOnly => (last_verdict, last_score),
-            FeedbackLevel::None => (None, None),
-        }
-    };
+    let (visible_verdict, visible_score) =
+        if can_view_full_feedback || contest_config.feedback_level.shows_total() {
+            (last_verdict, last_score)
+        } else {
+            (None, None)
+        };
 
     Ok(PluginHttpResponse {
         status: 200,
@@ -452,117 +436,139 @@ pub(crate) fn handle_scoreboard(
     );
     let participants: Vec<UserIdentity> = host.db.query_with_args(&sql, &p.into_args())?;
 
-    // Build rankings
     #[derive(Serialize)]
     struct ProblemScore {
         problem_id: i32,
         score: f64,
     }
 
+    /// A row's score. Absent when the viewer's feedback level shows no
+    /// total, which withholds the row's place on the board as well.
     #[derive(Serialize)]
-    struct RankEntry {
-        /// `None` on a board restricted to the viewer's own row, which cannot
-        /// place that row among the others.
-        rank: Option<usize>,
-        user_id: i32,
-        username: String,
-        display_name: String,
+    struct RankScore {
         total_score: f64,
         total_time_seconds: i64,
         #[serde(skip_serializing_if = "Option::is_none")]
         problems: Option<Vec<ProblemScore>>,
     }
 
-    let mut entries: Vec<RankEntry> = Vec::new();
+    #[derive(Serialize)]
+    struct RankEntry {
+        /// `None` on a board restricted to the viewer's own row, which cannot
+        /// place that row among the others, and on a board without scores.
+        rank: Option<usize>,
+        user_id: i32,
+        username: String,
+        display_name: String,
+        #[serde(flatten)]
+        score: Option<RankScore>,
+    }
+
+    let entry = |participant: &UserIdentity, rank, score| RankEntry {
+        rank,
+        user_id: participant.user_id,
+        username: participant.username.clone(),
+        display_name: participant.display_label().to_owned(),
+        score,
+    };
 
     // Before the contest ends, full scoreboard visibility is controlled by
-    // contest config; organizers always retain full visibility for supervision.
-    let can_view_all = req.is_staff();
-    let full_scoreboard_visible = full_scoreboard_visible_for_phase(
-        phase,
-        can_view_all,
-        contest_config.scoreboard_visibility,
-    );
-    let visible_participants: Vec<&UserIdentity> = participants
+    // contest config; staff always retain full visibility for supervision.
+    let staff = req.is_staff();
+    let full_scoreboard_visible =
+        full_scoreboard_visible_for_phase(phase, staff, contest_config.scoreboard_visibility);
+    let mut visible_participants: Vec<&UserIdentity> = participants
         .iter()
         .filter(|p| full_scoreboard_visible || req.user_id() == Some(p.user_id))
         .collect();
-    let visible_user_ids: Vec<i32> = visible_participants.iter().map(|p| p.user_id).collect();
-    let scoreboard_cells = load_scoreboard_cells(
-        host,
-        &contest_config,
-        contest_id,
-        &visible_user_ids,
-        &problem_ids,
-    )?;
+    let level = contest_config.feedback_level.for_scores(staff, phase);
 
-    for participant in &visible_participants {
-        let mut total = 0.0;
-        let mut problem_score_times = Vec::with_capacity(problem_ids.len());
-        let mut prob_scores = Vec::new();
+    let entries: Vec<RankEntry> = if level.shows_total() {
+        let visible_user_ids: Vec<i32> = visible_participants.iter().map(|p| p.user_id).collect();
+        let scoreboard_cells = load_scoreboard_cells(
+            host,
+            &contest_config,
+            contest_id,
+            &visible_user_ids,
+            &problem_ids,
+        )?;
 
-        for &pid in &problem_ids {
-            let cell = scoreboard_cells
-                .get(&(participant.user_id, pid))
-                .copied()
-                .unwrap_or_default();
-            let score = cell.score;
-            let score_time_seconds = cell.score_time_seconds;
-            total += score;
-            problem_score_times.push(score_time_seconds);
-            prob_scores.push(ProblemScore {
-                problem_id: pid,
-                score: round_score(score),
-            });
-        }
-        let total_time_seconds =
-            combined_score_time_seconds(contest_config.scoreboard_tiebreaker, &problem_score_times);
+        let mut scored: Vec<(RankScore, &UserIdentity)> = visible_participants
+            .iter()
+            .map(|participant| {
+                let mut total = 0.0;
+                let mut problem_score_times = Vec::with_capacity(problem_ids.len());
+                let mut prob_scores = Vec::with_capacity(problem_ids.len());
+                for &pid in &problem_ids {
+                    let cell = scoreboard_cells
+                        .get(&(participant.user_id, pid))
+                        .copied()
+                        .unwrap_or_default();
+                    total += cell.score;
+                    problem_score_times.push(cell.score_time_seconds);
+                    prob_scores.push(ProblemScore {
+                        problem_id: pid,
+                        score: round_score(cell.score),
+                    });
+                }
+                let score = RankScore {
+                    total_score: round_score(total),
+                    total_time_seconds: combined_score_time_seconds(
+                        contest_config.scoreboard_tiebreaker,
+                        &problem_score_times,
+                    ),
+                    problems: level.shows_subtask_scores().then_some(prob_scores),
+                };
+                (score, *participant)
+            })
+            .collect();
 
-        let problems = match contest_config.feedback_level {
-            FeedbackLevel::None | FeedbackLevel::TotalOnly => None,
-            FeedbackLevel::SubtaskScores | FeedbackLevel::Full => Some(prob_scores),
-        };
-
-        entries.push(RankEntry {
-            rank: None,
-            user_id: participant.user_id,
-            username: participant.username.clone(),
-            display_name: participant.display_label().to_owned(),
-            total_score: round_score(total),
-            total_time_seconds,
-            problems,
+        // Sort: total desc, optional configured score-time tiebreaker, then username asc.
+        scored.sort_by(|(a, a_user), (b, b_user)| {
+            compare_scoreboard_entries(
+                a.total_score,
+                a.total_time_seconds,
+                &a_user.username,
+                b.total_score,
+                b.total_time_seconds,
+                &b_user.username,
+                contest_config.scoreboard_tiebreaker,
+            )
         });
-    }
 
-    // Sort: total desc, optional configured score-time tiebreaker, then username asc.
-    entries.sort_by(|a, b| {
-        compare_scoreboard_entries(
-            a.total_score,
-            a.total_time_seconds,
-            &a.username,
-            b.total_score,
-            b.total_time_seconds,
-            &b.username,
-            contest_config.scoreboard_tiebreaker,
-        )
-    });
-
-    if full_scoreboard_visible {
-        for i in 0..entries.len() {
-            entries[i].rank = if i > 0
+        let mut ranks: Vec<Option<usize>> = Vec::with_capacity(scored.len());
+        for i in 0..scored.len() {
+            let rank = if !full_scoreboard_visible {
+                None
+            } else if i > 0
                 && scoreboard_entries_tied(
-                    entries[i].total_score,
-                    entries[i].total_time_seconds,
-                    entries[i - 1].total_score,
-                    entries[i - 1].total_time_seconds,
+                    scored[i].0.total_score,
+                    scored[i].0.total_time_seconds,
+                    scored[i - 1].0.total_score,
+                    scored[i - 1].0.total_time_seconds,
                     contest_config.scoreboard_tiebreaker,
-                ) {
-                entries[i - 1].rank
+                )
+            {
+                ranks[i - 1]
             } else {
                 Some(i + 1)
             };
+            ranks.push(rank);
         }
-    }
+        scored
+            .into_iter()
+            .zip(ranks)
+            .map(|((score, participant), rank)| entry(participant, rank, Some(score)))
+            .collect()
+    } else {
+        // No scores to rank by: list the rows by name, so their order says
+        // nothing about their scores either.
+        visible_participants.sort_by(|a, b| a.username.cmp(&b.username));
+        visible_participants
+            .into_iter()
+            .map(|participant| entry(participant, None, None))
+            .collect()
+    };
 
     Ok(PluginHttpResponse {
         status: 200,
@@ -636,13 +642,10 @@ pub(crate) fn subtask_scores_access_decision(
         }
     }
 
-    let can_view_full_feedback = can_view_all_submissions || phase == "after" || tokened_feedback;
-
-    let can_view_subtask_scores = can_view_full_feedback
-        || matches!(
-            feedback_level,
-            FeedbackLevel::Full | FeedbackLevel::SubtaskScores
-        );
+    let can_view_subtask_scores = tokened_feedback
+        || feedback_level
+            .for_scores(can_view_all_submissions, phase)
+            .shows_subtask_scores();
 
     SubtaskScoresAccess::Allowed {
         can_view_subtask_scores,
