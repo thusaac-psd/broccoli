@@ -168,14 +168,16 @@ impl Unit {
     }
 }
 
-/// SQL: the unit row `alias` finished as a system error in any shape, a
-/// `SystemError` status or a plugin's `SystemError` verdict.
+/// SQL: the unit row `alias` finished as a system error in any shape: a
+/// `SystemError` status (the host's), or a terminal status with a
+/// `SystemError` verdict (a plugin's, as `plugin_writes::as_recorded` reads
+/// the write that ends it).
 fn system_error(alias: &str) -> String {
     format!(
         "({alias}.status = '{system_error}' \
-          OR ({alias}.status = '{judged}' AND {alias}.verdict IS NOT DISTINCT FROM '{verdict}'))",
+          OR ({alias}.status IN {terminal} AND {alias}.verdict IS NOT DISTINCT FROM '{verdict}'))",
         system_error = SubmissionStatus::SystemError,
-        judged = SubmissionStatus::Judged,
+        terminal = StatusPhase::Terminal.sql_list(),
         verdict = common::Verdict::SystemError,
     )
 }

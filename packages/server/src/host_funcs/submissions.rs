@@ -850,6 +850,46 @@ mod tests {
         }
     }
 
+    /// Whatever terminal status a plugin's `SystemError` verdict comes with,
+    /// the host reads it as the system error the write rule
+    /// (`judging::as_recorded`) took it for: it awaits the system-error retry
+    /// instead of showing as a verdict that stands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_system_error_verdict_is_a_system_error_whatever_its_status() {
+        use crate::services::judging::{RetryBudget, retry_system_errors};
+
+        let (_pg, db) = crate::test_support::postgres().await;
+        let (sub, _) = seed_judged(&db).await;
+        let j = open(
+            &db,
+            sub.id,
+            OpenJudgement::Rejudge {
+                triggered_by_user_id: sub.user_id,
+                target_worker_id: None,
+            },
+        )
+        .await;
+        let update = SubmissionUpdate {
+            status: Some(SubmissionStatus::CompilationError),
+            ..finish(&j, Verdict::SystemError, 0.0)
+        };
+        assert_eq!(submission_update(&db, update).await, 1);
+        let shown = submission::Entity::find_by_id(sub.id)
+            .one(&db)
+            .await
+            .expect("db")
+            .expect("row");
+        assert_eq!(
+            shown.status,
+            common::SubmissionStatus::Queued,
+            "the submission keeps showing the attempt"
+        );
+        let pass = retry_system_errors(&db, RetryBudget::new(1), 10, &[])
+            .await
+            .expect("retry");
+        assert_eq!(pass.requeued, 1);
+    }
+
     /// A result insert from a dispatch whose judgement is being requeued waits
     /// for the requeue and then re-checks its fence against the committed
     /// row, so the stale rows never land.

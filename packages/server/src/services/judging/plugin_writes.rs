@@ -39,7 +39,8 @@ pub(crate) trait PluginWrite {
 
 /// `status` and `verdict` end a unit as a system error. A plugin writes no
 /// `SystemError` status, so its system error is a terminal write with a
-/// `SystemError` verdict.
+/// `SystemError` verdict, whichever terminal status; the judging scans read
+/// a finished row by the same rule (`unit::system_error`).
 fn ends_in_system_error(
     status: Option<SubmissionStatus>,
     verdict: &Option<Option<Verdict>>,
