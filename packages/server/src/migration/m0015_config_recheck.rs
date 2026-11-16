@@ -8,7 +8,7 @@ use sea_orm_migration::prelude::*;
 /// `plugin_group_role`, see m0001) may read the new column as it reads every
 /// other column that is not content.
 ///
-/// Rolling-safe: a defaulted column older replicas never read or write.
+/// Forward-only like every migration here.
 pub struct Migration;
 
 impl MigrationName for Migration {

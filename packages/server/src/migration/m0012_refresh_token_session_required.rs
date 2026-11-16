@@ -4,8 +4,7 @@ use sea_orm_migration::prelude::*;
 /// (`entity::refresh_token::Model::session_id`). A row without one can never
 /// be presented successfully, so it is deleted.
 ///
-/// Rolling-safe: every replica of this baseline inserts refresh tokens with a
-/// session.
+/// Forward-only like every migration here.
 pub struct Migration;
 
 impl MigrationName for Migration {

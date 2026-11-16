@@ -7,7 +7,7 @@ use sea_orm_migration::prelude::*;
 /// `plugin_group_role`, see m0001) gives up its grant on them; a plugin that
 /// declares one is granted it when its role is provisioned.
 ///
-/// Rolling-safe: a privilege change no replica's own statements depend on.
+/// Forward-only like every migration here.
 pub struct Migration;
 
 impl MigrationName for Migration {

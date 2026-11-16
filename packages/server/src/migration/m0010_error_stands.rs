@@ -13,7 +13,7 @@ use sea_orm_migration::prelude::*;
 /// shows the attempt in flight awaits the system-error retry's decision and
 /// keeps `false`.
 ///
-/// Rolling-safe: a defaulted column older replicas never read or write.
+/// Forward-only like every migration here.
 pub struct Migration;
 
 impl MigrationName for Migration {
