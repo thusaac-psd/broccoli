@@ -26,8 +26,8 @@ pub fn judge_with_context_detached(
     req: &OnSubmissionInput,
     ctx: &JudgeContext,
 ) -> Result<OnSubmissionOutput, SdkError> {
-    if ctx.test_cases.is_empty() {
-        return refuse(host, req, "NO_TEST_CASES", "Problem has no test cases");
+    if let Some(why) = crate::subtasks::unjudgeable(&ctx.subtask_defs, &ctx.test_cases) {
+        return refuse(host, req, why.code(), why.message());
     }
 
     let scoring_test_case_ids: HashSet<i32> =
@@ -40,15 +40,6 @@ pub fn judge_with_context_detached(
         .filter(|tc| scoring_test_case_ids.contains(&tc.id))
         .cloned()
         .collect();
-
-    if scoring_test_cases.is_empty() {
-        return refuse(
-            host,
-            req,
-            "NOTHING_TO_SCORE",
-            "No test case of the problem is judged: none is a sample, scores or belongs to a subtask",
-        );
-    }
 
     evaluate_all_detached(
         host,

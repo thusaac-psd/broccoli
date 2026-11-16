@@ -238,6 +238,8 @@
 'ioi.config.task.duplicateTestCase' = '测试点“{testCase}”已在此子任务中。'
 'ioi.config.task.ambiguousTestCase' = '“{testCase}”对应 {count} 个测试点，请用编号指定其中一个。'
 'ioi.config.task.zeroWeight' = '此求和子任务的所有测试点分值都为 0，永远无法得分。'
+'ioi.config.task.problemHasNoTestCases' = '本题没有测试点，无法评测。请在选手提交前添加测试点。'
+'ioi.config.task.nothingToScore' = '本题没有会被评测的测试点：没有样例、没有计分的测试点，也没有属于子任务的测试点。请为测试点设置分数或将其加入子任务。'
 
 # Judging refusals (a system error that stands)
 'ioi.apiError.NO_TEST_CASES' = '该题目没有测试点，无法评测。请联系比赛工作人员添加测试点。'

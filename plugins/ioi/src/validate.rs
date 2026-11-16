@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use broccoli_server_sdk::types::{ConfigViolation, TestCaseRow};
 
 use crate::config::{SubtaskDef, SubtaskScoringMethod};
-use crate::subtasks::{Member, MemberIndex};
+use crate::subtasks::{Member, MemberIndex, Unjudgeable, unjudgeable};
 
 /// Every reason `subtasks` cannot score `test_cases` as written:
 ///
@@ -18,7 +18,9 @@ use crate::subtasks::{Member, MemberIndex};
 ///   twice;
 /// - a subtask with no members, or a `sum` subtask whose members all weigh
 ///   0, which can never score;
-/// - two subtasks with the same name, which contestants cannot tell apart.
+/// - two subtasks with the same name, which contestants cannot tell apart;
+/// - a problem judging would refuse outright ([`unjudgeable`]): one with no
+///   test cases, or none that is judged.
 pub fn task_violations(
     subtasks: &[SubtaskDef],
     test_cases: &[TestCaseRow],
@@ -26,6 +28,23 @@ pub fn task_violations(
     let index = MemberIndex::new(test_cases);
 
     let mut violations = Vec::new();
+    match unjudgeable(subtasks, test_cases) {
+        Some(Unjudgeable::NoTestCases) => violations.push(
+            ConfigViolation::new(
+                "subtasks",
+                "the problem has no test cases, so it cannot be judged",
+            )
+            .key("ioi.config.task.problemHasNoTestCases"),
+        ),
+        Some(Unjudgeable::NothingToScore) => violations.push(
+            ConfigViolation::new(
+                "subtasks",
+                "no test case is judged: none is a sample, scores or belongs to a subtask",
+            )
+            .key("ioi.config.task.nothingToScore"),
+        ),
+        None => {}
+    }
     let mut names = HashSet::new();
     for (i, subtask) in subtasks.iter().enumerate() {
         if !names.insert(subtask.name.as_str()) {
@@ -210,5 +229,29 @@ mod tests {
             paths(&task_violations(&subtasks, &problem())),
             ["subtasks[1].name"]
         );
+    }
+
+    /// A problem judging would refuse is a config issue before anyone
+    /// submits, by the same rule judging reads (`subtasks::unjudgeable`).
+    #[test]
+    fn a_problem_with_nothing_to_judge_is_refused_as_judging_would() {
+        let keys = |subtasks: &[SubtaskDef], cases: &[TestCaseRow]| -> Vec<String> {
+            task_violations(subtasks, cases)
+                .into_iter()
+                .filter_map(|v| v.key)
+                .collect()
+        };
+        assert_eq!(
+            keys(&[], &[]),
+            vec!["ioi.config.task.problemHasNoTestCases"]
+        );
+        assert_eq!(
+            keys(&[], &[tc(1, 0.0, None)]),
+            vec!["ioi.config.task.nothingToScore"]
+        );
+        assert!(keys(&[], &[tc(1, 10.0, None)]).is_empty());
+        let mut sample = tc(1, 0.0, None);
+        sample.is_sample = true;
+        assert!(keys(&[], &[sample]).is_empty(), "a sample is judged");
     }
 }

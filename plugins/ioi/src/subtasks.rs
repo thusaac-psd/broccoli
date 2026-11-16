@@ -226,6 +226,50 @@ pub fn compute_scoring_test_case_ids(
         .collect()
 }
 
+/// Why a problem cannot be judged at all. Judging refuses such a problem with
+/// a system error that stands, and the `task` config's validator reports it
+/// as a config issue so staff see it before anyone submits; both read this
+/// one rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unjudgeable {
+    /// The problem has no test cases.
+    NoTestCases,
+    /// No test case is judged: none is a sample, scores, or belongs to a
+    /// subtask ([`compute_scoring_test_case_ids`]).
+    NothingToScore,
+}
+
+impl Unjudgeable {
+    /// The error code the refused submission records.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::NoTestCases => "NO_TEST_CASES",
+            Self::NothingToScore => "NOTHING_TO_SCORE",
+        }
+    }
+
+    /// The English description the refused submission records.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NoTestCases => "Problem has no test cases",
+            Self::NothingToScore => {
+                "No test case of the problem is judged: none is a sample, scores or belongs to a subtask"
+            }
+        }
+    }
+}
+
+/// Whether `test_cases`, scored by `subtask_defs`, leave nothing to judge.
+pub fn unjudgeable(subtask_defs: &[SubtaskDef], test_cases: &[TestCaseRow]) -> Option<Unjudgeable> {
+    if test_cases.is_empty() {
+        Some(Unjudgeable::NoTestCases)
+    } else if compute_scoring_test_case_ids(subtask_defs, test_cases).is_empty() {
+        Some(Unjudgeable::NothingToScore)
+    } else {
+        None
+    }
+}
+
 /// The subtasks a problem is scored by: its configured subtasks, or the
 /// default "All Tests" subtask when none are configured. Scoring, feedback
 /// and the scoreboard all read a problem's subtasks through this.
