@@ -1272,21 +1272,17 @@ async fn ioi_task_config_naming_a_missing_test_case_is_refused() {
     assert_eq!(res.status, 200, "{}", res.text);
 }
 
-/// Test data can change under a stored config: once a test case a subtask
-/// names is deleted, the problem's config issues list that config.
-#[tokio::test(flavor = "multi_thread")]
-async fn ioi_task_config_left_naming_a_deleted_test_case_is_listed_as_an_issue() {
-    let app = E2eTestApp::spawn().await;
-    let admin = app
-        .create_user_with_role("ioi_issue_admin", "password", "admin")
-        .await;
-    let problem_id = app.create_problem(&admin, "IOI Issues").await;
-    create_labelled_test_case(&app, problem_id, "t1", &admin).await;
-    let t2 = create_labelled_test_case(&app, problem_id, "t2", &admin).await;
+/// An IOI problem whose contest-problem `task` config splits test cases
+/// `t1` and `t2` into one subtask each. Returns the problem, the contest, and
+/// `t2`'s id.
+async fn ioi_problem_with_two_subtasks(app: &E2eTestApp, admin: &str) -> (i32, i32, i32) {
+    let problem_id = app.create_problem(admin, "IOI Issues").await;
+    create_labelled_test_case(app, problem_id, "t1", admin).await;
+    let t2 = create_labelled_test_case(app, problem_id, "t2", admin).await;
     let contest_id = app
-        .create_typed_contest(&admin, "IOI Issues Contest", "ioi", true, true)
+        .create_typed_contest(admin, "IOI Issues Contest", "ioi", true, true)
         .await;
-    app.add_problem_to_contest(contest_id, problem_id, &admin)
+    app.add_problem_to_contest(contest_id, problem_id, admin)
         .await;
     let res = app
         .put_with_token(
@@ -1295,26 +1291,16 @@ async fn ioi_task_config_left_naming_a_deleted_test_case_is_listed_as_an_issue()
                 { "name": "S1", "test_cases": ["t1"] },
                 { "name": "S2", "test_cases": ["t2"] },
             ]}}),
-            &admin,
+            admin,
         )
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
-    let issues_path = format!("/api/v1/problems/{problem_id}/config/issues");
-    let issues = app.get_with_token(&issues_path, &admin).await;
-    assert_eq!(issues.status, 200, "{}", issues.text);
-    assert_eq!(issues.body, json!([]));
+    (problem_id, contest_id, t2)
+}
 
-    let res = app
-        .delete_with_token(
-            &format!("/api/v1/problems/{problem_id}/test-cases/{t2}"),
-            &admin,
-        )
-        .await;
-    assert!(res.status < 300, "{}", res.text);
-
-    let issues = app.get_with_token(&issues_path, &admin).await;
-    assert_eq!(issues.status, 200, "{}", issues.text);
-    let issues = issues.body.as_array().expect("an array");
+/// The one issue a broken `S2` subtask makes, as the API lists it.
+fn assert_s2_issue(issues: &serde_json::Value, contest_id: i32, problem_id: i32) {
+    let issues = issues.as_array().expect("an array");
     assert_eq!(issues.len(), 1, "{issues:?}");
     assert_eq!(issues[0]["plugin_id"], "ioi");
     assert_eq!(issues[0]["scope"], "contest_problem");
@@ -1324,4 +1310,177 @@ async fn ioi_task_config_left_naming_a_deleted_test_case_is_listed_as_an_issue()
         issues[0]["errors"][0]["path"], "subtasks[1].test_cases[0]",
         "{issues:?}"
     );
+}
+
+/// Renaming a test case a stored config names would leave that config
+/// pointing at nothing, so the edit is refused with the issues it would cause
+/// and nothing changes. Confirming with `force` commits it, and the problem's
+/// config issues then list the config.
+#[tokio::test(flavor = "multi_thread")]
+async fn renaming_a_test_case_a_config_names_is_refused_until_confirmed() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_rename_admin", "password", "admin")
+        .await;
+    let (problem_id, contest_id, t2) = ioi_problem_with_two_subtasks(&app, &admin).await;
+    let issues_path = format!("/api/v1/problems/{problem_id}/config/issues");
+    let issues = app.get_with_token(&issues_path, &admin).await;
+    assert_eq!(issues.body, json!([]), "{}", issues.text);
+
+    let tc_path = format!("/api/v1/problems/{problem_id}/test-cases/{t2}");
+    let res = app
+        .patch_with_token(&tc_path, &json!({ "label": "t9" }), &admin)
+        .await;
+    assert_eq!(res.status, 409, "{}", res.text);
+    assert_eq!(res.body["code"], "CONFIG_WOULD_BREAK", "{}", res.text);
+    assert_s2_issue(&res.body["details"]["issues"], contest_id, problem_id);
+    let stored = app.get_with_token(&tc_path, &admin).await;
+    assert_eq!(stored.body["label"], "t2", "{}", stored.text);
+    let issues = app.get_with_token(&issues_path, &admin).await;
+    assert_eq!(issues.body, json!([]), "{}", issues.text);
+
+    let res = app
+        .patch_with_token(
+            &format!("{tc_path}?force=true"),
+            &json!({ "label": "t9" }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(res.body["label"], "t9", "{}", res.text);
+    let issues = app.get_with_token(&issues_path, &admin).await;
+    assert_eq!(issues.status, 200, "{}", issues.text);
+    assert_s2_issue(&issues.body, contest_id, problem_id);
+}
+
+/// Deleting a test case a stored config names is refused the same way, and
+/// commits once confirmed.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_test_case_a_config_names_is_refused_until_confirmed() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_delete_admin", "password", "admin")
+        .await;
+    let (problem_id, contest_id, t2) = ioi_problem_with_two_subtasks(&app, &admin).await;
+    let tc_path = format!("/api/v1/problems/{problem_id}/test-cases/{t2}");
+
+    let res = app.delete_with_token(&tc_path, &admin).await;
+    assert_eq!(res.status, 409, "{}", res.text);
+    assert_eq!(res.body["code"], "CONFIG_WOULD_BREAK", "{}", res.text);
+    assert_s2_issue(&res.body["details"]["issues"], contest_id, problem_id);
+    let stored = app.get_with_token(&tc_path, &admin).await;
+    assert_eq!(stored.status, 200, "{}", stored.text);
+
+    let res = app
+        .delete_with_token(&format!("{tc_path}?force=true"), &admin)
+        .await;
+    assert_eq!(res.status, 204, "{}", res.text);
+    let issues = app
+        .get_with_token(
+            &format!("/api/v1/problems/{problem_id}/config/issues"),
+            &admin,
+        )
+        .await;
+    assert_s2_issue(&issues.body, contest_id, problem_id);
+}
+
+/// A test-data edit that leaves every config valid needs no confirmation,
+/// and one that only keeps an issue the problem already had is not refused
+/// for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_test_data_edit_that_breaks_no_config_needs_no_confirmation() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_harmless_admin", "password", "admin")
+        .await;
+    let (problem_id, _contest_id, t2) = ioi_problem_with_two_subtasks(&app, &admin).await;
+    let tc_path = format!("/api/v1/problems/{problem_id}/test-cases/{t2}");
+    let res = app
+        .patch_with_token(&tc_path, &json!({ "score": 70 }), &admin)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+
+    let res = app
+        .patch_with_token(
+            &format!("{tc_path}?force=true"),
+            &json!({ "label": "t9" }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    create_labelled_test_case(&app, problem_id, "t3", &admin).await;
+    let res = app
+        .patch_with_token(&tc_path, &json!({ "description": "still broken" }), &admin)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+}
+
+/// A submission judged while the problem's stored configs have issues says
+/// so on its judgement, for staff, so a score computed from a broken config
+/// does not pass unnoticed. Fixing the config clears the mark for the next
+/// judging.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_judgement_made_while_a_config_has_issues_is_marked() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_honest_admin", "password", "admin")
+        .await;
+    let contestant = app
+        .create_authenticated_user("ioi_honest_user", "password")
+        .await;
+    let (problem_id, contest_id, t2) = ioi_problem_with_two_subtasks(&app, &admin).await;
+    app.register_for_contest(contest_id, &contestant).await;
+    let judgement_marks = |sub_id: i32| {
+        let app = &app;
+        let admin = admin.clone();
+        async move {
+            app.wait_for_submission_terminal(sub_id, &admin, 60).await;
+            let res = app
+                .get_with_token(&format!("/api/v1/submissions/{sub_id}/judgements"), &admin)
+                .await;
+            assert_eq!(res.status, 200, "{}", res.text);
+            res.body["data"]
+                .as_array()
+                .or_else(|| res.body.as_array())
+                .expect("judgements")
+                .iter()
+                .find(|j| j["is_current"] == true)
+                .expect("a current judgement")["config_issues"]
+                .clone()
+        }
+    };
+
+    let clean = app
+        .create_contest_submission(contest_id, problem_id, &contestant, "cpp", CPP_SUM)
+        .await;
+    assert_eq!(judgement_marks(clean).await, json!(false));
+
+    let res = app
+        .patch_with_token(
+            &format!("/api/v1/problems/{problem_id}/test-cases/{t2}?force=true"),
+            &json!({ "label": "t9" }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let broken = app
+        .create_contest_submission(contest_id, problem_id, &contestant, "cpp", CPP_SUM)
+        .await;
+    assert_eq!(judgement_marks(broken).await, json!(true));
+
+    let res = app
+        .put_with_token(
+            &format!("/api/v1/contests/{contest_id}/problems/{problem_id}/config/ioi/task"),
+            &json!({ "config": { "subtasks": [
+                { "name": "S1", "test_cases": ["t1"] },
+                { "name": "S2", "test_cases": ["t9"] },
+            ]}}),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let fixed = app
+        .create_contest_submission(contest_id, problem_id, &contestant, "cpp", CPP_SUM)
+        .await;
+    assert_eq!(judgement_marks(fixed).await, json!(false));
 }

@@ -30,7 +30,9 @@ use crate::utils::test_case_body::{
 };
 use crate::visibility::{Action, ProblemScope, Subject, VisibilityKernel};
 
-use super::{find_problem_for_update, require_problem_part_reachable};
+use super::require_problem_part_reachable;
+use crate::extractors::query::AppQuery;
+use crate::services::test_data::TestDataEdit;
 
 #[utoipa::path(
     post,
@@ -39,7 +41,7 @@ use super::{find_problem_for_update, require_problem_part_reachable};
     operation_id = "createTestCase",
     summary = "Create a test case for a problem",
     description = "Creates a new test case under the specified problem. Requires `problem:edit` permission. Position is auto-assigned if omitted. Input and expected_output may be empty for output-only or custom-checker problems. Body limit: 1 GB.",
-    params(("id" = i32, Path, description = "Problem ID")),
+    params(("id" = i32, Path, description = "Problem ID"), TestDataWriteQuery),
     request_body = CreateTestCaseRequest,
     responses(
         (status = 201, description = "Test case created", body = TestCaseResponse),
@@ -48,7 +50,7 @@ use super::{find_problem_for_update, require_problem_part_reachable};
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "Duplicate label in problem (CONFLICT)", body = ErrorBody),
+        (status = 409, description = "Duplicate label in problem (CONFLICT); or the change would leave stored configs of the problem refused by their plugins, listed in `details.issues`, which `force=true` makes anyway (CONFIG_WOULD_BREAK)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -57,24 +59,25 @@ pub async fn create_test_case(
     _auth: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath(problem_id): AppPath<i32>,
+    AppQuery(write): AppQuery<TestDataWriteQuery>,
     AppJson(payload): AppJson<CreateTestCaseRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let txn = state.db.begin().await?;
-    find_problem_for_update(&txn, problem_id).await?;
+    let edit = TestDataEdit::begin(&state.db, problem_id).await?;
+    let txn = edit.db();
     validate_create_test_case(&payload)?;
 
     let position = match payload.position {
         Some(p) => p,
-        None => next_test_case_position(&txn, problem_id).await?,
+        None => next_test_case_position(txn, problem_id).await?,
     };
 
     let label = match payload.label.as_deref() {
         Some(label) => {
             let label = label.trim().to_string();
-            ensure_test_case_label_available(&txn, problem_id, &label, None).await?;
+            ensure_test_case_label_available(txn, problem_id, &label, None).await?;
             label
         }
-        None => first_free_test_case_label(&txn, problem_id, position).await?,
+        None => first_free_test_case_label(txn, problem_id, position).await?,
     };
     let input_body = prepare_test_case_body(payload.input, state.blob_store.clone()).await?;
     let output_body =
@@ -98,8 +101,9 @@ pub async fn create_test_case(
         ..Default::default()
     };
 
-    let model = new_tc.insert(&txn).await?;
-    txn.commit().await?;
+    let model = new_tc.insert(txn).await?;
+    edit.commit(state.plugins.as_ref(), write.on_config_break())
+        .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -311,6 +315,7 @@ async fn get_test_case_in(
     params(
         ("id" = i32, Path, description = "Problem ID"),
         ("tc_id" = i32, Path, description = "Test case ID"),
+        TestDataWriteQuery,
     ),
     request_body = UpdateTestCaseRequest,
     responses(
@@ -320,7 +325,7 @@ async fn get_test_case_in(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Test case not found (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "Duplicate label in problem (CONFLICT)", body = ErrorBody),
+        (status = 409, description = "Duplicate label in problem (CONFLICT); or the change would leave stored configs of the problem refused by their plugins, listed in `details.issues`, which `force=true` makes anyway (CONFIG_WOULD_BREAK)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -329,6 +334,7 @@ pub async fn update_test_case(
     _auth: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath((problem_id, tc_id)): AppPath<(i32, i32)>,
+    AppQuery(write): AppQuery<TestDataWriteQuery>,
     AppJson(payload): AppJson<UpdateTestCaseRequest>,
 ) -> Result<Json<TestCaseResponse>, AppError> {
     validate_update_test_case(&payload)?;
@@ -340,14 +346,14 @@ pub async fn update_test_case(
         ));
     }
 
-    let txn = state.db.begin().await?;
-    // Take the same per-problem FOR UPDATE lock create/delete/reorder/bulk_delete
-    // hold, so a label change is serialized against them: without it,
+    // The edit holds the problem's row lock, as every test-data change does,
+    // so a label change is serialized against them: without it,
     // ensure_test_case_label_available below is a read-committed TOCTOU (there is
     // no DB unique index on test_case.label) and two concurrent updates could
     // both pass the check and commit duplicate labels.
-    find_problem_for_update(&txn, problem_id).await?;
-    let existing = find_test_case_for_problem(&txn, problem_id, tc_id).await?;
+    let edit = TestDataEdit::begin(&state.db, problem_id).await?;
+    let txn = edit.db();
+    let existing = find_test_case_for_problem(txn, problem_id, tc_id).await?;
     let mut active: test_case::ActiveModel = existing.into();
 
     if let Some(input) = payload.input {
@@ -375,7 +381,7 @@ pub async fn update_test_case(
     }
     if let Some(label) = payload.label {
         let label = label.trim().to_string();
-        ensure_test_case_label_available(&txn, problem_id, &label, Some(tc_id)).await?;
+        ensure_test_case_label_available(txn, problem_id, &label, Some(tc_id)).await?;
         active.label = Set(label);
     }
     match payload.description {
@@ -384,8 +390,9 @@ pub async fn update_test_case(
         None => {}
     }
 
-    let model = active.update(&txn).await?;
-    txn.commit().await?;
+    let model = active.update(txn).await?;
+    edit.commit(state.plugins.as_ref(), write.on_config_break())
+        .await?;
 
     Ok(Json(
         test_case_response_from_model(model, &*state.blob_store).await?,
@@ -402,13 +409,14 @@ pub async fn update_test_case(
     params(
         ("id" = i32, Path, description = "Problem ID"),
         ("tc_id" = i32, Path, description = "Test case ID"),
+        TestDataWriteQuery,
     ),
     responses(
         (status = 204, description = "Test case deleted"),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Test case not found (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "Cannot delete: has judge results (CONFLICT)", body = ErrorBody),
+        (status = 409, description = "Cannot delete: has judge results (CONFLICT); or the change would leave stored configs of the problem refused by their plugins, listed in `details.issues`, which `force=true` makes anyway (CONFIG_WOULD_BREAK)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -417,14 +425,15 @@ pub async fn delete_test_case(
     auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath((problem_id, tc_id)): AppPath<(i32, i32)>,
+    AppQuery(write): AppQuery<TestDataWriteQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     auth_user.require_permission(perm::PROBLEM_EDIT)?;
 
-    let txn = state.db.begin().await?;
-    find_problem_for_update(&txn, problem_id).await?;
-    let tc = find_test_case_for_problem(&txn, problem_id, tc_id).await?;
-    delete_unjudged_test_cases(&txn, test_case::Column::Id.eq(tc.id)).await?;
-    txn.commit().await?;
+    let edit = TestDataEdit::begin(&state.db, problem_id).await?;
+    let tc = find_test_case_for_problem(edit.db(), problem_id, tc_id).await?;
+    delete_unjudged_test_cases(edit.db(), test_case::Column::Id.eq(tc.id)).await?;
+    edit.commit(state.plugins.as_ref(), write.on_config_break())
+        .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -436,7 +445,7 @@ pub async fn delete_test_case(
     operation_id = "reorderTestCases",
     summary = "Reorder test cases for a problem",
     description = "Replaces the ordering of all test cases in a problem. Requires `problem:edit` permission. The ID array must contain exactly all test cases in the problem. Positions are assigned by array index starting at 0.",
-    params(("id" = i32, Path, description = "Problem ID")),
+    params(("id" = i32, Path, description = "Problem ID"), TestDataWriteQuery),
     request_body = ReorderTestCasesRequest,
     responses(
         (status = 204, description = "Test cases reordered"),
@@ -444,6 +453,7 @@ pub async fn delete_test_case(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
+        (status = 409, description = "The change would leave stored configs of the problem refused by their plugins; `details.issues` lists them, and `force=true` makes it anyway (CONFIG_WOULD_BREAK)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -452,19 +462,20 @@ pub async fn reorder_test_cases(
     _auth: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath(problem_id): AppPath<i32>,
+    AppQuery(write): AppQuery<TestDataWriteQuery>,
     AppJson(payload): AppJson<ReorderTestCasesRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     validate_reorder_test_cases(&payload)?;
 
-    let txn = state.db.begin().await?;
-    find_problem_for_update(&txn, problem_id).await?;
+    let edit = TestDataEdit::begin(&state.db, problem_id).await?;
+    let txn = edit.db();
 
     let existing: Vec<i32> = test_case::Entity::find()
         .filter(test_case::Column::ProblemId.eq(problem_id))
         .select_only()
         .column(test_case::Column::Id)
         .into_tuple::<i32>()
-        .all(&txn)
+        .all(txn)
         .await?;
 
     let existing_set: std::collections::HashSet<i32> = existing.into_iter().collect();
@@ -487,11 +498,12 @@ pub async fn reorder_test_cases(
                     })?,
                 ),
             )
-            .exec(&txn)
+            .exec(txn)
             .await?;
     }
 
-    txn.commit().await?;
+    edit.commit(state.plugins.as_ref(), write.on_config_break())
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -502,7 +514,7 @@ pub async fn reorder_test_cases(
     operation_id = "bulkDeleteTestCases",
     summary = "Bulk-delete test cases",
     description = "Deletes multiple test cases in a single operation. Requires `problem:edit` permission. Returns 409 CONFLICT if any test case has judge results, listing the offending IDs.",
-    params(("id" = i32, Path, description = "Problem ID")),
+    params(("id" = i32, Path, description = "Problem ID"), TestDataWriteQuery),
     request_body = BulkDeleteTestCasesRequest,
     responses(
         (status = 200, description = "Test cases deleted", body = BulkDeleteTestCasesResponse),
@@ -510,7 +522,7 @@ pub async fn reorder_test_cases(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found or test case IDs not in problem (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "Some test cases have judge results (CONFLICT)", body = ErrorBody),
+        (status = 409, description = "Some test cases have judge results (CONFLICT); or the change would leave stored configs of the problem refused by their plugins, listed in `details.issues`, which `force=true` makes anyway (CONFIG_WOULD_BREAK)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -519,12 +531,13 @@ pub async fn bulk_delete_test_cases(
     auth_user: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath(problem_id): AppPath<i32>,
+    AppQuery(write): AppQuery<TestDataWriteQuery>,
     AppJson(payload): AppJson<BulkDeleteTestCasesRequest>,
 ) -> Result<Json<BulkDeleteTestCasesResponse>, AppError> {
     validate_bulk_delete_test_cases(&payload)?;
 
-    let txn = state.db.begin().await?;
-    find_problem_for_update(&txn, problem_id).await?;
+    let edit = TestDataEdit::begin(&state.db, problem_id).await?;
+    let txn = edit.db();
 
     let existing_ids: Vec<i32> = test_case::Entity::find()
         .filter(test_case::Column::ProblemId.eq(problem_id))
@@ -532,7 +545,7 @@ pub async fn bulk_delete_test_cases(
         .select_only()
         .column(test_case::Column::Id)
         .into_tuple::<i32>()
-        .all(&txn)
+        .all(txn)
         .await?;
 
     let existing_set: std::collections::HashSet<i32> = existing_ids.into_iter().collect();
@@ -549,10 +562,10 @@ pub async fn bulk_delete_test_cases(
     }
 
     let deleted =
-        delete_unjudged_test_cases(&txn, test_case::Column::Id.is_in(payload.test_case_ids))
-            .await?;
+        delete_unjudged_test_cases(txn, test_case::Column::Id.is_in(payload.test_case_ids)).await?;
 
-    txn.commit().await?;
+    edit.commit(state.plugins.as_ref(), write.on_config_break())
+        .await?;
 
     tracing::info!(
         problem_id,
@@ -593,8 +606,8 @@ async fn find_test_case_for_problem<C: ConnectionTrait>(
 /// `test_case_result.test_case_id` FK rejects the delete and the caller sees a
 /// 500 instead of an actionable conflict. The check is one `SELECT DISTINCT`
 /// over the same scope, so it costs a single extra statement however many test
-/// cases are involved. Callers hold the problem row lock (via
-/// `find_problem_for_update`) for the surrounding transaction.
+/// cases are involved. Callers hold the problem row lock (a
+/// [`TestDataEdit`]) for the surrounding transaction.
 pub(super) async fn delete_unjudged_test_cases<C: ConnectionTrait>(
     db: &C,
     scope: impl sea_query::IntoCondition,

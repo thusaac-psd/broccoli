@@ -168,6 +168,12 @@ pub struct SubmissionJudgementResponse {
     /// Set when the judgement's outcome is left out of this response, with
     /// why: the same as the submission's own.
     pub withheld: Option<broccoli_api_types::visibility::Withheld>,
+    /// For viewers who see every submission: whether the problem's stored
+    /// configs had issues (`GET /problems/{id}/config/issues`) when this
+    /// judgement was dispatched, so its score may come from a config its
+    /// plugin refuses. `null` for everyone else.
+    #[serde(default)]
+    pub config_issues: Option<bool>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]

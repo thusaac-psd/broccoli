@@ -3,6 +3,7 @@ import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useQuery } from '@tanstack/react-query';
 import { AlertTriangle } from 'lucide-react';
 
+import { ConfigIssueList } from '@/features/admin/components/ConfigIssueList';
 import { problemConfigIssuesQueryKey } from '@/features/admin/hooks/test-case-queries';
 
 /**
@@ -34,41 +35,9 @@ export function ProblemConfigIssues({ problemId }: { problemId: number }) {
         <AlertTriangle className="h-4 w-4 shrink-0" />
         {t('admin.configIssues.title')}
       </p>
-      <ul className="mt-2 space-y-2">
-        {issues.map((issue) => {
-          const contestId =
-            issue.scope === 'contest_problem'
-              ? issue.ref_id.split(':')[0]
-              : undefined;
-          return (
-            <li
-              key={`${issue.scope}/${issue.ref_id}/${issue.plugin_id}/${issue.namespace}`}
-            >
-              <span className="font-medium">
-                {contestId
-                  ? t('admin.configIssues.inContest', {
-                      config: `${issue.plugin_id}/${issue.namespace}`,
-                      contestId,
-                    })
-                  : t('admin.configIssues.onProblem', {
-                      config: `${issue.plugin_id}/${issue.namespace}`,
-                    })}
-              </span>
-              <ul className="list-disc pl-5">
-                {issue.errors.map((error) => (
-                  <li key={`${error.path}:${error.message}`}>
-                    {error.path ? (
-                      <code className="font-mono text-xs">{error.path}</code>
-                    ) : null}
-                    {error.path ? ': ' : null}
-                    {error.message}
-                  </li>
-                ))}
-              </ul>
-            </li>
-          );
-        })}
-      </ul>
+      <div className="mt-2">
+        <ConfigIssueList issues={issues} />
+      </div>
     </div>
   );
 }

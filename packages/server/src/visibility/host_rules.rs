@@ -1334,6 +1334,7 @@ mod tests {
             show_test_details: false,
             is_public,
             submission_format: None,
+            config_issues: false,
             created_at: now,
             updated_at: now,
             deleted_at: None,

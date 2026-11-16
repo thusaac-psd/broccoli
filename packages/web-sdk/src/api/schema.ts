@@ -3291,6 +3291,14 @@ export interface components {
       };
       unresolved_by_message_type: components['schemas']['MessageTypeCounts'];
     };
+    /**
+     * @description What went wrong. `code` and `details` are the contract a client reads;
+     *     `message` is an English diagnostic for logs and for people reading the
+     *     API, the same whatever `Accept-Language` says. A client shows the user its
+     *     own text for `code` (the web app's `apiError.<code>` keys) and, for a
+     *     refused config, for each `details.fields[]` entry (its `kind` and
+     *     parameters, or the plugin's translation `key`).
+     */
     ErrorBody: {
       /**
        * @description Machine-readable error code. Any POST sent with an `Idempotency-Key`
@@ -3306,8 +3314,16 @@ export interface components {
        * @example VALIDATION_ERROR
        */
       code: string;
+      /**
+       * @description What the code is about, in a shape each code documents: for example
+       *     `fields` for `VALIDATION_ERROR` on a config, `issues` for
+       *     `CONFIG_WOULD_BREAK`.
+       */
       details?: unknown;
-      /** @example Title must be 1-256 characters */
+      /**
+       * @description An English description for logs and developers; never translated.
+       * @example Title must be 1-256 characters
+       */
       message: string;
     };
     /** @description A single evaluator registration entry. */
@@ -4341,6 +4357,13 @@ export interface components {
        */
       case_changes?: number | null;
       compile_output?: string | null;
+      /**
+       * @description For viewers who see every submission: whether the problem's stored
+       *     configs had issues (`GET /problems/{id}/config/issues`) when this
+       *     judgement was dispatched, so its score may come from a config its
+       *     plugin refuses. `null` for everyone else.
+       */
+      config_issues?: boolean | null;
       /**
        * Format: date-time
        * @example 2025-10-01T14:30:00Z
@@ -11850,7 +11873,14 @@ export interface operations {
   };
   createTestCase: {
     parameters: {
-      query?: never;
+      query?: {
+        /**
+         * @description Make the change even if it leaves stored configs of the problem
+         *     refused by their plugins, which it otherwise refuses with
+         *     `CONFIG_WOULD_BREAK`; the problem's config issues then list them.
+         */
+        force?: boolean;
+      };
       header?: never;
       path: {
         /** @description Problem ID */
@@ -11909,7 +11939,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Duplicate label in problem (CONFLICT) */
+      /** @description Duplicate label in problem (CONFLICT); or the change would leave stored configs of the problem refused by their plugins, listed in `details.issues`, which `force=true` makes anyway (CONFIG_WOULD_BREAK) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11931,7 +11961,14 @@ export interface operations {
   };
   bulkDeleteTestCases: {
     parameters: {
-      query?: never;
+      query?: {
+        /**
+         * @description Make the change even if it leaves stored configs of the problem
+         *     refused by their plugins, which it otherwise refuses with
+         *     `CONFIG_WOULD_BREAK`; the problem's config issues then list them.
+         */
+        force?: boolean;
+      };
       header?: never;
       path: {
         /** @description Problem ID */
@@ -11990,7 +12027,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Some test cases have judge results (CONFLICT) */
+      /** @description Some test cases have judge results (CONFLICT); or the change would leave stored configs of the problem refused by their plugins, listed in `details.issues`, which `force=true` makes anyway (CONFIG_WOULD_BREAK) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -12003,7 +12040,14 @@ export interface operations {
   };
   reorderTestCases: {
     parameters: {
-      query?: never;
+      query?: {
+        /**
+         * @description Make the change even if it leaves stored configs of the problem
+         *     refused by their plugins, which it otherwise refuses with
+         *     `CONFIG_WOULD_BREAK`; the problem's config issues then list them.
+         */
+        force?: boolean;
+      };
       header?: never;
       path: {
         /** @description Problem ID */
@@ -12060,11 +12104,27 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
+      /** @description The change would leave stored configs of the problem refused by their plugins; `details.issues` lists them, and `force=true` makes it anyway (CONFIG_WOULD_BREAK) */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
     };
   };
   uploadTestCases: {
     parameters: {
-      query?: never;
+      query?: {
+        /**
+         * @description Make the change even if it leaves stored configs of the problem
+         *     refused by their plugins, which it otherwise refuses with
+         *     `CONFIG_WOULD_BREAK`; the problem's config issues then list them.
+         */
+        force?: boolean;
+      };
       header?: never;
       path: {
         /** @description Problem ID */
@@ -12123,7 +12183,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Duplicate label (abort), or replace would delete test cases that have judge results (CONFLICT) */
+      /** @description Duplicate label (abort), or replace would delete test cases that have judge results (CONFLICT); or the change would leave stored configs of the problem refused by their plugins, listed in `details.issues`, which `force=true` makes anyway (CONFIG_WOULD_BREAK) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -12197,7 +12257,14 @@ export interface operations {
   };
   deleteTestCase: {
     parameters: {
-      query?: never;
+      query?: {
+        /**
+         * @description Make the change even if it leaves stored configs of the problem
+         *     refused by their plugins, which it otherwise refuses with
+         *     `CONFIG_WOULD_BREAK`; the problem's config issues then list them.
+         */
+        force?: boolean;
+      };
       header?: never;
       path: {
         /** @description Problem ID */
@@ -12243,7 +12310,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Cannot delete: has judge results (CONFLICT) */
+      /** @description Cannot delete: has judge results (CONFLICT); or the change would leave stored configs of the problem refused by their plugins, listed in `details.issues`, which `force=true` makes anyway (CONFIG_WOULD_BREAK) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -12256,7 +12323,14 @@ export interface operations {
   };
   updateTestCase: {
     parameters: {
-      query?: never;
+      query?: {
+        /**
+         * @description Make the change even if it leaves stored configs of the problem
+         *     refused by their plugins, which it otherwise refuses with
+         *     `CONFIG_WOULD_BREAK`; the problem's config issues then list them.
+         */
+        force?: boolean;
+      };
       header?: never;
       path: {
         /** @description Problem ID */
@@ -12317,7 +12391,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Duplicate label in problem (CONFLICT) */
+      /** @description Duplicate label in problem (CONFLICT); or the change would leave stored configs of the problem refused by their plugins, listed in `details.issues`, which `force=true` makes anyway (CONFIG_WOULD_BREAK) */
       409: {
         headers: {
           [name: string]: unknown;

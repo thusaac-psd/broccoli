@@ -73,6 +73,11 @@ pub struct Model {
     /// stuck; the budget is `max_dispatch_retries`.
     #[sea_orm(default_value = 0)]
     pub dispatch_retries: i32,
+    /// Whether the problem's stored configs had issues
+    /// (`problem::Model::config_issues`) when this dispatch was claimed: its
+    /// score may come from a config its plugin refuses.
+    #[sea_orm(default_value = false)]
+    pub config_issues: bool,
 
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeUtc,

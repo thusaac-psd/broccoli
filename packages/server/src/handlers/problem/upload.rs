@@ -26,8 +26,9 @@ use crate::upload_limits::{
 use crate::utils::filename::{is_sample_directory, split_dir_filename};
 use crate::utils::test_case_body::{TestCaseFile, prepare_test_case_file};
 
-use super::find_problem_for_update;
 use super::test_cases::{delete_unjudged_test_cases, next_test_case_position, tc_to_list_item};
+use crate::extractors::query::AppQuery;
+use crate::services::test_data::TestDataEdit;
 
 /// What an uploaded test case does when a case with its label exists.
 #[derive(Clone, Copy)]
@@ -44,7 +45,7 @@ enum OnExistingLabel {
     operation_id = "uploadTestCases",
     summary = "Upload test cases from a ZIP file",
     description = "Bulk-creates test cases from a ZIP archive. Customizable file matching formats using `*` wildcard. A file matching both formats belongs to the more specific one (more literal characters, e.g. `*.a` over `*`); equally specific overlaps are rejected. Requires `problem:edit` permission. Files under `sample/` are marked as samples. Files are bytes: one that is not UTF-8 text, holds a NUL or is 1 MiB or more is stored as a blob, byte for byte. Decompression limits: 1 GB per file, 4 GB total. Body limit: 1 GB.",
-    params(("id" = i32, Path, description = "Problem ID")),
+    params(("id" = i32, Path, description = "Problem ID"), TestDataWriteQuery),
     request_body(content_type = "multipart/form-data", content = UploadTestCasesRequest),
     responses(
         (status = 201, description = "Test cases uploaded", body = UploadTestCasesResponse),
@@ -53,7 +54,7 @@ enum OnExistingLabel {
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "Duplicate label (abort), or replace would delete test cases that have judge results (CONFLICT)", body = ErrorBody),
+        (status = 409, description = "Duplicate label (abort), or replace would delete test cases that have judge results (CONFLICT); or the change would leave stored configs of the problem refused by their plugins, listed in `details.issues`, which `force=true` makes anyway (CONFIG_WOULD_BREAK)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -62,6 +63,7 @@ pub async fn upload_test_cases(
     _auth: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath(problem_id): AppPath<i32>,
+    AppQuery(write): AppQuery<TestDataWriteQuery>,
     BaseMultipart { data, .. }: BaseMultipart<UploadTestCasesRequest, AppError>,
 ) -> Result<impl IntoResponse, AppError> {
     if data.input_format.matches('*').count() != 1 || data.output_format.matches('*').count() != 1 {
@@ -89,14 +91,14 @@ pub async fn upload_test_cases(
     }
     let auto_scores = default_uploaded_scores(&entries);
 
-    let txn = state.db.begin().await?;
-    find_problem_for_update(&txn, problem_id).await?;
+    let edit = TestDataEdit::begin(&state.db, problem_id).await?;
+    let txn = edit.db();
 
     // What an uploaded case does when its label already exists. `Replace`
     // first deletes every existing case, so no label can collide.
     let on_existing_label = match data.strategy {
         UploadTestCasesMergeStrategy::Replace => {
-            delete_unjudged_test_cases(&txn, test_case::Column::ProblemId.eq(problem_id)).await?;
+            delete_unjudged_test_cases(txn, test_case::Column::ProblemId.eq(problem_id)).await?;
             None
         }
         UploadTestCasesMergeStrategy::Abort => Some(OnExistingLabel::Abort),
@@ -108,12 +110,12 @@ pub async fn upload_test_cases(
         let existing: std::collections::HashMap<String, test_case::Model> =
             test_case::Entity::find()
                 .filter(test_case::Column::ProblemId.eq(problem_id))
-                .all(&txn)
+                .all(txn)
                 .await?
                 .into_iter()
                 .map(|m| (m.label.clone(), m))
                 .collect();
-        (next_test_case_position(&txn, problem_id).await?, existing)
+        (next_test_case_position(txn, problem_id).await?, existing)
     } else {
         (0, Default::default())
     };
@@ -152,7 +154,7 @@ pub async fn upload_test_cases(
                     active.label = Set(entry.label);
                     active.score = Set(score);
                     active.is_sample = Set(entry.is_sample);
-                    let model = active.update(&txn).await?;
+                    let model = active.update(txn).await?;
                     affected.push(model);
                     updated_count += 1;
                     continue;
@@ -178,7 +180,7 @@ pub async fn upload_test_cases(
             created_at: Set(now),
             ..Default::default()
         };
-        let model = new_tc.insert(&txn).await?;
+        let model = new_tc.insert(txn).await?;
         affected.push(model);
         created_count += 1;
         start_pos = start_pos
@@ -186,7 +188,8 @@ pub async fn upload_test_cases(
             .ok_or_else(|| AppError::Validation("Position overflow".into()))?;
     }
 
-    txn.commit().await?;
+    edit.commit(state.plugins.as_ref(), write.on_config_break())
+        .await?;
 
     let test_cases: Vec<TestCaseListItem> = affected.into_iter().map(tc_to_list_item).collect();
 

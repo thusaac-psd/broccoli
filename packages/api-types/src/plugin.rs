@@ -303,7 +303,7 @@ impl std::fmt::Display for FieldErrorKind {
 }
 
 /// A stored config that its plugin would no longer accept.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct IncompatibleConfig {
     #[schema(example = "ioi")]
     pub plugin_id: String,

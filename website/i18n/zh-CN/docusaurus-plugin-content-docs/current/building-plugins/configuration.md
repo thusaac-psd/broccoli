@@ -109,10 +109,15 @@ pub fn validate_task_config(input: String) -> FnResult<String> {
 插件自己用 `host.config.set*` 写入的值只按 schema 检查。这些值归插件所有，宿主不会再交给它的
 校验函数。
 
-配置存储之后，它引用的测试数据也可能变化，使配置失效。
-`GET /api/v1/problems/{id}/config/issues` 对一道题目存储的每条配置（题目级别的，以及使用该题的
-每场比赛中的）重新做同样的检查，并以 `incompatible_configs` 的格式列出被拒绝的配置。题目的测试点
-对话框会显示它们。
+配置存储之后，它引用的测试数据也可能变化。因此，对一道题目测试点的每次修改（创建、编辑、删除、
+重新排序、批量删除和 ZIP 上传）在提交之前，都会对该题存储的每条配置（题目级别的，以及使用该题的每场
+比赛中的）重新做同样的检查，此时 `host.submission.query_test_cases` 返回的是修改之后的测试点。
+若修改会使某条配置出现问题，请求会以 409 `CONFIG_WOULD_BREAK` 被拒绝，`details.issues` 以
+`incompatible_configs` 的格式列出这些配置，除非请求带上 `force=true`。检查期间，插件自己的 SQL
+（`host.db.*`）读到的是已提交的数据，所以校验函数应通过 `host.submission.query_test_cases` 读取测试点。
+
+`GET /api/v1/problems/{id}/config/issues` 列出当前被拒绝的配置。题目的测试点对话框会显示它们；
+在存在问题期间分发的评测，会向管理人员标明这一点（提交评测记录上的 `config_issues`）。
 
 ## 读取配置
 

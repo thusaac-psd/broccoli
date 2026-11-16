@@ -26,6 +26,7 @@ import { useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import { invalidateProblemTestCases } from '@/features/admin/hooks/test-case-queries';
+import { useTestDataWrite } from '@/features/admin/hooks/use-test-data-write';
 
 const DEFAULT_INPUT_FORMAT = '*.in';
 const DEFAULT_OUTPUT_FORMAT = '*.out';
@@ -45,6 +46,7 @@ export function TestCaseBulkUploadDialog({
   const { t } = useTranslation();
   const errorMessage = useErrorMessage();
   const queryClient = useQueryClient();
+  const [sendTestDataWrite, configBreakDialog] = useTestDataWrite();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -110,26 +112,29 @@ export function TestCaseBulkUploadDialog({
     setLoading(true);
 
     try {
-      const result = await apiClient.POST('/problems/{id}/test-cases/upload', {
-        params: { path: { id: problemId } },
-        // File is typed as string in the OpenAPI schema (binary format),
-        // but we pass a File object and handle serialization in bodySerializer.
-        body: {
-          file: selectedFile,
-          input_format: inputFormat,
-          output_format: outputFormat,
-          strategy: strategy as 'abort' | 'skip' | 'overwrite' | 'replace',
-        },
-        bodySerializer: (body) => {
-          const formData = new FormData();
-          formData.append('file', selectedFile);
-          formData.append('input_format', body.input_format);
-          formData.append('output_format', body.output_format);
-          formData.append('strategy', body.strategy);
-          return formData;
-        },
-      });
+      const result = await sendTestDataWrite((force) =>
+        apiClient.POST('/problems/{id}/test-cases/upload', {
+          params: { path: { id: problemId }, query: { force } },
+          // File is typed as string in the OpenAPI schema (binary format),
+          // but we pass a File object and handle serialization in bodySerializer.
+          body: {
+            file: selectedFile,
+            input_format: inputFormat,
+            output_format: outputFormat,
+            strategy: strategy as 'abort' | 'skip' | 'overwrite' | 'replace',
+          },
+          bodySerializer: (body) => {
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+            formData.append('input_format', body.input_format);
+            formData.append('output_format', body.output_format);
+            formData.append('strategy', body.strategy);
+            return formData;
+          },
+        }),
+      );
 
+      if (result === null) return;
       if (result.error) throw result.error;
 
       toast.success(t('admin.testCases.bulkUpload.uploadSuccess'));
@@ -164,6 +169,7 @@ export function TestCaseBulkUploadDialog({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="max-w-md">
+        {configBreakDialog}
         <DialogHeader>
           <DialogTitle>{t('admin.testCases.bulkUpload.title')}</DialogTitle>
           <DialogDescription>

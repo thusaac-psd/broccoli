@@ -36,7 +36,7 @@ impl PluginSql {
     }
 }
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex, TryLockError};
+use std::sync::{Arc, Mutex as StdMutex, TryLockError, Weak};
 use std::time::{Duration, Instant};
 
 use extism::host_fn;
@@ -924,10 +924,40 @@ pub(super) fn execute_on_pool(
     }
 }
 
+/// The uncommitted transaction a call tree's host-built reads run in, set
+/// while the host checks a change before committing it (see
+/// [`crate::services::plugin_config::Reads`]); unset for every other call.
+#[derive(Default)]
+pub(crate) struct ReadThrough(Option<Weak<DatabaseTransaction>>);
+
+impl ReadThrough {
+    /// Call locals whose host-built reads run in `txn`.
+    pub(crate) fn locals(txn: &Arc<DatabaseTransaction>) -> Arc<plugin_core::executor::CallLocals> {
+        let locals = Arc::<plugin_core::executor::CallLocals>::default();
+        locals.with(|through: &mut ReadThrough| through.0 = Some(Arc::downgrade(txn)));
+        locals
+    }
+
+    /// The running call tree's transaction: `Ok(None)` when it reads
+    /// committed data, an error once the transaction it reads in is gone.
+    fn current() -> Result<Option<Arc<DatabaseTransaction>>, extism::Error> {
+        let Some(through) = plugin_core::executor::call_locals()
+            .and_then(|locals| locals.with(|through: &mut ReadThrough| through.0.clone()))
+        else {
+            return Ok(None);
+        };
+        through
+            .upgrade()
+            .map(Some)
+            .ok_or_else(|| extism::Error::msg("the change this call checks has ended"))
+    }
+}
+
 /// Read-side counterpart to [`execute_on_pool`]: run a read a host function
-/// built on the host function pool, json_agg-wrapped exactly like `db_query`, and
-/// return the same `HostDbResponse` JSON envelope (`{"data": [rows]}`). Used by
-/// `host.submission.query_test_cases`.
+/// built, json_agg-wrapped exactly like `db_query`, and return the same
+/// `HostDbResponse` JSON envelope (`{"data": [rows]}`). Used by
+/// `host.submission.query_test_cases`. It runs on the host function pool, or
+/// in the transaction the call tree reads through ([`ReadThrough`]).
 pub(super) fn query_on_pool(
     db: &DatabaseConnection,
     plugin_id: &str,
@@ -941,7 +971,13 @@ pub(super) fn query_on_pool(
     );
     let stmt = plugin_statement(&wrapped_sql, values);
 
-    let query_result = tokio::runtime::Handle::current().block_on(db.query_one_raw(stmt));
+    let through = ReadThrough::current()?;
+    let query_result = tokio::runtime::Handle::current().block_on(async {
+        match &through {
+            Some(txn) => txn.query_one_raw(stmt).await,
+            None => db.query_one_raw(stmt).await,
+        }
+    });
 
     match query_result {
         Ok(Some(res)) => {

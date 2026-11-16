@@ -8,12 +8,17 @@ use broccoli_server_sdk::types::{ConfigValidateInput, ConfigValidateOutput};
 use plugin_core::config_schema::{self, FieldError, FieldErrorKind};
 pub(crate) use plugin_core::manifest::ConfigScope;
 use plugin_core::manifest::{ConfigNamespace, PluginManifest};
-use plugin_core::registry::PluginRegistry;
+use plugin_core::registry::{PluginRegistry, PluginStatus};
 use plugin_core::traits::PluginManager;
+
+use std::sync::Arc;
+
+use common::db::DatabaseTransaction;
 
 use crate::entity::plugin_config;
 use crate::error::AppError;
 use crate::host_funcs::config::{extract_plugin_id, resolve_namespace, strip_namespace_prefix};
+use crate::host_funcs::sql::ReadThrough;
 use crate::models::plugin_config::{PluginConfigResponse, config_key};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,6 +200,27 @@ pub(crate) fn check_schema(
     Ok(ns.clone())
 }
 
+/// What the plugins a config check calls read through the host.
+#[derive(Clone, Copy)]
+pub(crate) enum Reads<'a> {
+    /// The committed data.
+    Committed,
+    /// The data as a change the request holds in this transaction leaves it,
+    /// before it commits. Only reads the host makes for a plugin
+    /// (`host.submission.query_test_cases`) see the change; a plugin's own
+    /// SQL reads committed data.
+    Through(&'a Arc<DatabaseTransaction>),
+}
+
+impl Reads<'_> {
+    fn call(self) -> plugin_core::executor::CallOptions {
+        match self {
+            Reads::Committed => crate::interactive_call(),
+            Reads::Through(txn) => crate::interactive_call().with_locals(ReadThrough::locals(txn)),
+        }
+    }
+}
+
 /// Checks an admin's config before it is stored: its schema
 /// ([`check_schema`]), then the namespace's `validate` function, if it
 /// declares one, for what only the plugin knows about the target. Either
@@ -206,6 +232,26 @@ pub(crate) async fn validate_config(
     namespace: &str,
     config: &serde_json::Value,
 ) -> Result<(), AppError> {
+    check_config(
+        plugins,
+        target,
+        plugin_id,
+        namespace,
+        config,
+        Reads::Committed,
+    )
+    .await
+}
+
+/// [`validate_config`], with the plugin reading as `reads` says.
+async fn check_config(
+    plugins: &dyn PluginManager,
+    target: &ConfigTarget,
+    plugin_id: &str,
+    namespace: &str,
+    config: &serde_json::Value,
+    reads: Reads<'_>,
+) -> Result<(), AppError> {
     let ns = check_schema(
         plugins.get_registry(),
         target.scope(),
@@ -213,7 +259,7 @@ pub(crate) async fn validate_config(
         namespace,
         config,
     )?;
-    let errors = plugin_verdict(plugins, target, plugin_id, namespace, &ns, config).await?;
+    let errors = plugin_verdict(plugins, target, plugin_id, namespace, &ns, config, reads).await?;
     if errors.is_empty() {
         Ok(())
     } else {
@@ -231,6 +277,7 @@ async fn plugin_verdict(
     namespace: &str,
     ns: &ConfigNamespace,
     config: &serde_json::Value,
+    reads: Reads<'_>,
 ) -> Result<Vec<FieldError>, AppError> {
     let Some(function) = &ns.validate else {
         return Ok(Vec::new());
@@ -245,7 +292,7 @@ async fn plugin_verdict(
     let input = serde_json::to_vec(&input)
         .map_err(|e| AppError::Internal(format!("config validate input: {e}")))?;
     let output = plugins
-        .call_raw(plugin_id, function, input, crate::interactive_call())
+        .call_raw(plugin_id, function, input, reads.call())
         .await
         .map_err(|e| {
             tracing::warn!(plugin_id, function, error = %e, "config validate call failed");
@@ -480,14 +527,15 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
 
 /// Every stored config of a problem, at the problem scope and, with
 /// `include_contests`, in each contest that uses it, that its namespace would
-/// refuse if an admin wrote it now: test data a config refers to may have
-/// changed since it was stored. Configs of plugins not installed here are
-/// skipped; nothing reads them.
+/// refuse if an admin wrote it now, its plugin reading as `reads` says: test
+/// data a config refers to may have changed since it was stored. Configs of
+/// plugins not loaded here are skipped; nothing reads them.
 pub(crate) async fn problem_config_issues<C: ConnectionTrait>(
     db: &C,
     plugins: &dyn PluginManager,
     problem_id: i32,
     include_contests: bool,
+    reads: Reads<'_>,
 ) -> Result<Vec<IncompatibleConfig>, AppError> {
     let mut targets = sea_orm::Condition::any().add(
         sea_orm::Condition::all()
@@ -517,16 +565,17 @@ pub(crate) async fn problem_config_issues<C: ConnectionTrait>(
         };
         let plugin_id = extract_plugin_id(&row.namespace);
         let namespace = strip_namespace_prefix(&row.namespace);
-        let installed = plugins
+        let loaded = plugins
             .get_registry()
             .read()
             .map_err(|_| AppError::Internal("plugin registry lock poisoned".into()))?
-            .contains_key(plugin_id);
-        if !installed {
+            .get(plugin_id)
+            .is_some_and(|entry| entry.status == PluginStatus::Loaded);
+        if !loaded {
             continue;
         }
         let errors =
-            match validate_config(plugins, &target, plugin_id, namespace, &row.config).await {
+            match check_config(plugins, &target, plugin_id, namespace, &row.config, reads).await {
                 Ok(()) => continue,
                 Err(AppError::InvalidConfig(errors)) => errors,
                 Err(AppError::ConfigNamespaceNotFound(_)) => vec![FieldError::new(
