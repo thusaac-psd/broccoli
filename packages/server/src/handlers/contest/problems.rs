@@ -456,14 +456,12 @@ pub async fn bulk_delete_contest_problems(
         )));
     }
 
-    // Mirror remove_contest_problem's per-association config cleanup. Every other
-    // path that destroys a contest_problem link deletes the link's
-    // per-contest-problem plugin config too: single remove_contest_problem here,
-    // delete_contest via the contest_problem_by_contest pattern, and delete_problem
-    // via contest_problem_by_problem. Bulk delete skipped it, orphaning that config
-    // - and because config is keyed by (contest_id, problem_id), re-adding the same
-    // problem to the contest would silently resurrect the stale, admin-removed
-    // config. Every id here is already validated to be in the contest above.
+    // Removing a contest_problem link deletes its per-contest-problem plugin
+    // config, as every path that destroys a link does (remove_contest_problem,
+    // delete_contest, delete_problem): config is keyed by (contest_id,
+    // problem_id), so a config left behind would come back if the problem were
+    // added to the contest again. Every id here is in the contest (checked
+    // above).
     for &problem_id in &payload.problem_ids {
         delete_config_by_target(&txn, &ConfigTarget::contest_problem(contest_id, problem_id))
             .await?;

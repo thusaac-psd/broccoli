@@ -108,24 +108,26 @@ impl Drop for CallGuard {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_closed_gate_refuses_calls_and_drains_once_running_ones_end() {
         let gate = CallGate::default();
         let running = gate.enter().expect("open gate admits");
         gate.close();
         assert!(gate.enter().is_none(), "a closed gate refuses new calls");
         assert_eq!(gate.in_flight(), 1, "a refused call does not count");
+        // The paused clock advances only once every task waits, so the drain
+        // times out exactly because the call still runs.
         assert!(
-            !gate.drain(Duration::from_millis(50)).await,
+            !gate.drain(Duration::from_secs(1)).await,
             "still draining while a call runs"
         );
-        let waiter = {
-            let gate = gate.clone();
-            tokio::spawn(async move { gate.drain(Duration::from_secs(5)).await })
-        };
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut waiter = std::pin::pin!(gate.drain(Duration::from_secs(5)));
+        assert!(
+            futures::poll!(waiter.as_mut()).is_pending(),
+            "the drain waits for the running call"
+        );
         drop(running);
-        assert!(waiter.await.unwrap(), "drained when the last call ended");
+        assert!(waiter.await, "drained when the last call ended");
     }
 
     #[test]
