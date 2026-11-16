@@ -2,6 +2,8 @@ use crate::Checker;
 use crate::error::SdkError;
 use crate::types::*;
 
+use super::outcome::{CompileOutcome, RunOutcome};
+
 /// Canonical id of the fused `check` step. This is a contract between the
 /// checker resolver (standard-checkers emits a step with this id and sets it as
 /// the stage's `result_step_id`) and the batch-evaluator interpreter (looks the
@@ -184,226 +186,87 @@ pub(crate) fn precheck_verdict(
         });
     }
 
-    if let Some(compile_result) = result.task_results.get("compile") {
-        // A clobbered box can make the compiler exit non-zero (e.g. its source
-        // file vanished mid-run) with the declared stderr redirect also missing;
-        // isolate tags that as InternalError. Check it BEFORE the exit-code
-        // branch so an infrastructure fault becomes a retryable SystemError, not
-        // a terminal CompileError that never self-heals. Mirrors the exec arm.
-        if compile_result.sandbox_result.sandbox_status == SandboxStatus::InternalError {
-            return Some(TestCaseVerdict {
-                test_case_id,
-                verdict: Verdict::SystemError,
-                score: 0.0,
-                time_used_ms: None,
-                memory_used_kb: None,
-                message: Some(
-                    opt_nonempty(&compile_result.sandbox_result.message)
-                        .unwrap_or_else(|| "Compilation sandbox reported an internal error".into()),
-                ),
-                stdout: None,
-                stderr: None,
-            });
-        }
-        if let Some(exit_code) = compile_result.sandbox_result.exit_code {
-            if exit_code != 0 {
-                // A genuine compile error always carries the compiler's
-                // diagnostics -- gcc, g++, javac and py_compile all report the
-                // source problem on stderr (a few tools use stdout). A non-zero
-                // exit is an infrastructure fault, NOT a diagnosable source error,
-                // in two shapes, both of which must become a retryable SystemError
-                // rather than a terminal CompileError that pins a permanent wrong
-                // verdict on valid code under load:
-                //   (a) NO output on either stream -- the compiler died before it
-                //       could say anything;
-                //   (b) output that is the signature of the toolchain failing to
-                //       run at all (JVM thread-init EAGAIN, cc1 fork failure,
-                //       native OOM) rather than a source diagnostic -- observed:
-                //       a Java compile that cannot spawn its VM threads under
-                //       transient per-uid RLIMIT_NPROC pressure prints an
-                //       "unable to create native thread" / "Error occurred during
-                //       initialization of VM" block and exits 1. See
-                //       `compile_output_is_infra_fault`.
-                // The InternalError guard above covers the clobbered-box case
-                // (missing redirect files); this covers the completed non-zero
-                // exit. (Compare the exec arm, which by contrast treats empty
-                // present output as a legitimate WrongAnswer -- a program may print
-                // nothing, but a compiler that actually ran never stays silent
-                // about why it rejected source.)
-                let diagnostics = opt_nonempty(&compile_result.sandbox_result.stderr)
-                    .or_else(|| opt_nonempty(&compile_result.sandbox_result.stdout));
-                let Some(diagnostics) = diagnostics else {
-                    return Some(TestCaseVerdict {
-                        test_case_id,
-                        verdict: Verdict::SystemError,
-                        score: 0.0,
-                        time_used_ms: None,
-                        memory_used_kb: None,
-                        message: Some(format!(
-                            "Compilation exited with status {exit_code} but produced no diagnostics (transient infrastructure fault)"
-                        )),
-                        stdout: None,
-                        stderr: None,
-                    });
-                };
-                if compile_output_is_infra_fault(&diagnostics) {
-                    return Some(TestCaseVerdict {
-                        test_case_id,
-                        verdict: Verdict::SystemError,
-                        score: 0.0,
-                        time_used_ms: None,
-                        memory_used_kb: None,
-                        message: truncate_stderr(
-                            &diagnostics,
-                            "Compilation could not run (transient infrastructure fault)",
-                        ),
-                        stdout: None,
-                        stderr: None,
-                    });
-                }
+    if let Some(compile) = result.task_results.get("compile") {
+        match CompileOutcome::of(compile) {
+            CompileOutcome::Compiled => {}
+            CompileOutcome::Rejected { diagnostics } => {
                 return Some(TestCaseVerdict {
-                    test_case_id,
-                    verdict: Verdict::CompileError,
-                    score: 0.0,
-                    time_used_ms: None,
-                    memory_used_kb: None,
                     message: truncate_stderr(&diagnostics, "Compilation failed"),
-                    stdout: None,
-                    stderr: None,
+                    ..without_run(test_case_id, Verdict::CompileError)
                 });
             }
-        } else if !compile_result.success {
-            return Some(TestCaseVerdict {
-                test_case_id,
-                verdict: Verdict::SystemError,
-                score: 0.0,
-                time_used_ms: None,
-                memory_used_kb: None,
-                message: truncate_stderr(
-                    &compile_result.sandbox_result.stderr,
-                    "Compilation step failed (sandbox error)",
-                ),
-                stdout: None,
-                stderr: None,
-            });
+            CompileOutcome::Fault { reason } => {
+                return Some(TestCaseVerdict {
+                    message: truncate_stderr(&reason, "Compilation failed"),
+                    ..without_run(test_case_id, Verdict::SystemError)
+                });
+            }
         }
     }
 
-    if let Some(exec_result) = result.task_results.get("exec") {
-        let sandbox = &exec_result.sandbox_result;
-        let exec_stdout = opt_nonempty(&sandbox.stdout);
-        let exec_stderr = opt_nonempty(&sandbox.stderr);
-
-        if !exec_result.success && sandbox.status.is_empty() {
-            return Some(TestCaseVerdict {
-                test_case_id,
-                verdict: Verdict::SystemError,
-                score: 0.0,
-                time_used_ms: None,
-                memory_used_kb: None,
-                message: Some("Execution step was skipped".into()),
-                stdout: None,
-                stderr: None,
-            });
-        }
-
-        if sandbox.cg_oom_killed {
-            return Some(TestCaseVerdict {
-                test_case_id,
-                verdict: Verdict::MemoryLimitExceeded,
-                score: 0.0,
-                time_used_ms: extract_time_used(result),
-                memory_used_kb: extract_memory_used(result),
-                message: Some(format!(
-                    "Memory limit exceeded ({}KB)",
-                    sandbox.memory_used.unwrap_or(0)
-                )),
-                stdout: exec_stdout,
-                stderr: exec_stderr,
-            });
-        }
-
-        // Classify the sandbox termination once, via the normalized status.
-        match sandbox.sandbox_status {
-            SandboxStatus::TimedOut => {
-                let time_ms = extract_time_used(result);
-                return Some(TestCaseVerdict {
-                    test_case_id,
-                    verdict: Verdict::TimeLimitExceeded,
-                    score: 0.0,
-                    time_used_ms: time_ms,
-                    memory_used_kb: extract_memory_used(result),
-                    message: Some(format!(
-                        "Time limit exceeded ({}ms)",
-                        time_ms.map_or("?".into(), |t| t.to_string())
-                    )),
-                    stdout: exec_stdout,
-                    stderr: exec_stderr,
-                });
-            }
-            SandboxStatus::Signaled => {
-                return Some(TestCaseVerdict {
-                    test_case_id,
-                    verdict: Verdict::RuntimeError,
-                    score: 0.0,
-                    time_used_ms: extract_time_used(result),
-                    memory_used_kb: extract_memory_used(result),
-                    message: Some(sandbox.message.clone()),
-                    stdout: exec_stdout,
-                    stderr: exec_stderr,
-                });
-            }
-            SandboxStatus::NonZeroExit => {
-                return Some(TestCaseVerdict {
-                    test_case_id,
-                    verdict: Verdict::RuntimeError,
-                    score: 0.0,
-                    time_used_ms: extract_time_used(result),
-                    memory_used_kb: extract_memory_used(result),
-                    message: Some(format!("Exit code: {}", sandbox.exit_code.unwrap_or(-1))),
-                    stdout: exec_stdout,
-                    stderr: exec_stderr,
-                });
-            }
-            SandboxStatus::InternalError => {
-                // The sandbox itself failed (isolate `XX`, or a redirect file that
-                // vanished after a clean exit under concurrent load). This is a
-                // system condition, never the contestant's code, so surface it as
-                // a retryable SystemError instead of scoring the (lost) output as
-                // a terminal WrongAnswer/TLE that never self-heals.
-                return Some(TestCaseVerdict {
-                    test_case_id,
-                    verdict: Verdict::SystemError,
-                    score: 0.0,
-                    time_used_ms: extract_time_used(result),
-                    memory_used_kb: extract_memory_used(result),
-                    message: Some(
-                        opt_nonempty(&sandbox.message).unwrap_or_else(|| {
-                            "Execution sandbox reported an internal error".into()
-                        }),
-                    ),
-                    stdout: exec_stdout,
-                    stderr: exec_stderr,
-                });
-            }
-            SandboxStatus::Ok | SandboxStatus::Unknown => {}
-        }
-    }
-
-    // A clean exec result is required to consult the checker; its absence is a
-    // system error.
-    match result.task_results.get("exec") {
-        Some(_) => None,
-        None => Some(TestCaseVerdict {
-            test_case_id,
-            verdict: Verdict::SystemError,
-            score: 0.0,
-            time_used_ms: None,
-            memory_used_kb: None,
+    let Some(exec) = result.task_results.get("exec") else {
+        return Some(TestCaseVerdict {
             message: Some("No exec result found".into()),
-            stdout: None,
-            stderr: None,
-        }),
+            ..without_run(test_case_id, Verdict::SystemError)
+        });
+    };
+    let sandbox = &exec.sandbox_result;
+    let (verdict, message) = match RunOutcome::of(exec) {
+        RunOutcome::Exited => return None,
+        RunOutcome::NotRun => {
+            return Some(TestCaseVerdict {
+                message: Some("Execution step was skipped".into()),
+                ..without_run(test_case_id, Verdict::SystemError)
+            });
+        }
+        // The sandbox failed (isolate `XX`, or a redirect file that vanished
+        // after a clean exit under load): what the program printed is lost,
+        // and that is never the contestant's fault.
+        RunOutcome::SandboxFault => (
+            Verdict::SystemError,
+            opt_nonempty(&sandbox.message)
+                .unwrap_or_else(|| "Execution sandbox reported an internal error".into()),
+        ),
+        RunOutcome::MemoryLimitExceeded => (
+            Verdict::MemoryLimitExceeded,
+            format!(
+                "Memory limit exceeded ({}KB)",
+                sandbox.memory_used.unwrap_or(0)
+            ),
+        ),
+        RunOutcome::TimedOut => (
+            Verdict::TimeLimitExceeded,
+            format!(
+                "Time limit exceeded ({}ms)",
+                extract_time_used(result).map_or("?".into(), |t| t.to_string())
+            ),
+        ),
+        RunOutcome::Signaled(_) => (Verdict::RuntimeError, sandbox.message.clone()),
+        RunOutcome::NonZeroExit(code) => (Verdict::RuntimeError, format!("Exit code: {code}")),
+    };
+    Some(TestCaseVerdict {
+        test_case_id,
+        verdict,
+        score: 0.0,
+        time_used_ms: extract_time_used(result),
+        memory_used_kb: extract_memory_used(result),
+        message: Some(message),
+        stdout: opt_nonempty(&sandbox.stdout),
+        stderr: opt_nonempty(&sandbox.stderr),
+    })
+}
+
+/// A verdict for a case whose program never ran.
+fn without_run(test_case_id: i32, verdict: Verdict) -> TestCaseVerdict {
+    TestCaseVerdict {
+        test_case_id,
+        verdict,
+        score: 0.0,
+        time_used_ms: None,
+        memory_used_kb: None,
+        message: None,
+        stdout: None,
+        stderr: None,
     }
 }
 
@@ -431,59 +294,6 @@ fn opt_nonempty(s: &str) -> Option<String> {
     } else {
         Some(s.to_string())
     }
-}
-
-/// Whether a **failed compile step's** captured output is the signature of an
-/// infrastructure fault rather than a genuine, diagnosable source error.
-///
-/// A real source rejection from any supported compiler (gcc/g++/javac/py_compile)
-/// names the offending construct: `error: expected ';'`, a `SyntaxError`
-/// traceback, and so on. It never reports that the toolchain itself could not
-/// start. When a compile step fails under host pressure the driver instead emits
-/// an OS/runtime fault. Observed under a Java burst: the `javac` JVM cannot spawn
-/// its helper threads and prints
-///
-/// ```text
-/// [0.028s][warning][os,thread] Failed to start thread "Unknown thread" -
-///     pthread_create failed (EAGAIN) for attributes: stacksize: 1024k ...
-/// Error occurred during initialization of VM
-/// java.lang.OutOfMemoryError: unable to create native thread: possibly out of
-///     memory or process/resource limits reached
-/// ```
-///
-/// then exits non-zero -- indistinguishable from a source `CompileError` by exit
-/// code alone, but it is transient infrastructure (per-uid `RLIMIT_NPROC` /
-/// thread exhaustion), not the contestant's fault. The C/C++ drivers show the
-/// same class of fault when they cannot fork their backend (`cannot execute
-/// 'cc1'`, `Resource temporarily unavailable`, `Cannot allocate memory`).
-///
-/// Classifying these as a terminal `CompileError` pins a permanent wrong verdict
-/// on valid code; classifying them as a retryable `SystemError` lets the server's
-/// SystemError-retry reaper requeue the judgement so it self-heals once pressure
-/// clears. Every marker below only appears when the *compiler process itself*
-/// failed to run -- none is producible by a compiler diagnosing submitted source
-/// -- so this is safe against demoting a real `CompileError` to infra on the
-/// compile path. Match is case-insensitive.
-pub fn compile_output_is_infra_fault(output: &str) -> bool {
-    const MARKERS: &[&str] = &[
-        // A JVM (javac is itself a Java program) that cannot create its native
-        // threads or otherwise initialize under thread/memory pressure.
-        "unable to create native thread",
-        "failed to start thread",
-        "failed to start the native thread",
-        "pthread_create failed",
-        "error occurred during initialization of vm",
-        "cannot create gc thread",
-        "insufficient memory for the java runtime environment",
-        // Native allocation / fork-exec failures shared by the C/C++ drivers and
-        // the interpreters (strerror(ENOMEM)/strerror(EAGAIN) text, driver fork).
-        "cannot allocate memory",
-        "resource temporarily unavailable",
-        "cannot fork",
-        "out of system resources",
-    ];
-    let haystack = output.to_ascii_lowercase();
-    MARKERS.iter().any(|marker| haystack.contains(marker))
 }
 
 fn truncate_stderr(stderr: &str, fallback: &str) -> Option<String> {
@@ -689,24 +499,6 @@ mod tests {
         );
         let v = precheck_verdict(1, &op(vec![("compile", compile)])).unwrap();
         assert_eq!(v.verdict, Verdict::SystemError);
-    }
-
-    #[test]
-    fn compile_output_infra_signature_does_not_match_real_diagnostics() {
-        // Guard the reverse direction: a genuine source diagnostic must NOT trip
-        // the infra signature, or real compile errors would loop forever.
-        assert!(!compile_output_is_infra_fault(
-            "error: expected ';' before '}' token"
-        ));
-        assert!(!compile_output_is_infra_fault(
-            "Main.java:3: error: cannot find symbol\n  System.out.printn(x);"
-        ));
-        assert!(!compile_output_is_infra_fault(
-            "  File \"sol.py\", line 2\n    print(\nSyntaxError: unexpected EOF while parsing"
-        ));
-        assert!(compile_output_is_infra_fault(
-            "Error occurred during initialization of VM"
-        ));
     }
 
     #[test]

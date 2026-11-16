@@ -1,5 +1,5 @@
-use broccoli_server_sdk::evaluator::compile_output_is_infra_fault;
-use broccoli_server_sdk::types::{OperationResult, SandboxStatus, TestCaseVerdict, Verdict};
+use broccoli_server_sdk::evaluator::{CompileOutcome, RunOutcome};
+use broccoli_server_sdk::types::{OperationResult, TestCaseVerdict, Verdict};
 
 /// POSIX signal number for SIGPIPE. A contestant terminated by SIGPIPE wrote to
 /// a pipe whose reader (the interactor/manager) had already closed it - i.e. the
@@ -12,7 +12,6 @@ pub fn interpret_result(
     test_case_id: i32,
     result: &OperationResult,
     num_processes: usize,
-    req_memory_limit_kb: u32,
 ) -> TestCaseVerdict {
     if result.is_cancelled_by_host() {
         return TestCaseVerdict {
@@ -60,231 +59,99 @@ pub fn interpret_result(
     }
 
     for i in 0..num_processes {
-        let step_id = format!("compile_contestant_{i}");
-        if let Some(compile_c) = result.task_results.get(&step_id)
-            && !compile_c.success
-        {
-            // Classify a failed contestant compile with the SAME precedence as
-            // broccoli_server_sdk::evaluator precheck_verdict's compile arm, so
-            // interactive and batch problems agree on infra-vs-source faults:
-            //   (1) an isolate-tagged internal error (clobbered box, vanished
-            //       redirect file) -> SystemError,
-            //   (2) a non-zero exit WITH diagnostics -> genuine, terminal
-            //       CompileError (gcc/g++/javac/py_compile always say why they
-            //       reject source),
-            //   (3) a non-zero exit with NO diagnostics on either stream -> a
-            //       transient EAGAIN during JVM thread-init under per-uid
-            //       RLIMIT_NPROC pressure makes javac exit non-zero writing
-            //       nothing; infra, not source -> retryable SystemError,
-            //   (4) a compile aborted before it could exit (signal / timeout /
-            //       OOM, exit_code None) -> SystemError.
-            // Only (2) is terminal; the rest self-heal via the server's
-            // SystemError-retry reaper instead of pinning a permanent wrong
-            // CompileError on valid code under burst.
-            let sandbox = &compile_c.sandbox_result;
-            if sandbox.sandbox_status == SandboxStatus::InternalError {
-                return TestCaseVerdict {
+        let Some(compile) = result.task_results.get(&format!("compile_contestant_{i}")) else {
+            continue;
+        };
+        match CompileOutcome::of(compile) {
+            CompileOutcome::Compiled => {}
+            CompileOutcome::Rejected { diagnostics } => {
+                return without_run(
                     test_case_id,
-                    verdict: Verdict::SystemError,
-                    score: 0.0,
-                    time_used_ms: None,
-                    memory_used_kb: None,
-                    message: Some(opt_nonempty(&sandbox.message).unwrap_or_else(|| {
-                        format!("Contestant {i} compilation sandbox reported an internal error")
-                    })),
-                    stdout: None,
-                    stderr: None,
-                };
+                    Verdict::CompileError,
+                    truncate(&diagnostics, "Compilation failed"),
+                );
             }
-            match sandbox.exit_code {
-                // Compiled cleanly despite the success flag; keep checking.
-                Some(0) => {}
-                Some(_) => {
-                    return match opt_nonempty(&sandbox.stderr)
-                        .or_else(|| opt_nonempty(&sandbox.stdout))
-                    {
-                        // Output that is the signature of the toolchain failing
-                        // to run (JVM thread-init EAGAIN, cc1 fork failure,
-                        // native OOM) is infra, not a source diagnostic -> the
-                        // same retryable SystemError as the no-output case.
-                        // Single-sourced with server-sdk so the two classifiers
-                        // cannot drift on which strings count as infra.
-                        Some(diagnostics) if compile_output_is_infra_fault(&diagnostics) => {
-                            TestCaseVerdict {
-                                test_case_id,
-                                verdict: Verdict::SystemError,
-                                score: 0.0,
-                                time_used_ms: None,
-                                memory_used_kb: None,
-                                message: Some(truncate(
-                                    &diagnostics,
-                                    "Contestant compilation could not run (transient infrastructure fault)",
-                                )),
-                                stdout: None,
-                                stderr: None,
-                            }
-                        }
-                        Some(diagnostics) => TestCaseVerdict {
-                            test_case_id,
-                            verdict: Verdict::CompileError,
-                            score: 0.0,
-                            time_used_ms: None,
-                            memory_used_kb: None,
-                            message: Some(truncate(&diagnostics, "Compilation failed")),
-                            stdout: None,
-                            stderr: None,
-                        },
-                        None => TestCaseVerdict {
-                            test_case_id,
-                            verdict: Verdict::SystemError,
-                            score: 0.0,
-                            time_used_ms: None,
-                            memory_used_kb: None,
-                            message: Some(format!(
-                                "Contestant {i} compilation failed with no diagnostics (transient infrastructure fault)"
-                            )),
-                            stdout: None,
-                            stderr: None,
-                        },
-                    };
-                }
-                None => {
-                    return TestCaseVerdict {
-                        test_case_id,
-                        verdict: Verdict::SystemError,
-                        score: 0.0,
-                        time_used_ms: None,
-                        memory_used_kb: None,
-                        message: Some(truncate(
-                            &sandbox.stderr,
-                            "Compilation step failed (sandbox error)",
-                        )),
-                        stdout: None,
-                        stderr: None,
-                    };
-                }
+            CompileOutcome::Fault { reason } => {
+                return without_run(
+                    test_case_id,
+                    Verdict::SystemError,
+                    format!(
+                        "Contestant {i}: {}",
+                        truncate(&reason, "compilation failed")
+                    ),
+                );
             }
-        }
-    }
-
-    for i in 0..num_processes {
-        let step_id = format!("run_contestant_{i}");
-        if !result.task_results.contains_key(&step_id) {
-            return TestCaseVerdict {
-                test_case_id,
-                verdict: Verdict::SystemError,
-                score: 0.0,
-                time_used_ms: None,
-                memory_used_kb: None,
-                message: Some(format!(
-                    "Missing expected step '{step_id}' in operation result"
-                )),
-                stdout: None,
-                stderr: None,
-            };
         }
     }
 
     let mut total_time_s: f64 = 0.0;
     let mut max_memory_kb: Option<u32> = None;
-
+    let mut runs = Vec::with_capacity(num_processes);
     for i in 0..num_processes {
         let step_id = format!("run_contestant_{i}");
-        if let Some(run_c) = result.task_results.get(&step_id) {
-            let sandbox = &run_c.sandbox_result;
-
-            total_time_s += sandbox.time_used;
-            if let Some(mem) = sandbox.memory_used {
-                max_memory_kb = Some(max_memory_kb.map_or(mem, |m: u32| m.max(mem)));
-            }
-
-            if !run_c.success || sandbox.exit_code != Some(0) {
-                let mem_exceeded = sandbox
-                    .memory_used
-                    .is_some_and(|m| req_memory_limit_kb > 0 && m >= req_memory_limit_kb);
-                if sandbox.cg_oom_killed || (sandbox.killed && mem_exceeded) {
-                    return TestCaseVerdict {
-                        test_case_id,
-                        verdict: Verdict::MemoryLimitExceeded,
-                        score: 0.0,
-                        time_used_ms: time_to_ms(total_time_s),
-                        memory_used_kb: max_memory_kb.map(|m| m as i64),
-                        message: Some(format!(
-                            "Memory limit exceeded (contestant {i}, {}KB)",
-                            sandbox.memory_used.unwrap_or(0)
-                        )),
-                        stdout: None,
-                        stderr: opt_nonempty(&sandbox.stderr),
-                    };
-                }
-
-                match sandbox.status.as_str() {
-                    "TO" => {
-                        return TestCaseVerdict {
-                            test_case_id,
-                            verdict: Verdict::TimeLimitExceeded,
-                            score: 0.0,
-                            time_used_ms: time_to_ms(total_time_s),
-                            memory_used_kb: max_memory_kb.map(|m| m as i64),
-                            message: Some(format!("Time limit exceeded (contestant {i})")),
-                            stdout: None,
-                            stderr: opt_nonempty(&sandbox.stderr),
-                        };
-                    }
-                    "SG" => {
-                        // SIGPIPE (13) means the contestant wrote after the interactor had
-                        // already closed its end of the pipe - i.e. the interactor finished the
-                        // interaction (it decided the verdict, then exited and closed the FIFO)
-                        // and is the authority. Do NOT penalize the solution for that incidental
-                        // signal; fall through to the manager's verdict below. Any other signal
-                        // (SIGSEGV, SIGABRT, ...) is a genuine crash -> RuntimeError.
-                        if sandbox.signal != Some(SIGPIPE) {
-                            return TestCaseVerdict {
-                                test_case_id,
-                                verdict: Verdict::RuntimeError,
-                                score: 0.0,
-                                time_used_ms: time_to_ms(total_time_s),
-                                memory_used_kb: max_memory_kb.map(|m| m as i64),
-                                message: Some(format!(
-                                    "Signal received (contestant {i}): {}",
-                                    sandbox.message
-                                )),
-                                stdout: None,
-                                stderr: opt_nonempty(&sandbox.stderr),
-                            };
-                        }
-                        // SIGPIPE: interactor closed the pipe; defer to the manager's verdict.
-                    }
-                    _ => {
-                        // RE or unknown failure
-                        return TestCaseVerdict {
-                            test_case_id,
-                            verdict: Verdict::RuntimeError,
-                            score: 0.0,
-                            time_used_ms: time_to_ms(total_time_s),
-                            memory_used_kb: max_memory_kb.map(|m| m as i64),
-                            message: Some(format!(
-                                "Runtime error (contestant {i}, exit code: {})",
-                                sandbox.exit_code.unwrap_or(-1)
-                            )),
-                            stdout: None,
-                            stderr: opt_nonempty(&sandbox.stderr),
-                        };
-                    }
-                }
-            }
-        } else {
-            return TestCaseVerdict {
+        let Some(run) = result.task_results.get(&step_id) else {
+            return without_run(
                 test_case_id,
-                verdict: Verdict::SystemError,
-                score: 0.0,
-                time_used_ms: None,
-                memory_used_kb: None,
-                message: Some(format!("Contestant {i} run step was skipped")),
-                stdout: None,
-                stderr: None,
-            };
+                Verdict::SystemError,
+                format!("Missing expected step '{step_id}' in operation result"),
+            );
+        };
+        total_time_s += run.sandbox_result.time_used;
+        if let Some(mem) = run.sandbox_result.memory_used {
+            max_memory_kb = Some(max_memory_kb.map_or(mem, |m: u32| m.max(mem)));
         }
+        runs.push(run);
+    }
+
+    for (i, run) in runs.into_iter().enumerate() {
+        let sandbox = &run.sandbox_result;
+        let (verdict, message) = match RunOutcome::of(run) {
+            RunOutcome::Exited => continue,
+            // SIGPIPE means the contestant wrote after the interactor closed
+            // its end: the interactor finished the interaction and decided
+            // the verdict, so it is the authority, not the incidental signal.
+            RunOutcome::Signaled(Some(SIGPIPE)) => continue,
+            RunOutcome::NotRun => (
+                Verdict::SystemError,
+                format!("Contestant {i} run step was skipped"),
+            ),
+            RunOutcome::SandboxFault => (
+                Verdict::SystemError,
+                format!(
+                    "Contestant {i}: {}",
+                    truncate(&sandbox.message, "the sandbox reported an internal error")
+                ),
+            ),
+            RunOutcome::MemoryLimitExceeded => (
+                Verdict::MemoryLimitExceeded,
+                format!(
+                    "Memory limit exceeded (contestant {i}, {}KB)",
+                    sandbox.memory_used.unwrap_or(0)
+                ),
+            ),
+            RunOutcome::TimedOut => (
+                Verdict::TimeLimitExceeded,
+                format!("Time limit exceeded (contestant {i})"),
+            ),
+            RunOutcome::Signaled(_) => (
+                Verdict::RuntimeError,
+                format!("Signal received (contestant {i}): {}", sandbox.message),
+            ),
+            RunOutcome::NonZeroExit(code) => (
+                Verdict::RuntimeError,
+                format!("Runtime error (contestant {i}, exit code: {code})"),
+            ),
+        };
+        return TestCaseVerdict {
+            test_case_id,
+            verdict,
+            score: 0.0,
+            time_used_ms: time_to_ms(total_time_s),
+            memory_used_kb: max_memory_kb.map(|m| m as i64),
+            message: Some(message),
+            stdout: None,
+            stderr: opt_nonempty(&sandbox.stderr),
+        };
     }
 
     let run_mgr = match result.task_results.get("run_manager") {
@@ -366,6 +233,20 @@ pub fn interpret_result(
     }
 }
 
+/// A verdict for a case whose contestants never ran.
+fn without_run(test_case_id: i32, verdict: Verdict, message: String) -> TestCaseVerdict {
+    TestCaseVerdict {
+        test_case_id,
+        verdict,
+        score: 0.0,
+        time_used_ms: None,
+        memory_used_kb: None,
+        message: Some(message),
+        stdout: None,
+        stderr: None,
+    }
+}
+
 fn time_to_ms(secs: f64) -> Option<i64> {
     if secs >= 0.0 && secs.is_finite() && secs < (i64::MAX as f64 / 1000.0) {
         Some((secs * 1000.0) as i64)
@@ -398,7 +279,7 @@ fn truncate(s: &str, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use broccoli_server_sdk::types::{ExecutionResult, TaskExecutionResult};
+    use broccoli_server_sdk::types::{ExecutionResult, SandboxStatus, TaskExecutionResult};
     use std::collections::HashMap;
 
     const MEM_LIMIT: u32 = 262_144; // 256 MB
@@ -466,7 +347,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::Accepted);
         assert_eq!(verdict.score, 1.0);
         assert_eq!(verdict.message, Some("Correct".into()));
@@ -483,7 +364,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::WrongAnswer);
         assert_eq!(verdict.score, 0.75);
     }
@@ -499,7 +380,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::WrongAnswer);
         assert_eq!(verdict.score, 0.0);
     }
@@ -521,15 +402,15 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::TimeLimitExceeded);
     }
 
     #[test]
-    fn contestant_mle_via_memory_exceeded_without_oom_kill() {
-        // Killed + memory >= limit but cg_oom_killed is false
+    fn contestant_killed_by_the_oom_killer_exceeded_memory() {
         let mut mle_sandbox = ok_sandbox(0, 0.5, MEM_LIMIT);
         mle_sandbox.killed = true;
+        mle_sandbox.cg_oom_killed = true;
         mle_sandbox.exit_code = None;
         mle_sandbox.status = "SG".to_string();
         mle_sandbox.sandbox_status = SandboxStatus::Signaled;
@@ -543,8 +424,33 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::MemoryLimitExceeded);
+    }
+
+    /// A worker that lost a contestant's run (isolate `XX`, a step it could
+    /// not collect) says nothing about the solution: judged again, never a
+    /// runtime error.
+    #[test]
+    fn contestant_sandbox_internal_error_is_system_error() {
+        let lost = ExecutionResult {
+            exit_code: Some(1),
+            status: "XX".to_string(),
+            sandbox_status: SandboxStatus::InternalError,
+            message: "box clobbered".to_string(),
+            ..Default::default()
+        };
+        let result = OperationResult {
+            success: false,
+            task_results: HashMap::from([
+                task_result("run_manager", true, mgr_result("1.0", "")),
+                task_result("run_contestant_0", false, lost),
+            ]),
+            error: None,
+        };
+
+        let verdict = interpret_result(42, &result, 1);
+        assert_eq!(verdict.verdict, Verdict::SystemError);
     }
 
     #[test]
@@ -558,7 +464,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::RuntimeError);
     }
 
@@ -588,7 +494,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::Accepted);
         assert_eq!(verdict.score, 1.0);
     }
@@ -606,7 +512,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::WrongAnswer);
     }
 
@@ -623,7 +529,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::RuntimeError);
     }
 
@@ -641,7 +547,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::CompileError);
         assert!(verdict.message.unwrap().contains("expected ';'"));
     }
@@ -650,9 +556,8 @@ mod tests {
     fn contestant_compile_nonzero_without_diagnostics_is_system_error() {
         // A contestant Java compile that fails to spawn its VM threads under
         // transient per-uid RLIMIT_NPROC pressure exits non-zero writing nothing.
-        // A real compile error always carries diagnostics, so silence => retryable
-        // infra fault, not a terminal CompileError pinned on valid code under
-        // burst. Mirrors broccoli_server_sdk precheck_verdict's compile arm.
+        // A real compile error always carries diagnostics, so silence is the
+        // platform's fault and judged again.
         let mut silent = ok_sandbox(1, 1.0, 8192);
         silent.stderr = String::new();
         silent.stdout = String::new();
@@ -666,7 +571,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::SystemError);
     }
 
@@ -686,16 +591,15 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::CompileError);
         assert!(verdict.message.unwrap().contains("cannot find symbol"));
     }
 
     #[test]
     fn contestant_compile_jvm_thread_eagain_is_system_error() {
-        // A contestant Java compile that exits non-zero WITH a VM-init/thread
-        // EAGAIN block (not a source diagnostic) is infra -> SystemError, matching
-        // server-sdk via the shared compile_output_is_infra_fault signature.
+        // A Java compile that cannot start its VM threads says so instead of
+        // diagnosing the source: the platform's fault.
         let mut infra = ok_sandbox(1, 1.0, 8192);
         infra.stderr = "Failed to start thread \"Unknown thread\" - pthread_create failed \
                         (EAGAIN)\nError occurred during initialization of VM\n\
@@ -711,7 +615,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::SystemError);
     }
 
@@ -737,7 +641,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::SystemError);
     }
 
@@ -760,7 +664,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::SystemError);
     }
 
@@ -775,7 +679,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::SystemError);
     }
 
@@ -795,7 +699,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::SystemError);
     }
 
@@ -810,7 +714,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::SystemError);
         assert!(verdict.message.unwrap().contains("not a valid score"));
     }
@@ -826,7 +730,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::SystemError);
         assert!(verdict.message.unwrap().contains("not a valid score"));
     }
@@ -842,7 +746,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::SystemError);
     }
 
@@ -858,7 +762,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 2, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 2);
         assert_eq!(verdict.verdict, Verdict::Accepted);
         // Time = sum: 0.3 + 0.7 = 1.0s = 1000ms
         assert_eq!(verdict.time_used_ms, Some(1000));
@@ -877,7 +781,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::Accepted);
         assert_eq!(verdict.score, 1.0);
     }
@@ -893,7 +797,7 @@ mod tests {
             error: None,
         };
 
-        let verdict = interpret_result(42, &result, 1, MEM_LIMIT);
+        let verdict = interpret_result(42, &result, 1);
         assert_eq!(verdict.verdict, Verdict::WrongAnswer);
         assert_eq!(verdict.score, 0.0);
     }

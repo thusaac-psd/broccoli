@@ -133,13 +133,7 @@ pub fn evaluate_communication(input: String) -> FnResult<String> {
     }
     let result = results.remove(0);
 
-    let memory_limit_kb = u32::try_from(req.memory_limit_kb).unwrap_or(u32::MAX);
-    let verdict = interpret::interpret_result(
-        tc_id,
-        &result,
-        comm_config.num_processes as usize,
-        memory_limit_kb,
-    );
+    let verdict = interpret::interpret_result(tc_id, &result, comm_config.num_processes as usize);
 
     Ok(serde_json::to_string(&verdict)?)
 }
