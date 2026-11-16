@@ -5,8 +5,8 @@ import type {
   Submission,
   SubmissionSummary,
 } from '@broccoli/web-sdk/submission';
-import { Badge, Button } from '@broccoli/web-sdk/ui';
-import { formatKibibytes } from '@broccoli/web-sdk/utils';
+import { Badge, Button, QueryView } from '@broccoli/web-sdk/ui';
+import { formatKibibytes, getUserDisplayName } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
 import {
   Check,
@@ -58,7 +58,7 @@ const FULL_COLUMNS: SubmissionsTableColumn[] = [
   { key: 'submitted', align: 'right' },
 ];
 
-const ADMIN_COLUMNS: SubmissionsTableColumn[] = [
+const PEER_COLUMNS: SubmissionsTableColumn[] = [
   { key: 'problem', align: 'left' },
   { key: 'user', align: 'left' },
   { key: 'verdict', align: 'left' },
@@ -251,8 +251,8 @@ SubmissionsTable.fullColumns = FULL_COLUMNS;
 /** Columns for compact/panel view (no problem title). */
 SubmissionsTable.compactColumns = DEFAULT_COLUMNS;
 
-/** Columns for admin views (adds username next to problem). */
-SubmissionsTable.adminColumns = ADMIN_COLUMNS;
+/** The full columns and the submitter, for a list of several people's rows. */
+SubmissionsTable.peerColumns = PEER_COLUMNS;
 
 function SubmissionRow({
   submission,
@@ -333,7 +333,9 @@ function SubmissionRow({
     user: () => (
       <td key="user" className={`${px} ${py}`}>
         <div className="flex flex-col gap-0.5 min-w-0">
-          <span className="font-medium truncate">{submission.username}</span>
+          <span className="font-medium truncate">
+            {getUserDisplayName(submission)}
+          </span>
           <span className="text-[10px] font-mono text-muted-foreground">
             #{submission.user_id}
             {submission.contest_id != null && (
@@ -536,7 +538,7 @@ function SelectionCheckbox({
 function ExpandedDetail({ submissionId }: { submissionId: number }) {
   const apiClient = useApiClient();
 
-  const { data: submission, isLoading } = useQuery<Submission>({
+  const query = useQuery<Submission>({
     queryKey: ['submission', submissionId],
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/submissions/{id}', {
@@ -548,13 +550,16 @@ function ExpandedDetail({ submissionId }: { submissionId: number }) {
     staleTime: 60_000,
   });
 
-  if (isLoading || !submission) {
-    return (
-      <div className="flex items-center justify-center py-4">
-        <span className="h-4 w-4 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-      </div>
-    );
-  }
-
-  return <SubmissionResult submission={submission} />;
+  return (
+    <QueryView
+      query={query}
+      loading={
+        <div className="flex items-center justify-center py-4">
+          <span className="h-4 w-4 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+        </div>
+      }
+    >
+      {(submission) => <SubmissionResult submission={submission} />}
+    </QueryView>
+  );
 }

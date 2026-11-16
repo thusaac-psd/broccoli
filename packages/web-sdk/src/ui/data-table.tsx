@@ -25,7 +25,7 @@ import { useServerTable } from '@/hooks/use-server-table';
 import { useTranslation } from '@/i18n';
 import { Button } from '@/ui/button';
 import { Input } from '@/ui/input';
-import { QueryErrorState } from '@/ui/query-view';
+import { QueryErrorState, RefreshFailedNotice } from '@/ui/query-view';
 import { Skeleton } from '@/ui/skeleton';
 
 // Re-export ColumnDef for consumers
@@ -55,6 +55,8 @@ export interface DataTableProps<TData> {
   defaultSortOrder?: 'asc' | 'desc';
   emptyMessage?: string;
   toolbar?: React.ReactNode;
+  /** Fetch the page again this often (backing off while it fails). */
+  pollEveryMs?: number;
   state?: ControlledServerTableState;
   onPageChange?: (page: number) => void;
   onSearchChange?: (search: string) => void;
@@ -165,6 +167,7 @@ export function DataTable<TData>({
   defaultSortOrder = 'desc',
   emptyMessage,
   toolbar,
+  pollEveryMs,
   state,
   onPageChange,
   onSearchChange,
@@ -189,6 +192,7 @@ export function DataTable<TData>({
     defaultPerPage,
     defaultSortBy,
     defaultSortOrder,
+    pollEveryMs,
     state,
     onPageChange,
     onSearchChange,
@@ -215,6 +219,7 @@ export function DataTable<TData>({
                 style={{ insetInlineStart: '0.625rem' }}
               />
               <Input
+                aria-label={searchPlaceholder ?? t('table.search')}
                 placeholder={searchPlaceholder ?? t('table.search')}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
@@ -227,6 +232,10 @@ export function DataTable<TData>({
         </div>
       )}
 
+      {(view.status === 'data' || view.status === 'empty') &&
+        view.refreshError != null && (
+          <RefreshFailedNotice retry={view.retry} className="m-3" />
+        )}
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -240,17 +249,21 @@ export function DataTable<TData>({
                   return (
                     <th
                       key={header.id}
-                      className={`px-3 py-2.5 text-left font-medium text-foreground/80 ${
+                      className={`whitespace-nowrap px-3 py-2.5 text-left font-medium text-foreground/80 ${
                         isSortable
                           ? 'cursor-pointer select-none hover:text-foreground transition-colors'
                           : ''
                       }`}
-                      style={{
-                        width:
-                          header.getSize() !== 150
-                            ? header.getSize()
-                            : undefined,
-                      }}
+                      // A sized column keeps its size on a narrow screen:
+                      // the table scrolls sideways instead of squeezing it.
+                      style={
+                        header.getSize() !== 150
+                          ? {
+                              width: header.getSize(),
+                              minWidth: header.getSize(),
+                            }
+                          : undefined
+                      }
                       onClick={
                         isSortable
                           ? () => toggleSort(colDef.sortKey!)

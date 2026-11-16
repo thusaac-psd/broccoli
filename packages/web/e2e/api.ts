@@ -19,9 +19,58 @@ const at = (offsetMinutes: number) =>
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 
-const ZH_CN = parse(
-  readFileSync(join(REPO, 'plugins/broccoli-zh-cn/locales/zh-CN.toml'), 'utf8'),
-) as Record<string, string>;
+const readToml = (path: string) =>
+  parse(readFileSync(join(REPO, path), 'utf8')) as Record<string, unknown>;
+
+const ZH_CN = readToml('plugins/broccoli-zh-cn/locales/zh-CN.toml') as Record<
+  string,
+  string
+>;
+
+interface PluginWeb {
+  root: string;
+  entry: string;
+  css?: string[];
+  components?: Record<string, string>;
+  slots?: unknown[];
+  routes?: unknown[];
+}
+
+/**
+ * A plugin of this repository as the server serves it: its manifest's web
+ * part in `/plugins/active`, its translations merged into the locale's, and
+ * its built frontend (`pnpm build`) under `/assets/<id>/`.
+ */
+function repoPlugin(id: string) {
+  const manifest = readToml(`plugins/${id}/plugin.toml`) as {
+    name: string;
+    web: PluginWeb;
+    translations?: Record<string, string>;
+  };
+  const { web } = manifest;
+  const translations = Object.fromEntries(
+    Object.entries(manifest.translations ?? {}).map(([locale, file]) => [
+      locale,
+      readToml(`plugins/${id}/${file}`) as Record<string, string>,
+    ]),
+  );
+  return {
+    id,
+    root: join(REPO, 'plugins', id, web.root),
+    translations,
+    active: {
+      id,
+      name: manifest.name,
+      entry: `/assets/${id}/${web.entry}`,
+      components: web.components ?? {},
+      slots: web.slots ?? [],
+      routes: web.routes ?? [],
+      css: (web.css ?? []).map((file) => `/assets/${id}/${file}`),
+    },
+  };
+}
+
+type RepoPlugin = ReturnType<typeof repoPlugin>;
 
 export type Viewer = 'guest' | 'admin' | 'contestant';
 
@@ -133,7 +182,7 @@ const contestProblems = PROBLEM_TITLES.map((title, i) => ({
   position: i,
 }));
 
-const submission = (id: number, userId: number, verdict: string) => ({
+export const submission = (id: number, userId: number, verdict: string) => ({
   id,
   contest_id: 1,
   contest_type: 'icpc',
@@ -141,6 +190,7 @@ const submission = (id: number, userId: number, verdict: string) => ({
   problem_title: PROBLEM_TITLES[id % 3],
   user_id: userId,
   username: userId === 1 ? 'admin' : 'alice',
+  display_name: userId === 1 ? 'Admin' : 'Alice',
   language: 'cpp',
   status: 'Judged',
   verdict,
@@ -170,7 +220,7 @@ const SUBMISSIONS = [
   submission(1, 2, 'TimeLimitExceeded'),
 ];
 
-const cursorPage = <T>(data: T[]) => ({
+export const cursorPage = <T>(data: T[]) => ({
   data,
   pagination: {
     has_more: false,
@@ -213,7 +263,77 @@ class ErrorReply {
   }
 }
 
-type Handler = (url: URL, viewer: Viewer) => unknown;
+type Handler = (url: URL, viewer: Viewer, plugins: RepoPlugin[]) => unknown;
+
+const PRINT_JOB = {
+  id: 1,
+  contest_id: 1,
+  user_id: 2,
+  username: 'alice',
+  display_name: 'Alice',
+  problem_label: 'A',
+  submission_id: 3,
+  language: 'cpp',
+  filename: 'main.cpp',
+  pages_est: 1,
+  pages: null,
+  location: 'Row 3',
+  target_printer: null,
+  status: 'pending',
+  claimed_by: null,
+  claimed_printer: null,
+  error: null,
+  created_at: Math.floor(NOW / 1000) - 60,
+  claimed_at: null,
+  printed_at: null,
+};
+
+/** Answers for the plugins of this repository that the browser suite serves. */
+export const PLUGIN_ROUTES: [string, RegExp, Handler][] = [
+  [
+    'GET',
+    /^\/p\/print\/api\/plugins\/print\/admin\/jobs$/,
+    () => ({
+      data: [PRINT_JOB],
+      pagination: { page: 1, per_page: 50, total: 1, total_pages: 1 },
+    }),
+  ],
+  [
+    'GET',
+    /^\/p\/print\/api\/plugins\/print\/admin\/stations$/,
+    () => ({ data: [] }),
+  ],
+  [
+    'GET',
+    /^\/p\/icpc\/api\/plugins\/icpc\/contests\/1\/info$/,
+    () => ({
+      penalty_minutes: 20,
+      count_compile_error: false,
+      show_test_details: false,
+    }),
+  ],
+  [
+    'GET',
+    /^\/p\/icpc\/api\/plugins\/icpc\/contests\/1\/standings$/,
+    () => ({
+      phase: 'during',
+      penalty_minutes: 20,
+      problem_labels: ['A', 'B', 'C'],
+      full_board: true,
+      rows: [
+        {
+          rank: 1,
+          user_id: 2,
+          username: 'alice',
+          display_name: 'Alice',
+          solved: 1,
+          penalty: 23,
+          problems: { A: { attempts: 2, solved: true, time: 3, penalty: 23 } },
+        },
+      ],
+    }),
+  ],
+];
 
 /** `METHOD path-pattern` to the body answered. */
 const ROUTES: [string, RegExp, Handler][] = [
@@ -221,9 +341,19 @@ const ROUTES: [string, RegExp, Handler][] = [
   [
     'GET',
     /^\/i18n\/translations\/([\w-]+)$/,
-    (url) => (url.pathname.endsWith('/zh-CN') ? ZH_CN : {}),
+    (url, _, plugins) => {
+      const locale = url.pathname.split('/').at(-1) ?? 'en';
+      return Object.assign(
+        locale === 'zh-CN' ? { ...ZH_CN } : {},
+        ...plugins.map((plugin) => plugin.translations[locale] ?? {}),
+      );
+    },
   ],
-  ['GET', /^\/plugins\/active$/, () => []],
+  [
+    'GET',
+    /^\/plugins\/active$/,
+    (_, __, plugins) => plugins.map((plugin) => plugin.active),
+  ],
   ['GET', /^\/plugins\/registries$/, () => registries],
   [
     'GET',
@@ -319,7 +449,11 @@ const ROUTES: [string, RegExp, Handler][] = [
       dlq_unresolved_count: 0,
     }),
   ],
-  ['GET', /^\/admin\/plugins$/, () => [plugin]],
+  [
+    'GET',
+    /^\/admin\/plugins$/,
+    () => [plugin, { ...plugin, id: 'icpc', name: 'icpc', config_schemas: [] }],
+  ],
   [
     'GET',
     /^\/admin\/plugins\/upload$/,
@@ -352,6 +486,18 @@ const ROUTES: [string, RegExp, Handler][] = [
   ['GET', /^\/dlq$/, () => numberedPage([])],
 ];
 
+export interface MockOptions {
+  /** Plugins of this repository to serve, with their built frontends. */
+  plugins?: string[];
+  /**
+   * Answers for the plugins' own API calls, `METHOD path` to the body
+   * (`PLUGIN_ROUTES` unless given).
+   */
+  pluginRoutes?: [string, RegExp, Handler][];
+  /** Whether self-registration is open (default true). */
+  registrationOpen?: boolean;
+}
+
 /**
  * Answers the app's API calls for `viewer` (signed in through the session
  * hint and the refresh cookie the mock pretends to hold), on a server whose
@@ -361,9 +507,23 @@ const ROUTES: [string, RegExp, Handler][] = [
 export async function mockApi(
   page: Page,
   viewer: Viewer,
-  { registrationOpen = true }: { registrationOpen?: boolean } = {},
+  {
+    plugins: ids = [],
+    pluginRoutes = PLUGIN_ROUTES,
+    registrationOpen = true,
+  }: MockOptions = {},
 ): Promise<string[]> {
   const unanswered: string[] = [];
+  const plugins = ids.map(repoPlugin);
+  for (const plugin of plugins) {
+    await page.route(`**/assets/${plugin.id}/**`, (route) => {
+      const file = new URL(route.request().url()).pathname.slice(
+        `/assets/${plugin.id}/`.length,
+      );
+      return route.fulfill({ path: join(plugin.root, file) });
+    });
+  }
+  const routes = [...pluginRoutes, ...ROUTES];
   await page.clock.setFixedTime(NOW);
   if (viewer !== 'guest') {
     await page.addInitScript(
@@ -392,7 +552,7 @@ export async function mockApi(
     if (request.method() === 'GET' && path === '/auth/registration') {
       return route.fulfill({ headers, json: { open: registrationOpen } });
     }
-    const match = ROUTES.find(
+    const match = routes.find(
       ([method, pattern]) => method === request.method() && pattern.test(path),
     );
     if (!match) {
@@ -403,7 +563,7 @@ export async function mockApi(
         json: { code: 'NOT_FOUND', message: path },
       });
     }
-    const body = match[2](url, viewer);
+    const body = match[2](url, viewer, plugins);
     if (body instanceof ErrorReply) {
       return route.fulfill({ status: body.status, headers, json: body.json });
     }

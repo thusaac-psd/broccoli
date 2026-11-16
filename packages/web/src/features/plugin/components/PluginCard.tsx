@@ -47,6 +47,7 @@ export function PluginCard({
 }) {
   const { t } = useTranslation();
   const pluginText = usePluginText();
+  const name = pluginText(pluginKeys.name(plugin.id), plugin.name);
   const [configOpen, setConfigOpen] = useState(false);
   // The fleet-wide desired state, not whether the server that answered has
   // it loaded: a plugin enabled but failing to load is still enabled.
@@ -64,9 +65,7 @@ export function PluginCard({
       >
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
-            <span className="truncate">
-              {pluginText(pluginKeys.name(plugin.id), plugin.name)}
-            </span>
+            <span className="truncate">{name}</span>
           </CardTitle>
           <CardDescription className="text-xs font-mono">
             {plugin.id}
@@ -153,7 +152,9 @@ export function PluginCard({
                 disabled={toggling || reloading}
                 onCheckedChange={(checked) => onToggle(plugin, checked)}
                 aria-label={
-                  isEnabled ? t('plugins.disable') : t('plugins.enable')
+                  isEnabled
+                    ? t('plugins.disable', { name })
+                    : t('plugins.enable', { name })
                 }
               />
             </div>

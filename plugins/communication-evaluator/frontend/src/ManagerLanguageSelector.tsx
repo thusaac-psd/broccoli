@@ -58,7 +58,9 @@ export function ManagerLanguageSelector({
         onValueChange={(v) => onChange(v)}
         disabled={isLoading}
       >
-        <SelectTrigger>
+        <SelectTrigger
+          aria-label={schema.title ?? t('admin.additionalFiles.language')}
+        >
           <SelectValue
             placeholder={
               inheritedDisplay

@@ -1,7 +1,8 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
+import { queryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { QueryLoading } from '@broccoli/web-sdk/ui';
+import { QueryErrorState, QueryLoading } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import { Trophy } from 'lucide-react';
 import { useEffect } from 'react';
@@ -22,7 +23,7 @@ export default function Index() {
   const apiClient = useApiClient();
   const { contestId, setContest } = useContest();
 
-  const { data: contests, isLoading: isContestsLoading } = useQuery({
+  const contestsQuery = useQuery({
     queryKey: ['dashboard-contests'],
     enabled: !!user,
     queryFn: async () => {
@@ -40,6 +41,9 @@ export default function Index() {
       return data.data;
     },
   });
+
+  const list = queryState(contestsQuery, (contests) => contests.length === 0);
+  const contests = list.status === 'data' ? list.data : undefined;
 
   // FIX: check permissions instead of roles
   const isAdmin = !!user?.roles.includes('admin');
@@ -70,8 +74,7 @@ export default function Index() {
     return <GuestWelcome />;
   }
 
-  // Loading contests
-  if (isContestsLoading) {
+  if (list.status === 'loading' || list.status === 'idle') {
     return (
       <div className="flex flex-col gap-6 p-6">
         <h1 className="text-2xl font-bold">{t('homepage.title')}</h1>
@@ -87,8 +90,20 @@ export default function Index() {
     return <Navigate to={`/contests/${onlyContest.id}`} replace />;
   }
 
-  // No contests
-  if (!contests?.length) {
+  if (list.status === 'error') {
+    return (
+      <div className="flex flex-col gap-6 p-6">
+        <h1 className="text-2xl font-bold">{t('homepage.title')}</h1>
+        <QueryErrorState
+          error={list.error}
+          retry={list.retry}
+          retrying={list.retrying}
+        />
+      </div>
+    );
+  }
+
+  if (!contests) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] text-center px-4">
         <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-muted mb-6">

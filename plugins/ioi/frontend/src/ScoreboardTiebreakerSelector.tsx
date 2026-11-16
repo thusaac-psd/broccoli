@@ -78,7 +78,7 @@ export function ScoreboardTiebreakerSelector({
       </p>
 
       <Select value={selectedValue} onValueChange={(v) => onChange(v)}>
-        <SelectTrigger>
+        <SelectTrigger aria-label={t('ioi.scoreboardTiebreaker.label')}>
           <SelectValue
             placeholder={
               inheritedDisplay ??

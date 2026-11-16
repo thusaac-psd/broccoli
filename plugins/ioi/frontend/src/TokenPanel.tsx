@@ -4,7 +4,7 @@ import {
   useServerNow,
   useServerTimeReached,
 } from '@broccoli/web-sdk/api';
-import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
+import { pollInterval, unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
@@ -67,7 +67,7 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
         throw error;
       }
     },
-    refetchInterval: 60000,
+    refetchInterval: pollInterval(60000),
     retry: false,
   });
 

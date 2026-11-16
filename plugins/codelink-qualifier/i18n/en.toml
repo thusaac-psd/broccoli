@@ -48,3 +48,6 @@
 'codelink-qualifier.creditedProblems' = "{count} credited problems"
 'codelink-qualifier.status.reserve' = "Reserve qualifier"
 'codelink-qualifier.status.not_advanced' = "Not advanced"
+'plugin.codelink-qualifier.name' = 'Codelink qualifier'
+'plugin.codelink-qualifier.description' = 'Codelink qualifier with configurable scoring slots and qualification thresholds.'
+'identifier.contestType.codelink-qualifier' = 'Codelink qualifier'

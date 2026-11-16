@@ -164,13 +164,13 @@ export function ContestCountdown() {
           <span className="text-muted-foreground mr-1.5">
             {t('contest.countdown.start')}
           </span>
-          {format.dateTime(contest.start_time, { timeZoneName: true })}
+          {format.dateTime(contest.start_time)}
         </div>
         <div>
           <span className="text-muted-foreground mr-1.5">
             {t('contest.countdown.end')}
           </span>
-          {format.dateTime(contest.end_time, { timeZoneName: true })}
+          {format.dateTime(contest.end_time)}
         </div>
       </div>
     </div>

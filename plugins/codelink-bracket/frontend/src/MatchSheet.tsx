@@ -4,7 +4,7 @@ import {
   useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import { useAuth, viewerCacheKey } from '@broccoli/web-sdk/auth';
-import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
+import { pollInterval, unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   CONTEST_MANAGE,
@@ -124,10 +124,9 @@ function MatchDetail({
       viewerCacheKey(auth.user),
     ],
     queryFn: () => api.getMatch(contestId, matchId),
-    refetchInterval: (q) =>
-      (q.state.data as MatchView | undefined)?.state === 'decided'
-        ? false
-        : 3_000,
+    refetchInterval: pollInterval<MatchView>((match) =>
+      match?.state === 'decided' ? false : 3_000,
+    ),
   });
 
   const permissions = auth.user?.permissions ?? [];

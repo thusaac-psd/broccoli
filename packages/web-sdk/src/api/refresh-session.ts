@@ -180,6 +180,14 @@ interface RefreshState {
 
 const states = new Map<string, RefreshState>();
 
+export interface RefreshOptions {
+  /**
+   * Ask the server now, even inside the backoff window: a person asked (a
+   * retry button), not a timer. A request already in flight is still shared.
+   */
+  immediate?: boolean;
+}
+
 // What one response says; `lost-race` is a TOKEN_INVALID worth one retry.
 type Verdict = RefreshedSession | 'rejected' | 'lost-race' | 'transient';
 type Settled = Exclude<Verdict, 'lost-race'>;
@@ -187,11 +195,13 @@ type Settled = Exclude<Verdict, 'lost-race'>;
 /**
  * Exchange the refresh cookie for a new session. Concurrent calls for the
  * same URL share one request, and while the server is unreachable calls
- * inside the backoff window resolve at once without a request.
+ * inside the backoff window resolve at once without a request, unless
+ * `options.immediate` asks anyway.
  */
 export function refreshSession(
   refreshUrl: string,
   deps: Partial<RefreshDeps> = {},
+  options: RefreshOptions = {},
 ): Promise<RefreshOutcome> {
   const d = { ...defaultDeps, ...deps };
   let state = states.get(refreshUrl);
@@ -202,7 +212,7 @@ export function refreshSession(
   if (state.inFlight) return state.inFlight;
 
   const waitMs = state.retryAt - d.now();
-  if (waitMs > 0) {
+  if (waitMs > 0 && !options.immediate) {
     return Promise.resolve({ status: 'unavailable', retryInMs: waitMs });
   }
 

@@ -1,19 +1,15 @@
 import { Skeleton } from '@broccoli/web-sdk/ui';
-import { retryImport } from '@broccoli/web-sdk/utils';
-import { lazy, Suspense } from 'react';
+import { Suspense } from 'react';
 
 import type { CodeEditorProps } from './CodeEditor.impl';
+import { lazyImpl } from './lazy-impl';
 
 export type { EditorFile } from './code-editor-draft';
 export type { CodeEditorProps } from './CodeEditor.impl';
 
 // Monaco is about a megabyte: only a page that shows an editor loads it.
 // The implementation is reachable only through this dynamic import.
-const Impl = lazy(() =>
-  retryImport(() => import('./CodeEditor.impl')).then((m) => ({
-    default: m.CodeEditor,
-  })),
-);
+const Impl = lazyImpl(() => import('./CodeEditor.impl'), 'CodeEditor');
 
 export function CodeEditor(props: CodeEditorProps) {
   return (

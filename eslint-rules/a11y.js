@@ -10,7 +10,13 @@
  * are icons; `{t('key')}` is text).
  */
 
-const CONTROLS = new Set(['Button', 'button', 'a', 'Link', 'NavLink']);
+const CONTROLS = new Set([
+  'Button',
+  'button',
+  'a',
+  'Link',
+  'NavLink',
+]);
 const LABEL_ATTRS = new Set(['aria-label', 'aria-labelledby']);
 
 function elementName(node) {
@@ -176,6 +182,66 @@ const selectLabel = {
   },
 };
 
+const INPUTS = new Set([
+  'input',
+  'Input',
+  'textarea',
+  'Textarea',
+  'Checkbox',
+  'Switch',
+  // A combobox is not named by the option it shows.
+  'SelectTrigger',
+]);
+const LABELS = new Set(['label', 'Label']);
+
+/**
+ * A field is announced by its name, and a placeholder is not one: it is gone
+ * once something is typed, and a checkbox or switch has none at all. A field
+ * needs an `aria-label`, `aria-labelledby`, an `id` a `<Label htmlFor>`
+ * points at, or a `<label>` around it.
+ *
+ * @type {import('eslint').Rule.RuleModule}
+ */
+const inputLabel = {
+  meta: {
+    type: 'problem',
+    docs: { description: 'Require a name on form fields' },
+    messages: {
+      missing:
+        'Name this field: aria-label, aria-labelledby, an id with a <Label htmlFor>, or a <label> around it. A placeholder is not a name.',
+    },
+    schema: [],
+  },
+  create(context) {
+    return {
+      JSXOpeningElement(node) {
+        if (node.name.type !== 'JSXIdentifier' || !INPUTS.has(node.name.name))
+          return;
+        const named = node.attributes.some(
+          (attr) =>
+            attr.type === 'JSXSpreadAttribute' ||
+            ['id', ...LABEL_ATTRS].includes(attr.name.name) ||
+            (attr.name.name === 'type' && attr.value?.value === 'hidden') ||
+            // Not rendered (`display: none`): a file picker a button opens.
+            (attr.name.name === 'className' &&
+              /(^|\s)hidden(\s|$)/.test(attr.value?.value ?? '')),
+        );
+        if (named) return;
+        for (let up = node.parent.parent; up; up = up.parent) {
+          if (
+            up.type === 'JSXElement' &&
+            up.openingElement.name.type === 'JSXIdentifier' &&
+            LABELS.has(up.openingElement.name.name)
+          ) {
+            return;
+          }
+        }
+        context.report({ node, messageId: 'missing' });
+      },
+    };
+  },
+};
+
 const DIMMED_TEXT = /(^|[\s:])text-(muted-foreground|primary|destructive)\/\d/;
 
 /**
@@ -217,6 +283,7 @@ export default {
   rules: {
     'icon-button-label': iconButtonLabel,
     'img-alt': imgAlt,
+    'input-label': inputLabel,
     'select-label': selectLabel,
     'text-token-opacity': textTokenOpacity,
   },

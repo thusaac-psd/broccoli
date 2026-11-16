@@ -1,12 +1,17 @@
-import '@/lib/monaco-setup';
-
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useTheme } from '@broccoli/web-sdk/theme';
-import { Badge } from '@broccoli/web-sdk/ui';
+import { Badge, Skeleton } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
-import Editor from '@monaco-editor/react';
 import { ChevronDown, FileText, GripHorizontal } from 'lucide-react';
-import { useCallback, useRef, useState } from 'react';
+import { Suspense, useCallback, useRef, useState } from 'react';
+
+import { lazyImpl } from '@/components/lazy-impl';
+
+// Monaco loads when the source is first opened, not with the page.
+const SourceEditor = lazyImpl(
+  () => import('./ReadOnlySourceEditor.impl'),
+  'ReadOnlySourceEditor',
+);
 
 const LANG_TO_MONACO: Record<string, string> = {
   cpp: 'cpp',
@@ -146,34 +151,15 @@ export function ReadOnlyCodeViewer({
             </div>
           )}
 
-          {/* Monaco editor */}
           <div style={{ height: editorHeight }}>
             {open && (
-              <Editor
-                height="100%"
-                language={monacoLang}
-                value={activeFile.content}
-                theme={theme === 'dark' ? 'vs-dark' : 'vs'}
-                options={{
-                  readOnly: true,
-                  domReadOnly: true,
-                  minimap: { enabled: false },
-                  fontSize: 13,
-                  lineNumbers: 'on',
-                  scrollBeyondLastLine: false,
-                  renderLineHighlight: 'none',
-                  overviewRulerLanes: 0,
-                  hideCursorInOverviewRuler: true,
-                  overviewRulerBorder: false,
-                  scrollbar: { vertical: 'auto', horizontal: 'auto' },
-                  contextmenu: false,
-                  selectionHighlight: false,
-                  occurrencesHighlight: 'off',
-                  folding: false,
-                  lineDecorationsWidth: 8,
-                  padding: { top: 8, bottom: 8 },
-                }}
-              />
+              <Suspense fallback={<Skeleton className="h-full w-full" />}>
+                <SourceEditor
+                  language={monacoLang}
+                  value={activeFile.content}
+                  dark={theme === 'dark'}
+                />
+              </Suspense>
             )}
           </div>
 

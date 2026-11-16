@@ -1,3 +1,4 @@
 'identifier.problemType.batch' = 'Batch'
 'plugin.batch-evaluator.description' = 'Judges batch problems: compile, run against each test, check the output.'
 'config.batch-evaluator.sandbox.description' = 'Sandbox resource limits for compilation and execution steps'
+'plugin.batch-evaluator.name' = 'Batch evaluator'

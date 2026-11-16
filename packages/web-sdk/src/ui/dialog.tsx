@@ -3,9 +3,13 @@ import { X } from 'lucide-react';
 import * as React from 'react';
 
 import { useTranslation } from '@/i18n';
+import { usePageScopedOpen } from '@/ui/page-scoped';
 import { cn } from '@/utils';
 
-const Dialog = DialogPrimitive.Root;
+/** A dialog root; it closes when the page changes (see `PageContext`). */
+function Dialog(props: React.ComponentProps<typeof DialogPrimitive.Root>) {
+  return <DialogPrimitive.Root {...props} {...usePageScopedOpen(props)} />;
+}
 
 const DialogTrigger = DialogPrimitive.Trigger;
 

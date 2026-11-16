@@ -4,7 +4,11 @@ import {
   useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { unsettledMessageKey, useAsyncSubmit } from '@broccoli/web-sdk/hooks';
+import {
+  pollInterval,
+  unsettledMessageKey,
+  useAsyncSubmit,
+} from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -29,7 +33,7 @@ import {
   toast,
   useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
   Ban,
@@ -39,7 +43,7 @@ import {
   Printer,
   RotateCcw,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 
 import { StationsPanel } from './components/StationsPanel';
 import { StatusPill } from './components/StatusPill';
@@ -59,7 +63,6 @@ export function PrintQueuePage() {
   const [statusFilter, setStatusFilter] = useState('');
   const [stationFilter, setStationFilter] = useState('');
   const [printerFilter, setPrinterFilter] = useState('');
-  const [nonce, setNonce] = useState(0);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [confirm, confirmDialog] = useConfirmDialog();
   const batchSubmit = useAsyncSubmit();
@@ -76,7 +79,7 @@ export function PrintQueuePage() {
   const { data: stationsResp } = useQuery({
     queryKey: ['print', 'stations'],
     queryFn: () => api.listStations(),
-    refetchInterval: 15_000,
+    refetchInterval: pollInterval(15_000),
   });
   const stations = stationsResp?.data ?? [];
   const stationNames = stations.map((s) => s.name);
@@ -86,16 +89,11 @@ export function PrintQueuePage() {
     ),
   ];
 
-  // Poll the jobs table every 10 seconds.
-  useEffect(() => {
-    const id = setInterval(() => setNonce((n) => n + 1), 10_000);
-    return () => clearInterval(id);
-  }, []);
-
+  const queryClient = useQueryClient();
   const refresh = useCallback(() => {
-    setNonce((n) => n + 1);
+    void queryClient.invalidateQueries({ queryKey: ['print', 'jobs'] });
     setSelected(new Set());
-  }, []);
+  }, [queryClient]);
 
   // Runs job actions in order and refreshes the queue. Rejects with the
   // message to show when one fails or its outcome is unknown (it may have
@@ -190,6 +188,7 @@ export function PrintQueuePage() {
             pageIds.length > 0 && pageIds.every((id) => selected.has(id));
           return (
             <input
+              aria-label={t('print.queue.selectPage')}
               type="checkbox"
               className="h-4 w-4 cursor-pointer accent-primary"
               checked={allChecked}
@@ -206,6 +205,7 @@ export function PrintQueuePage() {
         },
         cell: ({ row }) => (
           <input
+            aria-label={t('print.queue.selectJob', { id: row.original.id })}
             type="checkbox"
             className="h-4 w-4 cursor-pointer accent-primary"
             checked={selected.has(row.original.id)}
@@ -391,6 +391,7 @@ export function PrintQueuePage() {
                   >
                     <SelectTrigger
                       className="h-7 w-7 px-0"
+                      aria-label={t('print.queue.action.pin')}
                       title={t('print.queue.action.pin')}
                     >
                       <Crosshair className="h-3.5 w-3.5" />
@@ -425,7 +426,7 @@ export function PrintQueuePage() {
       value={value || 'all'}
       onValueChange={(v) => onChange(v === 'all' ? '' : v)}
     >
-      <SelectTrigger className="h-7 w-32 text-xs">
+      <SelectTrigger aria-label={label} className="h-7 w-32 text-xs">
         <SelectValue placeholder={label} />
       </SelectTrigger>
       <SelectContent>
@@ -561,8 +562,8 @@ export function PrintQueuePage() {
               statusFilter || 'all',
               stationFilter,
               printerFilter,
-              String(nonce),
             ]}
+            pollEveryMs={10_000}
             fetchFn={fetchJobs}
             searchable
             searchPlaceholder={t('print.queue.search')}
@@ -622,7 +623,10 @@ export function PrintQueuePage() {
           </DialogHeader>
           {batchConfirm?.type === 'pin' && printerNames.length > 0 && (
             <Select value={pinPrinter} onValueChange={setPinPrinter}>
-              <SelectTrigger className="h-8 text-sm">
+              <SelectTrigger
+                aria-label={t('print.queue.action.pinPlaceholder')}
+                className="h-8 text-sm"
+              >
                 <SelectValue
                   placeholder={t('print.queue.action.pinPlaceholder')}
                 />
@@ -718,6 +722,7 @@ export function PrintQueuePage() {
             </DialogDescription>
           </DialogHeader>
           <Textarea
+            aria-label={t('print.queue.action.viewCode')}
             className="h-96 resize-none font-mono text-xs leading-relaxed"
             value={codeSource ?? 'Loading…'}
             readOnly

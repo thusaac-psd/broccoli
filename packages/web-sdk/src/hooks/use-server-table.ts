@@ -2,6 +2,7 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { type ApiClient, useApiClient } from '@/api';
+import { pollInterval } from '@/hooks/poll';
 import { queryState } from '@/hooks/query-state';
 
 export interface ServerTableParams {
@@ -41,6 +42,8 @@ export interface UseServerTableOptions<T> {
   defaultSortBy?: string;
   defaultSortOrder?: 'asc' | 'desc';
   debounceMs?: number;
+  /** Fetch the page again this often (backing off while it fails). */
+  pollEveryMs?: number;
   state?: ControlledServerTableState;
   onPageChange?: (page: number) => void;
   onSearchChange?: (search: string) => void;
@@ -57,6 +60,7 @@ export function useServerTable<T>({
   defaultSortBy,
   defaultSortOrder = 'desc',
   debounceMs = 300,
+  pollEveryMs,
   state,
   onPageChange,
   onSearchChange,
@@ -100,6 +104,7 @@ export function useServerTable<T>({
     queryKey: [...queryKey, params],
     queryFn: () => fetchFn(apiClient, params),
     placeholderData: keepPreviousData,
+    refetchInterval: pollInterval(() => pollEveryMs ?? false),
   });
   const { data, isLoading, isFetching } = query;
 

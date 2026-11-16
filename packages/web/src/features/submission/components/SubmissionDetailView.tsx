@@ -1,7 +1,11 @@
 import { queryState, useLanguageName } from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import { isTerminalStatus } from '@broccoli/web-sdk/submission';
-import { Badge, QueryErrorState } from '@broccoli/web-sdk/ui';
+import {
+  Badge,
+  QueryErrorState,
+  RefreshFailedNotice,
+} from '@broccoli/web-sdk/ui';
 import { formatKibibytes } from '@broccoli/web-sdk/utils';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router';
@@ -91,6 +95,9 @@ export function SubmissionDetailView({
   return (
     <div className="min-w-0 space-y-6">
       <BackLink target={returnTarget} />
+      {detail.refreshError != null && (
+        <RefreshFailedNotice retry={detail.retry} />
+      )}
 
       {/* Header card */}
       <div className="rounded-lg border bg-card">

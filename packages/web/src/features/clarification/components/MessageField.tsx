@@ -23,6 +23,7 @@ export function MessageField({
   return (
     <div className="space-y-2">
       <Textarea
+        aria-label={placeholder}
         placeholder={placeholder}
         className={cn('min-h-[150px]', className)}
         maxLength={MESSAGE_MAX_LENGTH}

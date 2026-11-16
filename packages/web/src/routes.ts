@@ -4,7 +4,12 @@ import { flatRoutes } from '@react-router/fs-routes';
 export default [
   layout('routes/_app.tsx', [
     ...(await flatRoutes({
-      ignoredRouteFiles: ['routes/extension.tsx', 'routes/_app.tsx'],
+      // Unit tests sit beside the routes they check; they are not pages.
+      ignoredRouteFiles: [
+        'routes/extension.tsx',
+        'routes/_app.tsx',
+        '**/*.test.ts',
+      ],
     })),
     route('*', 'routes/extension.tsx'),
   ]),

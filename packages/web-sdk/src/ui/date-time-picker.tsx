@@ -78,7 +78,7 @@ function DateTimePicker({
         >
           <CalendarIcon className="mr-2 h-4 w-4" />
           {value ? (
-            formatDateTime(value, locale, { timeZoneName: true })
+            formatDateTime(value, locale)
           ) : (
             <span>{placeholder ?? t('dateTime.placeholder')}</span>
           )}

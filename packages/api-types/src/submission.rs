@@ -72,6 +72,9 @@ pub struct SubmissionListItem {
     pub user_id: i32,
     #[schema(example = "alice")]
     pub username: String,
+    /// The name the submitter shows to others.
+    #[schema(example = "Alice")]
+    pub display_name: String,
     #[schema(example = 1)]
     pub problem_id: i32,
     #[schema(example = "Two Sum")]

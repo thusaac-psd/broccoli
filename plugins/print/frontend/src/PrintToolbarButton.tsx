@@ -163,7 +163,10 @@ export function PrintToolbarButton() {
             <div className="space-y-1.5">
               <Label>{t('print.dialog.language')}</Label>
               <Select value={language} onValueChange={setLanguage}>
-                <SelectTrigger className="w-36">
+                <SelectTrigger
+                  aria-label={t('print.dialog.language')}
+                  className="w-36"
+                >
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>

@@ -213,13 +213,78 @@ pub struct PluginUploadResponse {
     pub incompatible_configs: Vec<IncompatibleConfig>,
 }
 
-/// One way a config value breaks its namespace's schema.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+/// One way a config value breaks its namespace's schema: where, what (`kind`
+/// and its parameters, for a client to say in its own language), and the same
+/// in English (`message`, for logs).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct FieldError {
     /// Where the value is, as `field.nested[2].leaf`; empty for the config
     /// object itself.
     pub path: String,
+    #[schema(example = "must be at most 10")]
     pub message: String,
+    #[serde(flatten)]
+    pub kind: FieldErrorKind,
+}
+
+impl FieldError {
+    /// The error `kind` at `path`, with its English message.
+    pub fn new(path: impl Into<String>, kind: FieldErrorKind) -> Self {
+        Self {
+            path: path.into(),
+            message: kind.to_string(),
+            kind,
+        }
+    }
+}
+
+/// What is wrong with a config value, with the schema's numbers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FieldErrorKind {
+    /// The value is of another JSON type than the schema declares.
+    Type { expected: String, got: String },
+    /// The schema declares no such field.
+    UnknownField,
+    /// A required field is absent.
+    Missing,
+    /// The value is none of the schema's allowed values.
+    NotAllowed { allowed: Vec<serde_json::Value> },
+    /// A number below the schema's minimum.
+    Min { limit: f64 },
+    /// A number above the schema's maximum.
+    Max { limit: f64 },
+    /// A string shorter than the schema's minimum length.
+    MinLength { limit: u64 },
+    /// A string longer than the schema's maximum length.
+    MaxLength { limit: u64 },
+    /// A string that does not match the schema's pattern.
+    Pattern { pattern: String },
+    /// The plugin no longer declares the config's namespace at its scope.
+    NamespaceUndeclared { scope: String },
+}
+
+impl std::fmt::Display for FieldErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Type { expected, got } => write!(f, "expected {expected}, got {got}"),
+            Self::UnknownField => f.write_str("unknown field"),
+            Self::Missing => f.write_str("required field is missing"),
+            Self::NotAllowed { allowed } => {
+                let allowed: Vec<String> = allowed.iter().map(ToString::to_string).collect();
+                write!(f, "must be one of {}", allowed.join(", "))
+            }
+            Self::Min { limit } => write!(f, "must be at least {limit}"),
+            Self::Max { limit } => write!(f, "must be at most {limit}"),
+            Self::MinLength { limit } => write!(f, "must be at least {limit} characters"),
+            Self::MaxLength { limit } => write!(f, "must be at most {limit} characters"),
+            Self::Pattern { pattern } => write!(f, "must match the pattern {pattern}"),
+            Self::NamespaceUndeclared { scope } => write!(
+                f,
+                "the plugin no longer declares this namespace at the {scope} scope"
+            ),
+        }
+    }
 }
 
 /// A stored config that its plugin would no longer accept.

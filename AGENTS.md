@@ -138,7 +138,7 @@ pnpm build                        # just build-js
 pnpm dev                          # just dev
 pnpm --filter @broccoli/web dev   # just dev-web
 pnpm --filter @broccoli/web-sdk build   # just build-sdk
-pnpm lint                         # just lint-js
+pnpm lint                         # just lint-js (one eslint run over every TS project: a 4 GiB heap)
 pnpm format                       # just format
 pnpm format:check                 # just format-check
 pnpm test

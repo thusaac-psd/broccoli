@@ -159,6 +159,7 @@ export function TokenConfigPanel({
               {t('ioi.tokenConfig.initialTokens')}
             </Label>
             <Input
+              aria-label={t('ioi.tokenConfig.initialTokens')}
               type="number"
               min={0}
               max={100}
@@ -199,6 +200,7 @@ export function TokenConfigPanel({
                 {t('ioi.tokenConfig.initial')}
               </Label>
               <Input
+                aria-label={t('ioi.tokenConfig.initial')}
                 type="number"
                 min={0}
                 max={100}
@@ -217,6 +219,7 @@ export function TokenConfigPanel({
                 {t('ioi.tokenConfig.maximum')}
               </Label>
               <Input
+                aria-label={t('ioi.tokenConfig.maximum')}
                 type="number"
                 min={0}
                 max={100}
@@ -233,6 +236,7 @@ export function TokenConfigPanel({
                 {t('ioi.tokenConfig.interval')}
               </Label>
               <Input
+                aria-label={t('ioi.tokenConfig.interval')}
                 type="number"
                 min={1}
                 max={1440}

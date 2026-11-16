@@ -63,6 +63,7 @@ pub(super) async fn build_submission_list_items(
             verdict: sub.verdict,
             user_id: sub.user_id,
             username: user_model.username,
+            display_name: user_model.display_name,
             problem_id: sub.problem_id,
             problem_title: problem_model.title.clone(),
             contest_id: sub.contest_id,

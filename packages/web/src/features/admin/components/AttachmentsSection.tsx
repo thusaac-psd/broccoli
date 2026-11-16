@@ -306,6 +306,7 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
 
                 {/* Virtual path */}
                 <Input
+                  aria-label={t('admin.additionalFiles.path')}
                   value={item.path}
                   onChange={(e) => updateStagedPath(item.id, e.target.value)}
                   placeholder={item.file.name}

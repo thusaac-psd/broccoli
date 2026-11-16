@@ -340,6 +340,7 @@ export function AdditionalFilesSection({
 
                 {/* Virtual path */}
                 <Input
+                  aria-label={t('admin.additionalFiles.path')}
                   value={item.path}
                   onChange={(e) =>
                     updateStagedField(item.id, 'path', e.target.value)

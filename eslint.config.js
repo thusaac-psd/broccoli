@@ -82,6 +82,47 @@ export default defineConfig([
     },
   },
 
+  // Heavy code loads on the page that shows it. Every route module, and all
+  // it imports statically, loads for every visitor once the app has started
+  // (see `lib/preload-routes.ts`), so Monaco and KaTeX are imported at run
+  // time only by `*.impl` modules and their setup modules, which code reaches
+  // through a dynamic `import()` (see `components/lazy-impl.ts`).
+  {
+    files: ['packages/web/src/**/*.{ts,tsx}'],
+    ignores: [
+      '**/*.impl.{ts,tsx}',
+      'packages/web/src/lib/monaco-setup.ts',
+      'packages/web/src/components/markdown-math.ts',
+    ],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: [
+                'monaco-editor',
+                'monaco-editor/*',
+                '@monaco-editor/react',
+                'monaco-vim',
+                'katex',
+                'katex/*',
+                'rehype-katex',
+                'remark-math',
+                '**/monaco-setup',
+                '**/markdown-math',
+                '**/*.impl',
+              ],
+              allowTypeImports: true,
+              message:
+                'Heavy code loads through a dynamic import (lazyImpl), never with a route: import it statically only from an *.impl module.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+
   // Frontend-specific React config
   {
     files: ['packages/web/**/*.{ts,tsx}', 'packages/web-sdk/**/*.tsx'],
@@ -118,6 +159,7 @@ export default defineConfig([
     rules: {
       'a11y/icon-button-label': 'error',
       'a11y/img-alt': 'error',
+      'a11y/input-label': 'error',
       'a11y/select-label': 'error',
       'a11y/text-token-opacity': 'error',
     },
@@ -222,6 +264,23 @@ export default defineConfig([
             'VariableDeclarator[init.type="CallExpression"][init.callee.name=/^use[A-Z]/] > ObjectPattern > Property[key.name="data"] > AssignmentPattern',
           message:
             'Do not default a query result: render it through QueryView or queryState() so loading, failure and empty stay distinct.',
+        },
+        {
+          // `const { data, isLoading } = useQuery(...)` has no failed state:
+          // a list that could not load reads as empty once loading ends.
+          selector:
+            'VariableDeclarator[init.type="CallExpression"][init.callee.name="useQuery"] > ObjectPattern:has(> Property[key.name="data"]):has(> Property[key.name=/^is(Loading|Pending)$/]):not(:has(> Property[key.name=/^(error|isError|status)$/]))',
+          message:
+            'A query read without its failure shows a failed fetch as empty: render it through QueryView or queryState().',
+        },
+        {
+          // A fixed `refetchInterval` asks a failing server as often as a
+          // healthy one, from every seat at once, and flickers a page that
+          // has nothing to show between loading and failed.
+          selector:
+            "ObjectExpression > Property[key.name='refetchInterval']:not([value.type='CallExpression'][value.callee.name='pollInterval'])",
+          message:
+            'Poll through pollInterval() from @broccoli/web-sdk/hooks, which backs off while polls fail.',
         },
         {
           // A server's `message` is English detail for logs; what the user

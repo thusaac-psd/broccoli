@@ -1,6 +1,10 @@
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import type { CreateClarificationBody } from '@broccoli/web-sdk/clarification';
-import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
+import {
+  isAlreadyDone,
+  pollInterval,
+  useIdempotentRequest,
+} from '@broccoli/web-sdk/hooks';
 import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -38,7 +42,7 @@ export function useClarifications(contestId: number, enabled: boolean) {
     queryKey: ['contest-clarifications', contestId],
     queryFn: () => fetchClarifications(apiClient, contestId),
     enabled,
-    refetchInterval: 5000,
+    refetchInterval: pollInterval(5000),
   });
 }
 

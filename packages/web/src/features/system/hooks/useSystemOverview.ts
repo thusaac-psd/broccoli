@@ -1,4 +1,5 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
+import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { useQuery } from '@tanstack/react-query';
 
 const REFETCH_INTERVAL_MS = 5000;
@@ -16,7 +17,7 @@ export function useSystemOverview({
     // hooks run before a component's permission-gated early return, so gating
     // the render is not enough; the fetch itself has to be gated here.
     enabled,
-    refetchInterval: REFETCH_INTERVAL_MS,
+    refetchInterval: pollInterval(REFETCH_INTERVAL_MS),
     refetchIntervalInBackground: false,
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/admin/system/overview');

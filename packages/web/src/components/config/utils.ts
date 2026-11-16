@@ -1,3 +1,7 @@
+import type { ApiSchemas } from '@broccoli/web-sdk/api';
+
+import type { MessageKey } from '@/lib/i18n/catalog';
+
 import type { FieldProblem, JsonSchema, JsonSchemaProperty } from './types';
 
 export { resolveInheritedValue } from '@broccoli/web-sdk/slot';
@@ -209,12 +213,60 @@ export function validateAll(
   return errors;
 }
 
+/** A field error as the server reports it (see `FieldError` in the API). */
+type ServerFieldError = ApiSchemas['FieldError'];
+
+const TYPE_KEYS: Record<string, MessageKey> = {
+  integer: 'config.validation.integer',
+  number: 'config.validation.number',
+  string: 'config.validation.string',
+  boolean: 'config.validation.boolean',
+  array: 'config.validation.array',
+  object: 'config.validation.object',
+};
+
+/** What a server field error says, in the UI language when its kind is known. */
+function serverProblem(field: ServerFieldError): FieldProblem {
+  switch (field.kind) {
+    case 'type':
+      if (TYPE_KEYS[field.expected]) return { key: TYPE_KEYS[field.expected] };
+      break;
+    case 'min':
+      return { key: 'config.validation.min', params: { min: field.limit } };
+    case 'max':
+      return { key: 'config.validation.max', params: { max: field.limit } };
+    case 'min_length':
+      return {
+        key: 'config.validation.minLength',
+        params: { min: field.limit },
+      };
+    case 'max_length':
+      return {
+        key: 'config.validation.maxLength',
+        params: { max: field.limit },
+      };
+    case 'not_allowed':
+      return { key: 'config.validation.notAllowed' };
+    case 'pattern':
+      return { key: 'config.validation.pattern' };
+    case 'unknown_field':
+      return { key: 'config.validation.unknownField' };
+    case 'missing':
+      return { key: 'config.validation.required' };
+  }
+  // A kind this build does not know yet: the server's own words.
+  return {
+    key: 'plugins.config.serverFieldError',
+    params: { message: field.message },
+  };
+}
+
 /**
  * The field problems of a refused save: the server checks every config
  * against its schema and answers `VALIDATION_ERROR` with `details.fields`,
- * each `{path, message}` where `path` reads `field.nested[2].leaf`. Keyed
- * like `validateAll`, by dot path with array indices as segments. Empty when
- * the error names no field.
+ * each a `FieldError` whose `path` reads `field.nested[2].leaf`. Keyed like
+ * `validateAll`, by dot path with array indices as segments. Empty when the
+ * error names no field.
  */
 export function serverFieldErrors(
   error: unknown,
@@ -223,17 +275,11 @@ export function serverFieldErrors(
     ?.fields;
   const errors: Record<string, FieldProblem> = {};
   if (!Array.isArray(fields)) return errors;
-  for (const field of fields) {
-    const { path, message } = (field ?? {}) as {
-      path?: unknown;
-      message?: unknown;
-    };
-    if (typeof path !== 'string' || typeof message !== 'string') continue;
-    const key = path.replace(/\[(\d+)\]/g, '.$1');
-    errors[key] = {
-      key: 'plugins.config.serverFieldError',
-      params: { message },
-    };
+  for (const field of fields as ServerFieldError[]) {
+    if (typeof field?.path !== 'string' || typeof field.message !== 'string') {
+      continue;
+    }
+    errors[field.path.replace(/\[(\d+)\]/g, '.$1')] = serverProblem(field);
   }
   return errors;
 }

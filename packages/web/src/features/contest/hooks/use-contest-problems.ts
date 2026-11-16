@@ -1,5 +1,6 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
+import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
 import { useProblemPresentation } from '@broccoli/web-sdk/problem';
 import { useQuery } from '@tanstack/react-query';
@@ -34,7 +35,7 @@ export function useContestProblems(contestId: number | null | undefined) {
     queryKey: ['contest-problems', contestId, viewerCacheKey(user)],
     enabled: authReady && !!contest && !awaitingStart,
     queryFn: () => fetchContestProblemList(apiClient, id),
-    refetchInterval: () => problemListRefetchInterval(contest),
+    refetchInterval: pollInterval(() => problemListRefetchInterval(contest)),
   });
 
   return {
