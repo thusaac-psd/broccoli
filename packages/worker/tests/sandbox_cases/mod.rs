@@ -258,6 +258,7 @@ async fn run_task<B: Backend>(
         reply_to: "test-server".into(),
         operation_batch_id: None,
         trace_context: None,
+        judgement: None,
     };
 
     let result = worker.execute_task(task).await.unwrap();

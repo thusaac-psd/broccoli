@@ -69,6 +69,13 @@ impl Topology {
         format!("{}:reply:{server_id}", self.base)
     }
 
+    /// Server `server_id`'s ledger of outstanding operations: a sorted set of
+    /// the ids of the tasks it published and has no reply for yet, scored by
+    /// their publish time on the Redis clock.
+    pub fn outstanding(&self, server_id: &str) -> String {
+        format!("{}:outstanding:{server_id}", self.base)
+    }
+
     /// The dead-letter stream.
     pub fn dead_letter(&self) -> String {
         format!("{}:dlq", self.base)
@@ -109,6 +116,7 @@ mod tests {
         assert_eq!(t.role_of(&t.reply("s1")), Some(StreamRole::Reply));
         assert_eq!(t.role_of(&t.dead_letter()), Some(StreamRole::DeadLetter));
         assert_eq!(t.role_of(&t.pinned_set()), None);
+        assert_eq!(t.role_of(&t.outstanding("s1")), None);
         assert_eq!(t.role_of("ops:worker:"), None);
         assert_eq!(t.role_of("other"), None);
     }

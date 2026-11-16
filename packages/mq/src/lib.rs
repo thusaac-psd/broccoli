@@ -57,6 +57,29 @@ pub enum Route {
 /// keeps its unread replies, while a dead server's stream still expires.
 pub const REPLY_STREAM_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// How long a server's outstanding ledger outlives the last publish or check
+/// that touched it, so a dead server's ledger expires with its reply stream.
+pub const OUTSTANDING_TTL: std::time::Duration = REPLY_STREAM_TTL;
+
+/// Age past which a ledger entry is dropped: longer than any operation waits
+/// for its result. Only a task settled without a reply (the host cancelled
+/// it) stays in the ledger that long.
+pub const OUTSTANDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
+
+/// Task ids one [`Mq::check_outstanding`] round trip checks.
+pub const CHECK_CHUNK: usize = 1024;
+
+/// What [`Mq::check_outstanding`] found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Outstanding {
+    /// The checked task ids the ledger no longer holds.
+    pub missing: Vec<String>,
+    /// The id of the reply stream's last entry when the ledger was read;
+    /// `None` when it had none. Every reply for a missing task that its
+    /// server has not read yet is at or before it.
+    pub replies_through: Option<String>,
+}
+
 /// Approximate cap on a reply stream's length. A server reads its replies as
 /// they arrive, so only a stuck or dead server's stream gets near it; the cap
 /// keeps that stream from filling Redis (and stopping every write under
@@ -126,6 +149,13 @@ impl Mq {
         &self.topology
     }
 
+    /// Whether the last command on the shared connection reached Redis;
+    /// `true` until one fails to. It reads `true` again after the next
+    /// command that gets an answer.
+    pub fn is_reachable(&self) -> bool {
+        self.conn.is_reachable()
+    }
+
     /// Check that each key is missing or of its expected type (`TYPE`), so a
     /// foreign key under the queue's name fails boot with its name instead of
     /// failing every command with `WRONGTYPE`.
@@ -153,21 +183,24 @@ impl Mq {
     }
 
     /// Publish an operation task: to `pin`'s private stream when that worker
-    /// is live, else to the shared stream.
+    /// is live, else to the shared stream. The task is recorded in its
+    /// server's outstanding ledger (`task.reply_to`) in the same step.
     pub async fn publish_task(&self, task: &Task, pin: Option<&str>) -> Result<Route, MqError> {
         let payload = serde_json::to_string(task)?;
         let t = &self.topology;
+        let ledger = t.outstanding(&task.reply_to);
+        let ttl = OUTSTANDING_TTL.as_millis() as u64;
         let pinned: bool = match pin {
             None => {
-                let key = t.shared();
                 self.conn
                     .run(|mut c| async move {
-                        redis::cmd("XADD")
-                            .arg(&key)
-                            .arg("*")
-                            .arg("p")
+                        scripts::PUBLISH_SHARED
+                            .key(&ledger)
+                            .key(t.shared())
+                            .arg(&task.id)
+                            .arg(ttl)
                             .arg(&payload)
-                            .query_async::<String>(&mut c)
+                            .invoke_async::<()>(&mut c)
                             .await
                     })
                     .await?;
@@ -177,12 +210,15 @@ impl Mq {
                 self.conn
                     .run(|mut c| async move {
                         scripts::PUBLISH_PINNED
+                            .key(&ledger)
                             .key(NodeRole::Worker.key(t.namespace(), worker_id))
                             .key(t.private(worker_id))
                             .key(t.shared())
                             .key(t.pinned_set())
-                            .arg(worker_id)
+                            .arg(&task.id)
+                            .arg(ttl)
                             .arg(&payload)
+                            .arg(worker_id)
                             .invoke_async(&mut c)
                             .await
                     })
@@ -192,20 +228,27 @@ impl Mq {
         Ok(if pinned { Route::Pinned } else { Route::Shared })
     }
 
-    /// Publish a reply to server `server_id`.
+    /// Publish a reply to server `server_id`. A completed task leaves the
+    /// server's outstanding ledger in the same step.
     pub async fn publish_reply(
         &self,
         server_id: &str,
         reply: &TaskReply,
     ) -> Result<ReplyOutcome, MqError> {
         let payload = serde_json::to_string(reply)?;
+        let completed = match reply {
+            TaskReply::Completed { result } => result.task_id.as_str(),
+            TaskReply::Started { .. } => "",
+        };
         let code: i64 = self
             .conn
             .run(|mut c| async move {
                 scripts::PUBLISH_REPLY
                     .key(self.topology.reply(server_id))
+                    .key(self.topology.outstanding(server_id))
                     .arg(&payload)
                     .arg(REPLY_STREAM_MAXLEN)
+                    .arg(completed)
                     .invoke_async(&mut c)
                     .await
             })
@@ -215,6 +258,47 @@ impl Mq {
         } else {
             ReplyOutcome::ServerGone
         })
+    }
+
+    /// Which of `task_ids`, operations server `server_id` published and has
+    /// no reply for, the queue no longer holds. A task leaves the ledger only
+    /// with its completed reply, so a missing one either has its reply in the
+    /// reply stream at or before [`Outstanding::replies_through`], or was lost
+    /// with a Redis that restarted without it. Ids are checked
+    /// [`CHECK_CHUNK`] per round trip.
+    pub async fn check_outstanding(
+        &self,
+        server_id: &str,
+        task_ids: &[String],
+    ) -> Result<Outstanding, MqError> {
+        let ledger = self.topology.outstanding(server_id);
+        let reply = self.topology.reply(server_id);
+        let mut out = Outstanding::default();
+        // One round trip even with nothing to check: it keeps the ledger and
+        // shows whether Redis answers.
+        let mut chunks: Vec<&[String]> = task_ids.chunks(CHECK_CHUNK).collect();
+        if chunks.is_empty() {
+            chunks.push(&[]);
+        }
+        for chunk in chunks {
+            let (ledger, reply) = (&ledger, &reply);
+            let (missing, last): (Vec<String>, Option<String>) = self
+                .conn
+                .run(|mut c| async move {
+                    scripts::CHECK_OUTSTANDING
+                        .key(ledger)
+                        .key(reply)
+                        .arg(OUTSTANDING_TTL.as_millis() as u64)
+                        .arg(OUTSTANDING_MAX_AGE.as_millis() as u64)
+                        .arg(chunk)
+                        .invoke_async(&mut c)
+                        .await
+                })
+                .await?;
+            out.missing.extend(missing);
+            out.replies_through = last;
+        }
+        Ok(out)
     }
 
     /// Publish a dead letter that has no source entry (a server-side timeout).

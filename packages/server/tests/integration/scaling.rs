@@ -14,6 +14,7 @@ use mq::Mq;
 use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use server::consumers::consume_operation_results;
+use server::consumers::operation_result::OutstandingCheck;
 use server::host_funcs::context::OperationHostDeps;
 use server::registry::{EvaluateBatches, OperationBatches, OperationWaiter, OperationWaiters};
 use server::services::operation_batch::{
@@ -104,12 +105,14 @@ async fn a_reply_reaches_only_the_replica_that_published_the_task() {
     waiters_b.insert("task-1".to_string(), OperationWaiter::new(tx_b, None));
     let consumer_a = tokio::spawn(consume_operation_results(
         mq.reply_inbox("replica-a"),
+        outstanding_check(&mq, "replica-a"),
         Arc::clone(&waiters_a),
         EvaluateBatches::default(),
         metrics.clone(),
     ));
     let consumer_b = tokio::spawn(consume_operation_results(
         mq.reply_inbox("replica-b"),
+        outstanding_check(&mq, "replica-b"),
         Arc::clone(&waiters_b),
         EvaluateBatches::default(),
         metrics,
@@ -136,6 +139,16 @@ async fn a_reply_reaches_only_the_replica_that_published_the_task() {
     consumer_b.abort();
 }
 
+/// The result consumer's ledger check for `server_id`, at the production
+/// interval: these tests only need replies delivered.
+fn outstanding_check(mq: &Mq, server_id: &str) -> OutstandingCheck {
+    OutstandingCheck {
+        mq: mq.clone(),
+        server_id: server_id.to_string(),
+        interval: server::consumers::operation_result::OUTSTANDING_CHECK_INTERVAL,
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn operation_result_burst_has_no_missing_waiters() {
     const OP_COUNT: usize = 1_000;
@@ -152,6 +165,7 @@ async fn operation_result_burst_has_no_missing_waiters() {
 
     let consumer = tokio::spawn(consume_operation_results(
         mq.reply_inbox(server_id),
+        outstanding_check(&mq, server_id),
         Arc::clone(&operation_waiters),
         evaluate_batches.clone(),
         metrics.clone(),
@@ -171,6 +185,7 @@ async fn operation_result_burst_has_no_missing_waiters() {
         ),
         metrics: Some(metrics.clone()),
         evaluate_batches,
+        judgement: None,
     };
 
     let batch_id = start_operation_batch(
@@ -293,4 +308,101 @@ fn prometheus_counter_sum_with_label(metrics_text: &str, metric_name: &str, labe
         .filter_map(|line| line.rsplit_once(' '))
         .filter_map(|(_, value)| value.parse::<f64>().ok())
         .sum()
+}
+
+/// A Redis that restarts from a snapshot taken before an operation was
+/// published loses that task, while the server's reply stream (in the
+/// snapshot) survives, so stream-loss detection never fires. The result
+/// consumer's ledger check fails the lost operation's waiter at once, and
+/// leaves an operation the queue still holds waiting.
+#[tokio::test]
+async fn an_operation_a_stale_redis_snapshot_lost_fails_its_waiter() {
+    let (_redis, url) = redis().await;
+    let mq = Mq::connect(&url, "ops").await.expect("mq");
+    let server_id = "snapshot-server";
+    let _server = live_server(&url, &mq, server_id).await;
+    reply_stream_ready(&url, &mq, server_id).await;
+    let (metrics, _registry, _provider) = init_local_metrics("broccoli-lost-operation-test");
+    let mut admin = redis::Client::open(url.as_str())
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+
+    let waiters: OperationWaiters = Arc::new(DashMap::new());
+    let mut receivers = Vec::new();
+    let saved_keys = [mq.topology().shared(), mq.topology().outstanding(server_id)];
+    let mut saved = Vec::new();
+    for id in ["kept", "lost"] {
+        if id == "lost" {
+            // The snapshot Redis later comes back from.
+            for key in &saved_keys {
+                let dump: Option<Vec<u8>> = redis::cmd("DUMP")
+                    .arg(key)
+                    .query_async(&mut admin)
+                    .await
+                    .unwrap();
+                saved.push((key.clone(), dump));
+            }
+        }
+        let (tx, rx) = oneshot::channel();
+        let mut waiter = OperationWaiter::new(tx, None);
+        waiter.published = true;
+        waiters.insert(id.to_string(), waiter);
+        receivers.push(rx);
+        let task = common::worker::Task {
+            id: id.to_string(),
+            task_type: "operation".into(),
+            executor_name: "operation".into(),
+            payload: serde_json::json!({}),
+            reply_to: server_id.to_string(),
+            operation_batch_id: None,
+            trace_context: None,
+            judgement: None,
+        };
+        mq.publish_task(&task, None).await.unwrap();
+    }
+    for (key, dump) in &saved {
+        let _: () = redis::cmd("DEL")
+            .arg(key)
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+        let dump = dump.as_ref().expect("the snapshot holds the key");
+        let _: () = redis::cmd("RESTORE")
+            .arg(key)
+            .arg(0)
+            .arg(dump)
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+    }
+
+    let consumer = tokio::spawn(consume_operation_results(
+        mq.reply_inbox(server_id),
+        OutstandingCheck {
+            mq: mq.clone(),
+            server_id: server_id.to_string(),
+            interval: Duration::ZERO,
+        },
+        Arc::clone(&waiters),
+        EvaluateBatches::default(),
+        metrics,
+    ));
+
+    let lost = receivers.pop().unwrap();
+    let result = timeout(Duration::from_secs(30), lost)
+        .await
+        .expect("the lost operation must fail within a check or two")
+        .expect("the waiter is answered");
+    assert!(!result.success);
+    assert_eq!(
+        result.error.as_deref(),
+        Some(server::consumers::operation_result::OPERATION_LOST)
+    );
+    assert!(
+        waiters.contains_key("kept"),
+        "an operation the queue still holds keeps waiting"
+    );
+    consumer.abort();
 }

@@ -65,7 +65,10 @@ server:
     cargo run -p server
 
 # Run the worker
+# The comparator standard checkers mount builds beside the worker, where the
+# worker finds it without a [worker.tools] dir.
 worker:
+    cargo build -p broccoli-compare
     cargo run -p worker
 
 # Install all JS dependencies

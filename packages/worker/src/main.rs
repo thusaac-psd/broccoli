@@ -21,7 +21,8 @@ async fn main() -> anyhow::Result<()> {
     let nofile = common::rlimit::raise_nofile_limit();
     let config = WorkerAppConfig::load().context("Failed to load config")?;
     let _telemetry_guard = common::observability::init_tracing(&config.observability);
-    common::config::warn_unknown_keys(&config.unknown_keys, "BROCCOLI");
+    common::config::warn_unknown_keys(&config.unknown_keys);
+    common::config::warn_misnamed_env_settings();
     nofile.log();
     let runtime = WorkerRuntime::build(config).await?;
     runtime.run().await

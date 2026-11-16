@@ -46,16 +46,19 @@ pub enum AppError {
     RateLimited {
         retry_after: u64,
     },
-    /// Server is overloaded; client should retry after the given duration.
-    /// Distinct from `RateLimited` (429): 429 means "your client is too fast",
-    /// 503 means "the system as a whole is past capacity". Used for
-    /// durable-queue depth backpressure.
     /// The serving replica has no handler for this contest type right now
     /// (its plugin is still loading, or failed to load, here). Retryable: the
     /// load balancer will likely route the retry to a replica that has it.
     ContestTypeUnavailable(String),
     /// The contest already has a submission, so its contest type is fixed.
     ContestTypeLocked,
+    /// The plugin providing this contest type is disabled fleet-wide. Not
+    /// retryable: nothing changes until an admin enables it again.
+    ContestTypeDisabled(String),
+    /// Server is overloaded; client should retry after the given duration.
+    /// Distinct from `RateLimited` (429): 429 means "your client is too fast",
+    /// 503 means "the system as a whole is past capacity". Used for
+    /// durable-queue depth backpressure.
     Overloaded {
         retry_after: u64,
     },
@@ -175,6 +178,16 @@ impl AppError {
                     format!(
                         "This server cannot accept '{contest_type}' submissions right now; \
                          retry in {CONTEST_TYPE_RETRY_AFTER_SECS} seconds"
+                    ),
+                ),
+            ),
+            AppError::ContestTypeDisabled(contest_type) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                simple(
+                    "CONTEST_TYPE_DISABLED",
+                    format!(
+                        "'{contest_type}' submissions are closed: the plugin that judges them \
+                         is disabled"
                     ),
                 ),
             ),

@@ -113,7 +113,18 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
             ..Default::default()
         };
 
-        self.insert_entry(&envelope.message_id, model).await
+        let row = self.insert_entry(&envelope.message_id, model).await?;
+        // A letter filed after its submission's verdict already stood is
+        // settled at once.
+        if row.submission_id.is_some()
+            && crate::services::judging::resolve_if_settled(self.conn, row.id).await?
+        {
+            return dead_letter_message::Entity::find_by_id(row.id)
+                .one(self.conn)
+                .await?
+                .ok_or_else(|| DbErr::RecordNotFound(format!("dead letter {}", row.id)));
+        }
+        Ok(row)
     }
 
     /// Dead-letters `subject`: inserts its row, or reopens the existing one

@@ -389,7 +389,7 @@ impl WorkerConsumer {
         Settlement::DeadLetter(Box::new(DlqEnvelope {
             message_id: task.id.clone(),
             message_type: DlqMessageType::OperationTask,
-            submission_id: None,
+            submission_id: task.judgement.map(|j| j.submission_id),
             payload,
             error_code,
             error_message,
@@ -445,6 +445,7 @@ mod tests {
             reply_to: SERVER.into(),
             operation_batch_id: batch_id.map(str::to_string),
             trace_context: None,
+            judgement: None,
         }
     }
 
@@ -683,11 +684,16 @@ mod tests {
     }
 
     /// A task over the delivery limit is not run: the server gets a failed
-    /// reply and the task becomes a dead letter.
+    /// reply and the task becomes a dead letter, filed under the submission
+    /// it ran for.
     #[tokio::test]
     async fn a_poison_task_is_dead_lettered_without_running() {
         let mut h = harness().await;
-        let t = task("poison", None);
+        let mut t = task("poison", None);
+        t.judgement = Some(common::worker::JudgementRef {
+            submission_id: 7,
+            judgement_id: 9,
+        });
         let group = h.mq.task_consumer("worker-test");
         group.ensure_groups().await.unwrap();
         h.mq.publish_task(&t, None).await.unwrap();
@@ -719,6 +725,11 @@ mod tests {
             panic!("expected a dead letter, got {settlement:?}");
         };
         assert_eq!(envelope.error_code, DlqErrorCode::RedeliveryExhausted);
+        assert_eq!(
+            envelope.submission_id,
+            Some(7),
+            "filed under the submission it ran for"
+        );
         assert_eq!(h.calls.load(Ordering::SeqCst), 0);
         assert_eq!(h.replies().await, 1, "the server is told the task failed");
     }

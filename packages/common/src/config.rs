@@ -195,12 +195,53 @@ pub fn deserialize_noting_ignored<T: serde::de::DeserializeOwned>(
     Ok((value, unknown))
 }
 
+/// The environment prefix of every setting: `a.b` is `BROCCOLI__A__B`.
+pub const ENV_PREFIX: &str = "BROCCOLI";
+
+/// The environment source of every Broccoli binary's settings.
+pub fn environment() -> ::config::Environment {
+    ::config::Environment::with_prefix(ENV_PREFIX)
+        .separator("__")
+        .try_parsing(true)
+}
+
+/// The variables among `names` that are shaped like a setting but miss the
+/// double underscore after the prefix (`BROCCOLI_WORKER__TOOLS__DIR`), which
+/// [`environment`] would otherwise skip without a word. Variables without a
+/// `__` (`BROCCOLI_CONFIG`, the deployment scripts' own) are not settings.
+pub fn misnamed_env_settings(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    let single = format!("{ENV_PREFIX}_");
+    let double = format!("{ENV_PREFIX}__");
+    let mut out: Vec<String> = names
+        .into_iter()
+        .filter(|name| {
+            name.starts_with(&single) && !name.starts_with(&double) && name.contains("__")
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Logs one warning per variable [`misnamed_env_settings`] finds in this
+/// process's environment.
+pub fn warn_misnamed_env_settings() {
+    let names = std::env::vars_os().filter_map(|(name, _)| name.into_string().ok());
+    for name in misnamed_env_settings(names) {
+        let meant = format!("{ENV_PREFIX}_{}", &name[ENV_PREFIX.len()..]);
+        tracing::warn!(
+            env = %name,
+            meant = %meant,
+            "Ignoring an environment variable shaped like a setting: settings take two underscores after the prefix"
+        );
+    }
+}
+
 /// Logs one warning per setting the binary does not read (see
 /// [`deserialize_noting_ignored`]): a removed key, or a typo. Setting `a.b` comes from
-/// `a.b` in the config file or `{env_prefix}__A__B` in the environment.
-pub fn warn_unknown_keys(keys: &[String], env_prefix: &str) {
+/// `a.b` in the config file or `BROCCOLI__A__B` in the environment.
+pub fn warn_unknown_keys(keys: &[String]) {
     for key in keys {
-        let env = format!("{env_prefix}__{}", key.replace('.', "__").to_uppercase());
+        let env = format!("{ENV_PREFIX}__{}", key.replace('.', "__").to_uppercase());
         tracing::warn!(
             key,
             env,
@@ -212,6 +253,51 @@ pub fn warn_unknown_keys(keys: &[String], env_prefix: &str) {
 #[cfg(test)]
 mod unknown_key_tests {
     use super::*;
+
+    #[test]
+    fn a_setting_with_one_underscore_after_the_prefix_is_reported() {
+        let names = [
+            "BROCCOLI_WORKER__TOOLS__DIR",
+            "BROCCOLI__WORKER__TOOLS__DIR",
+            "BROCCOLI_CONFIG",
+            "BROCCOLI_DB_USER",
+            "PATH",
+        ]
+        .map(String::from);
+        assert_eq!(
+            misnamed_env_settings(names),
+            ["BROCCOLI_WORKER__TOOLS__DIR"]
+        );
+    }
+
+    #[test]
+    fn the_environment_source_reads_double_underscore_settings() {
+        #[derive(serde::Deserialize)]
+        struct Worker {
+            tools: Tools,
+        }
+        #[derive(serde::Deserialize)]
+        struct Tools {
+            dir: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct App {
+            worker: Worker,
+        }
+        let env = [(
+            "BROCCOLI__WORKER__TOOLS__DIR".to_string(),
+            "/x/tools".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let app: App = ::config::Config::builder()
+            .add_source(environment().source(Some(env)))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        assert_eq!(app.worker.tools.dir, "/x/tools");
+    }
 
     #[derive(Debug, serde::Deserialize)]
     struct Binary {

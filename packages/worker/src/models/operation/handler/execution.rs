@@ -88,6 +88,11 @@ impl OperationHandler {
 
     /// Set the worker-local platform tools directory (builder style so existing
     /// constructor call sites are unaffected).
+    /// The platform tools directory, if this handler has one.
+    pub fn tools_dir(&self) -> Option<&std::path::Path> {
+        self.tools_dir.as_deref()
+    }
+
     pub fn with_tools_dir(mut self, tools_dir: Option<PathBuf>) -> Self {
         self.tools_dir = tools_dir;
         self

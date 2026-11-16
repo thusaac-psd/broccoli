@@ -21,7 +21,8 @@ use crate::registry::{EvaluateCaseRef, OperationBatches, OperationWaiter, Operat
 use crate::services::batch_table::{BatchSender, Removal};
 use crate::services::batch_wait::{BatchWait, WaitCtx, WaitPolicy};
 use crate::services::windowed_session::{
-    SessionAction, SessionDecision, SlotEvent, SlotOutcome, WindowedSession, run_windowed_session,
+    SessionAction, SessionDecision, SessionEnd, SlotEvent, SlotOutcome, WindowedSession,
+    run_windowed_session,
 };
 
 const INLINE_FILE_BLOB_THRESHOLD_BYTES: usize = 1_048_576;
@@ -212,6 +213,7 @@ pub async fn start_operation_batch(
                 reply_to: deps.server_id.clone(),
                 operation_batch_id: None,
                 trace_context: common::observability::inject_trace_context(),
+                judgement: deps.judgement,
             };
 
             let publisher = deps
@@ -237,6 +239,9 @@ pub async fn start_operation_batch(
                 publish_start,
             );
             publish_result.with_context(|| "MQ publish error")?;
+            if let Some(mut waiter) = deps.operation_waiters.get_mut(&correlation_id) {
+                waiter.published = true;
+            }
 
             tracing::debug!(
                 batch_id = %batch_id,
@@ -300,8 +305,8 @@ pub fn start_detached_windowed_operation(
 
 /// [`WindowedSession`] driver for detached operation batches. Operation is the
 /// plain shape: a `usize` slot index, an MQ round-trip per slot, a raw
-/// `TaskResult` decoded into an `OperationResult`, no server-side retry, and no
-/// terminal hooks.
+/// `TaskResult` decoded into an `OperationResult`, no server-side retry, and
+/// nothing to record when it ends.
 struct OperationDriver {
     plugin_id: String,
     session_id: String,
@@ -418,6 +423,10 @@ impl WindowedSession for OperationDriver {
     async fn cancel_selected(&self, active: &mut Vec<(usize, String)>, ids: &HashSet<usize>) {
         cancel_operation_indices(&self.plugin_id, &self.deps, active, ids);
     }
+
+    /// An operation session judges no unit of its own: whatever its plugin
+    /// judges with it is finalized by that plugin's own judging session.
+    async fn on_end(&self, _end: SessionEnd) {}
 }
 
 async fn run_detached_windowed_operation(
@@ -528,11 +537,12 @@ const OPERATION_RESULT_WAIT_TICK: Duration = Duration::from_millis(50);
 
 /// Minimum time an in-flight operation is allowed before the result-wait gives
 /// up, independent of the (small) solution-derived `timeout`. Large in
-/// production so a slow / backed-up worker yields SLOW results, not failures -
-/// the operation's real time limit is enforced inside isolate, and a genuinely
-/// dead worker is reclaimed by the dispatcher lease/steal. Without this, a deep
-/// queue or cold-blob IO under load hard-times-out every operation at the small
-/// budget and mass-fails submissions. Zero in tests so the explicit `timeout`
+/// production so a slow or backed-up worker yields slow results, not failures:
+/// the operation's real time limit is enforced inside isolate, a dead worker's
+/// task is redelivered by the queue, and a task the queue lost fails its
+/// waiter within one ledger check (see
+/// [`crate::consumers::operation_result::OutstandingCheck`]). This ceiling is
+/// only the last resort behind those. Zero in tests so the explicit `timeout`
 /// still governs.
 #[cfg(not(test))]
 fn operation_infra_floor() -> Duration {
@@ -543,11 +553,12 @@ fn operation_infra_floor() -> Duration {
     Duration::from_secs(0)
 }
 
-/// The operation batch result-wait policy: wait while the operation is still
-/// in flight (pending), up to a large infrastructure ceiling, instead of a hard
-/// timeout at the small budget. A queued op (waiting for a backed-up worker) or
-/// a slowly-executing op thus degrades to a slow result, never a spurious
-/// failure.
+/// The operation batch result-wait policy: wait while the operation is in
+/// flight, up to a large infrastructure ceiling, instead of a hard timeout at
+/// the small budget. A queued op (waiting for a backed-up worker) or a slowly
+/// executing op thus degrades to a slow result, never a spurious failure. An
+/// operation that cannot finish any more is answered with a failure by the
+/// result consumer, which ends the wait like any result.
 struct OperationWait {
     ceiling: Duration,
 }
@@ -559,9 +570,8 @@ impl WaitPolicy<TaskResult, Vec<String>> for OperationWait {
         (waited < self.ceiling).then(|| (self.ceiling - waited).min(OPERATION_RESULT_WAIT_TICK))
     }
 
-    // Pending means the operation is in flight: keep waiting (system
-    // slowness) and give up only once it is no longer pending (accounted for,
-    // no result) or the ceiling is reached.
+    /// A pending operation keeps waiting until the ceiling: its result, or
+    /// the failure the result consumer sends for it, ends the wait.
     fn extend(&self, _wait: &WaitCtx<'_, TaskResult, Vec<String>>) -> bool {
         true
     }
@@ -891,6 +901,7 @@ mod tests {
             blob_store,
             metrics: None,
             evaluate_batches,
+            judgement: None,
         }
     }
 

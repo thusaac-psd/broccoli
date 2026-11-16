@@ -293,9 +293,10 @@ async fn prepare_and_run_case(
 /// (queueing + cold blob IO) that elapses while the worker is still alive and
 /// processing. Bounding the wait by it converts SYSTEM slowness into a
 /// SystemError. Extend up to this ceiling instead so slow degrades to slow, not
-/// failed; the solution's real time limit is enforced inside isolate, and a dead
-/// worker is reclaimed by the dispatcher stuck-detector. Zero in tests so the
-/// explicit `timeout` still governs.
+/// failed; the solution's real time limit is enforced inside isolate, a dead
+/// worker's task is redelivered by the queue, and a task the queue lost fails
+/// within one ledger check. Zero in tests so the explicit `timeout` still
+/// governs.
 #[cfg(not(test))]
 fn staged_result_infra_floor() -> Duration {
     Duration::from_secs(30 * 60)

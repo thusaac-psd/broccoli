@@ -78,6 +78,9 @@ pub struct OperationHostDeps {
     pub metrics: Option<common::metrics::Metrics>,
     /// Evaluate batches whose test cases an operation may run for.
     pub evaluate_batches: EvaluateBatches,
+    /// The judgement the operations started with these deps run for, if
+    /// any; each task carries it (see `common::worker::Task::judgement`).
+    pub judgement: Option<common::worker::JudgementRef>,
 }
 
 #[derive(Clone)]
@@ -120,6 +123,7 @@ impl HostFunctionSystemDeps {
             blob_store: self.blob_store.clone(),
             metrics: self.metrics.clone(),
             evaluate_batches: self.evaluate_batches.clone(),
+            judgement: None,
         }
     }
 }

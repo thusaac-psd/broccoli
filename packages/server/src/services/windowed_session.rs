@@ -18,8 +18,9 @@
 //! - **server-side retry** (`take_retry`/`note_retry*`): evaluate re-dispatches a
 //!   timed-out op a bounded number of times before surfacing the timeout;
 //!   operation never retries (the default no-ops).
-//! - **terminal hooks** (`on_terminal`): evaluate fires after-judging submission
-//!   hooks; operation has none (default no-op).
+//! - **the end** (`on_end`): called once on every exit with a [`SessionEnd`];
+//!   evaluate finalizes the judgement the session judges and fires its
+//!   after-judging hooks; operation has nothing to record.
 //!
 //! The callback protocol itself is isomorphic across the two domains (a
 //! Continue/Finish/Cancel action, a `refill` bool, and a per-slot cancel list),
@@ -148,10 +149,10 @@ pub trait WindowedSession: Send + Sync + Sized + 'static {
     /// Default no-op.
     fn note_retry_failed(&self, _slot_id: Self::SlotId, _error: &anyhow::Error) {}
 
-    /// Fired once when the session terminates with `action` (evaluate uses this
-    /// for after-judging completion hooks). NOT fired when the session aborts on
-    /// a callback error. Default no-op.
-    async fn on_terminal(&self, _action: SessionAction) {}
+    /// Called exactly once, when the session has ended and its active slots
+    /// are cancelled. A driver whose session judges a unit must leave that
+    /// unit terminal here, whatever `end` is.
+    async fn on_end(&self, end: SessionEnd);
 }
 
 /// Remove the active slot with `batch_id`; returns whether one was found. A late
@@ -164,6 +165,38 @@ fn remove_active_slot<S: Copy>(active: &mut Vec<(S, String)>, batch_id: &str) ->
     true
 }
 
+/// How a session ended. Every run of [`run_windowed_session`] ends in exactly
+/// one of these, handed once to [`WindowedSession::on_end`] after every active
+/// slot is cancelled, so no exit can leave the session's work unaccounted for.
+#[derive(Debug)]
+pub enum SessionEnd {
+    /// The plugin's callback ended it with this action: `Finish` or `Cancel`,
+    /// or whatever it answered to the `Exhausted` event.
+    Decided(SessionAction),
+    /// The plugin could not decide: its callback failed or the plugin is gone.
+    Aborted(String),
+    /// This server is shutting down. The session's work is released with the
+    /// server's leases and judged again elsewhere, so nothing is recorded.
+    Interrupted,
+}
+
+impl SessionEnd {
+    /// The end that a failed callback call means.
+    fn of_callback_error(error: &anyhow::Error) -> Self {
+        let shutting_down = error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<plugin_core::error::PluginError>(),
+                Some(plugin_core::error::PluginError::ShuttingDown)
+            )
+        });
+        if shutting_down {
+            Self::Interrupted
+        } else {
+            Self::Aborted(format!("{error:#}"))
+        }
+    }
+}
+
 /// Drive a detached windowed session to completion. Spawned as a background task
 /// by each domain's `start_detached_windowed_*`.
 pub async fn run_windowed_session<S: WindowedSession>(
@@ -171,8 +204,46 @@ pub async fn run_windowed_session<S: WindowedSession>(
     items: Vec<S::Item>,
     concurrency: usize,
     timeout: Duration,
-    mut state: serde_json::Value,
+    state: serde_json::Value,
 ) {
+    let mut active = Vec::<(S::SlotId, String)>::new();
+    let end = drive(&mut driver, &mut active, items, concurrency, timeout, state).await;
+    if let SessionEnd::Aborted(error) = &end {
+        tracing::error!(
+            plugin_id = %driver.plugin_id(),
+            session_id = %driver.session_id(),
+            error = %error,
+            "Detached windowed session aborted"
+        );
+    }
+    driver.cancel_active(&active).await;
+    driver.on_end(end).await;
+}
+
+/// Ask the plugin's callback about `event`; a failed call ends the session.
+async fn decide<S: WindowedSession>(
+    driver: &S,
+    event: SlotEvent<S::SlotId, S::Final>,
+    state: serde_json::Value,
+    completed: usize,
+    total: usize,
+) -> Result<SessionDecision<S::SlotId>, SessionEnd> {
+    driver
+        .call_callback(event, state, completed, total)
+        .await
+        .map_err(|e| SessionEnd::of_callback_error(&e))
+}
+
+/// The session loop. Returns how it ended, leaving `active` holding the slots
+/// still in flight.
+async fn drive<S: WindowedSession>(
+    driver: &mut S,
+    active: &mut Vec<(S::SlotId, String)>,
+    items: Vec<S::Item>,
+    concurrency: usize,
+    timeout: Duration,
+    mut state: serde_json::Value,
+) -> SessionEnd {
     let total = items.len();
     let concurrency = concurrency.max(1);
     // `(slot_id, item)`, reversed so `pop()` dispatches in original order.
@@ -182,7 +253,6 @@ pub async fn run_windowed_session<S: WindowedSession>(
         .map(|(index, item)| (driver.slot_id(index, &item), item))
         .collect();
     pending.reverse();
-    let mut active = Vec::<(S::SlotId, String)>::new();
     let (tx, mut rx) = mpsc::channel::<SlotOutcome<S::SlotId, S::Raw>>(concurrency * 2);
     let mut completed = 0usize;
 
@@ -195,40 +265,29 @@ pub async fn run_windowed_session<S: WindowedSession>(
             Ok(batch_id) => active.push((slot_id, batch_id)),
             Err(e) => {
                 // The initial batch could not start: surface the failure to the
-                // plugin, cancel any siblings, and terminalize.
-                let action = driver
-                    .call_callback(
-                        SlotEvent::Timeout {
-                            message: e.to_string(),
-                        },
-                        state.clone(),
-                        completed,
-                        total,
-                    )
-                    .await
-                    .map(|decision| decision.action)
-                    .unwrap_or(SessionAction::Cancel);
-                driver.cancel_active(&active).await;
-                driver.on_terminal(action).await;
-                return;
+                // plugin and end the session.
+                let event = SlotEvent::Timeout {
+                    message: e.to_string(),
+                };
+                return match decide(driver, event, state, completed, total).await {
+                    Ok(decision) => SessionEnd::Decided(decision.action),
+                    Err(end) => end,
+                };
             }
         }
     }
 
     if active.is_empty() {
-        // Nothing was dispatched at all (empty batch, or every start failed and
-        // returned above): give the plugin its Exhausted event and terminalize.
-        if let Ok(decision) = driver
-            .call_callback(SlotEvent::Exhausted, state, completed, total)
-            .await
-        {
-            driver.on_terminal(decision.action).await;
-        }
-        return;
+        // Nothing was dispatched at all (an empty batch): give the plugin its
+        // Exhausted event.
+        return match decide(driver, SlotEvent::Exhausted, state, completed, total).await {
+            Ok(decision) => SessionEnd::Decided(decision.action),
+            Err(end) => end,
+        };
     }
 
     while let Some(item) = rx.recv().await {
-        if !remove_active_slot(&mut active, &item.batch_id) {
+        if !remove_active_slot(active, &item.batch_id) {
             // A late result for a slot already removed (cancelled/superseded).
             continue;
         }
@@ -275,21 +334,9 @@ pub async fn run_windowed_session<S: WindowedSession>(
             },
         };
 
-        let decision = match driver
-            .call_callback(event, state.clone(), completed, total)
-            .await
-        {
+        let decision = match decide(driver, event, state.clone(), completed, total).await {
             Ok(decision) => decision,
-            Err(e) => {
-                tracing::error!(
-                    plugin_id = %driver.plugin_id(),
-                    session_id = %driver.session_id(),
-                    error = %e,
-                    "Detached windowed callback failed"
-                );
-                driver.cancel_active(&active).await;
-                return;
-            }
+            Err(end) => return end,
         };
 
         state = decision.state;
@@ -297,16 +344,14 @@ pub async fn run_windowed_session<S: WindowedSession>(
 
         if !decision.cancel_ids.is_empty() {
             let cancel_set: HashSet<S::SlotId> = decision.cancel_ids.iter().copied().collect();
-            driver.cancel_selected(&mut active, &cancel_set).await;
+            driver.cancel_selected(active, &cancel_set).await;
             pending.retain(|(slot_id, _)| !cancel_set.contains(slot_id));
         }
 
         match decision.action {
             SessionAction::Continue => {}
             SessionAction::Finish | SessionAction::Cancel => {
-                driver.cancel_active(&active).await;
-                driver.on_terminal(decision.action).await;
-                return;
+                return SessionEnd::Decided(decision.action);
             }
         }
 
@@ -324,48 +369,27 @@ pub async fn run_windowed_session<S: WindowedSession>(
                         error = %e,
                         "Failed to refill detached windowed slot"
                     );
-                    let decision = match driver
-                        .call_callback(
-                            SlotEvent::Timeout {
-                                message: e.to_string(),
-                            },
-                            state.clone(),
-                            completed,
-                            total,
-                        )
-                        .await
-                    {
-                        Ok(decision) => decision,
-                        Err(e) => {
-                            tracing::error!(
-                                plugin_id = %driver.plugin_id(),
-                                session_id = %driver.session_id(),
-                                error = %e,
-                                "Detached windowed callback failed after refill start failure"
-                            );
-                            driver.cancel_active(&active).await;
-                            return;
-                        }
+                    let event = SlotEvent::Timeout {
+                        message: e.to_string(),
                     };
+                    let decision =
+                        match decide(driver, event, state.clone(), completed, total).await {
+                            Ok(decision) => decision,
+                            Err(end) => return end,
+                        };
                     state = decision.state;
                     match decision.action {
                         SessionAction::Continue => {}
                         SessionAction::Finish | SessionAction::Cancel => {
-                            driver.cancel_active(&active).await;
-                            driver.on_terminal(decision.action).await;
-                            return;
+                            return SessionEnd::Decided(decision.action);
                         }
                     }
-                    // `continue`, NOT `break`: the failed item was already surfaced
-                    // to the plugin (which chose Continue), so drop it and try the
-                    // remaining pending. Breaking here would exit the refill loop
-                    // with `active` possibly empty while `pending` is non-empty; the
-                    // termination guard below would then be false and the outer
-                    // `rx.recv()` would block forever with no in-flight slot to ever
-                    // wake it (a permanent session hang from a transient start
-                    // failure). Continuing drains pending: it either fills the
-                    // window from a later successful start, or empties pending so
-                    // the guard below terminates the session cleanly.
+                    // `continue`, NOT `break`: the failed item was already
+                    // surfaced to the plugin (which chose Continue), so drop it
+                    // and try the remaining pending. Breaking here could leave
+                    // `active` empty while `pending` is not, and the outer
+                    // `rx.recv()` would then wait forever with no slot in
+                    // flight to wake it.
                     continue;
                 }
             }
@@ -376,17 +400,171 @@ pub async fn run_windowed_session<S: WindowedSession>(
         }
     }
 
-    if let Ok(decision) = driver
-        .call_callback(SlotEvent::Exhausted, state, completed, total)
-        .await
-    {
-        driver.on_terminal(decision.action).await;
+    match decide(driver, SlotEvent::Exhausted, state, completed, total).await {
+        Ok(decision) => SessionEnd::Decided(decision.action),
+        Err(end) => end,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// A driver whose slots deliver at once and whose callback answers from a
+    /// script, recording how the session ended.
+    struct Scripted {
+        answers: Mutex<Vec<anyhow::Result<SessionAction>>>,
+        ends: std::sync::Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Scripted {
+        /// Answers are taken in order, one per callback.
+        fn new(answers: Vec<anyhow::Result<SessionAction>>) -> Self {
+            let mut answers = answers;
+            answers.reverse();
+            Self {
+                answers: Mutex::new(answers),
+                ends: Default::default(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl WindowedSession for Scripted {
+        type Item = ();
+        type Raw = ();
+        type Final = ();
+        type SlotId = usize;
+
+        fn plugin_id(&self) -> &str {
+            "p"
+        }
+
+        fn session_id(&self) -> &str {
+            "s"
+        }
+
+        fn slot_id(&self, index: usize, _item: &()) -> usize {
+            index
+        }
+
+        async fn start_slot(
+            &self,
+            slot_id: usize,
+            _item: (),
+            _timeout: Duration,
+            tx: mpsc::Sender<SlotOutcome<usize, ()>>,
+        ) -> anyhow::Result<String> {
+            let batch_id = format!("b{slot_id}");
+            tx.send(SlotOutcome {
+                slot_id,
+                batch_id: batch_id.clone(),
+                result: Ok(Some(())),
+            })
+            .await
+            .unwrap();
+            Ok(batch_id)
+        }
+
+        fn decode(&self, raw: ()) -> Result<(), String> {
+            Ok(raw)
+        }
+
+        fn timeout_message(&self, _slot_id: usize) -> String {
+            String::new()
+        }
+
+        async fn call_callback(
+            &self,
+            _event: SlotEvent<usize, ()>,
+            state: serde_json::Value,
+            _completed: usize,
+            _total: usize,
+        ) -> anyhow::Result<SessionDecision<usize>> {
+            let action = self
+                .answers
+                .lock()
+                .unwrap()
+                .pop()
+                .expect("a scripted answer")?;
+            Ok(SessionDecision {
+                state,
+                action,
+                refill: true,
+                cancel_ids: Vec::new(),
+            })
+        }
+
+        async fn cancel_active(&self, _active: &[(usize, String)]) {}
+
+        async fn cancel_selected(&self, _active: &mut Vec<(usize, String)>, _ids: &HashSet<usize>) {
+        }
+
+        async fn on_end(&self, end: SessionEnd) {
+            self.ends.lock().unwrap().push(match end {
+                SessionEnd::Decided(action) => format!("decided {action:?}"),
+                SessionEnd::Aborted(_) => "aborted".into(),
+                SessionEnd::Interrupted => "interrupted".into(),
+            });
+        }
+    }
+
+    async fn ends_of(items: usize, answers: Vec<anyhow::Result<SessionAction>>) -> Vec<String> {
+        let driver = Scripted::new(answers);
+        let ends = driver.ends.clone();
+        run_windowed_session(
+            driver,
+            vec![(); items],
+            1,
+            Duration::from_secs(1),
+            serde_json::Value::Null,
+        )
+        .await;
+        ends.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn a_failed_result_callback_aborts_the_session_once() {
+        let ends = ends_of(
+            3,
+            vec![Ok(SessionAction::Continue), Err(anyhow::anyhow!("gone"))],
+        )
+        .await;
+        assert_eq!(ends, ["aborted"]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_exhausted_callback_aborts_the_session() {
+        let ends = ends_of(
+            1,
+            vec![Ok(SessionAction::Continue), Err(anyhow::anyhow!("gone"))],
+        )
+        .await;
+        assert_eq!(ends, ["aborted"]);
+        let ends = ends_of(0, vec![Err(anyhow::anyhow!("gone"))]).await;
+        assert_eq!(ends, ["aborted"]);
+    }
+
+    #[tokio::test]
+    async fn a_callback_cut_off_by_shutdown_interrupts_the_session() {
+        let shutdown = anyhow::Error::from(plugin_core::error::PluginError::ShuttingDown)
+            .context("Detached evaluate callback failed");
+        let ends = ends_of(2, vec![Err(shutdown)]).await;
+        assert_eq!(ends, ["interrupted"]);
+    }
+
+    #[tokio::test]
+    async fn the_plugin_decision_ends_the_session() {
+        let ends = ends_of(3, vec![Ok(SessionAction::Finish)]).await;
+        assert_eq!(ends, ["decided Finish"]);
+        let ends = ends_of(
+            1,
+            vec![Ok(SessionAction::Continue), Ok(SessionAction::Continue)],
+        )
+        .await;
+        assert_eq!(ends, ["decided Continue"]);
+    }
 
     #[test]
     fn remove_active_slot_removes_by_batch_id_then_ignores_late_duplicate() {

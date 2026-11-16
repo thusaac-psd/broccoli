@@ -76,8 +76,9 @@ services:
     # noeviction, publishes fail with OOM and the operation batch fails loudly
     # instead of losing its tasks.
     #
-    # AOF with everysec bounds a crash to the last second of writes; the stuck
-    # job detector recovers work lost in it.
+    # AOF with everysec bounds a crash to the last second of writes; each
+    # server's ledger check fails an operation lost in it within about 10 s,
+    # and the system-error retry judges its submission again.
     #
     # Sizing rationale (override via REDIS_MAXMEMORY):
     #   ~300 MB operation task entries pending under a 1000-submission spike

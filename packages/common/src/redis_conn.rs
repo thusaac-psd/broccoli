@@ -5,6 +5,7 @@
 //! instead of hanging, which is how a half-open socket surfaces. A timeout or
 //! I/O error drops the connection so the next command reconnects.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use redis::aio::MultiplexedConnection;
@@ -22,6 +23,9 @@ pub struct Conn {
     client: Client,
     response_timeout: Duration,
     cached: Mutex<Option<MultiplexedConnection>>,
+    /// Whether the last command reached Redis: cleared by a connection-level
+    /// failure, set by any reply (an error reply included).
+    reachable: AtomicBool,
 }
 
 impl Conn {
@@ -30,7 +34,14 @@ impl Conn {
             client,
             response_timeout,
             cached: Mutex::new(None),
+            reachable: AtomicBool::new(true),
         }
+    }
+
+    /// Whether the last command reached Redis. `true` until a command fails
+    /// to.
+    pub fn is_reachable(&self) -> bool {
+        self.reachable.load(Ordering::Relaxed)
     }
 
     pub fn client(&self) -> &Client {
@@ -60,10 +71,17 @@ impl Conn {
         F: FnOnce(MultiplexedConnection) -> Fut,
         Fut: Future<Output = Result<T, RedisError>>,
     {
-        let result = op(self.get().await?).await;
-        if let Err(e) = &result
-            && breaks_connection(e)
-        {
+        let conn = match self.get().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                self.reachable.store(false, Ordering::Relaxed);
+                return Err(e);
+            }
+        };
+        let result = op(conn).await;
+        let broken = result.as_ref().err().is_some_and(breaks_connection);
+        self.reachable.store(!broken, Ordering::Relaxed);
+        if broken {
             *self.cached.lock().await = None;
         }
         result
@@ -80,4 +98,24 @@ fn breaks_connection(e: &RedisError) -> bool {
 /// Errors raised by `redis.call` inside a script keep their code.
 pub fn has_code(e: &RedisError, code: &str) -> bool {
     e.code() == Some(code) || e.to_string().contains(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_command_that_cannot_reach_redis_marks_it_unreachable() {
+        // Nothing listens on port 1, so the connect is refused at once.
+        let conn = Conn::new(
+            Client::open("redis://127.0.0.1:1").unwrap(),
+            COMMAND_TIMEOUT,
+        );
+        assert!(conn.is_reachable());
+        let ping = conn
+            .run(|mut c| async move { redis::cmd("PING").query_async::<String>(&mut c).await })
+            .await;
+        assert!(ping.is_err());
+        assert!(!conn.is_reachable());
+    }
 }

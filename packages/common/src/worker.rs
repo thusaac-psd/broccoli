@@ -17,6 +17,17 @@ pub struct Task {
     pub operation_batch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_context: Option<String>,
+    /// The judgement this task runs for, when it runs for one: a dead letter
+    /// of the task is filed under its submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judgement: Option<JudgementRef>,
+}
+
+/// One judgement of one submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JudgementRef {
+    pub submission_id: i32,
+    pub judgement_id: i32,
 }
 
 /// The payload a worker writes into its liveness key (see

@@ -55,6 +55,13 @@ impl ReplyInbox {
         &self.key
     }
 
+    /// Whether every reply up to and including entry `id` has been returned
+    /// by [`Self::next_batch`]. `None` (the stream had no entry) is read
+    /// through at once.
+    pub fn has_read_through(&self, id: Option<&str>) -> bool {
+        id.is_none_or(|id| parse_id(&self.cursor) >= parse_id(id))
+    }
+
     /// Wait up to the block time for replies after the cursor and return them
     /// in publish order, deleting the ones the previous call returned.
     ///
@@ -119,7 +126,21 @@ fn parse_id(id: &str) -> (u64, u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_id;
+    use super::{ReplyInbox, parse_id};
+
+    #[test]
+    fn an_inbox_has_read_through_an_entry_once_its_cursor_reaches_it() {
+        let mut inbox = ReplyInbox::new(
+            redis::Client::open("redis://127.0.0.1:1").unwrap(),
+            "r".into(),
+        );
+        assert!(inbox.has_read_through(None), "an empty stream is read");
+        assert!(!inbox.has_read_through(Some("5-0")));
+        inbox.cursor = "5-0".into();
+        assert!(inbox.has_read_through(Some("5-0")));
+        assert!(inbox.has_read_through(Some("4-9")));
+        assert!(!inbox.has_read_through(Some("5-1")));
+    }
 
     #[test]
     fn ids_order_by_time_then_sequence() {

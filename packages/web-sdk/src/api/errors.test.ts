@@ -15,6 +15,9 @@ test('a busy plugin or a full queue is temporary', () => {
 
 test('a refusal or a crash is not temporary', () => {
   assert.ok(!isTemporaryApiError({ code: 'NOT_FOUND', message: 'gone' }));
+  assert.ok(
+    !isTemporaryApiError({ code: 'CONTEST_TYPE_DISABLED', message: 'closed' }),
+  );
   assert.ok(!isTemporaryApiError({ code: 'INTERNAL_ERROR', message: 'x' }));
   assert.ok(!isTemporaryApiError(new Error('network')));
   assert.ok(!isTemporaryApiError(null));
