@@ -135,7 +135,7 @@ pub(super) async fn apply_filter_to_judgement_response(
             vec![]
         },
         language: sub.language.clone(),
-        status: response.status.clone(),
+        status: response.status,
         user_id: sub.user_id,
         username: user_model.username.clone(),
         problem_id: sub.problem_id,

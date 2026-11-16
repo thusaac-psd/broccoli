@@ -12,7 +12,6 @@ use crate::cli::{
     BurstArgs, CancelStormArgs, FaultArgs, FaultScenario, KillServerRecoveryArgs,
     RollingWorkerRestartArgs,
 };
-use crate::client::AuthCreds;
 use crate::fault::scenarios::{
     Scenario, ScenarioContext, burst::Burst, cancel_storm::CancelStorm,
     kill_server_recovery::KillServerRecovery, rolling_worker_restart::RollingWorkerRestart,
@@ -51,8 +50,6 @@ async fn run_rolling_worker_restart(args: &RollingWorkerRestartArgs) -> anyhow::
     let ctx = ScenarioContext {
         redis_url,
         db_url: None,
-        server_url: None,
-        admin_token: None,
         kill_command: args.restart_command.clone(),
     };
 
@@ -90,8 +87,6 @@ async fn run_cancel_storm(args: &CancelStormArgs) -> anyhow::Result<u8> {
     let ctx = ScenarioContext {
         redis_url,
         db_url: None,
-        server_url: None,
-        admin_token: None,
         kill_command: None,
     };
 
@@ -114,22 +109,10 @@ async fn run_cancel_storm(args: &CancelStormArgs) -> anyhow::Result<u8> {
 }
 
 async fn run_burst(args: &BurstArgs) -> anyhow::Result<u8> {
-    let creds = match (
-        args.admin_token.clone(),
-        args.admin_username.clone(),
-        args.admin_password.clone(),
-    ) {
-        (Some(t), _, _) => AuthCreds::Token(t),
-        (None, Some(u), Some(p)) => AuthCreds::UsernamePassword {
-            username: u,
-            password: p,
-        },
-        _ => {
-            return Err(anyhow::anyhow!(
-                "burst requires --admin-token, or both --admin-username and --admin-password"
-            ));
-        }
-    };
+    let creds = args
+        .admin
+        .auth()
+        .map_err(|e| anyhow::anyhow!("burst: {e}"))?;
 
     let type_weights = crate::fault::scenarios::burst::parse_type_weights(&args.type_weights)?;
 
@@ -171,17 +154,15 @@ async fn run_kill_server_recovery(args: &KillServerRecoveryArgs) -> anyhow::Resu
     let ctx = ScenarioContext {
         redis_url: args.redis_url.clone(),
         db_url: Some(args.db_url.clone()),
-        server_url: Some(args.server_url.clone()),
-        admin_token: Some(args.admin_token.clone()),
         kill_command: Some(args.kill_command.clone()),
     };
 
-    // TODO: stress-test's `client::Client` already implements admin login and
-    // bearer auth (see packages/stress-test/src/client.rs); the
-    // kill-server-recovery scenario still hand-rolls reqwest. Consolidate so
-    // operators can pass --admin-username/--admin-password instead of having
-    // to pre-mint a token. Not done here to keep this commit a pure move.
     let outcome = KillServerRecovery {
+        server_url: args.server_url.clone(),
+        creds: args
+            .admin
+            .auth()
+            .map_err(|e| anyhow::anyhow!("kill-server-recovery: {e}"))?,
         submission_count: args.submission_count,
         observe_timeout_secs: args.observe_timeout_secs,
         problem_id: args.problem_id,

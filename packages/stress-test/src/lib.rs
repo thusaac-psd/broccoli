@@ -14,5 +14,7 @@ pub mod passthrough;
 pub mod report;
 pub mod runner;
 pub mod scenarios;
+#[cfg(test)]
+mod test_support;
 pub mod ui;
 pub mod version_check;

@@ -6,7 +6,7 @@ use matchit::Router;
 use serde::Serialize;
 
 use crate::error::{AssetError, PluginError};
-use crate::manifest::PluginManifest;
+use crate::manifest::{PluginManifest, resolve_schema_includes};
 use crate::pool::RecyclingPool;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -129,7 +129,7 @@ impl PluginEntry {
         let mut manifest: PluginManifest = toml::from_str(&toml_content)
             .map_err(|e| PluginError::LoadFailed(format!("Invalid manifest syntax: {}", e)))?;
 
-        manifest.resolve_schema_includes(plugin_dir)?;
+        resolve_schema_includes(&mut manifest, plugin_dir)?;
 
         Self::new(id, plugin_dir.to_path_buf(), manifest)
     }

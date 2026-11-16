@@ -28,6 +28,7 @@ futures = { workspace = true }
 
 # fault::* dependencies (merged from packages/fault-harness/).
 async-trait = { workspace = true }
+broccoli-api-types.workspace = true
 common = { workspace = true, features = ["test-util"] }
 redis = { workspace = true }
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros", "chrono", "uuid"] }

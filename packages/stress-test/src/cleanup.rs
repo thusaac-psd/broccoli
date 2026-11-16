@@ -54,37 +54,14 @@ pub async fn run(client: &Client, state: &BootstrapState) -> CleanupOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::AuthCreds;
+    use crate::test_support::client_with_login;
+
     use serde_json::json;
     use std::collections::HashMap;
     use wiremock::matchers::{method, path, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const TEST_CONTEST_ID: i32 = 9999;
-
-    async fn build_client(server: &MockServer) -> Client {
-        Mock::given(method("POST"))
-            .and(path("/api/v1/auth/login"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "token": "tok",
-                "id": 1,
-                "username": "admin",
-                "roles": ["admin"],
-                "permissions": ["problem:delete", "contest:delete"],
-            })))
-            .mount(server)
-            .await;
-
-        Client::new(
-            server.uri(),
-            AuthCreds::UsernamePassword {
-                username: "admin".into(),
-                password: "secret".into(),
-            },
-        )
-        .await
-        .expect("client built")
-    }
 
     async fn mount_default_contest_delete(server: &MockServer) {
         Mock::given(method("DELETE"))
@@ -111,7 +88,7 @@ mod tests {
     #[tokio::test]
     async fn happy_path_deletes_every_problem() {
         let server = MockServer::start().await;
-        let client = build_client(&server).await;
+        let client = client_with_login(&server, "tok").await;
         mount_default_contest_delete(&server).await;
 
         Mock::given(method("DELETE"))
@@ -132,7 +109,7 @@ mod tests {
     #[tokio::test]
     async fn not_found_counts_as_already_clean_no_warning() {
         let server = MockServer::start().await;
-        let client = build_client(&server).await;
+        let client = client_with_login(&server, "tok").await;
         mount_default_contest_delete(&server).await;
 
         Mock::given(method("DELETE"))
@@ -158,7 +135,7 @@ mod tests {
     #[tokio::test]
     async fn server_error_recorded_as_warning_not_panic() {
         let server = MockServer::start().await;
-        let client = build_client(&server).await;
+        let client = client_with_login(&server, "tok").await;
         mount_default_contest_delete(&server).await;
 
         Mock::given(method("DELETE"))
@@ -188,7 +165,7 @@ mod tests {
     #[tokio::test]
     async fn empty_state_returns_clean_outcome() {
         let server = MockServer::start().await;
-        let client = build_client(&server).await;
+        let client = client_with_login(&server, "tok").await;
         mount_default_contest_delete(&server).await;
 
         let state = state_with(&[]);
@@ -201,7 +178,7 @@ mod tests {
     #[tokio::test]
     async fn contest_delete_404_is_silent() {
         let server = MockServer::start().await;
-        let client = build_client(&server).await;
+        let client = client_with_login(&server, "tok").await;
 
         Mock::given(method("DELETE"))
             .and(path(format!("/api/v1/contests/{TEST_CONTEST_ID}")))
@@ -228,7 +205,7 @@ mod tests {
     #[tokio::test]
     async fn contest_delete_500_warns_but_continues_to_delete_problems() {
         let server = MockServer::start().await;
-        let client = build_client(&server).await;
+        let client = client_with_login(&server, "tok").await;
 
         Mock::given(method("DELETE"))
             .and(path(format!("/api/v1/contests/{TEST_CONTEST_ID}")))
@@ -261,7 +238,7 @@ mod tests {
     #[tokio::test]
     async fn existing_contest_state_is_not_deleted() {
         let server = MockServer::start().await;
-        let client = build_client(&server).await;
+        let client = client_with_login(&server, "tok").await;
 
         let mut state = state_with(&[("a", 10)]);
         state.owns_fixtures = false;

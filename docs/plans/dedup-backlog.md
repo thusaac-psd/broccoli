@@ -81,15 +81,16 @@ Done already (for reference on the pattern):
    `test-support` as free functions over `&DatabaseConnection` and have both
    fixtures delegate.
 
-2. **Shared API-client auth/retry protocol** (defensible split, lowest priority;
-   reviewed November 2026 and deliberately left).
-   `packages/cli-core/src/client.rs` (sync ureq) vs
-   `packages/stress-test/src/client.rs` (async reqwest) both retry a request
-   once after re-authenticating on 401, but nothing else is shared: cli-core
-   rotates a refresh token through `/auth/cli-refresh`, with a persisted,
-   thread-shared `TokenStore` that deduplicates concurrent refreshes, while
-   stress-test re-logs in with username and password behind an async `RwLock`.
-   The only common shape is the ~10-line "on 401, re-auth once and resend",
-   which cannot be shared across a sync and an async HTTP stack without a trait
-   heavier than the code it replaces. Revisit if both move to one HTTP client or
-   one auth flow.
+2. **Shared API-client auth/retry protocol** (defensible split, lowest
+   priority). Both Rust clients read and write the wire types from
+   `packages/api-types` (`broccoli-api-types`), so no request or response shape
+   is duplicated. What remains parallel is the ~10-line "on 401, re-authenticate
+   once and resend" in `packages/cli-core/src/client.rs` (`Client::authorized`,
+   sync ureq) and `packages/stress-test/src/client.rs`
+   (`send_request_with_retry`, async reqwest). The re-authentication itself
+   differs: cli-core asks its `Session` (`cli-core/src/session.rs`) to rotate a
+   refresh token through `/auth/cli-refresh` under a cross-process file lock,
+   while stress-test logs in again with a username and password. Sharing the
+   loop across a sync and an async HTTP stack would need a trait heavier than
+   the code it replaces. Revisit if both move to one HTTP client or one auth
+   flow.

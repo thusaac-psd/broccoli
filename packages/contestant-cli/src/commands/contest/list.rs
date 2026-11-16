@@ -32,32 +32,25 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn status_label(start_time: &str, end_time: &str) -> (String, console::StyledObject<&'static str>) {
+fn status_label(
+    start: &DateTime<Utc>,
+    end: &DateTime<Utc>,
+) -> (String, console::StyledObject<&'static str>) {
     let now = Utc::now();
-
-    let start = DateTime::parse_from_rfc3339(start_time)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or(now);
-    let end = DateTime::parse_from_rfc3339(end_time)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or(now);
-
-    if now < start {
+    if now < *start {
         ("Upcoming".into(), style("Upcoming").cyan())
-    } else if now > end {
+    } else if now > *end {
         ("Finished".into(), style("Finished").dim())
     } else {
         ("Running".into(), style("Running").green().bold())
     }
 }
 
-fn format_time(ts: &str) -> String {
-    DateTime::parse_from_rfc3339(ts)
-        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_else(|_| ts.to_string())
+fn format_time(ts: &DateTime<Utc>) -> String {
+    ts.format("%Y-%m-%d %H:%M").to_string()
 }
 
-fn print_table(contests: &[broccoli_cli_core::client::ContestListItem]) {
+fn print_table(contests: &[broccoli_cli_core::api::contest::ContestListItem]) {
     println!(
         "  {:<6} {:<40} {:<12} {:<20} {:<20}",
         style("ID").bold(),
@@ -81,7 +74,7 @@ fn print_table(contests: &[broccoli_cli_core::client::ContestListItem]) {
     }
 }
 
-fn print_cards(contests: &[broccoli_cli_core::client::ContestListItem]) {
+fn print_cards(contests: &[broccoli_cli_core::api::contest::ContestListItem]) {
     for (i, c) in contests.iter().enumerate() {
         let (_status_str, styled_status) = status_label(&c.start_time, &c.end_time);
         println!("  {} {}", style("#").dim(), i + 1);

@@ -1,25 +1,19 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::anyhow;
 use hdrhistogram::Histogram;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::task::JoinSet;
-use tokio::time::{Instant, MissedTickBehavior, interval, sleep};
+use tokio::time::{Instant, MissedTickBehavior, interval};
 use tracing::warn;
 
 use crate::bootstrap::BootstrapState;
 use crate::client::Client;
-use crate::dto::{
-    CreateSubmissionRequest, SubmissionFileDto, SubmissionResponse, SubmissionStatus, Verdict,
-};
-use crate::error::{StressError, StressResult};
+use crate::dto::{CreateSubmissionRequest, SubmissionFileDto, SubmissionStatus, Verdict};
 use crate::events::{ActualTerminal, Event, ExpectedTerminal, Phase};
 use crate::scenarios::Scenario;
-
-const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 const HISTOGRAM_LOW: u64 = 1;
 const HISTOGRAM_HIGH: u64 = 600_000;
@@ -173,29 +167,6 @@ fn terminal_status_passes(actual_status: SubmissionStatus) -> bool {
     actual_status != SubmissionStatus::SystemError
 }
 
-async fn poll_until_terminal(
-    client: &Client,
-    submission_id: i32,
-    timeout: Duration,
-) -> StressResult<SubmissionResponse> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let resp = client.get_submission(submission_id).await?;
-        if resp.status.is_terminal() {
-            return Ok(resp);
-        }
-        if Instant::now() >= deadline {
-            return Err(StressError::Other(anyhow!(
-                "submission {} did not reach a terminal status within {:?} (last status = {:?})",
-                submission_id,
-                timeout,
-                resp.status,
-            )));
-        }
-        sleep(POLL_INTERVAL).await;
-    }
-}
-
 pub async fn run(
     client: &Client,
     state: &BootstrapState,
@@ -338,7 +309,7 @@ pub async fn run(
                 }
             };
 
-            let polled = poll_until_terminal(&client, submitted.id, per_job_timeout).await;
+            let polled = client.wait_for_submission(submitted.id, per_job_timeout).await;
             match polled {
                 Ok(final_resp) => {
                     let actual_status = final_resp.status;
@@ -490,41 +461,15 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::{AuthCreds, Client};
+
     use crate::scenarios::SCENARIOS;
-    use serde_json::{Value, json};
-    use std::collections::{HashMap, HashSet};
-    use std::sync::atomic::{AtomicI32, Ordering};
-    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+    use crate::test_support::*;
+
+    use std::collections::HashMap;
+
+    use std::sync::Arc as StdArc;
     use wiremock::matchers::{method, path, path_regex};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-
-    fn login_body(token: &str) -> Value {
-        json!({
-            "token": token,
-            "id": 1,
-            "username": "admin",
-            "roles": ["admin"],
-            "permissions": []
-        })
-    }
-
-    async fn build_client_with_login(server: &MockServer, token: &str) -> Client {
-        Mock::given(method("POST"))
-            .and(path("/api/v1/auth/login"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(login_body(token)))
-            .mount(server)
-            .await;
-        Client::new(
-            server.uri(),
-            AuthCreds::UsernamePassword {
-                username: "admin".into(),
-                password: "secret".into(),
-            },
-        )
-        .await
-        .expect("client builds")
-    }
 
     const TEST_CONTEST_ID: i32 = 9001;
 
@@ -542,111 +487,12 @@ mod tests {
         }
     }
 
-    fn submission_json(id: i32, status: &str, verdict: Option<&str>) -> Value {
-        let result = match verdict {
-            Some(v) => json!({
-                "verdict": v,
-                "score": 100.0,
-                "time_used": 10,
-                "memory_used": 1024,
-                "compile_output": null,
-                "error_message": null,
-                "judged_at": "2026-05-01T00:00:00Z",
-                "test_case_results": []
-            }),
-            None => Value::Null,
-        };
-        json!({
-            "id": id,
-            "language": "cpp",
-            "status": status,
-            "user_id": 1,
-            "username": "admin",
-            "problem_id": 100,
-            "problem_title": "stress-test",
-            "contest_id": null,
-            "contest_type": "icpc",
-            "judge_epoch": 0,
-            "created_at": "2026-05-01T00:00:00Z",
-            "result": result,
-        })
-    }
-
-    fn verdict_wire(v: &Verdict) -> &'static str {
-        match v {
-            Verdict::Accepted => "Accepted",
-            Verdict::WrongAnswer => "WrongAnswer",
-            Verdict::TimeLimitExceeded => "TimeLimitExceeded",
-            Verdict::MemoryLimitExceeded => "MemoryLimitExceeded",
-            Verdict::RuntimeError => "RuntimeError",
-            Verdict::SystemError => "SystemError",
-            Verdict::Skipped => "Skipped",
-            Verdict::Cancelled => "Cancelled",
-            Verdict::Other(_) => "Other",
-        }
-    }
-
-    fn submission_status_wire(s: SubmissionStatus) -> &'static str {
-        match s {
-            SubmissionStatus::Queued => "Queued",
-            SubmissionStatus::Pending => "Pending",
-            SubmissionStatus::Compiling => "Compiling",
-            SubmissionStatus::Running => "Running",
-            SubmissionStatus::Judged => "Judged",
-            SubmissionStatus::CompilationError => "CompilationError",
-            SubmissionStatus::SystemError => "SystemError",
-            SubmissionStatus::Unknown => "Unknown",
-        }
-    }
-
-    #[derive(Clone)]
-    struct MockFinalSubmission {
-        status: &'static str,
-        verdict: Option<&'static str>,
-        fails_on_get: bool,
-    }
-
-    struct MockSubmissionStore {
-        next_id: AtomicI32,
-        final_by_id: StdMutex<HashMap<i32, MockFinalSubmission>>,
-        submitted_ids: StdMutex<Vec<i32>>,
-        polled_ids: StdMutex<Vec<i32>>,
-    }
-
-    impl MockSubmissionStore {
-        fn new(first_id: i32) -> Self {
-            Self {
-                next_id: AtomicI32::new(first_id),
-                final_by_id: StdMutex::new(HashMap::new()),
-                submitted_ids: StdMutex::new(Vec::new()),
-                polled_ids: StdMutex::new(Vec::new()),
-            }
-        }
-
-        fn submitted_ids(&self) -> Vec<i32> {
-            self.submitted_ids.lock().unwrap().clone()
-        }
-
-        fn polled_ids(&self) -> Vec<i32> {
-            self.polled_ids.lock().unwrap().clone()
-        }
-    }
-
     fn with_delay(template: ResponseTemplate, delay: Duration) -> ResponseTemplate {
         if delay.is_zero() {
             template
         } else {
             template.set_delay(delay)
         }
-    }
-
-    fn submission_id_from_request(request: &Request) -> Option<i32> {
-        request.url.path().rsplit('/').next()?.parse().ok()
-    }
-
-    fn assert_distinct_submission_ids(ids: &[i32]) {
-        let unique: HashSet<_> = ids.iter().copied().collect();
-        assert_eq!(unique.len(), ids.len(), "submission ids must be distinct");
     }
 
     async fn mount_distinct_submission_mocks(
@@ -669,8 +515,8 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| (scenario.expected_status, scenario.expected_verdict.clone()));
             let final_submission = MockFinalSubmission {
-                status: submission_status_wire(status),
-                verdict: verdict.as_ref().map(verdict_wire),
+                status,
+                verdict,
                 fails_on_get: failing_get_scenarios.contains(&scenario.id),
             };
             let store_for_post = store.clone();
@@ -678,20 +524,10 @@ mod tests {
             Mock::given(method("POST"))
                 .and(path(post_path))
                 .respond_with(move |_request: &Request| {
-                    let submission_id = store_for_post.next_id.fetch_add(1, Ordering::SeqCst);
-                    store_for_post
-                        .final_by_id
-                        .lock()
-                        .unwrap()
-                        .insert(submission_id, final_submission.clone());
-                    store_for_post
-                        .submitted_ids
-                        .lock()
-                        .unwrap()
-                        .push(submission_id);
+                    let submission_id = store_for_post.submit(final_submission.clone());
                     ResponseTemplate::new(201).set_body_json(submission_json(
                         submission_id,
-                        "Pending",
+                        SubmissionStatus::Pending,
                         None,
                     ))
                 })
@@ -702,32 +538,20 @@ mod tests {
         let store_for_get = store.clone();
         Mock::given(method("GET"))
             .and(path_regex(r"^/api/v1/submissions/\d+$"))
-            .respond_with(move |request: &Request| {
-                let Some(submission_id) = submission_id_from_request(request) else {
-                    return ResponseTemplate::new(400).set_body_string("invalid submission id");
-                };
-                store_for_get.polled_ids.lock().unwrap().push(submission_id);
-                let final_submission = store_for_get
-                    .final_by_id
-                    .lock()
-                    .unwrap()
-                    .get(&submission_id)
-                    .cloned();
-                match final_submission {
-                    Some(final_submission) if final_submission.fails_on_get => with_delay(
-                        ResponseTemplate::new(500).set_body_string("kaboom"),
-                        get_delay,
-                    ),
-                    Some(final_submission) => with_delay(
-                        ResponseTemplate::new(200).set_body_json(submission_json(
-                            submission_id,
-                            final_submission.status,
-                            final_submission.verdict,
-                        )),
-                        get_delay,
-                    ),
-                    None => ResponseTemplate::new(404).set_body_string("unknown submission id"),
-                }
+            .respond_with(move |request: &Request| match store_for_get.poll(request) {
+                Some((_, final_submission)) if final_submission.fails_on_get => with_delay(
+                    ResponseTemplate::new(500).set_body_string("kaboom"),
+                    get_delay,
+                ),
+                Some((submission_id, final_submission)) => with_delay(
+                    ResponseTemplate::new(200).set_body_json(submission_json(
+                        submission_id,
+                        final_submission.status,
+                        final_submission.verdict,
+                    )),
+                    get_delay,
+                ),
+                None => ResponseTemplate::new(404).set_body_string("unknown submission id"),
             })
             .mount(server)
             .await;
@@ -735,18 +559,10 @@ mod tests {
         store
     }
 
-    fn drain(rx: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
-        let mut out = Vec::new();
-        while let Ok(e) = rx.try_recv() {
-            out.push(e);
-        }
-        out
-    }
-
     #[tokio::test]
     async fn every_submission_terminates_and_matches_expectation() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "tok").await;
+        let client = client_with_login(&server, "tok").await;
         let state = make_state();
 
         let outcomes = HashMap::new();
@@ -810,7 +626,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_only_mode_does_not_require_builtin_expected_verdicts() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "tok").await;
+        let client = client_with_login(&server, "tok").await;
         let state = make_state();
 
         let outcomes: HashMap<&'static str, (SubmissionStatus, Option<Verdict>)> = SCENARIOS
@@ -887,7 +703,7 @@ mod tests {
     #[tokio::test]
     async fn concurrency_cap_is_respected() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "tok").await;
+        let client = client_with_login(&server, "tok").await;
         let state = make_state();
 
         let outcomes = HashMap::new();
@@ -946,7 +762,7 @@ mod tests {
     #[tokio::test]
     async fn p95_budget_violation_flagged() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "tok").await;
+        let client = client_with_login(&server, "tok").await;
         let state = make_state();
 
         let outcomes = HashMap::new();
@@ -993,7 +809,7 @@ mod tests {
     #[tokio::test]
     async fn http_errors_recorded_and_fail_overall() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "tok").await;
+        let client = client_with_login(&server, "tok").await;
         let state = make_state();
 
         let outcomes = HashMap::new();

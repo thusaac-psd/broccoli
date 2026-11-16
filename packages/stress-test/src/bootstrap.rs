@@ -56,6 +56,8 @@ pub async fn bootstrap(
             expected_output: scenario.test_expected_output.to_string(),
             score: 100,
             is_sample: false,
+            position: None,
+            description: None,
             label: None,
         };
         client.create_test_case(problem.id, &tc_req).await?;
@@ -169,11 +171,14 @@ pub(crate) fn build_create_contest_request(contest_type: &str) -> CreateContestR
         description: "Auto-created by broccoli-stress-test. \
                       Will be deleted after the run unless --keep-fixtures is set."
             .into(),
-        activate_time: Some(now - chrono::Duration::seconds(60)),
+        activate_time: Some(Some(now - chrono::Duration::seconds(60))),
         start_time: now - chrono::Duration::seconds(60),
         end_time: now + chrono::Duration::hours(24),
-        deactivate_time: Some(now + chrono::Duration::hours(24)),
+        deactivate_time: Some(Some(now + chrono::Duration::hours(24))),
         is_public: false,
+        submissions_visible: None,
+        show_compile_output: None,
+        show_participants_list: None,
         contest_type: contest_type.to_string(),
     }
 }
@@ -296,6 +301,7 @@ pub(crate) fn build_create_problem_request(
         checker_format: scenario.checker_format.to_string(),
         default_contest_type: contest_type.to_string(),
         show_test_details: None,
+        is_public: None,
         submission_format: Some(submission_format),
     }
 }
@@ -303,6 +309,7 @@ pub(crate) fn build_create_problem_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{client_with_login, contest_json, problem_json, test_case_json};
 
     fn types(names: &[&str]) -> Vec<String> {
         names.iter().map(|n| n.to_string()).collect()
@@ -346,6 +353,9 @@ mod tests {
             checker_formats: vec![],
             contest_types: vec![],
             languages: vec![],
+            evaluators: vec![],
+            contest_type_handlers: vec![],
+            hooks: vec![],
         };
         assert_eq!(resolve_problem_type(&registries, None).unwrap(), "batch");
     }
@@ -357,78 +367,20 @@ mod tests {
             checker_formats: vec![],
             contest_types: vec![],
             languages: vec![],
+            evaluators: vec![],
+            contest_type_handlers: vec![],
+            hooks: vec![],
         };
         let error = resolve_problem_type(&registries, None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("--problem-type"), "{error}");
     }
-    use crate::client::{AuthCreds, Client};
+
     use crate::scenarios::SCENARIOS;
     use serde_json::{Value, json};
     use wiremock::matchers::{method, path, path_regex};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-
-    fn login_body(token: &str) -> Value {
-        json!({
-            "token": token,
-            "id": 1,
-            "username": "admin",
-            "roles": ["admin"],
-            "permissions": []
-        })
-    }
-
-    async fn build_client(server: &MockServer) -> Client {
-        Mock::given(method("POST"))
-            .and(path("/api/v1/auth/login"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(login_body("t")))
-            .mount(server)
-            .await;
-
-        Client::new(
-            server.uri(),
-            AuthCreds::UsernamePassword {
-                username: "admin".into(),
-                password: "secret".into(),
-            },
-        )
-        .await
-        .expect("client builds")
-    }
-
-    fn problem_response_json(id: i32, problem_type: &str, contest_type: &str) -> Value {
-        json!({
-            "id": id,
-            "title": "stress-test:x",
-            "content": "...",
-            "time_limit": 1000,
-            "memory_limit": 65536,
-            "problem_type": problem_type,
-            "checker_format": "exact",
-            "default_contest_type": contest_type,
-            "show_test_details": false,
-            "submission_format": null,
-            "samples": [],
-            "created_at": "2026-05-01T00:00:00Z",
-            "updated_at": "2026-05-01T00:00:00Z"
-        })
-    }
-
-    fn test_case_response_json(id: i32, problem_id: i32) -> Value {
-        json!({
-            "id": id,
-            "input": "1\n",
-            "expected_output": "1\n",
-            "score": 100,
-            "description": null,
-            "label": "01",
-            "is_sample": false,
-            "position": 0,
-            "problem_id": problem_id,
-            "created_at": "2026-05-01T00:00:00Z"
-        })
-    }
 
     #[derive(Default)]
     struct CapturingMatcher {
@@ -471,9 +423,10 @@ mod tests {
                     .and_then(|v| v.as_str())
                     .unwrap_or("icpc")
                     .to_string();
-                ResponseTemplate::new(201).set_body_json(problem_response_json(
+                ResponseTemplate::new(201).set_body_json(problem_json(
                     id,
                     &problem_type,
+                    "exact",
                     &contest_type,
                 ))
             })
@@ -485,7 +438,7 @@ mod tests {
     async fn mount_test_case_creation(server: &MockServer) {
         Mock::given(method("POST"))
             .and(path_regex(r"^/api/v1/problems/\d+/test-cases$"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(test_case_response_json(1, 1)))
+            .respond_with(ResponseTemplate::new(201).set_body_json(test_case_json(1, 1, "1\n")))
             .expect(9)
             .mount(server)
             .await;
@@ -494,11 +447,10 @@ mod tests {
     async fn mount_contest_creation(server: &MockServer, contest_id: i32, contest_type: &str) {
         Mock::given(method("POST"))
             .and(path("/api/v1/contests"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-                "id": contest_id,
-                "title": "stress-test-scratch",
-                "contest_type": contest_type,
-            })))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_body_json(contest_json(contest_id, Some(contest_type))),
+            )
             .expect(1)
             .mount(server)
             .await;
@@ -534,7 +486,7 @@ mod tests {
     #[tokio::test]
     async fn happy_path_creates_one_problem_and_one_test_case_per_scenario() {
         let server = MockServer::start().await;
-        let client = build_client(&server).await;
+        let client = client_with_login(&server, "t").await;
 
         Mock::given(method("GET"))
             .and(path("/api/v1/plugins/registries"))
@@ -542,7 +494,10 @@ mod tests {
                 "problem_types": ["batch"],
                 "checker_formats": ["exact", "tokens-case-insensitive"],
                 "contest_types": ["icpc"],
-                "languages": []
+                "languages": [],
+                "evaluators": [],
+                "contest_type_handlers": [],
+                "hooks": []
             })))
             .expect(1)
             .mount(&server)
@@ -613,7 +568,7 @@ mod tests {
     #[tokio::test]
     async fn cli_override_wins_over_first_entry_when_valid() {
         let server = MockServer::start().await;
-        let client = build_client(&server).await;
+        let client = client_with_login(&server, "t").await;
 
         Mock::given(method("GET"))
             .and(path("/api/v1/plugins/registries"))
@@ -621,7 +576,10 @@ mod tests {
                 "problem_types": ["batch", "interactive"],
                 "checker_formats": ["exact"],
                 "contest_types": ["icpc", "ioi"],
-                "languages": []
+                "languages": [],
+                "evaluators": [],
+                "contest_type_handlers": [],
+                "hooks": []
             })))
             .expect(1)
             .mount(&server)
@@ -660,7 +618,7 @@ mod tests {
     #[tokio::test]
     async fn override_not_in_registries_fails_with_helpful_message() {
         let server = MockServer::start().await;
-        let client = build_client(&server).await;
+        let client = client_with_login(&server, "t").await;
 
         Mock::given(method("GET"))
             .and(path("/api/v1/plugins/registries"))
@@ -668,7 +626,10 @@ mod tests {
                 "problem_types": ["batch"],
                 "checker_formats": ["exact"],
                 "contest_types": ["icpc"],
-                "languages": []
+                "languages": [],
+                "evaluators": [],
+                "contest_type_handlers": [],
+                "hooks": []
             })))
             .expect(1)
             .mount(&server)
@@ -699,15 +660,11 @@ mod tests {
     #[tokio::test]
     async fn existing_contest_loads_attached_problem_ids_without_owning_fixtures() {
         let server = MockServer::start().await;
-        let client = build_client(&server).await;
+        let client = client_with_login(&server, "t").await;
 
         Mock::given(method("GET"))
             .and(path("/api/v1/contests/42"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "id": 42,
-                "title": "real contest",
-                "contest_type": "icpc"
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(contest_json(42, Some("icpc"))))
             .expect(1)
             .mount(&server)
             .await;
@@ -764,7 +721,7 @@ mod tests {
     #[tokio::test]
     async fn empty_registries_fails_fast_with_canonical_fix_hint() {
         let server = MockServer::start().await;
-        let client = build_client(&server).await;
+        let client = client_with_login(&server, "t").await;
 
         Mock::given(method("GET"))
             .and(path("/api/v1/plugins/registries"))
@@ -772,7 +729,10 @@ mod tests {
                 "problem_types": [],
                 "checker_formats": [],
                 "contest_types": [],
-                "languages": []
+                "languages": [],
+                "evaluators": [],
+                "contest_type_handlers": [],
+                "hooks": []
             })))
             .expect(1)
             .mount(&server)

@@ -251,7 +251,25 @@ pub async fn run(cli: Cli) -> u8 {
     };
     let mut overall_exit = exit_code::PASS;
 
-    if overall_exit == exit_code::PASS && !cli.skip_load && !cli.correctness_only {
+    // Fixtures this run created carry an expected verdict per scenario, so
+    // every scenario is judged once and checked before any load is applied.
+    // An existing contest's problems have no expectations to check.
+    if state.owns_fixtures {
+        let outcome = crate::correctness::run(
+            &client,
+            &state,
+            SCENARIOS,
+            Duration::from_secs(cli.per_job_timeout),
+            &tx,
+        )
+        .await;
+        if !outcome.is_ok() {
+            overall_exit = exit_code::CORRECTNESS_FAIL;
+        }
+        summary.correctness = Some(outcome);
+    }
+
+    if overall_exit == exit_code::PASS && !cli.skip_load {
         match cli.profile {
             LoadProfile::Judge => {
                 let load_config = crate::load::LoadConfig {
@@ -393,14 +411,9 @@ pub async fn run(cli: Cli) -> u8 {
 }
 
 fn build_creds(cli: &Cli) -> AuthCreds {
-    if let Some(t) = cli.admin_token.clone() {
-        AuthCreds::Token(t)
-    } else {
-        AuthCreds::UsernamePassword {
-            username: cli.admin_username.clone().unwrap_or_default(),
-            password: cli.admin_password.clone().unwrap_or_default(),
-        }
-    }
+    cli.admin
+        .auth()
+        .expect("Cli::validate checked the admin credentials")
 }
 
 fn passthrough_summary_from_outcome(

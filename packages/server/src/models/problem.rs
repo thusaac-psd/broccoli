@@ -3,7 +3,7 @@ use std::str::FromStr;
 use axum::body::Bytes;
 use axum_typed_multipart::{TryFromField, TryFromMultipart};
 use chrono::{DateTime, Utc};
-use sea_orm::{DerivePartialModel, FromQueryResult};
+use sea_orm::DerivePartialModel;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -16,35 +16,10 @@ use super::shared::{
     double_option, validate_bulk_ids, validate_optional_position, validate_reorder_ids,
     validate_title,
 };
-
-#[derive(Deserialize, utoipa::ToSchema)]
-pub struct CreateProblemRequest {
-    #[schema(example = "Two Sum")]
-    pub title: String,
-    #[schema(example = "Given an array of integers `nums` and an integer `target`...")]
-    pub content: String,
-    #[schema(example = 1000)]
-    pub time_limit: i32,
-    #[schema(example = 262144)]
-    pub memory_limit: i32,
-    #[schema(example = "batch")]
-    pub problem_type: String,
-    #[serde(default = "default_checker_format")]
-    #[schema(example = "exact")]
-    pub checker_format: String,
-    /// Contest type that judges submissions made outside any contest.
-    /// Required: the server never picks one, because any "first registered"
-    /// choice depends on plugin names and can land on a tournament format that
-    /// makes no sense for practice.
-    #[schema(example = "ioi")]
-    pub default_contest_type: String,
-    #[schema(example = false)]
-    pub show_test_details: Option<bool>,
-    #[schema(example = false)]
-    pub is_public: Option<bool>,
-    #[schema(example = json!({"cpp": ["solution.cpp"], "java": ["Main.java"]}))]
-    pub submission_format: Option<std::collections::HashMap<String, Vec<String>>>,
-}
+pub use broccoli_api_types::problem::{
+    CreateProblemRequest, CreateTestCaseRequest, ProblemResponse, SampleTestCaseMeta,
+    TestCaseListItem, TestCaseResponse,
+};
 
 #[derive(Deserialize, Default, PartialEq, utoipa::ToSchema)]
 pub struct UpdateProblemRequest {
@@ -69,49 +44,6 @@ pub struct UpdateProblemRequest {
     #[serde(default, deserialize_with = "double_option")]
     #[schema(value_type = Option<std::collections::HashMap<String, Vec<String>>>, example = json!({"cpp": ["solution.cpp"], "java": ["Main.java"]}))]
     pub submission_format: Option<Option<std::collections::HashMap<String, Vec<String>>>>,
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct ProblemResponse {
-    #[schema(example = 1)]
-    pub id: i32,
-    #[schema(example = "Two Sum")]
-    pub title: String,
-    #[schema(example = "Given an array of integers...")]
-    pub content: String,
-    #[schema(example = 1000)]
-    pub time_limit: i32,
-    #[schema(example = 262144)]
-    pub memory_limit: i32,
-    #[schema(example = "batch")]
-    pub problem_type: String,
-    #[schema(example = "exact")]
-    pub checker_format: String,
-    #[schema(example = "ioi")]
-    pub default_contest_type: String,
-    #[schema(example = false)]
-    pub show_test_details: bool,
-    #[schema(example = false)]
-    pub is_public: bool,
-    #[schema(example = json!({"cpp": ["solution.cpp"], "java": ["Main.java"]}))]
-    pub submission_format: Option<std::collections::HashMap<String, Vec<String>>>,
-    pub samples: Vec<SampleTestCaseMeta>,
-    #[schema(example = "2025-09-01T08:00:00Z")]
-    pub created_at: DateTime<Utc>,
-    #[schema(example = "2025-09-01T08:30:00Z")]
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct SampleTestCaseMeta {
-    #[schema(example = 1)]
-    pub id: i32,
-    #[schema(example = 12)]
-    pub input_size: usize,
-    #[schema(example = 4)]
-    pub output_size: usize,
-    #[schema(example = "The sample demonstrates the smallest non-empty input.")]
-    pub description: Option<String>,
 }
 
 // A `problem` projection; see `ContestListItem` for why it is a partial model.
@@ -164,24 +96,6 @@ pub struct ProblemListQuery {
     pub sort_order: Option<String>,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
-pub struct CreateTestCaseRequest {
-    #[schema(example = "4\n2 7 11 15\n9")]
-    pub input: String,
-    #[schema(example = "0 1")]
-    pub expected_output: String,
-    #[schema(example = 10)]
-    pub score: i32,
-    #[schema(example = true)]
-    pub is_sample: bool,
-    #[schema(example = 0)]
-    pub position: Option<i32>,
-    #[schema(example = "Basic case")]
-    pub description: Option<String>,
-    #[schema(value_type = Option<String>, example = "sample_01")]
-    pub label: Option<String>,
-}
-
 #[derive(Deserialize, Default, PartialEq, utoipa::ToSchema)]
 pub struct UpdateTestCaseRequest {
     #[schema(example = "5\n1 2 3 4 5\n3")]
@@ -228,62 +142,6 @@ pub struct UploadTestCasesRequest {
 pub struct ReorderTestCasesRequest {
     #[schema(example = json!([3, 1, 2]))]
     pub test_case_ids: Vec<i32>,
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct TestCaseResponse {
-    #[schema(example = 1)]
-    pub id: i32,
-    #[schema(example = "4\n2 7 11 15\n9")]
-    pub input: String,
-    #[schema(example = "0 1")]
-    pub expected_output: String,
-    #[schema(example = 12)]
-    pub input_size: usize,
-    #[schema(example = 4)]
-    pub output_size: usize,
-    #[schema(example = "4\n2 7 11 15\n9")]
-    pub input_preview: String,
-    #[schema(example = "0 1")]
-    pub output_preview: String,
-    #[schema(example = 10)]
-    pub score: i32,
-    #[schema(example = "Basic case")]
-    pub description: Option<String>,
-    #[schema(example = "sample_01")]
-    pub label: String,
-    #[schema(example = true)]
-    pub is_sample: bool,
-    #[schema(example = 0)]
-    pub position: i32,
-    #[schema(example = 1)]
-    pub problem_id: i32,
-    #[schema(example = "2025-09-01T09:00:00Z")]
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Serialize, FromQueryResult, utoipa::ToSchema)]
-pub struct TestCaseListItem {
-    #[schema(example = 1)]
-    pub id: i32,
-    #[schema(example = 10)]
-    pub score: i32,
-    #[schema(example = "Basic case")]
-    pub description: Option<String>,
-    #[schema(example = "sample_01")]
-    pub label: String,
-    #[schema(example = true)]
-    pub is_sample: bool,
-    #[schema(example = 0)]
-    pub position: i32,
-    #[schema(example = "4\n2 7 11 15\n9")]
-    pub input_preview: String,
-    #[schema(example = "0 1")]
-    pub output_preview: String,
-    #[schema(example = 1)]
-    pub problem_id: i32,
-    #[schema(example = "2025-09-01T09:00:00Z")]
-    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -366,10 +224,6 @@ pub fn truncate_preview(s: &str) -> String {
         Some((byte_idx, _)) => format!("{}...", &s[..byte_idx]),
         None => s.to_string(),
     }
-}
-
-fn default_checker_format() -> String {
-    "exact".into()
 }
 
 use crate::registry::{CheckerStageRegistry, ContestTypeRegistry, EvaluatorRegistry};

@@ -57,8 +57,7 @@ pub struct Burst {
     pub contest_type: Option<String>,
     pub problem_type: Option<String>,
 
-    // Connection params (burst constructs its own Client rather than using the
-    // legacy ScenarioContext, per the existing TODO in fault/runner.rs).
+    // Connection params for the client the scenario builds.
     pub server_url: String,
     pub creds: AuthCreds,
     pub out: PathBuf,
@@ -474,6 +473,8 @@ impl Burst {
                     expected_output: scenario.test_expected_output.to_string(),
                     score: testcase_score,
                     is_sample: false,
+                    position: None,
+                    description: None,
                     label: Some(format!("fanout_{}", case_idx + 1)),
                 };
                 if let Err(e) = client.create_test_case(problem.id, &tc_req).await {
@@ -959,6 +960,7 @@ impl Burst {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{contest_json, problem_json, submission_json, test_case_json};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
@@ -1168,7 +1170,10 @@ broccoli_plugin_pool_contention_total_created 123
                 "problem_types": ["batch"],
                 "checker_formats": ["exact"],
                 "contest_types": ["icpc"],
-                "languages": []
+                "languages": [],
+                "evaluators": [],
+                "contest_type_handlers": [],
+                "hooks": []
             })))
             .expect(1)
             .mount(&server)
@@ -1197,42 +1202,24 @@ broccoli_evaluate_batch_fanout_saturated_total{{problem_type=\"batch\"}} {fanout
 
         Mock::given(method("POST"))
             .and(path("/api/v1/contests"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-                "id": 7,
-                "title": "burst contest",
-                "contest_type": "icpc"
-            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(contest_json(7, Some("icpc"))))
             .expect(1)
             .mount(&server)
             .await;
 
         Mock::given(method("POST"))
             .and(path("/api/v1/problems"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-                "id": 11,
-                "title": "burst problem",
-                "time_limit": 1000,
-                "memory_limit": 262144,
-                "problem_type": "batch",
-                "checker_format": "exact",
-                "default_contest_type": "icpc"
-            })))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_body_json(problem_json(11, "batch", "exact", "icpc")),
+            )
             .expect(1)
             .mount(&server)
             .await;
 
         Mock::given(method("POST"))
             .and(path("/api/v1/problems/11/test-cases"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-                "id": 21,
-                "input": "1\n1\n",
-                "expected_output": "1\n",
-                "score": 5,
-                "label": "fanout",
-                "is_sample": false,
-                "position": 0,
-                "problem_id": 11
-            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(test_case_json(21, 11, "1\n")))
             .expect(20)
             .mount(&server)
             .await;
@@ -1256,20 +1243,11 @@ broccoli_evaluate_batch_fanout_saturated_total{{problem_type=\"batch\"}} {fanout
                 let submission_ids = Arc::clone(&submission_ids);
                 move |_request: &Request| {
                     let id = submission_ids.fetch_add(1, Ordering::SeqCst);
-                    ResponseTemplate::new(201).set_body_json(json!({
-                        "id": id,
-                        "language": "cpp",
-                        "status": "Pending",
-                        "user_id": 1,
-                        "username": "admin",
-                        "problem_id": 11,
-                        "problem_title": "burst problem",
-                        "contest_id": 7,
-                        "contest_type": "icpc",
-                        "judge_epoch": 1,
-                        "created_at": "2026-05-01T00:00:00Z",
-                        "result": null
-                    }))
+                    ResponseTemplate::new(201).set_body_json(submission_json(
+                        id,
+                        SubmissionStatus::Pending,
+                        None,
+                    ))
                 }
             })
             .expect(1000)
@@ -1286,20 +1264,11 @@ broccoli_evaluate_batch_fanout_saturated_total{{problem_type=\"batch\"}} {fanout
                     .next()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(0);
-                ResponseTemplate::new(200).set_body_json(json!({
-                    "id": id,
-                    "language": "cpp",
-                    "status": "Judged",
-                    "user_id": 1,
-                    "username": "admin",
-                    "problem_id": 11,
-                    "problem_title": "burst problem",
-                    "contest_id": 7,
-                    "contest_type": "icpc",
-                    "judge_epoch": 1,
-                    "created_at": "2026-05-01T00:00:00Z",
-                    "result": null
-                }))
+                ResponseTemplate::new(200).set_body_json(submission_json(
+                    id,
+                    SubmissionStatus::Judged,
+                    None,
+                ))
             })
             .expect(1000)
             .mount(&server)
@@ -1341,25 +1310,5 @@ broccoli_evaluate_batch_fanout_saturated_total{{problem_type=\"batch\"}} {fanout
                 .message
                 .contains("plugin_pool_contention_total delta 5 within cap")
         }));
-    }
-
-    #[test]
-    fn is_terminal_status_matches_dto_definition() {
-        // Belt-and-suspenders cross-check: keep this in sync if SubmissionStatus
-        // grows new terminal variants. Asserts both directions.
-        for s in [
-            SubmissionStatus::Pending,
-            SubmissionStatus::Compiling,
-            SubmissionStatus::Running,
-        ] {
-            assert!(!s.is_terminal(), "non-terminal: {s:?}");
-        }
-        for s in [
-            SubmissionStatus::Judged,
-            SubmissionStatus::CompilationError,
-            SubmissionStatus::SystemError,
-        ] {
-            assert!(s.is_terminal(), "terminal: {s:?}");
-        }
     }
 }

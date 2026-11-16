@@ -18,12 +18,11 @@ pub mod retry;
 pub mod rlimit;
 pub mod shutdown;
 pub mod storage;
-pub mod submission_status;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_util;
 pub mod warm;
 pub mod worker;
 
+pub use broccoli_api_types::{StatusPhase, SubmissionStatus, Verdict};
 pub use config::{DlqConfig, MqAppConfig};
 pub use dlq::{DlqEnvelope, DlqErrorCode, DlqMessageType, SubmissionDlqErrorCode};
-pub use submission_status::{StatusPhase, SubmissionStatus, Verdict};

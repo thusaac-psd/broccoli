@@ -3,39 +3,16 @@ use sea_orm::DerivePartialModel;
 use serde::{Deserialize, Serialize};
 
 use super::shared::{
-    Pagination, double_option, validate_bulk_ids, validate_optional_position, validate_reorder_ids,
+    double_option, validate_bulk_ids, validate_optional_position, validate_reorder_ids,
     validate_title,
 };
 use crate::error::AppError;
-
-#[derive(Deserialize, utoipa::ToSchema)]
-pub struct CreateContestRequest {
-    #[schema(example = "Weekly Contest #42")]
-    pub title: String,
-    #[schema(example = "Welcome to this week's programming contest.")]
-    pub description: String,
-    #[schema(example = "2025-09-30T12:00:00Z")]
-    pub activate_time: Option<Option<DateTime<Utc>>>,
-    #[schema(example = "2025-10-01T14:00:00Z")]
-    pub start_time: DateTime<Utc>,
-    #[schema(example = "2025-10-01T17:00:00Z")]
-    pub end_time: DateTime<Utc>,
-    #[schema(example = "2025-10-02T12:00:00Z")]
-    pub deactivate_time: Option<Option<DateTime<Utc>>>,
-    #[schema(example = true)]
-    pub is_public: bool,
-    #[schema(example = false)]
-    pub submissions_visible: Option<bool>,
-    #[schema(example = true)]
-    pub show_compile_output: Option<bool>,
-    #[schema(example = true)]
-    pub show_participants_list: Option<bool>,
-    /// The contest type (format) that judges this contest's submissions.
-    /// Required: the server never picks one, because any "first registered"
-    /// choice depends on plugin names.
-    #[schema(example = "ioi")]
-    pub contest_type: String,
-}
+pub use broccoli_api_types::contest::{
+    AddContestProblemRequest, BulkAddParticipantsRequest, BulkAddParticipantsResponse,
+    BulkParticipantAdded, BulkParticipantCreated, ContestListItem, ContestListResponse,
+    ContestProblemResponse, ContestResponse, ContestUserContextResponse, CreateContestRequest,
+    CreateUserEntry,
+};
 
 #[derive(Deserialize, Default, PartialEq, utoipa::ToSchema)]
 pub struct UpdateContestRequest {
@@ -64,16 +41,6 @@ pub struct UpdateContestRequest {
     /// Omit to keep the current type. A contest type cannot be removed.
     #[schema(example = "icpc")]
     pub contest_type: Option<String>,
-}
-
-#[derive(Deserialize, utoipa::ToSchema)]
-pub struct AddContestProblemRequest {
-    #[schema(example = 1)]
-    pub problem_id: i32,
-    #[schema(example = "A")]
-    pub label: String,
-    #[schema(example = 0)]
-    pub position: Option<i32>,
 }
 
 #[derive(Deserialize, Default, PartialEq, utoipa::ToSchema)]
@@ -112,94 +79,6 @@ pub struct ContestListQuery {
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
-pub struct ContestResponse {
-    #[schema(example = 1)]
-    pub id: i32,
-    #[schema(example = "Weekly Contest #42")]
-    pub title: String,
-    #[schema(example = "Welcome to this week's contest.")]
-    pub description: String,
-    #[schema(example = "2025-09-30T12:00:00Z")]
-    pub activate_time: Option<DateTime<Utc>>,
-    #[schema(example = "2025-10-01T14:00:00Z")]
-    pub start_time: DateTime<Utc>,
-    #[schema(example = "2025-10-01T17:00:00Z")]
-    pub end_time: DateTime<Utc>,
-    #[schema(example = "2025-10-02T12:00:00Z")]
-    pub deactivate_time: Option<DateTime<Utc>>,
-    #[schema(example = true)]
-    pub is_public: bool,
-    #[schema(example = false)]
-    pub submissions_visible: bool,
-    #[schema(example = true)]
-    pub show_compile_output: bool,
-    #[schema(example = true)]
-    pub show_participants_list: bool,
-    #[schema(example = "ioi")]
-    pub contest_type: Option<String>,
-    #[schema(example = "2025-09-25T10:00:00Z")]
-    pub created_at: DateTime<Utc>,
-    #[schema(example = "2025-09-25T10:30:00Z")]
-    pub updated_at: DateTime<Utc>,
-}
-
-// A `contest` projection. `DerivePartialModel` derives the selected columns
-// from these fields (via `into_partial_model`), so a field can never silently
-// read as `None` because someone forgot to add its column to a hand-written
-// `select_only()` list.
-/// One contest in a contest list.
-#[derive(Serialize, DerivePartialModel, utoipa::ToSchema)]
-#[sea_orm(entity = "crate::entity::contest::Entity")]
-pub struct ContestListItem {
-    #[schema(example = 1)]
-    pub id: i32,
-    #[schema(example = "Weekly Contest #42")]
-    pub title: String,
-    #[schema(example = "2025-09-30T12:00:00Z")]
-    pub activate_time: Option<DateTime<Utc>>,
-    #[schema(example = "2025-10-01T14:00:00Z")]
-    pub start_time: DateTime<Utc>,
-    #[schema(example = "2025-10-01T17:00:00Z")]
-    pub end_time: DateTime<Utc>,
-    #[schema(example = "2025-10-02T12:00:00Z")]
-    pub deactivate_time: Option<DateTime<Utc>>,
-    #[schema(example = true)]
-    pub is_public: bool,
-    #[schema(example = false)]
-    pub submissions_visible: bool,
-    #[schema(example = true)]
-    pub show_compile_output: bool,
-    #[schema(example = true)]
-    pub show_participants_list: bool,
-    #[schema(example = "ioi")]
-    pub contest_type: Option<String>,
-    #[schema(example = "2025-09-25T10:00:00Z")]
-    pub created_at: DateTime<Utc>,
-    #[schema(example = "2025-09-25T10:30:00Z")]
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct ContestListResponse {
-    pub data: Vec<ContestListItem>,
-    pub pagination: Pagination,
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct ContestProblemResponse {
-    #[schema(example = 1)]
-    pub contest_id: i32,
-    #[schema(example = 5)]
-    pub problem_id: i32,
-    #[schema(example = "A")]
-    pub label: String,
-    #[schema(example = 0)]
-    pub position: i32,
-    #[schema(example = "Two Sum")]
-    pub problem_title: String,
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
 pub struct ContestParticipantResponse {
     #[schema(example = 1)]
     pub contest_id: i32,
@@ -213,16 +92,62 @@ pub struct ContestParticipantResponse {
     pub registered_at: DateTime<Utc>,
 }
 
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct ContestUserContextResponse {
-    #[schema(example = 1)]
-    pub contest_id: i32,
-    #[schema(example = 7)]
-    pub user_id: i32,
-    #[schema(example = false)]
-    pub is_registered: bool,
-    #[schema(example = "2025-09-30T12:00:00Z")]
-    pub registered_at: Option<DateTime<Utc>>,
+/// The `contest` columns a [`ContestListItem`] carries. `DerivePartialModel`
+/// derives the selected columns from these fields (via `into_partial_model`),
+/// so a field can never silently read as `None` because someone forgot to add
+/// its column to a hand-written `select_only()` list, and the conversion below
+/// names every field, so the projection cannot fall behind the response type.
+#[derive(DerivePartialModel)]
+#[sea_orm(entity = "crate::entity::contest::Entity")]
+pub struct ContestListRow {
+    pub id: i32,
+    pub title: String,
+    pub activate_time: Option<DateTime<Utc>>,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub deactivate_time: Option<DateTime<Utc>>,
+    pub is_public: bool,
+    pub submissions_visible: bool,
+    pub show_compile_output: bool,
+    pub show_participants_list: bool,
+    pub contest_type: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<ContestListRow> for ContestListItem {
+    fn from(row: ContestListRow) -> Self {
+        let ContestListRow {
+            id,
+            title,
+            activate_time,
+            start_time,
+            end_time,
+            deactivate_time,
+            is_public,
+            submissions_visible,
+            show_compile_output,
+            show_participants_list,
+            contest_type,
+            created_at,
+            updated_at,
+        } = row;
+        Self {
+            id,
+            title,
+            activate_time,
+            start_time,
+            end_time,
+            deactivate_time,
+            is_public,
+            submissions_visible,
+            show_compile_output,
+            show_participants_list,
+            contest_type,
+            created_at,
+            updated_at,
+        }
+    }
 }
 
 impl From<crate::entity::contest::Model> for ContestResponse {
@@ -336,32 +261,6 @@ pub fn validate_bulk_delete_contest_problems(
     validate_bulk_ids(&req.problem_ids, "problem_ids", 1000)
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
-pub struct CreateUserEntry {
-    #[schema(example = "charlie")]
-    pub username: String,
-    pub display_name: Option<String>,
-    #[schema(example = "custom_pass123")]
-    pub password: Option<String>,
-}
-
-#[derive(Deserialize, utoipa::ToSchema)]
-pub struct BulkAddParticipantsRequest {
-    #[serde(default)]
-    pub usernames: Vec<String>,
-    #[serde(default)]
-    pub create_users: Vec<CreateUserEntry>,
-}
-
-#[derive(Clone, Serialize, utoipa::ToSchema)]
-pub struct BulkParticipantAdded {
-    #[schema(example = 5)]
-    pub user_id: i32,
-    #[schema(example = "alice")]
-    pub username: String,
-    pub display_name: String,
-}
-
 impl From<crate::entity::user::Model> for BulkParticipantAdded {
     fn from(user: crate::entity::user::Model) -> Self {
         Self {
@@ -370,25 +269,6 @@ impl From<crate::entity::user::Model> for BulkParticipantAdded {
             display_name: user.display_name,
         }
     }
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct BulkParticipantCreated {
-    #[schema(example = 12)]
-    pub user_id: i32,
-    #[schema(example = "charlie")]
-    pub username: String,
-    pub display_name: String,
-    #[schema(example = "aB3$kLm9xQ2z")]
-    pub password: String,
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct BulkAddParticipantsResponse {
-    pub added: Vec<BulkParticipantAdded>,
-    pub created: Vec<BulkParticipantCreated>,
-    pub already_enrolled: Vec<BulkParticipantAdded>,
-    pub not_found: Vec<String>,
 }
 
 pub fn validate_bulk_add_participants(req: &BulkAddParticipantsRequest) -> Result<(), AppError> {

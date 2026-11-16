@@ -5,12 +5,14 @@ description = "Shared CLI utilities for Broccoli (auth, config, API client)"
 license = "MIT"
 repository = "https://github.com/THUSAAC-PSD/broccoli"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 
 [dependencies]
+broccoli-api-types = { path = "../api-types" }
 anyhow.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+thiserror.workspace = true
 toml.workspace = true
 # rustls avoids an OpenSSL dependency. By default the CLI trusts the OS store
 # (rustls-native-certs) plus the bundled Mozilla roots (webpki-root-certs);
@@ -24,6 +26,9 @@ rand.workspace = true
 http = "1"
 ratatui.workspace = true
 crossterm.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

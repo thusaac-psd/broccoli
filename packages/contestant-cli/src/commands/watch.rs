@@ -16,11 +16,18 @@ use crossterm::terminal::{
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 
-use broccoli_cli_core::client::Client;
+use broccoli_cli_core::api::clarification::{ClarificationListResponse, ClarificationResponse};
+use broccoli_cli_core::api::submission::SubmissionListResponse;
+use broccoli_cli_core::backoff;
+use broccoli_cli_core::client::{Client, ClientError, ClientResult};
 use broccoli_cli_core::config;
 use broccoli_cli_core::fmt;
-use broccoli_cli_core::model::{ClarificationKind, SubmissionStatus, Verdict};
+use broccoli_cli_core::model::{
+    ClarificationKind, StatusDisplay, SubmissionStatus, Verdict, VerdictDisplay,
+};
+use broccoli_cli_core::session::SessionError;
 use broccoli_cli_core::tui::theme::THEME;
+use chrono::{DateTime, Utc};
 
 /// RAII guard that restores the terminal on drop, even on panic.
 struct TerminalGuard {
@@ -99,7 +106,7 @@ struct ClarReply {
     author: String,
     content: String,
     is_public: bool,
-    created_at: String,
+    created_at: DateTime<Utc>,
 }
 
 struct ClarificationRow {
@@ -107,11 +114,10 @@ struct ClarificationRow {
     author: String,
     content: String,
     kind: ClarificationKind,
-    created_at: String,
-    /// Threaded replies; legacy single-reply fields are folded in here too.
+    created_at: DateTime<Utc>,
     replies: Vec<ClarReply>,
     resolved: bool,
-    resolved_at: Option<String>,
+    resolved_at: Option<DateTime<Utc>>,
     resolved_by: Option<String>,
 }
 
@@ -157,8 +163,8 @@ impl Overlay {
 struct AppData {
     contest_id: String,
     contest_title: String,
-    /// Contest end time (RFC 3339) for live countdown.
-    end_time: String,
+    /// Contest end time for the live countdown.
+    end_time: DateTime<Utc>,
     remaining: String,
     selected_tab: Tab,
     my_submissions: Vec<SubmissionRow>,
@@ -169,9 +175,9 @@ struct AppData {
     sel_clar: usize,
     overlay: Option<Overlay>,
     /// Open submission overlay's detail body, refreshed live by the poller.
-    submission_detail: Option<broccoli_cli_core::client::SubmissionResponse>,
-    /// Consecutive failed poll cycles; drives a "reconnecting" header warning.
-    poll_failures: u32,
+    submission_detail: Option<broccoli_cli_core::api::submission::SubmissionResponse>,
+    /// How the poller has been doing; drives the header warning.
+    link: Link,
     /// Inner (width, height) of the overlay modal from the last render, for scroll clamping.
     overlay_viewport: Cell<(u16, u16)>,
     /// Reply count the user has seen per clarification id (absent means never opened).
@@ -192,6 +198,19 @@ struct AppData {
 }
 
 impl AppData {
+    /// Drop everything that belonged to the previous user's session.
+    fn forget_user(&mut self) {
+        self.my_submissions.clear();
+        self.subs_inited = false;
+        self.submission_detail = None;
+        if matches!(self.overlay, Some(Overlay::Submission { .. })) {
+            self.overlay = None;
+        }
+        for p in &mut self.problems {
+            p.solved = false;
+        }
+    }
+
     fn current_len(&self) -> usize {
         match self.selected_tab {
             Tab::MySubmissions => self.my_submissions.len(),
@@ -249,11 +268,76 @@ impl AppData {
     }
 }
 
+/// Time between polls while the server answers.
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Longest wait between polls while the server keeps failing.
+const MAX_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
 enum PollUpdate {
-    Submissions(serde_json::Value),
-    Clarifications(serde_json::Value),
-    /// Whether the most recent poll cycle reached the server.
-    Health(bool),
+    Submissions(SubmissionListResponse),
+    Clarifications(ClarificationListResponse),
+    /// How the most recent poll cycle ended.
+    Cycle(PollOutcome),
+    /// A new login replaced a rejected session with a different user's.
+    UserChanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PollOutcome {
+    Ok,
+    Failed,
+    /// The session ended; polling resumes once `broccoli login` saves a new one.
+    SessionRejected,
+}
+
+impl PollOutcome {
+    /// The worse of two outcomes in one cycle.
+    fn worst(self, other: Self) -> Self {
+        use PollOutcome::*;
+        match (self, other) {
+            (SessionRejected, _) | (_, SessionRejected) => SessionRejected,
+            (Failed, _) | (_, Failed) => Failed,
+            (Ok, Ok) => Ok,
+        }
+    }
+
+    fn of<T>(result: &ClientResult<T>) -> Self {
+        match result {
+            Ok(_) => Self::Ok,
+            Err(ClientError::Session(SessionError::Rejected)) => Self::SessionRejected,
+            Err(_) => Self::Failed,
+        }
+    }
+}
+
+/// The poller's connection to the server, as the header reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Link {
+    Connected,
+    Failing { cycles: u32 },
+    SessionRejected,
+}
+
+impl Link {
+    fn after(self, outcome: PollOutcome) -> Self {
+        match (outcome, self) {
+            (PollOutcome::Ok, _) => Self::Connected,
+            (PollOutcome::SessionRejected, _) => Self::SessionRejected,
+            (PollOutcome::Failed, Self::Failing { cycles }) => Self::Failing {
+                cycles: cycles.saturating_add(1),
+            },
+            (PollOutcome::Failed, _) => Self::Failing { cycles: 1 },
+        }
+    }
+
+    /// Header warning, if any. A single failed cycle is not worth one.
+    fn warning(self) -> Option<&'static str> {
+        match self {
+            Self::Connected | Self::Failing { cycles: 0..=1 } => None,
+            Self::Failing { .. } => Some("  ⚠ reconnecting… "),
+            Self::SessionRejected => Some("  ⚠ session expired: run `broccoli login` "),
+        }
+    }
 }
 
 pub fn run(args: WatchArgs) -> anyhow::Result<()> {
@@ -293,7 +377,7 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
     let mut app = AppData {
         contest_id: contest_id.clone(),
         contest_title: contest.title,
-        end_time: contest.end_time.clone(),
+        end_time: contest.end_time,
         remaining,
         selected_tab: Tab::MySubmissions,
         my_submissions: Vec::new(),
@@ -312,7 +396,7 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
         sel_clar: 0,
         overlay: None,
         submission_detail: None,
-        poll_failures: 0,
+        link: Link::Connected,
         overlay_viewport: Cell::new((0, 0)),
         clar_acked: HashMap::new(),
         clar_prev: HashMap::new(),
@@ -323,18 +407,14 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
         flash_at: None,
     };
 
-    // One shared Client across the poller and UI threads. The Client is Sync and
-    // serializes token refresh internally (via its TokenStore), so no outer lock
-    // is needed and concurrent calls never double-rotate the refresh token.
+    // One shared Client across the poller and UI threads. Its Session
+    // serializes token refresh, so concurrent calls never double-rotate the
+    // refresh token.
     let client = Arc::new(client);
 
     let (tx, rx) = mpsc::channel::<PollUpdate>();
     let cid = contest_id.clone();
-    let subs_path = format!(
-        "/api/v1/contests/{}/submissions?per_page=100&user_id={}",
-        cid, self_uid
-    );
-    let clars_path = format!("/api/v1/contests/{}/clarifications", cid);
+    let mut uid = self_uid;
 
     let running = Arc::new(AtomicBool::new(true));
     let poller_running = running.clone();
@@ -344,31 +424,57 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
     let poll_client = Arc::clone(&client);
 
     let poller = thread::spawn(move || {
-        let fetch =
-            |path: &str| -> Option<serde_json::Value> { poll_client.get_json_value(path).ok() };
+        let mut last = PollOutcome::Ok;
+        let mut failures = 0u32;
         'outer: while poller_running.load(Ordering::Relaxed) {
-            let mut ok = true;
-            match fetch(&subs_path) {
-                Some(d) => {
-                    if tx.send(PollUpdate::Submissions(d)).is_err() {
-                        break 'outer;
-                    }
+            // A rejected session resumes only through a new login, which may
+            // be another user's: re-read who we are before scoping the polls.
+            if last == PollOutcome::SessionRejected
+                && let Ok(me) = poll_client.me()
+                && me.id != uid
+            {
+                uid = me.id;
+                if tx.send(PollUpdate::UserChanged).is_err() {
+                    break 'outer;
                 }
-                None => ok = false,
             }
-            match fetch(&clars_path) {
-                Some(d) => {
-                    if tx.send(PollUpdate::Clarifications(d)).is_err() {
-                        break 'outer;
-                    }
-                }
-                None => ok = false,
-            }
-            if tx.send(PollUpdate::Health(ok)).is_err() {
+            let subs = poll_client.list_contest_submissions(
+                &cid,
+                None,
+                Some(&uid.to_string()),
+                None,
+                Some(100),
+            );
+            let mut outcome = PollOutcome::of(&subs);
+            if let Ok(d) = subs
+                && tx.send(PollUpdate::Submissions(d)).is_err()
+            {
                 break 'outer;
             }
-            // ~2s between polls, but wake early on refresh request.
-            for _ in 0..20 {
+            let clars = poll_client.list_clarifications(&cid);
+            outcome = outcome.worst(PollOutcome::of(&clars));
+            if let Ok(d) = clars
+                && tx.send(PollUpdate::Clarifications(d)).is_err()
+            {
+                break 'outer;
+            }
+            if tx.send(PollUpdate::Cycle(outcome)).is_err() {
+                break 'outer;
+            }
+            last = outcome;
+            failures = if outcome == PollOutcome::Failed {
+                failures + 1
+            } else {
+                0
+            };
+            // Every POLL_INTERVAL, backing off while the server keeps failing;
+            // `r` wakes the poller early.
+            let wait = match failures {
+                0 => POLL_INTERVAL,
+                n => backoff::exponential(POLL_INTERVAL, n, MAX_POLL_INTERVAL),
+            };
+            let deadline = Instant::now() + wait;
+            while Instant::now() < deadline {
                 if !poller_running.load(Ordering::Relaxed)
                     || poller_refresh.swap(false, Ordering::Relaxed)
                 {
@@ -407,10 +513,10 @@ fn run_event_loop(
         let mut got_poll = false;
         let mut pending_flash: Option<(u8, String)> = None;
         let consider = |prio: u8, msg: Option<String>, flash: &mut Option<(u8, String)>| {
-            if let Some(msg) = msg {
-                if flash.as_ref().is_none_or(|(p, _)| prio >= *p) {
-                    *flash = Some((prio, msg));
-                }
+            if let Some(msg) = msg
+                && flash.as_ref().is_none_or(|(p, _)| prio >= *p)
+            {
+                *flash = Some((prio, msg));
             }
         };
         while let Ok(update) = rx.try_recv() {
@@ -439,13 +545,8 @@ fn run_event_loop(
                     update_clarifications(app, &d);
                     consider(1, notify_new_clar(app), &mut pending_flash);
                 }
-                PollUpdate::Health(ok) => {
-                    app.poll_failures = if ok {
-                        0
-                    } else {
-                        app.poll_failures.saturating_add(1)
-                    };
-                }
+                PollUpdate::Cycle(outcome) => app.link = app.link.after(outcome),
+                PollUpdate::UserChanged => app.forget_user(),
             }
             app.clamp_selections();
         }
@@ -460,18 +561,16 @@ fn run_event_loop(
         }
 
         // Stop re-fetching an open submission overlay once it reaches a terminal verdict.
-        if subs_changed {
-            if let Some(Overlay::Submission { id, .. }) = app.overlay.as_ref() {
-                let still_judging = app
-                    .submission_detail
-                    .as_ref()
-                    .map(|s| s.status.is_in_progress())
-                    .unwrap_or(true);
-                if still_judging {
-                    let id = id.clone();
-                    if let Ok(sub) = client.get_submission(&id) {
-                        app.submission_detail = Some(sub);
-                    }
+        if subs_changed && let Some(Overlay::Submission { id, .. }) = app.overlay.as_ref() {
+            let still_judging = app
+                .submission_detail
+                .as_ref()
+                .map(|s| s.status.is_in_progress())
+                .unwrap_or(true);
+            if still_judging {
+                let id = id.clone();
+                if let Ok(sub) = client.get_submission(&id) {
+                    app.submission_detail = Some(sub);
                 }
             }
         }
@@ -713,22 +812,15 @@ fn colored(value: impl Into<String>, color: Color, bold: bool) -> Line<'static> 
     Line::from(Span::styled(value.into(), style))
 }
 
-/// RFC 3339 timestamp in local time, or the raw string if unparseable.
-fn format_timestamp(ts: &str) -> String {
-    if ts.is_empty() {
-        return "—".to_string();
-    }
-    chrono::DateTime::parse_from_rfc3339(ts)
-        .map(|dt| {
-            dt.with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M")
-                .to_string()
-        })
-        .unwrap_or_else(|_| ts.to_string())
+/// A timestamp in local time.
+fn format_timestamp(ts: &DateTime<Utc>) -> String {
+    ts.with_timezone(&chrono::Local)
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
 }
 
 fn build_submission_lines(
-    sub: &broccoli_cli_core::client::SubmissionResponse,
+    sub: &broccoli_cli_core::api::submission::SubmissionResponse,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(field("Language", sub.language.clone()));
@@ -860,15 +952,15 @@ fn build_clarification_lines(row: &ClarificationRow) -> Vec<Line<'static>> {
     ]));
     lines.push(field("From", row.author.clone()));
     lines.push(field("Asked", format_timestamp(&row.created_at)));
-    if row.resolved {
-        if let Some(at) = row.resolved_at.as_deref() {
-            let by = row
-                .resolved_by
-                .as_deref()
-                .map(|b| format!(" by {}", b))
-                .unwrap_or_default();
-            lines.push(field("Resolved", format!("{}{}", format_timestamp(at), by)));
-        }
+    if row.resolved
+        && let Some(at) = row.resolved_at.as_ref()
+    {
+        let by = row
+            .resolved_by
+            .as_deref()
+            .map(|b| format!(" by {}", b))
+            .unwrap_or_default();
+        lines.push(field("Resolved", format!("{}{}", format_timestamp(at), by)));
     }
 
     lines.push(plain(""));
@@ -1041,79 +1133,49 @@ fn find_executable(name: &str) -> Option<std::path::PathBuf> {
 }
 
 /// Seconds left until `end_time`, or `None` once the contest has ended.
-fn remaining_seconds(end_time: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(end_time)
-        .ok()
-        .and_then(|end| {
-            let secs = (end.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds();
-            if secs > 0 { Some(secs) } else { None }
-        })
+fn remaining_seconds(end_time: &DateTime<Utc>) -> Option<i64> {
+    let secs = (*end_time - Utc::now()).num_seconds();
+    (secs > 0).then_some(secs)
 }
 
-fn calculate_remaining(end_time: &str) -> String {
-    chrono::DateTime::parse_from_rfc3339(end_time)
-        .ok()
-        .and_then(|end| {
-            let end_utc = end.with_timezone(&chrono::Utc);
-            let dur = (end_utc - chrono::Utc::now()).to_std().ok()?;
-            let secs = dur.as_secs();
-            // Seconds included so the header visibly ticks.
-            Some(format!(
-                "{}h {:02}m {:02}s remaining",
-                secs / 3600,
-                (secs % 3600) / 60,
-                secs % 60
-            ))
-        })
-        .unwrap_or_else(|| "Finished".into())
-}
-
-fn update_submissions(app: &mut AppData, data: &serde_json::Value) {
-    if let Some(subs) = data["data"].as_array() {
-        app.my_submissions = subs
-            .iter()
-            .map(|s| SubmissionRow {
-                id: s["id"]
-                    .as_i64()
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| "?".to_string()),
-                problem_id: s["problem_id"]
-                    .as_i64()
-                    .map(|n| n.to_string())
-                    .unwrap_or_default(),
-                problem: s["problem_title"].as_str().unwrap_or("?").to_string(),
-                status: s["status"]
-                    .as_str()
-                    .unwrap_or("")
-                    .parse()
-                    .unwrap_or(SubmissionStatus::Pending),
-                verdict: s["verdict"].as_str().map(|v| v.parse().unwrap()),
-                score: s["score"].as_f64(),
-                time_used: s["time_used"].as_i64(),
-                memory_used: s["memory_used"].as_i64(),
-            })
-            .collect();
+fn calculate_remaining(end_time: &DateTime<Utc>) -> String {
+    match remaining_seconds(end_time) {
+        // Seconds included so the header visibly ticks.
+        Some(secs) => format!(
+            "{}h {:02}m {:02}s remaining",
+            secs / 3600,
+            (secs % 3600) / 60,
+            secs % 60
+        ),
+        None => "Finished".into(),
     }
+}
 
-    // Match on problem_id (robust to renamed titles), falling back to title for old servers.
-    let is_solved = |s: &&SubmissionRow| s.verdict.as_ref().is_some_and(|v| v.is_accepted());
-    let solved_ids: HashSet<String> = app
-        .my_submissions
+fn update_submissions(app: &mut AppData, data: &SubmissionListResponse) {
+    app.my_submissions = data
+        .data
         .iter()
-        .filter(is_solved)
-        .map(|s| s.problem_id.clone())
-        .filter(|id| !id.is_empty())
+        .map(|s| SubmissionRow {
+            id: s.id.to_string(),
+            problem_id: s.problem_id.to_string(),
+            problem: s.problem_title.clone(),
+            status: s.status,
+            verdict: s.verdict.clone(),
+            score: s.score,
+            time_used: s.time_used.map(i64::from),
+            memory_used: s.memory_used.map(i64::from),
+        })
         .collect();
-    let solved_titles: HashSet<String> = app
+
+    let solved_ids: HashSet<&str> = app
         .my_submissions
         .iter()
-        .filter(is_solved)
-        .map(|s| s.problem.clone())
+        .filter(|s| s.verdict.as_ref().is_some_and(|v| v.is_accepted()))
+        .map(|s| s.problem_id.as_str())
         .collect();
     // Solved is monotonic: keep the ✓ even when an early AC scrolls past the 100-row window.
     for p in &mut app.problems {
-        p.solved =
-            p.solved || solved_ids.contains(&p.problem_id) || solved_titles.contains(&p.title);
+        p.solved = p.solved || solved_ids.contains(p.problem_id.as_str());
     }
 }
 
@@ -1131,10 +1193,8 @@ fn notify_new_accept(app: &mut AppData, was_accepted: &HashSet<String>) -> Optio
     Some(format!("✓ Accepted — {}", problem))
 }
 
-fn update_clarifications(app: &mut AppData, data: &serde_json::Value) {
-    if let Some(arr) = data["data"].as_array() {
-        app.clarifications = arr.iter().map(parse_clarification).collect();
-    }
+fn update_clarifications(app: &mut AppData, data: &ClarificationListResponse) {
+    app.clarifications = data.data.iter().map(clarification_row).collect();
 }
 
 /// Flash for content that arrived since the last poll; announcements win over
@@ -1190,54 +1250,26 @@ fn notify_new_clar(app: &mut AppData) -> Option<String> {
     }
 }
 
-/// Parse one clarification, folding legacy single-reply fields into `replies`.
-fn parse_clarification(c: &serde_json::Value) -> ClarificationRow {
-    let mut replies: Vec<ClarReply> = c["replies"]
-        .as_array()
-        .map(|rs| {
-            rs.iter()
-                .map(|r| ClarReply {
-                    author: r["author_name"].as_str().unwrap_or("?").to_string(),
-                    content: r["content"].as_str().unwrap_or("").to_string(),
-                    is_public: r["is_public"].as_bool().unwrap_or(true),
-                    created_at: r["created_at"].as_str().unwrap_or("").to_string(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Legacy fallback: synthesize a reply from `reply_content` if none exist.
-    if replies.is_empty() {
-        if let Some(content) = c["reply_content"].as_str().filter(|s| !s.is_empty()) {
-            replies.push(ClarReply {
-                author: c["reply_author_name"]
-                    .as_str()
-                    .unwrap_or("staff")
-                    .to_string(),
-                content: content.to_string(),
-                is_public: c["reply_is_public"].as_bool().unwrap_or(true),
-                created_at: c["replied_at"].as_str().unwrap_or("").to_string(),
-            });
-        }
-    }
-
+fn clarification_row(c: &ClarificationResponse) -> ClarificationRow {
     ClarificationRow {
-        id: c["id"]
-            .as_i64()
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "?".to_string()),
-        author: c["author_name"].as_str().unwrap_or("?").to_string(),
-        content: c["content"].as_str().unwrap_or("").to_string(),
-        kind: c["clarification_type"]
-            .as_str()
-            .unwrap_or("question")
-            .parse()
-            .unwrap(),
-        created_at: c["created_at"].as_str().unwrap_or("").to_string(),
-        replies,
-        resolved: c["resolved"].as_bool().unwrap_or(false),
-        resolved_at: c["resolved_at"].as_str().map(|s| s.to_string()),
-        resolved_by: c["resolved_by_name"].as_str().map(|s| s.to_string()),
+        id: c.id.to_string(),
+        author: c.author_name.clone(),
+        content: c.content.clone(),
+        kind: c.clarification_type.parse().unwrap(), // Infallible
+        created_at: c.created_at,
+        replies: c
+            .replies
+            .iter()
+            .map(|r| ClarReply {
+                author: r.author_name.clone(),
+                content: r.content.clone(),
+                is_public: r.is_public,
+                created_at: r.created_at,
+            })
+            .collect(),
+        resolved: c.resolved,
+        resolved_at: c.resolved_at,
+        resolved_by: c.resolved_by_name.clone(),
     }
 }
 
@@ -1266,9 +1298,9 @@ fn render(f: &mut Frame, app: &AppData) {
             .fg(clock_color)
             .add_modifier(Modifier::BOLD),
     )];
-    if app.poll_failures >= 2 {
+    if let Some(warning) = app.link.warning() {
         header_spans.push(Span::styled(
-            "  ⚠ reconnecting… ",
+            warning,
             Style::default()
                 .fg(THEME.warning)
                 .add_modifier(Modifier::BOLD),
@@ -1612,14 +1644,99 @@ fn render_overlay(f: &mut Frame, app: &AppData, size: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use broccoli_cli_core::api::clarification::ClarificationReplyResponse;
+    use broccoli_cli_core::api::shared::ListPagination;
+    use broccoli_cli_core::api::submission::SubmissionListItem;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    fn ts(s: &str) -> DateTime<Utc> {
+        s.parse().unwrap()
+    }
+
+    fn pagination(total: usize) -> ListPagination {
+        ListPagination {
+            per_page: 100,
+            total: Some(total as u64),
+            total_pages: Some(1),
+            has_more: false,
+            next_cursor: None,
+        }
+    }
+
+    fn submissions(items: &[(i32, i32, &str, Verdict)]) -> SubmissionListResponse {
+        SubmissionListResponse {
+            data: items
+                .iter()
+                .map(|(id, problem_id, title, verdict)| SubmissionListItem {
+                    id: *id,
+                    language: "cpp".into(),
+                    status: SubmissionStatus::Judged,
+                    verdict: Some(verdict.clone()),
+                    user_id: 7,
+                    username: "alice".into(),
+                    problem_id: *problem_id,
+                    problem_title: title.to_string(),
+                    contest_id: Some(1),
+                    contest_type: "icpc".into(),
+                    judge_epoch: 0,
+                    target_worker_id: None,
+                    created_at: ts("2026-06-25T10:00:00Z"),
+                    score: Some(if verdict.is_accepted() { 100.0 } else { 0.0 }),
+                    time_used: Some(41),
+                    memory_used: Some(2048),
+                })
+                .collect(),
+            pagination: pagination(items.len()),
+        }
+    }
+
+    fn clarification(
+        id: i32,
+        kind: &str,
+        content: &str,
+        replies: &[&str],
+    ) -> ClarificationResponse {
+        ClarificationResponse {
+            id,
+            contest_id: 1,
+            author_id: 7,
+            author_name: "alice".into(),
+            content: content.into(),
+            clarification_type: kind.into(),
+            recipient_id: None,
+            recipient_name: None,
+            is_public: true,
+            replies: replies
+                .iter()
+                .enumerate()
+                .map(|(i, text)| ClarificationReplyResponse {
+                    id: i as i32 + 1,
+                    author_id: 1,
+                    author_name: "judge".into(),
+                    content: text.to_string(),
+                    is_public: true,
+                    created_at: ts("2026-06-25T10:01:00Z"),
+                })
+                .collect(),
+            resolved: false,
+            resolved_at: None,
+            resolved_by: None,
+            resolved_by_name: None,
+            created_at: ts("2026-06-25T10:00:00Z"),
+            updated_at: ts("2026-06-25T10:00:00Z"),
+        }
+    }
+
+    fn clarifications(items: Vec<ClarificationResponse>) -> ClarificationListResponse {
+        ClarificationListResponse { data: items }
+    }
 
     fn sample_app() -> AppData {
         AppData {
             contest_id: "1".into(),
             contest_title: "Test Cup 2026".into(),
-            end_time: "2099-01-01T00:00:00Z".into(),
+            end_time: ts("2099-01-01T00:00:00Z"),
             remaining: "2h 30m remaining".into(),
             selected_tab: Tab::MySubmissions,
             my_submissions: vec![
@@ -1663,15 +1780,15 @@ mod tests {
                 author: "alice".into(),
                 content: "Can we use the math library?".into(),
                 kind: ClarificationKind::Question,
-                created_at: "2026-06-25T10:00:00Z".into(),
+                created_at: ts("2026-06-25T10:00:00Z"),
                 replies: vec![ClarReply {
                     author: "judge".into(),
                     content: "Yes.".into(),
                     is_public: true,
-                    created_at: "2026-06-25T10:05:00Z".into(),
+                    created_at: ts("2026-06-25T10:05:00Z"),
                 }],
                 resolved: true,
-                resolved_at: Some("2026-06-25T10:06:00Z".into()),
+                resolved_at: Some(ts("2026-06-25T10:06:00Z")),
                 resolved_by: Some("judge".into()),
             }],
             sel_sub: 0,
@@ -1679,7 +1796,7 @@ mod tests {
             sel_clar: 0,
             overlay: None,
             submission_detail: None,
-            poll_failures: 0,
+            link: Link::Connected,
             overlay_viewport: Cell::new((0, 0)),
             clar_acked: HashMap::new(),
             clar_prev: HashMap::new(),
@@ -1853,36 +1970,16 @@ mod tests {
     }
 
     #[test]
-    fn test_clarification_parses_threaded_replies_and_legacy() {
-        // Modern server: `replies` array.
-        let modern = serde_json::json!({
-            "id": 7, "author_name": "bob", "content": "Is N <= 1e9?",
-            "clarification_type": "question", "created_at": "2026-06-25T09:00:00Z",
-            "replies": [
-                {"author_name": "judge", "content": "Yes.", "is_public": true,
-                 "created_at": "2026-06-25T09:01:00Z"},
-                {"author_name": "judge", "content": "Updated: N <= 2e9.",
-                 "is_public": true, "created_at": "2026-06-25T09:05:00Z"}
-            ],
-            "resolved": false
-        });
-        let row = parse_clarification(&modern);
+    fn clarification_rows_keep_every_threaded_reply() {
+        let row = clarification_row(&clarification(
+            7,
+            "question",
+            "Is N <= 1e9?",
+            &["Yes.", "Updated: N <= 2e9."],
+        ));
         assert_eq!(row.replies.len(), 2, "both replies retained");
         assert!(row.answered());
         assert!(!row.resolved);
-
-        // Legacy server: only `reply_content`.
-        let legacy = serde_json::json!({
-            "id": 8, "author_name": "carol", "content": "TL?",
-            "clarification_type": "question", "created_at": "2026-06-25T09:00:00Z",
-            "reply_content": "2 seconds.", "reply_author_name": "staff",
-            "replied_at": "2026-06-25T09:02:00Z", "replies": [],
-            "resolved": true
-        });
-        let row = parse_clarification(&legacy);
-        assert_eq!(row.replies.len(), 1, "legacy reply folded in");
-        assert_eq!(row.replies[0].content, "2 seconds.");
-        assert!(row.resolved);
     }
 
     #[test]
@@ -1901,7 +1998,7 @@ mod tests {
             author: "judge".into(),
             content: "Answered now.".into(),
             is_public: true,
-            created_at: "2026-06-25T11:00:00Z".into(),
+            created_at: ts("2026-06-25T11:00:00Z"),
         });
         let joined = lines_text(&overlay_lines(&app));
         assert!(joined.contains("Answered now."));
@@ -1923,13 +2020,12 @@ mod tests {
         app.clar_prev.clear();
 
         // First poll acks existing items silently.
-        let first = serde_json::json!({"data":[{
-            "id": 1, "author_name":"alice", "content":"Can we use STL?",
-            "clarification_type":"question", "created_at":"2026-06-25T10:00:00Z",
-            "replies":[{"author_name":"judge","content":"Yes","is_public":true,
-                        "created_at":"2026-06-25T10:01:00Z"}],
-            "resolved": false
-        }]});
+        let first = clarifications(vec![clarification(
+            1,
+            "question",
+            "Can we use STL?",
+            &["Yes"],
+        )]);
         update_clarifications(&mut app, &first);
         let flash = notify_new_clar(&mut app);
         assert!(app.clar_inited);
@@ -1937,15 +2033,10 @@ mod tests {
         assert!(flash.is_none());
 
         // New announcement is unread and flashes.
-        let second = serde_json::json!({"data":[
-            {"id": 1, "author_name":"alice", "content":"Can we use STL?",
-             "clarification_type":"question","created_at":"2026-06-25T10:00:00Z",
-             "replies":[{"author_name":"judge","content":"Yes","is_public":true,
-                         "created_at":"2026-06-25T10:01:00Z"}], "resolved": false},
-            {"id": 2, "author_name":"staff", "content":"Time limit doubled for C.",
-             "clarification_type":"announcement","created_at":"2026-06-25T10:05:00Z",
-             "replies":[], "resolved": false}
-        ]});
+        let second = clarifications(vec![
+            clarification(1, "question", "Can we use STL?", &["Yes"]),
+            clarification(2, "announcement", "Time limit doubled for C.", &[]),
+        ]);
         update_clarifications(&mut app, &second);
         let flash = notify_new_clar(&mut app);
         assert_eq!(app.unread_clar_count(), 1, "new announcement is unread");
@@ -1956,17 +2047,15 @@ mod tests {
         assert_eq!(app.unread_clar_count(), 0);
 
         // New reply on an existing thread is unread and flashes.
-        let third = serde_json::json!({"data":[
-            {"id": 1, "author_name":"alice", "content":"Can we use STL?",
-             "clarification_type":"question","created_at":"2026-06-25T10:00:00Z",
-             "replies":[
-                {"author_name":"judge","content":"Yes","is_public":true,"created_at":"2026-06-25T10:01:00Z"},
-                {"author_name":"judge","content":"But not <bits/stdc++.h>","is_public":true,"created_at":"2026-06-25T10:10:00Z"}
-             ], "resolved": false},
-            {"id": 2, "author_name":"staff", "content":"Time limit doubled for C.",
-             "clarification_type":"announcement","created_at":"2026-06-25T10:05:00Z",
-             "replies":[], "resolved": false}
-        ]});
+        let third = clarifications(vec![
+            clarification(
+                1,
+                "question",
+                "Can we use STL?",
+                &["Yes", "But not <bits/stdc++.h>"],
+            ),
+            clarification(2, "announcement", "Time limit doubled for C.", &[]),
+        ]);
         update_clarifications(&mut app, &third);
         let flash = notify_new_clar(&mut app);
         assert_eq!(app.unread_clar_count(), 1, "new reply on #1 is unread");
@@ -1980,13 +2069,7 @@ mod tests {
             p.solved = false;
         }
         app.my_submissions.clear();
-        let data = serde_json::json!({
-            "data": [{
-                "id": 1001, "problem_id": 1, "problem_title": "A Plus B",
-                "status": "Judged", "verdict": "Accepted", "score": 100.0,
-                "time_used": 41, "memory_used": 2048
-            }]
-        });
+        let data = submissions(&[(1001, 1, "A Plus B", Verdict::Accepted)]);
         update_submissions(&mut app, &data);
         assert_eq!(app.my_submissions.len(), 1);
         let s = &app.my_submissions[0];
@@ -2018,13 +2101,7 @@ mod tests {
         // Wire verdicts are PascalCase; the table must show the spaced human form.
         let mut app = sample_app();
         app.my_submissions.clear();
-        let data = serde_json::json!({
-            "data": [{
-                "id": 1, "problem_id": 1, "problem_title": "P",
-                "status": "Judged", "verdict": "TimeLimitExceeded",
-                "score": 0.0, "time_used": 1000
-            }]
-        });
+        let data = submissions(&[(1, 1, "P", Verdict::TimeLimitExceeded)]);
         update_submissions(&mut app, &data);
         let content = render_to(&app, 120, 30);
         assert!(
@@ -2039,10 +2116,10 @@ mod tests {
 
     #[test]
     fn test_calculate_remaining() {
-        let r = calculate_remaining("2099-01-01T00:00:00Z");
+        let r = calculate_remaining(&ts("2099-01-01T00:00:00Z"));
         assert!(r.contains("remaining"));
         assert!(r.contains('s'), "countdown shows seconds: {r}");
-        assert_eq!(calculate_remaining("2000-01-01T00:00:00Z"), "Finished");
+        assert_eq!(calculate_remaining(&ts("2000-01-01T00:00:00Z")), "Finished");
     }
 
     #[test]
@@ -2079,10 +2156,7 @@ mod tests {
         for p in &mut app.problems {
             p.solved = false;
         }
-        let ac = serde_json::json!({"data":[{
-            "id": 1, "problem_id": 1, "problem_title": "A Plus B",
-            "status": "Judged", "verdict": "Accepted", "score": 100.0
-        }]});
+        let ac = submissions(&[(1, 1, "A Plus B", Verdict::Accepted)]);
         update_submissions(&mut app, &ac);
         assert!(
             app.problems
@@ -2092,10 +2166,7 @@ mod tests {
                 .solved
         );
         // Next poll: no AC for problem 1 in the returned set.
-        let no_ac = serde_json::json!({"data":[{
-            "id": 2, "problem_id": 2, "problem_title": "Subarrays",
-            "status": "Judged", "verdict": "WrongAnswer", "score": 0.0
-        }]});
+        let no_ac = submissions(&[(2, 2, "Subarrays", Verdict::WrongAnswer)]);
         update_submissions(&mut app, &no_ac);
         assert!(
             app.problems
@@ -2112,5 +2183,46 @@ mod tests {
         let app = sample_app();
         let content = render_to(&app, 40, 20);
         assert!(!content.is_empty());
+    }
+
+    #[test]
+    fn a_rejected_session_is_reported_instead_of_reconnecting() {
+        let mut app = sample_app();
+        app.link = app.link.after(PollOutcome::Failed);
+        assert_eq!(app.link.warning(), None, "one failed cycle stays quiet");
+        app.link = app.link.after(PollOutcome::Failed);
+        assert!(render_to(&app, 120, 30).contains("reconnecting"));
+
+        app.link = app.link.after(PollOutcome::SessionRejected);
+        let screen = render_to(&app, 120, 30);
+        assert!(screen.contains("session expired"));
+        assert!(!screen.contains("reconnecting"));
+
+        app.link = app.link.after(PollOutcome::Ok);
+        assert_eq!(app.link, Link::Connected);
+    }
+
+    #[test]
+    fn a_cycle_reports_its_worst_request() {
+        use PollOutcome::*;
+        assert_eq!(Ok.worst(Failed), Failed);
+        assert_eq!(Failed.worst(SessionRejected), SessionRejected);
+        assert_eq!(Ok.worst(Ok), Ok);
+    }
+
+    #[test]
+    fn a_different_user_logging_in_clears_the_previous_users_state() {
+        let mut app = sample_app();
+        update_submissions(
+            &mut app,
+            &submissions(&[(1, 1, "A Plus B", Verdict::Accepted)]),
+        );
+        app.subs_inited = true;
+        assert!(app.problems.iter().any(|p| p.solved));
+
+        app.forget_user();
+        assert!(app.my_submissions.is_empty());
+        assert!(!app.subs_inited);
+        assert!(app.problems.iter().all(|p| !p.solved));
     }
 }

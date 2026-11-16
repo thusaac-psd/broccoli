@@ -145,20 +145,6 @@ impl SubmissionFeedbackQuery {
     }
 }
 
-/// Full lifecycle read from submissions. Judge writes continue to use the
-/// narrower `SubmissionStatus` in `SubmissionUpdate`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SubmissionLifecycle {
-    Queued,
-    #[default]
-    Pending,
-    Compiling,
-    Running,
-    Judged,
-    CompilationError,
-    SystemError,
-}
-
 /// Where an admitted submission's public feedback is. Withheld feedback
 /// shows the submission as still running to everyone but its judges.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -204,7 +190,7 @@ pub struct SubmissionFeedbackRecord {
     pub user_id: i32,
     pub problem_id: i32,
     pub submitted_at_us: i64,
-    pub status: SubmissionLifecycle,
+    pub status: super::SubmissionLifecycle,
     pub verdict: Option<super::Verdict>,
     pub key: String,
     pub metadata: Value,
