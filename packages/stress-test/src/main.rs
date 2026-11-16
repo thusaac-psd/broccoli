@@ -24,6 +24,15 @@ async fn main() -> ExitCode {
         return ExitCode::from(code);
     }
 
+    if let Some(stress_test::cli::Command::Perf(args)) = cli.command {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+            )
+            .try_init();
+        return ExitCode::from(stress_test::perf::run(args).await);
+    }
+
     let code = stress_test::runner::run(cli).await;
     ExitCode::from(code)
 }
