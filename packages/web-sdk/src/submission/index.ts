@@ -5,3 +5,5 @@ export * from '@/submission/types';
 export * from '@/submission/use-test-case-page';
 export * from '@/submission/utils';
 export * from '@/submission/verdict';
+export * from '@/submission/verdict-key';
+export * from '@/submission/verdict-style';

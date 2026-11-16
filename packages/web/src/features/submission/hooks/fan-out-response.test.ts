@@ -1,7 +1,6 @@
 // Pure-logic test for `pairFanOutSubmissions`/`isWithheldFanOutSubmission`
 // (see `fan-out-response.ts`). Runs via Node's built-in test runner + native
-// TypeScript support, matching the convention already established by
-// `../components/verdict-key.test.ts` and `../components/testCaseDiff.test.ts`:
+// TypeScript support, like `../components/testCaseDiff.test.ts`:
 // `node --experimental-strip-types --test`, no bundler/DOM needed since the
 // functions under test are pure.
 //

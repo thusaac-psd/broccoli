@@ -1,5 +1,5 @@
-import type { ShownStatus, Verdict } from '@broccoli/web-sdk/submission';
-import { isTerminalStatus } from '@broccoli/web-sdk/submission';
+import type { ShownStatus, Verdict } from './types.ts';
+import { isTerminalStatus } from './utils.ts';
 
 export type VerdictKey =
   | 'accepted'
@@ -30,11 +30,6 @@ export type VerdictKey =
  * level: a masked test case must be visually indistinguishable from a
  * genuinely skipped one). While the status is still non-terminal, a `null`
  * verdict genuinely means "not run yet".
- *
- * Extracted into its own JSX-free module (rather than living inline in
- * `TestCaseRow.tsx`) so it can be exercised directly by Node's built-in test
- * runner (`node --experimental-strip-types --test`) without needing a
- * JSX-capable loader -- see `verdict-key.test.ts`.
  *
  * `isTerminalStatus` alone is not enough here and must be
  * paired with an explicit `status === 'Running'` check. `test_case_results`
