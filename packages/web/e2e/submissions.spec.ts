@@ -124,8 +124,7 @@ test('a problem whose practice contest type has no provider offers no submit', a
   await expect(page.getByRole('button', { name: 'Submit' })).toHaveCount(0);
 });
 
-const JUDGED_WITH_ISSUES =
-  "Judged while this problem's stored settings had issues";
+const JUDGED_WITH_ISSUES = "Judged while this problem's settings had issues";
 
 /** The current judgement of submission 1 (problem 2), with its issue flag. */
 async function judgementOne(
