@@ -64,6 +64,10 @@ Extism 调用在发起它的线程上一直运行到客体返回，宿主函数�
 
 插件 SQL 同样会挂起，因此等待数据库的调用可以多于令牌数。插件数据库连接池按令牌数确定大小，并且等待连接的时间以调用超时为限；规则见 `packages/server/src/database.rs` 中的 `PoolSizes`。每个插件的 SQL 在共享这一预算的自有连接池上运行，见[插件数据库访问](./plugin-database.md)。
 
+## 注册的键
+
+多个已加载的插件可以注册同一个键（比赛类型、题目类型、检查器格式、语言）：每个注册都会保留（`registry::Providers`），该键解析为插件 ID 排序最靠前的提供者。这一规则只取决于加载了哪些插件，与加载顺序无关，因此加载相同插件的服务器结果一致；卸载当前解析到的提供者时，该键交给下一个提供者，而不是被丢弃。
+
 ## 嵌套调用
 
 `checker:resolve`、`checker:interpret` 和 `language:resolve`（`host_funcs/checker.rs`、`host_funcs/language.rs`）通过 `CallOptions::nested()` 回调插件。

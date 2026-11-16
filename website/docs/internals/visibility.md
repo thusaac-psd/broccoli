@@ -85,7 +85,11 @@ with the `PluginOutage` that says why
   problem sits in one of those contests, since every other replica enforces the
   plugin there.
 - A disabled plugin that last loaded as the visibility plugin of some contest
-  types: `disabled`, for what is read through those contests only.
+  types: `disabled`, for what is read through those contests only, and only
+  for the types it keeps closed. A type another enabled plugin provides is
+  served, by the same rule submissions and the claim follow
+  (`PluginLifecycle::disabled_provider`), so the disabled plugin withholds
+  nothing there.
 
 A querier that is loaded but cannot answer in time is `unavailable` for what it
 governs in that request.
