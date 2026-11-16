@@ -9,8 +9,3 @@ export function useTranslation() {
   }
   return context;
 }
-
-export function useLocale() {
-  const { locale, setLocale, availableLocales } = useTranslation();
-  return { locale, setLocale, availableLocales };
-}

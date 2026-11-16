@@ -199,33 +199,8 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
         },
       );
 
-      if (!error) {
-        return data;
-      }
-
-      const message = getErrorMessage(error, '');
-
-      // Compatibility fallback for older backend instances that still expect filter fields.
-      if (message.includes('At least one filter field must be provided')) {
-        let queued = 0;
-
-        for (const submissionId of submissionIds) {
-          const single = await apiClient.POST('/submissions/{id}/rejudge', {
-            params: { path: { id: submissionId } },
-            // Carry the user's choice through the fallback; an empty body
-            // would silently default to apply_immediately=true server-side.
-            body: { apply_immediately: bulkApplyImmediately },
-          });
-
-          if (!single.error) {
-            queued += 1;
-          }
-        }
-
-        return { queued };
-      }
-
-      throw error;
+      if (error) throw error;
+      return data;
     },
     onSuccess: async (data, submissionIds) => {
       toast.success(

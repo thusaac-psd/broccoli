@@ -1,3 +1,4 @@
+import { useApiBasePath } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Skeleton } from '@broccoli/web-sdk/ui';
 
@@ -58,6 +59,7 @@ export function ProblemDescriptionTab({
   onDownloadSample,
 }: ProblemDescriptionTabProps) {
   const { t } = useTranslation();
+  const apiBasePath = useApiBasePath();
 
   if (isLoading) {
     return (
@@ -79,7 +81,7 @@ export function ProblemDescriptionTab({
 
   const problemId = problem.id;
   const resolveUrl = (url: string | undefined) =>
-    scopeAttachmentUrl(url, problemId, contestId);
+    scopeAttachmentUrl(apiBasePath, url, problemId, contestId);
 
   return (
     <div className="prose prose-sm dark:prose-invert max-w-none">

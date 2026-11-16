@@ -1,3 +1,5 @@
+import { getErrorMessage } from '@broccoli/web-sdk/api';
+import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -20,19 +22,20 @@ import { AlertCircle, Check, Loader2, Printer, Upload } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { useParams } from 'react-router';
 
-import { ApiError, usePrintApi } from './hooks/usePrintApi';
+import { usePrintApi } from './hooks/usePrintApi';
 import { estimatePages } from './lib/format';
 
-const LANGUAGES: { value: string; label: string }[] = [
-  { value: 'cpp', label: 'C++' },
-  { value: 'c', label: 'C' },
-  { value: 'python3', label: 'Python' },
-  { value: 'java', label: 'Java' },
-  { value: 'kotlin', label: 'Kotlin' },
-  { value: 'rust', label: 'Rust' },
-  { value: 'go', label: 'Go' },
-  { value: 'javascript', label: 'JavaScript' },
-  { value: 'text', label: 'Plain text' },
+/** Languages a print job can be highlighted as, by their proper names. */
+const LANGUAGES: { value: string; name?: string }[] = [
+  { value: 'cpp', name: 'C++' },
+  { value: 'c', name: 'C' },
+  { value: 'python3', name: 'Python' },
+  { value: 'java', name: 'Java' },
+  { value: 'kotlin', name: 'Kotlin' },
+  { value: 'rust', name: 'Rust' },
+  { value: 'go', name: 'Go' },
+  { value: 'javascript', name: 'JavaScript' },
+  { value: 'text' },
 ];
 
 type Phase = 'idle' | 'sending' | 'done' | 'error';
@@ -82,9 +85,16 @@ export function PrintToolbarButton() {
         language,
         source,
       });
+      if (!r.settled) {
+        // The job may already be queued: say so instead of inviting a
+        // second print.
+        setPhase('error');
+        setMessage(t(unsettledMessageKey(r.outcome)));
+        return;
+      }
       setPhase('done');
       setMessage(
-        r.status === 'pending_approval'
+        r.data?.status === 'pending_approval'
           ? t('print.action.needsApproval')
           : t('print.action.submitted'),
       );
@@ -95,7 +105,7 @@ export function PrintToolbarButton() {
       }, 2200);
     } catch (e) {
       setPhase('error');
-      setMessage(e instanceof ApiError ? e.message : t('print.action.failed'));
+      setMessage(getErrorMessage(e, t('print.action.failed')));
     }
   };
 
@@ -154,7 +164,7 @@ export function PrintToolbarButton() {
                 <SelectContent>
                   {LANGUAGES.map((l) => (
                     <SelectItem key={l.value} value={l.value}>
-                      {l.label}
+                      {l.name ?? t('print.dialog.plainText')}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -207,7 +217,9 @@ export function PrintToolbarButton() {
 
           <DialogFooter className="items-center sm:justify-between">
             <span className="text-xs text-muted-foreground tabular-nums">
-              {pages > 0 ? `~${pages}p` : ''}
+              {pages > 0
+                ? t('print.submission.estimatedPages', { count: pages })
+                : ''}
             </span>
             <div className="flex gap-2">
               <Button

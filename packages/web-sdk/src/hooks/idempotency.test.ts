@@ -13,6 +13,7 @@ import {
   isAlreadyDone,
   isOutcomeUnknown,
   sendIdempotent,
+  settleIdempotent,
 } from './idempotency.ts';
 
 function counterKeys() {
@@ -290,4 +291,27 @@ test('a resend after a mismatch that lands on an unknown outcome is not resent a
     return result(201);
   });
   assert.deepEqual(sent, ['key-1', 'key-2', 'key-3']);
+});
+
+test('settleIdempotent maps idempotency refusals to results', async () => {
+  const refusal = (code: string) => Promise.reject({ code, message: code });
+  assert.deepEqual(await settleIdempotent(Promise.resolve(7)), {
+    settled: true,
+    data: 7,
+  });
+  assert.deepEqual(
+    await settleIdempotent(refusal(IDEMPOTENCY_RESPONSE_NOT_STORED)),
+    { settled: true, data: undefined },
+  );
+  assert.deepEqual(
+    await settleIdempotent(refusal(IDEMPOTENCY_OUTCOME_UNKNOWN)),
+    { settled: false, outcome: 'outcome-unknown' },
+  );
+  assert.deepEqual(
+    await settleIdempotent(refusal(IDEMPOTENCY_KEY_IN_PROGRESS)),
+    { settled: false, outcome: 'in-progress' },
+  );
+  await assert.rejects(settleIdempotent(refusal('VALIDATION_ERROR')), {
+    code: 'VALIDATION_ERROR',
+  });
 });

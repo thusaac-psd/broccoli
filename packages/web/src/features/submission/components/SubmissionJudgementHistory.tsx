@@ -303,7 +303,7 @@ function JudgementRow({
           )}
         </Button>
         <div className="w-14 font-mono font-semibold tabular-nums">
-          v{judgement.version}
+          {t('common.version', { version: judgement.version })}
         </div>
         <Badge variant={variant}>{label}</Badge>
         {judgement.is_current && (

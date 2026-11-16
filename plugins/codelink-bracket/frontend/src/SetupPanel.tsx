@@ -1,3 +1,5 @@
+import { getErrorMessage } from '@broccoli/web-sdk/api';
+import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button, Input, Label, Switch } from '@broccoli/web-sdk/ui';
 import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
@@ -31,6 +33,7 @@ export function SetupPanel({
   contestId: number;
   onClose?: () => void;
 }) {
+  const { t } = useTranslation();
   const api = useBracketApi();
   const { user } = useAuth();
   const config = useQuery({
@@ -38,7 +41,13 @@ export function SetupPanel({
     queryFn: () => api.getSetup(contestId),
     refetchOnWindowFocus: false,
   });
-  if (config.isError) return <p role="alert">{config.error.message}</p>;
+  if (config.isError) {
+    return (
+      <p role="alert">
+        {getErrorMessage(config.error, t('codelink-bracket.setup.loadFailed'))}
+      </p>
+    );
+  }
   if (!config.data) return null;
   return (
     <SetupForm
@@ -152,7 +161,7 @@ function SetupForm({
     setError(null);
     setSaving(true);
     try {
-      await api.setup(contestId, {
+      const result = await api.setup(contestId, {
         seeds: seedList,
         rounds: roundList.map((r, i) =>
           i < opened
@@ -189,14 +198,17 @@ function SetupForm({
       await queryClient.invalidateQueries({
         queryKey: ['codelink-bracket-setup', contestId],
       });
+      if (!result.settled) {
+        // It may or may not be saved: the refetched setup shows which.
+        setError(t(unsettledMessageKey(result.outcome)));
+        return;
+      }
       onClose?.();
       await queryClient.invalidateQueries({
         queryKey: ['codelink-bracket-bracket', contestId],
       });
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : t('codelink-bracket.setup.failed'),
-      );
+      setError(getErrorMessage(err, t('codelink-bracket.setup.failed')));
     } finally {
       setSaving(false);
     }

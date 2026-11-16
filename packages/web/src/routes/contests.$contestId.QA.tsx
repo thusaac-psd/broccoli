@@ -124,7 +124,7 @@ export default function ContestQAPage() {
             isAdmin={isAdmin}
             currentUserId={user?.id ?? -1}
             onReply={(content) =>
-              replyMutation.mutate({
+              replyMutation.mutateAsync({
                 clarificationId: c.id,
                 content,
               })
@@ -177,7 +177,7 @@ export default function ContestQAPage() {
             <>
               <PostAnnouncementDialog
                 onSubmit={(content) =>
-                  createMutation.mutate({
+                  createMutation.mutateAsync({
                     content,
                     clarification_type: 'announcement',
                   })
@@ -186,7 +186,7 @@ export default function ContestQAPage() {
               <SendDirectMessageDialog
                 contestId={id}
                 onSubmit={(content, recipientId) =>
-                  createMutation.mutate({
+                  createMutation.mutateAsync({
                     content,
                     clarification_type: 'direct_message',
                     recipient_id: recipientId,
@@ -197,7 +197,7 @@ export default function ContestQAPage() {
           )}
           <AskQuestionDialog
             onSubmit={(content) =>
-              createMutation.mutate({
+              createMutation.mutateAsync({
                 content,
                 clarification_type: 'question',
               })

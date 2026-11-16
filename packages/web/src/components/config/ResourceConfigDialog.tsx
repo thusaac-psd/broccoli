@@ -35,6 +35,9 @@ interface ConfigEntry {
   description?: string | null;
 }
 
+/** The enabled toggle's "inherit from the parent scope" option. */
+const INHERIT = 'unset';
+
 export interface ResourceConfigDialogProps {
   scope: ConfigScope;
   resourceLabel: string;
@@ -786,7 +789,7 @@ function SinglePluginContent({
       <div className="grid grid-cols-3 rounded-lg border border-border overflow-hidden bg-muted text-center divide-x divide-border">
         {(
           [
-            { key: 'unset', label: t('plugins.config.inherit') },
+            { key: INHERIT, label: t('plugins.config.inherit') },
             { key: true, label: t('plugins.config.enabledLabel') },
             { key: false, label: t('plugins.config.disabledLabel') },
           ] as const

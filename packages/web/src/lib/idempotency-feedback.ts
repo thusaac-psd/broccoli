@@ -2,7 +2,10 @@
 // refused in a way that is not a failure of the operation itself. Already-done
 // refusals are successes that callers handle first; this covers the other two.
 
-import { idempotencyOutcome } from '@broccoli/web-sdk/hooks';
+import {
+  idempotencyOutcome,
+  unsettledMessageKey,
+} from '@broccoli/web-sdk/hooks';
 import { toast } from 'sonner';
 
 type Translate = (
@@ -41,9 +44,9 @@ export function unsettledMessage(
   switch (idempotencyOutcome(error)) {
     case 'outcome-unknown':
       refetch?.();
-      return t(outcomeUnknownKey ?? 'toast.idempotency.outcomeUnknown');
+      return t(outcomeUnknownKey ?? unsettledMessageKey('outcome-unknown'));
     case 'in-progress':
-      return t('toast.idempotency.inProgress');
+      return t(unsettledMessageKey('in-progress'));
     default:
       return null;
   }

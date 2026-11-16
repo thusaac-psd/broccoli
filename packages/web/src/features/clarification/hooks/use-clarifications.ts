@@ -1,4 +1,4 @@
-import { useApiClient, useApiFetch } from '@broccoli/web-sdk/api';
+import { useApiClient } from '@broccoli/web-sdk/api';
 import type { CreateClarificationBody } from '@broccoli/web-sdk/clarification';
 import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -131,7 +131,7 @@ export function useResolveClarification(contestId: number) {
 
 export function useToggleReplyPublic(contestId: number) {
   const { t } = useTranslation();
-  const apiFetch = useApiFetch();
+  const apiClient = useApiClient();
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (payload: {
@@ -140,7 +140,7 @@ export function useToggleReplyPublic(contestId: number) {
       includeQuestion?: boolean;
     }) =>
       toggleReplyPublic(
-        apiFetch,
+        apiClient,
         contestId,
         payload.clarificationId,
         payload.replyId,

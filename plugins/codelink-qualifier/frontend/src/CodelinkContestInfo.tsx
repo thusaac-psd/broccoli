@@ -4,6 +4,9 @@ import { Badge, Button } from '@broccoli/web-sdk/ui';
 import type { ContestInfoResponse } from './types';
 import { useCodelinkQuery } from './useCodelinkQuery';
 
+/** Product name shown on the rules card; a brand, so it is not translated. */
+const BRAND_NAME = 'Codelink';
+
 export function CodelinkContestInfo({ contestId }: { contestId?: number }) {
   const { t } = useTranslation();
   const { data, isError, isPending, refetch } =
@@ -32,7 +35,7 @@ export function CodelinkContestInfo({ contestId }: { contestId?: number }) {
   return (
     <section className="mb-4 rounded-lg border border-border bg-card p-4 text-left">
       <div className="mb-2 flex items-center gap-2">
-        <Badge>Codelink</Badge>
+        <Badge>{BRAND_NAME}</Badge>
         <h2 className="font-semibold">{t('codelink-qualifier.rules.title')}</h2>
       </div>
       <p className="text-sm text-muted-foreground">

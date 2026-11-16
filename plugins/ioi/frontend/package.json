@@ -58,7 +58,7 @@
     "@tsdown/css": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
-    "lucide-react": "^0.500.0",
+    "lucide-react": "^1.7.0",
     "postcss": "catalog:",
     "postcss-import": "catalog:",
     "react-router": "catalog:",

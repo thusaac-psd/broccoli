@@ -6,7 +6,6 @@
 'icpc.scoreboard.phase.after' = 'Finished'
 'icpc.scoreboard.frozen' = 'Frozen'
 'icpc.scoreboard.reveal' = 'Reveal final board'
-'icpc.scoreboard.revealing' = 'Revealing…'
 'icpc.scoreboard.revealConfirm' = 'Reveal the final standings to everyone? This cannot be undone.'
 'icpc.scoreboard.revealFailed' = 'Reveal failed — try again'
 'icpc.scoreboard.autoRefresh' = 'Auto-refresh'

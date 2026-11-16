@@ -1,4 +1,5 @@
 import { useAuth } from '@broccoli/web-sdk/auth';
+import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
   Card,
@@ -26,6 +27,7 @@ function isLoopbackRedirect(uri: string): boolean {
 }
 
 export default function CliAuthPage() {
+  const { t } = useTranslation();
   const { logout, accessToken, user, isLoading } = useAuth();
   const [searchParams] = useSearchParams();
   const location = useLocation();
@@ -72,7 +74,7 @@ export default function CliAuthPage() {
   if (isLoading || !isAuthenticated) {
     return (
       <div className="flex min-h-screen items-center justify-center px-4">
-        <p className="text-sm text-muted-foreground">Loading…</p>
+        <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
       </div>
     );
   }
@@ -82,15 +84,12 @@ export default function CliAuthPage() {
       <div className="flex min-h-screen items-center justify-center px-4">
         <Card className="w-full max-w-md">
           <CardHeader>
-            <CardTitle>Authorized</CardTitle>
+            <CardTitle>{t('cliAuth.authorized')}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             {user && (
               <p className="text-sm text-muted-foreground">
-                Signed in as{' '}
-                <span className="font-medium text-foreground">
-                  {user.username}
-                </span>
+                {t('cliAuth.signedInAs', { username: user.username })}
               </p>
             )}
             <div className="rounded-md border bg-muted/50 p-4">
@@ -99,8 +98,7 @@ export default function CliAuthPage() {
               </code>
             </div>
             <p className="text-sm text-muted-foreground">
-              Paste this token in your terminal to complete login. You can close
-              this tab afterwards.
+              {t('cliAuth.pasteToken')}
             </p>
           </CardContent>
         </Card>
@@ -112,44 +110,31 @@ export default function CliAuthPage() {
     <div className="flex min-h-screen items-center justify-center px-4">
       <Card className="w-full max-w-md">
         <CardHeader>
-          <CardTitle className="text-2xl">Authorize Broccoli CLI</CardTitle>
+          <CardTitle className="text-2xl">{t('cliAuth.title')}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           {redirectRejected && (
             <p className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-              The provided redirect target was not a local address and has been
-              blocked for your security. After authorizing, copy the token shown
-              and paste it into your terminal manually.
+              {t('cliAuth.redirectBlocked')}
             </p>
           )}
           <p className="text-sm text-muted-foreground">
-            <strong className="text-foreground">broccoli</strong> on your
-            terminal wants to access your account
-            {user ? (
-              <>
-                {' '}
-                <span className="font-medium text-foreground">
-                  {user.username}
-                </span>
-              </>
-            ) : null}
-            .
+            {user
+              ? t('cliAuth.requestFor', { username: user.username })
+              : t('cliAuth.request')}
           </p>
-          <p className="text-sm text-muted-foreground">
-            This will let the CLI submit solutions, check scores, and manage
-            your contest participation on your behalf.
-          </p>
+          <p className="text-sm text-muted-foreground">{t('cliAuth.scope')}</p>
         </CardContent>
         <CardFooter className="flex-col gap-3">
           <Button className="w-full" onClick={handleAuthorize}>
-            Authorize
+            {t('cliAuth.authorize')}
           </Button>
           <Button
             variant="outline"
             className="w-full"
             onClick={handleSwitchUser}
           >
-            Sign in as a different user
+            {t('cliAuth.switchUser')}
           </Button>
         </CardFooter>
       </Card>

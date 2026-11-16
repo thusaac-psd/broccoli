@@ -65,7 +65,7 @@ export function PluginCard({
             {plugin.id}
             {plugin.version && (
               <span className="ml-2 text-muted-foreground">
-                v{plugin.version}
+                {t('common.version', { version: plugin.version })}
               </span>
             )}
           </CardDescription>

@@ -8,6 +8,9 @@ import { type RankingMode, rankStandings } from './ranking';
 import type { ProblemCell, StandingsResponse } from './types';
 import { useCodelinkQuery } from './useCodelinkQuery';
 
+/** Ranking modes offered by the toggle, in display order. */
+const RANKING_MODES: readonly RankingMode[] = ['points', 'accepted'];
+
 interface Props {
   contestId?: number;
   children?: ReactNode;
@@ -49,7 +52,7 @@ function Cell({
         >
           <div className="whitespace-nowrap text-xs font-medium">
             {acceptedView
-              ? 'AC'
+              ? t('codelink-qualifier.cell.acceptedShort')
               : cell.status === 'credited'
                 ? t('codelink-qualifier.cell.slot', { slot: cell.slot })
                 : t(`codelink-qualifier.cell.${cell.status}`)}
@@ -166,7 +169,7 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
         aria-label={t('codelink-qualifier.ranking.label')}
         className="flex flex-wrap gap-2"
       >
-        {(['points', 'accepted'] as const).map((mode) => (
+        {RANKING_MODES.map((mode) => (
           <Button
             key={mode}
             variant={rankingMode === mode ? 'default' : 'outline'}
@@ -227,7 +230,7 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
                   {problem.label}
                 </Link>
                 <Badge variant="outline" className="text-xs">
-                  {problem.points}pt
+                  {t('codelink-qualifier.points', { points: problem.points })}
                 </Badge>
                 <span className="text-xs text-muted-foreground">
                   {t('codelink-qualifier.slots.remaining', {
@@ -324,7 +327,7 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
                     <div>{p.label}</div>
                     {!acceptedView && (
                       <div className="mt-1 text-xs font-normal text-muted-foreground">
-                        {p.points}pt
+                        {t('codelink-qualifier.points', { points: p.points })}
                       </div>
                     )}
                   </th>
@@ -370,7 +373,9 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
                   )}
                   <td className="border-b border-border px-3 py-3 text-center font-mono">
                     <div className="font-semibold">
-                      {acceptedView ? row.accepted : `${row.score}pt`}
+                      {acceptedView
+                        ? row.accepted
+                        : t('codelink-qualifier.points', { points: row.score })}
                     </div>
                     {!acceptedView && (
                       <div className="mt-1 whitespace-nowrap text-xs text-muted-foreground">

@@ -1,7 +1,7 @@
 /**
  * Shows cooldown timer status on the problem detail sidebar.
  */
-import { useApiFetch } from '@broccoli/web-sdk/api';
+import { usePluginApi } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useSubmitGate } from '@broccoli/web-sdk/submission';
@@ -22,10 +22,10 @@ interface CooldownStatusData {
   source?: string;
 }
 
-const PLUGIN_BASE = '/api/v1/p/cooldown/api/plugins/cooldown';
+const ROUTES = '/api/plugins/cooldown';
 
 export function CooldownStatus({ submission, contestId, problemId }: Props) {
-  const apiFetch = useApiFetch();
+  const api = usePluginApi('cooldown');
   const { accessToken } = useAuth();
   const { t } = useTranslation();
   const [data, setData] = useState<CooldownStatusData | null>(null);
@@ -36,13 +36,11 @@ export function CooldownStatus({ submission, contestId, problemId }: Props) {
 
   const fetchStatus = useCallback(async () => {
     if (!problemId) return;
-    const url = contestId
-      ? `${PLUGIN_BASE}/contests/${contestId}/problems/${problemId}/status`
-      : `${PLUGIN_BASE}/problems/${problemId}/status`;
+    const path = contestId
+      ? `${ROUTES}/contests/${contestId}/problems/${problemId}/status`
+      : `${ROUTES}/problems/${problemId}/status`;
     try {
-      const res = await apiFetch(url);
-      if (!res.ok) return;
-      const d: CooldownStatusData = await res.json();
+      const d = await api.get<CooldownStatusData>(path);
       setData(d);
 
       // Compute initial remaining seconds
@@ -58,7 +56,7 @@ export function CooldownStatus({ submission, contestId, problemId }: Props) {
     } catch {
       // silent
     }
-  }, [apiFetch, contestId, problemId]);
+  }, [api, contestId, problemId]);
 
   // Fetch on mount, when submission changes, and when auth token becomes available
   useEffect(() => {

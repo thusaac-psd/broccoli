@@ -36,7 +36,6 @@ const SDK_SRC_ROOT = fileURLToPath(
  * automatically instead of depending on a hand-maintained list.
  */
 export const SDK_SHARED_DEPS: readonly string[] = [
-  '@broccoli/web-sdk',
   ...readdirSync(SDK_SRC_ROOT, { withFileTypes: true })
     .filter(
       (entry) =>

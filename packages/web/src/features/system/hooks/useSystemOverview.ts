@@ -1,14 +1,12 @@
-import { useApiFetch } from '@broccoli/web-sdk/api';
+import { useApiClient } from '@broccoli/web-sdk/api';
 import { useQuery } from '@tanstack/react-query';
-
-import type { SystemOverviewResponse } from '@/features/system/types';
 
 const REFETCH_INTERVAL_MS = 5000;
 
 export function useSystemOverview({
   enabled = true,
 }: { enabled?: boolean } = {}) {
-  const apiFetch = useApiFetch();
+  const apiClient = useApiClient();
 
   return useQuery({
     queryKey: ['system', 'overview'],
@@ -20,12 +18,10 @@ export function useSystemOverview({
     enabled,
     refetchInterval: REFETCH_INTERVAL_MS,
     refetchIntervalInBackground: false,
-    queryFn: async (): Promise<SystemOverviewResponse> => {
-      const res = await apiFetch('/api/v1/admin/system/overview');
-      if (!res.ok) {
-        throw new Error(`Failed to fetch system overview (${res.status})`);
-      }
-      return (await res.json()) as SystemOverviewResponse;
+    queryFn: async () => {
+      const { data, error } = await apiClient.GET('/admin/system/overview');
+      if (error) throw error;
+      return data;
     },
   });
 }

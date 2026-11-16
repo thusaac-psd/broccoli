@@ -5,7 +5,3 @@
 export { CollapsibleWrapper } from './CollapsibleWrapper';
 export { ColorPickerField } from './ColorPickerField';
 export { ModeCardSelector } from './ModeCardSelector';
-
-export function onInit() {
-  console.log('config-ui-test frontend plugin loaded');
-}

@@ -34,3 +34,9 @@ export type {
   InheritedValue,
   ParentScopeConfig,
 } from '@broccoli/web-sdk/slot';
+
+/** A field's validation problem: an i18n key and its parameters. */
+export interface FieldProblem {
+  key: string;
+  params?: Record<string, string | number>;
+}

@@ -2,6 +2,7 @@ import type {
   Clarification,
   ClarificationReply,
 } from '@broccoli/web-sdk/clarification';
+import { useAsyncSubmit } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
@@ -10,7 +11,6 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-  Textarea,
 } from '@broccoli/web-sdk/ui';
 import { formatTime } from '@broccoli/web-sdk/utils';
 import {
@@ -28,11 +28,15 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 
+import { MessageField } from '@/features/clarification/components/MessageField';
+import { isSendableMessage } from '@/features/clarification/message';
+
 interface ClarificationCardProps {
   clarification: Clarification;
   isAdmin: boolean;
   currentUserId: number;
-  onReply: (content: string) => void;
+  /** Sends a reply; rejects (after reporting why) when it was not sent. */
+  onReply: (content: string) => Promise<unknown>;
   onResolve: (resolved: boolean) => void;
   onToggleReplyPublic: (replyId: number, includeQuestion: boolean) => void;
 }
@@ -46,6 +50,7 @@ export function ClarificationCard({
   onToggleReplyPublic,
 }: ClarificationCardProps) {
   const [replyContent, setReplyContent] = useState('');
+  const reply = useAsyncSubmit();
   const { t, locale } = useTranslation();
 
   const isAnnouncement = clarification.clarification_type === 'announcement';
@@ -56,15 +61,11 @@ export function ClarificationCard({
   const isRecipient = clarification.recipient_id === currentUserId;
   const canReply = isAdmin || isOwn || isRecipient;
 
-  const MAX_REPLY_LENGTH = 10000;
-  const replyTrimmed = replyContent.trim();
-  const replyValid =
-    replyTrimmed.length > 0 && replyTrimmed.length <= MAX_REPLY_LENGTH;
+  const canSendReply = isSendableMessage(replyContent) && !reply.submitting;
 
-  const handleSubmit = () => {
-    if (!replyValid) return;
-    onReply(replyContent);
-    setReplyContent('');
+  const handleSubmit = async () => {
+    if (!canSendReply) return;
+    if (await reply.submit(() => onReply(replyContent))) setReplyContent('');
   };
 
   return (
@@ -177,27 +178,24 @@ export function ClarificationCard({
       {/* Reply input */}
       {!isAnnouncement && canReply && !clarification.resolved && (
         <div className="border-t px-5 py-4 space-y-3">
-          <Textarea
-            placeholder={t('clarification.replyPlaceholder')}
+          <MessageField
             value={replyContent}
-            onChange={(e) => setReplyContent(e.target.value)}
-            maxLength={MAX_REPLY_LENGTH}
+            onChange={setReplyContent}
+            placeholder={t('clarification.replyPlaceholder')}
+            disabled={reply.submitting}
             className="min-h-[80px] text-sm"
           />
-          <div className="flex items-center justify-between">
-            <span
-              className={`text-xs ${replyTrimmed.length > MAX_REPLY_LENGTH ? 'text-destructive' : 'text-muted-foreground'}`}
-            >
-              {replyTrimmed.length}/{MAX_REPLY_LENGTH}
-            </span>
+          <div className="flex justify-end">
             <Button
               onClick={handleSubmit}
-              disabled={!replyValid}
+              disabled={!canSendReply}
               size="sm"
               className="gap-1"
             >
               <Send className="h-3.5 w-3.5" />
-              {t('clarification.send')}
+              {reply.submitting
+                ? t('clarification.sending')
+                : t('clarification.send')}
             </Button>
           </div>
         </div>

@@ -1,4 +1,6 @@
+import { getErrorMessage, type IdempotentResult } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
+import { unsettledMessageKey, useAsyncSubmit } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -20,6 +22,8 @@ import {
   TabsList,
   TabsTrigger,
   Textarea,
+  toast,
+  useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -51,8 +55,8 @@ export function PrintQueuePage() {
   const [printerFilter, setPrinterFilter] = useState('');
   const [nonce, setNonce] = useState(0);
   const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [cancelTarget, setCancelTarget] = useState<PrintJob | null>(null);
-  const [reprintTarget, setReprintTarget] = useState<PrintJob | null>(null);
+  const [confirm, confirmDialog] = useConfirmDialog();
+  const batchSubmit = useAsyncSubmit();
   const [batchConfirm, setBatchConfirm] = useState<{
     type: 'reprint' | 'cancel' | 'pin';
     count: number;
@@ -87,15 +91,32 @@ export function PrintQueuePage() {
     setSelected(new Set());
   }, []);
 
+  // Runs job actions in order and refreshes the queue. Rejects with the
+  // message to show when one fails or its outcome is unknown (it may have
+  // happened: the refreshed queue shows whether it did), stopping there.
   const act = useCallback(
-    async (fn: () => Promise<unknown>) => {
+    async (actions: (() => Promise<IdempotentResult<unknown>>)[]) => {
       try {
-        await fn();
+        for (const action of actions) {
+          const result = await action().catch((error: unknown) => {
+            throw new Error(getErrorMessage(error, t('print.action.failed')));
+          });
+          if (!result.settled) {
+            throw new Error(t(unsettledMessageKey(result.outcome)));
+          }
+        }
       } finally {
         refresh();
       }
     },
-    [refresh],
+    [refresh, t],
+  );
+
+  // An action outside a confirm dialog reports its failure as a toast.
+  const actNow = useCallback(
+    (action: () => Promise<IdempotentResult<unknown>>) =>
+      act([action]).catch((error: Error) => toast.error(error.message)),
+    [act],
   );
 
   const handleViewCode = useCallback(
@@ -113,12 +134,8 @@ export function PrintQueuePage() {
   );
 
   const batchAct = useCallback(
-    (action: (id: number) => Promise<unknown>) => {
-      if (selected.size === 0) return Promise.resolve();
-      return act(async () => {
-        for (const id of selected) await action(id);
-      });
-    },
+    (action: (id: number) => Promise<IdempotentResult<unknown>>) =>
+      act([...selected].map((id) => () => action(id))),
     [selected, act],
   );
 
@@ -299,7 +316,7 @@ export function PrintQueuePage() {
                   variant="ghost"
                   size="sm"
                   className="h-7 gap-1 text-emerald-600 hover:text-emerald-700 dark:text-emerald-400"
-                  onClick={() => act(() => api.approveJob(job.id))}
+                  onClick={() => actNow(() => api.approveJob(job.id))}
                   title={t('print.queue.action.approve')}
                 >
                   <CheckCircle2 className="h-4 w-4" />
@@ -310,7 +327,17 @@ export function PrintQueuePage() {
                   variant="ghost"
                   size="sm"
                   className="h-7 gap-1 text-muted-foreground hover:text-foreground"
-                  onClick={() => setReprintTarget(job)}
+                  onClick={() =>
+                    confirm({
+                      title: t('print.queue.action.reprint'),
+                      description: t('print.queue.action.confirmReprint', {
+                        id: String(job.id),
+                        who: job.display_name || job.username,
+                      }),
+                      confirmLabel: t('print.queue.action.reprint'),
+                      onConfirm: () => act([() => api.reprintJob(job.id)]),
+                    })
+                  }
                   title={t('print.queue.action.reprint')}
                 >
                   <RotateCcw className="h-4 w-4" />
@@ -321,7 +348,18 @@ export function PrintQueuePage() {
                   variant="ghost"
                   size="sm"
                   className="h-7 gap-1 text-muted-foreground hover:text-red-600 dark:hover:text-red-400"
-                  onClick={() => setCancelTarget(job)}
+                  onClick={() =>
+                    confirm({
+                      title: t('print.queue.action.cancel'),
+                      description: t('print.queue.action.confirmCancel', {
+                        id: String(job.id),
+                        who: job.display_name || job.username,
+                      }),
+                      confirmLabel: t('print.queue.action.cancel'),
+                      destructive: true,
+                      onConfirm: () => act([() => api.cancelJob(job.id)]),
+                    })
+                  }
                   title={t('print.queue.action.cancel')}
                 >
                   <Ban className="h-4 w-4" />
@@ -332,7 +370,7 @@ export function PrintQueuePage() {
                   <Select
                     value=""
                     onValueChange={(v) =>
-                      act(() =>
+                      actNow(() =>
                         api.pinJob(job.id, v === '__clear__' ? null : v),
                       )
                     }
@@ -471,7 +509,9 @@ export function PrintQueuePage() {
   if (!user?.permissions.includes('contest:manage')) {
     return (
       <div className="flex h-[60vh] items-center justify-center p-6">
-        <p className="text-sm text-muted-foreground">403 — staff access only</p>
+        <p className="text-sm text-muted-foreground">
+          {t('print.queue.staffOnly')}
+        </p>
       </div>
     );
   }
@@ -529,7 +569,8 @@ export function PrintQueuePage() {
       <Dialog
         open={!!batchConfirm}
         onOpenChange={(o) => {
-          if (!o) {
+          if (!o && !batchSubmit.submitting) {
+            batchSubmit.reset();
             setBatchConfirm(null);
             setPinPrinter('');
           }
@@ -584,10 +625,20 @@ export function PrintQueuePage() {
               </SelectContent>
             </Select>
           )}
+          {batchSubmit.state.status === 'failed' && (
+            <p role="alert" className="text-sm text-destructive">
+              {getErrorMessage(
+                batchSubmit.state.error,
+                t('print.action.failed'),
+              )}
+            </p>
+          )}
           <DialogFooter>
             <Button
               variant="ghost"
+              disabled={batchSubmit.submitting}
               onClick={() => {
+                batchSubmit.reset();
                 setBatchConfirm(null);
                 setPinPrinter('');
               }}
@@ -598,17 +649,22 @@ export function PrintQueuePage() {
               variant={
                 batchConfirm?.type === 'cancel' ? 'destructive' : 'default'
               }
-              disabled={batchConfirm?.type === 'pin' && !pinPrinter}
-              onClick={() => {
-                batchConfirm?.fn(
-                  batchConfirm?.type === 'pin'
+              disabled={
+                batchSubmit.submitting ||
+                (batchConfirm?.type === 'pin' && !pinPrinter)
+              }
+              onClick={async () => {
+                if (!batchConfirm) return;
+                const printer =
+                  batchConfirm.type === 'pin'
                     ? pinPrinter === '__clear__'
                       ? null
                       : pinPrinter
-                    : undefined,
-                );
-                setBatchConfirm(null);
-                setPinPrinter('');
+                    : undefined;
+                if (await batchSubmit.submit(() => batchConfirm.fn(printer))) {
+                  setBatchConfirm(null);
+                  setPinPrinter('');
+                }
               }}
             >
               {batchConfirm?.type === 'cancel'
@@ -621,86 +677,7 @@ export function PrintQueuePage() {
         </DialogContent>
       </Dialog>
 
-      {/* Cancel confirmation */}
-      <Dialog
-        open={!!cancelTarget}
-        onOpenChange={(o) => {
-          if (!o) setCancelTarget(null);
-        }}
-      >
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <AlertTriangle className="h-5 w-5 text-destructive" />
-              {t('print.queue.action.cancel')}
-            </DialogTitle>
-            <DialogDescription>
-              {cancelTarget
-                ? t('print.queue.action.confirmCancel', {
-                    id: String(cancelTarget.id),
-                    who: cancelTarget.display_name || cancelTarget.username,
-                  })
-                : ''}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setCancelTarget(null)}>
-              {t('print.dialog.cancel')}
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => {
-                act(async () => {
-                  if (cancelTarget) await api.cancelJob(cancelTarget.id);
-                });
-                setCancelTarget(null);
-              }}
-            >
-              {t('print.queue.action.cancel')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Reprint confirmation */}
-      <Dialog
-        open={!!reprintTarget}
-        onOpenChange={(o) => {
-          if (!o) setReprintTarget(null);
-        }}
-      >
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <RotateCcw className="h-5 w-5" />
-              {t('print.queue.action.reprint')}
-            </DialogTitle>
-            <DialogDescription>
-              {reprintTarget
-                ? t('print.queue.action.confirmReprint', {
-                    id: String(reprintTarget.id),
-                    who: reprintTarget.display_name || reprintTarget.username,
-                  })
-                : ''}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setReprintTarget(null)}>
-              {t('print.dialog.cancel')}
-            </Button>
-            <Button
-              onClick={() => {
-                act(async () => {
-                  if (reprintTarget) await api.reprintJob(reprintTarget.id);
-                });
-                setReprintTarget(null);
-              }}
-            >
-              {t('print.queue.action.reprint')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {confirmDialog}
 
       {/* Code viewer */}
       <Dialog

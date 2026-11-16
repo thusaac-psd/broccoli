@@ -52,6 +52,7 @@ component = "CooldownStatus"
 
 [translations]
 en = "i18n/en.toml"
+zh-CN = "i18n/zh-CN.toml"
 
 [config.cooldown]
 description = "Cooldown timer settings"

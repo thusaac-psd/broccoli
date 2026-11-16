@@ -9,6 +9,7 @@ import {
   type EntryResult,
   pollEntry,
   type PollResponse,
+  pollTarget,
   type SubmissionEntry,
 } from './submission-entries.ts';
 
@@ -40,6 +41,34 @@ test('an accepted submission is polled until a final result settles it', () => {
   });
   assert.equal(entries[0].status, 'done');
   assert.equal(entries[0].submission?.status, 'Judged');
+});
+
+test('a submission accepted by id alone is polled by that id', () => {
+  let entries = entriesReducer([entry(1, 'submitting')], {
+    type: 'accepted',
+    id: 1,
+    submissionId: 41,
+  });
+  assert.equal(entries[0].status, 'polling');
+  assert.equal(entries[0].submission, null);
+  assert.deepEqual(pollTarget(entries[0]), { kind: 'submission', id: 41 });
+  entries = entriesReducer(entries, {
+    type: 'polled',
+    id: 1,
+    result: result('Judged', true),
+  });
+  assert.equal(entries[0].status, 'done');
+  assert.equal(entries[0].submission?.status, 'Judged');
+});
+
+test('an accept by id moves only a submitting entry', () => {
+  for (const status of ['polling', 'done', 'error'] as const) {
+    const entries = [entry(1, status)];
+    assert.equal(
+      entriesReducer(entries, { type: 'accepted', id: 1, submissionId: 41 }),
+      entries,
+    );
+  }
 });
 
 test('a late non-final poll cannot move a done entry back to polling', () => {

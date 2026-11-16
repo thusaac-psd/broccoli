@@ -75,6 +75,51 @@ function LinkIcon({ className }: { className?: string }) {
 const CODE_LENGTH = 8;
 const SEGMENT_SIZE = 4;
 
+/** The CLI binary's name, as typed in a terminal. */
+const CLI_NAME = 'broccoli';
+const CLI_LOGIN = `${CLI_NAME} login`;
+
+const SUCCESS_KEYFRAMES = `
+          @keyframes draw-circle {
+            to { stroke-dashoffset: 0; }
+          }
+          @keyframes draw-check {
+            to { stroke-dashoffset: 0; }
+          }
+          @keyframes success-fade-in {
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
+          }
+          @keyframes success-pulse {
+            0%, 100% { opacity: 0.4; }
+            50% { opacity: 0.8; }
+          }
+        `;
+
+const PAGE_KEYFRAMES = `
+        @keyframes fade-up {
+          from { opacity: 0; transform: translateY(16px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes slot-in {
+          from { opacity: 0; transform: scale(0.9) translateY(4px); }
+          to { opacity: 1; transform: scale(1) translateY(0); }
+        }
+        @keyframes cursor-blink {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0; }
+        }
+        @keyframes shake {
+          0%, 100% { transform: translateX(0); }
+          20%, 60% { transform: translateX(-6px); }
+          40%, 80% { transform: translateX(6px); }
+        }
+        @keyframes grid-fade {
+          from { opacity: 0; }
+          to { opacity: 0.03; }
+        }
+      `;
+
 export function DeviceAuthPage() {
   const { t } = useTranslation();
   const { user, isLoading } = useAuth();
@@ -122,7 +167,7 @@ export function DeviceAuthPage() {
   if (isLoading || !user) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background px-4">
-        <p className="text-sm text-muted-foreground">Loading…</p>
+        <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
       </div>
     );
   }
@@ -235,22 +280,7 @@ export function DeviceAuthPage() {
   if (isAuthorized) {
     return (
       <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-4">
-        <style>{`
-          @keyframes draw-circle {
-            to { stroke-dashoffset: 0; }
-          }
-          @keyframes draw-check {
-            to { stroke-dashoffset: 0; }
-          }
-          @keyframes success-fade-in {
-            from { opacity: 0; transform: translateY(12px); }
-            to { opacity: 1; transform: translateY(0); }
-          }
-          @keyframes success-pulse {
-            0%, 100% { opacity: 0.4; }
-            50% { opacity: 0.8; }
-          }
-        `}</style>
+        <style>{SUCCESS_KEYFRAMES}</style>
 
         {/* Subtle radial glow */}
         <div
@@ -283,8 +313,10 @@ export function DeviceAuthPage() {
             style={{ animation: 'success-fade-in 0.5s ease-out 1s both' }}
           >
             <span className="text-primary">$</span>
-            <span>broccoli</span>
-            <span className="text-primary">authenticated</span>
+            <span>{CLI_NAME}</span>
+            <span className="text-primary">
+              {t('deviceAuth.promptAuthenticated')}
+            </span>
             <span
               className="inline-block h-3.5 w-1.5 rounded-sm bg-primary"
               style={{ animation: 'success-pulse 1.2s ease-in-out infinite' }}
@@ -418,29 +450,7 @@ export function DeviceAuthPage() {
 
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-4">
-      <style>{`
-        @keyframes fade-up {
-          from { opacity: 0; transform: translateY(16px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes slot-in {
-          from { opacity: 0; transform: scale(0.9) translateY(4px); }
-          to { opacity: 1; transform: scale(1) translateY(0); }
-        }
-        @keyframes cursor-blink {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0; }
-        }
-        @keyframes shake {
-          0%, 100% { transform: translateX(0); }
-          20%, 60% { transform: translateX(-6px); }
-          40%, 80% { transform: translateX(6px); }
-        }
-        @keyframes grid-fade {
-          from { opacity: 0; }
-          to { opacity: 0.03; }
-        }
-      `}</style>
+      <style>{PAGE_KEYFRAMES}</style>
 
       {/* Background grid texture */}
       <div
@@ -547,7 +557,7 @@ export function DeviceAuthPage() {
                           ? 'border-border text-foreground'
                           : 'border-border/50 text-muted-foreground'
                     }`}
-                    aria-label={`Code digit ${i + 1}`}
+                    aria-label={t('deviceAuth.codeDigit', { index: i + 1 })}
                   />
                   {i === SEGMENT_SIZE - 1 && (
                     <div className="mx-0.5 flex shrink-0 items-center sm:mx-1">
@@ -589,7 +599,7 @@ export function DeviceAuthPage() {
         >
           <div className="flex items-center gap-1.5 rounded-full border border-border/40 bg-card/50 px-3 py-1.5 font-mono text-[11px] text-muted-foreground/70">
             <span className="text-primary/60">$</span>
-            <span>broccoli login</span>
+            <span>{CLI_LOGIN}</span>
             <span
               className="inline-block h-3 w-0.5 rounded-full bg-muted-foreground/30"
               style={{

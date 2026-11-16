@@ -4,6 +4,7 @@ import { ChevronsLeftRight, PanelLeft } from 'lucide-react';
 import * as React from 'react';
 
 import { useIsMobile } from '@/hooks';
+import { useTranslation } from '@/i18n';
 import { useSidebarState } from '@/sidebar';
 import { SidebarStateContext } from '@/sidebar/sidebar-state-context';
 import type { SidebarState } from '@/sidebar/types';
@@ -216,6 +217,7 @@ const Sidebar = ({
   variant?: 'sidebar' | 'floating' | 'inset';
   collapsible?: 'offcanvas' | 'icon' | 'none';
 } & { ref?: React.RefObject<HTMLDivElement | null> }) => {
+  const { t } = useTranslation();
   const { isMobile, openMobile, setOpenMobile } = useSidebar();
   const { sidebarState } = useSidebarState();
 
@@ -249,8 +251,10 @@ const Sidebar = ({
           side={side}
         >
           <SheetHeader className="sr-only">
-            <SheetTitle>Sidebar</SheetTitle>
-            <SheetDescription>Displays the mobile sidebar.</SheetDescription>
+            <SheetTitle>{t('sidebar.mobileTitle')}</SheetTitle>
+            <SheetDescription>
+              {t('sidebar.mobileDescription')}
+            </SheetDescription>
           </SheetHeader>
           <div className="flex h-full w-full flex-col">{children}</div>
         </SheetContent>
@@ -312,6 +316,7 @@ const SidebarTrigger = ({
 }: React.ComponentProps<typeof Button> & {
   ref?: React.RefObject<React.ElementRef<typeof Button> | null>;
 }) => {
+  const { t } = useTranslation();
   const { sidebarState, setSidebarState } = useSidebarState();
   const { isMobile, toggleSidebar: toggleMobileSidebar } = useSidebar();
   const toggleSidebar = () => {
@@ -336,7 +341,7 @@ const SidebarTrigger = ({
       {...props}
     >
       <PanelLeft />
-      <span className="sr-only">Toggle Sidebar</span>
+      <span className="sr-only">{t('sidebar.toggle')}</span>
     </Button>
   );
 };
@@ -349,24 +354,23 @@ const SidebarRail = ({
 }: React.ComponentProps<'button'> & {
   ref?: React.RefObject<HTMLButtonElement | null>;
 }) => {
+  const { t } = useTranslation();
   const { sidebarState, setSidebarState } = useSidebarState();
 
   const toggleSidebar = () => {
     setSidebarState(sidebarState === 'collapsed' ? 'expanded' : 'collapsed');
   };
+  const railLabel =
+    sidebarState === 'collapsed' ? t('sidebar.expand') : t('sidebar.collapse');
 
   return (
     <button
       ref={ref}
       data-sidebar="rail"
-      aria-label={
-        sidebarState === 'collapsed' ? 'Expand Sidebar' : 'Collapse Sidebar'
-      }
+      aria-label={railLabel}
       tabIndex={-1}
       onClick={toggleSidebar}
-      title={
-        sidebarState === 'collapsed' ? 'Expand Sidebar' : 'Collapse Sidebar'
-      }
+      title={railLabel}
       className={cn(
         'group absolute inset-y-0 z-20 hidden w-4 -translate-x-1/2 transition-colors ease-linear after:absolute after:inset-y-0 after:left-1/2 after:z-0 after:-translate-x-1/2 after:w-[2px] after:bg-sidebar-border/45 hover:bg-sidebar-accent/20 hover:after:bg-sidebar-border focus-visible:bg-sidebar-accent/30 focus-visible:after:bg-sidebar-border group-data-[side=left]:-right-4 group-data-[side=right]:left-0 sm:flex',
         'in-data-[side=left]:cursor-w-resize in-data-[side=right]:cursor-e-resize',

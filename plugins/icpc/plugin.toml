@@ -4,6 +4,7 @@ description = "ICPC-style contest plugin with binary pass/fail judging and time-
 
 [translations]
 en = "i18n/en.toml"
+zh-CN = "i18n/zh-CN.toml"
 
 [server]
 entry = "icpc.wasm"

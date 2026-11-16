@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
@@ -10,6 +10,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
+  useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { formatDateTime } from '@broccoli/web-sdk/utils';
 import { useQueryClient } from '@tanstack/react-query';
@@ -144,6 +145,7 @@ export function UsersManagementTab() {
   const { t, locale } = useTranslation();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
+  const [confirm, confirmDialog] = useConfirmDialog();
   const table = useTableSearchParams({
     defaultSortBy: 'created_at',
     defaultSortOrder: 'desc',
@@ -165,26 +167,21 @@ export function UsersManagementTab() {
     setRolesDialogOpen(true);
   }
 
-  async function handleDeleteUser(user: ManagedUserRow) {
-    if (
-      !window.confirm(
-        t('users.users.deleteUserConfirm', { username: user.username }),
-      )
-    ) {
-      return;
-    }
-
-    const { error } = await apiClient.DELETE('/users/{id}', {
-      params: { path: { id: user.id } },
+  function handleDeleteUser(user: ManagedUserRow) {
+    confirm({
+      title: t('users.users.deleteUserConfirm', { username: user.username }),
+      confirmLabel: t('admin.delete'),
+      destructive: true,
+      failureMessage: t('users.users.deleteUserError'),
+      onConfirm: async () => {
+        const { error } = await apiClient.DELETE('/users/{id}', {
+          params: { path: { id: user.id } },
+        });
+        if (error) throw error;
+        toast.success(t('users.users.deleteUserSuccess'));
+        queryClient.invalidateQueries({ queryKey: ['admin-users'] });
+      },
     });
-
-    if (error) {
-      toast.error(getErrorMessage(error, t('users.users.deleteUserError')));
-      return;
-    }
-
-    toast.success(t('users.users.deleteUserSuccess'));
-    queryClient.invalidateQueries({ queryKey: ['admin-users'] });
   }
 
   const columns = useUserColumns({
@@ -233,6 +230,7 @@ export function UsersManagementTab() {
         open={rolesDialogOpen}
         onOpenChange={setRolesDialogOpen}
       />
+      {confirmDialog}
     </>
   );
 }

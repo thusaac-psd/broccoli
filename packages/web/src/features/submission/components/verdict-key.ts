@@ -48,13 +48,10 @@ export type VerdictKey =
  * `is_terminal() || status == Running` (see
  * `hidden_result_mask_covers_every_list_shape_field_hide_used_to_blank` and
  * sibling tests in `plugins/icpc/src/lib.rs`). Without the `Running` half,
- * a masked test case under a still-`Running` judgement rendered "pending"
- * instead of "skipped" -- the exact bug this predicate was written to fix,
- * reproduced by `isTerminalStatus`'s omission of `Running` (it is
- * deliberately NOT terminal for polling purposes -- see
- * `@broccoli/web-sdk/submission`'s `TERMINAL_STATUSES` -- so that set must
- * not be widened; the extra check belongs here, at the one call site that
- * means something different by "terminal enough to trust a null verdict").
+ * a masked test case under a still-`Running` judgement would render
+ * "pending" instead of "skipped". `isTerminalStatus` leaves `Running` out on
+ * purpose (pollers must keep polling), so the extra check belongs here, at
+ * the one call site that means "terminal enough to trust a null verdict".
  */
 export function getVerdictKey(
   verdict: Verdict | null | undefined,

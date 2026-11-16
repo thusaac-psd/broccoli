@@ -1,17 +1,8 @@
 import { useServerNow } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import {
-  Badge,
-  Button,
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@broccoli/web-sdk/ui';
+import { Badge, Button, useConfirmDialog } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
-import { type ComponentProps, type ReactNode, useState } from 'react';
+import { type ComponentProps, type ReactNode } from 'react';
 
 import {
   deriveCountdownStatus,
@@ -146,7 +137,10 @@ export function VerdictBadge({ verdict }: { verdict: string }) {
   );
 }
 
-/** A button that asks before doing something staff cannot take back. */
+/**
+ * A button that asks before doing something staff cannot take back. The
+ * dialog stays open while `onConfirm` runs, and shows its failure.
+ */
 export function ConfirmButton({
   title,
   description,
@@ -158,37 +152,20 @@ export function ConfirmButton({
   title: string;
   description: ReactNode;
   confirmLabel: string;
-  onConfirm: () => void;
+  onConfirm: () => Promise<unknown> | unknown;
   children: ReactNode;
 } & Omit<ComponentProps<typeof Button>, 'onClick'>) {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
+  const [confirm, confirmDialog] = useConfirmDialog();
   return (
     <>
-      <Button type="button" {...buttonProps} onClick={() => setOpen(true)}>
+      <Button
+        type="button"
+        {...buttonProps}
+        onClick={() => confirm({ title, description, confirmLabel, onConfirm })}
+      >
         {children}
       </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{title}</DialogTitle>
-            <DialogDescription>{description}</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>
-              {t('codelink-bracket.confirm.cancel')}
-            </Button>
-            <Button
-              onClick={() => {
-                setOpen(false);
-                onConfirm();
-              }}
-            >
-              {confirmLabel}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {confirmDialog}
     </>
   );
 }

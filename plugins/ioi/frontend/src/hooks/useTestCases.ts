@@ -9,7 +9,7 @@ export function useTestCases(problemId: number | undefined) {
   const apiClient = useApiClient();
   const [testCases, setTestCases] = useState<TestCaseSummary[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
 
   const fetchTestCases = useCallback(async () => {
     if (!problemId) return;
@@ -19,12 +19,10 @@ export function useTestCases(problemId: number | undefined) {
       const { data, error } = await apiClient.GET('/problems/{id}/test-cases', {
         params: { path: { id: problemId } },
       });
-      if (error || !data) {
-        throw new Error('Failed to fetch test cases');
-      }
+      if (error) throw error;
       setTestCases(data);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unknown error');
+      setError(e);
     } finally {
       setLoading(false);
     }

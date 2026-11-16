@@ -1,3 +1,4 @@
+import { useApiBasePath } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import { formatBytes } from '@broccoli/web-sdk/utils';
@@ -27,12 +28,16 @@ interface Props extends Omit<MarkdownEditorProps, 'onEditorMount'> {
   attachments: Attachment[];
 }
 
+const INSERT_IMAGE_SHORTCUT = 'Ctrl+Shift+I';
+const INSERT_FILE_SHORTCUT = 'Ctrl+Shift+K';
+
 export function MarkdownEditorWithAttachments({
   problemId,
   attachments,
   ...editorProps
 }: Props) {
   const { t } = useTranslation();
+  const apiBasePath = useApiBasePath();
   const { upload } = useAttachmentUpload(problemId);
 
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
@@ -237,7 +242,7 @@ export function MarkdownEditorWithAttachments({
 
       const attachment = await upload(file);
       if (attachment) {
-        const url = attachmentUrl(problemId, attachment.id);
+        const url = attachmentUrl(apiBasePath, problemId, attachment.id);
         const md = attachmentMarkdownRef(
           attachment.path,
           url,
@@ -249,6 +254,7 @@ export function MarkdownEditorWithAttachments({
       }
     },
     [
+      apiBasePath,
       upload,
       problemId,
       insertPlaceholder,
@@ -377,7 +383,7 @@ export function MarkdownEditorWithAttachments({
             ) {
               return {
                 suggestions: items.map((att) => {
-                  const url = attachmentUrl(problemId, att.id);
+                  const url = attachmentUrl(apiBasePath, problemId, att.id);
                   const isImg = isImageType(att.content_type);
                   const md = attachmentMarkdownRef(att.path, url, isImg);
                   return {
@@ -406,7 +412,7 @@ export function MarkdownEditorWithAttachments({
             ) {
               return {
                 suggestions: items.map((att) => {
-                  const url = attachmentUrl(problemId, att.id);
+                  const url = attachmentUrl(apiBasePath, problemId, att.id);
                   return {
                     label: att.path,
                     kind: monaco.languages.CompletionItemKind.File,
@@ -480,7 +486,7 @@ export function MarkdownEditorWithAttachments({
         () => fileInputRef.current?.click(),
       );
     },
-    [uploadAndInsert, problemId],
+    [apiBasePath, uploadAndInsert, problemId],
   );
 
   return (
@@ -499,7 +505,10 @@ export function MarkdownEditorWithAttachments({
           size="sm"
           className="h-7 px-2 text-xs"
           onClick={() => imageInputRef.current?.click()}
-          title={`${t('admin.attachments.insertImage')} (Ctrl+Shift+I)`}
+          title={t('common.withShortcut', {
+            action: t('admin.attachments.insertImage'),
+            shortcut: INSERT_IMAGE_SHORTCUT,
+          })}
         >
           <ImagePlus className="h-3.5 w-3.5 mr-1" />
           {t('admin.attachments.insertImage')}
@@ -510,7 +519,10 @@ export function MarkdownEditorWithAttachments({
           size="sm"
           className="h-7 px-2 text-xs"
           onClick={() => fileInputRef.current?.click()}
-          title={`${t('admin.attachments.insertFile')} (Ctrl+Shift+K)`}
+          title={t('common.withShortcut', {
+            action: t('admin.attachments.insertFile'),
+            shortcut: INSERT_FILE_SHORTCUT,
+          })}
         >
           <Paperclip className="h-3.5 w-3.5 mr-1" />
           {t('admin.attachments.insertFile')}

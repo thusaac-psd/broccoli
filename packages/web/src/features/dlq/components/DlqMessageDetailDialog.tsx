@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiFetch } from '@broccoli/web-sdk/api';
+import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
@@ -9,6 +9,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Loader2, RotateCw, Trash2 } from 'lucide-react';
@@ -26,54 +27,52 @@ interface Props {
 
 export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
   const { t } = useTranslation();
-  const apiFetch = useApiFetch();
+  const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const open = messageId !== null;
 
   const { data, isLoading, error } = useDlqMessage(messageId);
   const meta = data ? messageTypeMeta(data.message_type) : null;
 
-  const [busy, setBusy] = useState<'retry' | 'delete' | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirm, confirmDialog] = useConfirmDialog();
 
   async function handleRetry() {
     if (!messageId) return;
-    setBusy('retry');
+    setBusy(true);
     try {
-      const res = await apiFetch(`/api/v1/dlq/${messageId}/retry`, {
-        method: 'POST',
+      const { error } = await apiClient.POST('/dlq/{id}/retry', {
+        params: { path: { id: messageId } },
       });
-      if (!res.ok) {
-        const body: unknown = await res.json().catch(() => null);
-        toast.error(getErrorMessage(body, t('dlq.detail.retryError')));
+      if (error) {
+        toast.error(getErrorMessage(error, t('dlq.detail.retryError')));
         return;
       }
       toast.success(t('dlq.detail.retrySuccess'));
       await queryClient.invalidateQueries({ queryKey: ['dlq'] });
       onOpenChange(false);
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   }
 
-  async function handleDelete() {
+  function handleDelete() {
     if (!messageId) return;
-    if (!window.confirm(t('dlq.detail.deleteConfirm'))) return;
-    setBusy('delete');
-    try {
-      const res = await apiFetch(`/api/v1/dlq/${messageId}`, {
-        method: 'DELETE',
-      });
-      if (!res.ok && res.status !== 204) {
-        const body: unknown = await res.json().catch(() => null);
-        toast.error(getErrorMessage(body, t('dlq.detail.deleteError')));
-        return;
-      }
-      toast.success(t('dlq.detail.deleteSuccess'));
-      await queryClient.invalidateQueries({ queryKey: ['dlq'] });
-      onOpenChange(false);
-    } finally {
-      setBusy(null);
-    }
+    confirm({
+      title: t('dlq.detail.deleteConfirm'),
+      confirmLabel: t('dlq.detail.deleteAction'),
+      destructive: true,
+      failureMessage: t('dlq.detail.deleteError'),
+      onConfirm: async () => {
+        const { error } = await apiClient.DELETE('/dlq/{id}', {
+          params: { path: { id: messageId } },
+        });
+        if (error) throw error;
+        toast.success(t('dlq.detail.deleteSuccess'));
+        await queryClient.invalidateQueries({ queryKey: ['dlq'] });
+        onOpenChange(false);
+      },
+    });
   }
 
   return (
@@ -186,21 +185,17 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
           <Button
             variant="outline"
             onClick={handleDelete}
-            disabled={busy !== null || !data || data.resolved}
+            disabled={busy || !data || data.resolved}
           >
-            {busy === 'delete' ? (
-              <Loader2 className="h-4 w-4 animate-spin mr-2" />
-            ) : (
-              <Trash2 className="h-4 w-4 mr-2" />
-            )}
+            <Trash2 className="h-4 w-4 mr-2" />
             {t('dlq.detail.deleteAction')}
           </Button>
           {meta?.retryable && (
             <Button
               onClick={handleRetry}
-              disabled={busy !== null || !data || data.resolved}
+              disabled={busy || !data || data.resolved}
             >
-              {busy === 'retry' ? (
+              {busy ? (
                 <Loader2 className="h-4 w-4 animate-spin mr-2" />
               ) : (
                 <RotateCw className="h-4 w-4 mr-2" />
@@ -209,6 +204,7 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
             </Button>
           )}
         </DialogFooter>
+        {confirmDialog}
       </DialogContent>
     </Dialog>
   );

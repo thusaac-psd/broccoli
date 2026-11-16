@@ -6,6 +6,9 @@ import { useMyMatch } from './hooks/useMyMatch';
 import { MatchSheet } from './MatchSheet';
 import { MyMatchPanel } from './MyMatchPanel';
 
+/** Product name shown on the rules card; a brand, so it is not translated. */
+const BRAND_NAME = 'Codelink';
+
 /**
  * The contest homepage for the afternoon round. Contestants land here, so it
  * leads with their own match (rank the opponent's problems, then the
@@ -30,7 +33,7 @@ export function BracketContestInfo({ contestId }: { contestId?: number }) {
       )}
       <section className="rounded-lg border border-border bg-card p-4 text-left">
         <div className="mb-2 flex items-center gap-2">
-          <Badge>Codelink</Badge>
+          <Badge>{BRAND_NAME}</Badge>
           <h2 className="font-semibold">{t('codelink-bracket.rules.title')}</h2>
         </div>
         <p className="text-sm text-muted-foreground">

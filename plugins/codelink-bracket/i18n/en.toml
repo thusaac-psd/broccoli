@@ -57,7 +57,6 @@
 'codelink-bracket.live.awaitingJudge' = 'The deadline passed while an earlier submission was still being judged. Waiting on the judge.'
 
 'codelink-bracket.card.you' = 'You'
-'codelink-bracket.confirm.cancel' = 'Cancel'
 'codelink-bracket.error.rejudge' = 'Failed to rejudge the submission.'
 'codelink-bracket.game.column' = 'Game'
 'codelink-bracket.game.live' = 'Live'
@@ -68,6 +67,7 @@
 'codelink-bracket.game.lost' = 'Loss'
 'codelink-bracket.game.noScore' = 'No points'
 'codelink-bracket.match.number' = 'Match {n}'
+'codelink-bracket.match.format' = 'BO{bestOf} / FT{winsToAdvance}'
 'codelink-bracket.match.openSubmission' = 'Open #{id}'
 'codelink-bracket.match.rejudge' = 'Rejudge #{id}'
 'codelink-bracket.match.contestEnded' = 'The contest ended before this match finished, so nobody can submit any more. Staff must decide it.'
@@ -102,6 +102,7 @@
 'codelink-bracket.setup.autofill' = 'Fill from problem order'
 'codelink-bracket.setup.bench' = 'Other enrolled players ({count})'
 'codelink-bracket.setup.breakMinutes' = 'Break before stage (minutes)'
+'codelink-bracket.setup.loadFailed' = 'Could not load the bracket setup.'
 'codelink-bracket.setup.confirmDescription' = 'Seeding is fixed when the contest starts. Each stage is fixed when it opens.'
 'codelink-bracket.setup.confirmTitle' = 'Create the bracket?'
 'codelink-bracket.setup.create' = 'Create bracket'

@@ -12,7 +12,3 @@ export { IoiContestInfo } from './IoiContestInfo';
 export { IoiScoreboard } from './IoiScoreboard';
 export { IoiSubmissionResult } from './IoiSubmissionResult';
 export { TokenPanel } from './TokenPanel';
-
-export function onInit() {
-  console.log('IOI contest frontend plugin loaded');
-}

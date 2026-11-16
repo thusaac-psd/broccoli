@@ -1,12 +1,10 @@
-import { useApiFetch } from '@broccoli/web-sdk/api';
+import { useApiClient } from '@broccoli/web-sdk/api';
 import { useQuery } from '@tanstack/react-query';
-
-import type { DlqStats } from '@/features/dlq/types';
 
 const REFETCH_INTERVAL_MS = 10_000;
 
 export function useDlqStats({ enabled = true }: { enabled?: boolean } = {}) {
-  const apiFetch = useApiFetch();
+  const apiClient = useApiClient();
 
   return useQuery({
     queryKey: ['dlq', 'stats'],
@@ -16,10 +14,10 @@ export function useDlqStats({ enabled = true }: { enabled?: boolean } = {}) {
     enabled,
     refetchInterval: REFETCH_INTERVAL_MS,
     refetchIntervalInBackground: false,
-    queryFn: async (): Promise<DlqStats> => {
-      const res = await apiFetch('/api/v1/dlq/stats');
-      if (!res.ok) throw new Error(`Failed to load DLQ stats (${res.status})`);
-      return (await res.json()) as DlqStats;
+    queryFn: async () => {
+      const { data, error } = await apiClient.GET('/dlq/stats');
+      if (error) throw error;
+      return data;
     },
   });
 }

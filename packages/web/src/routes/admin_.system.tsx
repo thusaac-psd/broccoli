@@ -18,6 +18,8 @@ import { SystemHealthSummary } from '@/features/system/components/SystemHealthSu
 import { WorkersGrid } from '@/features/system/components/WorkersGrid';
 import { useSystemOverview } from '@/features/system/hooks/useSystemOverview';
 
+const STAT_SKELETONS = ['workers', 'inflight', 'submissions', 'dlq'];
+
 export default function AdminSystemPage() {
   const { t } = useTranslation();
   const { user } = useAuth();
@@ -61,7 +63,7 @@ export default function AdminSystemPage() {
 
       {isLoading && !data && (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {['workers', 'inflight', 'submissions', 'dlq'].map((k) => (
+          {STAT_SKELETONS.map((k) => (
             <Skeleton key={k} className="h-24 w-full" />
           ))}
         </div>

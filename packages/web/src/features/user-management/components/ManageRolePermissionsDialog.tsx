@@ -10,6 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
   Input,
+  useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Loader2, Plus, Trash2 } from 'lucide-react';
@@ -36,14 +37,11 @@ export function ManageRolePermissionsDialog({
   const roleName = role?.role;
   const [newPermission, setNewPermission] = useState('');
   const [isGranting, setIsGranting] = useState(false);
-  const [revokingPermission, setRevokingPermission] = useState<string | null>(
-    null,
-  );
+  const [confirm, confirmDialog] = useConfirmDialog();
 
   useEffect(() => {
     if (open) {
       setNewPermission('');
-      setRevokingPermission(null);
     }
   }, [open, roleName]);
 
@@ -99,35 +97,25 @@ export function ManageRolePermissionsDialog({
     });
   }
 
-  async function handleRevokePermission(permission: string) {
+  function handleRevokePermission(permission: string) {
     if (!roleName) return;
-
-    if (
-      !window.confirm(t('users.roles.revokePermissionConfirm', { permission }))
-    ) {
-      return;
-    }
-
-    setRevokingPermission(permission);
-    const { error } = await apiClient.DELETE(
-      '/roles/{role}/permissions/{permission}',
-      {
-        params: { path: { role: roleName, permission } },
+    confirm({
+      title: t('users.roles.revokePermissionConfirm', { permission }),
+      confirmLabel: t('users.revoke'),
+      destructive: true,
+      failureMessage: t('users.roles.revokePermissionError'),
+      onConfirm: async () => {
+        const { error } = await apiClient.DELETE(
+          '/roles/{role}/permissions/{permission}',
+          { params: { path: { role: roleName, permission } } },
+        );
+        if (error) throw error;
+        toast.success(t('users.roles.revokePermissionSuccess'));
+        queryClient.invalidateQueries({ queryKey: ['admin-role-permissions'] });
+        queryClient.invalidateQueries({
+          queryKey: ['admin-role-permissions-detail', roleName],
+        });
       },
-    );
-    setRevokingPermission(null);
-
-    if (error) {
-      toast.error(
-        getErrorMessage(error, t('users.roles.revokePermissionError')),
-      );
-      return;
-    }
-
-    toast.success(t('users.roles.revokePermissionSuccess'));
-    queryClient.invalidateQueries({ queryKey: ['admin-role-permissions'] });
-    queryClient.invalidateQueries({
-      queryKey: ['admin-role-permissions-detail', roleName],
     });
   }
 
@@ -194,18 +182,10 @@ export function ManageRolePermissionsDialog({
                       variant="ghost"
                       size="sm"
                       className="text-destructive hover:text-destructive"
-                      disabled={
-                        isFetching ||
-                        revokingPermission === permission ||
-                        isGranting
-                      }
+                      disabled={isFetching || isGranting}
                       onClick={() => handleRevokePermission(permission)}
                     >
-                      {revokingPermission === permission ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Trash2 className="h-4 w-4" />
-                      )}
+                      <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
                 ))}
@@ -223,6 +203,7 @@ export function ManageRolePermissionsDialog({
             {t('users.common.close')}
           </Button>
         </DialogFooter>
+        {confirmDialog}
       </DialogContent>
     </Dialog>
   );

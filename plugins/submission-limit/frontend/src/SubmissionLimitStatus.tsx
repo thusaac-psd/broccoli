@@ -2,7 +2,7 @@
  * Shows submission count / limit on the problem detail sidebar.
  * Hidden when no limit is configured (unlimited) or plugin is not enabled.
  */
-import { useApiFetch } from '@broccoli/web-sdk/api';
+import { usePluginApi } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useSubmitGate } from '@broccoli/web-sdk/submission';
@@ -24,14 +24,14 @@ interface LimitStatus {
   source?: string;
 }
 
-const PLUGIN_BASE = '/api/v1/p/submission-limit/api/plugins/submission-limit';
+const ROUTES = '/api/plugins/submission-limit';
 
 export function SubmissionLimitStatus({
   submission,
   contestId,
   problemId,
 }: Props) {
-  const apiFetch = useApiFetch();
+  const api = usePluginApi('submission-limit');
   const { accessToken } = useAuth();
   const { t } = useTranslation();
   const [status, setStatus] = useState<LimitStatus | null>(null);
@@ -44,13 +44,11 @@ export function SubmissionLimitStatus({
     let cancelled = false;
 
     async function load() {
-      const url = contestId
-        ? `${PLUGIN_BASE}/contests/${contestId}/problems/${problemId}/status`
-        : `${PLUGIN_BASE}/problems/${problemId}/status`;
+      const path = contestId
+        ? `${ROUTES}/contests/${contestId}/problems/${problemId}/status`
+        : `${ROUTES}/problems/${problemId}/status`;
       try {
-        const res = await apiFetch(url);
-        if (!res.ok || cancelled) return;
-        const data = await res.json();
+        const data = await api.get<LimitStatus>(path);
         if (!cancelled) setStatus(data);
       } catch {
         // silent - status indicator is best-effort
@@ -61,7 +59,7 @@ export function SubmissionLimitStatus({
     return () => {
       cancelled = true;
     };
-  }, [apiFetch, accessToken, contestId, problemId, submissionId]);
+  }, [api, accessToken, contestId, problemId, submissionId]);
 
   useSubmitGate(
     'submission-limit',

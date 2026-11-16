@@ -59,12 +59,13 @@ export async function fetchSampleCase(
  * this problem's own attachments. Any other URL is returned unchanged.
  */
 export function scopeAttachmentUrl(
+  apiBasePath: string,
   url: string | undefined,
   problemId: number,
   contestId: number | undefined,
 ): string | undefined {
   if (url === undefined || contestId === undefined) return url;
-  const standalone = `/api/v1/problems/${problemId}/attachments/`;
+  const standalone = `${apiBasePath}/problems/${problemId}/attachments/`;
   if (!url.startsWith(standalone)) return url;
-  return `/api/v1/contests/${contestId}/problems/${problemId}/attachments/${url.slice(standalone.length)}`;
+  return `${apiBasePath}/contests/${contestId}/problems/${problemId}/attachments/${url.slice(standalone.length)}`;
 }

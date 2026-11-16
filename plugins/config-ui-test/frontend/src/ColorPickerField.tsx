@@ -5,6 +5,7 @@
  * Receives slot props: { value, schema, onChange, showAsPlaceholder, inheritedValue, inheritedSource, ... }
  */
 
+import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { ConfigFieldSlotProps } from '@broccoli/web-sdk/slot';
 import { InheritedAnnotation, InheritedBadge } from '@broccoli/web-sdk/slot';
 import { Input, Label } from '@broccoli/web-sdk/ui';
@@ -18,6 +19,7 @@ export function ColorPickerField({
   inheritedValue,
   inheritedSource,
 }: ConfigFieldSlotProps) {
+  const { t } = useTranslation();
   const displayColor = showAsPlaceholder
     ? typeof inheritedValue === 'string'
       ? inheritedValue
@@ -30,9 +32,9 @@ export function ColorPickerField({
     <div className="flex flex-col gap-1.5 col-span-2">
       <div className="flex items-center gap-2">
         <Label className="text-[11px] font-medium uppercase tracking-wide opacity-60">
-          {schema.title ?? 'Color'}
+          {schema.title ?? t('configUiTest.colorPicker.defaultTitle')}
           <span className="ml-1.5 text-[10px] font-normal normal-case tracking-normal text-amber-600">
-            (plugin override)
+            {t('configUiTest.pluginOverrideBadge')}
           </span>
         </Label>
         {showAsPlaceholder && inheritedSource && (
@@ -75,7 +77,9 @@ export function ColorPickerField({
             )}
             style={{ backgroundColor: displayColor }}
           />
-          <span className="text-xs opacity-60">Preview</span>
+          <span className="text-xs opacity-60">
+            {t('configUiTest.colorPicker.preview')}
+          </span>
         </div>
       </div>
       {inheritedSource && (

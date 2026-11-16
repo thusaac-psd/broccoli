@@ -1,5 +1,10 @@
-import { useApiClient } from '@broccoli/web-sdk/api';
+import {
+  getErrorMessage,
+  type IdempotentResult,
+  useApiClient,
+} from '@broccoli/web-sdk/api';
 import { useAuth, viewerCacheKey } from '@broccoli/web-sdk/auth';
+import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   CONTEST_MANAGE,
@@ -143,11 +148,21 @@ function MatchDetail({
   const nameB = playerLabel(match.player_b_name, match.player_b);
   const side = sideOf(match, auth.user?.id ?? null);
 
-  const run = async (action: () => Promise<unknown>, failKey: string) => {
+  const run = async (
+    action: () => Promise<IdempotentResult<unknown> | void>,
+    failKey: string,
+  ) => {
     setError(null);
     setBusy(true);
     try {
-      await action();
+      const result = await action();
+      // It may or may not have happened: the refetch below shows which.
+      if (result && !result.settled) {
+        setError(t(unsettledMessageKey(result.outcome)));
+      }
+    } catch (err) {
+      setError(getErrorMessage(err, t(failKey)));
+    } finally {
       await Promise.all([
         queryClient.invalidateQueries({
           queryKey: ['codelink-bracket-match', contestId, matchId],
@@ -156,9 +171,6 @@ function MatchDetail({
           queryKey: ['codelink-bracket-bracket', contestId],
         }),
       ]);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t(failKey));
-    } finally {
       setBusy(false);
     }
   };
@@ -171,7 +183,10 @@ function MatchDetail({
           {match.kind === 'elimination' && (
             <>{t('codelink-bracket.match.number', { n: match.pos + 1 })} · </>
           )}
-          BO{match.group_a.length} / FT{match.wins_to_advance}
+          {t('codelink-bracket.match.format', {
+            bestOf: match.group_a.length,
+            winsToAdvance: match.wins_to_advance,
+          })}
         </p>
         <SheetDescription asChild>
           <div className="pt-3">
@@ -295,7 +310,7 @@ async function rejudgeWith(
     params: { path: { id: submissionId } },
     body: { apply_immediately: true },
   });
-  if (error) throw new Error(error.message);
+  if (error) throw error;
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {

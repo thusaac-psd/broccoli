@@ -25,18 +25,21 @@ import { Upload } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { toast } from 'sonner';
 
+import { invalidateProblemTestCases } from '@/features/admin/hooks/test-case-queries';
+
+const DEFAULT_INPUT_FORMAT = '*.in';
+const DEFAULT_OUTPUT_FORMAT = '*.out';
+
 interface TestCaseBulkUploadDialogProps {
   problemId: number;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  testCasesQueryKey: (string | number)[];
 }
 
 export function TestCaseBulkUploadDialog({
   problemId,
   open,
   onOpenChange,
-  testCasesQueryKey,
 }: TestCaseBulkUploadDialogProps) {
   const apiClient = useApiClient();
   const { t } = useTranslation();
@@ -44,8 +47,8 @@ export function TestCaseBulkUploadDialog({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [inputFormat, setInputFormat] = useState('*.in');
-  const [outputFormat, setOutputFormat] = useState('*.out');
+  const [inputFormat, setInputFormat] = useState(DEFAULT_INPUT_FORMAT);
+  const [outputFormat, setOutputFormat] = useState(DEFAULT_OUTPUT_FORMAT);
   const [strategy, setStrategy] = useState<TestCaseMergeStrategy>('abort');
   const [loading, setLoading] = useState(false);
 
@@ -133,15 +136,11 @@ export function TestCaseBulkUploadDialog({
       }
 
       toast.success(t('admin.testCases.bulkUpload.uploadSuccess'));
-      queryClient.invalidateQueries({ queryKey: testCasesQueryKey });
-      queryClient.invalidateQueries({ queryKey: ['problem', problemId] });
-      queryClient.invalidateQueries({
-        queryKey: ['problem-sample-contents', problemId],
-      });
+      invalidateProblemTestCases(queryClient, problemId);
       onOpenChange(false);
       setSelectedFile(null);
-      setInputFormat('*.in');
-      setOutputFormat('*.out');
+      setInputFormat(DEFAULT_INPUT_FORMAT);
+      setOutputFormat(DEFAULT_OUTPUT_FORMAT);
       setStrategy('abort');
     } catch (error) {
       console.error('Bulk upload error:', error);
@@ -160,8 +159,8 @@ export function TestCaseBulkUploadDialog({
       onOpenChange(newOpen);
       if (!newOpen) {
         setSelectedFile(null);
-        setInputFormat('*.in');
-        setOutputFormat('*.out');
+        setInputFormat(DEFAULT_INPUT_FORMAT);
+        setOutputFormat(DEFAULT_OUTPUT_FORMAT);
         setStrategy('abort');
       }
     }
@@ -217,7 +216,7 @@ export function TestCaseBulkUploadDialog({
               id="input-format"
               value={inputFormat}
               onChange={(e) => setInputFormat(e.target.value)}
-              placeholder="*.in"
+              placeholder={DEFAULT_INPUT_FORMAT}
               required
             />
             <p className="text-xs text-muted-foreground">
@@ -233,7 +232,7 @@ export function TestCaseBulkUploadDialog({
               id="output-format"
               value={outputFormat}
               onChange={(e) => setOutputFormat(e.target.value)}
-              placeholder="*.out"
+              placeholder={DEFAULT_OUTPUT_FORMAT}
               required
             />
             <p className="text-xs text-muted-foreground">

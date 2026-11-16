@@ -1,5 +1,5 @@
-import { useApiFetch } from '@broccoli/web-sdk/api';
-import { useCallback, useMemo } from 'react';
+import { usePluginApi } from '@broccoli/web-sdk/api';
+import { useMemo } from 'react';
 
 import type {
   BracketResponse,
@@ -13,50 +13,20 @@ import type {
   StartResponse,
 } from '../types.ts';
 
-export const PLUGIN_BASE =
-  '/api/v1/p/codelink-bracket/api/plugins/codelink-bracket';
-
-export class ApiError extends Error {
-  status: number;
-  code?: string;
-
-  constructor(message: string, status: number, code?: string) {
-    super(message);
-    this.name = 'ApiError';
-    this.status = status;
-    this.code = code;
-  }
-}
+export const PLUGIN_ID = 'codelink-bracket';
+export const ROUTES = '/api/plugins/codelink-bracket';
 
 export function useBracketApi() {
-  const apiFetch = useApiFetch();
-
-  const fetchJson = useCallback(
-    async <T>(path: string, init?: RequestInit): Promise<T> => {
-      const res = await apiFetch(path, init);
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new ApiError(
-          body.error || body.message || `Request failed: ${res.status}`,
-          res.status,
-          body.code,
-        );
-      }
-      return res.json();
-    },
-    [apiFetch],
-  );
+  const api = usePluginApi(PLUGIN_ID);
 
   return useMemo(
     () => ({
       getBracket: (contestId: number) =>
-        fetchJson<BracketResponse>(
-          `${PLUGIN_BASE}/contests/${contestId}/bracket`,
-        ),
+        api.get<BracketResponse>(`${ROUTES}/contests/${contestId}/bracket`),
 
       getMatch: (contestId: number, matchId: number) =>
-        fetchJson<MatchView>(
-          `${PLUGIN_BASE}/contests/${contestId}/matches/${matchId}`,
+        api.get<MatchView>(
+          `${ROUTES}/contests/${contestId}/matches/${matchId}`,
         ),
 
       submitOrder: (
@@ -64,19 +34,14 @@ export function useBracketApi() {
         matchId: number,
         order: OrderRequest['order'],
       ) =>
-        fetchJson<OrderResponse>(
-          `${PLUGIN_BASE}/contests/${contestId}/matches/${matchId}/order`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ order } satisfies OrderRequest),
-          },
+        api.post<OrderResponse>(
+          `${ROUTES}/contests/${contestId}/matches/${matchId}/order`,
+          { order } satisfies OrderRequest,
         ),
 
       startMatch: (contestId: number, matchId: number) =>
-        fetchJson<StartResponse>(
-          `${PLUGIN_BASE}/contests/${contestId}/matches/${matchId}/start`,
-          { method: 'POST' },
+        api.post<StartResponse>(
+          `${ROUTES}/contests/${contestId}/matches/${matchId}/start`,
         ),
 
       forceDecide: (
@@ -84,25 +49,17 @@ export function useBracketApi() {
         matchId: number,
         winner: number | null,
       ) =>
-        fetchJson<ForceDecideResponse>(
-          `${PLUGIN_BASE}/contests/${contestId}/matches/${matchId}/force-decide`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ winner } satisfies ForceDecideRequest),
-          },
+        api.post<ForceDecideResponse>(
+          `${ROUTES}/contests/${contestId}/matches/${matchId}/force-decide`,
+          { winner } satisfies ForceDecideRequest,
         ),
 
       getSetup: (contestId: number) =>
-        fetchJson<SetupResponse>(`${PLUGIN_BASE}/contests/${contestId}/setup`),
+        api.get<SetupResponse>(`${ROUTES}/contests/${contestId}/setup`),
 
       setup: (contestId: number, body: SetupRequest) =>
-        fetchJson<unknown>(`${PLUGIN_BASE}/contests/${contestId}/setup`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        }),
+        api.post<unknown>(`${ROUTES}/contests/${contestId}/setup`, body),
     }),
-    [fetchJson],
+    [api],
   );
 }

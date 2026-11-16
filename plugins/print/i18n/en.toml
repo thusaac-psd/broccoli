@@ -18,10 +18,12 @@
 'print.dialog.submit' = 'Print'
 'print.dialog.empty' = 'Nothing to print'
 'print.dialog.tooManyPages' = 'Too long to print (estimated {pages} pages, limit {max}).'
+'print.dialog.plainText' = 'Plain text'
 
 # Submission print confirmation
 'print.submission.title' = 'Print this submission?'
 'print.submission.files' = '{count} file(s), ~{pages} page(s)'
+'print.submission.estimatedPages' = '~{count}p'
 
 # Queue page (staff)
 'print.queue.title' = 'Print Queue'
@@ -56,6 +58,7 @@
 'print.queue.action.confirmPinBatch' = 'Pin {count} print job(s) to the selected printer?'
 'print.queue.codeTitle' = '{filename} — {who}'
 'print.queue.nav' = 'Print Queue'
+'print.queue.staffOnly' = '403 — staff access only'
 'print.nav.groupLabel' = 'Print'
 
 # My Prints panel (contestant sidebar)
@@ -82,3 +85,4 @@
 'print.stations.col.queue' = 'Queue seen'
 'print.stations.col.version' = 'Version'
 'print.stations.col.lastSeen' = 'Last seen'
+'print.stations.version' = 'v{version}'

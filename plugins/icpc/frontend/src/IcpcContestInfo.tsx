@@ -4,6 +4,9 @@ import { useParams } from 'react-router';
 
 import { useIsIcpcContest } from './hooks/useIsIcpcContest';
 
+/** The contest format's proper name, shown as is in every language. */
+const FORMAT_NAME = 'ICPC';
+
 export function IcpcContestInfo() {
   const { contestId } = useParams();
   const cId = contestId ? Number(contestId) : undefined;
@@ -19,7 +22,7 @@ export function IcpcContestInfo() {
           variant="default"
           className="uppercase text-[11px] font-bold tracking-wide"
         >
-          ICPC
+          {FORMAT_NAME}
         </Badge>
         <span className="text-sm font-semibold text-foreground">
           {t('icpc.contestInfo.title')}

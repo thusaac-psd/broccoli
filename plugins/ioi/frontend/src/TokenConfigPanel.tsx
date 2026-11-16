@@ -187,7 +187,9 @@ export function TokenConfigPanel({
           {/* Regen visualization: dots filling up */}
           <div className="flex items-center gap-1.5 py-2 px-3 rounded-md bg-muted justify-center">
             <span className="text-[10px] opacity-40 ml-1 italic">
-              +1 / {val.regen_interval_min ?? 30}min
+              {t('ioi.tokenConfig.regenRate', {
+                minutes: val.regen_interval_min ?? 30,
+              })}
             </span>
           </div>
 

@@ -18,13 +18,6 @@ export function formatDateTime(dateStr: string, locale?: string): string {
   });
 }
 
-export function toLocalDatetimeValue(iso: string): string {
-  const d = new Date(iso);
-  const offset = d.getTimezoneOffset();
-  const local = new Date(d.getTime() - offset * 60000);
-  return local.toISOString().slice(0, 16);
-}
-
 export function formatRelativeDatetime(
   dateStr: string,
   t: (key: string, params?: Record<string, string>) => string,

@@ -1,3 +1,4 @@
+import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { SubmissionListPagination } from '@broccoli/web-sdk/submission';
 import { Button } from '@broccoli/web-sdk/ui';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
@@ -22,6 +23,7 @@ export function SubmissionListPager({
   onNext: (cursor: string) => void;
   onPrevious: () => void;
 }) {
+  const { t } = useTranslation();
   if (!pagination) return null;
   const {
     per_page: perPage,
@@ -35,7 +37,11 @@ export function SubmissionListPager({
     <div className="flex items-center justify-between text-sm text-muted-foreground">
       <span className="tabular-nums">
         {total != null && page != null
-          ? `${(page - 1) * perPage + 1}–${Math.min(page * perPage, total)} of ${total}`
+          ? t('list.range', {
+              start: (page - 1) * perPage + 1,
+              end: Math.min(page * perPage, total),
+              total,
+            })
           : null}
       </span>
       <div className="flex items-center gap-1">
