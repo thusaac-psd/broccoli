@@ -1380,6 +1380,43 @@ async fn a_system_error_that_stands_stays_shown_when_its_type_is_parked() {
     }
 }
 
+/// While its type is parked no system error spends budget, however many
+/// await a decision and however small the batch: one pick decides each.
+#[tokio::test]
+async fn no_system_error_retry_is_spent_while_its_type_is_parked() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    provider(&db, true).await;
+    let mut failed = Vec::new();
+    for _ in 0..3 {
+        let (s, _) = new_submission(&db).await;
+        let claimed = claim_one(&db, "srv").await;
+        fail_dispatch(
+            &db,
+            Unit::Judgement,
+            claimed.judgement.id,
+            claimed.judgement.judge_epoch,
+            &DispatchFailure::judging("PLUGIN_ERROR", "boom"),
+        )
+        .await
+        .unwrap();
+        failed.push(s.id);
+    }
+    provider(&db, false).await;
+    let pass = retry_system_errors(&db, RetryBudget::new(5), 2, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!((pass.handed_back, pass.requeued), (2, 0));
+    let pass = retry_system_errors(&db, RetryBudget::new(5), 2, NO_TYPES)
+        .await
+        .unwrap();
+    assert_eq!((pass.handed_back, pass.requeued), (1, 0));
+    for id in failed {
+        let s = sub(&db, id).await;
+        assert_eq!(s.status, SubmissionStatus::Queued);
+        assert_eq!(s.system_error_retries, 0, "no budget spent while parked");
+    }
+}
+
 /// In-flight work of a parked type whose owner was lost goes back without
 /// spending a dispatch retry, even with the budget spent.
 #[tokio::test]

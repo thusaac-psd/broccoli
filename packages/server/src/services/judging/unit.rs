@@ -502,6 +502,8 @@ struct Picked {
     submission_id: Option<i32>,
     is_current: bool,
     dispatch_retries: i32,
+    /// Its submission's spent system-error retries (0 for a code run).
+    system_error_retries: i32,
     /// Its contest type may be judged now ([`contest_type_open`]).
     open: bool,
 }
@@ -520,9 +522,12 @@ async fn pick(
         None => String::new(),
     };
     let columns = match unit {
-        Unit::Judgement => "u.id, u.submission_id, u.is_current, u.dispatch_retries",
+        Unit::Judgement => {
+            "u.id, u.submission_id, u.is_current, u.dispatch_retries, s.system_error_retries"
+        }
         Unit::CodeRun => {
-            "u.id, NULL::int AS submission_id, FALSE AS is_current, u.dispatch_retries"
+            "u.id, NULL::int AS submission_id, FALSE AS is_current, u.dispatch_retries, \
+             0 AS system_error_retries"
         }
     };
     let rows = txn
@@ -540,6 +545,7 @@ async fn pick(
                 submission_id: r.try_get("", "submission_id")?,
                 is_current: r.try_get("", "is_current")?,
                 dispatch_retries: r.try_get("", "dispatch_retries")?,
+                system_error_retries: r.try_get("", "system_error_retries")?,
                 open: r.try_get("", "open")?,
             })
         })
@@ -911,18 +917,41 @@ pub(crate) struct SystemErrorPass {
     pub confirmed: Vec<ConfirmedSystemError>,
 }
 
-/// Decides up to `limit` current judgements of each kind that finalized as a
-/// system error in any shape (a plugin's `SystemError` verdict, or a
-/// `SystemError` status from a dispatch failure or exhaustion) that does not
-/// stand yet, which the submission row has not shown (see
-/// [`awaits_retry_decision`]):
-///
-/// - while its contest type is parked, requeued spending nothing, so it waits
-///   parked;
-/// - otherwise requeued while its submission has system-error retries left,
-///   spending one;
-/// - otherwise confirmed: its error stands from then on (`error_stands`), and
-///   the submission shows it.
+/// What the system-error retry does with a judgement awaiting its decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetryDecision {
+    /// Its contest type is parked: a retry would only spend budget on an
+    /// attempt nothing can judge, and confirming the error would make the
+    /// disable's outage a verdict. It goes back to the queue spending
+    /// nothing, parked with its submission, and is judged again once a
+    /// provider is enabled.
+    HandBack,
+    /// Requeued for another attempt, spending one of its submission's
+    /// system-error retries.
+    Retry,
+    /// Its budget is spent: the error stands, and the submission shows it.
+    Confirm,
+}
+
+impl RetryDecision {
+    fn of(picked: &Picked, budget: RetryBudget) -> Self {
+        if !picked.open {
+            Self::HandBack
+        } else if budget.allows(picked.system_error_retries) {
+            Self::Retry
+        } else {
+            Self::Confirm
+        }
+    }
+}
+
+/// Decides up to `limit` current judgements that finalized as a system error
+/// in any shape (a plugin's `SystemError` verdict, or a `SystemError` status
+/// from a dispatch failure or exhaustion) that does not stand yet, which the
+/// submission row has not shown (see [`awaits_retry_decision`]), each by
+/// [`RetryDecision::of`]. One pick takes every judgement awaiting a decision
+/// that this replica may decide: one it can judge, or one to confirm, which
+/// any replica may, whatever it can judge.
 pub(crate) async fn retry_system_errors(
     db: &DatabaseConnection,
     budget: RetryBudget,
@@ -930,35 +959,39 @@ pub(crate) async fn retry_system_errors(
     local: &[String],
 ) -> Result<SystemErrorPass, DbErr> {
     let txn = db.begin().await?;
-    let undecided = awaits_retry_decision("u");
-
-    // A retry while the contest type is parked would only spend budget on
-    // an attempt nothing can judge, and confirming the error would make the
-    // disable's outage a verdict: the attempt goes back to the queue, parked
-    // with its submission, and is judged again once a provider is enabled.
-    let filter = format!("NOT {}", contest_type_open("s.contest_type"));
-    let ids = pick_current_system_errors(&txn, Binds::default(), &filter, limit, local).await?;
-    let handed_back = requeue(&txn, Unit::Judgement, &ids, Requeue::HandedBack).await?;
-
     let mut b = Binds::default();
-    let filter = format!("s.system_error_retries < {}", b.bind(budget.max()));
-    let ids = pick_current_system_errors(&txn, b, &filter, limit, local).await?;
-    let requeued = requeue(&txn, Unit::Judgement, &ids, Requeue::SystemErrorRetry).await?;
-
-    // Errors that stand: the submission shows each, once. Any replica may
-    // confirm, whatever it can judge; none confirms one of a parked type.
-    let mut b = Binds::default();
+    let max = b.bind(budget.max());
+    let local = b.bind(local.to_vec());
     let filter = format!(
-        "u.is_current AND {undecided} AND s.system_error_retries >= {max} AND {open}",
-        max = b.bind(budget.max()),
+        "u.is_current AND {undecided} \
+         AND ({handled} OR ({open} AND s.system_error_retries >= {max}))",
+        undecided = awaits_retry_decision("u"),
+        handled = prefer_local_handler("s.contest_type", &local),
         open = contest_type_open("s.contest_type"),
     );
-    let ids: Vec<i32> = pick(&txn, Unit::Judgement, b, filter, Some(limit))
-        .await?
-        .into_iter()
-        .map(|p| p.id)
-        .collect();
-    let confirmed = confirm_system_errors(&txn, &ids).await?;
+    let picked = pick(&txn, Unit::Judgement, b, filter, Some(limit)).await?;
+    let decided = |decision: RetryDecision| -> Vec<i32> {
+        picked
+            .iter()
+            .filter(|p| RetryDecision::of(p, budget) == decision)
+            .map(|p| p.id)
+            .collect()
+    };
+    let handed_back = requeue(
+        &txn,
+        Unit::Judgement,
+        &decided(RetryDecision::HandBack),
+        Requeue::HandedBack,
+    )
+    .await?;
+    let requeued = requeue(
+        &txn,
+        Unit::Judgement,
+        &decided(RetryDecision::Retry),
+        Requeue::SystemErrorRetry,
+    )
+    .await?;
+    let confirmed = confirm_system_errors(&txn, &decided(RetryDecision::Confirm)).await?;
     txn.commit().await?;
     Ok(SystemErrorPass {
         handed_back,
@@ -999,28 +1032,6 @@ async fn confirm_system_errors(
             })
         })
         .collect()
-}
-
-/// Locks up to `limit` current judgements awaiting a retry decision that
-/// match `filter` and this replica can judge.
-async fn pick_current_system_errors(
-    txn: &DatabaseTransaction,
-    mut b: Binds,
-    filter: &str,
-    limit: u32,
-    local: &[String],
-) -> Result<Vec<i32>, DbErr> {
-    let local = b.bind(local.to_vec());
-    let filter = format!(
-        "u.is_current AND {undecided} AND {filter} AND {handled}",
-        undecided = awaits_retry_decision("u"),
-        handled = prefer_local_handler("s.contest_type", &local),
-    );
-    Ok(pick(txn, Unit::Judgement, b, filter, Some(limit))
-        .await?
-        .into_iter()
-        .map(|p| p.id)
-        .collect())
 }
 
 /// What [`fail_dispatch`] did with the unit.
