@@ -94,7 +94,7 @@ read = ["submission.files"]
 
 ## SQL 防护
 
-`host_funcs/sql.rs` 中的 `reject_session_escape` 拒绝角色变更、`set_config`、`ALTER ROLE` 与 `ALTER USER`、`DISCARD`、`DO`、例程定义、对 `pg_settings` 的 `UPDATE`（它像 `set_config` 一样应用设置），以及对宿主强制设置的任何 `SET`，包括 `SET LOCAL`。角色变更由引擎约束；该防护阻止插件修改自身角色的密码或默认设置，并防止插件为其连接或事务解除 `statement_timeout` 的限制。
+`host_funcs/sql.rs` 中的 `reject_session_escape` 拒绝角色变更、`set_config`、`ALTER ROLE` 与 `ALTER USER`、`DISCARD`、`DO`、例程定义、任何提及 `pg_settings` 的语句（它的更新规则像 `set_config` 一样应用设置，无论是通过该视图本身还是基于它的视图），以及对宿主强制设置的任何 `SET`，包括 `SET LOCAL`。角色变更由引擎约束；该防护阻止插件修改自身角色的密码或默认设置，并防止插件为其连接或事务解除 `statement_timeout` 的限制。
 
 ## 边界不覆盖的部分
 

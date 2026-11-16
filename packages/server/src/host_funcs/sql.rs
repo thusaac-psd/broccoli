@@ -515,7 +515,8 @@ fn scrub_sql_for_guard(sql: &str) -> Result<String, ()> {
 /// Reject a raw plugin-`sql`-capability statement that changes the session role
 /// or authorization, runs an anonymous code block, or changes a host-enforced
 /// session bound ([`common::db::ENFORCED_SESSION_SETTINGS`]) in any scope,
-/// through `SET`, `SET LOCAL`, `set_config` or an `UPDATE` of `pg_settings`.
+/// through `SET`, `SET LOCAL`, `set_config` or `pg_settings` (named in any
+/// form: a view over it carries its update rule).
 /// A session-level `SET statement_timeout = 0` would outlive the call on the
 /// pooled connection and unbound every later plugin call that reuses it, and
 /// a `SET LOCAL` one would leave the rest of its transaction unbounded. Role
@@ -550,7 +551,7 @@ fn reject_session_escape(plugin_id: &str, sql: &str) -> Result<(), extism::Error
             "Rejected a role/session change on the plugin SQL path",
         );
         return Err(extism::Error::msg(
-            "not permitted on the plugin SQL capability: SET/RESET ROLE, SET SESSION AUTHORIZATION, set_config, ALTER ROLE/USER, DISCARD, anonymous code blocks, and changes to host-enforced settings (statement_timeout, tcp_keepalives_*) in any scope are forbidden",
+            "not permitted on the plugin SQL capability: SET/RESET ROLE, SET SESSION AUTHORIZATION, set_config, ALTER ROLE/USER, DISCARD, anonymous code blocks, pg_settings, and changes to host-enforced settings (statement_timeout, tcp_keepalives_*) in any scope are forbidden",
         ));
     }
     Ok(())
@@ -617,9 +618,11 @@ fn statement_escapes_session(stmt: &str) -> bool {
     {
         return true;
     }
-    // `UPDATE pg_settings SET setting = ..` is `set_config` by another name:
-    // the view's update rule applies it to the session.
-    if tokens.contains(&"pg_settings") && tokens.contains(&"update") {
+    // `pg_settings` is `set_config` by another name: its update rule applies
+    // an `UPDATE` to the session, through the view itself or any view,
+    // rule or statement built on it. A plugin never needs it, so a statement
+    // naming it in any form is refused.
+    if tokens.contains(&"pg_settings") {
         return true;
     }
     // A SET/RESET changes the role or session authorization when, allowing an
@@ -1077,6 +1080,10 @@ mod tests {
             "SET LOCAL statement_timeout TO 5000",
             "UPDATE pg_settings SET setting = '0' WHERE name = 'statement_timeout'",
             "update pg_catalog.pg_settings set setting = '0'",
+            // any statement naming pg_settings: a view or rule over it
+            // carries its update rule to a statement that does not name it
+            "CREATE VIEW v AS SELECT name, setting FROM pg_settings",
+            "SELECT setting FROM \"pg_settings\" WHERE name = 'statement_timeout'",
             "SET SESSION statement_timeout TO 0",
             "set statement_timeout to default",
             "SELECT 1; SET tcp_keepalives_idle = 0",
@@ -1192,8 +1199,6 @@ mod tests {
             // a column named like an enforced setting is DML, not a SET command
             "UPDATE t SET statement_timeout = 5 WHERE id = 1",
             "RESET statement_timeout",
-            // reading the settings changes nothing
-            "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
             // scope keyword before a NON-role parameter must stay allowed
             "SET LOCAL lock_timeout = 5000",
             "SET SESSION search_path TO my_schema",

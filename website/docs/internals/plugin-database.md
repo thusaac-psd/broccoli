@@ -194,8 +194,9 @@ A plugin's SQL runs within the deadline of the call that runs it
 
 `reject_session_escape` in `host_funcs/sql.rs` refuses role changes,
 `set_config`, `ALTER ROLE` and `ALTER USER`, `DISCARD`, `DO`, routine
-definitions, an `UPDATE` of `pg_settings` (which applies a setting as
-`set_config` does) and any `SET` of a host-enforced setting, `SET LOCAL`
+definitions, any statement naming `pg_settings` (whose update rule applies
+a setting as `set_config` does, through the view itself or a view built on
+it) and any `SET` of a host-enforced setting, `SET LOCAL`
 included. The engine confines role changes; the guard keeps a plugin from
 changing its own role's password or defaults, and from lifting
 `statement_timeout` for its connection or its transaction.
