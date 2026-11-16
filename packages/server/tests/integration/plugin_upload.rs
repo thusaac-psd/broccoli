@@ -769,7 +769,7 @@ fn archive_with_translations(id: &str, version: &str) -> Vec<u8> {
         (&format!("{id}/server_plugin.wasm"), &wasm),
         (
             &format!("{id}/i18n/en.toml"),
-            b"\"uploaded.greeting\" = \"Hello\"\n",
+            format!("\"{id}.greeting\" = \"Hello\"\n").as_bytes(),
         ),
     ])
 }
@@ -793,7 +793,7 @@ async fn a_plugin_whose_cache_entry_vanished_fails_no_other_plugins_lifecycle() 
     assert_eq!(status(&a, BUNDLED), Some(PluginStatus::Loaded));
     let en = a.state.plugins.get_i18n_registry().get_translations("en");
     assert!(
-        format!("{en:?}").contains("uploaded.greeting"),
+        format!("{en:?}").contains(&format!("{UPLOAD_ONLY}.greeting")),
         "the vanished plugin's translations are still served: {en:?}"
     );
 }
