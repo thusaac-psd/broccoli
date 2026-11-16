@@ -1022,6 +1022,28 @@ async fn a_submission_cut_by_a_disable_another_replica_published_is_handed_back_
     cut_by_a_disable(Change::Peer).await;
 }
 
+/// A contest plugin the fleet forgets while one of its submissions is being
+/// judged unloads like a disabled one: its judging session ends at once,
+/// though no result arrives, instead of when the worker's next result does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_judging_session_of_a_plugin_the_fleet_forgets_ends_at_once() {
+    let HeldJudging {
+        app, sub_id, cut, ..
+    } = held_judging().await;
+    exec(&app, "DELETE FROM plugin WHERE id = 'ioi'").await;
+    app.reconcile_plugins().await;
+    tokio::time::timeout(std::time::Duration::from_secs(30), app.judging_idle())
+        .await
+        .expect("forgetting the plugin cut the judging session");
+    let ended = current_judgement(&app, sub_id).await;
+    assert!(
+        ended.status != SubmissionStatus::Compiling || ended.judge_epoch > cut.judge_epoch,
+        "the cut judgement left its attempt: {:?}",
+        ended.status
+    );
+    app.resume_worker();
+}
+
 /// Where a plugin change comes from.
 #[derive(Clone, Copy)]
 enum Change {
@@ -1066,7 +1088,19 @@ async fn exec(app: &E2eTestApp, sql: &str) {
     app.db.execute_unprepared(sql).await.expect(sql);
 }
 
-async fn cut_by_a_disable(change: Change) {
+/// An IOI submission whose judging session has started and waits for its
+/// first result, which the paused worker never sends.
+struct HeldJudging {
+    app: E2eTestApp,
+    admin: String,
+    contestant: String,
+    problem_id: i32,
+    contest_id: i32,
+    sub_id: i32,
+    cut: submission_judgement::Model,
+}
+
+async fn held_judging() -> HeldJudging {
     let app = E2eTestApp::spawn().await;
     let admin = app
         .create_user_with_role("ioi_disable_admin", "password", "admin")
@@ -1116,6 +1150,27 @@ async fn cut_by_a_disable(change: Change) {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     };
 
+    HeldJudging {
+        app,
+        admin,
+        contestant,
+        problem_id,
+        contest_id,
+        sub_id,
+        cut,
+    }
+}
+
+async fn cut_by_a_disable(change: Change) {
+    let HeldJudging {
+        app,
+        admin,
+        contestant,
+        problem_id,
+        contest_id,
+        sub_id,
+        cut,
+    } = held_judging().await;
     change.set_enabled(&app, &admin, false).await;
     // The disable ends the session at once, on the replica that made it and
     // on one that applied it alike, though no result arrives: the worker

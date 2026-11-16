@@ -674,9 +674,14 @@ async fn retain_cache(state: &AppState, mut keep: HashSet<String>) {
     plugin_distribution::retain(state, keep).await;
 }
 
-/// Unload a plugin whose row was deleted and forget it on this replica.
+/// Unload a plugin whose row was deleted and forget it on this replica. It
+/// unloads through [`deactivate`], as every unload does, so its judging
+/// sessions end and its SQL pool closes now; then this replica drops what it
+/// recorded about it.
 async fn forget(state: &AppState, applied: &mut HashMap<String, Applied>, plugin_id: &str) {
-    purge_plugin_registrations(&state.registries, plugin_id).await;
+    if let Err(e) = deactivate(state, plugin_id).await {
+        tracing::warn!(plugin_id, error = %e, "Could not unload a plugin the fleet forgot");
+    }
     if let Ok(mut registry) = state.plugins.get_registry().write() {
         registry.remove(plugin_id);
     }
@@ -839,7 +844,11 @@ async fn apply(
 /// that took the change and every one that applies it in its reconcile.
 async fn deactivate(state: &AppState, plugin_id: &str) -> Result<(), PluginError> {
     purge_plugin_registrations(&state.registries, plugin_id).await;
-    state.plugins.unload_plugin(plugin_id)?;
+    match state.plugins.unload_plugin(plugin_id) {
+        // Never registered here: nothing of it runs, but its leftovers go.
+        Ok(()) | Err(PluginError::NotFound(_)) => {}
+        Err(e) => return Err(e),
+    }
     let cut = state.registries.judging_sessions.cut(plugin_id);
     if cut > 0 {
         tracing::info!(
@@ -1546,7 +1555,6 @@ pub async fn remove_upload(
                 }
                 forget(state, applied, plugin_id).await;
                 delete_timers(state, plugin_id).await;
-                state.plugin_sql.forget(plugin_id).await;
                 if let Err(e) = crate::plugin_db::schema::retire(&state.db, plugin_id).await {
                     tracing::warn!(plugin_id, error = %e, "Could not retire the plugin's database role");
                 }

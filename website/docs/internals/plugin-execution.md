@@ -213,7 +213,9 @@ A call still queued at its deadline, or cancelled at it, fails with
 Each loaded plugin's instance pool carries a `pool::Liveness`, live until the
 plugin is unloaded (`unload_plugin` retires it). A reload replaces the pool
 without retiring the old one, so a call made across a reload finishes on the
-version it started on.
+version it started on. Every unload, a disable or the fleet forgetting the
+plugin, goes through `plugin_lifecycle::deactivate`, which also cuts the
+plugin's judging sessions and drops its SQL pool.
 
 A call already running when its plugin is unloaded keeps its instance until
 its guest returns, but it can no longer reach the host: the call scope
