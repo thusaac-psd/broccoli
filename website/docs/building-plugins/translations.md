@@ -25,18 +25,26 @@ zh-CN = "i18n/zh-CN.toml"
 
 ```toml
 # plugins/submission-limit/i18n/en.toml
-'limit.usedCount' = '{used} / {total} used'
+'submission-limit.usedCount' = '{used} / {total} used'
 ```
 
 ```toml
 # plugins/submission-limit/i18n/zh-CN.toml
-'limit.usedCount' = '已用 {used} / {total}'
+'submission-limit.usedCount' = '已用 {used} / {total}'
 ```
 
 ```toml
 # plugins/cooldown/i18n/en.toml
 'cooldown.apiError.COOLDOWN_ACTIVE' = '{remaining_seconds, plural, one {Wait # more second before submitting again.} other {Wait # more seconds before submitting again.}}'
 ```
+
+Every key starts with your plugin's id, so a plugin can never reword the
+host's text or another plugin's. The only other keys a catalog may hold are
+the text of your manifest (`plugin.<plugin id>.…` and `config.<plugin id>.…`,
+below) and the names of what you register (`identifier.contestType.…`,
+`identifier.problemType.…` and `identifier.checker.…`). A catalog with any
+other key does not load, and the error names the keys. When two plugins name
+the same identifier, the one whose id sorts first is shown, on every server.
 
 A frontend reads them with `t()` from `useTranslation()` in
 `@broccoli/web-sdk/i18n`. `{name}` inserts a parameter.
@@ -63,7 +71,8 @@ version = '0.1.0'
 ja = "locales/ja.toml"
 ```
 
-Install it like any plugin and the language appears in the language menu,
+A language pack's keys are the host's own, so they are not confined to its
+id. Install it like any plugin and the language appears in the language menu,
 without rebuilding the web app. The web build embeds the packs in the
 repository, so the UI speaks them before the server answers and while it is
 unreachable; what the server serves overrides them. A key a pack lacks shows

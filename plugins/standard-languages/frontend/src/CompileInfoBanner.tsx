@@ -22,7 +22,7 @@ function buildPreviews(values: Record<string, unknown>) {
     ]
       .filter(Boolean)
       .join(' ');
-    return { key: `lang.${language}`, command };
+    return { key: `standard-languages.lang.${language}`, command };
   });
 }
 
@@ -33,7 +33,7 @@ export function CompileInfoBanner({ values }: ConfigFormSlotProps) {
   return (
     <div className="rounded-md border border-border bg-muted/50 p-3 mb-3">
       <div className="text-xs font-medium text-muted-foreground mb-2">
-        {t('lang.compileCommandPreview')}
+        {t('standard-languages.lang.compileCommandPreview')}
       </div>
       <div className="space-y-1">
         {previews.map((p) => (

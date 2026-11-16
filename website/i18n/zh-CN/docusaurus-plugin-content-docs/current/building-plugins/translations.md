@@ -20,18 +20,20 @@ zh-CN = "i18n/zh-CN.toml"
 
 ```toml
 # plugins/submission-limit/i18n/en.toml
-'limit.usedCount' = '{used} / {total} used'
+'submission-limit.usedCount' = '{used} / {total} used'
 ```
 
 ```toml
 # plugins/submission-limit/i18n/zh-CN.toml
-'limit.usedCount' = '已用 {used} / {total}'
+'submission-limit.usedCount' = '已用 {used} / {total}'
 ```
 
 ```toml
 # plugins/cooldown/i18n/en.toml
 'cooldown.apiError.COOLDOWN_ACTIVE' = '{remaining_seconds, plural, one {Wait # more second before submitting again.} other {Wait # more seconds before submitting again.}}'
 ```
+
+每个键都以插件 ID 开头，因此插件永远无法改写宿主或其他插件的文本。词条目录中只允许另外两类键：清单文本（`plugin.<插件 ID>.…` 和 `config.<插件 ID>.…`，见下文）以及所注册内容的名称（`identifier.contestType.…`、`identifier.problemType.…` 和 `identifier.checker.…`）。含有其他任何键的词条目录无法加载，错误信息会列出这些键。两个插件为同一标识符命名时，在每台服务器上都显示 ID 排序在前的那个插件的名称。
 
 前端通过 `@broccoli/web-sdk/i18n` 中 `useTranslation()` 返回的 `t()` 读取词条。`{name}` 插入参数。`{count, plural, one {...} other {...}}` 按该语言的复数规则为 `count` 选择形式，分支中的 `#` 表示该数字。日期和相对时间由 `useFormat()` 按用户语言格式化；服务器时间戳请用 `useFormat().relative` 计算，它以服务器时钟为准。
 
@@ -48,7 +50,7 @@ version = '0.1.0'
 ja = "locales/ja.toml"
 ```
 
-像安装其他插件一样安装它，该语言即出现在语言菜单中，无需重新构建 Web 应用。Web 构建会内嵌仓库中的语言包，因此在服务器响应之前以及无法连接时界面也能使用这些语言；服务器提供的语言包会覆盖内嵌版本。语言包缺少的键以英文显示。
+语言包的键是宿主自己的键，因此不限于其 ID。像安装其他插件一样安装它，该语言即出现在语言菜单中，无需重新构建 Web 应用。Web 构建会内嵌仓库中的语言包，因此在服务器响应之前以及无法连接时界面也能使用这些语言；服务器提供的语言包会覆盖内嵌版本。语言包缺少的键以英文显示。
 
 ## 为注册的内容命名
 

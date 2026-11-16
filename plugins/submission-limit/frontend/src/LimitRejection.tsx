@@ -37,10 +37,10 @@ export function LimitRejection({ error, children }: Props) {
       <div className="px-6 pt-5">
         <div className="flex items-center justify-between">
           <span className="text-base font-semibold text-foreground">
-            {t('limit.result')}
+            {t('submission-limit.result')}
           </span>
           <Badge variant="destructive" className="rounded-full">
-            {t('limit.limitReached')}
+            {t('submission-limit.limitReached')}
           </Badge>
         </div>
       </div>
@@ -68,10 +68,10 @@ export function LimitRejection({ error, children }: Props) {
         {/* Message */}
         <div className="text-center max-w-[280px]">
           <p className="text-[13px] font-medium text-foreground">
-            {t('limit.submissionLimitReached')}
+            {t('submission-limit.submissionLimitReached')}
           </p>
           <p className="text-[11px] text-muted-foreground mt-1">
-            {t('limit.allUsed')}
+            {t('submission-limit.allUsed')}
           </p>
         </div>
 
@@ -83,13 +83,13 @@ export function LimitRejection({ error, children }: Props) {
             </div>
             <div className="flex justify-between mt-2">
               <span className="font-mono tabular-nums text-[11px] text-muted-foreground">
-                {t('limit.usedCount', {
+                {t('submission-limit.usedCount', {
                   used: counts.used,
                   total: counts.total,
                 })}
               </span>
               <span className="font-mono tabular-nums text-[11px] font-medium text-red-500">
-                {t('limit.zeroRemaining')}
+                {t('submission-limit.zeroRemaining')}
               </span>
             </div>
           </div>

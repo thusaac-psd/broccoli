@@ -64,7 +64,7 @@ export function SubmissionLimitStatus({
   useSubmitGate(
     'submission-limit',
     status?.enabled === true && !status.unlimited && status.remaining === 0,
-    t('limit.reached'),
+    t('submission-limit.reached'),
   );
 
   if (!problemId || !status) return null;
@@ -77,7 +77,7 @@ export function SubmissionLimitStatus({
   return (
     <div className="rounded-lg border border-border p-4 bg-card">
       <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-3">
-        {t('limit.submissions')}
+        {t('submission-limit.submissions')}
       </div>
 
       <div className="flex justify-between items-baseline mb-1.5">
@@ -91,12 +91,12 @@ export function SubmissionLimitStatus({
         </span>
         {remaining !== null && remaining > 0 && (
           <span className="text-[11px] text-muted-foreground">
-            {t('limit.remaining', { count: remaining })}
+            {t('submission-limit.remaining', { count: remaining })}
           </span>
         )}
         {remaining === 0 && (
           <span className="text-[11px] text-red-500 font-medium">
-            {t('limit.reached')}
+            {t('submission-limit.reached')}
           </span>
         )}
       </div>
@@ -116,7 +116,7 @@ export function SubmissionLimitStatus({
       </div>
       {status.source && status.source !== 'default' && (
         <div className="mt-1.5 text-[11px] text-muted-foreground opacity-60">
-          ({t(`limit.source.${status.source}`)})
+          ({t(`submission-limit.source.${status.source}`)})
         </div>
       )}
     </div>

@@ -32,9 +32,9 @@ export function ColorPickerField({
     <div className="flex flex-col gap-1.5 col-span-2">
       <div className="flex items-center gap-2">
         <Label className="text-[11px] font-medium uppercase tracking-wide opacity-60">
-          {schema.title ?? t('configUiTest.colorPicker.defaultTitle')}
+          {schema.title ?? t('config-ui-test.colorPicker.defaultTitle')}
           <span className="ml-1.5 text-[10px] font-normal normal-case tracking-normal text-amber-600">
-            {t('configUiTest.pluginOverrideBadge')}
+            {t('config-ui-test.pluginOverrideBadge')}
           </span>
         </Label>
         {showAsPlaceholder && inheritedSource && (
@@ -48,7 +48,7 @@ export function ColorPickerField({
         {/* Native color picker */}
         <input
           aria-label={
-            schema.title ?? t('configUiTest.colorPicker.defaultTitle')
+            schema.title ?? t('config-ui-test.colorPicker.defaultTitle')
           }
           type="color"
           value={displayColor}
@@ -61,7 +61,7 @@ export function ColorPickerField({
         {/* Hex text input */}
         <Input
           aria-label={
-            schema.title ?? t('configUiTest.colorPicker.defaultTitle')
+            schema.title ?? t('config-ui-test.colorPicker.defaultTitle')
           }
           type="text"
           value={showAsPlaceholder ? '' : displayColor}
@@ -84,7 +84,7 @@ export function ColorPickerField({
             style={{ backgroundColor: displayColor }}
           />
           <span className="text-xs opacity-60">
-            {t('configUiTest.colorPicker.preview')}
+            {t('config-ui-test.colorPicker.preview')}
           </span>
         </div>
       </div>
