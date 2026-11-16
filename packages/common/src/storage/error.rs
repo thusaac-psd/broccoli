@@ -5,8 +5,14 @@ pub enum StorageError {
     NotFound(String),
     Io(std::io::Error),
     InvalidHash(String),
-    SizeLimitExceeded { actual: u64, limit: u64 },
+    SizeLimitExceeded {
+        actual: u64,
+        limit: u64,
+    },
     Backend(String),
+    /// The store did not answer, or failed, through every retry: an outage,
+    /// not a refusal. Worth retrying later.
+    Unavailable(String),
 }
 
 impl fmt::Display for StorageError {
@@ -19,6 +25,7 @@ impl fmt::Display for StorageError {
                 write!(f, "blob exceeds size limit ({actual} > {limit} bytes)")
             }
             Self::Backend(msg) => write!(f, "storage backend error: {msg}"),
+            Self::Unavailable(msg) => write!(f, "storage unavailable: {msg}"),
         }
     }
 }

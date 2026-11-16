@@ -22,3 +22,20 @@ pub enum MqError {
         found: String,
     },
 }
+
+impl MqError {
+    /// Whether this is Redis not answering (refused, reset, timed out), which
+    /// waiting can fix, as opposed to an answer no retry changes: rejected
+    /// credentials, a bad URL, a Redis that is too old, a foreign key.
+    pub fn is_unreachable(&self) -> bool {
+        match self {
+            Self::Redis(e) => {
+                e.is_io_error()
+                    || e.is_timeout()
+                    || e.is_connection_refusal()
+                    || e.is_connection_dropped()
+            }
+            Self::Encode(_) | Self::RedisTooOld { .. } | Self::WrongKeyType { .. } => false,
+        }
+    }
+}

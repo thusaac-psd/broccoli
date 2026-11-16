@@ -24,6 +24,11 @@
 //!
 //! A queued waiter is an async future holding no thread. Dropping it leaves
 //! the queue, so a request that went away no longer waits.
+//!
+//! A request call is not queued at all when the queue ahead of it would take
+//! longer than [`SHED_WAIT`] to drain, judged from how long request calls have
+//! been taking: it is refused at once, so the person gets a quick "busy, retry"
+//! instead of waiting out the request's deadline behind slower calls.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
@@ -152,6 +157,14 @@ pub const DEFAULT_JUDGING_CAP: usize = 256;
 /// Lifecycle calls admitted at once: plugins load a few at a time.
 pub const LIFECYCLE_CAP: usize = 4;
 
+/// The longest a request call is expected to queue before it is refused
+/// instead: a person waiting on a page is better served by a retry a moment
+/// later than by a minute behind slow calls.
+pub const SHED_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Weight of the newest request call's duration in the running average.
+const SERVICE_TIME_WEIGHT: f64 = 0.2;
+
 /// The cap on admitted calls of each kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Caps([usize; 5]);
@@ -247,11 +260,31 @@ struct State {
     /// Parked calls returning from a host function, per class. Within the
     /// class a token goes to, they go ahead of its queued calls.
     resuming: [VecDeque<SyncSender<Token>>; 2],
+    /// Running average of how long admitted request calls took, admitted to
+    /// done; `None` until one finished.
+    request_secs: Option<f64>,
 }
 
 impl State {
     fn running_total(&self) -> usize {
         self.running.iter().sum()
+    }
+
+    /// How long a request call queued now is expected to wait: the calls
+    /// queued ahead of it and itself, served by the request calls admitted
+    /// now at their average duration. `None` before any finished.
+    fn expected_request_wait(&self) -> Option<f64> {
+        let per_call = self.request_secs?;
+        let ahead = self.queued[CallKind::Request.index()].len() + 1;
+        let serving = self.admitted[CallKind::Request.index()].max(1);
+        Some(ahead as f64 * per_call / serving as f64)
+    }
+
+    fn observe_request(&mut self, secs: f64) {
+        self.request_secs = Some(match self.request_secs {
+            Some(avg) => avg + SERVICE_TIME_WEIGHT * (secs - avg),
+            None => secs,
+        });
     }
 
     fn has_room(&self, kind: CallKind) -> bool {
@@ -303,9 +336,12 @@ pub struct Admitted {
     admission: Admission,
     kind: CallKind,
     queued: bool,
+    since: Instant,
 }
 
-/// A top-level call that reached its deadline while queued.
+/// A top-level call that could not be admitted in time: it reached its
+/// deadline while queued, or, for a request call, the queue ahead of it was
+/// expected to take longer than [`SHED_WAIT`].
 #[derive(Debug, PartialEq, Eq)]
 pub struct Expired;
 
@@ -318,6 +354,7 @@ impl Admission {
             next_waiter: 0,
             queued: Default::default(),
             resuming: [VecDeque::new(), VecDeque::new()],
+            request_secs: None,
         })))
     }
 
@@ -386,6 +423,13 @@ impl Admission {
                 drop(state);
                 return Ok((self.admission(kind, false), token));
             }
+            if kind == CallKind::Request
+                && state
+                    .expected_request_wait()
+                    .is_some_and(|wait| wait > SHED_WAIT.as_secs_f64())
+            {
+                return Err(Expired);
+            }
             let (tx, rx) = oneshot::channel();
             let id = state.next_waiter;
             state.next_waiter += 1;
@@ -443,6 +487,7 @@ impl Admission {
             admission: self.clone(),
             kind,
             queued,
+            since: Instant::now(),
         }
     }
 
@@ -560,6 +605,9 @@ impl Drop for Admitted {
     fn drop(&mut self) {
         let mut state = self.admission.0.lock();
         state.admitted[self.kind.index()] -= 1;
+        if self.kind == CallKind::Request {
+            state.observe_request(self.since.elapsed().as_secs_f64());
+        }
         self.admission.grant(&mut state);
     }
 }
@@ -603,6 +651,49 @@ mod tests {
         CallKind::ALL
             .into_iter()
             .fold(Capacity::new(tokens), |c, k| c.with_cap(k, 1000))
+    }
+
+    /// Request calls that have been taking `secs` each.
+    fn observed(a: &Admission, secs: f64) {
+        a.0.lock().request_secs = Some(secs);
+    }
+
+    #[tokio::test]
+    async fn a_request_call_is_refused_at_once_when_the_queue_would_outlast_the_shed_wait() {
+        let a = Admission::new(roomy(2));
+        let _held = [admit(&a, INTERACTIVE).await, admit(&a, INTERACTIVE).await];
+
+        // Calls of 0.5 s on two admitted calls: one queued ahead is ~0.5 s.
+        observed(&a, 0.5);
+        let _ahead = queue(&a, INTERACTIVE).await;
+        let fast = futures::FutureExt::now_or_never(a.admit(INTERACTIVE, far()));
+        assert!(fast.is_none(), "queues: the wait is under the shed bound");
+
+        // Calls of 10 s: the wait would be far past it, so refused unqueued.
+        observed(&a, 10.0);
+        let refused = futures::FutureExt::now_or_never(a.admit(INTERACTIVE, far()));
+        assert!(matches!(refused, Some(Err(Expired))));
+        assert_eq!(a.queued_kind(INTERACTIVE), 1);
+        // Background calls are never shed.
+        let background = futures::FutureExt::now_or_never(a.admit(BACKGROUND, far()));
+        assert!(background.is_none(), "background queues");
+    }
+
+    #[tokio::test]
+    async fn with_no_finished_request_call_nothing_is_shed() {
+        let a = Admission::new(roomy(2));
+        let _held = [admit(&a, INTERACTIVE).await, admit(&a, INTERACTIVE).await];
+        let queued = futures::FutureExt::now_or_never(a.admit(INTERACTIVE, far()));
+        assert!(queued.is_none());
+    }
+
+    #[test]
+    fn the_service_time_follows_finished_request_calls() {
+        let a = Admission::new(roomy(2));
+        let mut state = a.0.lock();
+        state.observe_request(1.0);
+        state.observe_request(2.0);
+        assert!((state.request_secs.unwrap() - 1.2).abs() < 1e-9);
     }
 
     #[tokio::test]

@@ -57,10 +57,7 @@ static PASSWORD_POOL: std::sync::LazyLock<std::sync::mpsc::Sender<PasswordJob>> 
     std::sync::LazyLock::new(|| {
         let (tx, rx) = std::sync::mpsc::channel::<PasswordJob>();
         let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-        for _ in 0..threads {
+        for _ in 0..password_threads() {
             let rx = rx.clone();
             std::thread::Builder::new()
                 .name("password-hash".into())
@@ -83,6 +80,13 @@ static PASSWORD_POOL: std::sync::LazyLock<std::sync::mpsc::Sender<PasswordJob>> 
     });
 
 type PasswordJob = Box<dyn FnOnce() + Send>;
+
+/// Threads of the password pool: one per core.
+fn password_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
 
 /// Run `work` on the password pool and await its result.
 async fn on_password_pool<R: Send + 'static>(
@@ -109,6 +113,17 @@ pub async fn verify_password_off_thread(
 /// [`hash_password`] on the password pool.
 pub async fn hash_password_off_thread(password: String) -> Result<String> {
     on_password_pool(move || hash_password(&password)).await?
+}
+
+/// [`hash_password`] for each of `passwords`, in order, several at once on the
+/// password pool. At most half the pool's threads hash for one call, so a
+/// bulk import never queues sign-ins behind more than a few of its hashes.
+pub async fn hash_passwords_off_thread(passwords: Vec<String>) -> Result<Vec<String>> {
+    use futures::{StreamExt, TryStreamExt};
+    futures::stream::iter(passwords.into_iter().map(hash_password_off_thread))
+        .buffered((password_threads() / 2).max(1))
+        .try_collect()
+        .await
 }
 
 /// Lowercase hex SHA-256 of `input`.
@@ -169,5 +184,15 @@ mod tests {
             release.send(()).unwrap();
             blocker.await.unwrap();
         });
+    }
+
+    #[tokio::test]
+    async fn bulk_hashes_come_back_in_the_order_of_their_passwords() {
+        let passwords: Vec<String> = (0..9).map(|i| format!("password-{i}")).collect();
+        let hashes = hash_passwords_off_thread(passwords.clone()).await.unwrap();
+        assert_eq!(hashes.len(), passwords.len());
+        for (password, hash) in passwords.iter().zip(&hashes) {
+            assert!(verify_password(password, Some(hash)).unwrap(), "{password}");
+        }
     }
 }

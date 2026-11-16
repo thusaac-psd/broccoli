@@ -121,11 +121,7 @@ impl Mq {
     /// [`MIN_REDIS_MAJOR`]. `base` is `mq.operation_queue_name`, the prefix of
     /// every key.
     pub async fn connect(url: &str, base: &str) -> Result<Self, MqError> {
-        let client = redis::Client::open(url)?;
-        let mq = Self {
-            conn: Arc::new(Conn::new(client, COMMAND_TIMEOUT)),
-            topology: Topology::new(base),
-        };
+        let mq = Self::lazy(url, base)?;
         let info: String = mq
             .conn
             .run(|mut c| async move { redis::cmd("INFO").arg("server").query_async(&mut c).await })
@@ -145,15 +141,60 @@ impl Mq {
         Ok(mq)
     }
 
+    /// A handle on `url` that connects on first use, with none of
+    /// [`Self::connect`]'s checks. For tests that need a queue handle but
+    /// never reach Redis.
+    pub fn lazy(url: &str, base: &str) -> Result<Self, MqError> {
+        let client = redis::Client::open(url)?;
+        Ok(Self {
+            conn: Arc::new(Conn::new(client, COMMAND_TIMEOUT)),
+            topology: Topology::new(base),
+        })
+    }
+
     pub fn topology(&self) -> &Topology {
         &self.topology
     }
 
-    /// Whether the last command on the shared connection reached Redis;
-    /// `true` until one fails to. It reads `true` again after the next
-    /// command that gets an answer.
-    pub fn is_reachable(&self) -> bool {
-        self.conn.is_reachable()
+    /// Whether Redis is reachable now. Costs no round trip while it is up (the
+    /// last command answered) and one `PING` while it is down, so work that
+    /// needs the queue can poll this before it starts (see
+    /// [`common::redis_conn::Conn::check_reachable`]).
+    pub async fn check_reachable(&self) -> bool {
+        self.conn.check_reachable().await
+    }
+
+    /// Count an event in fixed window `window` of length `length` and return
+    /// how many the window holds now, this one included, and how long until
+    /// it closes. The window and its clock live in Redis, so every node
+    /// sharing the queue shares the count, whatever their clocks say. One
+    /// round trip.
+    pub async fn count_in_window(
+        &self,
+        window: &str,
+        length: std::time::Duration,
+    ) -> Result<(u64, std::time::Duration), MqError> {
+        let key = self.topology.window_counter(window);
+        let length_ms = u64::try_from(length.as_millis()).unwrap_or(u64::MAX).max(1);
+        let (count, left_ms): (u64, u64) = self
+            .conn
+            .run(|mut c| async move {
+                scripts::COUNT_IN_WINDOW
+                    .key(key)
+                    .arg(length_ms)
+                    .invoke_async(&mut c)
+                    .await
+            })
+            .await?;
+        Ok((count, std::time::Duration::from_millis(left_ms)))
+    }
+
+    /// Send a `PING`, for health checks.
+    pub async fn ping(&self) -> Result<(), MqError> {
+        self.conn
+            .run(|mut c| async move { redis::cmd("PING").query_async::<()>(&mut c).await })
+            .await?;
+        Ok(())
     }
 
     /// Check that each key is missing or of its expected type (`TYPE`), so a

@@ -28,6 +28,7 @@ import { fetchUsersTable } from '@/features/user-management/api/fetch-users-tabl
 import { CreateUsersDialog } from '@/features/user-management/components/CreateUsersDialog';
 import { EditUserDialog } from '@/features/user-management/components/EditUserDialog';
 import { ManageUserRolesDialog } from '@/features/user-management/components/ManageUserRolesDialog';
+import { RegistrationSwitch } from '@/features/user-management/components/RegistrationSwitch';
 import type { ManagedUserRow } from '@/features/user-management/types';
 import { useTableSearchParams } from '@/hooks/use-table-search-params';
 
@@ -193,6 +194,7 @@ export function UsersManagementTab() {
 
   return (
     <>
+      <RegistrationSwitch />
       <DataTable
         columns={columns}
         queryKey={['admin-users']}

@@ -161,7 +161,6 @@ class Topology:
         env.update({
             "BROCCOLI__DATABASE__URL": self.a.db_url,
             "BROCCOLI__MQ__URL": self.a.redis_url,
-            "BROCCOLI__MQ__ENABLED": "true",
             "BROCCOLI__OBSERVABILITY__LOG_FORMAT": "json",
             "BROCCOLI__OBSERVABILITY__LOG_FILTER": "warn",
             "BROCCOLI_CONFIG": "/nonexistent/perf",

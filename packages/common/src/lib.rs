@@ -1,3 +1,4 @@
+pub mod boot;
 pub mod cancel;
 #[cfg(feature = "sea-orm")]
 pub mod clock;

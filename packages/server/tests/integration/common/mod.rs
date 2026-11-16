@@ -533,6 +533,14 @@ pub struct SpawnOptions {
     /// `Some(0)` so the dispatcher's retry reaper never re-judges it behind
     /// the test's back.
     pub max_system_error_retries: Option<u32>,
+    /// Point the server's message queue at an address nothing listens on, as
+    /// if Redis were down.
+    pub mq_unreachable: bool,
+    /// Sets `server.rate_limit_auth` (off by default here).
+    pub rate_limit_auth: bool,
+    /// Leave self-registration as a fresh install has it, closed. Otherwise
+    /// it is opened, since most tests create their users by registering.
+    pub registration_closed: bool,
 }
 
 impl TestApp {
@@ -611,9 +619,34 @@ impl TestApp {
                 .expect("Failed to connect to test database"),
         );
 
+        if !options.registration_closed {
+            server::services::registration::set_open(&db, true)
+                .await
+                .expect("open self-registration");
+        }
+
         let blob_store = create_blob_store(&BlobStoreConfig::default(), db.clone(), None)
             .await
             .expect("Failed to initialize blob store");
+
+        // The queue the server's own MQ handle uses (health, queue depths, the
+        // claim fiber's reachability check); plugin operations get no
+        // publisher, as no worker runs here. Replicas share the namespace.
+        let mq_url = match (&options.redis_url, options.mq_unreachable) {
+            (_, true) => "redis://127.0.0.1:1".to_string(),
+            (Some(url), false) => url.clone(),
+            (None, false) => format!(
+                "redis://127.0.0.1:{}",
+                test_support::shared_redis_port().await
+            ),
+        };
+        // A test with its own Redis (`redis_url`) has it to itself and keeps
+        // the default namespace; on the shared one each database gets its own.
+        let mq_namespace = match options.redis_url {
+            Some(_) => common::config::default_operation_queue_name(),
+            None => database.name().to_string(),
+        };
+        let mq = mq::Mq::lazy(&mq_url, &mq_namespace).expect("valid redis url");
 
         let plugin_cache = tempfile::tempdir().expect("plugin cache dir");
         let mut app_config = AppConfig {
@@ -627,7 +660,7 @@ impl TestApp {
                 public_base_url: None,
                 frontend_dist: PathBuf::from("/srv/dist"),
                 trusted_proxies: vec![],
-                rate_limit_auth: false,
+                rate_limit_auth: options.rate_limit_auth,
                 // Unique per spawned app: replicas sharing a database
                 // (`spawn_replica`) must report under distinct server ids.
                 id: format!(
@@ -682,7 +715,8 @@ impl TestApp {
             },
             storage: BlobStoreConfig::default(),
             mq: MqAppConfig {
-                enabled: false,
+                url: mq_url.clone(),
+                operation_queue_name: mq_namespace.clone(),
                 ..Default::default()
             },
             observability: common::config::ObservabilityConfig::default(),
@@ -821,7 +855,7 @@ impl TestApp {
             clock: clock.clone(),
             plugin_config_cache,
             config: app_config,
-            mq: None,
+            mq,
             redis_client,
             blob_store,
             registries: server::state::RegistryState {

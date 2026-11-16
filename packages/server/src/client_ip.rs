@@ -2,7 +2,7 @@
 //!
 //! [`client_ip_source_middleware`] resolves the client IP once per request and
 //! stores it as a [`ClientIp`] extension. Every consumer that keys on client IP
-//! (the governor rate limiters, the login throttle) reads that extension, so
+//! (the per-address quotas, the login throttle) reads that extension, so
 //! they can never disagree about which address a request came from.
 
 use std::convert::Infallible;

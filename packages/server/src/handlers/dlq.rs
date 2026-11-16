@@ -1,9 +1,5 @@
-use axum::{
-    Json,
-    extract::{Query, State},
-    http::StatusCode,
-    response::IntoResponse,
-};
+use crate::extractors::query::AppQuery;
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use broccoli_server_sdk::permissions as perm;
 use common::db::DatabaseConnection;
 use common::{DlqMessageType, SubmissionStatus};
@@ -51,7 +47,7 @@ use crate::state::AppState;
 pub async fn list_dlq_messages(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    Query(params): Query<ListDlqParams>,
+    AppQuery(params): AppQuery<ListDlqParams>,
 ) -> Result<Json<DlqListResponse>, AppError> {
     auth_user.require_permission(perm::DLQ_MANAGE)?;
 

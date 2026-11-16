@@ -29,6 +29,13 @@ file can serve both.
 | `storage.backend`                                                          | yes            | yes            | `object_storage`, `database` or `filesystem` |
 | `storage.object_storage.endpoint`, `.access_key`, `.secret_key`, `.bucket` | object storage | object storage | The S3 store                                 |
 
+A required setting has no default: when one is missing, or `auth.jwt_secret` is
+shorter than 32 bytes, the binary exits at once with the name of the setting and
+its environment variable. At boot a node waits for Postgres and Redis, logging
+each attempt with the URL (password redacted) and the cause, and exits instead
+when the answer is one no retry fixes, such as a rejected password or a missing
+database.
+
 ### The database role
 
 `database.url` logs in as the app role: a role with `LOGIN` and `CREATEROLE` and
@@ -78,22 +85,22 @@ Leave these alone unless a measurement says otherwise.
 
 ### Server (`server.*`)
 
-| Setting                                                                                         | Default               | Effect                                                                                                                                 |
-| ----------------------------------------------------------------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `host`, `port`                                                                                  | `127.0.0.1`, `3000`   | Listen address                                                                                                                         |
-| `public_base_url`                                                                               | from the request      | Origin for links the server hands out                                                                                                  |
-| `trusted_proxies`                                                                               | none                  | CIDRs whose `X-Forwarded-*` headers are trusted (`install.sh` sets the gateway)                                                        |
-| `cors.allow_origins`, `cors.max_age`                                                            | none, `3600`          | Cross-origin frontend                                                                                                                  |
-| `rate_limit_auth`                                                                               | `true`                | Per-IP limit of 10 logins a minute on `/auth/login`; turn off only behind a NAT that shows the server one address for many contestants |
-| `max_queued_submissions`                                                                        | derived               | A fixed queue cap; `0` turns it off                                                                                                    |
-| `dispatcher_semaphore_enabled`, `dispatcher_concurrency`, `dispatcher_admission_queue_max`      | `true`, `16`, `1000`  | In-process dispatch admission; the queue is above the in-flight floor so the in-flight cap governs                                     |
-| `dispatcher_lease_steal_enabled`                                                                | `true`                | Servers take over the in-flight work of a server that stopped renewing its leases                                                      |
-| `lease_ttl_secs`, `lease_refresh_interval_secs`, `steal_scan_interval_secs`, `steal_batch_size` | `60`, `10`, `15`, `8` | Lease recovery timing; `steal_batch_size` is rows per steal transaction, and a scan repeats them until it has taken every lapsed unit  |
-| `max_dispatch_retries`, `max_system_error_retries`                                              | `5`, `10`             | Retry budgets                                                                                                                          |
-| `cancel_primitive_enabled`                                                                      | `false`               | Redis-backed operation cancellation                                                                                                    |
-| `claim_fiber_enabled`                                                                           | `true`                | Turn off to stop a server from dispatching while debugging                                                                             |
-| `plugin_timer_tick_interval_secs`, `plugin_timer_batch`, `plugin_timer_max_attempts`            | `1`, `64`, `5`        | Plugin timer delivery                                                                                                                  |
-| `batch_max_age_secs` (top level)                                                                | `7200`                | Age at which an unfinished evaluate batch is reaped                                                                                    |
+| Setting                                                                                         | Default               | Effect                                                                                                                                                                                     |
+| ----------------------------------------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `host`, `port`                                                                                  | `127.0.0.1`, `3000`   | Listen address                                                                                                                                                                             |
+| `public_base_url`                                                                               | from the request      | Origin for links the server hands out                                                                                                                                                      |
+| `trusted_proxies`                                                                               | none                  | CIDRs whose `X-Forwarded-*` headers are trusted (`install.sh` sets the gateway)                                                                                                            |
+| `cors.allow_origins`, `cors.max_age`                                                            | none, `3600`          | Cross-origin frontend                                                                                                                                                                      |
+| `rate_limit_auth`                                                                               | `true`                | At most 10 sign-in attempts per client address per minute on `/auth/login`, counted across every server; turn off only behind a NAT that shows the server one address for many contestants |
+| `max_queued_submissions`                                                                        | derived               | A fixed queue cap; `0` turns it off                                                                                                                                                        |
+| `dispatcher_semaphore_enabled`, `dispatcher_concurrency`, `dispatcher_admission_queue_max`      | `true`, `16`, `1000`  | In-process dispatch admission; the queue is above the in-flight floor so the in-flight cap governs                                                                                         |
+| `dispatcher_lease_steal_enabled`                                                                | `true`                | Servers take over the in-flight work of a server that stopped renewing its leases                                                                                                          |
+| `lease_ttl_secs`, `lease_refresh_interval_secs`, `steal_scan_interval_secs`, `steal_batch_size` | `60`, `10`, `15`, `8` | Lease recovery timing; `steal_batch_size` is rows per steal transaction, and a scan repeats them until it has taken every lapsed unit                                                      |
+| `max_dispatch_retries`, `max_system_error_retries`                                              | `5`, `10`             | Retry budgets                                                                                                                                                                              |
+| `cancel_primitive_enabled`                                                                      | `false`               | Redis-backed operation cancellation                                                                                                                                                        |
+| `claim_fiber_enabled`                                                                           | `true`                | Turn off to stop a server from dispatching while debugging                                                                                                                                 |
+| `plugin_timer_tick_interval_secs`, `plugin_timer_batch`, `plugin_timer_max_attempts`            | `1`, `64`, `5`        | Plugin timer delivery                                                                                                                                                                      |
+| `batch_max_age_secs` (top level)                                                                | `7200`                | Age at which an unfinished evaluate batch is reaped                                                                                                                                        |
 
 ### Database (`database.*`)
 

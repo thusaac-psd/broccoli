@@ -64,4 +64,12 @@ pub trait BlobStore: Send + Sync {
     async fn delete(&self, hash: &ContentHash) -> Result<bool, StorageError>;
 
     async fn size(&self, hash: &ContentHash) -> Result<u64, StorageError>;
+
+    /// Whether the store can serve requests now, for health checks: cheap, and
+    /// answered from a recent check where reaching the store costs a round
+    /// trip. A store inside a dependency the caller already probes (the
+    /// database) answers `Ok`.
+    async fn probe(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
 }

@@ -45,6 +45,13 @@ it with a warning. A token means "running guest code", not "call in progress".
   resuming call first, so neither class starves the other under a flood.
 - A queued waiter is an async future holding no thread. Dropping it, as a
   client that went away does, leaves the queue.
+- A `Request` call is not queued when the wait ahead of it is expected to pass
+  `admission::SHED_WAIT` (2 s): the calls queued ahead of it plus itself,
+  times the running average duration of finished request calls, over the
+  request calls admitted now. It fails at once with
+  `PluginError::Unavailable`, so a person gets a quick 503 to retry instead of
+  waiting out the request's deadline behind slower calls. Background calls
+  are never shed, and nothing is shed before a request call has finished.
 
 Every admitted call holds one guest thread until it returns, parked or not,
 so each `CallKind` has its own cap on admitted calls:

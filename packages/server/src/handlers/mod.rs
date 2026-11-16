@@ -16,6 +16,7 @@ pub mod plugin_config;
 pub mod problem;
 pub mod proxy;
 pub mod role;
+pub mod settings;
 pub mod submission;
 pub mod system;
 pub mod telemetry;

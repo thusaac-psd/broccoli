@@ -141,6 +141,7 @@ async fn build_code_run_response(
     responses(
         (status = 201, description = "Code run created", body = CodeRunResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 413, description = "Request body over the endpoint's limit (PAYLOAD_TOO_LARGE)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
@@ -251,6 +252,7 @@ pub async fn run_code(
     responses(
         (status = 201, description = "Code run created", body = CodeRunResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 413, description = "Request body over the endpoint's limit (PAYLOAD_TOO_LARGE)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Contest or problem not found (NOT_FOUND)", body = ErrorBody),
@@ -363,6 +365,6 @@ pub async fn get_code_run(
     Ok(Json(response))
 }
 
-pub fn code_run_body_limit(max_size: usize) -> axum::extract::DefaultBodyLimit {
-    axum::extract::DefaultBodyLimit::max(crate::upload_limits::source_request_limit_bytes(max_size))
+pub fn code_run_body_limit(max_size: usize) -> usize {
+    crate::upload_limits::source_request_limit_bytes(max_size)
 }

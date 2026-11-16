@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::extract::{DefaultBodyLimit, Multipart, State};
+use axum::extract::{Multipart, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use broccoli_server_sdk::permissions as perm;
@@ -29,8 +29,8 @@ use crate::utils::blob::{
 };
 use crate::utils::soft_delete::{SoftDeletable, find_active_child};
 
-pub fn additional_file_upload_body_limit() -> DefaultBodyLimit {
-    DefaultBodyLimit::max(LARGE_UPLOAD_LIMIT_BYTES)
+pub fn additional_file_upload_body_limit() -> usize {
+    LARGE_UPLOAD_LIMIT_BYTES
 }
 
 fn validate_language_code(lang: &str) -> Result<(), AppError> {
@@ -67,6 +67,7 @@ fn validate_language_code(lang: &str) -> Result<(), AppError> {
     responses(
         (status = 201, description = "Additional file created", body = AdditionalFileResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 413, description = "Request body over the endpoint's limit (PAYLOAD_TOO_LARGE)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
@@ -90,11 +91,7 @@ pub async fn upload_additional_file(
     let mut language: Option<String> = None;
     let mut virtual_path: Option<String> = None;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::Validation(format!("Multipart error: {e}")))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(AppError::from)? {
         match field.name() {
             Some("file") => {
                 file_name = field.file_name().map(|s| s.to_string());

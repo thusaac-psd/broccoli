@@ -115,7 +115,6 @@ async fn claim_loop(
     ));
 
     let mut last_pass: Option<Instant> = None;
-    let mut queue_unreachable = false;
 
     loop {
         tokio::select! {
@@ -133,19 +132,6 @@ async fn claim_loop(
                 continue;
             }
         }
-        // Work claimed while the queue is unreachable could only fail its
-        // dispatch and burn its retries, so it stays `Queued` for a replica
-        // that can judge it. The result consumer's periodic ledger check
-        // reaches Redis again within its interval once Redis answers.
-        if state.mq.as_ref().is_some_and(|mq| !mq.is_reachable()) {
-            if !queue_unreachable {
-                warn!(server_id = %server_id, "The message queue is unreachable; not claiming until it answers");
-            }
-            queue_unreachable = true;
-            last_pass = Some(Instant::now());
-            continue;
-        }
-        queue_unreachable = false;
         common::deadline::bounded(
             "dispatcher.claim",
             common::deadline::BACKGROUND_STEP,
@@ -277,6 +263,15 @@ pub struct ClaimPass {
 }
 
 impl ClaimPass {
+    /// A pass that claimed nothing because the queue is unreachable. Held
+    /// back with no room, so the fiber stops this round and tries again on its
+    /// next wake or tick.
+    pub const QUEUE_DOWN: Self = Self {
+        judgements: (0, 0),
+        code_runs: (0, 0),
+        held_back: true,
+    };
+
     /// Some kind of unit filled all of its room, so more of it may be queued.
     pub fn more_may_wait(&self) -> bool {
         let filled = |(claimed, room): (u32, u32)| room > 0 && claimed == room;
@@ -292,6 +287,7 @@ impl ClaimPass {
 }
 
 /// One claim pass: judgements within the in-flight cap, then code runs.
+/// Nothing is claimed while the message queue is unreachable.
 /// Errors are returned to the caller so the fiber loop can log; whatever is
 /// still `Queued` is claimed by the next pass.
 ///
@@ -309,6 +305,12 @@ pub async fn claim_once(
     batch_size: u32,
     max_in_flight: u32,
 ) -> anyhow::Result<ClaimPass> {
+    // Claimed work is dispatched through the queue: while Redis is down it
+    // would only fail and burn retries, so it stays `Queued` for a server
+    // that can reach the queue, or for this one once it can again.
+    if !state.mq.check_reachable().await {
+        return Ok(ClaimPass::QUEUE_DOWN);
+    }
     let in_flight = if max_in_flight == 0 {
         0
     } else {

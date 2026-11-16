@@ -1,5 +1,6 @@
+use crate::extractors::query::AppQuery;
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
@@ -134,7 +135,7 @@ pub async fn create_problem(
 pub async fn list_problems(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    Query(query): Query<ProblemListQuery>,
+    AppQuery(query): AppQuery<ProblemListQuery>,
 ) -> Result<Json<ProblemListResponse>, AppError> {
     auth_user.require_any_permission(&[perm::PROBLEM_CREATE, perm::PROBLEM_EDIT])?;
 

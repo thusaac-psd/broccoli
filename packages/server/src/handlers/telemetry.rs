@@ -1,8 +1,4 @@
-use axum::{
-    extract::{DefaultBodyLimit, State},
-    http::StatusCode,
-    response::IntoResponse,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse};
 use serde::Deserialize;
 use tracing::instrument;
 use utoipa::ToSchema;
@@ -57,7 +53,7 @@ pub struct WebVitalsPayload {
     responses(
         (status = 204, description = "Error recorded"),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
-        (status = 413, description = "Payload too large (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 413, description = "Payload too large (PAYLOAD_TOO_LARGE)", body = ErrorBody),
         (status = 500, description = "Internal error (INTERNAL_ERROR)", body = ErrorBody),
     ),
 )]
@@ -91,7 +87,7 @@ pub async fn report_error(
     responses(
         (status = 204, description = "Vitals recorded"),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
-        (status = 413, description = "Payload too large (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 413, description = "Payload too large (PAYLOAD_TOO_LARGE)", body = ErrorBody),
         (status = 500, description = "Internal error (INTERNAL_ERROR)", body = ErrorBody),
     ),
 )]
@@ -111,6 +107,6 @@ pub async fn report_vitals(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub fn telemetry_body_limit() -> DefaultBodyLimit {
-    DefaultBodyLimit::max(TELEMETRY_BODY_LIMIT_BYTES)
+pub fn telemetry_body_limit() -> usize {
+    TELEMETRY_BODY_LIMIT_BYTES
 }

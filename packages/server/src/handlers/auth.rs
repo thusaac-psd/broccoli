@@ -10,6 +10,7 @@ use tracing::instrument;
 
 use crate::client_ip::{ClientIp, ForwardedHop};
 use crate::config::ServerConfig;
+use crate::services::ip_quota;
 // visibility-bypass-audited: this module has no permission gate to name
 // because it has no third-party resource parameter to gate - every query is
 // scoped to the identity resolved from the request's own credentials
@@ -31,7 +32,8 @@ use crate::extractors::json::AppJson;
 use crate::models::auth::{
     CliRefreshRequest, CliTokenResponse, DeviceAuthorizeRequest, DeviceCodeRequest,
     DeviceCodeResponse, DeviceTokenRequest, LoginRequest, LoginResponse, MeResponse,
-    RegisterRequest, RegisterResponse, validate_login_request, validate_register_request,
+    RegisterRequest, RegisterResponse, RegistrationStatus, validate_login_request,
+    validate_register_request,
 };
 use crate::services::auth_tokens::{
     issue_access_token, mint_refresh_token, revoke_presented, rotate_refresh_token,
@@ -42,24 +44,50 @@ use crate::utils::soft_delete::SoftDeletable;
 use crate::utils::{hash, refresh};
 
 #[utoipa::path(
+    get,
+    path = "/registration",
+    tag = "Auth",
+    operation_id = "getRegistrationStatus",
+    summary = "Whether self-registration is open",
+    description = "Public. Whether `POST /auth/register` creates accounts right now; an admin opens or closes it with `PUT /admin/settings/registration`.",
+    responses(
+        (status = 200, description = "Registration status", body = RegistrationStatus),
+    ),
+)]
+pub async fn get_registration_status(
+    State(state): State<AppState>,
+) -> Result<Json<RegistrationStatus>, AppError> {
+    Ok(Json(RegistrationStatus {
+        open: crate::services::registration::is_open(&state.db).await?,
+    }))
+}
+
+#[utoipa::path(
     post,
     path = "/register",
     tag = "Auth",
     operation_id = "registerUser",
     summary = "Register a new user account",
-    description = "Creates a new user account with the provided credentials. No authentication required. Returns 409 USERNAME_TAKEN if the username is already in use.",
+    description = "Creates a new user account with the provided credentials. No authentication required. Returns 403 REGISTRATION_CLOSED unless an admin opened self-registration, and 409 USERNAME_TAKEN if the username is already in use (usernames differing only in case are the same).",
     request_body = RegisterRequest,
     responses(
         (status = 201, description = "User registered", body = RegisterResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 403, description = "Self-registration is closed (REGISTRATION_CLOSED)", body = ErrorBody),
         (status = 409, description = "Username taken (USERNAME_TAKEN)", body = ErrorBody),
+        (status = 429, description = "Too many registrations from this address, 30 a minute (RATE_LIMITED). Includes Retry-After.", body = ErrorBody),
     ),
 )]
 #[instrument(skip(state, payload), fields(username = %payload.username))]
 pub async fn register(
     State(state): State<AppState>,
+    ClientIp(client_ip): ClientIp,
     AppJson(payload): AppJson<RegisterRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    ip_quota::REGISTER.admit(&state.mq, client_ip).await?;
+    if !crate::services::registration::is_open(&state.db).await? {
+        return Err(AppError::RegistrationClosed);
+    }
     validate_register_request(&payload)?;
 
     let prepared = crate::services::user_accounts::prepare_accounts(vec![
@@ -93,7 +121,7 @@ pub async fn register(
         (status = 200, description = "Login successful", body = LoginResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Invalid credentials (INVALID_CREDENTIALS)", body = ErrorBody),
-        (status = 429, description = "Rate limited (RATE_LIMITED). Includes Retry-After header when auth rate limiting is enabled.", body = ErrorBody),
+        (status = 429, description = "Rate limited (RATE_LIMITED): too many sign-ins from this address (10 a minute, with `server.rate_limit_auth`) or failed ones for this account. Includes Retry-After.", body = ErrorBody),
     ),
 )]
 #[instrument(skip(state, payload, jar), fields(username = %payload.username))]
@@ -104,22 +132,27 @@ pub async fn login(
     jar: CookieJar,
     AppJson(payload): AppJson<LoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    if state.config.server.rate_limit_auth {
+        ip_quota::LOGIN.admit(&state.mq, client_ip).await?;
+    }
     validate_login_request(&payload)?;
 
     let username = payload.username.trim();
+    // The throttle counts failures per account, whatever case they are typed in.
+    let throttle_key = user::username_key(username);
 
     // Contest-safe brute-force throttle: only FAILED attempts for this
     // (username, client IP) pair count and a success clears them, so a
     // legitimate sign-in is never blocked even when a whole venue shares one NAT
     // IP. Fails open when the client IP is unknown.
     if let Some(ip) = client_ip
-        && let Some(retry_after) = state.login_throttle.check(username, ip)
+        && let Some(retry_after) = state.login_throttle.check(&throttle_key, ip)
     {
         return Err(AppError::RateLimited { retry_after });
     }
 
     let maybe_user = user::Entity::find_active()
-        .filter(user::Column::Username.eq(username))
+        .filter(user::username_is_any([username]))
         .one(&state.db)
         .await?;
 
@@ -136,7 +169,7 @@ pub async fn login(
         Some(u) if is_valid => u,
         _ => {
             if let Some(ip) = client_ip {
-                state.login_throttle.record_failure(username, ip);
+                state.login_throttle.record_failure(&throttle_key, ip);
             }
             return Err(AppError::InvalidCredentials);
         }
@@ -144,7 +177,7 @@ pub async fn login(
 
     // Successful auth: clear any accumulated failures for this pair.
     if let Some(ip) = client_ip {
-        state.login_throttle.clear(username, ip);
+        state.login_throttle.clear(&throttle_key, ip);
     }
 
     let grant = issue_access_token(&state.db, &state.config.auth.jwt_secret, user.id).await?;
@@ -376,16 +409,18 @@ fn host_header(headers: &HeaderMap) -> Option<String> {
     request_body = DeviceCodeRequest,
     responses(
         (status = 200, description = "Device code generated", body = DeviceCodeResponse),
-        (status = 429, description = "Too many pending device codes (RATE_LIMITED)", body = ErrorBody),
+        (status = 429, description = "Too many device codes requested from this address (30 a minute) or pending (RATE_LIMITED). Includes Retry-After.", body = ErrorBody),
     ),
 )]
 #[instrument(skip(state, headers, forwarded))]
 pub async fn request_device_code(
     State(state): State<AppState>,
+    ClientIp(client_ip): ClientIp,
     headers: HeaderMap,
     forwarded: Option<Extension<ForwardedHop>>,
     AppJson(_payload): AppJson<DeviceCodeRequest>,
 ) -> Result<Json<DeviceCodeResponse>, AppError> {
+    ip_quota::DEVICE_CODE.admit(&state.mq, client_ip).await?;
     let (device_code, user_code) = device_auth::create(
         &state.db,
         DEVICE_CODE_EXPIRY_SECS,

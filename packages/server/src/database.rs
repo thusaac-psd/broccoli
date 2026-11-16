@@ -245,9 +245,6 @@ async fn usable_connections(db: &DatabaseConnection) -> Result<u32, DbErr> {
 /// The live fleet in Redis. Without Redis this server is taken to be alone.
 async fn fleet_at_boot(config: &crate::config::AppConfig, server_id: &str) -> Fleet {
     use common::liveness::{NodeRole, live_nodes};
-    if !config.mq.enabled {
-        return Fleet::default();
-    }
     let namespace = &config.mq.operation_queue_name;
     let read = async {
         let client = redis::Client::open(config.mq.url.as_str())?;

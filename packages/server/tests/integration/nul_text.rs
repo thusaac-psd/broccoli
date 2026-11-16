@@ -1,7 +1,8 @@
 //! Text a person submits through the API never reaches Postgres with a NUL
 //! (U+0000) in it: TEXT rejects it with 22021 and JSONB with 22P05. Every
 //! entry point answers such text with a 400 `VALIDATION_ERROR` and stores
-//! nothing.
+//! nothing. Zipped test data is bytes rather than text, and goes to blob
+//! storage instead.
 
 use serde_json::{Value, json};
 
@@ -130,19 +131,24 @@ async fn test_case_with_a_nul_body_is_rejected() {
     assert_rejected(&res, "test case body");
 }
 
+/// Zipped test data is bytes, not text: a body with NUL or bytes that are not
+/// UTF-8 is kept byte for byte in blob storage (Postgres text could hold
+/// neither), with a readable preview.
 #[tokio::test]
-async fn zipped_test_case_with_a_nul_body_is_rejected() {
+async fn zipped_binary_test_data_is_kept_byte_for_byte() {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     use std::io::Write;
 
     let app = TestApp::spawn().await;
     let admin = admin(&app).await;
     let pid = app.create_problem(&admin, "P1").await;
+    let binary: &[u8] = b"1\x002\xff\xfe\n";
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    for (name, content) in [("01.in", "1\u{0}2\n"), ("01.ans", "3\n")] {
+    for (name, content) in [("01.in", binary), ("01.ans", b"3\n".as_slice())] {
         zip.start_file(name, options).unwrap();
-        zip.write_all(content.as_bytes()).unwrap();
+        zip.write_all(content).unwrap();
     }
     let bytes = zip.finish().unwrap().into_inner();
     let res = app
@@ -156,14 +162,23 @@ async fn zipped_test_case_with_a_nul_body_is_rejected() {
             &admin,
         )
         .await;
-    assert_rejected(&res, "zipped test case body");
-    let listed = app.get_with_token(&routes::test_cases(pid), &admin).await;
-    assert_eq!(
-        listed.body.as_array().map(Vec::len),
-        Some(0),
-        "{}",
-        listed.text
-    );
+    assert_eq!(res.status, 201, "{}", res.text);
+
+    let case = server::entity::test_case::Entity::find()
+        .filter(server::entity::test_case::Column::ProblemId.eq(pid))
+        .one(&app.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(case.input, "");
+    assert_eq!(case.input_size, Some(binary.len() as i64));
+    let hash =
+        common::storage::ContentHash::from_hex(case.input_blob_hash.as_deref().unwrap()).unwrap();
+    assert_eq!(app.state.blob_store.get(&hash).await.unwrap(), binary);
+    assert_eq!(case.input_preview.as_deref(), Some("12\u{fffd}\u{fffd}\n"));
+    // A text body stays inline.
+    assert_eq!(case.expected_output, "3\n");
+    assert_eq!(case.expected_output_blob_hash, None);
 }
 
 #[tokio::test]

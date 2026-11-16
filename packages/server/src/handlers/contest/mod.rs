@@ -1,5 +1,6 @@
+use crate::extractors::query::AppQuery;
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
@@ -146,7 +147,7 @@ pub async fn create_contest(
 pub async fn list_contests(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    Query(query): Query<ContestListQuery>,
+    AppQuery(query): AppQuery<ContestListQuery>,
 ) -> Result<Json<ContestListResponse>, AppError> {
     let window = PageWindow::new(query.page, query.per_page)?;
 

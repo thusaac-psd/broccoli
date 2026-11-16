@@ -69,3 +69,9 @@ pub struct DeviceAuthorizeRequest {
     #[schema(example = "BCDF-GHJK")]
     pub user_code: String,
 }
+
+/// Whether `POST /auth/register` creates accounts.
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RegistrationStatus {
+    pub open: bool,
+}

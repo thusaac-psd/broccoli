@@ -11,7 +11,8 @@ pub struct PreparedAccount {
     password_hash: String,
 }
 
-/// Hash outside the async executor and before opening a database transaction.
+/// Hash on the password pool, several at once, before opening a database
+/// transaction.
 pub async fn prepare_accounts(
     entries: Vec<CreateUserRequest>,
 ) -> Result<Vec<PreparedAccount>, AppError> {
@@ -35,34 +36,45 @@ pub async fn prepare_accounts(
             ))
         })
         .collect::<Result<Vec<_>, AppError>>()?;
-    tokio::task::spawn_blocking(move || {
+    let entries: Vec<_> = entries
+        .into_iter()
+        .map(|(username, display_name, password)| {
+            let password =
+                password.unwrap_or_else(|| crate::utils::password::generate_password(16));
+            (username, display_name, password)
+        })
+        .collect();
+    let hashes = crate::utils::hash::hash_passwords_off_thread(
         entries
-            .into_iter()
-            .map(|(username, display_name, password)| {
-                let password =
-                    password.unwrap_or_else(|| crate::utils::password::generate_password(16));
-                let password_hash = crate::utils::hash::hash_password(&password)
-                    .map_err(|e| AppError::Internal(format!("Password hash error: {e}")))?;
-                Ok(PreparedAccount {
-                    username,
-                    display_name,
-                    password,
-                    password_hash,
-                })
-            })
-            .collect()
-    })
+            .iter()
+            .map(|(_, _, password)| password.clone())
+            .collect(),
+    )
     .await
-    .map_err(|e| AppError::Internal(format!("Password hashing task failed: {e}")))?
+    .map_err(|e| AppError::Internal(format!("Password hash error: {e}")))?;
+    Ok(entries
+        .into_iter()
+        .zip(hashes)
+        .map(
+            |((username, display_name, password), password_hash)| PreparedAccount {
+                username,
+                display_name,
+                password,
+                password_hash,
+            },
+        )
+        .collect())
 }
 
-/// Map a write to the `user` table onto the API error contract. The only
-/// unique constraint besides the primary key is the active-username index, so
-/// a unique violation means the username is taken (for example, a race with a
-/// concurrent create or rename).
-pub fn username_conflict(e: DbErr) -> AppError {
-    match e.sql_err() {
-        Some(SqlErr::UniqueConstraintViolation(_)) => AppError::UsernameTaken,
+/// Map a write of `username` to the `user` table onto the API error contract.
+/// The only unique constraint besides the primary key is the active-username
+/// index, so a unique violation means the username is taken (for example, a
+/// race with a concurrent create or rename).
+pub fn username_conflict(username: &str) -> impl FnOnce(DbErr) -> AppError + '_ {
+    move |e| match e.sql_err() {
+        Some(SqlErr::UniqueConstraintViolation(_)) => {
+            AppError::UsernameTaken(vec![username.to_owned()])
+        }
         _ => AppError::from(e),
     }
 }
@@ -80,7 +92,7 @@ pub async fn insert_account<C: ConnectionTrait>(
     }
     .insert(db)
     .await
-    .map_err(username_conflict)?;
+    .map_err(username_conflict(&account.username))?;
     for role_name in role::DEFAULT_ROLES {
         let role = role::Entity::find_by_id(role_name.to_string())
             .one(db)

@@ -81,7 +81,7 @@ pub async fn prepare_test_case_body(
 ) -> Result<PreparedTestCaseBody, AppError> {
     let size = i64::try_from(body.len())
         .map_err(|_| AppError::Validation("Test case body is too large".into()))?;
-    let preview = body.chars().take(STORED_PREVIEW_CHARS).collect::<String>();
+    let preview = preview_of(body.as_bytes());
 
     if body.len() < INLINE_TEST_CASE_BODY_THRESHOLD_BYTES {
         return Ok(PreparedTestCaseBody {
@@ -95,7 +95,7 @@ pub async fn prepare_test_case_body(
     let hash = blob_store
         .put(body.as_bytes())
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to store test case body blob: {e}")))?;
+        .map_err(store_failed)?;
 
     Ok(PreparedTestCaseBody {
         inline_text: String::new(),
@@ -103,6 +103,100 @@ pub async fn prepare_test_case_body(
         size,
         preview,
     })
+}
+
+/// A test-case body unpacked to a temporary file, of `size` bytes.
+pub struct TestCaseFile {
+    pub file: tempfile::NamedTempFile,
+    pub size: u64,
+}
+
+/// Store a body unpacked to a file. Text under the inline threshold is kept
+/// inline; anything else (a large body, or bytes that are not text Postgres
+/// can store: invalid UTF-8 or a NUL) goes to blob storage, streamed from the
+/// file, so the server never holds a large body in memory and binary test
+/// data is kept byte for byte.
+pub async fn prepare_test_case_file(
+    body: TestCaseFile,
+    blob_store: &dyn BlobStore,
+) -> Result<PreparedTestCaseBody, AppError> {
+    let size = i64::try_from(body.size)
+        .map_err(|_| AppError::Validation("Test case body is too large".into()))?;
+    let path = body.file.path().to_path_buf();
+    if body.size < INLINE_TEST_CASE_BODY_THRESHOLD_BYTES as u64 {
+        let bytes = tokio::fs::read(&path).await.map_err(|e| {
+            AppError::Internal(format!("Failed to read an unpacked test case: {e}"))
+        })?;
+        let preview = preview_of(&bytes);
+        return match String::from_utf8(bytes) {
+            Ok(text) if !text.contains('\0') => Ok(PreparedTestCaseBody {
+                inline_text: text,
+                blob_hash: None,
+                size,
+                preview,
+            }),
+            Ok(text) => blob_body(text.into_bytes(), size, preview, blob_store).await,
+            Err(binary) => blob_body(binary.into_bytes(), size, preview, blob_store).await,
+        };
+    }
+    let mut head = vec![0u8; STORED_PREVIEW_CHARS * 4];
+    let read = {
+        use tokio::io::AsyncReadExt;
+        let mut file = tokio::fs::File::open(&path).await.map_err(|e| {
+            AppError::Internal(format!("Failed to read an unpacked test case: {e}"))
+        })?;
+        file.read(&mut head)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to read an unpacked test case: {e}")))?
+    };
+    let preview = preview_of(&head[..read]);
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to read an unpacked test case: {e}")))?;
+    let hash = blob_store
+        .put_stream(Box::new(file))
+        .await
+        .map_err(store_failed)?;
+    Ok(PreparedTestCaseBody {
+        inline_text: String::new(),
+        blob_hash: Some(hash.to_hex()),
+        size,
+        preview,
+    })
+}
+
+async fn blob_body(
+    bytes: Vec<u8>,
+    size: i64,
+    preview: String,
+    blob_store: &dyn BlobStore,
+) -> Result<PreparedTestCaseBody, AppError> {
+    let hash = blob_store.put(&bytes).await.map_err(store_failed)?;
+    Ok(PreparedTestCaseBody {
+        inline_text: String::new(),
+        blob_hash: Some(hash.to_hex()),
+        size,
+        preview,
+    })
+}
+
+/// A storage outage stays a retryable 503; anything else is an internal
+/// failure to store the body.
+fn store_failed(e: common::storage::StorageError) -> AppError {
+    match e {
+        common::storage::StorageError::Unavailable(_) => AppError::from(e),
+        e => AppError::Internal(format!("Failed to store test case body blob: {e}")),
+    }
+}
+
+/// The stored preview: the first characters of the body, binary bytes shown
+/// as U+FFFD, NUL dropped (Postgres text holds none).
+fn preview_of(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .filter(|&c| c != '\0')
+        .take(STORED_PREVIEW_CHARS)
+        .collect()
 }
 
 pub async fn read_test_case_body(
@@ -120,8 +214,12 @@ pub async fn read_test_case_body(
         .get(&hash)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to read test case body blob: {e}")))?;
-    String::from_utf8(bytes)
-        .map_err(|e| AppError::Internal(format!("Test case body blob is not UTF-8: {e}")))
+    // Binary test data (stored only as a blob) reads as text with U+FFFD for
+    // the bytes that are not UTF-8.
+    Ok(match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(binary) => String::from_utf8_lossy(binary.as_bytes()).into_owned(),
+    })
 }
 
 /// Maximum bytes of a test-case `input`/`expected_output` body to inline into an

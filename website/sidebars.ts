@@ -27,6 +27,7 @@ const sidebars: SidebarsConfig = {
             'plugins/codelink-bracket',
           ],
         },
+        'running-contests/accounts',
         'running-contests/plugin-settings',
         'running-contests/checking-output',
       ],

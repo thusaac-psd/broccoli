@@ -21,6 +21,8 @@ use sea_orm_migration::prelude::*;
 
 mod m0001_baseline;
 mod m0002_checker_format_no_default;
+mod m0003_username_case_insensitive;
+mod m0004_platform_setting;
 
 pub use m0001_baseline::{PLUGIN_READABLE, PLUGIN_READABLE_COLUMNS};
 
@@ -98,6 +100,8 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m0001_baseline::Migration),
             Box::new(m0002_checker_format_no_default::Migration),
+            Box::new(m0003_username_case_insensitive::Migration),
+            Box::new(m0004_platform_setting::Migration),
         ]
     }
 }

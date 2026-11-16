@@ -15,6 +15,7 @@ import { type FormEvent, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 
 import { DisplayNameField } from '@/components/DisplayNameField';
+import { useRegistrationStatus } from '@/features/auth/hooks/use-registration-status';
 
 export default function RegisterForm() {
   const { t } = useTranslation();
@@ -28,6 +29,7 @@ export default function RegisterForm() {
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const apiClient = useApiClient();
+  const registration = useRegistrationStatus();
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -62,6 +64,8 @@ export default function RegisterForm() {
       if (regError) {
         if (regError.code === 'USERNAME_TAKEN') {
           setError(t('auth.usernameTaken'));
+        } else if (regError.code === 'REGISTRATION_CLOSED') {
+          setError(t('auth.registrationClosed'));
         } else {
           setError(regError.message || t('auth.validationError'));
         }
@@ -78,6 +82,26 @@ export default function RegisterForm() {
       setIsSubmitting(false);
     }
   };
+
+  if (registration.data?.open === false) {
+    return (
+      <Card className="w-full max-w-md">
+        <CardHeader>
+          <CardTitle className="text-2xl">{t('auth.registerTitle')}</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p role="status" className="text-sm text-muted-foreground">
+            {t('auth.registrationClosed')}
+          </p>
+        </CardContent>
+        <CardFooter>
+          <Link to="/login" className="text-sm text-primary underline">
+            {t('auth.login')}
+          </Link>
+        </CardFooter>
+      </Card>
+    );
+  }
 
   return (
     <Card className="w-full max-w-md">

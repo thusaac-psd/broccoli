@@ -178,11 +178,7 @@ pub async fn stream_field_to_store(
 
         let mut total_size: u64 = 0;
 
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|e| AppError::Validation(format!("Upload read error: {e}")))?
-        {
+        while let Some(chunk) = field.chunk().await.map_err(AppError::from)? {
             total_size += chunk.len() as u64;
             if total_size > max_size {
                 return Err(AppError::Validation(format!(

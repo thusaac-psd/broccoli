@@ -22,4 +22,5 @@ tracing.workspace = true
 utoipa.workspace = true
 
 [dev-dependencies]
+futures.workspace = true
 tempfile = "3"

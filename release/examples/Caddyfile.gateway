@@ -1,5 +1,10 @@
 :80 {
 	encode zstd gzip
+	# Internal endpoints never reach the public edge: Prometheus scrapes
+	# /metrics from each server on the internal network, and the API
+	# documentation is for the operators, who reach a server directly.
+	@internal path /metrics /metrics/* /swagger-ui /swagger-ui/* /scalar /scalar/* /api-docs /api-docs/*
+	respond @internal 404
 
 	reverse_proxy {$BROCCOLI_UPSTREAMS} {
 		lb_policy round_robin

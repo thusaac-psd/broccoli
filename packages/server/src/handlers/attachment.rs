@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::extract::{DefaultBodyLimit, Multipart, State};
+use axum::extract::{Multipart, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use broccoli_server_sdk::permissions as perm;
@@ -31,8 +31,8 @@ use crate::utils::blob::{
 use crate::utils::soft_delete::{SoftDeletable, find_active_child};
 use crate::visibility::{Action, ProblemScope, Resource, Subject, VisibilityKernel};
 
-pub fn attachment_upload_body_limit() -> DefaultBodyLimit {
-    DefaultBodyLimit::max(LARGE_UPLOAD_LIMIT_BYTES)
+pub fn attachment_upload_body_limit() -> usize {
+    LARGE_UPLOAD_LIMIT_BYTES
 }
 
 #[utoipa::path(
@@ -49,6 +49,7 @@ pub fn attachment_upload_body_limit() -> DefaultBodyLimit {
     responses(
         (status = 201, description = "Attachment created", body = AttachmentResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 413, description = "Request body over the endpoint's limit (PAYLOAD_TOO_LARGE)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
@@ -70,11 +71,7 @@ pub async fn upload_attachment(
     let mut file_name: Option<String> = None;
     let mut virtual_path: Option<String> = None;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::Validation(format!("Multipart error: {e}")))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(AppError::from)? {
         match field.name() {
             Some("file") => {
                 file_name = field.file_name().map(|s| s.to_string());

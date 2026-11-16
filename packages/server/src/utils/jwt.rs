@@ -18,7 +18,11 @@ pub struct Claims {
     pub iat: u64,
 }
 
-/// How long an access token is valid.
+/// How long an access token is valid. Access tokens are checked without a
+/// session lookup (the read path makes no database call to authenticate), so
+/// logging out, which revokes the refresh token, leaves an access token already
+/// issued usable for at most this long. A credential change (password, roles,
+/// deactivation) ends it at once on every `FreshAuthUser` endpoint.
 pub const ACCESS_TOKEN_TTL: Duration = Duration::minutes(5);
 
 /// Sign an access token valid for [`ACCESS_TOKEN_TTL`] from `issued_at`.
@@ -55,9 +59,17 @@ pub fn sign_access_token(
     Ok(token)
 }
 
-/// Verify `token`'s signature and that it has not expired at `now`, the
-/// platform clock. The library's own expiry check reads this host's clock, so
-/// it is off and `exp` is compared here.
+/// How far past `now` a token's `iat` may lie. Every replica signs and
+/// verifies with the platform clock, so a later `iat` comes only from a key
+/// holder minting tokens dated in the future, which would otherwise outlive
+/// every credential change made before that date (`FreshAuthUser` compares
+/// `iat` with `credentials_changed_at`).
+pub const IAT_LEEWAY_SECS: i64 = 30;
+
+/// Verify `token`'s signature, that it has not expired at `now`, the platform
+/// clock, and that it was not issued after `now` (plus [`IAT_LEEWAY_SECS`]).
+/// The library's own expiry check reads this host's clock, so it is off and
+/// `exp` is compared here.
 pub fn verify(token: &str, secret: &str, now: DateTime<Utc>) -> Result<Claims> {
     let mut validation = Validation::default();
     validation.validate_exp = false;
@@ -70,6 +82,10 @@ pub fn verify(token: &str, secret: &str, now: DateTime<Utc>) -> Result<Claims> {
     anyhow::ensure!(
         (claims.exp as i64) > now.timestamp(),
         "access token expired"
+    );
+    anyhow::ensure!(
+        (claims.iat as i64) <= now.timestamp() + IAT_LEEWAY_SECS,
+        "access token issued in the future"
     );
     Ok(claims)
 }
@@ -97,5 +113,15 @@ mod tests {
         let issued = at(1_000_000_000);
         let token = sign_access_token(1, "u", vec![], vec![], issued, "secret").unwrap();
         assert!(verify(&token, "other", issued).is_err());
+    }
+
+    #[test]
+    fn a_token_issued_in_the_future_is_rejected() {
+        let now = at(1_000_000_000);
+        let token = |issued| sign_access_token(1, "u", vec![], vec![], issued, "secret").unwrap();
+        let near = token(now + Duration::seconds(IAT_LEEWAY_SECS));
+        assert!(verify(&near, "secret", now).is_ok());
+        let ahead = token(now + Duration::seconds(IAT_LEEWAY_SECS + 1));
+        assert!(verify(&ahead, "secret", now).is_err());
     }
 }
