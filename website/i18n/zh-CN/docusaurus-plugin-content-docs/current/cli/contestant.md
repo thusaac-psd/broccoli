@@ -145,6 +145,8 @@ broccoli submit sol.cpp -c "Spring Round" -p A
 
 Broccoli 会识别语言，完成提交，并打印一个提交编号。需要时用 `-l` 覆盖语言。加上 `-w` 可以当场等待评测结果，而不必之后再查看。使用 `-w` 时，若结果不是 Accepted，命令以状态码 3 退出。
 
+等待期间，Broccoli 会说明在等什么：提交排队时等空闲的评测机，运行时等评测机评测，组织者关闭了比赛的插件时等该插件。5 分钟内没有结果时，它停止等待并以状态码 4 退出。提交不会被取消：评测机或插件一有空就会评测它，之后用 `broccoli status` 即可看到结果。远程 `test` 也以同样方式等待，最多 2 分钟。
+
 ```bash
 broccoli submit sol.cpp -c "Spring Round" -p A -w
 ```
@@ -175,11 +177,13 @@ broccoli status
 broccoli status 12345
 ```
 
-使用 `--recent` 把你最近的提交以纯文本表格打印出来。从最近提交中选择需要知道是哪场比赛，Broccoli 会从你的 `.broccoli` 文件或你保存的默认值中读取。
+使用 `--recent` 把你最近的提交以纯文本表格打印出来。从最近提交中选择需要知道是哪场比赛，Broccoli 会从 `-c`、你的 `.broccoli` 文件或你保存的默认值中读取。加上 `-p` 只看某一道题的提交。
 
 ```bash
-broccoli status --recent
+broccoli status --recent -c "Spring Round" -p A
 ```
+
+比赛暂不向你公布结果时（例如封榜期间），提交显示为 `Hidden`；评测该比赛的插件被关闭或无法响应时，提交显示为 `Waiting for plugin`。隐藏的结果会一直隐藏，直到组织者公布；等待中的提交会在插件恢复后评测。
 
 ## 实时观看比赛
 
@@ -256,6 +260,7 @@ Broccoli 根据你的文件扩展名，按照比赛服务器支持的语言及�
 | `1`    | 出现错误，例如无法连接或尚未登录                        |
 | `2`    | 命令行无法解析                                          |
 | `3`    | `test` 有样例未通过，或 `submit -w` 的结果不是 Accepted |
+| `4`    | `submit -w` 或 `test` 停止等待评测；提交并未取消        |
 
 ## 全部命令
 

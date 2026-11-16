@@ -8,6 +8,7 @@ pub mod prewarm;
 pub mod status;
 pub mod submit;
 pub mod test;
+pub mod wait;
 pub mod watch;
 pub mod whoami;
 

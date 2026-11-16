@@ -95,6 +95,19 @@ if worker.get("BROCCOLI__WORKER__MAX_CONCURRENCY") != "2":
 ' || fail "$t hands secrets to the wrong container"
 done
 rm .env.single-host.worker
+# A server's and a worker's blank id is derived from the host's machine-id,
+# which every template that runs them mounts where the binary reads it.
+for t in docker-compose.single-host.object-storage.yaml.template docker-compose.single-host.yaml.template; do
+  single_json "$t" | python3 -c '
+import json, sys
+services = json.load(sys.stdin)["services"]
+for name in ("server", "worker"):
+    mounts = [v for v in services[name].get("volumes", [])
+              if v.get("target") == "/run/broccoli/host/machine-id"]
+    if not (mounts and mounts[0]["source"] == "/etc/machine-id" and mounts[0].get("read_only")):
+        sys.exit(name + " does not mount the host machine-id read-only")
+' || fail "$t does not hand the host identity to its nodes"
+done
 # An env file from before these URLs existed gets them on a re-run.
 sed -i '/^BROCCOLI_LOCAL_/d' .env.single-host
 install_dry single-host

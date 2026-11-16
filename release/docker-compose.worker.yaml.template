@@ -38,6 +38,16 @@ services:
       # so no deployment needs to override it.
       - worker_data:/data
       - worker_box_ids:/var/lib/broccoli/box-ids
+      # The host's identity: a blank node id is derived from it, so the id
+      # survives recreating the container. Every systemd host has the file;
+      # without one the container does not start, rather than mounting an
+      # empty directory there.
+      - type: bind
+        source: /etc/machine-id
+        target: /run/broccoli/host/machine-id
+        read_only: true
+        bind:
+          create_host_path: false
     healthcheck:
       test: ["CMD", "gosu", "worker:worker", "/usr/local/bin/broccoli-worker", "--healthcheck"]
       interval: 10s

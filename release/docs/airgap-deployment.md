@@ -35,11 +35,12 @@ guided one-click installer,
 `setup.sh --role {server|gateway|worker|contestant}`, which wraps the underlying
 per-role engine `install.sh` with runtime detection, a go/no-go preflight, and
 auto-generated configuration (§4). `install.sh` remains available directly for
-operators who manage their own `.env` files. Nothing under `release/airgap/`
-ever shells out to `curl`, `wget`, `apt`, `pip`, or `docker pull` — that
-invariant is enforced by `release/airgap/test/offline_guard_test.sh` and
-`install_test.sh`, and it's what makes the target-side scripts safe to run with
-no network at all.
+operators who manage their own `.env` files. No script that runs on a target
+machine (everything under `release/` but the staging-side bundle builders and
+`stage-*.sh`) ever shells out to `curl`, `wget`, `apt`, `pip`, or `docker pull`,
+and every `compose up` passes `--pull never`. That invariant is enforced by
+`release/airgap/test/offline_guard_test.sh` and `install_test.sh`, and it's what
+makes the target-side scripts safe to run with no network at all.
 
 ## 2. On the staging box (networked)
 

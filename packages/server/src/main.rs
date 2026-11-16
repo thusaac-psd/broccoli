@@ -34,9 +34,9 @@ struct Cli {
     /// Probe this server's `/healthz` and exit 0 when it answers 2xx.
     #[arg(long, exclusive = true)]
     healthcheck: bool,
-    /// Print the ID this machine's server takes when none is configured
-    /// (`common::node_identity::default_node_id`) and exit, so an installer
-    /// records the binary's own answer. Reads no configuration.
+    /// Print the id this machine's server takes when `server.id` is left
+    /// blank, derived from the machine, and exit, so an installer records the
+    /// binary's own answer. Reads no configuration.
     #[arg(long, exclusive = true)]
     node_id: bool,
     #[command(subcommand)]

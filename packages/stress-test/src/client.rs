@@ -217,6 +217,26 @@ impl Client {
         .await
     }
 
+    /// The server's clock now, from the `Date` header of `GET /livez`, which
+    /// the server stamps from the platform clock: times a run gives the
+    /// server hold there whatever this host's clock says.
+    pub async fn server_now(&self) -> StressResult<chrono::DateTime<chrono::Utc>> {
+        let url = format!("{}/livez", self.0.base_url);
+        let resp = self
+            .instrument_request(self.0.http.get(url))
+            .send()
+            .await
+            .map_err(StressError::Network)?;
+        let date = resp
+            .headers()
+            .get(reqwest::header::DATE)
+            .and_then(|d| d.to_str().ok())
+            .ok_or_else(|| StressError::Decode("the server's answer has no Date header".into()))?;
+        chrono::DateTime::parse_from_rfc2822(date)
+            .map(|d| d.with_timezone(&chrono::Utc))
+            .map_err(|e| StressError::Decode(format!("the server's Date header {date:?}: {e}")))
+    }
+
     pub async fn create_contest(
         &self,
         req: &CreateContestRequest,
@@ -941,6 +961,39 @@ mod tests {
             .await;
 
         client.delete_problem(12).await.expect("delete ok");
+    }
+
+    /// A scratch contest opens on the server's clock: a stress-test host
+    /// whose own clock is years off still creates one that has started.
+    #[tokio::test]
+    async fn a_scratch_contest_is_timed_by_the_servers_clock() {
+        let server = MockServer::start().await;
+        let client = client_with_login(&server, "tok").await;
+
+        Mock::given(method("GET"))
+            .and(path("/livez"))
+            .respond_with(
+                ResponseTemplate::new(200).insert_header("date", "Tue, 01 Jan 2030 10:00:00 GMT"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/contests"))
+            .and(body_partial_json(json!({
+                "activate_time": "2030-01-01T09:59:00Z",
+                "start_time": "2030-01-01T09:59:00Z",
+                "end_time": "2030-01-02T10:00:00Z",
+                "contest_type": "icpc"
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(contest_json(7, Some("icpc"))))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let contest = crate::bootstrap::create_scratch_contest(&client, "icpc")
+            .await
+            .expect("contest created");
+        assert_eq!(contest.id, 7);
     }
 
     #[tokio::test]

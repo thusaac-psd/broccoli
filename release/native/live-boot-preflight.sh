@@ -90,7 +90,7 @@ fi
 hdr "toolchain (c / c++ / python)"
 T="$(mktemp -d)"; printf 'int main(){return 0;}\n' >"$T/a.c"; printf 'int main(){return 0;}\n' >"$T/a.cpp"
 { command -v gcc >/dev/null 2>&1 && gcc "$T/a.c"   -o "$T/a"  2>/dev/null; } && ok "gcc compiles C" \
-  || bad "gcc cannot compile C -- install build-essential (dpkg toolchain/<ver>/*.deb, or apt)"
+  || bad "gcc cannot compile C -- install build-essential (dpkg -i toolchain/<ver>/*.deb)"
 { command -v g++ >/dev/null 2>&1 && g++ "$T/a.cpp" -o "$T/ax" 2>/dev/null; } && ok "g++ compiles C++" \
   || bad "g++ cannot compile C++ -- install build-essential"
 command -v python3 >/dev/null 2>&1 && ok "python3: $(python3 --version 2>&1)" || bad "python3 missing"
@@ -99,7 +99,7 @@ fi  # HOST_ONLY
 
 hdr "connectivity to box 1"
 if [ $# -ge 1 ]; then
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "http://$1/api/v1/health" 2>/dev/null || echo 000)
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "http://$1/api/v1/health" 2>/dev/null || echo 000) # offline-ok: probes box 1 on this LAN
   [ "$code" = 200 ] && ok "box1 http://$1 health 200" || bad "box1 http://$1 unreachable (HTTP $code)"
 else
   warn "no box1 IP given -- skipped server reachability (re-run: sudo $0 <box1-LAN-IP>)"

@@ -1280,6 +1280,7 @@
 'apiError.CONFIG_WOULD_BREAK' = "This change would break settings that refer to this problem's test cases."
 'apiError.CHECKER_SOURCE_UNSUPPORTED' = "This problem's checker format takes no checker source."
 'apiError.STORAGE_UNAVAILABLE' = "File storage is unavailable right now. Try again in a moment."
+'apiError.DATABASE_UNAVAILABLE' = "The server's database is unavailable right now. Try again in a moment."
 'apiError.PLUGIN_ERROR' = "A plugin failed while handling this request. Try again, or ask an administrator."
 'apiError.PLUGIN_SESSION_ABORTED' = "Judging stopped because the plugin judging it failed or was turned off."
 'apiError.PLUGIN_NO_VERDICT' = "The judging plugin finished without giving a verdict."

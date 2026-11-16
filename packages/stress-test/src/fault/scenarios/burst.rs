@@ -21,7 +21,7 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::bootstrap::{build_create_contest_request, build_create_problem_request, contest_label};
+use crate::bootstrap::{build_create_problem_request, contest_label, create_scratch_contest};
 use crate::client::{AuthCreds, Client};
 #[cfg(test)]
 use crate::dto::SubmissionStatus;
@@ -426,8 +426,7 @@ impl Burst {
         let mut problem_ids: HashMap<String, i32> = HashMap::new();
 
         for (idx, (ctype, _w)) in mix.iter().enumerate() {
-            let contest_req = build_create_contest_request(ctype);
-            let contest = match client.create_contest(&contest_req).await {
+            let contest = match create_scratch_contest(&client, ctype).await {
                 Ok(c) => c,
                 Err(e) => {
                     transcript.record(

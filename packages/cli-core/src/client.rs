@@ -9,7 +9,8 @@ use broccoli_api_types::clarification::{
 };
 use broccoli_api_types::code_run::{CodeRunResponse, CustomTestCaseInput, RunCodeRequest};
 use broccoli_api_types::contest::{
-    ContestListResponse, ContestProblemResponse, ContestResponse, ContestUserContextResponse,
+    ContestListItem, ContestListResponse, ContestProblemResponse, ContestResponse,
+    ContestUserContextResponse,
 };
 use broccoli_api_types::error::ErrorBody;
 use broccoli_api_types::plugin::{
@@ -108,6 +109,10 @@ impl NetworkCause {
 pub type ClientResult<T> = Result<T, ClientError>;
 
 type Response = http::Response<ureq::Body>;
+
+/// How many contests one page of [`Client::contests`] asks for: the most the
+/// server serves in one page.
+const CONTEST_PAGE: &str = "100";
 
 /// The cookie the server reads a refresh token from.
 const REFRESH_COOKIE: &str = "broccoli_refresh";
@@ -236,9 +241,18 @@ impl Client {
     }
 
     fn get(&self, path: &str) -> ClientResult<Response> {
+        self.get_query(path, &[])
+    }
+
+    /// GET `path` with `query` appended, each value percent-encoded.
+    fn get_query(&self, path: &str, query: &[(&str, &str)]) -> ClientResult<Response> {
         let url = self.url(path);
         self.authorized(&url, |bearer| {
-            self.agent.get(&url).header("Authorization", bearer).call()
+            self.agent
+                .get(&url)
+                .query_pairs(query.iter().copied())
+                .header("Authorization", bearer)
+                .call()
         })
     }
 
@@ -458,9 +472,24 @@ impl Client {
         Ok(registries.languages)
     }
 
-    pub fn list_contests(&self) -> ClientResult<ContestListResponse> {
-        let resp = self.get("/api/v1/contests")?;
-        self.parse_response(resp)
+    /// Every contest the caller can see, newest first, or only those whose
+    /// title contains `search` (ignoring case, as the server matches it).
+    /// The server pages its answer; this reads every page.
+    pub fn contests(&self, search: Option<&str>) -> ClientResult<Vec<ContestListItem>> {
+        let search = search.map(str::trim).filter(|s| !s.is_empty());
+        let mut contests = Vec::new();
+        for page in 1.. {
+            let page = page.to_string();
+            let mut query = vec![("page", page.as_str()), ("per_page", CONTEST_PAGE)];
+            query.extend(search.map(|s| ("search", s)));
+            let resp = self.get_query("/api/v1/contests", &query)?;
+            let answer: ContestListResponse = self.parse_response(resp)?;
+            contests.extend(answer.data);
+            if answer.pagination.page >= answer.pagination.total_pages {
+                break;
+            }
+        }
+        Ok(contests)
     }
 
     pub fn get_contest(&self, id: ContestId) -> ClientResult<ContestResponse> {

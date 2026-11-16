@@ -27,7 +27,7 @@ use super::contest::{Countdown, local_time};
 use broccoli_cli_core::fmt;
 use broccoli_cli_core::ids::{ContestId, ProblemId};
 use broccoli_cli_core::model::{
-    ClarificationKind, StatusDisplay, SubmissionStatus, Verdict, VerdictDisplay,
+    ClarificationKind, Standing, StatusDisplay, Verdict, VerdictDisplay,
 };
 use broccoli_cli_core::session::SessionError;
 use broccoli_cli_core::tui::theme::THEME;
@@ -93,7 +93,7 @@ struct SubmissionRow {
     id: String,
     problem_id: ProblemId,
     problem: String,
-    status: Option<SubmissionStatus>,
+    standing: Standing,
     verdict: Option<Verdict>,
     score: Option<f64>,
     time_used: Option<i64>,
@@ -589,7 +589,7 @@ fn run_event_loop(
             let still_judging = app
                 .submission_detail
                 .as_ref()
-                .map(|s| s.status.is_in_progress())
+                .map(|s| Standing::of_submission(s).is_in_progress())
                 .unwrap_or(true);
             if still_judging {
                 let id = id.clone();
@@ -842,8 +842,8 @@ fn build_submission_lines(
     lines.push(Line::from(vec![
         Span::styled(format!("{:<9}", "Status"), Style::default().fg(THEME.muted)),
         Span::styled(
-            sub.status.human().to_string(),
-            Style::default().fg(sub.status.color()),
+            Standing::of_submission(sub).human().to_string(),
+            Style::default().fg(Standing::of_submission(sub).color()),
         ),
     ]));
     if let Some(r) = sub.result.as_ref() {
@@ -1190,7 +1190,7 @@ fn update_submissions(app: &mut AppData, data: &SubmissionListResponse) {
             id: s.id.to_string(),
             problem_id: ProblemId::from_server(s.problem_id),
             problem: s.problem_title.clone(),
-            status: s.status,
+            standing: Standing::of_item(s),
             verdict: s.verdict.clone(),
             score: s.score,
             time_used: s.time_used.map(i64::from),
@@ -1493,7 +1493,7 @@ fn render_submissions(f: &mut Frame, app: &AppData, area: Rect) {
             // judged verdict if present, else lifecycle status
             let (label, color) = match s.verdict.as_ref() {
                 Some(v) => (v.human().to_string(), v.color()),
-                None => (s.status.human().to_string(), s.status.color()),
+                None => (s.standing.human().to_string(), s.standing.color()),
             };
             let score = s.score.map(fmt::score).unwrap_or_else(|| "—".into());
             let time = s.time_used.map(fmt::time_ms).unwrap_or_else(|| "—".into());
@@ -1687,6 +1687,7 @@ fn render_overlay(f: &mut Frame, app: &AppData, size: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use broccoli_cli_core::model::SubmissionStatus;
 
     #[test]
     fn watch_without_a_terminal_says_it_needs_one() {
@@ -1801,7 +1802,7 @@ mod tests {
                     id: "1001".into(),
                     problem_id: ProblemId::from_server(1),
                     problem: "A Plus B".into(),
-                    status: Some(SubmissionStatus::Judged),
+                    standing: Standing::Status(SubmissionStatus::Judged),
                     verdict: Some(Verdict::Accepted),
                     score: Some(100.0),
                     time_used: Some(41),
@@ -1811,7 +1812,7 @@ mod tests {
                     id: "1002".into(),
                     problem_id: ProblemId::from_server(2),
                     problem: "Subarrays".into(),
-                    status: Some(SubmissionStatus::Judged),
+                    standing: Standing::Status(SubmissionStatus::Judged),
                     verdict: Some(Verdict::WrongAnswer),
                     score: Some(0.0),
                     time_used: Some(33),

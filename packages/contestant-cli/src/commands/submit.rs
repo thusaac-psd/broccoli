@@ -1,12 +1,12 @@
+use super::wait;
 use super::{Rejected, context};
 use anyhow::Context;
 use broccoli_cli_core::api::submission::SubmissionFileDto;
 use broccoli_cli_core::client::Client;
 use broccoli_cli_core::fmt;
 use broccoli_cli_core::ids::{ContestId, ProblemId};
-use broccoli_cli_core::model::{StatusDisplay, VerdictDisplay};
+use broccoli_cli_core::model::{Standing, StatusDisplay, VerdictDisplay};
 use broccoli_cli_core::resolve;
-use broccoli_cli_core::tui::progress::Progress;
 use clap::Args;
 use console::style;
 use std::collections::HashMap;
@@ -36,7 +36,9 @@ pub struct SubmitArgs {
     #[arg(short = 'l', long)]
     pub language: Option<String>,
 
-    /// Watch for the verdict after submitting
+    /// Wait for the verdict after submitting. Gives up after 5 minutes
+    /// (exit status 4) while the submission is still queued or judged; it
+    /// is not cancelled, and `broccoli status <id>` shows it later.
     #[arg(short = 'w', long, default_value_t = false)]
     pub watch: bool,
 }
@@ -185,74 +187,55 @@ fn single_required_filename<'a>(
     names.all(|name| name == first).then_some(first)
 }
 
+/// How long `submit -w` waits for the verdict before it gives up.
+const VERDICT_WAIT: Duration = Duration::from_secs(300);
+
 fn watch_verdict(client: &Client, submission_id: i32) -> anyhow::Result<()> {
-    let submission_id = submission_id.to_string();
-    let submission_id = submission_id.as_str();
-    let mut progress = Progress::stderr();
-    let start = std::time::Instant::now();
-
-    loop {
-        if start.elapsed() > Duration::from_secs(300) {
-            progress.clear();
-            anyhow::bail!(
-                "Timed out waiting for the verdict. Check later with `broccoli status {}`.",
-                submission_id
-            );
-        }
-
+    let id = submission_id.to_string();
+    let check_later = format!("check it later with `broccoli status {submission_id}`.");
+    let (sub, elapsed) = wait::until_final(VERDICT_WAIT, &check_later, || {
         let sub = client
-            .get_submission(submission_id)
+            .get_submission(&id)
             .context("Failed to poll submission status")?;
-        let elapsed = start.elapsed();
+        Ok((Standing::of_submission(&sub), sub))
+    })?;
 
-        if sub.status.is_in_progress() {
-            progress.tick(format_args!(
-                "Judging... {} ({:.1}s)",
-                sub.status.human(),
-                elapsed.as_secs_f64()
-            ));
-            std::thread::sleep(Duration::from_millis(200));
-        } else {
-            progress.clear();
+    let accepted = sub
+        .result
+        .as_ref()
+        .and_then(|r| r.verdict.as_ref())
+        .is_some_and(|v| v.is_accepted());
+    // judged verdict if present, else where the submission stands
+    let label = match sub.result.as_ref().and_then(|r| r.verdict.as_ref()) {
+        Some(v) => v.human().to_string(),
+        None => Standing::of_submission(&sub).human().to_string(),
+    };
+    let score = sub.result.as_ref().and_then(|r| r.score);
+    println!(
+        "{}",
+        verdict_line(&label, accepted, score, elapsed.as_secs_f64())
+    );
 
-            let accepted = sub
-                .result
-                .as_ref()
-                .and_then(|r| r.verdict.as_ref())
-                .is_some_and(|v| v.is_accepted());
-            // judged verdict if present, else lifecycle status
-            let label = match sub.result.as_ref().and_then(|r| r.verdict.as_ref()) {
-                Some(v) => v.human().to_string(),
-                None => sub.status.human().to_string(),
-            };
-            let score = sub.result.as_ref().and_then(|r| r.score);
-            println!(
-                "{}",
-                verdict_line(&label, accepted, score, elapsed.as_secs_f64())
-            );
-
-            if let Some(ref result) = sub.result {
-                if let Some(msg) = result.error_message.as_deref().filter(|m| !m.is_empty()) {
-                    println!("  {}", style("Error:").red().bold());
-                    for line in msg.lines() {
-                        println!("    {}", style(line).red());
-                    }
-                }
-                if let Some(ref co) = result.compile_output
-                    && !co.is_empty()
-                {
-                    println!("\n  Compilation output:");
-                    for line in co.lines() {
-                        println!("    {}", style(line).dim());
-                    }
-                }
+    if let Some(ref result) = sub.result {
+        if let Some(msg) = result.error_message.as_deref().filter(|m| !m.is_empty()) {
+            println!("  {}", style("Error:").red().bold());
+            for line in msg.lines() {
+                println!("    {}", style(line).red());
             }
-
-            return match accepted {
-                true => Ok(()),
-                false => Err(Rejected(label).into()),
-            };
         }
+        if let Some(ref co) = result.compile_output
+            && !co.is_empty()
+        {
+            println!("\n  Compilation output:");
+            for line in co.lines() {
+                println!("    {}", style(line).dim());
+            }
+        }
+    }
+
+    match accepted {
+        true => Ok(()),
+        false => Err(Rejected(label).into()),
     }
 }
 

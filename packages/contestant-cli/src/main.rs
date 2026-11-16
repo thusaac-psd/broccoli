@@ -4,6 +4,7 @@ use clap::{CommandFactory, Parser};
 use std::process::ExitCode;
 
 use broccoli_contestant_cli::commands::contest::ContestCommand;
+use broccoli_contestant_cli::commands::wait::StillWaiting;
 use broccoli_contestant_cli::commands::{Command, GlobalArgs, Rejected};
 
 #[derive(Parser)]
@@ -34,8 +35,8 @@ struct Cli {
 }
 
 /// Exit codes: 0 on success, 1 on an error, 2 on a usage error (from clap),
-/// and [`Rejected::EXIT_CODE`] when a verdict is not Accepted or a sample
-/// fails.
+/// [`Rejected::EXIT_CODE`] when a verdict is not Accepted or a sample fails,
+/// and [`StillWaiting::EXIT_CODE`] when a wait for the judge gave up.
 fn main() -> ExitCode {
     configure_colors();
     let cli = Cli::parse();
@@ -44,6 +45,10 @@ fn main() -> ExitCode {
         Err(e) => match e.downcast_ref::<Rejected>() {
             // The command already printed the verdict or the sample results.
             Some(_) => ExitCode::from(Rejected::EXIT_CODE),
+            None if e.downcast_ref::<StillWaiting>().is_some() => {
+                eprintln!("{e}");
+                ExitCode::from(StillWaiting::EXIT_CODE)
+            }
             None => {
                 eprintln!("Error: {e}");
                 for cause in e.chain().skip(1) {

@@ -302,15 +302,29 @@ node_id_comment() {
 # record_blank_node_id: a preserved server or worker env file with a blank id
 # (written by a dry run) takes the id its image derives (ask_node_id).
 record_blank_node_id() {
-  local key image_key
+  local node key
+  for node in $(role_nodes); do
+    key="BROCCOLI__$(printf '%s' "$node" | tr '[:lower:]' '[:upper:]')__ID"
+    [ -z "$(env_get "$ENV_FILE" "$key")" ] || continue
+    ask_node_id "$key" "$node" "$(env_get "$ENV_FILE" "$(node_image_key "$node")")"
+    [ -z "${!key:-}" ] || env_set_if_changed "$key" "${!key}"
+  done
+}
+
+# role_nodes: the nodes (server, worker) the role runs, each with an id.
+role_nodes() {
   case "$ROLE" in
-    server) key=BROCCOLI__SERVER__ID image_key=BROCCOLI_SERVER_IMAGE ;;
-    worker) key=BROCCOLI__WORKER__ID image_key=BROCCOLI_WORKER_IMAGE ;;
-    *) return 0 ;;
+    server|worker) echo "$ROLE" ;;
+    single-host) echo server worker ;;
   esac
-  [ -z "$(env_get "$ENV_FILE" "$key")" ] || return 0
-  ask_node_id "$key" "$ROLE" "$(env_get "$ENV_FILE" "$image_key")"
-  [ -z "${!key:-}" ] || env_set_if_changed "$key" "${!key}"
+}
+
+# node_image_key NODE: the env key naming NODE's image.
+node_image_key() {
+  case "$1" in
+    server) echo BROCCOLI_SERVER_IMAGE ;;
+    worker) echo BROCCOLI_WORKER_IMAGE ;;
+  esac
 }
 
 env_set_if_changed() {
@@ -319,11 +333,13 @@ env_set_if_changed() {
   echo "updated $1 in $ENV_FILE to $2"
 }
 
+# start_role: run the role's containers from the images already loaded;
+# nothing is pulled.
 start_role() {
   if [ "$ROLE" = "infra" ] && ! using_object_storage; then
-    compose up -d db redis
+    compose up -d --pull never db redis
   else
-    compose up -d
+    compose up -d --pull never
   fi
 }
 
@@ -671,7 +687,8 @@ validate_role_env() {
     server) env_require BROCCOLI_SERVER_IMAGE && { is_dry_run || env_require BROCCOLI__SERVER__ID; } ;;
     worker) env_require BROCCOLI_WORKER_IMAGE && { is_dry_run || env_require BROCCOLI__WORKER__ID; } ;;
     gateway) env_require CADDY_IMAGE ;;
-    single-host) env_require BROCCOLI_SERVER_IMAGE BROCCOLI_WORKER_IMAGE ;;
+    single-host) env_require BROCCOLI_SERVER_IMAGE BROCCOLI_WORKER_IMAGE \
+      && { is_dry_run || env_require BROCCOLI__SERVER__ID BROCCOLI__WORKER__ID; } ;;
     *) true ;;
   esac || die "fix $ENV_FILE (or the variables passed to this run) and re-run"
   if using_object_storage; then
@@ -781,6 +798,10 @@ write_env_file() {
       prompt_secret BROCCOLI_ADMIN_PASSWORD "Initial admin password" generate
       resolve_infra_host
       infra_host="$BROCCOLI_INFRA_HOST"
+      if [ "$ROLE" = "single-host" ]; then
+        ask_node_id BROCCOLI__SERVER__ID server "$server_image"
+        ask_node_id BROCCOLI__WORKER__ID worker "$worker_image"
+      fi
       postgres_bind="${POSTGRES_BIND:-0.0.0.0:5432}"
       redis_bind="${REDIS_BIND:-0.0.0.0:6379}"
       s3_bind="${SEAWEEDFS_S3_BIND:-0.0.0.0:8333}"
@@ -836,8 +857,10 @@ write_env_file() {
         env_line BROCCOLI_BOOTSTRAP_ADMIN_USERNAME "$admin_user"
         env_line BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD "$admin_pass"
         env_line BROCCOLI_HTTP_BIND "${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}"
-        env_line BROCCOLI__SERVER__ID "${BROCCOLI__SERVER__ID:-server-1}"
-        env_line BROCCOLI__WORKER__ID "${BROCCOLI__WORKER__ID:-worker-1}"
+        node_id_comment BROCCOLI__SERVER__ID
+        env_line BROCCOLI__SERVER__ID "${BROCCOLI__SERVER__ID:-}"
+        node_id_comment BROCCOLI__WORKER__ID
+        env_line BROCCOLI__WORKER__ID "${BROCCOLI__WORKER__ID:-}"
         env_line BROCCOLI__SERVER__TRUSTED_PROXIES "${BROCCOLI__SERVER__TRUSTED_PROXIES:-[]}"
       } > "$ENV_FILE.tmp"
       mv "$ENV_FILE.tmp" "$ENV_FILE"
@@ -949,7 +972,7 @@ wait_until() {
 }
 
 http_ok() {
-  curl -fsS "$1" >/dev/null 2>&1
+  curl -fsS "$1" >/dev/null 2>&1 # offline-ok: probes this install's own server
 }
 
 service_healthy() {
@@ -1016,7 +1039,7 @@ if ! is_dry_run; then
   need docker "Install Docker Engine from https://docs.docker.com/engine/install/."
   need gzip "Install gzip with your OS package manager."
   if [ "$ROLE" = "server" ] || [ "$ROLE" = "gateway" ] || [ "$ROLE" = "single-host" ]; then
-    need curl "Install curl with your OS package manager."
+    need curl "Install curl with your OS package manager." # offline-ok: for http_ok
   fi
   docker compose version >/dev/null 2>&1 || die "docker compose is required. Install the Docker Compose plugin from the official Docker docs."
 fi

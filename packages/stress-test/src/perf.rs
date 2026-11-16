@@ -32,7 +32,7 @@ use hdrhistogram::Histogram;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::bootstrap::{build_create_contest_request, build_create_problem_request, contest_label};
+use crate::bootstrap::{build_create_problem_request, contest_label, create_scratch_contest};
 use crate::client::{AuthCreds, Client};
 use crate::dto::{
     AddContestProblemRequest, CreateSubmissionRequest, CreateTestCaseRequest, SubmissionFileDto,
@@ -281,9 +281,7 @@ async fn setup(
     let registries = client.list_registries().await?;
     let problem_type =
         crate::bootstrap::resolve_problem_type(&registries, args.problem_type.as_deref())?;
-    let contest = client
-        .create_contest(&build_create_contest_request(&args.contest_type))
-        .await?;
+    let contest = create_scratch_contest(client, &args.contest_type).await?;
     let problem = client
         .create_problem(&build_create_problem_request(
             scenario,

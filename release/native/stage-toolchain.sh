@@ -2,7 +2,7 @@
 # Stage the C/C++/Python toolchain (build-essential + python3 closure) as offline
 # .deb sets for live-boot / airgapped Broccoli WORKER boxes. install-native.sh
 # (worker role) auto-installs the set matching the box's Ubuntu VERSION_ID via
-# `dpkg -i toolchain/<ver>/*.deb` before falling back to apt.
+# `dpkg -i toolchain/<ver>/*.deb`, and stops when the bundle has none for it.
 #
 # Run on ANY machine with Docker + internet (it does NOT need to match the target
 # Ubuntu version -- each set is built inside that version's container):
