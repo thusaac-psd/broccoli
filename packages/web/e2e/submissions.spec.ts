@@ -1,6 +1,13 @@
 import { expect, test } from '@playwright/test';
 
-import { cursorPage, mockApi, NOW, problem, submission } from './api';
+import {
+  cursorPage,
+  mockApi,
+  NOW,
+  problem,
+  submission,
+  SYSTEM_ERROR_DETAIL,
+} from './api';
 
 test('a contest submission names its author by name and username, with no ids', async ({
   page,
@@ -204,5 +211,32 @@ test('staff see a system error once, its cause in their language and the server 
   await expect(page.getByText('服务器提供的详细信息')).toBeVisible();
   await expect(
     page.getByText('sandbox: cgroup memory controller unavailable'),
+  ).toBeVisible();
+});
+
+test("a judge error a plugin raised shows in the language of that plugin's pack", async ({
+  page,
+}) => {
+  await page.addInitScript(() =>
+    localStorage.setItem('broccoli-locale', 'zh-CN'),
+  );
+  await mockApi(page, 'admin', { plugins: ['icpc'] });
+  await page.route(/\/api\/v1\/submissions\/5$/, (route) =>
+    route.fulfill({
+      json: {
+        ...SYSTEM_ERROR_DETAIL,
+        result: {
+          ...SYSTEM_ERROR_DETAIL.result,
+          error_code: 'icpc.NO_TEST_CASES',
+          error_message: 'Problem has no test cases; cannot be judged',
+        },
+      },
+    }),
+  );
+  await page.goto('/submissions/5');
+  await expect(
+    page.getByText(
+      '该题目没有测试点，无法评测。请联系比赛工作人员添加测试点。',
+    ),
   ).toBeVisible();
 });

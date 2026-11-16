@@ -5,6 +5,7 @@ import {
   describeError,
   errorKind,
   isTemporaryApiError,
+  judgeErrorText,
   RequestError,
   TranslatedError,
 } from './errors.ts';
@@ -127,4 +128,33 @@ test('an already translated error is shown as it is', () => {
     describeError(new TranslatedError('已取消'), 'Failed', translator).message,
     '已取消',
   );
+});
+
+test("a judge error code a plugin raised reads from that plugin's pack first", () => {
+  const catalog: Record<string, string> = {
+    'icpc.apiError.NO_TEST_CASES': 'ICPC: no test cases',
+    'apiError.NO_TEST_CASES': 'Host: no test cases',
+    'apiError.OPERATION_LOST': 'Host: operation lost',
+    'apiError.SHARED': 'Host: shared',
+  };
+  const translator = { lookup: (key: string) => catalog[key] };
+  assert.equal(
+    judgeErrorText('icpc.NO_TEST_CASES', translator),
+    'ICPC: no test cases',
+  );
+  // Another plugin raising the same code without its own text falls back
+  // to the host catalog, never to the first plugin's text.
+  assert.equal(
+    judgeErrorText('codelink-bracket.NO_TEST_CASES', translator),
+    'Host: no test cases',
+  );
+  assert.equal(judgeErrorText('ioi.SHARED', translator), 'Host: shared');
+  // A host code carries no plugin id.
+  assert.equal(
+    judgeErrorText('OPERATION_LOST', translator),
+    'Host: operation lost',
+  );
+  // No translation anywhere: the caller shows its generic message.
+  assert.equal(judgeErrorText('icpc.UNKNOWN', translator), undefined);
+  assert.equal(judgeErrorText('UNKNOWN', translator), undefined);
 });

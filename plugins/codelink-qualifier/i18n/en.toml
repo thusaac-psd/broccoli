@@ -50,3 +50,6 @@
 'plugin.codelink-qualifier.name' = 'Codelink qualifier'
 'plugin.codelink-qualifier.description' = 'Codelink qualifier with configurable scoring slots and qualification thresholds.'
 'identifier.contestType.codelink-qualifier' = 'Codelink qualifier'
+
+# Judge error codes (a judgement records them as `codelink-qualifier.<CODE>`)
+'codelink-qualifier.apiError.CODELINK_NO_TEST_CASES' = 'Codelink problems need test cases, and this one has none. Ask the contest staff to add them.'

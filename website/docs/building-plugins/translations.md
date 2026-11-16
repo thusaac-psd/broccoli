@@ -106,6 +106,28 @@ HookResponse::reject(
 A code with no translation falls back to a generic message for its HTTP status
 class. The same lookup applies to errors from your plugin's own HTTP routes.
 
+## Translate your judging errors
+
+A judgement or code run your plugin ends as a system error can carry an
+`error_code`. The host records it under your plugin's id, so `NO_TEST_CASES`
+from `icpc` is stored as `icpc.NO_TEST_CASES` and never collides with another
+plugin's code or passes for one of the host's. The UI shows the translation of
+`<plugin id>.apiError.<CODE>` from your catalog, else the host's
+`apiError.<CODE>`, else a generic system-error message:
+
+```rust
+host.submission.update(&SubmissionUpdate {
+    verdict: Some(Some(Verdict::SystemError)),
+    error_code: Some(Some("NO_TEST_CASES".to_string())),
+    error_message: Some(Some("Problem has no test cases; cannot be judged".to_string())),
+    // ...
+})?;
+```
+
+```toml
+'icpc.apiError.NO_TEST_CASES' = 'This problem has no test cases, so it cannot be judged. Ask the contest staff to add them.'
+```
+
 ## Translate your manifest and config schemas
 
 The plugin list and the config forms show the manifest's `name` and

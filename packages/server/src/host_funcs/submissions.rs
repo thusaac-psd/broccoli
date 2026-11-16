@@ -61,8 +61,9 @@ fn ok_affected(n: u64) -> Result<String, extism::Error> {
     Ok(json!({ "data": n }).to_string())
 }
 
-/// The statement behind `submission_update`, with its bound arguments.
-/// `None` when the update sets nothing.
+/// The statement behind a `submission_update` as the host records it
+/// (`judging::as_recorded`), with its bound arguments. `None` when the update
+/// sets nothing.
 fn submission_update_statement(update: &SubmissionUpdate) -> Option<(String, Vec<JsonValue>)> {
     let mut p = Params::new();
     let sql = judging::judgement_write(&mut p, update)?;
@@ -75,9 +76,11 @@ host_fn!(pub submission_update(user_data: Arc<(String, DatabaseConnection)>; inp
 
     let update: SubmissionUpdate = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid submission_update input: {e}")))?;
-    // A write that would finalize an attempt the platform lost is fenced
+    // The update as the host records it: the plugin's error code under its
+    // id, and a write that would finalize an attempt the platform lost fenced
     // out, as a stale dispatch's is: 0 judgements written.
-    let Some(update) = judging::under_dispatch_fault(
+    let Some(update) = judging::as_recorded(
+        plugin_id,
         update,
         judging::DispatchFaults::of_current_call().and_then(|faults| faults.get()),
     ) else {
@@ -306,11 +309,14 @@ host_fn!(pub submission_query_test_cases(user_data: Arc<(String, DatabaseConnect
 
 /// The write fence against real Postgres, driven through the same builders and
 /// in the same order as `submission_update`.
-/// The statement behind `code_run_update`, with its bound arguments.
-/// `None` when the update sets nothing.
-fn code_run_update_statement(update: &CodeRunUpdate) -> Option<(String, Vec<JsonValue>)> {
+/// The statement behind `plugin_id`'s `code_run_update`, with its bound
+/// arguments. `None` when the update sets nothing.
+fn code_run_update_statement(
+    plugin_id: &str,
+    update: CodeRunUpdate,
+) -> Option<(String, Vec<JsonValue>)> {
     let mut p = Params::new();
-    let sql = judging::code_run_write(&mut p, update)?;
+    let sql = judging::code_run_write(&mut p, plugin_id, update)?;
     Some((sql, p.into_args()))
 }
 
@@ -321,7 +327,7 @@ host_fn!(pub code_run_update(user_data: Arc<(String, DatabaseConnection)>; input
     let update: CodeRunUpdate = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid code_run_update input: {e}")))?;
     // An update that sets nothing is not a fenced-out write.
-    let Some((sql, args)) = code_run_update_statement(&update) else {
+    let Some((sql, args)) = code_run_update_statement(plugin_id, update) else {
         return ok_affected(1);
     };
     let args = serde_json::to_string(&args)?;
@@ -688,7 +694,7 @@ mod tests {
                         verdict: Some(Some(Verdict::Accepted)),
                         ..Default::default()
                     };
-                    let (sql, args) = code_run_update_statement(&update).expect("sets");
+                    let (sql, args) = code_run_update_statement("judge", update).expect("sets");
                     (inserted, execute(&db, sql, args))
                 })
                 .await
