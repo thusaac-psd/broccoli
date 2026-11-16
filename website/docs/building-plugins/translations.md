@@ -112,8 +112,9 @@ A judgement or code run your plugin ends as a system error can carry an
 `error_code`. The host records it under your plugin's id, so `NO_TEST_CASES`
 from `icpc` is stored as `icpc.NO_TEST_CASES` and never collides with another
 plugin's code or passes for one of the host's. The UI shows the translation of
-`<plugin id>.apiError.<CODE>` from your catalog, else the host's
-`apiError.<CODE>`, else a generic system-error message:
+`<plugin id>.apiError.<CODE>` from your catalog, and only that: a code your
+catalog does not translate shows a generic system-error message, never the
+host's text for a code of the same name. For example:
 
 ```rust
 host.submission.update(&SubmissionUpdate {

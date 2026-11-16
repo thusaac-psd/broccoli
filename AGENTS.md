@@ -265,6 +265,12 @@ binaries warn about every key they do not read.
   missing tool is the worker's fault, a hand-back that spends no retry; work
   already dispatched when the last capable worker stops taking work is handed
   back under `NO_CAPABLE_WORKER`.
+- Every judgement write a plugin makes goes through one rule,
+  `judging::as_recorded`: the plugin's error code is recorded as
+  `<plugin_id>.<CODE>`, a terminal write of an attempt the platform lost is
+  fenced out, and a system error under a dispatch fault carries the fault's bare
+  code. `SystemErrorClass` matches only bare host codes, so a plugin can never
+  write a code that hands back or stands; a new host code stays bare.
 - Every submit path (practice and contest submissions, code runs) accepts work
   through one rule, `plugin_lifecycle::accepting_handler`, which refuses a
   contest type no provider can judge now; a new submit path calls it too.

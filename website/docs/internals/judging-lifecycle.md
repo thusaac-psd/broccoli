@@ -216,6 +216,15 @@ system error carries the code and how the checker failed (staff only, like
 every system-error diagnostic). Any other system error is retried within the
 budget.
 
+The classes read only the host's own codes. Every write a plugin makes goes
+through one rule (`judging::as_recorded`): the plugin's own error code is
+recorded as `<plugin_id>.<CODE>`, and a fault the dispatch met decides the code
+of a system error, recorded bare. Every code of the hand-back and standing
+classes is bare, so no code a plugin writes, whatever its text, can class as
+anything but a failure of judging (pinned by
+`fault::no_code_a_plugin_writes_classes_as_a_host_code`). The UI translates a
+plugin's code from that plugin's pack only.
+
 A missing platform tool is the worker's fault, never the submission's. A worker
 that lacks one reads no task at all: it stays live, and its heartbeat lists the
 missing tools, so the System page shows it as not taking work. A task reaches

@@ -85,7 +85,7 @@ HookResponse::reject(
 
 ## 翻译评测错误
 
-插件以系统错误结束的评测记录或代码运行可以带上 `error_code`。主机会把它记在插件的 ID 下，因此 `icpc` 给出的 `NO_TEST_CASES` 会存为 `icpc.NO_TEST_CASES`，既不会与其他插件的代码冲突，也不会被当作主机自己的代码。界面依次显示词条目录中 `<插件 ID>.apiError.<CODE>` 的翻译、主机的 `apiError.<CODE>`，都没有时显示通用的系统错误提示：
+插件以系统错误结束的评测记录或代码运行可以带上 `error_code`。主机会把它记在插件的 ID 下，因此 `icpc` 给出的 `NO_TEST_CASES` 会存为 `icpc.NO_TEST_CASES`，既不会与其他插件的代码冲突，也不会被当作主机自己的代码。界面只显示词条目录中 `<插件 ID>.apiError.<CODE>` 的翻译：你的词条目录未翻译的代码显示通用的系统错误提示，绝不会显示主机对同名代码的说明。例如：
 
 ```rust
 host.submission.update(&SubmissionUpdate {
