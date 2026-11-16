@@ -13,7 +13,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use common::SubmissionDlqErrorCode;
+use broccoli_api_types::error::HostCode;
 use common::worker::OperationFault;
 use plugin_core::executor::CallLocals;
 
@@ -39,10 +39,10 @@ impl DispatchFault {
     ];
 
     /// The error code a judgement this fault ends carries.
-    pub fn code(self) -> &'static str {
+    pub fn code(self) -> HostCode {
         match self {
             Self::Operation(fault) => fault.code(),
-            Self::CheckerFailed => "CHECKER_FAILED",
+            Self::CheckerFailed => HostCode::CheckerFailed,
         }
     }
 }
@@ -170,10 +170,10 @@ impl SystemErrorClass {
         let faults = DispatchFault::ALL
             .into_iter()
             .filter(|f| Self::of_fault(*f) == self)
-            .map(DispatchFault::code);
+            .map(|f| f.code().as_str());
         match self {
             Self::Judging => Vec::new(),
-            Self::Stands => [SubmissionDlqErrorCode::PLUGIN_REFUSED]
+            Self::Stands => [HostCode::PluginRefused.as_str()]
                 .into_iter()
                 .chain(faults)
                 .collect(),
@@ -211,12 +211,16 @@ mod tests {
     fn every_fault_belongs_to_a_class_with_its_code() {
         for fault in DispatchFault::ALL {
             let class = SystemErrorClass::of_fault(fault);
-            assert!(class.codes().contains(&fault.code()), "{fault:?}");
-            assert_eq!(SystemErrorClass::of_code(fault.code()), class, "{fault:?}");
+            assert!(class.codes().contains(&fault.code().as_str()), "{fault:?}");
+            assert_eq!(
+                SystemErrorClass::of_code(fault.code().as_str()),
+                class,
+                "{fault:?}"
+            );
             assert!(!SystemErrorClass::Judging.sql_matches("c").contains("IN ()"));
         }
         assert_eq!(
-            SystemErrorClass::of_code(SubmissionDlqErrorCode::PLUGIN_REFUSED),
+            SystemErrorClass::of_code(HostCode::PluginRefused.as_str()),
             SystemErrorClass::Stands
         );
         for fault in OperationFault::ALL {

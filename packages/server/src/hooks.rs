@@ -1,3 +1,4 @@
+use crate::error::HostCode;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
@@ -324,7 +325,7 @@ fn parse_reject_detail(reason: &str) -> (String, String, u16, Option<serde_json:
         let code = v
             .get("code")
             .and_then(|c| c.as_str())
-            .unwrap_or("PLUGIN_REJECTED")
+            .unwrap_or(HostCode::PluginRejected.as_str())
             .to_string();
         let message = v
             .get("message")
@@ -339,7 +340,12 @@ fn parse_reject_detail(reason: &str) -> (String, String, u16, Option<serde_json:
         let details = v.get("details").cloned();
         (code, message, status_code, details)
     } else {
-        ("PLUGIN_REJECTED".into(), reason.to_string(), 400, None)
+        (
+            HostCode::PluginRejected.as_str().into(),
+            reason.to_string(),
+            400,
+            None,
+        )
     }
 }
 

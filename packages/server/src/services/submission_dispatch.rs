@@ -1,9 +1,9 @@
+use crate::error::HostCode;
 use crate::registry::ContestTypeRegistry;
 use broccoli_server_sdk::types::{
     AfterJudgingEvent, DetachedSubmissionCompletion, OnSubmissionInput, OnSubmissionOutput,
     SourceFile, TestCaseBodyRef, TestCaseRow,
 };
-use common::SubmissionDlqErrorCode;
 use common::db::DatabaseConnection;
 use sea_orm::prelude::Expr;
 use sea_orm::*;
@@ -182,12 +182,12 @@ async fn record_dispatch_failure(
     metrics: &common::metrics::Metrics,
     judgement: JudgementRef,
     faults: &DispatchFaults,
-    error_code: &'static str,
+    error_code: HostCode,
     error_message: &str,
 ) {
     let (error_code, error_message) = match faults.get() {
-        Some(fault) => (fault.fault.code(), fault.message),
-        None => (error_code, error_message.to_string()),
+        Some(fault) => (fault.fault.code().as_str(), fault.message),
+        None => (error_code.as_str(), error_message.to_string()),
     };
     let recovered = match judging::fail_dispatch(
         db,
@@ -287,7 +287,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &state.metrics,
                 judgement_ref,
                 &faults,
-                "NO_HANDLER_REGISTERED",
+                HostCode::NoHandlerRegistered,
                 &format!("No plugin registered for contest type {:?}", contest_type),
             )
             .await;
@@ -307,7 +307,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &state.metrics,
                 judgement_ref,
                 &faults,
-                "PROBLEM_NOT_FOUND",
+                HostCode::ProblemNotFound,
                 &format!("Problem {} not found", submission.problem_id),
             )
             .await;
@@ -320,7 +320,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &state.metrics,
                 judgement_ref,
                 &faults,
-                "DATABASE_ERROR",
+                HostCode::DatabaseError,
                 &format!("Failed to fetch problem: {}", e),
             )
             .await;
@@ -337,7 +337,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &state.metrics,
                 judgement_ref,
                 &faults,
-                "INVALID_FILES",
+                HostCode::InvalidFiles,
                 &format!("Failed to parse submission files: {}", e),
             )
             .await;
@@ -380,7 +380,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                     &state.metrics,
                     judgement_ref,
                     &faults,
-                    "DATABASE_ERROR",
+                    HostCode::DatabaseError,
                     &format!("Failed to query test cases: {}", e),
                 )
                 .await;
@@ -444,7 +444,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                         &state.metrics,
                         judgement_ref,
                         &faults,
-                        "BLOB_STORE_ERROR",
+                        HostCode::BlobStoreError,
                         &format!("Failed to store oversized inline test case input: {e}"),
                     )
                     .await;
@@ -467,7 +467,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                         &state.metrics,
                         judgement_ref,
                         &faults,
-                        "BLOB_STORE_ERROR",
+                        HostCode::BlobStoreError,
                         &format!("Failed to store oversized inline test case expected_output: {e}"),
                     )
                     .await;
@@ -516,7 +516,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &state.metrics,
                 judgement_ref,
                 &faults,
-                "SERIALIZATION_ERROR",
+                HostCode::SerializationError,
                 &format!("Failed to serialize input: {}", e),
             )
             .await;
@@ -588,9 +588,9 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                                 // its own code, which the SystemError-retry
                                 // reaper leaves alone.
                                 let error_code = if output.retryable {
-                                    "PLUGIN_ERROR"
+                                    HostCode::PluginError
                                 } else {
-                                    SubmissionDlqErrorCode::PLUGIN_REFUSED
+                                    HostCode::PluginRefused
                                 };
                                 record_dispatch_failure(
                                     &db,
@@ -611,7 +611,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                                     &metrics,
                                     judgement_ref,
                                     &faults,
-                                    "PLUGIN_ERROR",
+                                    HostCode::PluginError,
                                     "The platform lost the attempt",
                                 )
                                 .await;
@@ -642,7 +642,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                                 &metrics,
                                 judgement_ref,
                                 &faults,
-                                "PLUGIN_INVALID_OUTPUT",
+                                HostCode::PluginInvalidOutput,
                                 &format!("Plugin returned invalid output: {}", e),
                             )
                             .await;
@@ -664,7 +664,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                         &metrics,
                         judgement_ref,
                         &faults,
-                        "PLUGIN_EXECUTION_ERROR",
+                        HostCode::PluginExecutionError,
                         &e.to_string(),
                     )
                     .await;

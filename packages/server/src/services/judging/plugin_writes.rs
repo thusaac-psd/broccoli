@@ -260,8 +260,8 @@ fn push_double_opt_str<P: SqlBindSink>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::HostCode;
     use crate::services::judging::fault::DispatchFault;
-    use common::SubmissionDlqErrorCode;
     use common::worker::OperationFault;
 
     fn update(status: SubmissionStatus, verdict: Option<Verdict>) -> SubmissionUpdate {
@@ -345,9 +345,9 @@ mod tests {
     /// one of the host's classes.
     #[test]
     fn a_plugin_writing_a_host_code_records_it_as_its_own() {
-        for code in [SubmissionDlqErrorCode::PLUGIN_REFUSED, "OPERATION_LOST"] {
+        for code in [HostCode::PluginRefused, HostCode::OperationLost] {
             let mut u = update(SubmissionStatus::Judged, Some(Verdict::SystemError));
-            u.error_code = Some(Some(code.into()));
+            u.error_code = Some(Some(code.as_str().into()));
             assert_eq!(
                 as_recorded("judge", u, None).unwrap().error_code,
                 Some(Some(format!("judge.{code}")))

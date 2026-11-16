@@ -1,8 +1,9 @@
 //! Transitions of a dispatch unit (a judgement or a code run): claim, lease
 //! refresh, requeue, exhaust and dispatch failure.
 
+use crate::error::HostCode;
 use common::db::{DatabaseConnection, DatabaseTransaction};
-use common::{DlqErrorCode, StatusPhase, SubmissionDlqErrorCode, SubmissionStatus};
+use common::{DlqErrorCode, StatusPhase, SubmissionStatus};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, QueryFilter, Statement,
     TransactionTrait, Value,
@@ -701,7 +702,7 @@ impl Abandoned {
     fn exhausted(self, budget: RetryBudget) -> (&'static str, DlqErrorCode, String) {
         match self {
             Abandoned::LeaseLapsed { .. } => (
-                SubmissionDlqErrorCode::DISPATCH_RETRY_EXHAUSTED,
+                HostCode::DispatchRetryExhausted.as_str(),
                 DlqErrorCode::DispatchRetryExhausted,
                 format!(
                     "Dispatch retry limit exhausted after {} retries",
@@ -709,7 +710,7 @@ impl Abandoned {
                 ),
             ),
             Abandoned::Stuck { .. } => (
-                SubmissionDlqErrorCode::STUCK_JOB,
+                HostCode::StuckJob.as_str(),
                 DlqErrorCode::StuckJob,
                 format!("Exceeded {} retries", budget.max()),
             ),

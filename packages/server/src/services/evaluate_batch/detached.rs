@@ -1,4 +1,5 @@
 use super::*;
+use crate::error::HostCode;
 use crate::services::judging_sessions::RunningSession;
 
 pub fn start_detached_windowed_evaluate(
@@ -299,10 +300,10 @@ async fn run_detached_windowed_evaluate(
 
 /// `error_code` of a judgement whose judging session aborted before the
 /// plugin recorded a verdict.
-pub const SESSION_ABORTED: &str = "PLUGIN_SESSION_ABORTED";
+pub const SESSION_ABORTED: HostCode = HostCode::PluginSessionAborted;
 /// `error_code` of a judgement whose plugin ended its judging session without
 /// recording a verdict.
-pub const SESSION_ENDED_WITHOUT_VERDICT: &str = "PLUGIN_NO_VERDICT";
+pub const SESSION_ENDED_WITHOUT_VERDICT: HostCode = HostCode::PluginNoVerdict;
 
 /// Leave the judgement a session judged settled: finalize it as
 /// `SystemError` if the plugin did not (a no-op when it did, or when the
@@ -315,7 +316,7 @@ pub const SESSION_ENDED_WITHOUT_VERDICT: &str = "PLUGIN_NO_VERDICT";
 async fn finish_judgement(
     deps: &EvaluateHostDeps,
     completion: &DetachedSubmissionCompletion,
-    error_code: &str,
+    error_code: HostCode,
     error_message: &str,
 ) {
     let fault = deps
@@ -324,8 +325,8 @@ async fn finish_judgement(
         .as_ref()
         .and_then(|faults| faults.get());
     let (error_code, error_message) = match &fault {
-        Some(fault) => (fault.fault.code(), fault.message.as_str()),
-        None => (error_code, error_message),
+        Some(fault) => (fault.fault.code().as_str(), fault.message.as_str()),
+        None => (error_code.as_str(), error_message),
     };
     use crate::services::judging::DispatchFailed;
     match crate::services::judging::fail_dispatch(

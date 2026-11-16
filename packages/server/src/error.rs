@@ -4,7 +4,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_typed_multipart::TypedMultipartError;
-pub use broccoli_api_types::error::ErrorBody;
+pub use broccoli_api_types::error::{ErrorBody, HostCode};
 use common::storage::StorageError;
 use plugin_core::error::{AssetError, PluginError};
 use sea_orm::DbErr;
@@ -112,18 +112,21 @@ pub enum AppError {
 
 impl AppError {
     fn status_and_body(self) -> (StatusCode, ErrorBody) {
-        let simple = |code: &str, message: String| ErrorBody {
-            code: code.into(),
+        let simple = |code: HostCode, message: String| ErrorBody {
+            code: code.as_str().into(),
             message,
             details: None,
         };
 
         match self {
-            AppError::Validation(msg) => (StatusCode::BAD_REQUEST, simple("VALIDATION_ERROR", msg)),
+            AppError::Validation(msg) => (
+                StatusCode::BAD_REQUEST,
+                simple(HostCode::ValidationError, msg),
+            ),
             AppError::InvalidConfig(fields) => (
                 StatusCode::BAD_REQUEST,
                 ErrorBody {
-                    code: "VALIDATION_ERROR".into(),
+                    code: HostCode::ValidationError.as_str().into(),
                     message: format!(
                         "Config refused: {}",
                         plugin_core::config_schema::describe(&fields)
@@ -133,12 +136,12 @@ impl AppError {
             ),
             AppError::ConfigNamespaceNotFound(msg) => (
                 StatusCode::NOT_FOUND,
-                simple("CONFIG_NAMESPACE_NOT_FOUND", msg),
+                simple(HostCode::ConfigNamespaceNotFound, msg),
             ),
             AppError::ConfigWouldBreak(issues) => (
                 StatusCode::CONFLICT,
                 ErrorBody {
-                    code: "CONFIG_WOULD_BREAK".into(),
+                    code: HostCode::ConfigWouldBreak.as_str().into(),
                     message: format!(
                         "The change would leave {} stored config(s) refused by their plugins; \
                          send it again with force=true to make it anyway",
@@ -149,44 +152,50 @@ impl AppError {
             ),
             AppError::PayloadTooLarge(msg) => (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                simple("PAYLOAD_TOO_LARGE", msg),
+                simple(HostCode::PayloadTooLarge, msg),
             ),
             AppError::TokenMissing => (
                 StatusCode::UNAUTHORIZED,
-                simple("TOKEN_MISSING", "Authentication required".into()),
+                simple(HostCode::TokenMissing, "Authentication required".into()),
             ),
             AppError::TokenInvalid => (
                 StatusCode::UNAUTHORIZED,
-                simple("TOKEN_INVALID", "Invalid or expired token".into()),
+                simple(HostCode::TokenInvalid, "Invalid or expired token".into()),
             ),
             AppError::InvalidCredentials => (
                 StatusCode::UNAUTHORIZED,
-                simple("INVALID_CREDENTIALS", "Invalid username or password".into()),
+                simple(
+                    HostCode::InvalidCredentials,
+                    "Invalid username or password".into(),
+                ),
             ),
             AppError::PermissionDenied => (
                 StatusCode::FORBIDDEN,
-                simple("PERMISSION_DENIED", "Insufficient permissions".into()),
+                simple(
+                    HostCode::PermissionDenied,
+                    "Insufficient permissions".into(),
+                ),
             ),
             AppError::ContestNotRegistered => (
                 StatusCode::FORBIDDEN,
                 simple(
-                    "CONTEST_NOT_REGISTERED",
+                    HostCode::ContestNotRegistered,
                     "Register for this contest first".into(),
                 ),
             ),
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, simple("NOT_FOUND", msg)),
+            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, simple(HostCode::NotFound, msg)),
             AppError::MethodNotAllowed => (
                 StatusCode::METHOD_NOT_ALLOWED,
                 simple(
-                    "METHOD_NOT_ALLOWED",
+                    HostCode::MethodNotAllowed,
                     "HTTP method not allowed for this endpoint".into(),
                 ),
             ),
-            AppError::Conflict(msg) => (StatusCode::CONFLICT, simple("CONFLICT", msg)),
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, simple(HostCode::Conflict, msg)),
             AppError::RegistrationClosed => (
                 StatusCode::FORBIDDEN,
                 simple(
-                    "REGISTRATION_CLOSED",
+                    HostCode::RegistrationClosed,
                     "Self-registration is closed; ask the organisers for an account".into(),
                 ),
             ),
@@ -201,7 +210,7 @@ impl AppError {
                 (
                     StatusCode::CONFLICT,
                     ErrorBody {
-                        code: "USERNAME_TAKEN".into(),
+                        code: HostCode::UsernameTaken.as_str().into(),
                         message,
                         details,
                     },
@@ -210,52 +219,53 @@ impl AppError {
             AppError::PluginExists(id) => (
                 StatusCode::CONFLICT,
                 ErrorBody {
-                    code: "PLUGIN_EXISTS".into(),
+                    code: HostCode::PluginExists.as_str().into(),
                     message: format!(
                         "Plugin '{id}' already exists; upload it as a replacement instead"
                     ),
                     details: Some(serde_json::json!({ "plugin_id": id })),
                 },
             ),
-            AppError::PluginNotReady(msg) => {
-                (StatusCode::BAD_REQUEST, simple("PLUGIN_NOT_READY", msg))
-            }
+            AppError::PluginNotReady(msg) => (
+                StatusCode::BAD_REQUEST,
+                simple(HostCode::PluginNotReady, msg),
+            ),
             AppError::PluginLoadFailed(msg) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                simple("PLUGIN_LOAD_FAILED", msg),
+                simple(HostCode::PluginLoadFailed, msg),
             ),
             AppError::PluginUploadDisabled => (
                 StatusCode::FORBIDDEN,
                 simple(
-                    "PLUGIN_UPLOAD_DISABLED",
+                    HostCode::PluginUploadDisabled,
                     "Plugin uploads are disabled on this server".into(),
                 ),
             ),
             AppError::RateLimited { retry_after } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 simple(
-                    "RATE_LIMITED",
+                    HostCode::RateLimited,
                     format!("Rate limit exceeded. Try again in {} seconds", retry_after),
                 ),
             ),
             AppError::CheckerSourceUnsupported(id) => (
                 StatusCode::CONFLICT,
                 simple(
-                    "CHECKER_SOURCE_UNSUPPORTED",
+                    HostCode::CheckerSourceUnsupported,
                     format!("Problem {id}'s checker format takes no checker source"),
                 ),
             ),
             AppError::ContestTypeLocked => (
                 StatusCode::CONFLICT,
                 simple(
-                    "CONTEST_TYPE_LOCKED",
+                    HostCode::ContestTypeLocked,
                     "The contest type cannot change once the contest has a submission".into(),
                 ),
             ),
             AppError::ContestTypeUnavailable(contest_type) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 simple(
-                    "CONTEST_TYPE_UNAVAILABLE",
+                    HostCode::ContestTypeUnavailable,
                     format!(
                         "This server cannot accept '{contest_type}' submissions right now; \
                          retry in {CONTEST_TYPE_RETRY_AFTER_SECS} seconds"
@@ -265,7 +275,7 @@ impl AppError {
             AppError::ContestTypeDisabled(contest_type) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 simple(
-                    "CONTEST_TYPE_DISABLED",
+                    HostCode::ContestTypeDisabled,
                     format!(
                         "'{contest_type}' submissions are closed: the plugin that judges them \
                          is disabled"
@@ -275,7 +285,7 @@ impl AppError {
             AppError::Overloaded { retry_after } => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 simple(
-                    "QUEUE_OVERLOADED",
+                    HostCode::QueueOverloaded,
                     format!(
                         "Server is temporarily overloaded; retry in {} seconds",
                         retry_after
@@ -285,7 +295,7 @@ impl AppError {
             AppError::PluginUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 simple(
-                    "PLUGIN_UNAVAILABLE",
+                    HostCode::PluginUnavailable,
                     format!(
                         "A plugin this request needs is busy; retry in \
                          {PLUGIN_RETRY_AFTER_SECS} seconds"
@@ -295,7 +305,7 @@ impl AppError {
             AppError::PluginDisabled(plugin_id) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 simple(
-                    "PLUGIN_DISABLED",
+                    HostCode::PluginDisabled,
                     format!(
                         "The plugin '{plugin_id}' is disabled, so what it provides is \
                          unavailable until an administrator enables it"
@@ -305,7 +315,7 @@ impl AppError {
             AppError::StorageUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 simple(
-                    "STORAGE_UNAVAILABLE",
+                    HostCode::StorageUnavailable,
                     format!(
                         "File storage is not answering; retry in {STORAGE_RETRY_AFTER_SECS} seconds"
                     ),
@@ -333,18 +343,18 @@ impl AppError {
             AppError::IdempotencyKeyInProgress => (
                 StatusCode::CONFLICT,
                 simple(
-                    "IDEMPOTENCY_KEY_IN_PROGRESS",
+                    HostCode::IdempotencyKeyInProgress,
                     "A request with this idempotency key is already being processed".into(),
                 ),
             ),
             AppError::IdempotencyKeyMismatch(msg) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                simple("IDEMPOTENCY_KEY_MISMATCH", msg),
+                simple(HostCode::IdempotencyKeyMismatch, msg),
             ),
             AppError::IdempotencyResponseTooLarge => (
                 StatusCode::CONFLICT,
                 simple(
-                    "IDEMPOTENCY_RESPONSE_TOO_LARGE",
+                    HostCode::IdempotencyResponseTooLarge,
                     "Idempotent response too large to replay; original request \
                      succeeded but cannot be safely re-issued"
                         .into(),
@@ -353,7 +363,7 @@ impl AppError {
             AppError::IdempotencyResponseNotStored => (
                 StatusCode::CONFLICT,
                 simple(
-                    "IDEMPOTENCY_RESPONSE_NOT_STORED",
+                    HostCode::IdempotencyResponseNotStored,
                     "Idempotent response carries credentials and is never stored; \
                      original request succeeded but cannot be replayed"
                         .into(),
@@ -362,7 +372,7 @@ impl AppError {
             AppError::IdempotencyOutcomeUnknown => (
                 StatusCode::CONFLICT,
                 simple(
-                    "IDEMPOTENCY_OUTCOME_UNKNOWN",
+                    HostCode::IdempotencyOutcomeUnknown,
                     "The original request with this idempotency key failed after it started \
                      and may have taken effect; check its result and retry with a new key"
                         .into(),
@@ -372,7 +382,10 @@ impl AppError {
                 tracing::error!("Internal error: {}", detail);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    simple("INTERNAL_ERROR", "An unexpected error occurred".into()),
+                    simple(
+                        HostCode::InternalError,
+                        "An unexpected error occurred".into(),
+                    ),
                 )
             }
         }

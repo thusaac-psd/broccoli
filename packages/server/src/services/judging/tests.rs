@@ -4,6 +4,8 @@ use chrono::Utc;
 use common::db::DatabaseConnection;
 use common::worker::OperationFault;
 use common::{DlqMessageType, SubmissionStatus, Verdict};
+
+use crate::error::HostCode;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait,
     QueryFilter, Set, Statement, TransactionTrait,
@@ -574,8 +576,8 @@ async fn a_contestant_verdict_or_a_failure_that_stands_is_never_retried() {
     finish(&db, &wrong.judgement, Verdict::WrongAnswer).await;
     let mut standing = Vec::new();
     for code in [
-        common::SubmissionDlqErrorCode::PLUGIN_REFUSED,
-        DispatchFault::CheckerFailed.code(),
+        HostCode::PluginRefused.as_str(),
+        DispatchFault::CheckerFailed.code().as_str(),
     ] {
         let (_, _) = new_submission(&db).await;
         let claimed = claim_one(&db, "srv").await;
@@ -1170,7 +1172,7 @@ async fn a_judgement_the_platform_lost_is_handed_back_without_a_verdict_or_a_ret
                 Unit::Judgement,
                 claimed.judgement.id,
                 claimed.judgement.judge_epoch,
-                fault.code(),
+                fault.code().as_str(),
                 "the queue",
             )
             .await

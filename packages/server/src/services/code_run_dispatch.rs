@@ -1,3 +1,4 @@
+use crate::error::HostCode;
 use broccoli_server_sdk::types::{
     OnCodeRunInput, OnCodeRunOutput, SourceFile, TestCaseBodyRef, TestCaseRow,
 };
@@ -16,12 +17,19 @@ use crate::utils::judging::files_log_summary;
 async fn mark_code_run_error_or_log(
     db: &common::db::DatabaseConnection,
     code_run_id: i32,
-    code: &str,
+    code: HostCode,
     message: &str,
     judge_epoch: i32,
 ) {
-    if let Err(e) =
-        judging::fail_dispatch(db, Unit::CodeRun, code_run_id, judge_epoch, code, message).await
+    if let Err(e) = judging::fail_dispatch(
+        db,
+        Unit::CodeRun,
+        code_run_id,
+        judge_epoch,
+        code.as_str(),
+        message,
+    )
+    .await
     {
         error!(
             code_run_id,
@@ -68,7 +76,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
             mark_code_run_error_or_log(
                 &state.db,
                 code_run.id,
-                "NO_HANDLER_REGISTERED",
+                HostCode::NoHandlerRegistered,
                 &format!(
                     "No plugin registered for contest type {:?}",
                     code_run.contest_type
@@ -90,7 +98,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
             mark_code_run_error_or_log(
                 &state.db,
                 code_run.id,
-                "PROBLEM_NOT_FOUND",
+                HostCode::ProblemNotFound,
                 &format!("Problem {} not found", code_run.problem_id),
                 code_run.judge_epoch,
             )
@@ -102,7 +110,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
             mark_code_run_error_or_log(
                 &state.db,
                 code_run.id,
-                "DATABASE_ERROR",
+                HostCode::DatabaseError,
                 &format!("Failed to fetch problem: {}", e),
                 code_run.judge_epoch,
             )
@@ -118,7 +126,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
             mark_code_run_error_or_log(
                 &state.db,
                 code_run.id,
-                "INVALID_FILES",
+                HostCode::InvalidFiles,
                 &format!("Failed to parse code run files: {}", e),
                 code_run.judge_epoch,
             )
@@ -170,7 +178,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
             mark_code_run_error_or_log(
                 &state.db,
                 code_run.id,
-                "SERIALIZATION_ERROR",
+                HostCode::SerializationError,
                 &format!("Failed to serialize input: {}", e),
                 code_run.judge_epoch,
             )
@@ -227,7 +235,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                             mark_code_run_error_or_log(
                                 &db,
                                 code_run_id,
-                                "PLUGIN_ERROR",
+                                HostCode::PluginError,
                                 &output
                                     .error_message
                                     .unwrap_or_else(|| "Unknown plugin error".to_string()),
@@ -248,7 +256,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                         mark_code_run_error_or_log(
                             &db,
                             code_run_id,
-                            "PLUGIN_INVALID_OUTPUT",
+                            HostCode::PluginInvalidOutput,
                             &format!("Plugin returned invalid output: {}", e),
                             judge_epoch,
                         )
@@ -265,7 +273,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                     mark_code_run_error_or_log(
                         &db,
                         code_run_id,
-                        "DISPATCH_TIMEOUT",
+                        HostCode::DispatchTimeout,
                         &e.to_string(),
                         judge_epoch,
                     )
@@ -276,7 +284,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                     mark_code_run_error_or_log(
                         &db,
                         code_run_id,
-                        "PLUGIN_EXECUTION_ERROR",
+                        HostCode::PluginExecutionError,
                         &e.to_string(),
                         judge_epoch,
                     )

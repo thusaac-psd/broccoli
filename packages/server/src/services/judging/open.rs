@@ -1,7 +1,8 @@
 //! Transitions that create judgements or move "current" between them.
 
+use crate::error::HostCode;
+use common::SubmissionStatus;
 use common::db::DatabaseTransaction;
-use common::{SubmissionDlqErrorCode, SubmissionStatus};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, ExprTrait,
@@ -224,7 +225,7 @@ async fn supersede_current_judgement<C: ConnectionTrait>(
            WHERE submission_id = $4 AND is_current = TRUE"#,
         [
             SubmissionStatus::SystemError.to_string().into(),
-            SubmissionDlqErrorCode::SUPERSEDED.into(),
+            HostCode::Superseded.as_str().into(),
             reason.message().into(),
             submission_id.into(),
         ],

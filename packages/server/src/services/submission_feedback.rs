@@ -1,6 +1,7 @@
 //! Atomic admission and durable, plugin-owned public feedback.
 use crate::entity::{plugin_storage, submission};
 use crate::error::AppError;
+use crate::error::HostCode;
 use crate::state::AppState;
 use crate::utils::advisory_lock;
 use broccoli_server_sdk::types::{
@@ -49,9 +50,9 @@ fn parse_outcome(value: &str) -> Result<FeedbackOutcome, DbErr> {
         .ok_or_else(|| DbErr::Custom(format!("Unknown submission feedback outcome {value:?}")))
 }
 
-fn rejected(code: &str, message: &str) -> AppError {
+fn rejected(code: HostCode, message: &str) -> AppError {
     AppError::PluginRejection {
-        code: code.into(),
+        code: code.as_str().into(),
         message: message.into(),
         status_code: 409,
         details: None,
@@ -75,7 +76,7 @@ pub async fn insert_admitted(
         let (generation, pending) = slot_state(&txn, plugin_id, slot.key()).await?;
         if generation != slot.generation() || pending.is_some() {
             return Err(rejected(
-                "SUBMISSION_IN_FLIGHT",
+                HostCode::SubmissionInFlight,
                 "Submission slot changed; refresh and retry.",
             ));
         }
@@ -90,13 +91,13 @@ pub async fn insert_admitted(
     .await?
     .ok_or_else(|| {
         rejected(
-            "SUBMISSION_STATE_CHANGED",
+            HostCode::SubmissionStateChanged,
             "Admission state changed; refresh and retry.",
         )
     })?;
     if crate::utils::text::plugin_storage_text(&row.data) != admission.guard.expected_value() {
         return Err(rejected(
-            "SUBMISSION_STATE_CHANGED",
+            HostCode::SubmissionStateChanged,
             "Admission state changed; refresh and retry.",
         ));
     }
@@ -119,7 +120,7 @@ pub async fn insert_admitted(
         .is_some_and(|end| i128::from(now.timestamp_micros()) >= i128::from(end) * 1000)
     {
         return Err(rejected(
-            "SUBMISSION_TOO_LATE",
+            HostCode::SubmissionTooLate,
             "Submission admission window has closed.",
         ));
     }
