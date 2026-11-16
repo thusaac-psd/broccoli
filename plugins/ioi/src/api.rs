@@ -2,8 +2,6 @@
 use std::collections::HashMap;
 
 #[cfg(target_arch = "wasm32")]
-use broccoli_server_sdk::permissions as perm;
-#[cfg(target_arch = "wasm32")]
 use broccoli_server_sdk::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use serde::{Deserialize, Serialize};
@@ -16,9 +14,7 @@ use crate::config::{ContestConfig, round_score};
 #[cfg(any(target_arch = "wasm32", test))]
 use crate::config::FeedbackLevel;
 #[cfg(target_arch = "wasm32")]
-use crate::feedback::{
-    can_view_privileged_submission_feedback, viewer_has_token_feedback_for_submission,
-};
+use crate::feedback::viewer_has_token_feedback_for_submission;
 #[cfg(target_arch = "wasm32")]
 use crate::score::score_submission_subtask_details;
 #[cfg(target_arch = "wasm32")]
@@ -222,7 +218,7 @@ pub(crate) fn handle_task_config(
     let (test_cases_list, effective_subtasks) =
         load_effective_subtasks(host, problem_id, &task_config)?;
 
-    let expose_full_task_feedback = can_view_privileged_submission_feedback(req)
+    let expose_full_task_feedback = req.is_staff()
         || (tokens_enabled(&contest_config) && req.user_id().is_some())
         || contest_config.feedback_level == FeedbackLevel::Full;
 
@@ -323,7 +319,7 @@ pub(crate) fn handle_submission_status(
 
     let contest_config: ContestConfig = contest::load_config(host, contest_id)?;
 
-    let can_view_full_feedback = can_view_privileged_submission_feedback(req)
+    let can_view_full_feedback = req.is_staff()
         || match last_submission_id {
             Some(sid) => {
                 tokens_enabled(&contest_config)
@@ -481,7 +477,7 @@ pub(crate) fn handle_scoreboard(
 
     // Before the contest ends, full scoreboard visibility is controlled by
     // contest config; organizers always retain full visibility for supervision.
-    let can_view_all = req.has_permission(perm::CONTEST_MANAGE);
+    let can_view_all = req.is_staff();
     let full_scoreboard_visible = full_scoreboard_visible_for_phase(
         phase,
         can_view_all,
@@ -682,7 +678,7 @@ pub(crate) fn handle_submission_subtask_scores(
         .ok_or_else(|| PluginHttpResponse::error(404, "Submission not found"))?;
     let problem_id = sub_info.problem_id;
 
-    let can_view_all_submissions = can_view_privileged_submission_feedback(req);
+    let can_view_all_submissions = req.is_staff();
 
     // Only spend the storage read on a token lookup when it could actually
     // change the outcome for `subtask_scores_access_decision` below.

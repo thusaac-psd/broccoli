@@ -1,5 +1,6 @@
 import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { isStaff } from '@broccoli/web-sdk/permissions';
 import { useSlotPermissions } from '@broccoli/web-sdk/slot';
 import {
   isTerminalStatus,
@@ -25,7 +26,6 @@ import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { resolveFeedbackVisibility } from './feedback-visibility';
 import { useIoiApi } from './hooks/useIoiApi';
 import { useIoiContestInfo } from './hooks/useIoiContestInfo';
-import { canViewPrivilegedSubmissionFeedback } from './permissions';
 import type {
   SubtaskInfo,
   SubtaskScoreEntry,
@@ -733,8 +733,8 @@ export function IoiSubmissionResult({
   const queryClient = useQueryClient();
   const { t } = useTranslation();
   const slotPermissions = useSlotPermissions();
-  const hasPrivilegedSubmissionAccess = canViewPrivilegedSubmissionFeedback(
-    slotPermissions?.permissions,
+  const hasPrivilegedSubmissionAccess = isStaff(
+    slotPermissions?.permissions ?? [],
   );
 
   // Invalidate submission-status when a submission reaches terminal status.

@@ -77,6 +77,9 @@ the plugin governs are listed with their plugin-governed fields `null` and a
 `withheld` field saying why, and a read whose whole answer is the plugin's
 answers one of the `503`s above. A visibility query is never asked about staff
 (`contest:manage` or `submission:view_all`); they see what the host rules show.
+A route that shows staff more than a contestant decides staff the same way,
+with `req.is_staff()`, and a plugin frontend with `isStaff` from
+`@broccoli/web-sdk/permissions`.
 
 A contest that is not activated or already deactivated is visible to
 `contest:manage` only. A private contest is visible to its participants and to

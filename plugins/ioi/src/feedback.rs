@@ -1,8 +1,6 @@
 #[cfg(any(target_arch = "wasm32", test))]
 use std::collections::HashMap;
 
-#[cfg(target_arch = "wasm32")]
-use broccoli_server_sdk::permissions as perm;
 // Host/PluginHttpRequest/SdkError/WireDecision/VisibilityQueryInput/Params are
 // used by both the wasm32-gated handlers below and the #[cfg(test)] unit
 // tests in `visibility_tests`, which exercise `decide_visibility_decisions`
@@ -23,11 +21,6 @@ use crate::load_token_state;
 use crate::scoreboard::full_scoreboard_visible_for_phase;
 #[cfg(any(target_arch = "wasm32", test))]
 use crate::tokens::TokenState;
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn can_view_privileged_submission_feedback(req: &PluginHttpRequest) -> bool {
-    req.has_permission(perm::CONTEST_MANAGE) || req.has_permission(perm::SUBMISSION_VIEW_ALL)
-}
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn viewer_has_token_feedback_for_submission(

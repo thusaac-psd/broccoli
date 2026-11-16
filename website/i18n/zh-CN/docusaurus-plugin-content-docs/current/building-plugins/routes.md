@@ -57,7 +57,7 @@ contest_type = "ioi"
 | `503` | `PLUGIN_DISABLED` | 你的插件，或决定谁可以读取该路由题目的插件，已被禁用。不带 `Retry-After`：在管理员重新启用之前不会改变。 |
 | `503` | `PLUGIN_UNAVAILABLE` | 决定谁可以读取该路由题目的插件当前无法答复。带有 `Retry-After`。 |
 
-比赛类型插件被禁用或未加载时，服务器保持其比赛可读，并以 `plugin_outage` 标记。该插件管辖的题目和提交仍会列出，其插件管辖的字段为 `null`，并由 `withheld` 字段说明原因；整个答复都取决于该插件的读取会返回上表中的某个 `503`。可见性查询从不会被问到管理人员（`contest:manage` 或 `submission:view_all`），他们看到的是主机规则所显示的内容。
+比赛类型插件被禁用或未加载时，服务器保持其比赛可读，并以 `plugin_outage` 标记。该插件管辖的题目和提交仍会列出，其插件管辖的字段为 `null`，并由 `withheld` 字段说明原因；整个答复都取决于该插件的读取会返回上表中的某个 `503`。可见性查询从不会被问到管理人员（`contest:manage` 或 `submission:view_all`），他们看到的是主机规则所显示的内容。向管理人员展示比参赛者更多内容的路由也以同样的方式判断管理人员：后端用 `req.is_staff()`，插件前端用 `@broccoli/web-sdk/permissions` 中的 `isStaff`。
 
 未激活或已停用的比赛仅对 `contest:manage` 可见。私有比赛对其参赛者和 `contest:manage` 可见。
 

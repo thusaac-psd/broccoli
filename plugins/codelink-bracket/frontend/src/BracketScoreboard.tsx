@@ -2,7 +2,7 @@ import { useServerNow } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
+import { isStaff } from '@broccoli/web-sdk/permissions';
 import {
   Button,
   QueryErrorState,
@@ -78,7 +78,7 @@ export function BracketScoreboard({
 
   const { data, refreshError, retry } = bracket;
   const viewerId = auth.user?.id ?? null;
-  const isStaff = (auth.user?.permissions ?? []).includes(CONTEST_MANAGE);
+  const staff = isStaff(auth.user?.permissions ?? []);
 
   const stale = refreshError != null && <RefreshFailedNotice retry={retry} />;
 
@@ -117,7 +117,7 @@ export function BracketScoreboard({
           stageCount={Math.log2(data.player_count)}
           thirdPlace={data.third_place_enabled ?? false}
           contestEndMs={data.contest_end_ms}
-          isStaff={isStaff}
+          staff={staff}
           presenting={presenting}
           onTogglePresent={() =>
             presenting
@@ -160,7 +160,7 @@ function SummaryBar({
   stageCount,
   thirdPlace,
   contestEndMs,
-  isStaff,
+  staff,
   presenting,
   onTogglePresent,
 }: {
@@ -168,7 +168,7 @@ function SummaryBar({
   stageCount: number;
   thirdPlace: boolean;
   contestEndMs?: number | null;
-  isStaff: boolean;
+  staff: boolean;
   presenting: boolean;
   onTogglePresent: () => void;
 }) {
@@ -207,7 +207,7 @@ function SummaryBar({
         )}
       </div>
       <div className="ml-auto flex items-center gap-3">
-        {isStaff && !presenting && endWarning && (
+        {staff && !presenting && endWarning && (
           <div className="flex items-center gap-2 rounded-lg bg-amber-500/10 px-3 py-1.5 text-sm font-medium text-amber-800 dark:text-amber-200">
             <Clock className="h-4 w-4" />
             {endWarning.kind === 'ended'
@@ -220,7 +220,7 @@ function SummaryBar({
           </div>
         )}
         {/* Staff-only signal: kept off the projected view. */}
-        {isStaff && !presenting && attention > 0 && (
+        {staff && !presenting && attention > 0 && (
           <div className="flex items-center gap-2 rounded-lg bg-red-500/10 px-3 py-1.5 text-sm font-medium text-red-700 dark:text-red-300">
             <AlertTriangle className="h-4 w-4" />
             {t('codelink-bracket.summary.attention', { count: attention })}

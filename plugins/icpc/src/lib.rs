@@ -735,8 +735,6 @@ mod sql_tests {
 #[cfg(any(target_arch = "wasm32", test))]
 use std::collections::HashMap;
 
-#[cfg(target_arch = "wasm32")]
-use broccoli_server_sdk::permissions as perm;
 #[cfg(any(target_arch = "wasm32", test))]
 use broccoli_server_sdk::prelude::*;
 #[cfg(target_arch = "wasm32")]
@@ -1322,7 +1320,7 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     // Fetch participants (during before/during phase, only fetch the requesting user
     // unless they have contest:manage so organizers can supervise live scoring).
     let phase = info.phase.stage();
-    let can_view_all = req.has_permission(perm::CONTEST_MANAGE);
+    let can_view_all = req.is_staff();
     let restricted_user_id =
         match standings_restriction(phase, can_view_all, config.public_standings, req.user_id()) {
             StandingsRestriction::Unrestricted => None,
