@@ -8,6 +8,8 @@ import { mockApi, NOW, PLUGIN_ROUTES } from './api';
 
 const COOLDOWN =
   /^\/p\/cooldown\/api\/plugins\/cooldown\/contests\/1\/problems\/(\d+)\/status$/;
+const LIMIT =
+  /^\/p\/submission-limit\/api\/plugins\/submission-limit\/contests\/1\/problems\/(\d+)\/status$/;
 
 const problemOf = (url: URL) => Number(url.pathname.split('/').at(-2));
 
@@ -89,5 +91,36 @@ test("one problem's cooldown does not block Submit on the next problem", async (
   );
   await backToProblemTwo(page, 'Wait 30s');
   await expect(page.getByText('Wait 30s')).toHaveCount(0);
+  await expect(submit(page)).toBeEnabled();
+});
+
+test("one problem's submission limit does not block Submit on the next problem", async ({
+  page,
+}) => {
+  await page.clock.install({ time: NOW });
+  await mockApi(page, 'contestant', {
+    plugins: ['submission-limit'],
+    pluginRoutes: [
+      ...PLUGIN_ROUTES,
+      [
+        'GET',
+        LIMIT,
+        () => ({
+          enabled: true,
+          submissions_made: 5,
+          max_submissions: 5,
+          remaining: 0,
+          unlimited: false,
+          source: 'contest',
+        }),
+      ],
+    ],
+  });
+  await page.route(
+    '**/submission-limit/contests/1/problems/2/status',
+    (route) => route.fulfill(UNAVAILABLE),
+  );
+  await backToProblemTwo(page, '5 / 5');
+  await expect(page.getByText('5 / 5')).toHaveCount(0);
   await expect(submit(page)).toBeEnabled();
 });
