@@ -10,13 +10,14 @@
 
 #![allow(dead_code)]
 
+use common::storage::filesystem::FilesystemBlobStore;
 use common::worker::{Executor, Task, TaskResult};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use worker::models::operation::executor::OperationTaskExecutor;
-use worker::models::operation::file_cacher::UnavailableFileCacher;
+use worker::models::operation::file_cacher::{BlobStoreFileCacher, UnavailableFileCacher};
 use worker::models::operation::handler::OperationHandler;
 use worker::models::operation::models::{
     Channel, Environment, IOConfig, IOTarget, MountSource, MountSpec, OperationResult,
@@ -60,11 +61,16 @@ macro_rules! sandbox_suite {
             echo_succeeds,
             nonzero_exit_fails_the_step,
             large_stdout_is_returned_as_capped_preview,
+            a_collected_redirect_that_fits_inline_is_not_uploaded,
+            a_collected_redirect_too_large_to_inline_is_uploaded,
+            a_collected_redirect_the_inline_text_rewrites_is_uploaded,
             blob_input_fails_when_blob_storage_is_unavailable,
             platform_tool_mount_executes_tool_inside_box,
             platform_tool_mount_without_configured_tools_dir_fails_the_step,
             empty_pipe_name_fails_the_step,
             two_envs_share_a_mapped_directory,
+            a_later_operation_never_sees_files_an_earlier_one_left,
+            a_many_process_operation_gets_a_box_for_every_environment,
             shared_channel_fifo_between_two_environments,
             channel_pipe_io_redirect_between_environments,
             non_channel_pipe_still_works_with_channels_present,
@@ -321,6 +327,75 @@ pub async fn large_stdout_is_returned_as_capped_preview<B: Backend>() {
             .sandbox_result
             .stdout
             .contains("... (truncated)")
+    );
+}
+
+/// Run `operation` on a handler whose blob store is a fresh local directory.
+async fn run_with_blob_store<B: Backend>(operation: OperationTask) -> OperationResult {
+    let dir = unique_temp_dir("collect-blobs");
+    let store = Arc::new(
+        FilesystemBlobStore::new(dir.join("blobs"), 10 * 1024 * 1024)
+            .await
+            .unwrap(),
+    );
+    let file_cacher = BlobStoreFileCacher::new(store, dir.join("cache"), 10 * 1024 * 1024, None)
+        .await
+        .unwrap();
+    let (metrics, _registry) = common::observability::init_metrics("broccoli-worker-test");
+    let result = OperationHandler::new(
+        B::manager(),
+        Box::new(file_cacher),
+        Box::new(NoopTaskCacheStore),
+        ToolchainFingerprint::Known(String::new()),
+        metrics,
+    )
+    .execute(&operation)
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+/// A step writing `command`'s stderr to `stderr.txt` and collecting it.
+fn collected_stderr(command: &str) -> OperationTask {
+    let mut step = multi_process(sh("step-1", "env-1", command));
+    step.io.stderr = file("stderr.txt");
+    step.collect = vec!["stderr.txt".to_string()];
+    operation(vec![env("env-1")], vec![step], vec![])
+}
+
+pub async fn a_collected_redirect_that_fits_inline_is_not_uploaded<B: Backend>() {
+    let result = run_with_blob_store::<B>(collected_stderr("printf 'small diagnostics' >&2")).await;
+
+    let step = &result.task_results["step-1"];
+    assert!(step.success, "{step:?}");
+    assert_eq!(step.sandbox_result.stderr, "small diagnostics");
+    assert!(step.collected_outputs.is_empty(), "{step:?}");
+}
+
+pub async fn a_collected_redirect_too_large_to_inline_is_uploaded<B: Backend>() {
+    let command = "awk 'BEGIN { for (i = 0; i < 70000; i++) printf \"e\" > \"/dev/stderr\" }'";
+    let result = run_with_blob_store::<B>(collected_stderr(command)).await;
+
+    let step = &result.task_results["step-1"];
+    assert!(step.success, "{step:?}");
+    assert!(step.sandbox_result.stderr.ends_with("... (truncated)"));
+    assert!(
+        step.collected_outputs.contains_key("stderr.txt"),
+        "{step:?}"
+    );
+}
+
+pub async fn a_collected_redirect_the_inline_text_rewrites_is_uploaded<B: Backend>() {
+    // The inline text replaces NUL, so it does not hold this file's bytes.
+    let result = run_with_blob_store::<B>(collected_stderr("printf 'a\\000b' >&2")).await;
+
+    let step = &result.task_results["step-1"];
+    assert!(step.success, "{step:?}");
+    assert_eq!(step.sandbox_result.stderr, "a\u{FFFD}b");
+    assert!(
+        step.collected_outputs.contains_key("stderr.txt"),
+        "{step:?}"
     );
 }
 
@@ -612,6 +687,57 @@ pub async fn two_envs_share_a_mapped_directory<B: Backend>() {
     assert_eq!(consumer.sandbox_result.exit_code, Some(0));
 
     let _ = std::fs::remove_dir_all(&shared_dir);
+}
+
+/// A communication problem runs one box per contestant process (up to 64),
+/// plus the manager and its compile box, so one operation can need far more
+/// boxes than a batch problem. Every environment must get its own box, and
+/// nothing may hand two of them the same box id: `isolate --init` on a box in
+/// use re-initialises it under the running program.
+pub async fn a_many_process_operation_gets_a_box_for_every_environment<B: Backend>() {
+    const ENVIRONMENTS: usize = 66;
+    let ids: Vec<String> = (0..ENVIRONMENTS).map(|i| format!("env-{i}")).collect();
+    let result = handler::<B>(None)
+        .execute(&operation(
+            ids.iter().map(|id| env(id)).collect(),
+            ids.iter()
+                // Each box writes its own name, then reads it back: a box
+                // re-initialised under a running step loses the file.
+                .map(|id| sh(id, id, &format!("echo {id} > mine; grep -qx {id} mine")))
+                .collect(),
+            vec![],
+        ))
+        .await
+        .unwrap();
+
+    assert!(result.success, "{result:?}");
+    assert_eq!(result.task_results.len(), ENVIRONMENTS);
+}
+
+pub async fn a_later_operation_never_sees_files_an_earlier_one_left<B: Backend>() {
+    // One handler, so the second operation gets the box ids the first freed.
+    let handler = handler::<B>(None);
+    let two_boxes = |command: &str| {
+        operation(
+            vec![env("solution"), env("checker")],
+            vec![
+                sh("solution", "solution", command),
+                sh("checker", "checker", command),
+            ],
+            vec![],
+        )
+    };
+
+    let first = handler
+        .execute(&two_boxes("echo answer > leftover"))
+        .await
+        .unwrap();
+    assert!(first.success, "{first:?}");
+    let second = handler
+        .execute(&two_boxes("test ! -e leftover"))
+        .await
+        .unwrap();
+    assert!(second.success, "a box kept a file: {second:?}");
 }
 
 pub async fn shared_channel_fifo_between_two_environments<B: Backend>() {

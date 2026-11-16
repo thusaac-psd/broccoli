@@ -21,6 +21,8 @@ tmp/
 /vendor
 
 .github/*
+!.github/actions/
+!.github/actions/**
 !.github/workflows/
 !.github/workflows/**
 

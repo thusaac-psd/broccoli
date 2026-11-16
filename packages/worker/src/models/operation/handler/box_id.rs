@@ -1,126 +1,224 @@
-use std::collections::BTreeSet;
-use std::sync::Mutex;
+//! Host-wide isolate box ids.
+//!
+//! isolate box ids are one namespace per host: box `N` lives at
+//! `<box_root>/N` and runs as uid `first_uid + N`, and `isolate --init` on a
+//! box another process is using silently re-initialises it. A worker
+//! therefore holds every box id it uses as an exclusive `flock` on that id's
+//! lock file in a directory all workers on the host share. The kernel drops
+//! the lock when the guard closes the file or the worker dies, so a crashed
+//! worker frees its ids at once.
+//!
+//! `flock` locks belong to an open file, so a second open of the same lock
+//! file, in the same process or another, cannot take a held id: the lock is
+//! the one record of which ids are live. That makes the lock directory part
+//! of the guarantee: it must be a directory nothing unlinks under a running
+//! worker, because a new lock file at the same path is a new inode and its
+//! lock would be free while the old one is still held. Reserving an id
+//! refreshes its lock file's mtime, so an age-based temp-file cleaner leaves
+//! the ids in use alone; the shipped deployment templates point workers at a
+//! persistent volume instead. An operation takes all its ids at
+//! once or none, so two workers that each hold part of what they need never
+//! wait on each other.
+
+use std::fs::File;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use tracing::{info, warn};
+use std::time::Duration;
+use tokio::sync::Notify;
 
-/// Number of disjoint slots the host's 0..1000 isolate box-id space is split
-/// into - i.e. the maximum number of worker processes that can share a host
-/// without box-id collisions. Each worker claims exactly one slot for life.
-const BOX_ID_SLOTS: u32 = 16;
-/// Box ids available to a single worker (slot width).
-const BOX_IDS_PER_SLOT: u32 = 1000 / BOX_ID_SLOTS;
-
-/// Process-local counter for shared-channel directory names. Kept separate from
-/// box-id allocation so channel-dir uniqueness and box-id reservation never
-/// perturb each other.
+/// Process-local counter for shared-channel directory names.
 static NEXT_CHANNEL_SEQ: AtomicU32 = AtomicU32::new(0);
 
-/// Fallback counter used only when the whole slot is momentarily saturated (more
-/// concurrent environments than the slot can hold); see `allocate_box_id`.
-static SATURATION_FALLBACK: AtomicU32 = AtomicU32::new(0);
-
-/// Box-id offsets (within this process's slot) currently reserved by a live
-/// environment. Guards allocation: a box id is never reissued while its
-/// [`BoxId`] guard is still alive. See [`allocate_box_id`].
-static IN_USE: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
-
-/// Directory holding the per-slot `flock` files. Set once at startup from
-/// `[worker] box_slot_lock_dir` via [`configure_slot_lock_dir`]; unset means the
-/// process temp dir. Must be SHARED by every worker on a host - see that config
-/// field's doc comment for why a per-container `/tmp` defeats the whole scheme.
-static SLOT_LOCK_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-
-/// Record the configured slot-lock directory. Call once, before the first
-/// environment is created: the slot is claimed lazily on first use, so a later
-/// call cannot change the slot already claimed. Returns `false` if a directory
-/// was already set.
-pub fn configure_slot_lock_dir(dir: std::path::PathBuf) -> bool {
-    SLOT_LOCK_DIR.set(dir).is_ok()
+/// Next value for the process-local shared-channel directory sequence.
+pub(super) fn next_channel_seq() -> u32 {
+    NEXT_CHANNEL_SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
-fn slot_lock_dir() -> std::path::PathBuf {
-    SLOT_LOCK_DIR
-        .get()
-        .cloned()
-        .unwrap_or_else(std::env::temp_dir)
+/// How long an operation waits for enough free box ids before it fails.
+const RESERVE_WAIT: Duration = Duration::from_secs(300);
+
+/// How often a waiting operation looks again for ids other workers freed.
+/// Ids this worker frees wake it at once.
+const RESERVE_POLL: Duration = Duration::from_millis(100);
+
+/// Why an operation got no box ids.
+#[derive(Debug, thiserror::Error)]
+pub enum BoxIdError {
+    #[error("operation needs {needed} sandbox boxes but this host provides {available}")]
+    TooMany { needed: usize, available: u32 },
+    #[error("no {needed} free sandbox boxes on this host after waiting {waited:?}")]
+    Exhausted { needed: usize, waited: Duration },
+    #[error("box id lock dir {}: {source}", dir.display())]
+    LockDir {
+        dir: PathBuf,
+        source: std::io::Error,
+    },
 }
 
-/// First box id of this worker process's slot, lazily claimed on first use.
-///
-/// isolate box ids are a host-wide 0..1000 namespace, and `isolate --init` on
-/// an idle, already-initialized box silently *re-initializes* it (verified:
-/// exit 0). So two worker processes that pick the same box id clobber each
-/// other's sandbox during setup - the corruption only surfaces later as
-/// "box currently in use by another process" -> a spurious SystemError. Pure
-/// retry can't fix the clobber-during-setup window (there is no error to retry
-/// on). Instead each worker claims a disjoint slot via an advisory file lock
-/// (released automatically by the kernel when the process dies) and only ever
-/// allocates box ids inside `[base, base + BOX_IDS_PER_SLOT)`, making
-/// cross-worker collisions impossible for up to `BOX_ID_SLOTS` workers/host.
-static BOX_SLOT_BASE: std::sync::LazyLock<u32> =
-    std::sync::LazyLock::new(|| claim_box_id_slot_in(&slot_lock_dir()) * BOX_IDS_PER_SLOT);
+/// The box ids `0..count` of this host, shared through lock files in `dir`.
+#[derive(Debug)]
+pub struct BoxIds {
+    dir: PathBuf,
+    count: u32,
+    wait: Duration,
+    freed: Notify,
+    /// Where the next scan starts: the lowest id this process freed since its
+    /// last reservation, or the id after that reservation. Ids this process
+    /// cycles through are found first, without trying the ids other workers
+    /// hold; the scan still wraps over every id.
+    hint: AtomicU32,
+}
 
-/// Claim the lowest free box-id slot for the lifetime of this process using a
-/// non-blocking `flock` on a per-slot lock file. The locked fd is intentionally
-/// leaked so the lock is held until the process exits, at which point the kernel
-/// releases it and the slot becomes available to a restarted worker.
-fn claim_box_id_slot_in(dir: &std::path::Path) -> u32 {
-    use std::os::unix::io::IntoRawFd;
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        warn!(dir = %dir.display(), error = %e, "Cannot create isolate box-id slot lock dir");
+impl BoxIds {
+    /// Box ids `0..count` locked in `dir`, which is created if missing. Fails
+    /// when `dir` cannot hold lock files, so a misconfigured worker refuses
+    /// to start instead of sharing ids it cannot lock.
+    pub fn open(dir: impl Into<PathBuf>, count: u32) -> Result<Arc<Self>, BoxIdError> {
+        Self::with_wait(dir, count, RESERVE_WAIT)
     }
-    for slot in 0..BOX_ID_SLOTS {
-        let path = dir.join(format!("broccoli-box-slot-{slot}.lock"));
-        let Ok(file) = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            // Lock file: only ever `flock`-ed, never written, so truncation is a
-            // no-op - stated explicitly to satisfy `suspicious_open_options`.
-            .truncate(false)
-            .open(&path)
-        else {
-            continue;
+
+    fn with_wait(
+        dir: impl Into<PathBuf>,
+        count: u32,
+        wait: Duration,
+    ) -> Result<Arc<Self>, BoxIdError> {
+        let dir = dir.into();
+        let lock_dir_error = |source| BoxIdError::LockDir {
+            dir: dir.clone(),
+            source,
         };
-        let fd = file.into_raw_fd();
-        // SAFETY: `fd` is a freshly opened, owned file descriptor.
-        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            // Intentionally leak `fd`: the advisory lock must be held for the
-            // whole process lifetime, so the descriptor must never be closed.
-            info!(
-                slot,
-                base = slot * BOX_IDS_PER_SLOT,
-                lock_dir = %dir.display(),
-                "Claimed isolate box-id slot"
-            );
-            return slot;
+        std::fs::create_dir_all(&dir).map_err(lock_dir_error)?;
+        let probe = dir.join("probe.lock");
+        let file = open_lock(&probe).map_err(lock_dir_error)?;
+        // A held probe is another worker's startup probe, not an error.
+        if let Err(e) = try_lock(&file)
+            && e.kind() != std::io::ErrorKind::WouldBlock
+        {
+            return Err(lock_dir_error(e));
         }
-        // Slot owned by another process - close and try the next one.
-        // SAFETY: `fd` is owned here and not used after this close.
-        unsafe { libc::close(fd) };
+        Ok(Arc::new(Self {
+            dir,
+            count,
+            wait,
+            freed: Notify::new(),
+            hint: AtomicU32::new(0),
+        }))
     }
-    warn!(
-        slots = BOX_ID_SLOTS,
-        "No free isolate box-id slot (more workers than slots on this host); \
-         falling back to slot 0 — box-id collisions are possible"
-    );
-    0
+
+    /// The default ids for tests and the mock sandbox: the first `count` ids
+    /// in the process temp dir.
+    pub fn in_temp_dir(count: u32) -> Arc<Self> {
+        Self::open(std::env::temp_dir().join("broccoli-box-ids"), count)
+            .expect("the temp dir holds lock files")
+    }
+
+    /// Reserve `n` distinct box ids, waiting for other operations to free
+    /// some when too few are free.
+    pub(super) async fn reserve(self: &Arc<Self>, n: usize) -> Result<Vec<BoxId>, BoxIdError> {
+        if n > self.count as usize {
+            return Err(BoxIdError::TooMany {
+                needed: n,
+                available: self.count,
+            });
+        }
+        let deadline = tokio::time::Instant::now() + self.wait;
+        loop {
+            // Registered before looking, so an id freed in between wakes us.
+            let freed = self.freed.notified();
+            tokio::pin!(freed);
+            freed.as_mut().enable();
+            if let Some(ids) = self.try_reserve(n)? {
+                return Ok(ids);
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(BoxIdError::Exhausted {
+                    needed: n,
+                    waited: self.wait,
+                });
+            }
+            let next_look = (now + RESERVE_POLL).min(deadline);
+            tokio::select! {
+                _ = freed => {}
+                _ = tokio::time::sleep_until(next_look) => {}
+            }
+        }
+    }
+
+    /// Take `n` free ids, the first ones found from the hint on, or none.
+    fn try_reserve(self: &Arc<Self>, n: usize) -> Result<Option<Vec<BoxId>>, BoxIdError> {
+        let mut locked = Vec::with_capacity(n);
+        let start = self.hint.load(Ordering::Relaxed) % self.count.max(1);
+        for id in (start..self.count).chain(0..start) {
+            if locked.len() == n {
+                break;
+            }
+            let file = open_lock(&self.lock_path(id)).map_err(|source| BoxIdError::LockDir {
+                dir: self.dir.clone(),
+                source,
+            })?;
+            if try_lock(&file).is_ok() {
+                locked.push((id, file));
+            }
+        }
+        if locked.len() < n {
+            // Closing the files frees the partial set without waking waiters,
+            // which would only find the same shortage.
+            return Ok(None);
+        }
+        if let Some((last, _)) = locked.last() {
+            self.hint.store(last + 1, Ordering::Relaxed);
+        }
+        Ok(Some(
+            locked
+                .into_iter()
+                .map(|(id, file)| {
+                    // A lock file in use is never stale to a temp-dir cleaner.
+                    let _ = file.set_modified(std::time::SystemTime::now());
+                    BoxId {
+                        number: id,
+                        id: id.to_string(),
+                        _lock: file,
+                        ids: self.clone(),
+                    }
+                })
+                .collect(),
+        ))
+    }
+
+    fn lock_path(&self, id: u32) -> PathBuf {
+        self.dir.join(format!("box-{id}.lock"))
+    }
 }
 
-/// A box id reserved for the lifetime of one environment.
-///
-/// Allocation records the id's offset in [`IN_USE`]; `Drop` clears it. Because
-/// the environment (see `EnvironmentList`) owns its `BoxId`, the reservation is
-/// released on EVERY exit path - normal cleanup, early `?` returns, and a panic
-/// that unwinds the environment map - with no manual release call to forget.
+fn open_lock(path: &Path) -> std::io::Result<File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        // Only ever `flock`-ed, never written.
+        .truncate(false)
+        .open(path)
+}
+
+fn try_lock(file: &File) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: `file` owns a valid descriptor for the call.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// A box id held for one environment. Dropping it releases the id.
 #[derive(Debug)]
 pub(super) struct BoxId {
-    /// Offset within this process's slot; the key held in [`IN_USE`].
-    offset: u32,
-    /// Rendered host-wide box id (`BOX_SLOT_BASE + offset`) handed to isolate.
+    number: u32,
     id: String,
-    /// A saturation-fallback id is not a real reservation (its offset may be
-    /// shared with a live environment), so its `Drop` must not clear the offset.
-    reserved: bool,
+    /// The locked lock file; closing it releases the id.
+    _lock: File,
+    ids: Arc<BoxIds>,
 }
 
 impl BoxId {
@@ -137,179 +235,234 @@ impl std::fmt::Display for BoxId {
 
 impl Drop for BoxId {
     fn drop(&mut self) {
-        if self.reserved {
-            in_use().remove(&self.offset);
-        }
+        self.ids.hint.fetch_min(self.number, Ordering::Relaxed);
+        // The lock file closes after this body; a woken waiter that looks
+        // before then simply looks again on its next poll.
+        self.ids.freed.notify_waiters();
     }
 }
 
-fn in_use() -> std::sync::MutexGuard<'static, BTreeSet<u32>> {
-    IN_USE.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Reserve the lowest free box id in this worker's slot.
-///
-/// Reserving the *lowest-free* offset (not a lapping round-robin counter)
-/// guarantees a box id is never reissued while its environment still holds it.
-/// The previous round-robin `NEXT_BOX_ID % BOX_IDS_PER_SLOT` handed a still-live
-/// box to a new op every `BOX_IDS_PER_SLOT` allocations, so `isolate --init`
-/// clobbered the running sandbox and produced permanent wrong verdicts (missing
-/// source -> CompilationError, lost output -> WrongAnswer, pipe deadlock ->
-/// TimeLimitExceeded) that never self-heal because they are terminal, not
-/// SystemError.
-pub(super) fn allocate_box_id() -> BoxId {
-    let base = *BOX_SLOT_BASE;
-    let mut in_use = in_use();
-    match (0..BOX_IDS_PER_SLOT).find(|o| !in_use.contains(o)) {
-        Some(offset) => {
-            in_use.insert(offset);
-            BoxId {
-                offset,
-                id: (base + offset).to_string(),
-                reserved: true,
-            }
-        }
-        None => {
-            // Every id in the slot is live at once: more concurrent environments
-            // than the slot holds. This is a capacity limit (lower per-worker
-            // concurrency or widen the slot), not something we can resolve here,
-            // so fall back to a wrapping id and log it rather than block forever.
-            let offset = SATURATION_FALLBACK.fetch_add(1, Ordering::Relaxed) % BOX_IDS_PER_SLOT;
-            warn!(
-                slot_width = BOX_IDS_PER_SLOT,
-                "isolate box-id slot saturated; falling back to a possibly-colliding id"
-            );
-            BoxId {
-                offset,
-                id: (base + offset).to_string(),
-                reserved: false,
-            }
+/// The number of boxes an isolate config file provides (`num_boxes`), or
+/// isolate's built-in default when the file does not set it.
+pub fn isolate_num_boxes(config: &str) -> Result<u32, String> {
+    const ISOLATE_DEFAULT_NUM_BOXES: u32 = 1000;
+    for line in config.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if let Some((key, value)) = line.split_once('=')
+            && key.trim() == "num_boxes"
+        {
+            return value
+                .trim()
+                .parse()
+                .map_err(|e| format!("invalid num_boxes {:?}: {e}", value.trim()));
         }
     }
-}
-
-/// Next value for the process-local shared-channel directory sequence.
-pub(super) fn next_channel_seq() -> u32 {
-    NEXT_CHANNEL_SEQ.fetch_add(1, Ordering::Relaxed)
+    Ok(ISOLATE_DEFAULT_NUM_BOXES)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // The shared IN_USE set is process-global; serialize the tests that mutate it.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    fn reset() {
-        in_use().clear();
-        SATURATION_FALLBACK.store(0, Ordering::Relaxed);
+    fn ids_of(boxes: &[BoxId]) -> Vec<u32> {
+        boxes.iter().map(|b| b.as_str().parse().unwrap()).collect()
     }
 
-    // Two workers sharing a lock dir must claim DIFFERENT slots. `flock` locks
-    // belong to the open file description, so two independent opens in one
-    // test process contend exactly as two worker processes would.
-    #[test]
-    fn workers_sharing_a_lock_dir_claim_distinct_slots() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let first = claim_box_id_slot_in(dir.path());
-        let second = claim_box_id_slot_in(dir.path());
-        assert_ne!(
-            first, second,
-            "two workers on one host must never share an isolate box-id slot"
-        );
+    #[tokio::test]
+    async fn a_seventy_process_operation_gets_distinct_ids_none_reissued_while_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = BoxIds::open(dir.path(), 1000).unwrap();
+
+        // 70 contestant processes, the manager and its compile box.
+        let first = ids.reserve(72).await.unwrap();
+        let second = ids.reserve(72).await.unwrap();
+
+        let mut all = ids_of(&first);
+        all.extend(ids_of(&second));
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), 144, "a live id was handed out twice");
     }
 
-    // Pins the mechanism behind the measured failure, so the reason the lock
-    // dir must be shared is checked rather than merely asserted. Separate
-    // directories stand in for separate containers' private `/tmp`: neither
-    // sees the other's lock, both claim slot 0, and both then run contestant
-    // code as the same host UID.
-    #[test]
-    fn workers_with_private_lock_dirs_collide_on_slot_zero() {
-        let a = tempfile::tempdir().expect("tempdir");
-        let b = tempfile::tempdir().expect("tempdir");
-        assert_eq!(claim_box_id_slot_in(a.path()), 0);
-        assert_eq!(claim_box_id_slot_in(b.path()), 0);
-    }
+    #[tokio::test]
+    async fn workers_sharing_a_lock_dir_never_share_an_id() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two openers stand for two worker processes: flock locks belong to
+        // the open file, not the process.
+        let worker_a = BoxIds::open(dir.path(), 100).unwrap();
+        let worker_b = BoxIds::open(dir.path(), 100).unwrap();
 
-    #[test]
-    fn claiming_creates_a_missing_lock_dir() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let nested = root.path().join("not").join("there").join("yet");
-        assert_eq!(claim_box_id_slot_in(&nested), 0);
-        assert!(nested.join("broccoli-box-slot-0.lock").exists());
-    }
-
-    // A box id handed to a still-running environment must never be reissued to a
-    // second environment while the first holds it: `isolate --init` on a live box
-    // silently re-initializes it, clobbering the running sandbox and producing
-    // permanent wrong verdicts (missing source -> CE, lost output -> WA).
-    #[test]
-    fn does_not_reissue_a_live_box_id() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        reset();
-        // Hold several live ids at once so churn exercises more than one offset
-        // (a single held id would only ever bounce between offsets 0 and 1).
-        let live: Vec<BoxId> = (0..(BOX_IDS_PER_SLOT / 2))
-            .map(|_| allocate_box_id())
-            .collect();
-        let held: std::collections::HashSet<&str> = live.iter().map(|b| b.as_str()).collect();
-        // Churn more than a full slot's worth of allocate/release cycles. A
-        // lapping counter would wrap and hand out a held id again; the free-list
-        // must always skip every still-held id.
-        for _ in 0..(BOX_IDS_PER_SLOT * 2) {
-            let tmp = allocate_box_id();
-            assert!(
-                !held.contains(tmp.as_str()),
-                "reissued a box id still held by a live environment: {}",
-                tmp.as_str()
-            );
-        }
-    }
-
-    // When the whole slot is live at once, allocation must fall back to a
-    // non-reserved id whose Drop leaves the real reservations untouched - a
-    // fallback that cleared a shared offset would free a still-live box.
-    #[test]
-    fn saturation_fallback_does_not_corrupt_reservations() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        reset();
-        // Fill every offset in the slot with a real reservation.
-        let live: Vec<BoxId> = (0..BOX_IDS_PER_SLOT).map(|_| allocate_box_id()).collect();
-        assert_eq!(
-            in_use().len() as u32,
-            BOX_IDS_PER_SLOT,
-            "slot should be full"
-        );
-        // The next allocation saturates: a fallback id, not a real reservation.
-        let fallback = allocate_box_id();
+        let held_a = worker_a.reserve(10).await.unwrap();
+        let held_b = worker_b.reserve(10).await.unwrap();
+        let (a, b) = (ids_of(&held_a), ids_of(&held_b));
         assert!(
-            !fallback.reserved,
-            "expected a non-reserved saturation fallback"
-        );
-        let before = in_use().len();
-        drop(fallback);
-        assert_eq!(
-            in_use().len(),
-            before,
-            "fallback Drop must not remove a live reservation's offset"
-        );
-        drop(live);
-        assert!(
-            in_use().is_empty(),
-            "dropping every live id should free the slot"
+            a.iter().all(|id| !b.contains(id)),
+            "{a:?} and {b:?} overlap"
         );
     }
 
-    // Dropping a `BoxId` frees its offset for reuse (lowest-free reallocation).
+    #[tokio::test]
+    async fn an_operation_needing_more_boxes_than_the_host_has_fails_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = BoxIds::open(dir.path(), 8).unwrap();
+        let err = ids.reserve(9).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BoxIdError::TooMany {
+                    needed: 9,
+                    available: 8
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exhaustion_waits_then_fails_without_a_fallback_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = BoxIds::with_wait(dir.path(), 4, Duration::from_secs(5)).unwrap();
+        let held = ids.reserve(3).await.unwrap();
+
+        let started = tokio::time::Instant::now();
+        let err = ids.reserve(2).await.unwrap_err();
+        assert!(
+            matches!(err, BoxIdError::Exhausted { needed: 2, .. }),
+            "{err}"
+        );
+        assert!(started.elapsed() >= Duration::from_secs(5));
+        // The failed attempt left the one free id free.
+        assert_eq!(ids_of(&ids.reserve(1).await.unwrap()), [3]);
+        drop(held);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_waiting_operation_takes_the_ids_another_one_frees() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = BoxIds::with_wait(dir.path(), 2, Duration::from_secs(3600)).unwrap();
+        let held = ids.reserve(2).await.unwrap();
+
+        let waiting = tokio::spawn({
+            let ids = ids.clone();
+            async move { ids_of(&ids.reserve(2).await.unwrap()) }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        drop(held);
+        assert_eq!(waiting.await.unwrap(), [0, 1]);
+    }
+
+    #[tokio::test]
+    async fn a_worker_reuses_the_ids_it_freed_before_trying_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = BoxIds::open(dir.path(), 100).unwrap();
+        let ids = BoxIds::open(dir.path(), 100).unwrap();
+        let mine = ids.reserve(2).await.unwrap();
+        assert_eq!(ids_of(&mine), [0, 1]);
+        let theirs = other.reserve(5).await.unwrap();
+        assert_eq!(ids_of(&theirs), [2, 3, 4, 5, 6]);
+
+        drop(mine);
+        assert_eq!(ids_of(&ids.reserve(2).await.unwrap()), [0, 1]);
+        drop(theirs);
+    }
+
+    #[tokio::test]
+    async fn the_scan_wraps_to_free_ids_below_the_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = BoxIds::open(dir.path(), 5).unwrap();
+        let other = BoxIds::open(dir.path(), 5).unwrap();
+        let theirs = other.reserve(2).await.unwrap();
+        let mine = ids.reserve(2).await.unwrap();
+        assert_eq!(ids_of(&mine), [2, 3]);
+        let last = other.reserve(1).await.unwrap();
+        assert_eq!(ids_of(&last), [4]);
+
+        // The other worker frees ids below this one's hint (4, now held).
+        drop(theirs);
+        assert_eq!(ids_of(&ids.reserve(2).await.unwrap()), [0, 1]);
+        drop((mine, last));
+    }
+
     #[test]
-    fn releases_on_drop() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        reset();
-        let first = allocate_box_id().as_str().to_string();
-        // The temporary above is dropped at the end of that statement, freeing
-        // its offset; the next allocation must reuse the now-lowest-free id.
-        let second = allocate_box_id();
-        assert_eq!(second.as_str(), first, "freed box id should be reused");
+    fn an_unusable_lock_dir_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"").unwrap();
+        assert!(matches!(
+            BoxIds::open(&file, 10),
+            Err(BoxIdError::LockDir { .. })
+        ));
+    }
+
+    #[test]
+    fn num_boxes_is_read_from_the_isolate_config() {
+        let config = "box_root = /var/local/lib/isolate\n# num_boxes = 5\nnum_boxes = 10000\n";
+        assert_eq!(isolate_num_boxes(config), Ok(10000));
+        assert_eq!(isolate_num_boxes("first_uid = 1\n"), Ok(1000));
+        assert!(isolate_num_boxes("num_boxes = many").is_err());
+    }
+
+    /// Run by [`a_worker_takes_over_the_ids_of_one_that_exits`] in a child
+    /// process: holds `BOX_ID_CHILD_COUNT` ids from `BOX_ID_CHILD_DIR`, prints
+    /// them, and keeps them until its stdin closes.
+    #[tokio::test]
+    #[ignore = "a helper the cross-process test runs in a child process"]
+    async fn box_id_child_process() {
+        let dir = std::env::var("BOX_ID_CHILD_DIR").unwrap();
+        let count: usize = std::env::var("BOX_ID_CHILD_COUNT")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let ids = BoxIds::open(dir, 10).unwrap();
+        let held = ids.reserve(count).await.unwrap();
+        println!("held {:?}", ids_of(&held));
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+    }
+
+    #[test]
+    fn a_worker_takes_over_the_ids_of_one_that_exits() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "models::operation::handler::box_id::tests::box_id_child_process",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("BOX_ID_CHILD_DIR", dir.path())
+            .env("BOX_ID_CHILD_COUNT", "3")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let held = lines
+            .by_ref()
+            .map(Result::unwrap)
+            .find_map(|l| l.split_once("held ").map(|(_, ids)| ids.to_string()))
+            .expect("the child reports its ids");
+        assert_eq!(held, "[0, 1, 2]");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let ids = BoxIds::open(dir.path(), 10).unwrap();
+        let while_alive = rt.block_on(ids.reserve(3)).unwrap();
+        assert_eq!(ids_of(&while_alive), [3, 4, 5]);
+
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        // A fresh worker scans from id 0, so it finds the exited one's ids.
+        let fresh = BoxIds::open(dir.path(), 10).unwrap();
+        let after_exit = rt.block_on(fresh.reserve(3)).unwrap();
+        assert_eq!(ids_of(&after_exit), [0, 1, 2]);
+        drop(while_alive);
     }
 }

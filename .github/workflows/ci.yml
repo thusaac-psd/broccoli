@@ -136,17 +136,9 @@ jobs:
           node-version-file: package.json
           cache: pnpm
 
-      - name: Install isolate
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev libsystemd-dev
-          git clone --depth 1 --branch "$ISOLATE_VERSION" https://github.com/ioi/isolate.git "$RUNNER_TEMP/isolate"
-          sudo make -C "$RUNNER_TEMP/isolate" install
-          sudo install -m 0644 "$RUNNER_TEMP"/isolate/systemd/isolate.service "$RUNNER_TEMP"/isolate/systemd/isolate.slice /etc/systemd/system/
-          sudo systemctl daemon-reload
-          sudo systemctl start isolate.service
-          isolate --version
-          isolate-check-environment || true
+      - uses: ./.github/actions/setup-isolate
+        with:
+          version: ${{ env.ISOLATE_VERSION }}
 
       - name: Build plugin WASM artefacts
         run: ./scripts/build-plugins.sh

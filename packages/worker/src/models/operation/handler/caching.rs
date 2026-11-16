@@ -298,6 +298,91 @@ mod tests {
         )
     }
 
+    /// A compile step whose runs are counted in `runs`, outside its box.
+    fn counted_build(runs: &Path) -> crate::models::operation::models::OperationTask {
+        use crate::models::operation::models::{
+            Environment, IOConfig, OperationTask, RunOptions, SessionFile, Step, StepKind,
+        };
+        let script = format!("echo run >> {}; echo built > out.bin", runs.display());
+        OperationTask {
+            environments: vec![Environment {
+                id: "env".into(),
+                files_in: vec![(
+                    "main.c".into(),
+                    SessionFile::Content {
+                        content: "int main() {}".into(),
+                    },
+                )],
+            }],
+            tasks: vec![Step {
+                id: "build".into(),
+                kind: StepKind::Compile,
+                env_ref: "env".into(),
+                argv: vec!["sh".into(), "-c".into(), script],
+                conf: RunOptions::default(),
+                io: IOConfig::default(),
+                collect: vec!["out.bin".into()],
+                depends_on: vec![],
+                cache: Some(StepCacheConfig {
+                    key_inputs: vec!["main.c".into()],
+                    outputs: vec!["out.bin".into()],
+                }),
+                mounts: vec![],
+            }],
+            channels: vec![],
+            target_worker_id: None,
+            evaluate_batch_id: None,
+            test_case_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_memoized_hit_whose_blob_is_gone_runs_the_step_again() {
+        use crate::models::operation::file_cacher::BlobStoreFileCacher;
+        use crate::models::operation::task_cache::MemoizedTaskCacheStore;
+        use common::storage::{BlobStore, ContentHash, filesystem::FilesystemBlobStore};
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("cache");
+        let store = std::sync::Arc::new(
+            FilesystemBlobStore::new(dir.path().join("blobs"), 1_000_000)
+                .await
+                .unwrap(),
+        );
+        let file_cacher =
+            BlobStoreFileCacher::new(store.clone(), cache_dir.clone(), 1_000_000, None)
+                .await
+                .unwrap();
+        let (metrics, _provider) =
+            common::observability::init_metrics_local("broccoli-worker-test");
+        let handler = OperationHandler::new(
+            Box::new(MockSandboxManager::new(dir.path().join("boxes"))),
+            Box::new(file_cacher),
+            Box::new(MemoizedTaskCacheStore::new(NoopTaskCacheStore)),
+            ToolchainFingerprint::Known("fp".into()),
+            metrics,
+        );
+        let runs = dir.path().join("runs");
+        let op = counted_build(&runs);
+        let run_count = || std::fs::read_to_string(&runs).unwrap().lines().count();
+
+        let first = handler.execute(&op).await.unwrap();
+        let hash = first.task_results["build"].collected_outputs["out.bin"].clone();
+        assert!(handler.execute(&op).await.unwrap().success);
+        assert_eq!(run_count(), 1, "the second build is a memoized hit");
+
+        store
+            .delete(&ContentHash::from_hex(&hash).unwrap())
+            .await
+            .unwrap();
+        std::fs::remove_file(cache_dir.join(&hash)).unwrap();
+        assert!(handler.execute(&op).await.unwrap().success);
+        assert_eq!(run_count(), 2, "a hit whose blob is gone runs the step");
+
+        assert!(handler.execute(&op).await.unwrap().success);
+        assert_eq!(run_count(), 2, "the fresh outputs are memoized again");
+    }
+
     #[tokio::test]
     async fn an_unreliable_toolchain_fingerprint_builds_no_cache_key() {
         let argv = vec!["g++".to_string()];

@@ -15,9 +15,9 @@ services:
       BROCCOLI__WORKER__ISOLATE_BIN: /usr/local/bin/isolate
       BROCCOLI__WORKER__ENABLE_CGROUPS: "true"
       # Shared by every worker container on this host (including
-      # `--scale worker=N` replicas) so each claims a distinct isolate box-id
-      # slot. See `box_slot_lock_dir` in packages/worker/src/config.rs.
-      BROCCOLI__WORKER__BOX_SLOT_LOCK_DIR: /var/lib/broccoli/box-slots
+      # `--scale worker=N` replicas) so no two ever use the same isolate box.
+      # See `box_id_lock_dir` in packages/worker/src/config.rs.
+      BROCCOLI__WORKER__BOX_ID_LOCK_DIR: /var/lib/broccoli/box-ids
       BROCCOLI__DATABASE__URL: "${BROCCOLI__DATABASE__URL}"
       BROCCOLI__MQ__ENABLED: "true"
       BROCCOLI__MQ__URL: "${BROCCOLI__MQ__URL}"
@@ -38,7 +38,7 @@ services:
       # resource limits are passed via isolate CLI flags, not this static config,
       # so no deployment needs to override it.
       - worker_data:/data
-      - worker_box_slots:/var/lib/broccoli/box-slots
+      - worker_box_ids:/var/lib/broccoli/box-ids
     healthcheck:
       test: ["CMD", "gosu", "worker:worker", "/usr/local/bin/broccoli-worker", "--healthcheck"]
       interval: 10s
@@ -47,4 +47,4 @@ services:
 
 volumes:
   worker_data:
-  worker_box_slots:
+  worker_box_ids:

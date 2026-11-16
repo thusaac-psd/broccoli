@@ -1,0 +1,65 @@
+# What the real isolate sandbox costs per judging step. isolate needs cgroup v2
+# delegation and a setuid binary, so the benchmark cannot run in a development
+# container: push a branch under `bench/` and read the table in this run's
+# summary. Runners are shared, noisy VMs, so compare shapes, and a before and
+# after pair, within one run and read the spread.
+name: Isolate overhead
+
+on:
+  push:
+    branches:
+      - "bench/**"
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: Isolate overhead
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: isolate-bench
+
+      - uses: ./.github/actions/setup-isolate
+
+      # One shape at a time: box ids and the host's CPUs are shared, and a
+      # concurrent build would skew every number.
+      - name: Benchmark
+        run: |
+          set -euo pipefail
+          cargo test -p worker --locked --release --test isolate_overhead -- \
+            --ignored --test-threads=1 --nocapture | tee "$RUNNER_TEMP/bench.log"
+
+      - name: Summarize
+        if: always()
+        run: |
+          set -euo pipefail
+          grep '^ISOLATE_BENCH ' "$RUNNER_TEMP/bench.log" | cut -d' ' -f2- > "$RUNNER_TEMP/bench.jsonl"
+          {
+            echo "## Isolate overhead (${GITHUB_SHA:0:12})"
+            echo
+            echo "| shape | n | mean ms | p50 ms | p95 ms | p99 ms | min ms | max ms |"
+            echo "|---|---|---|---|---|---|---|---|"
+            python3 - "$RUNNER_TEMP/bench.jsonl" <<'PY'
+          import json, sys
+          for line in open(sys.argv[1]):
+              r = json.loads(line)
+              print("| {shape} | {n} | {mean_ms:.3f} | {p50_ms:.3f} | {p95_ms:.3f} | "
+                    "{p99_ms:.3f} | {min_ms:.3f} | {max_ms:.3f} |".format(**r))
+          PY
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: isolate-overhead
+          path: ${{ runner.temp }}/bench.jsonl
+          if-no-files-found: error

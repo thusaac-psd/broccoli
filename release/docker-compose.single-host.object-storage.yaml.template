@@ -75,4 +75,4 @@ volumes:
   server_data:
   plugin_cache:
   worker_data:
-  worker_box_slots:
+  worker_box_ids:

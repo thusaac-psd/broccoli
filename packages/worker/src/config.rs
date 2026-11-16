@@ -92,25 +92,26 @@ pub struct WorkerConfig {
     pub cache_follower_max_wait_secs: u64,
     #[serde(default)]
     pub tools: ToolsConfig,
-    /// Directory holding the `flock` files a worker uses to claim a disjoint
-    /// isolate box-id slot (see `handler::box_id`). Defaults to the process
-    /// temp dir.
+    /// Directory holding one `flock` file per isolate box id (see
+    /// `handler::box_id`). Defaults to `broccoli-box-ids` in the process temp
+    /// dir.
     ///
-    /// isolate runs box `N` as host UID `60000 + N`, and its `--processes`
-    /// limit is enforced per UID across the whole kernel. Workers on one host
-    /// must therefore claim DIFFERENT slots - which only works if they can see
-    /// each other's lock files. Separate containers each have a private
-    /// `/tmp`, so with the default every container claims slot 0, all run
-    /// contestant code as the same UID, and exhaust each other's process
-    /// limit: `execve` fails with EAGAIN and correct solutions come back
-    /// SystemError or TimeLimitExceeded. Measured on a 4-worker host under a
-    /// 64-submission burst: 0/64 Accepted with private temp dirs, 64/64 with a
-    /// shared one.
-    ///
-    /// Point every worker container on a host at the SAME directory (e.g. a
-    /// shared volume). Native installs, which share `/tmp`, need nothing.
+    /// isolate box ids are one namespace per host: box `N` runs as uid
+    /// `first_uid + N`, and `isolate --init` on a box another worker is using
+    /// re-initialises it under that worker's running program. Every worker on
+    /// a host must therefore lock its ids in the SAME directory. Native
+    /// installs share the temp dir and need nothing. Separate containers each
+    /// have a private `/tmp`, so every worker container on a host must point
+    /// this at one shared volume; the shipped compose templates do. Whatever
+    /// it points at must be a directory nothing unlinks under a running
+    /// worker: a lock file recreated at the same path is a new inode, whose
+    /// lock is free while the old one is still held.
     #[serde(default)]
-    pub box_slot_lock_dir: Option<String>,
+    pub box_id_lock_dir: Option<String>,
+    /// The isolate config file, read for `num_boxes`: the box ids `0..num_boxes`
+    /// are the ones workers on this host share.
+    #[serde(default = "default_isolate_config")]
+    pub isolate_config: String,
     /// Address the Prometheus `/metrics` endpoint binds. Give each worker on
     /// one host its own port so every one of them can be scraped.
     #[serde(default = "default_metrics_addr")]
@@ -129,6 +130,9 @@ fn default_worker_id() -> String {
 }
 fn default_isolate_bin() -> String {
     "isolate".into()
+}
+fn default_isolate_config() -> String {
+    "/usr/local/etc/isolate".into()
 }
 fn default_enable_cgroups() -> bool {
     true
@@ -175,7 +179,8 @@ impl Default for WorkerConfig {
             cache_follower_max_wait_secs: default_cache_follower_max_wait_secs(),
             tools: ToolsConfig::default(),
             metrics_addr: default_metrics_addr(),
-            box_slot_lock_dir: None,
+            box_id_lock_dir: None,
+            isolate_config: default_isolate_config(),
         }
     }
 }

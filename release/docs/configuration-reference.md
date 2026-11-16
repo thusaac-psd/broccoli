@@ -108,7 +108,9 @@ Leave these alone unless a measurement says otherwise.
 | --- | --- | --- |
 | `max_concurrency` | `1` | Keep at 1: see Capacity Planning in the runbook. Scale by adding worker machines |
 | `sandbox_backend`, `isolate_bin`, `enable_cgroups`, `allow_insecure_no_cgroups` | `isolate`, `isolate`, `true`, `false` | Sandbox |
-| `box_slot_lock_dir` | system temp | Shared by every worker container on one host |
+| `box_id_lock_dir` | system temp | One lock file per isolate box id; every worker container on one host must share it |
+| `isolate_config` | `/usr/local/etc/isolate` | Read for `num_boxes`, the box ids every worker on the host shares |
+| `metrics_addr` | `0.0.0.0:9091` | Prometheus `/metrics` bind; one port per worker on a host |
 | `tools.dir` | none | Platform tools such as `broccoli-compare` |
 | `cache_leader_election_enabled`, `cache_leader_ttl_secs`, `cache_leader_heartbeat_interval_secs`, `cache_follower_poll_interval_ms`, `cache_follower_max_wait_secs` | `true`, `60`, `5`, `250`, `30` | Test data download coordination between workers on one host |
 | `storage.cache_dir`, `storage.max_cache_size` | `./data/cache`, 32 GiB | Local test data cache |

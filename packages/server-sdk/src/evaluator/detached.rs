@@ -217,6 +217,11 @@ pub struct DetachedEval<J: ContestJudge> {
     held: Vec<TestCaseVerdict>,
     marked_running: bool,
     policy: J,
+    /// Rows recorded in this callback and not yet inserted. They go to the
+    /// host in one call, before the terminal update and when the callback
+    /// returns, so a callback that records several cases costs one insert.
+    #[serde(skip)]
+    unsaved: Vec<TestCaseResultRow>,
 }
 
 impl<J: ContestJudge> DetachedEval<J> {
@@ -271,6 +276,7 @@ impl<J: ContestJudge> DetachedEval<J> {
             held: Vec::new(),
             marked_running: false,
             policy,
+            unsaved: Vec::new(),
         };
 
         let start_result = host
@@ -283,10 +289,9 @@ impl<J: ContestJudge> DetachedEval<J> {
 
         if let Err(e) = start_result {
             state.fill_unrecorded(
-                host,
                 Verdict::SystemError,
                 &format!("{BATCH_START_FAILED}: {e:?}"),
-            )?;
+            );
             state.finalize(host)?;
         }
 
@@ -303,10 +308,14 @@ impl<J: ContestJudge> DetachedEval<J> {
         let mut state: DetachedEval<J> = serde_json::from_value(input.state.clone())?;
 
         match &input.event {
-            DetachedEvaluateCallbackEvent::Result { result } => state.on_result(host, result),
+            DetachedEvaluateCallbackEvent::Result { result } => {
+                let out = state.on_result(host, result)?;
+                state.save(host)?;
+                Ok(out)
+            }
             DetachedEvaluateCallbackEvent::Timeout { .. }
             | DetachedEvaluateCallbackEvent::Exhausted => {
-                state.fill_unrecorded(host, Verdict::SystemError, EVALUATION_TIMEOUT)?;
+                state.fill_unrecorded(Verdict::SystemError, EVALUATION_TIMEOUT);
                 state.finalize(host)?;
                 Ok(DetachedEvaluateCallbackOutput::cancel(
                     serde_json::to_value(&state)?,
@@ -326,7 +335,10 @@ impl<J: ContestJudge> DetachedEval<J> {
             // remaining safety net.
             return;
         };
-        let _ = state.fill_unrecorded(host, Verdict::SystemError, EVALUATION_PERSIST_FAILED);
+        state.fill_unrecorded(Verdict::SystemError, EVALUATION_PERSIST_FAILED);
+        // A rejected row must not keep the terminal update from landing.
+        let _ = state.save(host);
+        state.unsaved.clear();
         let _ = state.finalize(host);
     }
 
@@ -403,8 +415,8 @@ impl<J: ContestJudge> DetachedEval<J> {
         // Compile error short-circuits the entire batch before the submission is
         // ever marked Running: record it, skip the rest, finalize.
         if outcome.verdict == Verdict::CompileError {
-            self.record(host, outcome)?;
-            self.fill_unrecorded(host, Verdict::Skipped, SKIPPED_SHORT_CIRCUIT)?;
+            self.record(outcome);
+            self.fill_unrecorded(Verdict::Skipped, SKIPPED_SHORT_CIRCUIT);
             self.finalize(host)?;
             return Ok(DetachedEvaluateCallbackOutput::finish(
                 serde_json::to_value(&*self)?,
@@ -424,7 +436,7 @@ impl<J: ContestJudge> DetachedEval<J> {
             self.marked_running = true;
         }
 
-        self.record(host, outcome)?;
+        self.record(outcome);
 
         let step = {
             let DetachedEval {
@@ -449,16 +461,17 @@ impl<J: ContestJudge> DetachedEval<J> {
             JudgeStep::Continue => self.continue_or_finish(host, Vec::new()),
             JudgeStep::Cancel(ids) => {
                 for id in &ids {
-                    self.record(
-                        host,
-                        CaseOutcome::filled(*id, Verdict::Skipped, SKIPPED_SHORT_CIRCUIT),
-                    )?;
+                    self.record(CaseOutcome::filled(
+                        *id,
+                        Verdict::Skipped,
+                        SKIPPED_SHORT_CIRCUIT,
+                    ));
                 }
                 self.continue_or_finish(host, ids)
             }
             JudgeStep::Finish { fill } => {
                 if let Some((verdict, message)) = fill {
-                    self.fill_unrecorded(host, verdict, &message)?;
+                    self.fill_unrecorded(verdict, &message);
                 }
                 self.finalize(host)?;
                 Ok(DetachedEvaluateCallbackOutput::finish(
@@ -490,9 +503,9 @@ impl<J: ContestJudge> DetachedEval<J> {
         )
     }
 
-    /// Insert the row for `outcome` (scored via the policy), mark it recorded,
+    /// Queue the row for `outcome` (scored via the policy), mark it recorded,
     /// and retain a stripped copy (no stdout/stderr) in the session state.
-    fn record(&mut self, host: &Host, outcome: CaseOutcome) -> Result<(), SdkError> {
+    fn record(&mut self, outcome: CaseOutcome) {
         let tc = self
             .scoring_cases
             .iter()
@@ -502,7 +515,7 @@ impl<J: ContestJudge> DetachedEval<J> {
             None => 0.0,
         };
         let row = build_tc_row(&self.submission, &outcome, score, tc);
-        host.submission.insert_results(&[row])?;
+        self.unsaved.push(row);
 
         self.recorded_ids.insert(outcome.test_case_id);
         self.outcomes.push(CaseOutcome {
@@ -510,16 +523,19 @@ impl<J: ContestJudge> DetachedEval<J> {
             stderr: None,
             ..outcome
         });
+    }
+
+    /// Insert every queued row in one host call.
+    fn save(&mut self, host: &Host) -> Result<(), SdkError> {
+        if !self.unsaved.is_empty() {
+            host.submission.insert_results(&self.unsaved)?;
+            self.unsaved.clear();
+        }
         Ok(())
     }
 
     /// Record a filled-in outcome for every scoring case not yet recorded.
-    fn fill_unrecorded(
-        &mut self,
-        host: &Host,
-        verdict: Verdict,
-        message: &str,
-    ) -> Result<(), SdkError> {
+    fn fill_unrecorded(&mut self, verdict: Verdict, message: &str) {
         let unrecorded: Vec<i32> = self
             .scoring_cases
             .iter()
@@ -527,12 +543,13 @@ impl<J: ContestJudge> DetachedEval<J> {
             .filter(|id| !self.recorded_ids.contains(id))
             .collect();
         for id in unrecorded {
-            self.record(host, CaseOutcome::filled(id, verdict.clone(), message))?;
+            self.record(CaseOutcome::filled(id, verdict.clone(), message));
         }
-        Ok(())
     }
 
-    fn finalize(&self, host: &Host) -> Result<(), SdkError> {
+    /// Save the queued rows, then persist the terminal verdict.
+    fn finalize(&mut self, host: &Host) -> Result<(), SdkError> {
+        self.save(host)?;
         let progress = JudgeProgress {
             submission: &self.submission,
             scoring_cases: &self.scoring_cases,
@@ -709,4 +726,128 @@ fn build_tc_row(
 
 fn sanitize_optional_text(value: Option<&str>) -> Option<String> {
     value.map(|s| sanitize_result_text_field(s).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{SourceFile, TestCaseBodyRef};
+
+    /// Stops at the first case that is not accepted.
+    #[derive(Serialize, serde::Deserialize)]
+    struct FirstFailureStops;
+
+    impl ContestJudge for FirstFailureStops {
+        const IN_ORDER: bool = true;
+
+        fn score(&self, result: &TestCaseVerdict) -> CaseOutcome {
+            CaseOutcome::from_verdict(result, 1.0)
+        }
+
+        fn next_step(&mut self, progress: &JudgeProgress<'_>) -> JudgeStep {
+            match progress.last {
+                Some(outcome) if outcome.verdict != Verdict::Accepted => JudgeStep::short_circuit(),
+                _ => JudgeStep::Continue,
+            }
+        }
+
+        fn finalize(&self, host: &Host, progress: &JudgeProgress<'_>) -> Result<(), SdkError> {
+            host.submission.update(&crate::types::SubmissionUpdate {
+                submission_id: progress.submission.submission_id,
+                judgement_id: progress.submission.judgement_id,
+                judge_epoch: progress.submission.judge_epoch,
+                status: Some(crate::types::SubmissionStatus::Judged),
+                ..Default::default()
+            })?;
+            Ok(())
+        }
+    }
+
+    fn submission(case_ids: impl IntoIterator<Item = i32>) -> OnSubmissionInput {
+        OnSubmissionInput {
+            submission_id: 1,
+            judgement_id: 1,
+            fire_after_judging: false,
+            user_id: 10,
+            problem_id: 100,
+            contest_id: Some(1000),
+            files: vec![SourceFile {
+                filename: "main.cpp".into(),
+                content: "int main() {}".into(),
+            }],
+            language: "cpp".into(),
+            time_limit_ms: 1000,
+            memory_limit_kb: 65536,
+            problem_type: "standard".into(),
+            test_cases: case_ids
+                .into_iter()
+                .map(|id| TestCaseRow {
+                    id,
+                    score: 1.0,
+                    is_sample: false,
+                    position: id,
+                    description: None,
+                    label: None,
+                    input: TestCaseBodyRef::Missing,
+                    expected_output: TestCaseBodyRef::Missing,
+                    is_custom: false,
+                })
+                .collect(),
+            judge_epoch: 1,
+            target_worker_id: None,
+        }
+    }
+
+    fn callback(
+        host: &Host,
+        state: serde_json::Value,
+        result: TestCaseVerdict,
+    ) -> DetachedEvaluateCallbackOutput {
+        DetachedEval::<FirstFailureStops>::handle_callback(
+            host,
+            DetachedEvaluateCallbackInput {
+                session_id: "test".into(),
+                state,
+                event: DetachedEvaluateCallbackEvent::Result { result },
+                completed: 0,
+                total: 0,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_callback_that_records_several_cases_inserts_them_in_one_call() {
+        let host = Host::mock();
+        let req = submission(1..=5);
+        DetachedEval::start(&host, &req, &req.test_cases, FirstFailureStops, "cb", 4).unwrap();
+        let state = host.eval.detached_windowed_requests()[0].state.clone();
+
+        // Case 2 arrives first and is held for case 1; case 1 then decides
+        // both, and case 2's failure skips cases 3 to 5.
+        let held = callback(&host, state, TestCaseVerdict::wrong_answer(2));
+        assert_eq!(host.submission.insert_call_count(), 0);
+        let out = callback(&host, held.state, TestCaseVerdict::accepted(1));
+
+        assert_eq!(out.action, DetachedEvaluateCallbackAction::Finish);
+        assert_eq!(host.submission.results().len(), 5);
+        assert_eq!(host.submission.insert_call_count(), 1);
+    }
+
+    #[test]
+    fn recovery_finalizes_even_when_the_rows_are_rejected() {
+        let host = Host::mock();
+        let req = submission(1..=2);
+        DetachedEval::start(&host, &req, &req.test_cases, FirstFailureStops, "cb", 2).unwrap();
+        let state = host.eval.detached_windowed_requests()[0].state.clone();
+
+        host.submission.queue_insert_error(SdkError::StaleEpoch);
+        DetachedEval::<FirstFailureStops>::recover(&host, &state);
+
+        assert!(host.submission.results().is_empty());
+        assert_eq!(
+            host.submission.last_update().status,
+            Some(crate::types::SubmissionStatus::Judged)
+        );
+    }
 }
