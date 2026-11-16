@@ -17,8 +17,8 @@ const MAX_KEYS: usize = 50_000;
 /// Keyed on (username, client IP) and counts ONLY failed attempts, which makes
 /// it safe to run during a real onsite contest where hundreds of contestants
 /// share one venue NAT IP:
-/// - a legitimate contestant who signs in is never throttled - success
-///   [`clear`](Self::clear)s the key, and other contestants are distinct
+/// - a legitimate contestant who signs in is never throttled - a success
+///   [`settle`](Self::settle)d clears the key, and other contestants are distinct
 ///   usernames, so one person's failures never touch another's;
 /// - an attacker guessing a victim's password from the attacker's own IP only
 ///   fills the (victim, attacker-ip) key, so the victim signing in from their
