@@ -667,6 +667,7 @@ impl E2eTestApp {
                 evaluate_batches: evaluate_batches.clone(),
                 hook_registry,
                 judging_sessions: judging_sessions.clone(),
+                live_dispatches: Default::default(),
             },
             metrics: e2e_metrics.clone(),
             prometheus_registry: e2e_prom_registry,

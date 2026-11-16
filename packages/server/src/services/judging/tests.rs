@@ -131,6 +131,20 @@ async fn claim_one(db: &DatabaseConnection, server: &str) -> ClaimedJudgement {
     claimed.remove(0).unit
 }
 
+/// A dispatch of judgement `j`, live in `live` while it is held.
+fn dispatch_of(live: &LiveDispatches, j: &submission_judgement::Model) -> Dispatch {
+    Dispatch::new(
+        "p",
+        DispatchedUnit::Judgement {
+            submission_id: j.submission_id,
+            judgement_id: j.id,
+            judge_epoch: j.judge_epoch,
+        },
+        DispatchFaults::default(),
+        live,
+    )
+}
+
 async fn add_result(db: &DatabaseConnection, j: &submission_judgement::Model) {
     test_case_result::ActiveModel {
         submission_id: Set(j.submission_id),
@@ -397,7 +411,8 @@ async fn an_immediate_rejudge_queues_both_rows_with_no_owner() {
 async fn lease_refresh_covers_a_current_judgement_beside_a_newer_deferred_one() {
     let (_pg, db) = crate::test_support::postgres().await;
     let (s, j1) = new_submission(&db).await;
-    claim_one(&db, "srv-a").await;
+    let live = LiveDispatches::default();
+    let _dispatch = dispatch_of(&live, &claim_one(&db, "srv-a").await.judgement);
     // A deferred rejudge (a higher version) exists while the current
     // judgement is judging.
     rejudge(&db, s.id, false).await;
@@ -411,7 +426,7 @@ async fn lease_refresh_covers_a_current_judgement_beside_a_newer_deferred_one() 
     )
     .await;
 
-    let counts = refresh_leases(&db, "srv-a").await.unwrap();
+    let counts = refresh_leases(&db, "srv-a", &live).await.unwrap();
     assert_eq!(counts.judgements, 1);
     let reclaimed = reclaim_abandoned(
         &db,
@@ -424,6 +439,56 @@ async fn lease_refresh_covers_a_current_judgement_beside_a_newer_deferred_one() 
     .await
     .unwrap();
     assert_eq!(reclaimed.requeued, 0, "a refreshed lease is not stolen");
+}
+
+/// A judgement this server owns but no dispatch of it works on any more (its
+/// task was lost) keeps its old heartbeat, so its lease lapses and it is
+/// stolen; one a dispatch still holds is refreshed and kept.
+#[tokio::test]
+async fn lease_refresh_covers_only_live_dispatches() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let live = LiveDispatches::default();
+    new_submission(&db).await;
+    let kept = claim_one(&db, "srv").await.judgement;
+    let _kept = dispatch_of(&live, &kept);
+    new_submission(&db).await;
+    let lost = claim_one(&db, "srv").await.judgement;
+    drop(dispatch_of(&live, &lost));
+    // A dispatch of the kept judgement's earlier epoch is not its dispatch.
+    let _stale = dispatch_of(
+        &live,
+        &submission_judgement::Model {
+            judge_epoch: kept.judge_epoch - 1,
+            ..kept.clone()
+        },
+    );
+    exec(
+        &db,
+        "UPDATE submission_judgement SET lease_heartbeat_at = NOW() - INTERVAL '1 hour'",
+    )
+    .await;
+
+    let counts = refresh_leases(&db, "srv", &live).await.unwrap();
+    assert_eq!(counts.judgements, 1, "only the live dispatch's lease");
+    let reclaimed = reclaim_abandoned(
+        &db,
+        Unit::Judgement,
+        Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
+        RetryBudget::new(5),
+        10,
+        NO_TYPES,
+    )
+    .await
+    .unwrap();
+    assert_eq!(reclaimed.requeued, 1, "the lost judgement is stolen");
+    assert_eq!(
+        judgement(&db, lost.id).await.status,
+        SubmissionStatus::Queued
+    );
+    assert_ne!(
+        judgement(&db, kept.id).await.status,
+        SubmissionStatus::Queued
+    );
 }
 
 #[tokio::test]
@@ -992,10 +1057,11 @@ async fn a_rejudge_serializes_with_another_rejudge_and_a_claim() {
 #[tokio::test]
 async fn lease_refresh_skips_a_judgement_a_rejudge_holds() {
     let (_pg, db) = crate::test_support::postgres().await;
+    let live = LiveDispatches::default();
     let (held, _) = new_submission(&db).await;
-    claim_one(&db, "srv").await;
+    let _held = dispatch_of(&live, &claim_one(&db, "srv").await.judgement);
     new_submission(&db).await;
-    claim_one(&db, "srv").await;
+    let _other = dispatch_of(&live, &claim_one(&db, "srv").await.judgement);
 
     let txn = db.begin().await.unwrap();
     open_judgement(
@@ -1009,7 +1075,7 @@ async fn lease_refresh_skips_a_judgement_a_rejudge_holds() {
     .await
     .unwrap()
     .unwrap();
-    let counts = refresh_leases(&db, "srv").await.unwrap();
+    let counts = refresh_leases(&db, "srv", &live).await.unwrap();
     assert_eq!(counts.judgements, 1, "the held judgement is skipped");
     txn.commit().await.unwrap();
 }

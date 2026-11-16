@@ -537,16 +537,21 @@ pub struct UnitCounts {
     pub code_runs: u64,
 }
 
-/// Bumps the lease heartbeat of every in-flight unit `server_id` owns, with
-/// the database clock, which every lease-age comparison also uses. Rows are
-/// taken in id order and a busy one is skipped: it is mid-transition, and the
-/// lease TTL spans many refresh intervals.
+/// Bumps the lease heartbeat of every in-flight unit `server_id` owns that
+/// one of its dispatches still works on (`live`, at the epoch it was claimed
+/// under), with the database clock, which every lease-age comparison also
+/// uses. A unit it owns with no live dispatch keeps its old heartbeat, so its
+/// lease lapses and another server steals it. Rows are taken in id order and
+/// a busy one is skipped: it is mid-transition, and the lease TTL spans many
+/// refresh intervals.
 pub(crate) async fn refresh_leases(
     db: &DatabaseConnection,
     server_id: &str,
+    live: &super::LiveDispatches,
 ) -> Result<UnitCounts, DbErr> {
     let mut counts = UnitCounts::default();
     for unit in [Unit::Judgement, Unit::CodeRun] {
+        let (ids, epochs) = live.leases(unit);
         let n = db
             .execute_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
@@ -554,11 +559,13 @@ pub(crate) async fn refresh_leases(
                     "UPDATE {table} SET lease_heartbeat_at = NOW() \
                      WHERE id IN (SELECT id FROM {table} \
                                   WHERE owner_server_id = $1 AND status IN {in_flight} \
+                                    AND (id, judge_epoch) IN \
+                                        (SELECT * FROM unnest($2::int[], $3::int[])) \
                                   ORDER BY id FOR NO KEY UPDATE SKIP LOCKED)",
                     table = unit.table(),
                     in_flight = StatusPhase::InFlight.sql_list(),
                 ),
-                [server_id.into()],
+                [server_id.into(), ids.into(), epochs.into()],
             ))
             .await?
             .rows_affected();

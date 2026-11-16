@@ -259,6 +259,7 @@ async fn operation_deps(slots: &WorkerSlots, faults: &DispatchFaults) -> Operati
                 judge_epoch: 0,
             },
             faults.clone(),
+            &Default::default(),
         )),
         worker_slots: slots.clone(),
     }

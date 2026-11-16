@@ -156,6 +156,7 @@ impl Dispatcher {
             handles.push(tokio::spawn(lease::run(
                 deps.state.db.clone(),
                 deps.server_id.clone(),
+                deps.state.registries.live_dispatches.clone(),
                 deps.config.lease_refresh_interval_secs,
                 cancel_rx.clone(),
             )));

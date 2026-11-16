@@ -1,5 +1,6 @@
 //! Lease-refresh fiber: keeps the lease of every in-flight unit this server
-//! owns fresh, so the steal scanner leaves its work alone.
+//! owns and still works on fresh, so the steal scanner leaves that work alone
+//! (see `judging::LiveDispatches`).
 
 use std::time::Duration;
 
@@ -12,6 +13,7 @@ use crate::services::judging;
 pub async fn run(
     db: DatabaseConnection,
     server_id: String,
+    live: judging::LiveDispatches,
     interval_secs: u64,
     mut cancel: watch::Receiver<bool>,
 ) {
@@ -21,7 +23,7 @@ pub async fn run(
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                let refresh = judging::refresh_leases(&db, &server_id);
+                let refresh = judging::refresh_leases(&db, &server_id, &live);
                 match common::deadline::bounded("dispatcher.lease", common::deadline::BACKGROUND_STEP, refresh).await {
                     Some(Ok(counts)) => {
                         if counts.judgements > 0 || counts.code_runs > 0 {

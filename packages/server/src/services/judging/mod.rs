@@ -106,7 +106,7 @@ mod unit;
 mod tests;
 
 pub(crate) use budget::RetryBudget;
-pub use dispatch::{Dispatch, DispatchedUnit, NotOwned};
+pub use dispatch::{Dispatch, DispatchedUnit, LiveDispatches, NotOwned};
 pub(crate) use fault::{CallEnd, DispatchFailure};
 pub use fault::{DispatchFault, DispatchFaults};
 pub use notify::CLAIM_CHANNEL;

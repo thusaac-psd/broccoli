@@ -228,6 +228,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
         plugin_id = %plugin_id,
         function_name = %function_name,
     );
+    let live_dispatches = state.registries.live_dispatches.clone();
     tokio::spawn(async move {
         async move {
             // The run goes to its contest type's plugin, which alone may
@@ -240,6 +241,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                     judge_epoch,
                 },
                 faults.clone(),
+                &live_dispatches,
             );
             let options = plugins
                 .get_config()

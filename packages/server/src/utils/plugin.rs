@@ -444,6 +444,7 @@ mod tests {
             evaluate_batches: Default::default(),
             hook_registry: crate::hooks::new_shared_registry(),
             judging_sessions: Default::default(),
+            live_dispatches: Default::default(),
         }
     }
 

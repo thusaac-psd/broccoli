@@ -881,6 +881,7 @@ impl TestApp {
                 evaluate_batches,
                 hook_registry,
                 judging_sessions,
+                live_dispatches: Default::default(),
             },
             metrics: test_metrics.clone(),
             prometheus_registry: test_prom_registry.clone(),

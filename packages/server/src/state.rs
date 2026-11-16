@@ -25,6 +25,8 @@ pub struct RegistryState {
     /// The detached judging sessions running here, the same the plugin
     /// manager's host functions start.
     pub judging_sessions: crate::services::judging_sessions::JudgingSessions,
+    /// The dispatches running here, whose leases the lease refresh keeps.
+    pub live_dispatches: crate::services::judging::LiveDispatches,
 }
 
 impl RegistryState {

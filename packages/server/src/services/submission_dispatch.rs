@@ -560,6 +560,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             judge_epoch: judgement_ref.judge_epoch,
         },
         faults.clone(),
+        &state.registries.live_dispatches,
     );
     let plugins = state.plugins.clone();
     let hook_registry = state.registries.hook_registry.clone();

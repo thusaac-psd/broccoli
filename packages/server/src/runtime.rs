@@ -326,6 +326,7 @@ impl ServerRuntime {
                 evaluate_batches: evaluate_batches.clone(),
                 hook_registry,
                 judging_sessions,
+                live_dispatches: Default::default(),
             },
             metrics,
             prometheus_registry,
