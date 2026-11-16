@@ -1,3 +1,4 @@
+use crate::error::HostCode;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
@@ -331,7 +332,7 @@ struct RejectDetail {
 fn parse_reject_detail(reason: &str) -> RejectDetail {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(reason) else {
         return RejectDetail {
-            code: "PLUGIN_REJECTED".into(),
+            code: HostCode::PluginRejected.as_str().into(),
             message: reason.to_string(),
             status: 400,
             details: None,
@@ -341,7 +342,7 @@ fn parse_reject_detail(reason: &str) -> RejectDetail {
         code: v
             .get("code")
             .and_then(|c| c.as_str())
-            .unwrap_or("PLUGIN_REJECTED")
+            .unwrap_or(HostCode::PluginRejected.as_str())
             .to_string(),
         message: v
             .get("message")

@@ -6,20 +6,19 @@ import {
 import { useSessionView } from '@broccoli/web-sdk/auth';
 import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import {
-  type CodeRun,
-  isTerminalStatus,
-  type Submission,
-} from '@broccoli/web-sdk/submission';
+import { type CodeRun, type Submission } from '@broccoli/web-sdk/submission';
 import { sleep } from '@broccoli/web-sdk/utils';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
+import { contestQueryKey } from '@/features/contest/hooks/use-contest-info';
 import { pairFanOutSubmissions } from '@/features/submission/hooks/fan-out-response';
 import {
   entriesReducer,
+  entryInProgress,
   type EntryResult,
+  isOutageRefusal,
   pollEntry,
   type PollResponse,
   pollTarget,
@@ -31,13 +30,9 @@ export type { SubmissionEntry } from '@/features/submission/hooks/submission-ent
 
 const submissionResult = (submission: Submission): EntryResult => ({
   submission,
-  terminal: isTerminalStatus(submission.status),
 });
 
-const codeRunResult = (codeRun: CodeRun): EntryResult => ({
-  codeRun,
-  terminal: isTerminalStatus(codeRun.status),
-});
+const codeRunResult = (codeRun: CodeRun): EntryResult => ({ codeRun });
 
 interface SubmissionFile {
   filename: string;
@@ -135,7 +130,7 @@ export function useSubmissions({
           ? { ok: false, status: res.response.status, error: res.error }
           : { ok: true, result: submissionResult(res.data) };
       };
-      void pollEntry(entryId, poller.signal, {
+      void pollEntry(entryId, target.pace, poller.signal, {
         fetch: fetchOnce,
         sleep,
         dispatch,
@@ -151,6 +146,21 @@ export function useSubmissions({
       pollers.clear();
     };
   }, []);
+
+  // A submit or run refused because the contest type's plugin is out means
+  // the page's view of that outage is stale (opened before a disable, say):
+  // read it again, so the page closes submissions or shows them open.
+  const rereadOutage = useCallback(
+    (err: unknown) => {
+      if (!isOutageRefusal(err)) return;
+      void queryClient.invalidateQueries({
+        queryKey: contestId
+          ? contestQueryKey(contestId)
+          : ['problem', problemId],
+      });
+    },
+    [contestId, problemId, queryClient],
+  );
 
   const submit = useCallback(
     async (
@@ -285,6 +295,7 @@ export function useSubmissions({
           placeholderEntries.forEach((placeholder) =>
             dispatch({ type: 'rejected', id: placeholder.id, error: err }),
           );
+          rereadOutage(err);
           toast.error(errorMessage(err, t('toast.submission.error')));
         }
         return;
@@ -375,6 +386,7 @@ export function useSubmissions({
           return;
         }
         dispatch({ type: 'rejected', id: entryId, error: err });
+        rereadOutage(err);
         toast.error(errorMessage(err, t('toast.submission.error')));
       }
     },
@@ -384,6 +396,7 @@ export function useSubmissions({
       errorMessage,
       problemId,
       queryClient,
+      rereadOutage,
       sendIdempotent,
       t,
     ],
@@ -446,18 +459,17 @@ export function useSubmissions({
         toast.success(t('toast.submission.running'));
       } catch (err) {
         dispatch({ type: 'rejected', id: entryId, error: err });
+        rereadOutage(err);
         toast.error(errorMessage(err, t('toast.submission.runError')));
       }
     },
-    [apiClient, contestId, errorMessage, problemId, t],
+    [apiClient, contestId, errorMessage, problemId, rereadOutage, t],
   );
 
   const submissionEntries = entries.filter((e) => !e.isRun);
   const latestRun = entries.find((e) => e.isRun) ?? null;
 
-  const isAnySubmitting = entries.some(
-    (e) => e.status === 'submitting' || e.status === 'polling',
-  );
+  const isAnySubmitting = entries.some(entryInProgress);
 
   // A new problem starts with no entries; their pollers stop with them.
   useEffect(() => {

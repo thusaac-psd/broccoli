@@ -14,7 +14,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use common::SubmissionDlqErrorCode;
+use broccoli_api_types::error::HostCode;
 use common::worker::OperationFault;
 
 /// A fault one dispatch met that decides its system error.
@@ -30,10 +30,10 @@ pub enum DispatchFault {
 
 impl DispatchFault {
     /// The error code a judgement this fault ends carries.
-    pub fn code(self) -> &'static str {
+    pub fn code(self) -> HostCode {
         match self {
             Self::Operation(fault) => fault.code(),
-            Self::CheckerFailed => "CHECKER_FAILED",
+            Self::CheckerFailed => HostCode::CheckerFailed,
         }
     }
 }
@@ -135,14 +135,14 @@ impl SystemErrorClass {
 /// ([`super::fail_dispatch`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DispatchFailure {
-    pub code: &'static str,
+    pub code: HostCode,
     pub message: String,
     pub class: SystemErrorClass,
 }
 
 impl DispatchFailure {
     /// A failure judging the submission, retried within its budget.
-    pub(crate) fn judging(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn judging(code: HostCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -153,7 +153,7 @@ impl DispatchFailure {
     /// The contest plugin refused the work as one every attempt would fail.
     pub(crate) fn refused(message: impl Into<String>) -> Self {
         Self {
-            code: SubmissionDlqErrorCode::PLUGIN_REFUSED,
+            code: HostCode::PluginRefused,
             message: message.into(),
             class: SystemErrorClass::Stands,
         }
@@ -193,7 +193,7 @@ impl DispatchOutput for broccoli_server_sdk::types::OnSubmissionOutput {
                 .error_message
                 .unwrap_or_else(|| "Unknown plugin error".to_string());
             if self.retryable {
-                DispatchFailure::judging("PLUGIN_ERROR", message)
+                DispatchFailure::judging(HostCode::PluginError, message)
             } else {
                 DispatchFailure::refused(message)
             }
@@ -205,7 +205,7 @@ impl DispatchOutput for broccoli_server_sdk::types::OnCodeRunOutput {
     fn failure(self) -> Option<DispatchFailure> {
         (!self.success).then(|| {
             DispatchFailure::judging(
-                "PLUGIN_ERROR",
+                HostCode::PluginError,
                 self.error_message
                     .unwrap_or_else(|| "Unknown plugin error".to_string()),
             )
@@ -232,13 +232,13 @@ impl CallEnd {
             Err(plugin_core::error::PluginError::ShuttingDown) => return Self::ShuttingDown,
             Err(e) if e.is_unavailable() => {
                 return Self::Failed(DispatchFailure::judging(
-                    "PLUGIN_UNAVAILABLE",
+                    HostCode::PluginUnavailable,
                     e.to_string(),
                 ));
             }
             Err(e) => {
                 return Self::Failed(DispatchFailure::judging(
-                    "PLUGIN_EXECUTION_ERROR",
+                    HostCode::PluginExecutionError,
                     e.to_string(),
                 ));
             }
@@ -247,7 +247,7 @@ impl CallEnd {
             Ok(output) => output,
             Err(e) => {
                 return Self::Failed(DispatchFailure::judging(
-                    "PLUGIN_INVALID_OUTPUT",
+                    HostCode::PluginInvalidOutput,
                     format!("Plugin returned invalid output: {e}"),
                 ));
             }
@@ -256,7 +256,7 @@ impl CallEnd {
             Some(failure) => Self::Failed(failure),
             // The plugin's verdict, if it wrote one, was fenced out.
             None if faults.lost().is_some() => Self::Failed(DispatchFailure::judging(
-                "PLUGIN_ERROR",
+                HostCode::PluginError,
                 "The platform lost the attempt",
             )),
             None => Self::Handled,
@@ -281,11 +281,11 @@ mod tests {
     #[test]
     fn a_recorded_fault_decides_the_failure() {
         let faults = DispatchFaults::default();
-        let own = DispatchFailure::judging("PLUGIN_ERROR", "boom");
+        let own = DispatchFailure::judging(HostCode::PluginError, "boom");
         assert_eq!(own.clone().unless_fault(&faults), own);
         faults.record(DispatchFault::CheckerFailed, "signal 6");
         let failure = own.unless_fault(&faults);
-        assert_eq!(failure.code, "CHECKER_FAILED");
+        assert_eq!(failure.code, HostCode::CheckerFailed);
         assert_eq!(failure.message, "signal 6");
         assert_eq!(failure.class, SystemErrorClass::Stands);
     }
@@ -297,7 +297,7 @@ mod tests {
         )
     }
 
-    fn code(end: CallEnd) -> &'static str {
+    fn code(end: CallEnd) -> HostCode {
         match end {
             CallEnd::Failed(failure) => failure.code,
             other => panic!("{other:?}"),
@@ -322,7 +322,7 @@ mod tests {
             },
         ];
         for e in unavailable {
-            assert_eq!(code(end(Err(e))), "PLUGIN_UNAVAILABLE");
+            assert_eq!(code(end(Err(e))), HostCode::PluginUnavailable);
         }
         let failed = PluginError::ExecutionFailed {
             plugin_id: "p".into(),
@@ -330,9 +330,12 @@ mod tests {
             depth: 1,
             message: "trap".into(),
         };
-        assert_eq!(code(end(Err(failed))), "PLUGIN_EXECUTION_ERROR");
+        assert_eq!(code(end(Err(failed))), HostCode::PluginExecutionError);
         assert_eq!(end(Err(PluginError::ShuttingDown)), CallEnd::ShuttingDown);
-        assert_eq!(code(end(Ok(b"nope".to_vec()))), "PLUGIN_INVALID_OUTPUT");
+        assert_eq!(
+            code(end(Ok(b"nope".to_vec()))),
+            HostCode::PluginInvalidOutput
+        );
         let refused = br#"{"success":false,"error_message":"no","retryable":false}"#;
         let CallEnd::Failed(refusal) = end(Ok(refused.to_vec())) else {
             panic!("refused");
@@ -346,7 +349,7 @@ mod tests {
             CallEnd::of::<broccoli_server_sdk::types::OnCodeRunOutput>(Ok(ok.to_vec()), &lost);
         assert_eq!(
             code(run),
-            "PLUGIN_ERROR",
+            HostCode::PluginError,
             "a lost attempt fails, to be handed back"
         );
     }

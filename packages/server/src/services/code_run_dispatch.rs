@@ -1,3 +1,4 @@
+use crate::error::HostCode;
 use broccoli_server_sdk::types::{
     OnCodeRunInput, OnCodeRunOutput, SourceFile, TestCaseBodyRef, TestCaseRow,
 };
@@ -28,7 +29,7 @@ async fn record_dispatch_failure(
     {
         error!(
             code_run_id,
-            error_code = failure.code,
+            error_code = failure.code.as_str(),
             error = %e,
             "Failed to record the code run's dispatch failure; the row may be left stuck"
         );
@@ -78,7 +79,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                 code_run.judge_epoch,
                 &faults,
                 DispatchFailure::judging(
-                    "NO_HANDLER_REGISTERED",
+                    HostCode::NoHandlerRegistered,
                     format!(
                         "No plugin registered for contest type {:?}",
                         code_run.contest_type
@@ -103,7 +104,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                 code_run.judge_epoch,
                 &faults,
                 DispatchFailure::judging(
-                    "PROBLEM_NOT_FOUND",
+                    HostCode::ProblemNotFound,
                     format!("Problem {} not found", code_run.problem_id),
                 ),
             )
@@ -118,7 +119,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                 code_run.judge_epoch,
                 &faults,
                 DispatchFailure::judging(
-                    "DATABASE_ERROR",
+                    HostCode::DatabaseError,
                     format!("Failed to fetch problem: {}", e),
                 ),
             )
@@ -137,7 +138,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                 code_run.judge_epoch,
                 &faults,
                 DispatchFailure::judging(
-                    "INVALID_FILES",
+                    HostCode::InvalidFiles,
                     format!("Failed to parse code run files: {}", e),
                 ),
             )
@@ -192,7 +193,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                 code_run.judge_epoch,
                 &faults,
                 DispatchFailure::judging(
-                    "SERIALIZATION_ERROR",
+                    HostCode::SerializationError,
                     format!("Failed to serialize input: {}", e),
                 ),
             )
@@ -259,7 +260,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                         code_run_id,
                         problem_id,
                         contest_id = ?contest_id,
-                        error_code = failure.code,
+                        error_code = failure.code.as_str(),
                         error = %failure.message,
                         "Code run plugin call ended without a verdict"
                     );

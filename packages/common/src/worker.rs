@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use broccoli_api_types::error::HostCode;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
@@ -134,12 +135,12 @@ impl OperationFault {
     ];
 
     /// The error code a judgement this fault ends carries.
-    pub fn code(self) -> &'static str {
+    pub fn code(self) -> HostCode {
         match self {
-            Self::QueueUnreachable => "QUEUE_UNREACHABLE",
-            Self::OperationLost => "OPERATION_LOST",
-            Self::PlatformToolMissing => "PLATFORM_TOOL_MISSING",
-            Self::NoCapableWorker => "NO_CAPABLE_WORKER",
+            Self::QueueUnreachable => HostCode::QueueUnreachable,
+            Self::OperationLost => HostCode::OperationLost,
+            Self::PlatformToolMissing => HostCode::PlatformToolMissing,
+            Self::NoCapableWorker => HostCode::NoCapableWorker,
         }
     }
 }

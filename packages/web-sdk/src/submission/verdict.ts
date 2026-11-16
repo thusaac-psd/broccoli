@@ -1,12 +1,9 @@
 import type { I18nContextValue } from '@/i18n';
-import type {
-  PluginOutage,
-  ShownStatus,
-  Verdict,
-  Withheld,
-} from '@/submission/types';
-import { getStatusLabel, withheldLabel } from '@/submission/utils';
+import type { SubmissionOutcome } from '@/submission/progress';
+import type { ShownStatus, Verdict } from '@/submission/types';
 import type { BadgeProps } from '@/ui/badge';
+
+import { getStatusLabel, withheldLabel } from './utils.ts';
 
 type BadgeVariant = NonNullable<BadgeProps['variant']>;
 
@@ -57,13 +54,18 @@ function getVerdictVariant(verdict: Verdict): BadgeVariant {
 }
 
 /** What decides the badge of a submission's outcome, as its responses carry it. */
-export interface VerdictOutcome {
+export interface VerdictOutcome extends SubmissionOutcome {
   verdict?: Verdict | null;
-  status?: ShownStatus;
-  withheld?: Withheld | null;
-  /** Set while the submission waits for its contest type's provider. */
-  plugin_outage?: PluginOutage | null;
 }
+
+/**
+ * A `VerdictOutcome` copied into a row of a list: every field is required, so
+ * a row built from a response cannot leave one out (and show a parked or
+ * withheld submission as being judged).
+ */
+export type RowOutcome = {
+  [K in keyof Required<VerdictOutcome>]: VerdictOutcome[K];
+};
 
 /**
  * The badge of a submission's outcome. A withheld outcome (`status` `null`)
@@ -105,6 +107,25 @@ export function getVerdictBadge(
     label: getVerdictLabel(verdict, t),
     variant: getVerdictVariant(verdict),
   };
+}
+
+/**
+ * What a submission being judged shows beside its spinner. A queued one
+ * waits for a judge (no worker may be taking work at all), so it never
+ * reads as being judged.
+ */
+export function progressLabel(
+  status: ShownStatus,
+  t: I18nContextValue['t'],
+): string {
+  switch (status) {
+    case 'Queued':
+      return t('result.waitingForJudge');
+    case 'Compiling':
+      return t('result.compiling');
+    default:
+      return t('result.judging');
+  }
 }
 
 export function verdictToString(verdict: Verdict): string;

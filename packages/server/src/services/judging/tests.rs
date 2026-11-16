@@ -4,6 +4,8 @@ use chrono::Utc;
 use common::db::DatabaseConnection;
 use common::worker::OperationFault;
 use common::{DlqMessageType, SubmissionStatus, Verdict};
+
+use crate::error::HostCode;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait,
     QueryFilter, Set, Statement, TransactionTrait,
@@ -469,7 +471,7 @@ async fn a_lapsed_lease_requeues_under_a_new_epoch_and_spends_a_retry() {
             Unit::Judgement,
             j.id,
             claimed.judgement.judge_epoch,
-            &DispatchFailure::judging("X", "late"),
+            &DispatchFailure::judging(HostCode::PluginError, "late"),
         )
         .await
         .unwrap(),
@@ -655,7 +657,7 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
             Unit::Judgement,
             claimed.judgement.id,
             claimed.judgement.judge_epoch,
-            &DispatchFailure::judging("PLUGIN_ERROR", "boom"),
+            &DispatchFailure::judging(HostCode::PluginError, "boom"),
         )
         .await
         .unwrap(),
@@ -692,7 +694,7 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
         Unit::Judgement,
         again.judgement.id,
         again.judgement.judge_epoch,
-        &DispatchFailure::judging("PLUGIN_ERROR", "boom"),
+        &DispatchFailure::judging(HostCode::PluginError, "boom"),
     )
     .await
     .unwrap();
@@ -763,7 +765,7 @@ async fn a_contestant_verdict_or_a_failure_that_stands_is_never_retried() {
             SubmissionStatus::SystemError,
             "{code} shows at once"
         );
-        assert_eq!(shown.error_code.as_deref(), Some(code));
+        assert_eq!(shown.error_code.as_deref(), Some(code.as_str()));
     }
 }
 
@@ -858,7 +860,7 @@ async fn a_code_run_follows_the_same_claim_and_requeue_rules() {
             Unit::CodeRun,
             run.id,
             run.judge_epoch,
-            &DispatchFailure::judging("X", "late")
+            &DispatchFailure::judging(HostCode::PluginError, "late")
         )
         .await
         .unwrap(),
@@ -1399,7 +1401,7 @@ async fn work_of_a_disabled_contest_plugin_is_parked_until_it_is_enabled() {
             Unit::Judgement,
             claimed.judgement.id,
             claimed.judgement.judge_epoch,
-            &DispatchFailure::judging("PLUGIN_SESSION_ABORTED", "the callback is gone"),
+            &DispatchFailure::judging(HostCode::PluginSessionAborted, "the callback is gone"),
         )
         .await
         .unwrap(),
@@ -1456,7 +1458,7 @@ async fn a_system_error_awaiting_its_retry_is_handed_back_when_its_type_is_parke
             Unit::Judgement,
             claimed.judgement.id,
             claimed.judgement.judge_epoch,
-            &DispatchFailure::judging("PLUGIN_ERROR", "boom"),
+            &DispatchFailure::judging(HostCode::PluginError, "boom"),
         )
         .await
         .unwrap();
@@ -1515,7 +1517,7 @@ async fn a_system_error_that_stands_stays_shown_when_its_type_is_parked() {
         Unit::Judgement,
         claimed.judgement.id,
         claimed.judgement.judge_epoch,
-        &DispatchFailure::judging("PLUGIN_ERROR", "boom"),
+        &DispatchFailure::judging(HostCode::PluginError, "boom"),
     )
     .await
     .unwrap();
@@ -1552,7 +1554,7 @@ async fn no_system_error_retry_is_spent_while_its_type_is_parked() {
             Unit::Judgement,
             claimed.judgement.id,
             claimed.judgement.judge_epoch,
-            &DispatchFailure::judging("PLUGIN_ERROR", "boom"),
+            &DispatchFailure::judging(HostCode::PluginError, "boom"),
         )
         .await
         .unwrap();
@@ -1594,7 +1596,7 @@ async fn a_failed_code_run_is_handed_back_or_finalized_by_the_judgements_rule() 
         fault: OperationFault::OperationLost.into(),
         message: "lost".into(),
     });
-    let judging = DispatchFailure::judging("PLUGIN_ERROR", "boom");
+    let judging = DispatchFailure::judging(HostCode::PluginError, "boom");
     let find = |db: DatabaseConnection, id| async move {
         code_run::Entity::find_by_id(id)
             .one(&db)

@@ -3,7 +3,6 @@ import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
 import { defineConfig } from 'vite';
 
-import { precompressPlugin } from './plugins/precompress';
 import {
   resolveSdkEntry as resolveSdkDep,
   SDK_SHARED_DEPS,
@@ -33,7 +32,6 @@ export default defineConfig(() => {
       tailwindcss(),
       sharedDepsPlugin(),
       reactRouter(),
-      precompressPlugin(),
     ],
     server: {
       proxy: {

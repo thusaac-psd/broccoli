@@ -236,6 +236,10 @@ binaries warn about every key they do not read.
   logic, response.
 - Use the project's structured error patterns and treat error `code` values as
   API contracts.
+- Every error code the host sends or records is a variant of
+  `broccoli_api_types::error::HostCode`, and every language pack has an
+  `apiError.<CODE>` text for it unless the variant is marked `generic`;
+  `packages/api-types/tests/host_code_text.rs` fails otherwise.
 - Prefer permission helpers instead of checking roles directly.
 - Think about transaction boundaries before editing write paths.
 - The schema changes only through versioned forward migrations in

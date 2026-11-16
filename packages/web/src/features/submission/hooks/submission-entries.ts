@@ -1,5 +1,12 @@
-import type { CodeRun, Submission } from '@broccoli/web-sdk/submission';
-import { backoffDelay, type BackoffPolicy } from '@broccoli/web-sdk/utils';
+import { parseApiError } from '@broccoli/web-sdk/api';
+import { nextPollDelay } from '@broccoli/web-sdk/hooks';
+import {
+  type CodeRun,
+  JUDGING_POLL_MS,
+  type Submission,
+  submissionPhase,
+  submissionPollPace,
+} from '@broccoli/web-sdk/submission';
 
 // The submissions and code runs started from one problem page, each moving
 // through `submitting -> polling -> done`. From `submitting` the server may
@@ -46,11 +53,18 @@ export interface SubmissionEntry {
   targetWorkerId?: string;
 }
 
-/** What the server reported for an entry, and whether it is final. */
-export type EntryResult = (
+/** What the server reported for an entry. */
+export type EntryResult =
   | { submission: Submission; codeRun?: never }
-  | { codeRun: CodeRun; submission?: never }
-) & { terminal: boolean };
+  | { codeRun: CodeRun; submission?: never };
+
+/**
+ * How often an entry with this result is polled (`submissionPollPace`):
+ * `false` once nothing more can change, which makes the entry `done`.
+ */
+export function resultPace(result: EntryResult): number | false {
+  return submissionPollPace(result.codeRun ?? result.submission);
+}
 
 export type EntryAction =
   | { type: 'added'; entries: SubmissionEntry[] }
@@ -79,14 +93,14 @@ const FROM: Record<
 
 function withResult(
   entry: SubmissionEntry,
-  { terminal, ...result }: EntryResult,
+  result: EntryResult,
 ): SubmissionEntry {
   return {
     ...entry,
     ...(result.codeRun
       ? { codeRun: result.codeRun }
       : { submission: result.submission }),
-    status: terminal ? 'done' : 'polling',
+    status: resultPace(result) === false ? 'done' : 'polling',
   };
 }
 
@@ -127,20 +141,64 @@ export function entriesReducer(
   }
 }
 
-/** What an entry in `polling` polls: its submission or its code run. */
-export function pollTarget(
-  entry: SubmissionEntry,
-): { kind: 'submission' | 'codeRun'; id: number } | null {
-  if (entry.status !== 'polling') return null;
-  if (entry.isRun) {
-    return entry.codeRun ? { kind: 'codeRun', id: entry.codeRun.id } : null;
-  }
-  const id = entry.submission?.id ?? entry.submissionId;
-  return id === undefined ? null : { kind: 'submission', id };
+/** The submission or code run an entry last heard of, if any. */
+function lastResult(entry: SubmissionEntry): Submission | CodeRun | null {
+  return entry.isRun ? entry.codeRun : entry.submission;
 }
 
-export const POLL_INTERVAL_MS = 1_000;
-const POLL_BACKOFF: BackoffPolicy = { baseMs: POLL_INTERVAL_MS, maxMs: 15_000 };
+/**
+ * Whether an entry shows as in progress (a spinner, a busy submit button):
+ * while it is sent, and while its submission is being judged
+ * (`submissionPhase`). One its contest's plugin parks is polled but not in
+ * progress.
+ */
+export function entryInProgress(entry: SubmissionEntry): boolean {
+  if (entry.status === 'submitting') return true;
+  if (entry.status !== 'polling') return false;
+  const last = lastResult(entry);
+  return !last || submissionPhase(last) === 'judging';
+}
+
+/** What an entry in `polling` polls: its submission or its code run. */
+export interface PollTarget {
+  kind: 'submission' | 'codeRun';
+  id: number;
+  /** The pace the entry's last result asks for. */
+  pace: number;
+}
+
+export function pollTarget(entry: SubmissionEntry): PollTarget | null {
+  if (entry.status !== 'polling') return null;
+  const last = lastResult(entry);
+  // An entry in `polling` never holds a result that settles it; one known
+  // only by id is being judged until its first poll says otherwise.
+  const pace = last ? submissionPollPace(last) : JUDGING_POLL_MS;
+  if (pace === false) return null;
+  if (entry.isRun) {
+    return entry.codeRun
+      ? { kind: 'codeRun', id: entry.codeRun.id, pace }
+      : null;
+  }
+  const id = entry.submission?.id ?? entry.submissionId;
+  return id === undefined ? null : { kind: 'submission', id, pace };
+}
+
+/**
+ * The codes of a refusal that says the plugin judging the contest type is
+ * out: whatever the page shows of the contest's (or problem's) outage is
+ * stale, so it is read again.
+ */
+const OUTAGE_REFUSALS: ReadonlySet<string> = new Set([
+  'CONTEST_TYPE_DISABLED',
+  'CONTEST_TYPE_UNAVAILABLE',
+  'PLUGIN_DISABLED',
+  'PLUGIN_UNAVAILABLE',
+]);
+
+export function isOutageRefusal(error: unknown): boolean {
+  const code = parseApiError(error)?.code;
+  return code !== undefined && OUTAGE_REFUSALS.has(code);
+}
 
 /** One poll: the result, or the HTTP status and body of a failed request. */
 export type PollResponse =
@@ -153,6 +211,8 @@ export interface PollDeps {
   dispatch: (action: EntryAction) => void;
   /** Whether nobody is signed in (as opposed to a token being renewed). */
   isSignedOut: () => boolean;
+  /** Spreads the backoff of seats that failed together (`Math.random`). */
+  random?: () => number;
 }
 
 /**
@@ -171,21 +231,22 @@ export function isPermanentPollFailure(
 /**
  * Poll one entry until it is final, one request at a time: the next poll is
  * scheduled only once the previous one has answered, so responses can never
- * arrive out of order. Transient failures back off; a permanent one fails the
- * entry. Stops when `signal` aborts.
+ * arrive out of order. Each wait is `nextPollDelay` at the pace the last
+ * result asks for (`resultPace`), starting from `pace`: transient failures
+ * back off with jitter; a permanent one fails the entry. Stops when `signal`
+ * aborts.
  */
 export async function pollEntry(
   entryId: number,
+  initialPace: number,
   signal: AbortSignal,
   deps: PollDeps,
 ): Promise<void> {
+  let pace = initialPace;
   // Consecutive transient failures.
   let failures = 0;
   while (!signal.aborted) {
-    await deps.sleep(
-      failures === 0 ? POLL_INTERVAL_MS : backoffDelay(failures, POLL_BACKOFF),
-      signal,
-    );
+    await deps.sleep(nextPollDelay(pace, failures, deps.random), signal);
     if (signal.aborted) return;
     let response: PollResponse;
     try {
@@ -196,7 +257,9 @@ export async function pollEntry(
     if (signal.aborted) return;
     if (response.ok) {
       deps.dispatch({ type: 'polled', id: entryId, result: response.result });
-      if (response.result.terminal) return;
+      const next = resultPace(response.result);
+      if (next === false) return;
+      pace = next;
       failures = 0;
     } else if (isPermanentPollFailure(response.status, deps.isSignedOut())) {
       deps.dispatch({

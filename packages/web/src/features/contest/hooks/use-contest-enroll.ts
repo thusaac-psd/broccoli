@@ -1,6 +1,5 @@
 import {
   parseApiError,
-  serverNow,
   useApiClient,
   useErrorMessage,
 } from '@broccoli/web-sdk/api';
@@ -9,12 +8,17 @@ import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
+import {
+  type ContestPhase,
+  phaseHasEnded,
+  phaseHasStarted,
+} from '@/features/contest/utils/status';
 import { toastUnsettled } from '@/lib/idempotency-feedback';
 
 type ContestEnrollState = {
   is_public: boolean;
-  start_time: string;
-  end_time: string;
+  /** Where the contest is now, on the server's word. */
+  phase: ContestPhase;
 };
 
 export function useContestEnroll({
@@ -104,11 +108,10 @@ export function useContestEnroll({
 
   const hasMyInfo = myInfo !== undefined;
   const isRegistered = Boolean(myInfo?.is_registered);
-  const now = serverNow();
-  const hasEnded = contest ? now >= Date.parse(contest.end_time) : true;
+  const hasEnded = contest ? phaseHasEnded(contest.phase) : true;
   // The server refuses to unregister once the contest has started, because
   // standings are built from registrations.
-  const hasStarted = contest ? now >= Date.parse(contest.start_time) : true;
+  const hasStarted = contest ? phaseHasStarted(contest.phase) : true;
 
   const canShowEnrollCard =
     !!contest &&

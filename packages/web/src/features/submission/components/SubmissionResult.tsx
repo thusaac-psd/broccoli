@@ -7,13 +7,14 @@ import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Slot } from '@broccoli/web-sdk/slot';
 import {
   parseSubmissionError,
+  progressLabel,
   type Submission,
+  submissionPhase,
   withheldLabel,
 } from '@broccoli/web-sdk/submission';
 import { TextPreview } from '@broccoli/web-sdk/ui';
 import { Timer, XCircle } from 'lucide-react';
 
-import { submissionPhase } from '../utils/phase';
 import { ReadOnlyCodeViewer } from './ReadOnlyCodeViewer';
 import { SubmissionTestCases } from './SubmissionTestCases';
 
@@ -46,8 +47,7 @@ export function SubmissionResult({
     (!submission && isSubmitting) ||
     (phase === 'judging' && status !== 'Running')
   ) {
-    const statusLabel =
-      status === 'Compiling' ? t('result.compiling') : t('result.judging');
+    const statusLabel = progressLabel(status, t);
 
     return (
       <div className="flex items-center justify-center h-32">

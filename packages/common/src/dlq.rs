@@ -1,20 +1,7 @@
+use broccoli_api_types::error::HostCode;
 use serde::{Deserialize, Serialize};
 
 use crate::retry::RetryAttempt;
-
-pub struct SubmissionDlqErrorCode;
-
-impl SubmissionDlqErrorCode {
-    pub const STUCK_JOB: &'static str = "STUCK_JOB";
-    pub const DISPATCH_RETRY_EXHAUSTED: &'static str = "DISPATCH_RETRY_EXHAUSTED";
-    /// A judgement still in flight when a newer judgement replaced it as
-    /// current (rejudge, DLQ retry, applying another judgement).
-    pub const SUPERSEDED: &'static str = "SUPERSEDED";
-    /// A contest-type plugin refused the submission deterministically
-    /// (`OnSubmissionOutput::refused`). Terminal: never re-judged
-    /// automatically.
-    pub const PLUGIN_REFUSED: &'static str = "PLUGIN_REFUSED";
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -34,8 +21,8 @@ impl DlqErrorCode {
             Self::MaxRetriesExceeded => "MAX_RETRIES_EXCEEDED",
             Self::RedeliveryExhausted => "REDELIVERY_EXHAUSTED",
             Self::DeserializationError => "DESERIALIZATION_ERROR",
-            Self::StuckJob => "STUCK_JOB",
-            Self::DispatchRetryExhausted => "DISPATCH_RETRY_EXHAUSTED",
+            Self::StuckJob => HostCode::StuckJob.as_str(),
+            Self::DispatchRetryExhausted => HostCode::DispatchRetryExhausted.as_str(),
         }
     }
 }

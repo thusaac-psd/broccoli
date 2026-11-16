@@ -1,3 +1,4 @@
+use crate::error::HostCode;
 use crate::registry::ContestTypeRegistry;
 use broccoli_server_sdk::types::{
     AfterJudgingEvent, DetachedSubmissionCompletion, HookEvent, OnSubmissionInput,
@@ -212,7 +213,7 @@ async fn record_dispatch_failure(
             error!(
                 submission_id = judgement.submission_id,
                 judgement_id = judgement.id,
-                error_code = failure.code,
+                error_code = failure.code.as_str(),
                 marking_error = %e,
                 "Failed to persist the dispatch failure; the judgement stays in flight until a detector requeues it"
             );
@@ -222,7 +223,7 @@ async fn record_dispatch_failure(
     metrics.submission_dispatch_failure_total.add(
         1,
         &[
-            opentelemetry::KeyValue::new("error_code", failure.code),
+            opentelemetry::KeyValue::new("error_code", failure.code.as_str()),
             opentelemetry::KeyValue::new("recovered", recovered),
         ],
     );
@@ -296,7 +297,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 judgement_ref,
                 &faults,
                 DispatchFailure::judging(
-                    "NO_HANDLER_REGISTERED",
+                    HostCode::NoHandlerRegistered,
                     format!("No plugin registered for contest type {:?}", contest_type),
                 ),
             )
@@ -318,7 +319,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 judgement_ref,
                 &faults,
                 DispatchFailure::judging(
-                    "PROBLEM_NOT_FOUND",
+                    HostCode::ProblemNotFound,
                     format!("Problem {} not found", submission.problem_id),
                 ),
             )
@@ -333,7 +334,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 judgement_ref,
                 &faults,
                 DispatchFailure::judging(
-                    "DATABASE_ERROR",
+                    HostCode::DatabaseError,
                     format!("Failed to fetch problem: {}", e),
                 ),
             )
@@ -352,7 +353,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 judgement_ref,
                 &faults,
                 DispatchFailure::judging(
-                    "INVALID_FILES",
+                    HostCode::InvalidFiles,
                     format!("Failed to parse submission files: {}", e),
                 ),
             )
@@ -396,7 +397,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                     &state.metrics,
                     judgement_ref,
                     &faults,
-                    DispatchFailure::judging("DATABASE_ERROR", format!("Failed to query test cases: {}", e)),
+                    DispatchFailure::judging(HostCode::DatabaseError, format!("Failed to query test cases: {}", e)),
                 )
                 .await;
                 return;
@@ -460,7 +461,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                         judgement_ref,
                         &faults,
                         DispatchFailure::judging(
-                            "BLOB_STORE_ERROR",
+                            HostCode::BlobStoreError,
                             format!("Failed to store oversized inline test case input: {e}"),
                         ),
                     )
@@ -485,7 +486,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                         judgement_ref,
                         &faults,
                         DispatchFailure::judging(
-                            "BLOB_STORE_ERROR",
+                            HostCode::BlobStoreError,
                             format!(
                                 "Failed to store oversized inline test case expected_output: {e}"
                             ),
@@ -538,7 +539,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 judgement_ref,
                 &faults,
                 DispatchFailure::judging(
-                    "SERIALIZATION_ERROR",
+                    HostCode::SerializationError,
                     format!("Failed to serialize input: {}", e),
                 ),
             )
@@ -626,7 +627,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                         judgement_id,
                         problem_id,
                         contest_id = ?contest_id,
-                        error_code = failure.code,
+                        error_code = failure.code.as_str(),
                         error = %failure.message,
                         "Plugin call ended without a verdict"
                     );

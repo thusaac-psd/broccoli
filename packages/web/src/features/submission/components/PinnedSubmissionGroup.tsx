@@ -1,16 +1,15 @@
 import { useErrorMessage } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
-  isTerminalStatus,
-  type ShownStatus,
-  type Verdict,
-  type Withheld,
+  getVerdictBadge,
+  type RowOutcome,
+  submissionPhase,
 } from '@broccoli/web-sdk/submission';
-import { getVerdictBadge } from '@broccoli/web-sdk/submission';
 import { Badge } from '@broccoli/web-sdk/ui';
 import { formatKibibytes } from '@broccoli/web-sdk/utils';
 import { AlertTriangle, Loader2, Pin } from 'lucide-react';
 
+import { entryInProgress } from '@/features/submission/hooks/submission-entries';
 import { useSubmissionNavigation } from '@/features/submission/hooks/use-submission-navigation';
 import type { SubmissionEntry } from '@/features/submission/hooks/use-submissions';
 
@@ -23,9 +22,7 @@ interface Props {
 interface Row {
   workerId: string;
   entry: SubmissionEntry;
-  status: ShownStatus;
-  withheld: Withheld | null;
-  verdict: Verdict | null;
+  outcome: RowOutcome;
   timeUsed: number | null;
   memoryUsed: number | null;
 }
@@ -35,9 +32,12 @@ function buildRow(entry: SubmissionEntry): Row {
   return {
     workerId: entry.targetWorkerId ?? '?',
     entry,
-    status: sub ? sub.status : 'Pending',
-    withheld: sub?.withheld ?? null,
-    verdict: (sub?.result?.verdict as Verdict | null) ?? null,
+    outcome: {
+      status: sub ? sub.status : 'Pending',
+      withheld: sub?.withheld ?? null,
+      plugin_outage: sub?.plugin_outage ?? null,
+      verdict: sub?.result?.verdict ?? null,
+    },
     timeUsed: sub?.result?.time_used ?? null,
     memoryUsed: sub?.result?.memory_used ?? null,
   };
@@ -52,12 +52,20 @@ export function PinnedSubmissionGroup({ entries, linkBuilder }: Props) {
     .map(buildRow)
     .sort((a, b) => a.workerId.localeCompare(b.workerId));
 
-  const allTerminal = rows.every((r) => isTerminalStatus(r.status));
-  const verdictsSeen = new Set(rows.map((r) => r.verdict ?? r.status));
-  const diverges = allTerminal && verdictsSeen.size > 1;
+  // Settled: nothing more will change for this viewer.
+  const allSettled = rows.every((r) => {
+    const phase = submissionPhase(r.outcome);
+    return phase === 'final' || phase === 'hidden';
+  });
+  const verdictsSeen = new Set(
+    rows.map((r) => r.outcome.verdict ?? r.outcome.status),
+  );
+  const diverges = allSettled && verdictsSeen.size > 1;
   const allAccepted =
-    allTerminal &&
-    rows.every((r) => r.verdict === 'Accepted' && r.status === 'Judged');
+    allSettled &&
+    rows.every(
+      (r) => r.outcome.verdict === 'Accepted' && r.outcome.status === 'Judged',
+    );
 
   return (
     <section
@@ -98,9 +106,8 @@ export function PinnedSubmissionGroup({ entries, linkBuilder }: Props) {
         {rows.map((row) => {
           const submissionId = row.entry.submission?.id ?? null;
           const canOpen = submissionId != null && !!linkBuilder;
-          const { label, variant } = getVerdictBadge(row, t);
-          const isPolling =
-            row.entry.status === 'submitting' || row.entry.status === 'polling';
+          const { label, variant } = getVerdictBadge(row.outcome, t);
+          const isPolling = entryInProgress(row.entry);
           return (
             <div
               key={row.entry.id}

@@ -75,7 +75,8 @@ export function getVerdictKey(
       return 'cancelled';
     case null:
     case undefined:
-      return isTerminalStatus(status) || status === 'Running'
+      // A withheld status (`null`) shows no live test cases either.
+      return status == null || isTerminalStatus(status) || status === 'Running'
         ? 'skipped'
         : 'pending';
     default:

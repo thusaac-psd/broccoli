@@ -109,7 +109,7 @@ const USERS = {
   },
 };
 
-const contest = (
+export const contest = (
   id: number,
   title: string,
   startMinutes: number,

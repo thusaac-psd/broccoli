@@ -26,4 +26,4 @@ pub mod worker;
 
 pub use broccoli_api_types::{StatusPhase, SubmissionStatus, Verdict};
 pub use config::{DlqConfig, MqAppConfig};
-pub use dlq::{DlqEnvelope, DlqErrorCode, DlqMessageType, SubmissionDlqErrorCode};
+pub use dlq::{DlqEnvelope, DlqErrorCode, DlqMessageType};

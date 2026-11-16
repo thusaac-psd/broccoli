@@ -37,18 +37,9 @@ export function phaseHasStarted(phase: ContestPhase): boolean {
   return phase === 'running' || phase === 'ended' || phase === 'deactivated';
 }
 
-/**
- * The instant the contest's phase next changes for a contestant, while it is
- * upcoming or running: when to ask the server for its phase again.
- */
-export function nextPhaseChange(contest: {
-  phase: ContestPhase;
-  start_time: string;
-  end_time: string;
-}): number | null {
-  if (contest.phase === 'upcoming') return Date.parse(contest.start_time);
-  if (contest.phase === 'running') return Date.parse(contest.end_time);
-  return null;
+/** Whether the contest has ended: ended, or deactivated after. */
+export function phaseHasEnded(phase: ContestPhase): boolean {
+  return phase === 'ended' || phase === 'deactivated';
 }
 
 const STATUS_BADGES: Record<
