@@ -22,7 +22,7 @@ use sea_orm::{QuerySelect, TransactionTrait};
 use crate::entity::problem;
 use crate::error::AppError;
 use crate::services::config_issues::{
-    ConfigChecker, ConfigIssue, Subject, issues_of, set_config_issues,
+    ConfigChecker, ConfigIssue, Subject, issues_of, record_outcome,
 };
 use crate::services::plugin_config::Reads;
 use crate::utils::soft_delete::SoftDeletable;
@@ -80,8 +80,9 @@ impl TestDataEdit {
     /// that gives a config a refusal it did not have, something a write of
     /// that config would now be refused for, is refused with those
     /// refusals. A refusal the problem already had never refuses a change,
-    /// and neither does an issue of the data alone (no test cases yet): the
-    /// flag records both.
+    /// and neither does an issue of the data alone (no test cases yet), nor
+    /// what a plugin not loaded here would say: the flag records all three
+    /// ([`crate::services::config_issues::Outcome`]).
     pub(crate) async fn commit(
         self,
         checker: &ConfigChecker<'_>,
@@ -90,10 +91,18 @@ impl TestDataEdit {
         let problem_id = self.problem.id;
         let subject = Subject::flag_of(problem_id);
         let after = issues_of(self.db(), checker, subject, Reads::Through(&self.txn)).await?;
-        let refused_after: Vec<_> = after.iter().filter_map(ConfigIssue::refused).collect();
+        let refused_after: Vec<_> = after
+            .issues
+            .iter()
+            .filter_map(ConfigIssue::refused)
+            .collect();
         if on_break == OnConfigBreak::Refuse && !refused_after.is_empty() {
             let before = issues_of(self.db(), checker, subject, Reads::Committed).await?;
-            let refused_before: Vec<_> = before.iter().filter_map(ConfigIssue::refused).collect();
+            let refused_before: Vec<_> = before
+                .issues
+                .iter()
+                .filter_map(ConfigIssue::refused)
+                .collect();
             let caused: Vec<_> = refused_after
                 .into_iter()
                 .filter(|issue| !refused_before.contains(issue))
@@ -102,10 +111,7 @@ impl TestDataEdit {
                 return Err(AppError::ConfigWouldBreak(caused));
             }
         }
-        let has_issues = !after.is_empty();
-        if has_issues != self.problem.config_issues {
-            set_config_issues(self.db(), problem_id, has_issues).await?;
-        }
+        record_outcome(self.db(), problem_id, &after).await?;
         let txn = Arc::try_unwrap(self.txn).map_err(|_| {
             AppError::Internal("a config check still holds the test data change".into())
         })?;

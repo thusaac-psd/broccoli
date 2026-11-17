@@ -318,7 +318,7 @@ const TABLES: &[Table] = &[
 /// Columns a bundle never carries and an import never restores: what the
 /// target works out for itself. Whether a problem's configs have issues
 /// depends on the plugins that check them, which an import does not run, so
-/// an imported problem starts clear and marked for a recheck (see
+/// an imported problem starts unknown: flagged and marked for a recheck (see
 /// [`mark_for_recheck`]).
 const DERIVED: &[(&str, &str)] = &[("problem", "config_issues"), ("problem", "config_recheck")];
 
@@ -695,10 +695,12 @@ pub async fn import(
 }
 
 /// Marks every problem the import restored, or restored a contest's use of,
-/// for a config issues recheck: the import runs no plugin, so it checks
-/// none of the configs and test data it restores. Every running server
-/// rechecks the marked problems on its next reconcile pass
-/// (`services::config_issues::recheck_marked`).
+/// for a config issues recheck any replica can make: the import runs no
+/// plugin, so it checks none of the configs and test data it restores. Until
+/// a running server decides it on its next reconcile pass
+/// (`services::config_issues::recheck_marked`), the problem's issues are
+/// unknown, which reads as having issues: judgements claimed meanwhile say
+/// so.
 async fn mark_for_recheck(
     tx: &mut Transaction<'_, Postgres>,
     restored: &[&str],
@@ -712,7 +714,8 @@ async fn mark_for_recheck(
         return Ok(());
     }
     sqlx::query(AssertSqlSafe(format!(
-        "UPDATE problem SET config_recheck = true WHERE id IN ({})",
+        "UPDATE problem SET config_issues = true, config_recheck = '[]'::jsonb \
+         WHERE id IN ({})",
         of.join(" UNION ")
     )))
     .execute(&mut **tx)

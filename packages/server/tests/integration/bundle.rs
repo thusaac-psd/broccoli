@@ -632,20 +632,18 @@ async fn replacing_problems_removes_the_configs_of_the_replaced_ones() {
 }
 
 /// Whether a problem's configs have issues is a fact about the target's
-/// plugins, so a bundle does not carry the flag: an imported problem starts
-/// clear, marked for the recheck the target's servers make.
+/// plugins, so a bundle does not carry the flag. An imported problem's issues
+/// are unknown until a server of the target decides them, and unknown reads
+/// as having issues: it lands flagged and marked for any server, so a
+/// judgement claimed before the decision says so, and the decision clears
+/// both.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_imported_problem_does_not_carry_the_config_issues_flag() {
+async fn an_imported_problem_is_flagged_until_a_server_decides_it() {
     let source = TestApp::spawn().await;
     let admin = source
         .create_user_with_role("bundle_flag_admin", "pass1234", "admin")
         .await;
-    let problem = source.create_problem(&admin, "Flagged").await;
-    exec(
-        &source,
-        &format!("UPDATE problem SET config_issues = true WHERE id = {problem}"),
-    )
-    .await;
+    let problem = source.create_problem(&admin, "Clean").await;
     let archive = export(
         &source,
         ExportOptions {
@@ -660,21 +658,17 @@ async fn an_imported_problem_does_not_carry_the_config_issues_flag() {
     import(&target, &archive, ImportOptions::default())
         .await
         .expect("import");
-    assert_eq!(
-        text(
-            &target,
-            &format!("SELECT config_issues::text AS v FROM problem WHERE id = {problem}")
-        )
-        .await,
-        "false"
-    );
+    assert_eq!(flags(&target, problem).await, "true/[]");
+
+    server::services::recheck_marked(&target.state).await;
+    assert_eq!(flags(&target, problem).await, "false/none");
 }
 
 async fn flags(app: &TestApp, problem: i32) -> String {
     text(
         app,
         &format!(
-            "SELECT config_issues::text || '/' || config_recheck::text AS v \
+            "SELECT config_issues::text || '/' || coalesce(config_recheck::text, 'none') AS v \
              FROM problem WHERE id = {problem}"
         ),
     )
@@ -706,8 +700,8 @@ async fn bundle_with_a_refused_config(source: &TestApp) -> (i32, Vec<u8>) {
 }
 
 /// An import runs no plugin, so it marks every problem it restores, and a
-/// running server rechecks the marked problems on its next reconcile pass,
-/// without a restart: the restored config its plugin refuses sets the flag,
+/// running server decides the marked problems on its next reconcile pass,
+/// without a restart: the restored config its plugin refuses keeps the flag,
 /// and the mark clears.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_running_server_rechecks_the_problems_an_import_restores() {
@@ -718,15 +712,15 @@ async fn a_running_server_rechecks_the_problems_an_import_restores() {
     import(&target, &archive, ImportOptions::default())
         .await
         .expect("import");
-    assert_eq!(flags(&target, problem).await, "false/true");
+    assert_eq!(flags(&target, problem).await, "true/[]");
 
     server::services::recheck_marked(&target.state).await;
-    assert_eq!(flags(&target, problem).await, "true/false");
+    assert_eq!(flags(&target, problem).await, "true/none");
 }
 
 /// The columns a target works out for itself are never restored, whatever a
 /// bundle carries: a bundle that holds a problem's flag and mark restores
-/// neither.
+/// neither, and the import marks the problem as it marks every other.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_import_restores_no_derived_column_a_bundle_carries() {
     let source = TestApp::spawn().await;
@@ -743,14 +737,16 @@ async fn an_import_restores_no_derived_column_a_bundle_carries() {
     )
     .await
     .expect("export");
-    let archive =
-        with_problem_columns(&archive, &[("config_issues", "t"), ("config_recheck", "f")]);
+    let archive = with_problem_columns(
+        &archive,
+        &[("config_issues", "f"), ("config_recheck", "[\"x\"]")],
+    );
 
     let target = TestApp::spawn().await;
     import(&target, &archive, ImportOptions::default())
         .await
         .expect("import");
-    assert_eq!(flags(&target, problem).await, "false/true");
+    assert_eq!(flags(&target, problem).await, "true/[]");
 }
 
 /// `archive` with `columns` added to every row of its `problem` table, each

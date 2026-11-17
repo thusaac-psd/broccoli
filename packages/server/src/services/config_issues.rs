@@ -10,9 +10,20 @@
 //! does not meet yet (a problem with no test cases), which a write stores;
 //! both are listed.
 //!
+//! Only a replica that loads a plugin can run its checks. A plugin that is
+//! enabled fleet-wide (`plugin.is_enabled`) but not loaded here, whose
+//! checks reach a target (it stores a config there, or provides the
+//! target's type), leaves the answer unknown here ([`Outcome::undecided`]).
+//! Unknown reads as having issues and never clears anything: the problem
+//! stays flagged and marked with the plugins a replica must load to decide
+//! (`problem::Model::config_recheck`), and the first replica that loads them
+//! all claims the mark and decides ([`recheck_marked`]). A plugin disabled
+//! fleet-wide is not checked anywhere, so its configs count as having no
+//! issues.
+//!
 //! A problem's `config_issues` flag (`problem::Model::config_issues`) records
 //! whether anything is listed for it at the problem scope or in a contest
-//! that uses it. Judging copies the flag onto every judgement it claims, so
+//! that uses it, or the answer is unknown. Judging copies the flag onto every judgement it claims, so
 //! it must follow whatever can change the answer:
 //!
 //! - a test-data change sets it in its own commit
@@ -27,16 +38,16 @@
 //!   removed) changes which checks run and how, so it rechecks the problems
 //!   its checks reach and every flagged one ([`recheck_problems_of_plugins`]);
 //! - a bundle import restores configs and test data without the plugins
-//!   that check them, so it marks each problem it restores
-//!   (`problem::Model::config_recheck`), and every running server rechecks
-//!   the marked problems on its next reconcile pass ([`recheck_marked`]);
+//!   that check them, so it flags and marks each problem it restores for any
+//!   replica to decide, and a running server decides the marked problems on
+//!   its next reconcile pass ([`recheck_marked`]);
 //! - a server start loads plugins that may check configs differently than
 //!   the ones that last checked them, so it rechecks every problem a check
 //!   reaches, is flagged or is marked ([`recheck_every_problem`]).
 //!
 //! The rechecks run after the change committed, on the action that made it,
 //! never on the judging path. A recheck that fails is logged and leaves the
-//! flag as it was.
+//! flag and the mark as they were.
 //!
 //! A contest's own configs are listed with its contest problems' on the
 //! contest's config issues, read when asked for; they set no flag, since no
@@ -48,15 +59,16 @@ use common::db::{DatabaseConnection, DatabaseTransaction};
 use plugin_core::config_schema::{FieldError, FieldErrorKind};
 use plugin_core::registry::PluginStatus;
 use plugin_core::traits::PluginManager;
-use sea_orm::sea_query::{Expr, LockType};
+use sea_orm::sea_query::{Expr, ExprTrait, LockType};
 use sea_orm::{
     ColumnTrait, Condition, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect,
     TransactionTrait,
 };
 
-use crate::entity::{contest, contest_problem, plugin_config, problem};
+use crate::entity::{contest, contest_problem, plugin as plugin_entity, plugin_config, problem};
 use crate::error::AppError;
 use crate::host_funcs::config::{extract_plugin_id, strip_namespace_prefix};
+use crate::plugin_lifecycle::Governs;
 use crate::registry::TypeProviders;
 use crate::services::plugin_config::{
     ConfigScope, ConfigTarget, Findings, IncompatibleConfig, Reads, check_config,
@@ -109,12 +121,16 @@ impl Subject {
     }
 }
 
-/// A target a listing checks, with the plugins that provide its types:
-/// their namespaces that declare a `validate` function are checked there
-/// with their defaults when no config is stored.
+/// A target a listing checks, with the plugins loaded here that provide its
+/// types: their namespaces that declare a `validate` function are checked
+/// there with their defaults when no config is stored. `contest_types` and
+/// `problem_types` are the target's types, by which a plugin not loaded here
+/// that provides one is found ([`undecided_at`]).
 struct Checked {
     target: ConfigTarget,
     providers: Vec<String>,
+    contest_types: Vec<String>,
+    problem_types: Vec<String>,
 }
 
 /// One config a listing checks: stored, or a namespace's defaults.
@@ -158,35 +174,68 @@ impl ConfigIssue {
     }
 }
 
+/// What the checks of a subject found here.
+#[derive(Debug, Default)]
+pub(crate) struct Outcome {
+    /// The configs a plugin loaded here finds something wrong with.
+    pub(crate) issues: Vec<ConfigIssue>,
+    /// The plugins enabled fleet-wide but not loaded here whose checks reach
+    /// the subject: what they would find is unknown here.
+    pub(crate) undecided: BTreeSet<String>,
+}
+
+impl Outcome {
+    /// Whether the subject has issues, as its flag records it: unknown reads
+    /// as having issues.
+    pub(crate) fn flagged(&self) -> bool {
+        !self.issues.is_empty() || !self.undecided.is_empty()
+    }
+
+    /// The mark it leaves: the plugins a replica must load to decide, `None`
+    /// once decided.
+    fn mark(&self) -> Option<serde_json::Value> {
+        (!self.undecided.is_empty()).then(|| serde_json::json!(self.undecided))
+    }
+}
+
 /// Every config of `subject` its plugin finds something wrong with, as
-/// things stand, as the API lists them ([`issues_of`]).
+/// things stand, as the API lists them ([`issues_of`]). A subject a plugin
+/// not loaded here would check has no answer here: `PLUGIN_UNAVAILABLE`.
 pub(crate) async fn config_issues<C: ConnectionTrait>(
     db: &C,
     checker: &ConfigChecker<'_>,
     subject: Subject,
     reads: Reads<'_>,
 ) -> Result<Vec<IncompatibleConfig>, AppError> {
-    Ok(issues_of(db, checker, subject, reads)
-        .await?
-        .iter()
-        .map(ConfigIssue::listed)
-        .collect())
+    let outcome = issues_of(db, checker, subject, reads).await?;
+    if !outcome.undecided.is_empty() {
+        tracing::info!(
+            ?subject,
+            undecided = ?outcome.undecided,
+            "config issues are unknown here: a plugin that checks them is not loaded"
+        );
+        return Err(AppError::PluginUnavailable);
+    }
+    Ok(outcome.issues.iter().map(ConfigIssue::listed).collect())
 }
 
 /// Every config of `subject` its plugin finds something wrong with, as
 /// things stand, the plugins reading as `reads` says: each stored config of
 /// a loaded plugin, and the defaults of each namespace with a `validate`
 /// function of a plugin that provides the target's types and stores none
-/// there. Ordered by scope, target, plugin and namespace.
+/// there; issues ordered by scope, target, plugin and namespace. The plugins
+/// whose checks it cannot run here are [`Outcome::undecided`].
 pub(crate) async fn issues_of<C: ConnectionTrait>(
     db: &C,
     checker: &ConfigChecker<'_>,
     subject: Subject,
     reads: Reads<'_>,
-) -> Result<Vec<ConfigIssue>, AppError> {
+) -> Result<Outcome, AppError> {
     let targets = targets_of(db, &checker.types, subject).await?;
+    let (checks, stored_by_unloaded) = checks_at(db, checker.plugins, &targets).await?;
+    let undecided = undecided_at(db, checker.plugins, &targets, stored_by_unloaded).await?;
     let mut issues = Vec::new();
-    for check in checks_at(db, checker.plugins, &targets).await? {
+    for check in checks {
         let findings = match check_config(
             checker.plugins,
             &check.target,
@@ -230,7 +279,7 @@ pub(crate) async fn issues_of<C: ConnectionTrait>(
         };
         key(a).cmp(&key(b))
     });
-    Ok(issues)
+    Ok(Outcome { issues, undecided })
 }
 
 /// The targets `subject` covers. A deleted problem or contest has none, and
@@ -262,6 +311,8 @@ async fn targets_of<C: ConnectionTrait>(
                         &problem.default_contest_type,
                     )
                     .await,
+                contest_types: vec![problem.default_contest_type.clone()],
+                problem_types: vec![problem.problem_type.clone()],
             });
             if in_contests {
                 let contests: Vec<i32> = contest_problem::Entity::find()
@@ -275,6 +326,8 @@ async fn targets_of<C: ConnectionTrait>(
                     targets.push(Checked {
                         target: ConfigTarget::contest_problem(contest.id, problem_id),
                         providers: contest_type_provider(types, &contest).await,
+                        contest_types: contest.contest_type.into_iter().collect(),
+                        problem_types: Vec::new(),
                     });
                 }
             }
@@ -284,9 +337,12 @@ async fn targets_of<C: ConnectionTrait>(
                 return Ok(targets);
             };
             let providers = contest_type_provider(types, &contest).await;
+            let contest_types: Vec<String> = contest.contest_type.into_iter().collect();
             targets.push(Checked {
                 target: ConfigTarget::contest(contest_id),
                 providers: providers.clone(),
+                contest_types: contest_types.clone(),
+                problem_types: Vec::new(),
             });
             let problems: Vec<i32> = contest_problem::Entity::find()
                 .select_only()
@@ -299,6 +355,8 @@ async fn targets_of<C: ConnectionTrait>(
                 targets.push(Checked {
                     target: ConfigTarget::contest_problem(contest_id, problem_id),
                     providers: providers.clone(),
+                    contest_types: contest_types.clone(),
+                    problem_types: Vec::new(),
                 });
             }
         }
@@ -331,14 +389,15 @@ async fn contest_type_provider(types: &TypeProviders, contest: &contest::Model) 
 /// The configs to check at `targets`: those stored there by a loaded
 /// plugin, then the defaults of each namespace with a `validate` function at
 /// the target's scope of a loaded plugin that provides the target's types,
-/// where none is stored.
+/// where none is stored. Also the plugins not loaded here that store a
+/// config at one of the targets.
 async fn checks_at<C: ConnectionTrait>(
     db: &C,
     plugins: &dyn PluginManager,
     targets: &[Checked],
-) -> Result<Vec<Check>, AppError> {
+) -> Result<(Vec<Check>, BTreeSet<String>), AppError> {
     if targets.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), BTreeSet::new()));
     }
     let at = targets.iter().fold(Condition::any(), |any, checked| {
         any.add(
@@ -359,6 +418,7 @@ async fn checks_at<C: ConnectionTrait>(
             .filter(|entry| entry.status == PluginStatus::Loaded)
     };
     let mut stored = HashSet::new();
+    let mut stored_by_unloaded = BTreeSet::new();
     let mut checks = Vec::new();
     for row in rows {
         let Some(checked) = targets.iter().find(|checked| {
@@ -369,6 +429,7 @@ async fn checks_at<C: ConnectionTrait>(
         stored.insert((row.scope.clone(), row.ref_id.clone(), row.namespace.clone()));
         let plugin_id = extract_plugin_id(&row.namespace);
         if loaded(plugin_id).is_none() {
+            stored_by_unloaded.insert(plugin_id.to_string());
             continue;
         }
         checks.push(Check {
@@ -402,7 +463,72 @@ async fn checks_at<C: ConnectionTrait>(
             }
         }
     }
-    Ok(checks)
+    Ok((checks, stored_by_unloaded))
+}
+
+/// The plugins whose checks reach `targets` but cannot run here: enabled
+/// fleet-wide and not loaded here, and either storing a config at a target
+/// (`stored_by_unloaded`) or providing a target's type, as the replica that
+/// last loaded them recorded (`plugin.governs`). A provider whose manifest
+/// this replica knows is counted only when it declares a namespace with a
+/// `validate` function at the target's scope, as a loaded one is checked.
+async fn undecided_at<C: ConnectionTrait>(
+    db: &C,
+    plugins: &dyn PluginManager,
+    targets: &[Checked],
+    stored_by_unloaded: BTreeSet<String>,
+) -> Result<BTreeSet<String>, AppError> {
+    if targets.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let enabled: Vec<(String, Option<serde_json::Value>)> = plugin_entity::Entity::find()
+        .select_only()
+        .columns([plugin_entity::Column::Id, plugin_entity::Column::Governs])
+        .filter(plugin_entity::Column::IsEnabled.eq(true))
+        .into_tuple()
+        .all(db)
+        .await?;
+    let registry = plugins
+        .get_registry()
+        .read()
+        .map_err(|_| AppError::Internal("plugin registry lock poisoned".into()))?;
+    let mut undecided = BTreeSet::new();
+    for (plugin_id, governs) in enabled {
+        let entry = registry.get(&plugin_id);
+        if entry.is_some_and(|entry| entry.status == PluginStatus::Loaded) {
+            continue;
+        }
+        if stored_by_unloaded.contains(&plugin_id) {
+            undecided.insert(plugin_id);
+            continue;
+        }
+        let governs: Governs = governs
+            .and_then(|g| serde_json::from_value(g).ok())
+            .unwrap_or_default();
+        let checks_at = |scope: ConfigScope| {
+            entry.is_none_or(|entry| {
+                entry
+                    .manifest
+                    .config
+                    .values()
+                    .any(|ns| ns.validate.is_some() && ns.scopes.contains(&scope))
+            })
+        };
+        let provides = targets.iter().any(|t| {
+            let of_its_types = t
+                .contest_types
+                .iter()
+                .any(|key| governs.contest_types.contains(key))
+                || t.problem_types
+                    .iter()
+                    .any(|key| governs.problem_types.contains(key));
+            of_its_types && checks_at(t.target.scope())
+        });
+        if provides {
+            undecided.insert(plugin_id);
+        }
+    }
+    Ok(undecided)
 }
 
 /// The problems the checks of `plugin_ids` (of every plugin for `None`)
@@ -503,14 +629,20 @@ pub(crate) async fn problems_checked_by<C: ConnectionTrait>(
     Ok(problems)
 }
 
-/// Records whether problem `problem_id` has config issues, in `txn`.
-pub(crate) async fn set_config_issues(
+/// Records what the checks of problem `problem_id` found, in `txn`: its
+/// flag, and the mark an undecided outcome leaves for a replica that can
+/// decide. The one writer of both.
+pub(crate) async fn record_outcome(
     txn: &DatabaseTransaction,
     problem_id: i32,
-    has_issues: bool,
+    outcome: &Outcome,
 ) -> Result<(), AppError> {
     problem::Entity::update_many()
-        .col_expr(problem::Column::ConfigIssues, Expr::value(has_issues))
+        .col_expr(
+            problem::Column::ConfigIssues,
+            Expr::value(outcome.flagged()),
+        )
+        .col_expr(problem::Column::ConfigRecheck, Expr::value(outcome.mark()))
         .filter(problem::Column::Id.eq(problem_id))
         .exec(txn)
         .await?;
@@ -528,15 +660,38 @@ async fn flagged(db: &DatabaseConnection) -> Result<Vec<i32>, AppError> {
         .await?)
 }
 
-/// The problems marked for a recheck.
-async fn marked(db: &DatabaseConnection) -> Result<Vec<i32>, AppError> {
-    Ok(problem::Entity::find()
+/// The problems marked for a recheck that a replica loading `loaded` can
+/// decide (every problem marked, for `None`): those whose mark names no
+/// plugin outside `loaded`.
+async fn marked(db: &DatabaseConnection, loaded: Option<&[String]>) -> Result<Vec<i32>, AppError> {
+    let mut query = problem::Entity::find()
         .select_only()
         .column(problem::Column::Id)
-        .filter(problem::Column::ConfigRecheck.eq(true))
-        .into_tuple()
-        .all(db)
-        .await?)
+        .filter(problem::Column::ConfigRecheck.is_not_null());
+    if let Some(loaded) = loaded {
+        query = query.filter(
+            Expr::col((problem::Entity, problem::Column::ConfigRecheck)).binary(
+                sea_orm::sea_query::BinOper::Custom("<@"),
+                Expr::val(serde_json::json!(loaded)).cast_as("jsonb"),
+            ),
+        );
+    }
+    Ok(query.into_tuple().all(db).await?)
+}
+
+/// The plugins loaded here.
+fn loaded_here(plugins: &dyn PluginManager) -> Vec<String> {
+    plugins
+        .get_registry()
+        .read()
+        .map(|registry| {
+            registry
+                .iter()
+                .filter(|(_, entry)| entry.status == PluginStatus::Loaded)
+                .map(|(id, _)| id.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Rechecks the flag of every problem the checks of `plugin_ids` reach, and
@@ -571,7 +726,7 @@ pub(crate) async fn recheck_every_problem(db: &DatabaseConnection, checker: &Con
     let problems = async {
         let mut problems = problems_checked_by(db, checker, None).await?;
         problems.extend(flagged(db).await?);
-        problems.extend(marked(db).await?);
+        problems.extend(marked(db, None).await?);
         Ok::<_, AppError>(problems)
     };
     match problems.await {
@@ -585,21 +740,33 @@ pub(crate) async fn recheck_every_problem(db: &DatabaseConnection, checker: &Con
     }
 }
 
-/// Rechecks the flag of every problem marked for a recheck, clearing each
-/// mark. Every running server runs it on each reconcile pass; two servers
-/// rechecking one problem agree, under the problem's row lock.
+/// Decides every marked problem this replica can: one whose mark names only
+/// plugins loaded here. Every running server runs it on each reconcile pass;
+/// a replica that cannot decide a mark leaves it alone, and a problem
+/// another server is deciding is skipped, not decided twice. Deciding
+/// clears the mark, or replaces it when another plugin is missing here now.
 pub async fn recheck_marked(state: &AppState) {
-    match marked(&state.db).await {
-        Ok(problems) if problems.is_empty() => {}
+    let checker = ConfigChecker::of(state);
+    let loaded = loaded_here(checker.plugins);
+    match marked(&state.db, Some(&loaded)).await {
         Ok(problems) => {
-            recheck_problems(
-                &state.db,
-                &ConfigChecker::of(state),
-                problems.into_iter().collect(),
-                Recheck::Both,
-                Reads::Committed,
-            )
-            .await
+            for problem_id in problems {
+                if let Err(error) = try_recheck(
+                    &state.db,
+                    &checker,
+                    problem_id,
+                    Claim::Mark,
+                    Reads::Committed,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        problem_id,
+                        ?error,
+                        "could not decide the problem's marked config issues"
+                    );
+                }
+            }
         }
         Err(error) => tracing::warn!(
             ?error,
@@ -618,7 +785,9 @@ pub(crate) async fn recheck_problems(
     reads: Reads<'_>,
 ) {
     for problem_id in problems {
-        if let Err(error) = try_recheck(db, checker, problem_id, recheck, reads).await {
+        if let Err(error) =
+            try_recheck(db, checker, problem_id, Claim::Change(recheck), reads).await
+        {
             tracing::warn!(
                 problem_id,
                 ?error,
@@ -628,44 +797,52 @@ pub(crate) async fn recheck_problems(
     }
 }
 
+/// Why a recheck runs, which decides how it takes the problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claim {
+    /// A change reached the problem: wait for its row lock, and move the
+    /// flag as the [`Recheck`] allows.
+    Change(Recheck),
+    /// The problem is marked: claim it, skipping it when another server
+    /// holds it, and decide it only if it is still marked.
+    Mark,
+}
+
 /// Rechecks one problem under its row lock, the lock a test-data change and
 /// a write of one of its configs hold, so a recheck never races the data it
-/// checks against. A full recheck clears the problem's recheck mark.
+/// checks against. An undecided outcome only ever sets the flag and the mark
+/// ([`Outcome::flagged`]); a decided one replaces both.
 async fn try_recheck(
     db: &DatabaseConnection,
     checker: &ConfigChecker<'_>,
     problem_id: i32,
-    recheck: Recheck,
+    claim: Claim,
     reads: Reads<'_>,
 ) -> Result<(), AppError> {
     let txn = db.begin().await?;
-    let Some(row) = problem::Entity::find_by_id(problem_id)
-        .lock(LockType::Update)
-        .one(&txn)
-        .await?
-    else {
+    let lock = match claim {
+        Claim::Change(_) => problem::Entity::find_by_id(problem_id).lock(LockType::Update),
+        Claim::Mark => problem::Entity::find_by_id(problem_id).lock_with_behavior(
+            LockType::Update,
+            sea_orm::sea_query::LockBehavior::SkipLocked,
+        ),
+    };
+    let Some(row) = lock.one(&txn).await? else {
         return Ok(());
     };
-    if recheck == Recheck::ClearOnly && !row.config_issues {
-        return Ok(());
+    match claim {
+        Claim::Change(Recheck::ClearOnly) if !row.config_issues => return Ok(()),
+        Claim::Mark if row.config_recheck.is_none() => return Ok(()),
+        _ => {}
     }
-    let has_issues = !issues_of(&txn, checker, Subject::flag_of(problem_id), reads)
-        .await?
-        .is_empty();
-    let moves = match recheck {
-        Recheck::ClearOnly => !has_issues,
-        Recheck::Both => has_issues != row.config_issues || row.config_recheck,
+    let outcome = issues_of(&txn, checker, Subject::flag_of(problem_id), reads).await?;
+    let record = match claim {
+        // A change that can only resolve issues never sets the flag.
+        Claim::Change(Recheck::ClearOnly) => !outcome.flagged() || outcome.mark().is_some(),
+        _ => true,
     };
-    if moves {
-        problem::Entity::update_many()
-            .col_expr(problem::Column::ConfigIssues, Expr::value(has_issues))
-            .col_expr(
-                problem::Column::ConfigRecheck,
-                Expr::value(row.config_recheck && recheck == Recheck::ClearOnly),
-            )
-            .filter(problem::Column::Id.eq(problem_id))
-            .exec(&txn)
-            .await?;
+    if record && (outcome.flagged(), outcome.mark()) != (row.config_issues, row.config_recheck) {
+        record_outcome(&txn, problem_id, &outcome).await?;
         txn.commit().await?;
     }
     Ok(())

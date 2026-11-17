@@ -42,12 +42,16 @@ pub struct Model {
     #[sea_orm(default_value = false)]
     pub config_issues: bool,
 
-    /// Whether the problem waits for a config issues recheck: set by a bundle
-    /// import, which restores it without the plugins that check it, and
-    /// cleared by the recheck every running server makes of the marked
-    /// problems (`services::config_issues::recheck_marked`).
-    #[sea_orm(default_value = false)]
-    pub config_recheck: bool,
+    /// Whether the problem's config issues wait for a replica to decide
+    /// them, and which plugins it must load to: a JSON array of plugin ids
+    /// (empty: any replica can), `None` once decided. Set by a bundle import,
+    /// which restores the problem without the plugins that check it, and by
+    /// a check a plugin not loaded on the checking replica could not run;
+    /// cleared by the replica that decides
+    /// (`services::config_issues::recheck_marked`). While it is set,
+    /// `config_issues` is set too: unknown reads as having issues.
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub config_recheck: Option<Json>,
 
     #[sea_orm(has_many)]
     pub submissions: HasMany<super::submission::Entity>,

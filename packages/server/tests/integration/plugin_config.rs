@@ -1156,3 +1156,109 @@ mod plugin_writes {
         );
     }
 }
+
+/// Only a replica that loads a plugin can run its checks. One where a plugin
+/// enabled fleet-wide is not loaded cannot say what the plugin would find,
+/// and unknown is not clean: it leaves the problem flagged, marked for a
+/// replica that loads the plugin, and answers the issues route with a retry.
+mod unknown_checks {
+    use super::*;
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    async fn flags(app: &TestApp, problem_id: i32) -> String {
+        app.db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                format!(
+                    "SELECT config_issues::text || '/' || coalesce(config_recheck::text, 'none') \
+                     AS v FROM problem WHERE id = {problem_id}"
+                ),
+            ))
+            .await
+            .unwrap()
+            .expect("the problem")
+            .try_get("", "v")
+            .unwrap()
+    }
+
+    /// A problem whose `server-plugin` config the plugin refuses, flagged by
+    /// the replica that checked it.
+    async fn problem_with_a_refused_config(app: &TestApp) -> i32 {
+        let problem_id = app.insert_public_problem("P").await;
+        app.db
+            .execute_unprepared(&format!(
+                "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+                 VALUES ('problem', '{problem_id}', 'server-plugin:checked', \
+                 '{{\"refuse\": true}}', 0, now()); \
+                 UPDATE problem SET config_issues = true WHERE id = {problem_id}"
+            ))
+            .await
+            .unwrap();
+        problem_id
+    }
+
+    #[tokio::test]
+    async fn a_replica_without_the_plugin_leaves_the_problem_flagged_and_marked() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("unknown_check_admin", "password123", "admin")
+            .await;
+        let problem_id = problem_with_a_refused_config(&app).await;
+        app.state
+            .plugins
+            .unload_plugin("server-plugin")
+            .expect("unload here only");
+
+        // A test-data change rechecks the problem on this replica.
+        app.create_test_case(problem_id, &admin).await;
+        assert_eq!(
+            flags(&app, problem_id).await,
+            r#"true/["server-plugin"]"#,
+            "the flag stays and the mark names the plugin a replica must load"
+        );
+        let res = app
+            .get_with_token(
+                &format!("/api/v1/problems/{problem_id}/config/issues"),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 503, "{}", res.text);
+        assert_eq!(res.body["code"], "PLUGIN_UNAVAILABLE", "{}", res.text);
+
+        server::services::recheck_marked(&app.state).await;
+        assert_eq!(
+            flags(&app, problem_id).await,
+            r#"true/["server-plugin"]"#,
+            "a replica that cannot decide leaves the mark alone"
+        );
+
+        app.state
+            .plugins
+            .load_plugin("server-plugin")
+            .expect("load it again");
+        server::services::recheck_marked(&app.state).await;
+        assert_eq!(
+            flags(&app, problem_id).await,
+            "true/none",
+            "a replica that loads the plugin decides: the config is refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plugin_disabled_fleet_wide_is_not_checked_anywhere() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("disabled_check_admin", "password123", "admin")
+            .await;
+        let problem_id = problem_with_a_refused_config(&app).await;
+        let res = app
+            .post_with_token(
+                "/api/v1/admin/plugins/server-plugin/disable",
+                &json!({}),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        assert_eq!(flags(&app, problem_id).await, "false/none");
+    }
+}
