@@ -454,7 +454,7 @@ impl Inner {
     fn open(&self) -> u32 {
         self.built()
             .iter()
-            .map(|(_, db)| sqlx_pool(db).size())
+            .map(|(_, db)| db.connections().open)
             .sum()
     }
 
@@ -464,23 +464,15 @@ impl Inner {
         let built = self.built();
         let own_idle = built
             .iter()
-            .any(|(id, db)| id == plugin_id && sqlx_pool(db).num_idle() > 0);
-        let open: u32 = built.iter().map(|(_, db)| sqlx_pool(db).size()).sum();
+            .any(|(id, db)| id == plugin_id && db.connections().idle > 0);
+        let open: u32 = built.iter().map(|(_, db)| db.connections().open).sum();
         if own_idle || open < self.budget {
             return;
         }
-        let idle = built
-            .iter()
-            .filter(|(id, _)| id != plugin_id)
-            .find_map(|(_, db)| sqlx_pool(db).try_acquire());
-        if let Some(conn) = idle
-            && let Err(e) = conn.close().await
-        {
-            tracing::debug!(error = %e, "Closing an idle plugin connection failed");
+        for (id, db) in &built {
+            if id != plugin_id && db.close_idle().await {
+                return;
+            }
         }
     }
-}
-
-fn sqlx_pool(db: &DatabaseConnection) -> &sea_orm::sqlx::PgPool {
-    db.as_sea_orm().get_postgres_connection_pool()
 }

@@ -353,11 +353,6 @@ fn idents(names: &[String]) -> String {
         .join(", ")
 }
 
-/// The database's sqlx pool, for `COPY` and one-connection transactions.
-fn pool(db: &DatabaseConnection) -> &sqlx::PgPool {
-    db.as_sea_orm().get_postgres_connection_pool()
-}
-
 /// The newest migration `db` has applied; this build must know it.
 async fn schema_version(tx: &mut Transaction<'_, Postgres>) -> anyhow::Result<String> {
     let applied: Option<String> = sqlx::query_scalar("SELECT max(version) FROM seaql_migrations")
@@ -391,7 +386,10 @@ pub async fn export(
     out: impl Write,
 ) -> anyhow::Result<Summary> {
     let scope = Scope::new(&options.selection);
-    let mut tx = pool(db).begin().await?;
+    // One connection, checked out through the handle, for `COPY` and the
+    // one transaction everything runs in.
+    let mut conn = db.acquire().await?;
+    let mut tx = sqlx::Connection::begin(conn.raw()).await?;
     // One snapshot for every table and the blob references.
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .execute(&mut *tx)
@@ -596,7 +594,10 @@ pub async fn import(
         !options.wipe_dependents || options.replace_problems || options.replace_contest,
         "wiping dependents needs --replace-problems or --replace-contest"
     );
-    let mut tx = pool(db).begin().await?;
+    // One connection, checked out through the handle, for `COPY` and the
+    // one transaction everything runs in.
+    let mut conn = db.acquire().await?;
+    let mut tx = sqlx::Connection::begin(conn.raw()).await?;
     let target = schema_version(&mut tx).await?;
     ensure!(
         known.last() == Some(&target),
