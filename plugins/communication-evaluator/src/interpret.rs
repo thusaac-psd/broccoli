@@ -110,6 +110,10 @@ pub fn interpret_result(
         runs.push(run);
     }
 
+    let last_contestant_wall = runs
+        .iter()
+        .map(|run| run.sandbox_result.wall_time_used)
+        .fold(0.0_f64, f64::max);
     let mut contestants_exited = true;
     for (i, run) in runs.into_iter().enumerate() {
         let sandbox = &run.sandbox_result;
@@ -203,6 +207,30 @@ pub fn interpret_result(
     // again.
     let judged_again =
         |how: &str| manager_failed(Verdict::SystemError, format!("{how}: {}", detail()), None);
+    // Every contestant exited on its own (none of them was cut off by a
+    // closed pipe), and no later than the manager ended: the steps start
+    // together on their shared pipes, so the manager failed after it was left
+    // without the interaction it needed. Whatever the manager then did, the
+    // contestant left early, and no contestant can make a correct problem
+    // look broken.
+    let left_by_contestants =
+        contestants_exited && last_contestant_wall <= mgr_sandbox.wall_time_used;
+    let left_early = || {
+        manager_failed(
+            Verdict::WrongAnswer,
+            "The contestant exited before the interaction was over".into(),
+            None,
+        )
+    };
+    // The manager failed on its own while a contestant still ran: every
+    // attempt fails alike, so the problem's failure stands.
+    let own_failure = |failure: String, message: String| {
+        if left_by_contestants {
+            left_early()
+        } else {
+            manager_failed(Verdict::SystemError, message, Some(failure))
+        }
+    };
     match RunOutcome::of(run_mgr) {
         RunOutcome::Exited => {}
         // The manager wrote to a pipe no contestant reads any more: every
@@ -213,11 +241,7 @@ pub fn interpret_result(
         // judges it again.
         RunOutcome::Signaled(Some(SIGPIPE)) => {
             return if contestants_exited {
-                manager_failed(
-                    Verdict::WrongAnswer,
-                    "The contestant exited before the interaction was over".into(),
-                    None,
-                )
+                left_early()
             } else {
                 manager_failed(
                     Verdict::SystemError,
@@ -226,26 +250,18 @@ pub fn interpret_result(
                 )
             };
         }
-        // The problem's manager failed on its own: every attempt fails alike,
-        // so the failure stands.
         RunOutcome::NonZeroExit(code) => {
             let failure = format!("Manager exited with code {code}");
-            return manager_failed(
-                Verdict::SystemError,
-                format!("{failure}: {}", detail()),
-                Some(failure),
-            );
+            let message = format!("{failure}: {}", detail());
+            return own_failure(failure, message);
         }
         RunOutcome::Signaled(signal) => {
             let failure = match signal {
                 Some(n) => format!("Manager was terminated by signal {n}"),
                 None => "Manager was terminated by a signal".to_string(),
             };
-            return manager_failed(
-                Verdict::SystemError,
-                format!("{failure}: {}", detail()),
-                Some(failure),
-            );
+            let message = format!("{failure}: {}", detail());
+            return own_failure(failure, message);
         }
         RunOutcome::TimedOut => return judged_again("Manager timed out"),
         RunOutcome::MemoryLimitExceeded => {
@@ -260,13 +276,12 @@ pub fn interpret_result(
     let score_str = mgr_sandbox.stdout.lines().next().unwrap_or("").trim();
     let score: f64 = match score_str.parse::<f64>() {
         Ok(s) if s.is_finite() => s,
-        // The manager finished on its own but printed no score: every
-        // attempt fails alike, so the failure stands.
+        // The manager finished but printed no score.
         _ => {
             let failure = format!("Manager stdout is not a valid score: '{score_str}'");
             return TestCaseVerdict {
                 stdout: opt_nonempty(&mgr_sandbox.stdout),
-                ..manager_failed(Verdict::SystemError, failure.clone(), Some(failure))
+                ..own_failure(failure.clone(), failure)
             };
         }
     };
@@ -384,6 +399,15 @@ mod tests {
         )
     }
 
+    /// A contestant that exited 0 but still ran when the manager ended, so a
+    /// manager failure is the manager's own.
+    fn outlasting_contestant() -> ExecutionResult {
+        ExecutionResult {
+            wall_time_used: 5.0,
+            ..ok_sandbox(0, 0.3, 2048)
+        }
+    }
+
     fn mgr_result(score: &str, message: &str) -> ExecutionResult {
         ExecutionResult {
             exit_code: Some(0),
@@ -417,7 +441,7 @@ mod tests {
         operation(vec![
             task_result("compile_manager", true, ok_sandbox(0, 1.0, 8192)),
             task_result("compile_contestant_0", true, ok_sandbox(0, 1.0, 8192)),
-            task_result("run_contestant_0", true, ok_sandbox(0, 0.5, 4096)),
+            task_result("run_contestant_0", true, outlasting_contestant()),
             task_result("run_manager", success, sandbox),
         ])
     }
@@ -559,6 +583,88 @@ mod tests {
         let verdict = interpret_result(42, &lost, 1);
         assert_eq!(verdict.verdict, Verdict::SystemError);
         assert_eq!(verdict.problem_failure, None, "the platform's failure");
+    }
+
+    /// When a manager fails on its own decides whose fault it is. One that
+    /// fails after every contestant exited was left without the interaction
+    /// it needed: the contestant's failure, a wrong answer, whatever the
+    /// manager then did. One that fails while a contestant still runs fails
+    /// on its own: the problem's, which stands.
+    #[test]
+    fn a_manager_failing_after_every_contestant_left_is_the_contestants_failure() {
+        let contestant = |wall: f64| ExecutionResult {
+            wall_time_used: wall,
+            ..ok_sandbox(0, 0.1, 2048)
+        };
+        let manager = |sandbox: ExecutionResult, wall: f64| ExecutionResult {
+            wall_time_used: wall,
+            ..sandbox
+        };
+        let abort = || ExecutionResult {
+            signal: Some(6),
+            ..ended(SandboxStatus::Signaled, None, "")
+        };
+        let exit_3 = || ended(SandboxStatus::NonZeroExit, Some(3), "assertion failed");
+        let no_score = || mgr_result("abc\n", "");
+        let case = |contestant_wall: f64, mgr: ExecutionResult| {
+            interpret_result(
+                42,
+                &operation(vec![
+                    task_result("compile_manager", true, ok_sandbox(0, 1.0, 8192)),
+                    task_result("compile_contestant_0", true, ok_sandbox(0, 1.0, 8192)),
+                    task_result("run_contestant_0", true, contestant(contestant_wall)),
+                    task_result("run_manager", true, mgr),
+                ]),
+                1,
+            )
+        };
+        for (name, contestant_wall, mgr, contestants_fault) in [
+            (
+                "abort after the contestant left",
+                0.2,
+                manager(abort(), 0.5),
+                true,
+            ),
+            (
+                "exit 3 after the contestant left",
+                0.2,
+                manager(exit_3(), 0.5),
+                true,
+            ),
+            (
+                "no score after the contestant left",
+                0.5,
+                manager(no_score(), 0.5),
+                true,
+            ),
+            (
+                "abort while the contestant ran",
+                0.9,
+                manager(abort(), 0.5),
+                false,
+            ),
+            (
+                "exit 3 while the contestant ran",
+                0.9,
+                manager(exit_3(), 0.5),
+                false,
+            ),
+            (
+                "no score while the contestant ran",
+                0.9,
+                manager(no_score(), 0.5),
+                false,
+            ),
+        ] {
+            let verdict = case(contestant_wall, mgr);
+            if contestants_fault {
+                assert_eq!(verdict.verdict, Verdict::WrongAnswer, "{name}: {verdict:?}");
+                assert_eq!(verdict.problem_failure, None, "{name}");
+            } else {
+                assert_eq!(verdict.verdict, Verdict::SystemError, "{name}: {verdict:?}");
+                assert!(verdict.problem_failure.is_some(), "{name}: {verdict:?}");
+            }
+        }
     }
 
     /// A manager killed by SIGPIPE wrote to a contestant that had already
@@ -949,7 +1055,7 @@ mod tests {
             success: false,
             task_results: HashMap::from([
                 task_result("run_manager", false, mgr),
-                task_result("run_contestant_0", true, ok_sandbox(0, 0.3, 2048)),
+                task_result("run_contestant_0", true, outlasting_contestant()),
             ]),
             error: None,
         };
@@ -964,7 +1070,7 @@ mod tests {
             success: true,
             task_results: HashMap::from([
                 task_result("run_manager", true, mgr_result("not_a_number", "")),
-                task_result("run_contestant_0", true, ok_sandbox(0, 0.3, 2048)),
+                task_result("run_contestant_0", true, outlasting_contestant()),
             ]),
             error: None,
         };
@@ -980,7 +1086,7 @@ mod tests {
             success: true,
             task_results: HashMap::from([
                 task_result("run_manager", true, mgr_result("NaN", "")),
-                task_result("run_contestant_0", true, ok_sandbox(0, 0.3, 2048)),
+                task_result("run_contestant_0", true, outlasting_contestant()),
             ]),
             error: None,
         };
@@ -996,7 +1102,7 @@ mod tests {
             success: true,
             task_results: HashMap::from([
                 task_result("run_manager", true, mgr_result("inf", "")),
-                task_result("run_contestant_0", true, ok_sandbox(0, 0.3, 2048)),
+                task_result("run_contestant_0", true, outlasting_contestant()),
             ]),
             error: None,
         };
