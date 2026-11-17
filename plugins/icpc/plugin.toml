@@ -77,7 +77,7 @@ default = false
 [config.contest.properties.freeze_minutes]
 type = "integer"
 title = "Scoreboard Freeze (minutes)"
-description = "Freeze the contestant scoreboard in the final N minutes (ICPC-style: rank stops updating, freeze-window submissions show as pending). 0 = disabled. Organizers always see the real board."
+description = "Freeze the contestant scoreboard in the final N minutes (ICPC-style: ranks stop updating, and other teams' freeze-window submissions show as pending; a team always sees its own results). 0 = disabled. Organizers always see the real board."
 default = 0
 min = 0
 step = 5
