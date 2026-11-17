@@ -173,6 +173,20 @@ The test reads your `plugin.toml` and the packs it declares, and also asks for
 the codes the SDK itself answers your routes with (`INVALID_PATH_PARAMETER`,
 `SIGN_IN_REQUIRED`).
 
+A refusal names the numbers it is about with `.detail(name, value)`, which
+takes only numbers and words. The client passes each to the code's text as a
+parameter, so the pack text says what the limit is:
+
+```rust
+PluginHttpResponse::refuse(413, Refusal::TooManyPages, "too long")
+    .detail("pages", pages)
+    .detail("limit", max_pages)
+```
+
+```toml
+'print.apiError.TOO_MANY_PAGES' = 'This document has {pages} pages; this contest prints at most {limit} pages.'
+```
+
 The server answers every `5xx` from a plugin route itself, so database or host
 text can never reach a response body, even from a handler that builds a `500`
 response by hand. A status that is neither a success nor a client error, such

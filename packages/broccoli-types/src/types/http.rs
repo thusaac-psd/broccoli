@@ -131,6 +131,49 @@ impl PluginHttpResponse {
             body: Some(serde_json::json!({ "code": code.as_str(), "message": message.into() })),
         }
     }
+
+    /// The refusal with `value` under `name` in its `details`, which a client
+    /// passes to the code's text as a parameter (`{name}` in the pack), so the
+    /// user reads the numbers the refusal is about.
+    pub fn detail(mut self, name: &str, value: impl Into<RefusalDetail>) -> Self {
+        if let Some(body) = self.body.as_mut().and_then(|b| b.as_object_mut()) {
+            let details = body
+                .entry("details")
+                .or_insert_with(|| serde_json::Value::Object(Default::default()));
+            if let Some(details) = details.as_object_mut() {
+                details.insert(name.to_string(), value.into().0);
+            }
+        }
+        self
+    }
+}
+
+/// A value a refusal's text may name: a number or a word, the only kinds a
+/// client passes to a text as a parameter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RefusalDetail(serde_json::Value);
+
+macro_rules! number_detail {
+    ($($t:ty),*) => {$(
+        impl From<$t> for RefusalDetail {
+            fn from(value: $t) -> Self {
+                Self(serde_json::Value::from(value))
+            }
+        }
+    )*};
+}
+number_detail!(i32, i64, u32, u64, usize);
+
+impl From<&str> for RefusalDetail {
+    fn from(value: &str) -> Self {
+        Self(serde_json::Value::from(value))
+    }
+}
+
+impl From<String> for RefusalDetail {
+    fn from(value: String) -> Self {
+        Self(serde_json::Value::from(value))
+    }
 }
 
 /// The error code the host gives a plugin route's client error whose body
@@ -147,5 +190,33 @@ pub fn error_code_for_status(status: u16) -> &'static str {
         413 => "PAYLOAD_TOO_LARGE",
         429 => "RATE_LIMITED",
         _ => "REQUEST_FAILED",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    crate::refusal_codes! {
+        enum Refusal {
+            TooManyPages = "TOO_MANY_PAGES",
+        }
+    }
+
+    /// A refusal's details are the numbers and words its text names.
+    #[test]
+    fn a_refusal_carries_the_details_its_text_names() {
+        let response = PluginHttpResponse::refuse(413, Refusal::TooManyPages, "too long")
+            .detail("pages", 12_u32)
+            .detail("limit", 10_i64)
+            .detail("file", "main.cpp");
+        assert_eq!(
+            response.body,
+            Some(serde_json::json!({
+                "code": "TOO_MANY_PAGES",
+                "message": "too long",
+                "details": { "pages": 12, "limit": 10, "file": "main.cpp" },
+            }))
+        );
     }
 }

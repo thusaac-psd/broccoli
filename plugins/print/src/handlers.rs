@@ -192,6 +192,8 @@ pub fn handle_print_submission(
                     f.filename, cfg.max_pages
                 ),
             )
+            .detail("pages", pages)
+            .detail("limit", cfg.max_pages)
             .into());
         }
         planned.push((f, pages));
@@ -283,6 +285,8 @@ pub fn handle_print_arbitrary(
             Refusal::TooManyPages,
             format!("Too long to print ({pages} pages, limit {})", cfg.max_pages),
         )
+        .detail("pages", pages)
+        .detail("limit", cfg.max_pages)
         .into());
     }
 
@@ -356,6 +360,7 @@ fn queue_jobs(
                 cfg.max_jobs_per_user
             ),
         )
+        .detail("limit", cfg.max_jobs_per_user)
         .into());
     }
     if let Err(e) = jobs::insert_jobs(host, new_jobs) {
