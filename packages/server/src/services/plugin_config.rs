@@ -5,7 +5,10 @@ use sea_orm::{
     TransactionTrait,
 };
 
-use broccoli_server_sdk::types::{ConfigValidateInput, ConfigValidateOutput, ConfigViolation};
+use broccoli_server_sdk::types::{
+    ConfigResult, ConfigValidateInput, ConfigValidateOutput, ConfigViolation, EffectiveConfig,
+    resolve_cascade,
+};
 use plugin_core::config_schema::{self, FieldError, FieldErrorKind};
 pub(crate) use plugin_core::manifest::ConfigScope;
 use plugin_core::manifest::{ConfigNamespace, PluginManifest};
@@ -661,6 +664,121 @@ async fn delete_configs_like<C: ConnectionTrait>(
         .exec(db)
         .await?;
     Ok(())
+}
+
+/// A stored row as the host hands it to its plugin: the stored value with
+/// every default its namespace's schema declares filled in (the schema's
+/// defaults alone when nothing is stored). Plugins' own reads (`config_get`)
+/// and the admin forms' cascade ([`config_cascade`]) build it here, so the
+/// forms show what plugins read.
+pub(crate) fn config_result(
+    ns: Option<&ConfigNamespace>,
+    row: Option<&plugin_config::Model>,
+) -> ConfigResult {
+    let stored = row.map(|row| &row.config);
+    let config = match ns {
+        Some(ns) => ns.resolve(stored),
+        None => stored
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
+    };
+    ConfigResult {
+        config,
+        stored: stored.cloned(),
+        enabled: row.and_then(|row| row.enabled),
+    }
+}
+
+/// A namespace's config at a target as plugins read it, and what the scopes
+/// above the target give it: what the target's form inherits.
+#[derive(Debug, Clone)]
+pub(crate) struct Cascade {
+    pub(crate) plugin_id: String,
+    pub(crate) namespace: String,
+    /// The config a problem reads with nothing stored narrower than the
+    /// target: the target's own row included.
+    pub(crate) effective: EffectiveConfig,
+    /// The same without the target's own row: what it inherits.
+    pub(crate) inherited: EffectiveConfig,
+}
+
+/// The cascade ([`resolve_cascade`], the rule the guest SDK reads configs
+/// by) of each of `namespaces` (plugin id, namespace) at `target`, a problem,
+/// contest or contest problem. A contest is resolved for a problem of it
+/// that stores nothing of its own.
+pub(crate) async fn config_cascade<C: ConnectionTrait>(
+    db: &C,
+    registry: &PluginRegistry,
+    target: &ConfigTarget,
+    namespaces: &[(String, String)],
+) -> Result<Vec<Cascade>, AppError> {
+    let (cp, c, p) = match target.scope {
+        ConfigScope::ContestProblem => {
+            let (contest, problem) = (target.contest_id, target.problem_id);
+            (
+                Some(target.clone()),
+                contest.map(ConfigTarget::contest),
+                problem.map(ConfigTarget::problem),
+            )
+        }
+        ConfigScope::Contest => (None, Some(target.clone()), None),
+        ConfigScope::Problem => (None, None, Some(target.clone())),
+        ConfigScope::Plugin => {
+            return Err(AppError::Validation(
+                "the plugin-wide config inherits from nothing".into(),
+            ));
+        }
+    };
+    let levels: Vec<&ConfigTarget> = [&cp, &c, &p].into_iter().flatten().collect();
+    let at = levels.iter().fold(
+        sea_orm::Condition::any()
+            .add(plugin_config::Column::Scope.eq(ConfigScope::Plugin.as_str())),
+        |any, level| {
+            any.add(
+                sea_orm::Condition::all()
+                    .add(plugin_config::Column::Scope.eq(level.scope().as_str()))
+                    .add(plugin_config::Column::RefId.eq(level.ref_id())),
+            )
+        },
+    );
+    let rows = plugin_config::Entity::find().filter(at).all(db).await?;
+    let registry = registry
+        .read()
+        .map_err(|_| AppError::Internal("plugin registry lock poisoned".into()))?;
+    let mut cascades = Vec::new();
+    for (plugin_id, namespace) in namespaces {
+        let ns = registry
+            .get(plugin_id)
+            .and_then(|entry| entry.manifest.config.get(namespace));
+        let row = |level: &ConfigTarget| {
+            let stored = level.stored_namespace(plugin_id, namespace);
+            rows.iter().find(|r| {
+                r.scope == level.scope().as_str()
+                    && r.ref_id == level.ref_id()
+                    && r.namespace == stored
+            })
+        };
+        let read = |level: &Option<ConfigTarget>| level.as_ref().map(|l| config_result(ns, row(l)));
+        let unset = config_result(ns, None);
+        let plugin = config_result(ns, row(&ConfigTarget::plugin(plugin_id)));
+        let (cp, c, p) = (
+            read(&cp),
+            read(&c),
+            read(&p).unwrap_or_else(|| unset.clone()),
+        );
+        let effective = resolve_cascade(cp, c.clone(), p.clone(), plugin.clone());
+        let inherited = match target.scope {
+            ConfigScope::ContestProblem => resolve_cascade(None, c, p, plugin),
+            _ => resolve_cascade(None, None, unset, plugin),
+        };
+        cascades.push(Cascade {
+            plugin_id: plugin_id.clone(),
+            namespace: namespace.clone(),
+            effective,
+            inherited,
+        });
+    }
+    Ok(cascades)
 }
 
 pub use broccoli_api_types::plugin::IncompatibleConfig;

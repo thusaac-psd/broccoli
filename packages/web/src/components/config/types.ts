@@ -31,11 +31,7 @@ export type ConfigScope =
   | { scope: 'problem'; problemId: number }
   | { scope: 'contest_problem'; contestId: number; problemId: number };
 
-export type {
-  InheritedConfig,
-  InheritedValue,
-  ParentScopeConfig,
-} from '@broccoli/web-sdk/slot';
+export type { InheritedConfig, InheritedValue } from '@broccoli/web-sdk/slot';
 
 /**
  * A field's validation problem: a host i18n key and its parameters, or what a

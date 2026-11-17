@@ -4,7 +4,31 @@ import type { MessageKey } from '@/lib/i18n/catalog';
 
 import type { FieldProblem, JsonSchema, JsonSchemaProperty } from './types';
 
-export { deepMerge, resolveInheritedValue } from '@broccoli/web-sdk/slot';
+export { inheritedValueOf } from '@broccoli/web-sdk/slot';
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * `override` laid over `base`, as the form shows its scope's own row over
+ * what the scope inherits while it is edited: a field `override` sets
+ * replaces the one in `base`, except that two objects merge field by field;
+ * a field it does not set keeps `base`'s. What a scope inherits is the
+ * server's to resolve (`InheritedConfig`); this only lays one row over it.
+ */
+export function deepMerge(
+  base: Record<string, unknown>,
+  override: Record<string, unknown>,
+): Record<string, unknown> {
+  const result = { ...base };
+  for (const [key, val] of Object.entries(override)) {
+    const below = result[key];
+    result[key] =
+      isObject(val) && isObject(below) ? deepMerge(below, val) : val;
+  }
+  return result;
+}
 
 export function extractDefaults(schema: JsonSchema): Record<string, unknown> {
   const result: Record<string, unknown> = {};

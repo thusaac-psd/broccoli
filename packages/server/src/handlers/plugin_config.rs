@@ -22,12 +22,14 @@ use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::host_funcs::config::{extract_plugin_id, strip_namespace_prefix};
-use crate::models::plugin_config::{PluginConfigResponse, UpsertPluginConfigRequest};
+use crate::models::plugin_config::{
+    ConfigCascadeResponse, PluginConfigResponse, UpsertPluginConfigRequest,
+};
 use crate::services::config_issues::ConfigChecker;
 use crate::services::config_issues::{Subject, config_issues};
 use crate::services::plugin_config::{
-    ConfigScope, ConfigTarget, IncompatibleConfig, Reads, RowSettings, delete_config, get_config,
-    write_config,
+    ConfigScope, ConfigTarget, IncompatibleConfig, Reads, RowSettings, config_cascade,
+    delete_config, get_config, write_config,
 };
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, find_contest_problem};
@@ -151,6 +153,32 @@ async fn list_config_inner<C: ConnectionTrait>(
 
     Ok(Json(response))
 }
+
+/// The cascade of every namespace loaded plugins declare at `target`'s scope.
+async fn cascade_inner<C: ConnectionTrait>(
+    db: &C,
+    plugins: &dyn PluginManager,
+    target: &ConfigTarget,
+) -> Result<Json<Vec<ConfigCascadeResponse>>, AppError> {
+    let namespaces: Vec<(String, String)> = collect_schemas_for_scope(plugins, target.scope())
+        .into_iter()
+        .map(|s| (s.plugin_id, s.namespace))
+        .collect();
+    let cascades = config_cascade(db, plugins.get_registry(), target, &namespaces).await?;
+    Ok(Json(
+        cascades
+            .into_iter()
+            .map(|c| ConfigCascadeResponse {
+                plugin_id: c.plugin_id,
+                namespace: c.namespace,
+                effective: c.effective,
+                inherited: c.inherited,
+            })
+            .collect(),
+    ))
+}
+
+const CASCADE_DESCRIPTION: &str = "For each config namespace loaded plugins declare at this scope: the config a plugin reads here (`effective`), and what the scopes above give it (`inherited`), with the scope each field comes from. Both come from the cascade rule the plugin SDK reads configs by: each scope that stores the namespace sets the fields it stores (contest problem, contest, problem, the plugin-wide row, then the schema's defaults), and the most specific scope whose row says decides whether it is on.";
 
 fn validate_plugin_id(id: &str) -> Result<(), AppError> {
     crate::plugin_id::PluginId::parse(id)
@@ -375,6 +403,38 @@ pub async fn list_problem_config_issues(
 
 #[utoipa::path(
     get,
+    path = "/cascade",
+    tag = "Plugin Config",
+    operation_id = "listProblemConfigCascade",
+    summary = "What each config namespace of a problem reads, and inherits",
+    description = CASCADE_DESCRIPTION,
+    params(("id" = i32, Path, description = "Problem ID")),
+    responses(
+        (status = 200, description = "One entry per namespace", body = Vec<ConfigCascadeResponse>),
+        (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = crate::error::ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = crate::error::ErrorBody),
+        (status = 404, description = "Problem not found (NOT_FOUND)", body = crate::error::ErrorBody),
+    ),
+    security(("jwt" = [])),
+)]
+#[instrument(skip(state, auth_user))]
+pub async fn list_problem_config_cascade(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    AppPath(problem_id): AppPath<i32>,
+) -> Result<Json<Vec<ConfigCascadeResponse>>, AppError> {
+    auth_user.require_permission(perm::PROBLEM_EDIT)?;
+    find_problem(&state.db, problem_id).await?;
+    cascade_inner(
+        &state.db,
+        state.plugins.as_ref(),
+        &ConfigTarget::problem(problem_id),
+    )
+    .await
+}
+
+#[utoipa::path(
+    get,
     path = "/{plugin_id}/{namespace}",
     tag = "Plugin Config",
     operation_id = "getProblemConfig",
@@ -535,6 +595,39 @@ pub async fn list_contest_problem_config(
     let target = ConfigTarget::contest_problem(contest_id, problem_id);
     let schemas = collect_schemas_for_scope(&*state.plugins, ConfigScope::ContestProblem);
     list_config_inner(&state.db, &target, &schemas).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/cascade",
+    tag = "Plugin Config",
+    operation_id = "listContestProblemConfigCascade",
+    summary = "What each config namespace of a contest problem reads, and inherits",
+    description = CASCADE_DESCRIPTION,
+    params(("id" = i32, Path, description = "Contest ID"),
+        ("problem_id" = i32, Path, description = "Problem ID"),),
+    responses(
+        (status = 200, description = "One entry per namespace", body = Vec<ConfigCascadeResponse>),
+        (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = crate::error::ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = crate::error::ErrorBody),
+        (status = 404, description = "Contest problem not found (NOT_FOUND)", body = crate::error::ErrorBody),
+    ),
+    security(("jwt" = [])),
+)]
+#[instrument(skip(state, auth_user))]
+pub async fn list_contest_problem_config_cascade(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    AppPath((contest_id, problem_id)): AppPath<(i32, i32)>,
+) -> Result<Json<Vec<ConfigCascadeResponse>>, AppError> {
+    auth_user.require_permission(perm::CONTEST_MANAGE)?;
+    find_contest_problem(&state.db, contest_id, problem_id).await?;
+    cascade_inner(
+        &state.db,
+        state.plugins.as_ref(),
+        &ConfigTarget::contest_problem(contest_id, problem_id),
+    )
+    .await
 }
 
 #[utoipa::path(
@@ -740,6 +833,38 @@ pub async fn list_contest_config_issues(
     )
     .await?;
     Ok(Json(issues))
+}
+
+#[utoipa::path(
+    get,
+    path = "/cascade",
+    tag = "Plugin Config",
+    operation_id = "listContestConfigCascade",
+    summary = "What each config namespace of a contest reads, and inherits",
+    description = CASCADE_DESCRIPTION,
+    params(("id" = i32, Path, description = "Contest ID")),
+    responses(
+        (status = 200, description = "One entry per namespace", body = Vec<ConfigCascadeResponse>),
+        (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = crate::error::ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = crate::error::ErrorBody),
+        (status = 404, description = "Contest not found (NOT_FOUND)", body = crate::error::ErrorBody),
+    ),
+    security(("jwt" = [])),
+)]
+#[instrument(skip(state, auth_user))]
+pub async fn list_contest_config_cascade(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    AppPath(contest_id): AppPath<i32>,
+) -> Result<Json<Vec<ConfigCascadeResponse>>, AppError> {
+    auth_user.require_permission(perm::CONTEST_MANAGE)?;
+    find_contest(&state.db, contest_id).await?;
+    cascade_inner(
+        &state.db,
+        state.plugins.as_ref(),
+        &ConfigTarget::contest(contest_id),
+    )
+    .await
 }
 
 #[utoipa::path(

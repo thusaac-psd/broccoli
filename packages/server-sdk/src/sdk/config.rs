@@ -1,5 +1,5 @@
 use crate::error::SdkError;
-use crate::types::{CascadeLevel, CascadeLevels, ConfigResult, ConfigSource, EffectiveConfig};
+use crate::types::{ConfigResult, EffectiveConfig, resolve_cascade};
 use serde_json::Value;
 
 pub struct Config {
@@ -7,93 +7,10 @@ pub struct Config {
     pub(super) inner: ConfigMock,
 }
 
-/// The effective config of a namespace at one problem. Each scope that
-/// stores the namespace sets the fields it stores and leaves the rest to the
-/// next scope up: contest problem, contest, problem, the plugin-wide row, then
-/// the schema's defaults (see [`overlay`]). Whether it is on is decided by the
-/// most specific scope that says; a switched-off override contributes nothing
-/// and leaves what it overrode, so when the deciding scope is switched off the
-/// config is the plugin-wide one. The admin forms preview the same rule in
-/// `packages/web-sdk/src/slot/config-cascade.ts`; see the config cascade
-/// entry of `docs/plans/dedup-backlog.md`.
-fn resolve_cascade(
-    cp: Option<ConfigResult>,
-    c: Option<ConfigResult>,
-    p: ConfigResult,
-    plugin: ConfigResult,
-) -> EffectiveConfig {
-    // Most specific first, only the scopes that store the namespace.
-    let stored: Vec<(&ConfigResult, &Value, ConfigSource)> = [
-        (cp.as_ref(), ConfigSource::ContestProblem),
-        (c.as_ref(), ConfigSource::Contest),
-        (Some(&p), ConfigSource::Problem),
-    ]
-    .into_iter()
-    .filter_map(|(r, source)| {
-        let r = r?;
-        Some((r, r.stored.as_ref()?, source))
-    })
-    .collect();
-    let decided = stored.iter().find_map(|(r, _, _)| r.enabled);
-
-    let (config, source, is_enabled) = match (stored.first(), decided) {
-        (None, _) => {
-            let source = if plugin.is_default() {
-                ConfigSource::Default
-            } else {
-                ConfigSource::Plugin
-            };
-            (plugin.config.clone(), source, plugin.enabled == Some(true))
-        }
-        (Some(_), Some(false)) => (plugin.config.clone(), ConfigSource::Disabled, false),
-        (Some((_, _, source)), decided) => {
-            let mut config = plugin.config.clone();
-            for (row, raw, _) in stored.iter().rev() {
-                if row.enabled != Some(false) {
-                    overlay(&mut config, raw, Some(&row.config));
-                }
-            }
-            (config, source.clone(), decided == Some(true))
-        }
-    };
-    EffectiveConfig {
-        config,
-        source,
-        is_enabled,
-        levels: CascadeLevels {
-            contest_problem: cp.as_ref().map(CascadeLevel::from),
-            contest: c.as_ref().map(CascadeLevel::from),
-            problem: CascadeLevel::from(&p),
-            plugin: CascadeLevel::from(&plugin),
-        },
-    }
-}
-
-/// Lay a narrower scope's stored row over the config of the scopes above it:
-/// a field the row stores replaces the one above, except that two objects
-/// merge field by field, and a field it does not store keeps the one above.
-/// A value the row brings takes its schema defaults from `filled`, the row
-/// as the host resolved it.
-fn overlay(above: &mut Value, stored: &Value, filled: Option<&Value>) {
-    match (above, stored) {
-        (Value::Object(above), Value::Object(stored)) => {
-            for (key, value) in stored {
-                let filled = filled.and_then(|f| f.get(key));
-                match above.get_mut(key) {
-                    Some(slot) => overlay(slot, value, filled),
-                    None => {
-                        above.insert(key.clone(), filled.unwrap_or(value).clone());
-                    }
-                }
-            }
-        }
-        (above, stored) => *above = filled.unwrap_or(stored).clone(),
-    }
-}
-
 impl Config {
-    /// The config `ns` has at `problem_id`, in `contest_id` when given; see
-    /// [`ConfigSource`] for where it comes from.
+    /// The config `ns` has at `problem_id`, in `contest_id` when given, as
+    /// the shared cascade rule decides it ([`resolve_cascade`]); see
+    /// [`crate::types::ConfigSource`] for where it comes from.
     pub fn get_effective(
         &self,
         ns: &str,
@@ -330,8 +247,8 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::{ConfigResult, ConfigSource};
-    use serde_json::{Value, json};
+    use crate::types::ConfigSource;
+    use serde_json::json;
 
     fn make_host() -> crate::sdk::Host {
         crate::sdk::Host::mock()
@@ -541,39 +458,6 @@ mod tests {
         assert_eq!(
             eff.config,
             json!({"cpp": {"compiler": "gcc-14", "flags": ["-O2"]}, "python3": {"interpreter": "pypy3"}})
-        );
-    }
-
-    /// The defaults the host fills into a narrower row never hide what a
-    /// wider scope stores; they reach the effective config only where no
-    /// scope stores the field.
-    #[test]
-    fn a_narrower_rows_filled_defaults_never_hide_a_wider_scopes_field() {
-        let row = |stored: Option<Value>, config: Value| ConfigResult {
-            config,
-            stored,
-            enabled: Some(true),
-        };
-        let plugin = row(
-            Some(json!({"cpp": {"compiler": "gcc-14"}})),
-            json!({"cpp": {"compiler": "gcc-14", "flags": ["-O2"]}, "java": {"runner": "java"}}),
-        );
-        let problem = row(
-            Some(json!({"cpp": {"flags": ["-O3"]}, "kotlin": {"compiler": "kotlinc-2"}})),
-            json!({
-                "cpp": {"compiler": "g++", "flags": ["-O3"]},
-                "java": {"runner": "java"},
-                "kotlin": {"compiler": "kotlinc-2", "flags": ["-Werror"]},
-            }),
-        );
-        let eff = super::resolve_cascade(None, None, problem, plugin);
-        assert_eq!(
-            eff.config,
-            json!({
-                "cpp": {"compiler": "gcc-14", "flags": ["-O3"]},
-                "java": {"runner": "java"},
-                "kotlin": {"compiler": "kotlinc-2", "flags": ["-Werror"]},
-            })
         );
     }
 

@@ -971,6 +971,10 @@
 'config.source.problem' = "from the problem"
 'config.source.plugin' = "server-wide"
 'config.source.disabled' = "override switched off"
+'config.level.contestProblem' = "Contest problem"
+'config.level.contest' = "Contest"
+'config.level.problem' = "Problem"
+'config.level.plugin' = "Server-wide"
 
 # Language switcher
 'locale.switch' = "Language"

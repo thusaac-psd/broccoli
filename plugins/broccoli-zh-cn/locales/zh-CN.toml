@@ -972,6 +972,10 @@
 'config.source.problem' = "来自题目"
 'config.source.plugin' = "全站设置"
 'config.source.disabled' = "覆盖已关闭"
+'config.level.contestProblem' = "比赛题目"
+'config.level.contest' = "比赛"
+'config.level.problem' = "题目"
+'config.level.plugin' = "全服务器"
 
 # Language switcher
 'locale.switch' = "语言"

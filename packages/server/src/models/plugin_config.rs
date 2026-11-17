@@ -18,6 +18,24 @@ pub struct PluginConfigResponse {
     pub description: Option<String>,
 }
 
+/// A namespace's config at a problem, contest or contest problem as its
+/// plugin reads it, and what the scopes above give it: what the admin form
+/// shows as inherited. Both come from the cascade rule the plugin SDK reads
+/// configs by.
+#[derive(Serialize, ToSchema)]
+pub struct ConfigCascadeResponse {
+    #[schema(example = "standard-languages")]
+    pub plugin_id: String,
+    #[schema(example = "compilation")]
+    pub namespace: String,
+    /// The config a problem reads that stores nothing narrower than this
+    /// target, this target's own row included.
+    pub effective: broccoli_server_sdk::types::EffectiveConfig,
+    /// The same without this target's own row: what it inherits, and from
+    /// which scope each field comes (`fields`).
+    pub inherited: broccoli_server_sdk::types::EffectiveConfig,
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct UpsertPluginConfigRequest {
     pub config: serde_json::Value,

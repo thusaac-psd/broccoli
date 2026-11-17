@@ -358,6 +358,9 @@ fn problem_config_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::plugin_config::list_problem_config))
         .routes(routes!(handlers::plugin_config::list_problem_config_issues))
         .routes(routes!(
+            handlers::plugin_config::list_problem_config_cascade
+        ))
+        .routes(routes!(
             handlers::plugin_config::get_problem_config,
             handlers::plugin_config::upsert_problem_config,
             handlers::plugin_config::delete_problem_config,
@@ -369,6 +372,9 @@ fn contest_config_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::plugin_config::list_contest_config))
         .routes(routes!(handlers::plugin_config::list_contest_config_issues))
         .routes(routes!(
+            handlers::plugin_config::list_contest_config_cascade
+        ))
+        .routes(routes!(
             handlers::plugin_config::get_contest_config,
             handlers::plugin_config::upsert_contest_config,
             handlers::plugin_config::delete_contest_config,
@@ -379,6 +385,9 @@ fn contest_problem_config_routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(
             handlers::plugin_config::list_contest_problem_config
+        ))
+        .routes(routes!(
+            handlers::plugin_config::list_contest_problem_config_cascade
         ))
         .routes(routes!(
             handlers::plugin_config::get_contest_problem_config,

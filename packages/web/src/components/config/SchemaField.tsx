@@ -3,10 +3,11 @@ import {
   usePluginText,
   useTranslation,
 } from '@broccoli/web-sdk/i18n';
+import { configSourceName } from '@broccoli/web-sdk/plugin';
 import {
   InheritedAnnotation,
   InheritedBadge,
-  resolveInheritedValue,
+  inheritedValueOf,
   Slot,
 } from '@broccoli/web-sdk/slot';
 import { Button, Input, Label, Switch } from '@broccoli/web-sdk/ui';
@@ -89,7 +90,13 @@ export function SchemaField({
   const hasFieldOverride = hasExplicitDescendant(path);
   const isFieldDirty = isDirty?.(path) ?? false;
 
-  const inheritedResult = resolveInheritedValue(name, inherited);
+  // The server says where each top-level field comes from.
+  const inheritedValue =
+    path.length === 1 ? inheritedValueOf(path[0], inherited) : null;
+  const inheritedResult = inheritedValue && {
+    value: inheritedValue.value,
+    source: configSourceName(inheritedValue.source, t),
+  };
   const showAsPlaceholder = !isFieldExplicit && !isFieldDirty;
 
   const badge = (() => {

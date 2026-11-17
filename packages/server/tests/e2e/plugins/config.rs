@@ -293,3 +293,65 @@ async fn contest_config_issues_need_contest_manage() {
         .await;
     assert_eq!(res.status, 404, "{}", res.text);
 }
+
+/// The admin form of a contest problem reads what it inherits from the
+/// server, resolved by the rule plugins read configs by: a field the
+/// deployment sets plugin-wide comes from there, with every default filled,
+/// and a narrower scope switched off leaves the plugin-wide config in place.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_contest_problem_form_inherits_what_the_plugin_reads() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("cfg_cascade_admin", "password", "admin")
+        .await;
+    let problem_id = app.create_problem(&admin, "Cascade").await;
+    let contest_id = app.create_contest(&admin, "Cascade Cup", true, true).await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    let res = app
+        .put_with_token(
+            "/api/v1/admin/plugins/standard-languages/config/compilation",
+            &json!({ "config": { "cpp": { "compiler": "/opt/gcc-14/bin/g++" } } }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let res = app
+        .put_with_token(
+            &format!("/api/v1/problems/{problem_id}/config/standard-languages/compilation"),
+            &json!({ "config": { "cpp": { "flags": ["-O3"] } }, "enabled": false }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+
+    let res = app
+        .get_with_token(
+            &format!("/api/v1/contests/{contest_id}/problems/{problem_id}/config/cascade"),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let compilation = res
+        .body
+        .as_array()
+        .expect("an array")
+        .iter()
+        .find(|c| c["plugin_id"] == "standard-languages" && c["namespace"] == "compilation")
+        .expect("the compilation namespace")
+        .clone();
+    let inherited = &compilation["inherited"];
+    assert_eq!(
+        inherited["config"]["cpp"]["compiler"], "/opt/gcc-14/bin/g++",
+        "the switched-off problem row leaves the deployment's compiler: {inherited}"
+    );
+    assert_eq!(
+        inherited["config"]["cpp"]["flags"],
+        json!(["-O2"]),
+        "with the schema's defaults filled in"
+    );
+    assert_eq!(inherited["source"], "disabled");
+    assert_eq!(inherited["fields"]["cpp"], "plugin");
+    assert_eq!(inherited["levels"]["problem"]["enabled"], false);
+    assert_eq!(compilation["effective"]["config"], inherited["config"]);
+}

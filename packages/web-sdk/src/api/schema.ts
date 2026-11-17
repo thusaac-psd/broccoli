@@ -760,6 +760,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/contests/{id}/config/cascade': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * What each config namespace of a contest reads, and inherits
+     * @description For each config namespace loaded plugins declare at this scope: the config a plugin reads here (`effective`), and what the scopes above give it (`inherited`), with the scope each field comes from. Both come from the cascade rule the plugin SDK reads configs by: each scope that stores the namespace sets the fields it stores (contest problem, contest, problem, the plugin-wide row, then the schema's defaults), and the most specific scope whose row says decides whether it is on.
+     */
+    get: operations['listContestConfigCascade'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/contests/{id}/config/issues': {
     parameters: {
       query?: never;
@@ -1081,6 +1101,26 @@ export interface paths {
     };
     /** List all config namespaces for a contest-problem */
     get: operations['listContestProblemConfig'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/contests/{id}/problems/{problem_id}/config/cascade': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * What each config namespace of a contest problem reads, and inherits
+     * @description For each config namespace loaded plugins declare at this scope: the config a plugin reads here (`effective`), and what the scopes above give it (`inherited`), with the scope each field comes from. Both come from the cascade rule the plugin SDK reads configs by: each scope that stores the namespace sets the fields it stores (contest problem, contest, problem, the plugin-wide row, then the schema's defaults), and the most specific scope whose row says decides whether it is on.
+     */
+    get: operations['listContestProblemConfigCascade'];
     put?: never;
     post?: never;
     delete?: never;
@@ -1692,6 +1732,26 @@ export interface paths {
     };
     /** List all config namespaces for a problem */
     get: operations['listProblemConfig'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/problems/{id}/config/cascade': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * What each config namespace of a problem reads, and inherits
+     * @description For each config namespace loaded plugins declare at this scope: the config a plugin reads here (`effective`), and what the scopes above give it (`inherited`), with the scope each field comes from. Both come from the cascade rule the plugin SDK reads configs by: each scope that stores the namespace sets the fields it stores (contest problem, contest, problem, the plugin-wide row, then the schema's defaults), and the most specific scope whose row says decides whether it is on.
+     */
+    get: operations['listProblemConfigCascade'];
     put?: never;
     post?: never;
     delete?: never;
@@ -2537,6 +2597,24 @@ export interface components {
        */
       id: number;
     };
+    /** @description One scope's row of a namespace, as the cascade read it. */
+    CascadeLevel: {
+      /**
+       * @description The row with its schema's defaults filled in; the defaults alone when
+       *     nothing is stored.
+       */
+      config: unknown;
+      enabled?: boolean | null;
+      is_default: boolean;
+      /** @description The row as stored, without defaults; `None` when nothing is stored. */
+      stored?: unknown;
+    };
+    CascadeLevels: {
+      contest?: components['schemas']['CascadeLevel'] | null;
+      contest_problem?: components['schemas']['CascadeLevel'] | null;
+      plugin: components['schemas']['CascadeLevel'];
+      problem: components['schemas']['CascadeLevel'];
+    };
     CheckerSourceFile: {
       /**
        * @example #include "testlib.h"
@@ -2744,6 +2822,28 @@ export interface components {
        */
       size: number;
     };
+    /**
+     * @description A namespace's config at a problem, contest or contest problem as its
+     *     plugin reads it, and what the scopes above give it: what the admin form
+     *     shows as inherited. Both come from the cascade rule the plugin SDK reads
+     *     configs by.
+     */
+    ConfigCascadeResponse: {
+      /**
+       * @description The config a problem reads that stores nothing narrower than this
+       *     target, this target's own row included.
+       */
+      effective: components['schemas']['EffectiveConfig'];
+      /**
+       * @description The same without this target's own row: what it inherits, and from
+       *     which scope each field comes (`fields`).
+       */
+      inherited: components['schemas']['EffectiveConfig'];
+      /** @example compilation */
+      namespace: string;
+      /** @example standard-languages */
+      plugin_id: string;
+    };
     ConfigSchemaResponse: {
       /** @example Testlib checker compiler settings */
       description?: string | null;
@@ -2757,6 +2857,17 @@ export interface components {
      * @enum {string}
      */
     ConfigScope: 'plugin' | 'problem' | 'contest' | 'contest_problem';
+    /**
+     * @description The most specific scope whose row an effective config takes fields from.
+     * @enum {string}
+     */
+    ConfigSource:
+      | 'contest_problem'
+      | 'contest'
+      | 'problem'
+      | 'plugin'
+      | 'default'
+      | 'disabled';
     /** @description One contest in a contest list. */
     ContestListItem: {
       /**
@@ -3310,6 +3421,23 @@ export interface components {
         [key: string]: number;
       };
       unresolved_by_message_type: components['schemas']['MessageTypeCounts'];
+    };
+    /**
+     * @description The config a plugin reads for a namespace at one problem, as
+     *     [`resolve_cascade`] decides it.
+     */
+    EffectiveConfig: {
+      config: unknown;
+      /**
+       * @description Where each top-level field of `config` comes from: the scope whose
+       *     row sets it, else the plugin-wide row, else the schema's defaults.
+       */
+      fields?: {
+        [key: string]: components['schemas']['ConfigSource'];
+      };
+      is_enabled: boolean;
+      levels: components['schemas']['CascadeLevels'];
+      source: components['schemas']['ConfigSource'];
     };
     /**
      * @description What went wrong. `code` and `details` are the contract a client reads;
@@ -7486,6 +7614,56 @@ export interface operations {
       };
     };
   };
+  listContestConfigCascade: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Contest ID */
+        id: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description One entry per namespace */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ConfigCascadeResponse'][];
+        };
+      };
+      /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Forbidden (PERMISSION_DENIED) */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Contest not found (NOT_FOUND) */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
   listContestConfigIssues: {
     parameters: {
       query?: never;
@@ -8772,6 +8950,58 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['PluginConfigResponse'][];
+        };
+      };
+      /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Forbidden (PERMISSION_DENIED) */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Contest problem not found (NOT_FOUND) */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  listContestProblemConfigCascade: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Contest ID */
+        id: number;
+        /** @description Problem ID */
+        problem_id: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description One entry per namespace */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ConfigCascadeResponse'][];
         };
       };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
@@ -11844,6 +12074,56 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['PluginConfigResponse'][];
+        };
+      };
+      /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Forbidden (PERMISSION_DENIED) */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Problem not found (NOT_FOUND) */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  listProblemConfigCascade: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Problem ID */
+        id: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description One entry per namespace */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ConfigCascadeResponse'][];
         };
       };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
