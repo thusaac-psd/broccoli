@@ -76,6 +76,8 @@ export interface ScoreboardResponse {
   scoreboard_visibility: ScoreboardVisibility;
   scoreboard_tiebreaker: ScoreboardTiebreaker;
   max_scores: Record<string, number>;
+  /** The contest's problems in its order, with the labels the contest gives them. */
+  problems: { problem_id: number; label: string }[];
   /** False when `rankings` holds only the viewer's own row, or nothing. */
   full_board: boolean;
   rankings: ScoreboardEntry[];

@@ -58,3 +58,26 @@ pub fn results_may_change(
         .query_one_with_args::<Pending>(&sql, &p.into_args())?
         .is_some_and(|row| row.pending))
 }
+
+/// One problem of a contest, as the contest names it.
+#[cfg(feature = "guest")]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ContestProblem {
+    pub problem_id: i32,
+    /// The contest's label for the problem, which the host requires and
+    /// every view of the contest shows.
+    pub label: String,
+}
+
+/// The contest's problems in the contest's order, each with the label the
+/// contest gives it. A board names its columns by these labels, as the host's
+/// own contest pages do.
+#[cfg(feature = "guest")]
+pub fn problems(host: &crate::sdk::Host, contest_id: i32) -> Result<Vec<ContestProblem>, SdkError> {
+    let mut p = crate::db::Params::new();
+    let sql = format!(
+        "SELECT problem_id, label FROM contest_problem WHERE contest_id = {} ORDER BY position",
+        p.bind(contest_id)
+    );
+    host.db.query_with_args(&sql, &p.into_args())
+}

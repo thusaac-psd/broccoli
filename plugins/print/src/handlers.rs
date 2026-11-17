@@ -153,13 +153,7 @@ pub fn handle_print_submission(
         .into());
     }
 
-    let label = jobs::fetch_problem_label(host, contest_id, sub.problem_id)?.map(|r| {
-        if r.label.trim().is_empty() {
-            models::problem_letter(r.position)
-        } else {
-            r.label
-        }
-    });
+    let label = jobs::fetch_problem_label(host, contest_id, sub.problem_id)?;
 
     let files: Vec<SourceFile> = serde_json::from_value(sub.files.clone()).unwrap_or_default();
     if files.is_empty() {
@@ -294,13 +288,7 @@ pub fn handle_print_arbitrary(
     // Scoped by (contest_id, problem_id), so an unrelated problem id yields no
     // label rather than leaking one; contest access is already checked above.
     let problem_label = match body.problem_id {
-        Some(pid) => jobs::fetch_problem_label(host, contest_id, pid)?.map(|r| {
-            if r.label.trim().is_empty() {
-                models::problem_letter(r.position)
-            } else {
-                r.label
-            }
-        }),
+        Some(pid) => jobs::fetch_problem_label(host, contest_id, pid)?,
         None => None,
     };
 

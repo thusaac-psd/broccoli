@@ -419,23 +419,14 @@ pub(crate) fn handle_scoreboard(
 
     let contest_config: ContestConfig = contest::load_config(host, contest_id)?;
 
-    #[derive(Deserialize)]
-    struct ContestProblem {
-        problem_id: i32,
-    }
-    let mut p = Params::new();
-    let sql = format!(
-        "SELECT problem_id FROM contest_problem WHERE contest_id = {} ORDER BY position",
-        p.bind(contest_id)
-    );
-    let problems: Vec<ContestProblem> = host.db.query_with_args(&sql, &p.into_args())?;
+    let problems = contest::problems(host, contest_id)?;
     let problem_ids: Vec<i32> = problems.iter().map(|p| p.problem_id).collect();
 
     let mut max_scores: HashMap<i32, f64> = HashMap::new();
     for &pid in &problem_ids {
         let task_config = load_task_config(host, contest_id, pid)?;
-        let (_, subtasks) = load_effective_subtasks(host, pid, &task_config)?;
-        max_scores.insert(pid, problem_max_score(&subtasks));
+        let (test_cases, subtasks) = load_effective_subtasks(host, pid, &task_config)?;
+        max_scores.insert(pid, problem_max_score(&subtasks, &test_cases));
     }
 
     let mut p = Params::new();
@@ -595,6 +586,12 @@ pub(crate) fn handle_scoreboard(
             "scoreboard_visibility": contest_config.scoreboard_visibility,
             "scoreboard_tiebreaker": contest_config.scoreboard_tiebreaker,
             "max_scores": max_scores,
+            // The contest's problems in its order, with its labels: the
+            // board's columns.
+            "problems": problems
+                .iter()
+                .map(|p| serde_json::json!({ "problem_id": p.problem_id, "label": p.label }))
+                .collect::<Vec<_>>(),
             // Whether `rankings` holds every participant, rather than only
             // the viewer's own row (or nothing, for a viewer with none).
             "full_board": full_scoreboard_visible,

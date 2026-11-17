@@ -79,12 +79,6 @@ pub struct SubmissionRow {
     pub problem_id: i32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProblemLabelRow {
-    pub label: String,
-    pub position: i32,
-}
-
 #[derive(Deserialize)]
 struct CountRow {
     count: i64,
@@ -205,18 +199,26 @@ pub fn fetch_submission(
     host.db.query_one_with_args(&sql, &p.into_args())
 }
 
+/// The label the contest gives `problem_id`, when the contest holds it.
 pub fn fetch_problem_label(
     host: &Host,
     contest_id: i32,
     problem_id: i32,
-) -> Result<Option<ProblemLabelRow>, SdkError> {
+) -> Result<Option<String>, SdkError> {
+    #[derive(Deserialize)]
+    struct Label {
+        label: String,
+    }
     let mut p = Params::new();
     let sql = format!(
-        "SELECT label, position FROM contest_problem WHERE contest_id = {} AND problem_id = {}",
+        "SELECT label FROM contest_problem WHERE contest_id = {} AND problem_id = {}",
         p.bind(contest_id),
         p.bind(problem_id)
     );
-    host.db.query_one_with_args(&sql, &p.into_args())
+    Ok(host
+        .db
+        .query_one_with_args::<Label>(&sql, &p.into_args())?
+        .map(|row| row.label))
 }
 
 pub fn list_my_jobs(

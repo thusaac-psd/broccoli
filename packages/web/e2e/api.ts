@@ -415,6 +415,7 @@ export const PLUGIN_ROUTES: [string, RegExp, Handler][] = [
       scoreboard_visibility: 'all_contest_viewers',
       scoreboard_tiebreaker: 'equal_rank',
       max_scores: { '1': 100 },
+      problems: [{ problem_id: 1, label: 'C' }],
       full_board: true,
       rankings: [
         {

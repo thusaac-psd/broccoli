@@ -1173,39 +1173,8 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     let contest_id = info.id;
     let config: ContestConfig = contest::load_config(host, contest_id)?;
 
-    // Fetch contest problems in order
-    #[derive(Deserialize)]
-    struct ContestProblem {
-        problem_id: i32,
-        label: Option<String>,
-    }
-    let mut p = Params::new();
-    let sql = format!(
-        "SELECT problem_id, label FROM contest_problem WHERE contest_id = {} ORDER BY position",
-        p.bind(contest_id)
-    );
-    let problems: Vec<ContestProblem> = host.db.query_with_args(&sql, &p.into_args())?;
-
-    // Build problem labels: use explicit label if set, otherwise A, B, C...
-    let problem_labels: Vec<String> = problems
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            p.label
-                .as_deref()
-                .filter(|l| !l.is_empty())
-                .map(|l| l.to_string())
-                .unwrap_or_else(|| {
-                    // A, B, C, ... Z, AA, AB, ...
-                    let c = (b'A' + (i as u8) % 26) as char;
-                    if i < 26 {
-                        c.to_string()
-                    } else {
-                        format!("{}{}", (b'A' + (i as u8) / 26 - 1) as char, c)
-                    }
-                })
-        })
-        .collect();
+    let problems = contest::problems(host, contest_id)?;
+    let problem_labels: Vec<String> = problems.iter().map(|p| p.label.clone()).collect();
     let problem_ids: Vec<i32> = problems.iter().map(|p| p.problem_id).collect();
 
     // Fetch participants (during before/during phase, only fetch the requesting user

@@ -280,16 +280,12 @@ function Rankings({
   const { phase, rankings } = scoreboard;
   const showTimeTiebreaker = scoreboard.scoreboard_tiebreaker !== 'equal_rank';
 
-  // Determine problem labels from the first entry that has problems
-  const sampleEntry = rankings.find(
-    (r: ScoreboardEntry) => r.problems && r.problems.length > 0,
-  );
-  const problemIds =
-    sampleEntry?.problems?.map((p: { problem_id: number }) => p.problem_id) ??
-    [];
-  const problemLabels = problemIds.map((_: number, i: number) =>
-    String.fromCharCode(65 + i),
-  );
+  // One column per contest problem, named as the contest labels it, when
+  // the viewer's level shows per-problem scores.
+  const columns = rankings.some((r: ScoreboardEntry) => r.problems?.length)
+    ? scoreboard.problems
+    : [];
+  const problemIds = columns.map((p) => p.problem_id);
 
   // The server sends every problem's maximum: the sum of its subtasks'
   // maximums, the default subtask's for a problem with no subtask config.
@@ -369,9 +365,9 @@ function Rankings({
                 >
                   {t('ioi.scoreboard.header.user')}
                 </th>
-                {problemLabels.map((label: string, i: number) => (
+                {columns.map(({ problem_id, label }) => (
                   <th
-                    key={problemIds[i]}
+                    key={problem_id}
                     className="py-2 px-3 text-center font-semibold text-xs uppercase tracking-wide text-muted-foreground border-b-2 border-border bg-muted whitespace-nowrap"
                     style={{ width: 80 }}
                   >
