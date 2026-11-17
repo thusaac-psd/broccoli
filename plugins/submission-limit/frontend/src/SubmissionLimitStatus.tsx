@@ -2,7 +2,7 @@
  * Shows submission count / limit on the problem detail sidebar.
  * Hidden when no limit is configured (unlimited) or plugin is not enabled.
  */
-import { usePluginApi } from '@broccoli/web-sdk/api';
+import { nothingForThisViewer, usePluginApi } from '@broccoli/web-sdk/api';
 import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -50,12 +50,16 @@ export function SubmissionLimitStatus({
       viewerKey,
     ],
     enabled: authReady && !!user && problemId !== undefined,
+    // A viewer the route refuses (one who does not take part in the
+    // contest) has no limit: nothing to show.
     queryFn: () =>
-      api.get<LimitStatus>(
-        contestId
-          ? `${ROUTES}/contests/${contestId}/problems/${problemId}/status`
-          : `${ROUTES}/problems/${problemId}/status`,
-      ),
+      api
+        .get<LimitStatus>(
+          contestId
+            ? `${ROUTES}/contests/${contestId}/problems/${problemId}/status`
+            : `${ROUTES}/problems/${problemId}/status`,
+        )
+        .catch(nothingForThisViewer),
   });
   const view = useQueryState(query);
   const { data: status } = query;

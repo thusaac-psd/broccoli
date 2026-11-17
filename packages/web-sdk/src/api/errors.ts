@@ -201,6 +201,18 @@ export function errorKind(err: unknown): ErrorKind {
 }
 
 /**
+ * `null` for a failure that refuses this viewer the resource (403, 404): the
+ * view has nothing to show them, such as a participant's panel on the page
+ * of a contest they do not take part in. Any other failure is rethrown, as
+ * `promise.catch(nothingForThisViewer)` keeps it.
+ */
+export function nothingForThisViewer(err: unknown): null {
+  const kind = errorKind(err);
+  if (kind === 'forbidden' || kind === 'notFound') return null;
+  throw err;
+}
+
+/**
  * Whether `err` is a temporary error: show it as "busy, retrying" and retry,
  * never as a failure of the request.
  */

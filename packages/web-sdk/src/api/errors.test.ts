@@ -7,6 +7,7 @@ import {
   type ErrorKind,
   errorKind,
   isTemporaryApiError,
+  nothingForThisViewer,
   RequestError,
   retryCanFix,
   TranslatedError,
@@ -258,4 +259,16 @@ test('only a failure a retry can fix offers one', () => {
     'rateLimited',
     'server',
   ]);
+});
+
+test('a refusal of this viewer is nothing to show; any other failure stays', () => {
+  for (const status of [403, 404]) {
+    assert.equal(nothingForThisViewer(new RequestError(status, 'X')), null);
+  }
+  for (const err of [new RequestError(500, 'X'), new RequestError(null, 'X')]) {
+    assert.throws(
+      () => nothingForThisViewer(err),
+      (thrown) => thrown === err,
+    );
+  }
 });
