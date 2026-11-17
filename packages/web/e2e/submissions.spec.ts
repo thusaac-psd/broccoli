@@ -114,7 +114,11 @@ test('a problem whose practice contest type has no provider offers no submit', a
   await mockApi(page, 'contestant');
   await page.route(/\/api\/v1\/problems\/1(\?|$)/, (route) =>
     route.fulfill({
-      json: { ...problem(1), plugin_outage: DISABLED_OUTAGE },
+      json: {
+        ...problem(1),
+        plugin_outage: DISABLED_OUTAGE,
+        closed_by: CLOSED_BY_ICPC,
+      },
     }),
   );
   await page.goto('/problems/1?tab=coding');

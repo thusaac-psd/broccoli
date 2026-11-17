@@ -273,6 +273,7 @@ pub async fn get_contest_problem(
 /// `not_found` is the calling handler's own 404 message. The "not started"
 /// rule is a 400 business rule, not a reachability outcome, so the kernel
 /// does not model it and it is applied here between the two decisions.
+/// Under a contest, it returns the contest it read.
 pub(crate) async fn require_problem_part_reachable(
     kernel: &VisibilityKernel<'_>,
     state: &AppState,
@@ -280,7 +281,8 @@ pub(crate) async fn require_problem_part_reachable(
     scope: ProblemScope,
     action: Action,
     not_found: &str,
-) -> Result<(), AppError> {
+) -> Result<Option<crate::entity::contest::Model>, AppError> {
+    let mut reached = None;
     if let Some(contest_id) = scope.contest_id {
         if kernel
             .decide(Action::Read, Resource::Contest(contest_id))
@@ -291,6 +293,7 @@ pub(crate) async fn require_problem_part_reachable(
         }
         let contest = find_contest(&state.db, contest_id).await?;
         require_contest_started(auth_user, &contest, state.clock.now())?;
+        reached = Some(contest);
     }
     let decision = kernel.decide(action, scope.problem()).await?;
     if decision.is_denied() {
@@ -301,7 +304,7 @@ pub(crate) async fn require_problem_part_reachable(
     if let Some(outage) = decision.outage() {
         return Err(outage.clone().into());
     }
-    Ok(())
+    Ok(reached)
 }
 
 /// Shared body of `get_problem` and `get_contest_problem`: the problem as
@@ -321,7 +324,7 @@ async fn get_problem_in(
     // reachability via any contest it is attached to; under a contest it
     // is that contest's access, window and membership checks - see
     // `visibility::host_rules::decide_problem_or_sample`.
-    require_problem_part_reachable(
+    let contest = require_problem_part_reachable(
         &kernel,
         state,
         auth_user,
@@ -333,6 +336,14 @@ async fn get_problem_in(
 
     let mut response =
         problem_response(state, find_problem(&state.db, scope.problem_id).await?).await;
+    // Under a contest, its work runs in the contest's type.
+    if let Some(contest) = contest {
+        response.closed_by = contest.contest_type.and_then(|contest_type| {
+            state
+                .plugin_lifecycle
+                .closed_by(&contest_type, &response.problem_type)
+        });
+    }
     response.samples = load_sample_test_cases(&state.db, scope.problem_id).await?;
 
     // The DTO reaches the response body only through `into_masked_json`, so

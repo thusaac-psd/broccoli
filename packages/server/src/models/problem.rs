@@ -170,14 +170,19 @@ pub struct UploadTestCasesResponse {
 }
 
 /// The problem's response, with what keeps its default contest type from
-/// being served (`crate::plugin_lifecycle::contest_type_outage`) and no
-/// samples (the caller loads them when it shows them).
+/// being served (`crate::plugin_lifecycle::contest_type_outage`), what keeps
+/// its practice work from running
+/// (`crate::plugin_lifecycle::PluginLifecycle::closed_by`), and no samples
+/// (the caller loads them when it shows them).
 pub async fn problem_response(
     state: &crate::state::AppState,
     m: crate::entity::problem::Model,
 ) -> ProblemResponse {
     let plugin_outage =
         crate::plugin_lifecycle::contest_type_outage(state, &m.default_contest_type).await;
+    let closed_by = state
+        .plugin_lifecycle
+        .closed_by(&m.default_contest_type, &m.problem_type);
     let submission_format: Option<std::collections::HashMap<String, Vec<String>>> = m
         .submission_format
         .and_then(|v| serde_json::from_value(v).ok());
@@ -197,6 +202,7 @@ pub async fn problem_response(
         created_at: m.created_at,
         updated_at: m.updated_at,
         plugin_outage,
+        closed_by,
     }
 }
 

@@ -4079,6 +4079,7 @@ export interface components {
     ProblemResponse: {
       /** @example lines */
       checker_format: string;
+      closed_by?: components['schemas']['ClosedBy'] | null;
       /** @example Given an array of integers... */
       content: string;
       /**

@@ -147,7 +147,13 @@ test('a practice problem closed by an outage opens for submitting once the plugi
   await mockApi(page, 'contestant');
   let enabled = false;
   await answerGets(page, /\/api\/v1\/problems\/1(\?|$)/, () =>
-    enabled ? problem(1) : { ...problem(1), plugin_outage: DISABLED_OUTAGE },
+    enabled
+      ? problem(1)
+      : {
+          ...problem(1),
+          plugin_outage: DISABLED_OUTAGE,
+          closed_by: { plugin_id: 'icpc', provides: 'contest_type' },
+        },
   );
   await page.goto('/problems/1?tab=coding');
   await expect(page.getByRole('button', { name: 'Submit' })).toHaveCount(0);
@@ -159,6 +165,52 @@ test('a practice problem closed by an outage opens for submitting once the plugi
     }),
   );
 });
+
+// Every plugin a submission needs closes the submit the same way: the
+// problem's evaluator as much as its contest type's plugin. The page says
+// which one, once, and offers no Submit the server would refuse.
+const EVALUATOR_CLOSED = {
+  plugin_id: 'batch-evaluator',
+  provides: 'problem_type',
+} as const;
+
+for (const [name, path, api] of [
+  [
+    'a practice problem',
+    '/problems/1?tab=coding',
+    /\/api\/v1\/problems\/1(\?|$)/,
+  ],
+  [
+    'a contest problem',
+    '/contests/1/problems/1?tab=coding',
+    /\/api\/v1\/contests\/1\/problems\/1(\?|$)/,
+  ],
+] as const) {
+  test(`${name} whose evaluator is disabled says so and offers no Submit until it is back`, async ({
+    page,
+  }) => {
+    await page.clock.install({ time: NOW });
+    await mockApi(page, 'contestant');
+    let enabled = false;
+    await answerGets(page, api, () =>
+      enabled ? problem(1) : { ...problem(1), closed_by: EVALUATOR_CLOSED },
+    );
+    await page.goto(path);
+    await expect(
+      page.getByText(
+        'Submitting is unavailable while the plugin that evaluates this problem is disabled.',
+      ),
+    ).toHaveCount(1);
+    await expect(page.getByRole('button', { name: 'Submit' })).toHaveCount(0);
+
+    enabled = true;
+    await runClockUntil(page, () =>
+      expect(page.getByRole('button', { name: 'Submit' })).toBeVisible({
+        timeout: 500,
+      }),
+    );
+  });
+}
 
 // A parked submission names what parks it, as the server records it.
 for (const [provides, label] of [

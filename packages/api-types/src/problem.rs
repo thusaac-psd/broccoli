@@ -69,6 +69,11 @@ pub struct ProblemResponse {
     /// or code run, from being served, if anything: such a submission is
     /// refused until it is.
     pub plugin_outage: Option<crate::visibility::PluginOutage>,
+    /// The plugin that keeps a new submission or code run of this problem
+    /// from running, in the contest type the response is read under (the
+    /// contest's, or `default_contest_type` on its own), if anything: such
+    /// work is refused until a provider is enabled.
+    pub closed_by: Option<crate::visibility::ClosedBy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

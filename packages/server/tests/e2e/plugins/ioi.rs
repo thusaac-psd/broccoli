@@ -1640,6 +1640,7 @@ async fn cut_by_a_disable(change: Change) {
         .get_with_token(&format!("/api/v1/problems/{problem_id}"), &admin)
         .await;
     assert_eq!(res.body["plugin_outage"], outage, "{}", res.text);
+    assert_eq!(res.body["closed_by"], parked, "{}", res.text);
 
     let cut_statuses = app.logged_statuses().await;
     assert!(
