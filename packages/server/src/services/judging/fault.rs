@@ -26,6 +26,9 @@ pub enum DispatchFault {
     /// unit, is not loaded here any more (it is reloading or was unloaded):
     /// the replica's fault, not the submission's.
     NotLoadedHere,
+    /// The database did not answer a statement the dispatch's plugins ran
+    /// (`common::db::is_outage`): the platform's fault, not the submission's.
+    DatabaseUnavailable,
     /// The problem's checker program failed (crashed, was killed by a
     /// signal, exited with a code its format gives no meaning), as its
     /// checker plugin reported through `CheckerVerdict::checker_failure`.
@@ -42,6 +45,7 @@ impl DispatchFault {
         match self {
             Self::Operation(fault) => fault.code(),
             Self::NotLoadedHere => HostCode::PluginNotLoadedHere,
+            Self::DatabaseUnavailable => HostCode::DatabaseUnavailable,
             Self::CheckerFailed => HostCode::CheckerFailed,
             Self::ProblemFailed => HostCode::ProblemFailed,
         }
@@ -115,8 +119,8 @@ pub(crate) enum SystemErrorClass {
     Judging,
     /// The platform lost the attempt (the queue was unreachable or lost an
     /// operation, the worker that took it lacks a platform tool, no worker
-    /// could take it, or a plugin it needs stopped being loaded on the
-    /// replica that claimed it): handed back to the queue at once, spending no budget,
+    /// could take it, a plugin it needs stopped being loaded on the replica
+    /// that claimed it, or the database did not answer): handed back to the queue at once, spending no budget,
     /// and never finalized (see [`DispatchFaults::lost`]). A worker without
     /// its platform tools takes no work, so the next attempt goes to one that
     /// has them.
@@ -136,7 +140,8 @@ impl SystemErrorClass {
                 | OperationFault::PlatformToolMissing
                 | OperationFault::NoCapableWorker,
             )
-            | DispatchFault::NotLoadedHere => Self::HandBack,
+            | DispatchFault::NotLoadedHere
+            | DispatchFault::DatabaseUnavailable => Self::HandBack,
             DispatchFault::CheckerFailed | DispatchFault::ProblemFailed => Self::Stands,
         }
     }

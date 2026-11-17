@@ -217,6 +217,17 @@ async fn by_deadline<T>(
 /// Fail the running call as unavailable: the plugin's SQL cannot run right
 /// now (no connection free in time, or its role unprovisioned), which says
 /// nothing about the request, so callers answer it with "try again".
+/// The answer to a plugin statement that failed with `e`. A database outage
+/// under a dispatch is the platform's, not the submission's: it is recorded
+/// on the dispatch (`judging::Dispatch::note_database_error`), which hands
+/// the attempt back instead of spending its budget.
+fn db_error(e: &sea_orm::DbErr) -> Result<String, extism::Error> {
+    if let Some(dispatch) = crate::services::judging::Dispatch::of_current_call() {
+        dispatch.note_database_error(e);
+    }
+    HostDbResponse::err(e.to_string()).to_json_string()
+}
+
 fn unavailable(e: crate::plugin_db::Unavailable) -> extism::Error {
     tracing::warn!(error = %e, "Plugin SQL unavailable");
     plugin_core::executor::fail_unavailable();
@@ -755,7 +766,7 @@ host_fn!(pub db_execute(user_data: Arc<(String, PluginSql)>; sql: String, args: 
             let sql_preview: String = sql.chars().take(800).collect();
             let args_preview: String = args.chars().take(800).collect();
             error!(plugin_id = %plugin_id, sql_len = sql.len(), args_len = args.len(), sql = %sql_preview, args = %args_preview, "DB execution error: {}", e);
-            HostDbResponse::err(e.to_string()).to_json_string()
+            db_error(&e)
         }
     }
 });
@@ -786,7 +797,7 @@ host_fn!(pub db_query(user_data: Arc<(String, PluginSql)>; sql: String, args: St
         Ok(None) => HostDbResponse::ok(serde_json::json!([])).to_json_string(),
         Err(e) => {
             error!("DB query error: {}", e);
-            HostDbResponse::err(e.to_string()).to_json_string()
+            db_error(&e)
         }
     }
 });
@@ -876,7 +887,7 @@ host_fn!(pub db_query_in(user_data: Arc<(String, PluginSql, TransactionMap)>; tx
         Ok(None) => HostDbResponse::ok(serde_json::json!([])).to_json_string(),
         Err(e) => {
             error!("DB query_in error: {}", e);
-            HostDbResponse::err(e.to_string()).to_json_string()
+            db_error(&e)
         }
     }
 });
@@ -898,7 +909,7 @@ host_fn!(pub db_execute_in(user_data: Arc<(String, PluginSql, TransactionMap)>; 
         Ok(res) => HostDbResponse::ok(JsonValue::from(res.rows_affected())).to_json_string(),
         Err(e) => {
             error!("DB execute_in error: {}", e);
-            HostDbResponse::err(e.to_string()).to_json_string()
+            db_error(&e)
         }
     }
 });
@@ -924,7 +935,7 @@ host_fn!(pub db_commit(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_
         Ok(()) => HostDbResponse::ok(serde_json::json!({"ok": true})).to_json_string(),
         Err(e) => {
             error!("DB commit error: {}", e);
-            HostDbResponse::err(e.to_string()).to_json_string()
+            db_error(&e)
         }
     }
 });
@@ -961,7 +972,7 @@ host_fn!(pub db_rollback(user_data: Arc<(String, PluginSql, TransactionMap)>; tx
                 Ok(()) => HostDbResponse::ok(serde_json::json!({"ok": true})).to_json_string(),
                 Err(e) => {
                     error!("DB rollback error: {}", e);
-                    HostDbResponse::err(e.to_string()).to_json_string()
+                    db_error(&e)
                 }
             }
         }
@@ -991,7 +1002,7 @@ pub(super) fn execute_on_pool(
             let sql_preview: String = sql.chars().take(800).collect();
             let args_preview: String = args.chars().take(800).collect();
             error!(plugin_id = %plugin_id, sql_len = sql.len(), args_len = args.len(), sql = %sql_preview, args = %args_preview, "Submission DB execution error: {}", e);
-            HostDbResponse::err(e.to_string()).to_json_string()
+            db_error(&e)
         }
     }
 }
@@ -1061,7 +1072,7 @@ pub(super) fn query_on_pool(
         Ok(None) => HostDbResponse::ok(serde_json::json!([])).to_json_string(),
         Err(e) => {
             error!(plugin_id, "Submission DB query error: {}", e);
-            HostDbResponse::err(e.to_string()).to_json_string()
+            db_error(&e)
         }
     }
 }
