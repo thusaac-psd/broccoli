@@ -72,6 +72,7 @@ export function AdditionalFilesSection({
     queryFn: () => fetchSupportedLanguages(apiClient),
     staleTime: 60_000,
   });
+  const languagesState = useQueryState(languagesQuery);
   const languages = languagesQuery.data ?? NO_LANGUAGES;
 
   // --- Staging ---
@@ -248,12 +249,10 @@ export function AdditionalFilesSection({
       </p>
 
       {/* Drop zone — always available */}
-      {languagesQuery.isError && !languagesQuery.data ? (
+      {languagesState.status === 'error' ? (
         <QueryErrorState
           className="py-4"
-          error={languagesQuery.error}
-          retry={() => void languagesQuery.refetch()}
-          retrying={languagesQuery.isFetching}
+          state={languagesState}
           failure={t('admin.additionalFiles.languagesLoadFailed')}
         />
       ) : noLanguages ? (
@@ -391,9 +390,7 @@ export function AdditionalFilesSection({
       {filesState.status === 'error' ? (
         <QueryErrorState
           className="py-4"
-          error={filesState.error}
-          retry={filesState.retry}
-          retrying={filesState.retrying}
+          state={filesState}
           failure={t('admin.additionalFiles.loadFailed')}
         />
       ) : filesState.status === 'loading' ? (

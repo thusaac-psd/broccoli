@@ -70,9 +70,7 @@ export function SubmissionDetailView({
         {detail.status === 'error' && (
           <QueryErrorState
             className="py-20"
-            error={detail.error}
-            retry={detail.retry}
-            retrying={detail.retrying}
+            state={detail}
             notFound={t('submissionDetail.notFound')}
             failure={t('submissionDetail.loadFailed')}
           />

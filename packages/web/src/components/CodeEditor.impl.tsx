@@ -137,14 +137,7 @@ export function CodeEditor(props: CodeEditorProps) {
   // A failed fetch is said for what it is, with a retry: the fallback list
   // would cost the contestant their draft just the same.
   if (languages.status === 'error') {
-    return (
-      <QueryErrorState
-        className="h-full"
-        error={languages.error}
-        retry={languages.retry}
-        retrying={languages.retrying}
-      />
-    );
+    return <QueryErrorState className="h-full" state={languages} />;
   }
   if (languages.status !== 'data') {
     return (

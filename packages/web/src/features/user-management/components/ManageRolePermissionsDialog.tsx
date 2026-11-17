@@ -165,9 +165,7 @@ export function ManageRolePermissionsDialog({
             {permissionsState.status === 'error' ? (
               <QueryErrorState
                 className="py-6"
-                error={permissionsState.error}
-                retry={permissionsState.retry}
-                retrying={permissionsState.retrying}
+                state={permissionsState}
                 failure={t('users.roles.permissionsLoadFailed')}
               />
             ) : permissionsState.status === 'loading' ? (

@@ -16,15 +16,22 @@ import { type ErrorKind, errorKind } from '../api/errors.ts';
 export type QueryState<T> =
   | { status: 'idle' }
   | { status: 'loading' }
-  | {
-      status: 'error';
-      error: unknown;
-      kind: ErrorKind;
-      retry: () => void;
-      retrying: boolean;
-    }
+  | QueryFailure
   | { status: 'empty'; data: T; refreshError: unknown; retry: () => void }
   | { status: 'data'; data: T; refreshError: unknown; retry: () => void };
+
+/**
+ * A query that failed with nothing to show, as `useQueryState` reports it:
+ * what `QueryErrorState` shows, so a view shows a failure only as the one
+ * rule decides it.
+ */
+export interface QueryFailure {
+  status: 'error';
+  error: unknown;
+  kind: ErrorKind;
+  retry: () => void;
+  retrying: boolean;
+}
 
 /** The fields of a TanStack Query result that decide its `QueryState`. */
 export interface QueryLike<T> {

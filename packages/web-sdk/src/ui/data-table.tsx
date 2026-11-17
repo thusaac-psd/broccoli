@@ -305,11 +305,7 @@ export function DataTable<TData>({
             ) : view.status === 'error' ? (
               <tr>
                 <td colSpan={columns.length}>
-                  <QueryErrorState
-                    error={view.error}
-                    retry={view.retry}
-                    retrying={view.retrying}
-                  />
+                  <QueryErrorState state={view} />
                 </td>
               </tr>
             ) : table.getRowModel().rows.length === 0 ? (

@@ -1,4 +1,5 @@
 import { useErrorMessage } from '@broccoli/web-sdk/api';
+import type { QueryFailure } from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   getVerdictBadge,
@@ -22,7 +23,7 @@ interface RecentSubmissionOverviewProps {
   entries: SubmissionEntry[];
   history: SubmissionSummary[];
   /** Set when the earlier submissions could not be loaded. */
-  historyError?: { error: unknown; retry: () => void } | null;
+  historyError?: QueryFailure | null;
   isSubmitting?: boolean;
   visibleCount?: number;
   linkBuilder?: (submissionId: number) => string;
@@ -214,8 +215,7 @@ export function RecentSubmissionOverview({
         {historyError && !isSubmitting ? (
           <QueryErrorState
             className="py-4"
-            error={historyError.error}
-            retry={historyError.retry}
+            state={historyError}
             failure={t('submissions.loadFailed')}
           />
         ) : (

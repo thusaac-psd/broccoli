@@ -202,10 +202,9 @@ export default function ProblemView({
     },
   });
   const submissionHistory = historyQuery.data ?? [];
+  const historyState = useQueryState(historyQuery);
   const submissionHistoryError =
-    historyQuery.isError && !historyQuery.data
-      ? { error: historyQuery.error, retry: () => void historyQuery.refetch() }
-      : null;
+    historyState.status === 'error' ? historyState : null;
 
   const samplesQuery = useQuery<SampleContentMap>({
     queryKey: [
@@ -431,9 +430,7 @@ export default function ProblemView({
     return (
       <QueryErrorState
         className="p-6"
-        error={problemState.error}
-        retry={problemState.retry}
-        retrying={problemState.retrying}
+        state={problemState}
         notFound={t('problem.notFound')}
         failure={t('problem.loadFailed')}
       />

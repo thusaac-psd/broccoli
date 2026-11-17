@@ -10,6 +10,7 @@ import {
   type ServerTableParams,
   useAsyncDialog,
   useIdempotentRequest,
+  useQueryState,
   useRegistries,
 } from '@broccoli/web-sdk/hooks';
 import {
@@ -681,11 +682,14 @@ export function ContestProblemsDialog({
     });
   }
 
+  const contestProblemsState = useQueryState(contestProblemsQuery);
+  const allProblemsState = useQueryState(allProblemsQuery);
   const isLoading =
-    contestProblemsQuery.isLoading || allProblemsQuery.isLoading;
+    contestProblemsState.status === 'loading' ||
+    allProblemsState.status === 'loading';
   // Either list failing leaves the dialog unable to show what is added.
-  const failedQuery = [contestProblemsQuery, allProblemsQuery].find(
-    (query) => query.isError && query.data === undefined,
+  const failed = [contestProblemsState, allProblemsState].find(
+    (state) => state.status === 'error',
   );
 
   return (
@@ -785,11 +789,9 @@ export function ContestProblemsDialog({
           {errorMsg && <p className="text-sm text-destructive">{errorMsg}</p>}
 
           <div className="overflow-y-auto max-h-64 rounded-md border">
-            {failedQuery ? (
+            {failed ? (
               <QueryErrorState
-                error={failedQuery.error}
-                retry={() => void failedQuery.refetch()}
-                retrying={failedQuery.isFetching}
+                state={failed}
                 failure={t('admin.contestProblemsLoadFailed')}
               />
             ) : isLoading ? (

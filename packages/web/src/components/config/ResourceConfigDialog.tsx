@@ -446,12 +446,7 @@ export function ResourceConfigDialog({
 
         <div className="flex-1 overflow-y-auto px-6 py-5">
           {source.status === 'error' ? (
-            <QueryErrorState
-              error={source.error}
-              retry={source.retry}
-              retrying={source.retrying}
-              failure={t('config.loadFailed')}
-            />
+            <QueryErrorState state={source} failure={t('config.loadFailed')} />
           ) : source.status === 'loading' ? (
             <QueryLoading />
           ) : pluginsWithSchemas.length === 0 ? (

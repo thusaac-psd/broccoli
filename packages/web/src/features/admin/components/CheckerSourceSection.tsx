@@ -275,9 +275,7 @@ export function CheckerSourceSection({ problemId }: CheckerSourceSectionProps) {
       {existingState.status === 'error' ? (
         <QueryErrorState
           className="py-4"
-          error={existingState.error}
-          retry={existingState.retry}
-          retrying={existingState.retrying}
+          state={existingState}
           failure={t('admin.checkerSource.loadFailed')}
         />
       ) : existingState.status === 'loading' ? (

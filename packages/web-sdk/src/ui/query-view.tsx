@@ -7,21 +7,25 @@ import {
 } from 'lucide-react';
 import type { ReactNode } from 'react';
 
-import { errorKind, retryCanFix } from '@/api/errors';
+import { retryCanFix } from '@/api/errors';
 import { useErrorMessage } from '@/api/use-error-message';
 import { useSignIn } from '@/auth/sign-in';
-import { type QueryLike, useQueryState } from '@/hooks/query-state';
+import {
+  type QueryFailure,
+  type QueryLike,
+  useQueryState,
+} from '@/hooks/query-state';
 import { useTranslation } from '@/i18n';
 import { Button } from '@/ui/button';
 import { Skeleton } from '@/ui/skeleton';
 import { cn } from '@/utils';
 
 export interface QueryErrorStateProps {
-  error: unknown;
-  /** Fetch again; offered for failures a retry can fix. */
-  retry?: () => void;
-  /** A retry is under way. */
-  retrying?: boolean;
+  /**
+   * The failure, from `useQueryState`: shown from the first failed attempt,
+   * with its retry offered where one can help.
+   */
+  state: QueryFailure;
   /** What to say for a 404, e.g. "This submission does not exist". */
   notFound?: string;
   /** What failed, e.g. "Could not load the submissions". */
@@ -37,16 +41,13 @@ export interface QueryErrorStateProps {
  * only where one can help (`retryCanFix`).
  */
 export function QueryErrorState({
-  error,
-  retry,
-  retrying = false,
+  state: { error, kind, retry, retrying },
   notFound,
   failure,
   className,
 }: QueryErrorStateProps) {
   const { t } = useTranslation();
   const errorMessage = useErrorMessage();
-  const kind = errorKind(error);
 
   const box = (icon: ReactNode, text: string, action?: ReactNode) => (
     <div
@@ -78,7 +79,7 @@ export function QueryErrorState({
       return box(
         <AlertTriangle className={iconClass} aria-hidden />,
         described,
-        retry && retryCanFix(kind) && (
+        retryCanFix(kind) && (
           <Button
             variant="outline"
             size="sm"
@@ -230,13 +231,7 @@ export function QueryView<T>({
       return loading ?? <QueryLoading />;
     case 'error':
       return (
-        <QueryErrorState
-          error={state.error}
-          retry={state.retry}
-          retrying={state.retrying}
-          notFound={notFound}
-          failure={failure}
-        />
+        <QueryErrorState state={state} notFound={notFound} failure={failure} />
       );
     case 'empty':
       return (

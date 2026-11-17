@@ -125,9 +125,7 @@ function RecipientPicker({
             {participantsState.status === 'error' ? (
               <QueryErrorState
                 className="py-4"
-                error={participantsState.error}
-                retry={participantsState.retry}
-                retrying={participantsState.retrying}
+                state={participantsState}
                 failure={t('admin.participants.loadFailed')}
               />
             ) : participantsState.status === 'loading' ? (

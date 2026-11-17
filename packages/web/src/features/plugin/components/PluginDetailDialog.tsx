@@ -1,4 +1,5 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import {
   pluginKeys,
   useFormat,
@@ -472,7 +473,8 @@ export function PluginDetailDialog({
     },
     enabled: open && !!pluginId,
   });
-  const { data: plugin, isLoading, error } = pluginQuery;
+  const { data: plugin } = pluginQuery;
+  const pluginState = useQueryState(pluginQuery);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -517,7 +519,7 @@ export function PluginDetailDialog({
           </DialogDescription>
         </DialogHeader>
 
-        {isLoading && (
+        {pluginState.status === 'loading' && (
           <div className="space-y-4 py-4">
             <Skeleton className="h-4 w-3/4" />
             <Skeleton className="h-20 w-full" />
@@ -526,11 +528,9 @@ export function PluginDetailDialog({
           </div>
         )}
 
-        {error && !plugin && (
+        {pluginState.status === 'error' && (
           <QueryErrorState
-            error={error}
-            retry={() => void pluginQuery.refetch()}
-            retrying={pluginQuery.isFetching}
+            state={pluginState}
             failure={t('plugins.detail.loadError')}
           />
         )}

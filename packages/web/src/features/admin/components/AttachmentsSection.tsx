@@ -355,9 +355,7 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
       {filesState.status === 'error' ? (
         <QueryErrorState
           className="py-4"
-          error={filesState.error}
-          retry={filesState.retry}
-          retrying={filesState.retrying}
+          state={filesState}
           failure={t('admin.attachments.loadFailed')}
         />
       ) : filesState.status === 'loading' ? (

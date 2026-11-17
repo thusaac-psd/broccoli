@@ -13,6 +13,7 @@ export {
 } from '@/hooks/idempotency';
 export * from '@/hooks/poll';
 export {
+  type QueryFailure,
   type QueryLike,
   type QueryState,
   useQueryState,

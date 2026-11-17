@@ -86,11 +86,7 @@ export function CooldownStatus({ submission, contestId, problemId }: Props) {
   if (view.status === 'error') {
     return (
       <div className="rounded-lg border border-border bg-card p-4">
-        <QueryErrorState
-          error={view.error}
-          retry={view.retry}
-          retrying={view.retrying}
-        />
+        <QueryErrorState state={view} />
       </div>
     );
   }
