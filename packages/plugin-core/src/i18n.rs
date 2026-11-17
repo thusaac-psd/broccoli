@@ -149,6 +149,16 @@ impl IdentifierOwners {
         self.0.insert((kind, id.to_string()), plugin_id.to_string());
     }
 
+    /// Record that `plugin_id` last provided identifier `id` of `kind`,
+    /// unless a loaded provider already resolves it: the identifier then
+    /// keeps the name its last provider gave it while that provider is
+    /// disabled or not loaded.
+    pub fn insert_last_provider(&mut self, kind: IdentifierKind, id: &str, plugin_id: &str) {
+        self.0
+            .entry((kind, id.to_string()))
+            .or_insert_with(|| plugin_id.to_string());
+    }
+
     fn owns(&self, plugin_id: &str, (kind, id): (IdentifierKind, &str)) -> bool {
         self.0
             .get(&(kind, id.to_string()))
@@ -165,11 +175,14 @@ impl IdentifierOwners {
 ///   wins a locale by how its id sorts;
 /// - every loaded plugin's own keys (`<plugin_id>.…`) and manifest text,
 ///   over a pack's text for the same key: a plugin speaks for itself;
-/// - an identifier's name only from the plugin it resolves to (`owners`):
-///   a plugin never renames another's contest type, problem type or checker;
+/// - an identifier's name only from the plugin it resolves to (`owners`),
+///   or, while no loaded plugin provides it, from the plugin that last did
+///   ([`IdentifierOwners::insert_last_provider`]): a plugin never renames
+///   another's contest type, problem type or checker;
 /// - a plugin installed but not loaded (disabled, or failed to load) adds
-///   only its manifest text, which the admin pages show for it, to the
-///   locales the loaded plugins serve.
+///   only its manifest text, which the admin pages show for it, and the
+///   names of the identifiers it last provided, to the locales the loaded
+///   plugins serve.
 pub fn served_translations<'a>(
     plugins: impl IntoIterator<Item = InstalledPacks<'a>>,
     owners: &IdentifierOwners,
@@ -208,10 +221,9 @@ pub fn served_translations<'a>(
     for plugin in &plugins {
         let speaks = |key: &str| {
             is_manifest_text(plugin.plugin_id, key)
-                || (plugin.loaded
-                    && (under(Some(key), plugin.plugin_id)
-                        || plugin_identifier(key)
-                            .is_some_and(|identifier| owners.owns(plugin.plugin_id, identifier))))
+                || plugin_identifier(key)
+                    .is_some_and(|identifier| owners.owns(plugin.plugin_id, identifier))
+                || (plugin.loaded && under(Some(key), plugin.plugin_id))
         };
         for (lang, map) in plugin.packs {
             let Some(served) = merged.get_mut(lang) else {
@@ -320,8 +332,7 @@ mod tests {
             ),
             pack("fr", &[("plugin.ioi.name", "IOI")]),
         ];
-        let mut owners = IdentifierOwners::default();
-        owners.insert(IdentifierKind::ContestType, "ioi", "ioi");
+        let owners = IdentifierOwners::default();
         let served = served_translations(
             [
                 InstalledPacks {
@@ -348,6 +359,43 @@ mod tests {
             ),
         ]);
         assert_eq!(served["zh-CN"].0, expected);
+    }
+
+    /// An identifier no loaded plugin provides keeps the name its last
+    /// provider gave it while that provider is disabled; a disabled plugin
+    /// still never names an identifier a loaded plugin provides.
+    #[test]
+    fn a_disabled_provider_still_names_the_identifiers_it_last_provided() {
+        let batch = [pack(
+            "zh-CN",
+            &[
+                ("identifier.problemType.batch", "传统题"),
+                ("identifier.contestType.icpc", "冒名"),
+            ],
+        )];
+        let host = [pack("zh-CN", &[("sidebar.plugins", "插件")])];
+        let mut owners = IdentifierOwners::default();
+        owners.insert(IdentifierKind::ContestType, "icpc", "icpc");
+        owners.insert_last_provider(IdentifierKind::ProblemType, "batch", "batch-evaluator");
+        owners.insert_last_provider(IdentifierKind::ContestType, "icpc", "batch-evaluator");
+        let served = served_translations(
+            [
+                InstalledPacks {
+                    plugin_id: "batch-evaluator",
+                    loaded: false,
+                    host_locale: None,
+                    packs: &batch,
+                },
+                language_pack("broccoli-zh-cn", "zh-CN", &host),
+            ],
+            &owners,
+        );
+        assert_eq!(served["zh-CN"].0["identifier.problemType.batch"], "传统题");
+        assert!(
+            !served["zh-CN"]
+                .0
+                .contains_key("identifier.contestType.icpc")
+        );
     }
 
     #[test]

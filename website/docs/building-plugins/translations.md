@@ -49,9 +49,11 @@ below) and the names of what you register (`identifier.contestType.…`,
 `identifier.problemType.…` and `identifier.checker.…`). A catalog with any
 other key does not load, and an upload with one is refused; the error names
 the keys. An identifier's name is shown only from the plugin the identifier
-resolves to while that plugin is loaded: naming a contest type you do not
-register shows nothing. A plugin that is disabled, or failed to load, keeps
-only its manifest text, which the plugin list shows.
+resolves to: naming a contest type you do not register shows nothing. While no
+loaded plugin provides an identifier, it keeps the name the plugin that last
+provided it gave it, so a disabled evaluator's problem type still reads
+"Batch", not `batch`. A plugin that is disabled, or failed to load, keeps only
+its manifest text, which the plugin list shows, and those names.
 
 A frontend reads them with `t()` from `useTranslation()` in
 `@broccoli/web-sdk/i18n`. `{name}` inserts a parameter.

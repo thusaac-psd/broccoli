@@ -113,8 +113,9 @@ pub async fn activate_plugin(state: &AppState, plugin_id: &str) -> Result<(), Pl
     result
 }
 
-/// Rebuild the translations this replica serves from its plugins and the
-/// identifiers each one resolves (see
+/// Rebuild the translations this replica serves from its plugins, the
+/// identifiers each one resolves and those the plugins not loaded here last
+/// provided (see
 /// `plugin_core::i18n::served_translations`). Every change to what is loaded
 /// or registered here ends with it.
 pub async fn update_translations(state: &AppState) {
@@ -131,6 +132,23 @@ pub async fn update_translations(state: &AppState) {
     }
     for (key, handler) in registries.checker_stage_registry.read().await.iter() {
         owners.insert(IdentifierKind::Checker, key, handler.plugin_id());
+    }
+    // An identifier no loaded plugin provides keeps the name the plugin that
+    // last provided it gave it (its recorded governs), the first by id when
+    // several did, as `registry::Providers` resolves a key.
+    for (plugin_id, governs) in state.plugin_lifecycle.recorded_governs() {
+        if state.plugins.is_plugin_loaded(&plugin_id).unwrap_or(false) {
+            continue;
+        }
+        for (kind, ids) in [
+            (IdentifierKind::ContestType, &governs.contest_types),
+            (IdentifierKind::ProblemType, &governs.problem_types),
+            (IdentifierKind::Checker, &governs.checkers),
+        ] {
+            for id in ids {
+                owners.insert_last_provider(kind, id, &plugin_id);
+            }
+        }
     }
     state.plugins.update_translations(&owners);
 }

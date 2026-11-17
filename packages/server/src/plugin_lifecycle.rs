@@ -335,6 +335,17 @@ impl PluginLifecycle {
         }
     }
 
+    /// Every plugin's recorded [`Governs`], in plugin id order.
+    pub fn recorded_governs(&self) -> Vec<(String, Governs)> {
+        let mut recorded: Vec<(String, Governs)> = self
+            .governs
+            .read()
+            .map(|map| map.iter().map(|(id, g)| (id.clone(), g.clone())).collect())
+            .unwrap_or_default();
+        recorded.sort_by(|a, b| a.0.cmp(&b.0));
+        recorded
+    }
+
     fn set_governs(&self, plugin_id: &str, governs: Governs) {
         if let Ok(mut map) = self.governs.write() {
             map.insert(plugin_id.to_string(), governs);

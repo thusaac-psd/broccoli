@@ -33,7 +33,7 @@ zh-CN = "i18n/zh-CN.toml"
 'cooldown.apiError.COOLDOWN_ACTIVE' = '{remaining_seconds, plural, one {Wait # more second before submitting again.} other {Wait # more seconds before submitting again.}}'
 ```
 
-每个键都以插件 ID 开头，因此插件永远无法改写宿主或其他插件的文本。出于同样的原因，插件 ID 不能是宿主消息的命名空间：英文语言包中任何键的首段（`apiError`、`toast`、`nav` 等），以及键族 `plugin`、`config`、`identifier` 和 `apiError`，比较时不区分大小写。使用这类 ID 的插件无法加载，其上传也会被拒绝。词条目录中只允许另外两类键：清单文本（`plugin.<插件 ID>.…` 和 `config.<插件 ID>.…`，见下文）以及所注册内容的名称（`identifier.contestType.…`、`identifier.problemType.…` 和 `identifier.checker.…`）。含有其他任何键的词条目录无法加载，含有它的上传也会被拒绝；错误信息会列出这些键。标识符的名称只取自该标识符所解析到的插件，且仅在该插件已加载时显示：为你未注册的竞赛类型命名不会显示任何内容。已禁用或加载失败的插件只保留插件列表所显示的清单文本。
+每个键都以插件 ID 开头，因此插件永远无法改写宿主或其他插件的文本。出于同样的原因，插件 ID 不能是宿主消息的命名空间：英文语言包中任何键的首段（`apiError`、`toast`、`nav` 等），以及键族 `plugin`、`config`、`identifier` 和 `apiError`，比较时不区分大小写。使用这类 ID 的插件无法加载，其上传也会被拒绝。词条目录中只允许另外两类键：清单文本（`plugin.<插件 ID>.…` 和 `config.<插件 ID>.…`，见下文）以及所注册内容的名称（`identifier.contestType.…`、`identifier.problemType.…` 和 `identifier.checker.…`）。含有其他任何键的词条目录无法加载，含有它的上传也会被拒绝；错误信息会列出这些键。标识符的名称只取自该标识符所解析到的插件：为你未注册的竞赛类型命名不会显示任何内容。当没有已加载的插件提供某个标识符时，它保留最后提供它的插件所起的名称，因此已禁用的评测插件的题目类型仍显示为“传统题”，而不是 `batch`。已禁用或加载失败的插件只保留插件列表所显示的清单文本以及这些名称。
 
 前端通过 `@broccoli/web-sdk/i18n` 中 `useTranslation()` 返回的 `t()` 读取词条。`{name}` 插入参数。`{count, plural, one {...} other {...}}` 按该语言的复数规则为 `count` 选择形式，分支中的 `#` 表示该数字。日期和相对时间由 `useFormat()` 按用户语言格式化；服务器时间戳请用 `useFormat().relative` 计算，它以服务器时钟为准。
 
