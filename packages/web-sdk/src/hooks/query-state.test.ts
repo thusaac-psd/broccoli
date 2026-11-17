@@ -8,6 +8,7 @@ function query<T>(fields: Partial<QueryLike<T>>): QueryLike<T> {
   return {
     data: undefined,
     error: null,
+    failureReason: null,
     isError: false,
     isFetching: false,
     fetchStatus: 'idle',
@@ -84,4 +85,20 @@ test('a query asked again after failing keeps its failure on screen until it ans
     queryState({ ...asking, errorUpdateCount: 0 }, isEmpty, error).status,
     'loading',
   );
+});
+
+test('a first load that failed shows its failure while it is retried', () => {
+  // TanStack keeps a failing fetch's error in `failureReason` while it
+  // retries, and reports `error` only once the retries are spent.
+  const error = new RequestError(503, 'DATABASE_UNAVAILABLE');
+  const state = queryState(
+    query<number[]>({
+      failureReason: error,
+      isFetching: true,
+      fetchStatus: 'fetching',
+    }),
+  );
+  assert.equal(state.status, 'error');
+  assert.equal(state.status === 'error' && state.error, error);
+  assert.equal(state.status === 'error' && state.retrying, true);
 });

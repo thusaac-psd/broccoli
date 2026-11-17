@@ -30,6 +30,11 @@ export type QueryState<T> =
 export interface QueryLike<T> {
   data: T | undefined;
   error: unknown;
+  /**
+   * The error of the latest failed attempt while TanStack still retries,
+   * before it reports `error`.
+   */
+  failureReason: unknown;
   isError: boolean;
   isFetching: boolean;
   fetchStatus?: 'fetching' | 'paused' | 'idle';
@@ -39,9 +44,21 @@ export interface QueryLike<T> {
 }
 
 /**
- * The state of `query`. `lastError` is the error it last failed with: a
- * query asked again with nothing to show starts over as loading, with no
- * error, and the failure it had stays on screen until the new answer.
+ * The failure `query` shows while it has nothing to show: its error, or the
+ * error of an attempt it is retrying. `lastError` is the error it last failed
+ * with: a query asked again with nothing to show starts over as loading,
+ * with no error, and the failure it had stays on screen until the new answer.
+ */
+function shownFailure(query: QueryLike<unknown>, lastError: unknown): unknown {
+  if (query.isError) return query.error;
+  if (query.failureReason != null) return query.failureReason;
+  return query.isFetching && !!query.errorUpdateCount ? lastError : null;
+}
+
+/**
+ * The state of `query`: once a first load has failed, its failure, whether
+ * TanStack is still retrying it or a poll asks again behind it, and never a
+ * load that seems to go on.
  */
 export function queryState<T>(
   query: QueryLike<T>,
@@ -55,22 +72,14 @@ export function queryState<T>(
       ? { status: 'empty', data: query.data, refreshError, retry }
       : { status: 'data', data: query.data, refreshError, retry };
   }
-  if (query.isError) {
+  const failure = shownFailure(query, lastError);
+  if (failure != null) {
     return {
       status: 'error',
-      error: query.error,
-      kind: errorKind(query.error),
+      error: failure,
+      kind: errorKind(failure),
       retry,
       retrying: query.isFetching,
-    };
-  }
-  if (lastError != null && query.isFetching && !!query.errorUpdateCount) {
-    return {
-      status: 'error',
-      error: lastError,
-      kind: errorKind(lastError),
-      retry,
-      retrying: true,
     };
   }
   return query.fetchStatus === 'idle' && !query.isFetching
@@ -88,6 +97,7 @@ export function useQueryState<T>(
   isEmpty?: (data: T) => boolean,
 ): QueryState<T> {
   const [lastError, setLastError] = useState<unknown>(null);
-  if (query.isError && query.error !== lastError) setLastError(query.error);
-  return queryState(query, isEmpty, query.isError ? query.error : lastError);
+  const failure = query.isError ? query.error : query.failureReason;
+  if (failure != null && failure !== lastError) setLastError(failure);
+  return queryState(query, isEmpty, failure ?? lastError);
 }

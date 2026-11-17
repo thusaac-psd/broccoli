@@ -3,6 +3,7 @@ import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import {
   PLUGIN_OUTAGE_POLL_MS,
   pollInterval,
+  useQueryState,
   useRegistries,
 } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -12,7 +13,10 @@ import {
   useProblemPresentation,
 } from '@broccoli/web-sdk/problem';
 import type { SubmissionSummary } from '@broccoli/web-sdk/submission';
-import { SubmitGatingProvider } from '@broccoli/web-sdk/submission';
+import {
+  SubmitGatingProvider,
+  useSubmitGate,
+} from '@broccoli/web-sdk/submission';
 import { QueryErrorState } from '@broccoli/web-sdk/ui';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useState } from 'react';
@@ -132,7 +136,10 @@ export default function ProblemView({
         !contestId && problem?.plugin_outage ? PLUGIN_OUTAGE_POLL_MS : false,
     ),
   });
-  const { data: problem, isLoading, error } = problemQuery;
+  const { data: problem, error } = problemQuery;
+  // A first load that failed shows its failure while it is asked again.
+  const problemState = useQueryState(problemQuery);
+  const isLoading = problemState.status === 'loading';
   // A contest problem is out with its contest's plugin; a problem on its own
   // with the plugin of the contest type its practice submit uses.
   const outage = contestId ? contest?.plugin_outage : problem?.plugin_outage;
@@ -420,13 +427,13 @@ export default function ProblemView({
     );
   }
 
-  if (error && !problem) {
+  if (problemState.status === 'error') {
     return (
       <QueryErrorState
         className="p-6"
-        error={error}
-        retry={() => void problemQuery.refetch()}
-        retrying={problemQuery.isFetching}
+        error={problemState.error}
+        retry={problemState.retry}
+        retrying={problemState.retrying}
         notFound={t('problem.notFound')}
         failure={t('problem.loadFailed')}
       />
@@ -453,6 +460,7 @@ export default function ProblemView({
 
   return (
     <SubmitGatingProvider>
+      <ProblemLoadedGate loaded={!!problem} />
       <div className="flex flex-col flex-1 min-h-0">
         {copiedNotice && (
           <div
@@ -535,4 +543,10 @@ export default function ProblemView({
       </div>
     </SubmitGatingProvider>
   );
+}
+
+/** Holds Submit back until the problem it submits to has loaded. */
+function ProblemLoadedGate({ loaded }: { loaded: boolean }) {
+  useSubmitGate('problem-loaded', !loaded);
+  return null;
 }
