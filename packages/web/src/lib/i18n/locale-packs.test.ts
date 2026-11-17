@@ -11,6 +11,7 @@ import { test } from 'node:test';
 
 import { parse } from 'smol-toml';
 
+import { pluginKeys } from '../../../../web-sdk/src/i18n/labels.ts';
 import { messageParameters } from '../../../../web-sdk/src/i18n/message.ts';
 import {
   languagePackFiles,
@@ -40,14 +41,66 @@ const plugins = readdirSync(PLUGINS_DIR).filter((name) =>
   existsSync(join(PLUGINS_DIR, name, 'plugin.toml')),
 );
 
+interface SchemaProperty {
+  title?: string;
+  description?: string;
+  properties?: Record<string, SchemaProperty>;
+  items?: SchemaProperty;
+}
+
+interface Namespace {
+  description?: string;
+  properties?: Record<string, SchemaProperty>;
+}
+
+/**
+ * The English of a plugin's config schemas, under the keys the settings
+ * form looks their translations up by (`pluginKeys`): the schema is the
+ * source of that text, so the English pack need not repeat it, and every
+ * other pack translates it.
+ */
+function schemaText(
+  plugin: string,
+  config: Record<string, Namespace>,
+): Catalog {
+  const text: Catalog = {};
+  for (const [namespace, ns] of Object.entries(config)) {
+    if (ns.description) {
+      text[pluginKeys.configDescription(plugin, namespace)] = ns.description;
+    }
+    const walk = (
+      path: string[],
+      properties: Record<string, SchemaProperty>,
+    ) => {
+      for (const [name, property] of Object.entries(properties)) {
+        const at = [...path, name];
+        for (const part of ['title', 'description'] as const) {
+          const value = property[part];
+          if (value) {
+            text[pluginKeys.configField(plugin, namespace, at, part)] = value;
+          }
+        }
+        if (property.properties) walk(at, property.properties);
+        if (property.items?.properties) walk(at, property.items.properties);
+      }
+    };
+    walk([], ns.properties ?? {});
+  }
+  return text;
+}
+
 for (const plugin of plugins) {
   const dir = join(PLUGINS_DIR, plugin);
   const manifest = parse(readFileSync(join(dir, 'plugin.toml'), 'utf8')) as {
     translations?: Record<string, string>;
+    config?: Record<string, Namespace>;
   };
   const translations = manifest.translations ?? {};
   const source = translations[SOURCE_LOCALE]
-    ? readCatalog(join(dir, translations[SOURCE_LOCALE]))
+    ? {
+        ...readCatalog(join(dir, translations[SOURCE_LOCALE])),
+        ...schemaText(plugin, manifest.config ?? {}),
+      }
     : hostMessages;
   for (const [locale, file] of Object.entries(translations)) {
     if (locale === SOURCE_LOCALE) continue;

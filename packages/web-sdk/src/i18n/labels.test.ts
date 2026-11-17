@@ -30,4 +30,14 @@ test('plugin text keys follow the plugin, schema and field', () => {
     ),
     'config.cooldown.cooldown.limits.seconds.title',
   );
+  assert.equal(
+    pluginKeys.configField(
+      'print',
+      'print',
+      ['stations', '3', 'name'],
+      'title',
+    ),
+    'config.print.print.stations.name.title',
+    "every item of an array shares its fields' keys",
+  );
 });
