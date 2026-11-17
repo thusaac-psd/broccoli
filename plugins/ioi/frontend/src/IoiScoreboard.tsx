@@ -1,5 +1,5 @@
 import { serverNow } from '@broccoli/web-sdk/api';
-import { contestPollPace } from '@broccoli/web-sdk/contest';
+import { liveBoardPace } from '@broccoli/web-sdk/contest';
 import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { formatRelativeSeconds, useTranslation } from '@broccoli/web-sdk/i18n';
 import { useContestSlotContext } from '@broccoli/web-sdk/slot';
@@ -12,7 +12,6 @@ import { useIoiApi } from './hooks/useIoiApi';
 import type { ScoreboardEntry, ScoreboardResponse } from './types';
 
 /** How often a live board asks for new results. */
-const LIVE_BOARD_POLL_MS = 30_000;
 
 interface IoiScoreboardProps {
   contestId?: number;
@@ -196,9 +195,7 @@ export function IoiScoreboard({ contestId }: IoiScoreboardProps) {
     // (`contestPollPace`).
     refetchInterval: pollInterval<ScoreboardResponse>((scoreboard) => {
       if (!autoRefresh || scoreboard === undefined) return false;
-      const pace = contest ? contestPollPace(contest, serverNow()) : false;
-      if (!scoreboard.live) return pace;
-      return Math.min(LIVE_BOARD_POLL_MS, pace === false ? Infinity : pace);
+      return liveBoardPace(contest, scoreboard.live, serverNow());
     }),
   });
   const { data: scoreboard, dataUpdatedAt } = query;

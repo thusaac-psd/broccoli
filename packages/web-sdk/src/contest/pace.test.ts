@@ -4,6 +4,8 @@ import { test } from 'node:test';
 import { PLUGIN_OUTAGE_POLL_MS } from '../hooks/poll.ts';
 import {
   contestPollPace,
+  LIVE_BOARD_POLL_MS,
+  liveBoardPace,
   nextPhaseChange,
   PHASE_DUE_POLL_MS,
   PHASE_DUE_SPREAD_MS,
@@ -105,6 +107,7 @@ test('seats spread their asks about a running contest around the stated pace', (
     {
       phaseOffsetMs: 0,
       runningPollMs: RUNNING_CONTEST_POLL_MS * 0.75,
+      liveBoardPollMs: LIVE_BOARD_POLL_MS * 0.75,
     },
   );
   assert.deepEqual(
@@ -112,6 +115,25 @@ test('seats spread their asks about a running contest around the stated pace', (
     {
       phaseOffsetMs: PHASE_DUE_SPREAD_MS,
       runningPollMs: RUNNING_CONTEST_POLL_MS * 1.25,
+      liveBoardPollMs: LIVE_BOARD_POLL_MS * 1.25,
     },
   );
+});
+
+test('a live board asks at its seat pace, and stops with its contest once it is final', () => {
+  const ended = {
+    phase: 'ended' as const,
+    start_time: new Date(0).toISOString(),
+    end_time: new Date(1_000).toISOString(),
+  };
+  const slow = { ...seatPace(() => 1), phaseOffsetMs: 0 };
+  assert.equal(
+    liveBoardPace(ended, true, 10_000, slow),
+    LIVE_BOARD_POLL_MS * 1.25,
+  );
+  assert.equal(
+    liveBoardPace(undefined, true, 10_000, slow),
+    LIVE_BOARD_POLL_MS * 1.25,
+  );
+  assert.equal(liveBoardPace(ended, false, 10_000, slow), false);
 });
