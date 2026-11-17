@@ -1741,7 +1741,7 @@ mod tests {
                     time_used: Some(41),
                     memory_used: Some(2048),
                     withheld: None,
-                    plugin_outage: None,
+                    parked_by: None,
                 })
                 .collect(),
             pagination: pagination(items.len()),

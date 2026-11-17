@@ -29,6 +29,7 @@ function result(
 }
 
 const DISABLED = { state: 'disabled', plugin_id: 'icpc' } as const;
+const PARKED = { plugin_id: 'icpc', provides: 'contest_type' } as const;
 
 const error = { code: 'NOT_FOUND', message: 'gone' };
 
@@ -278,7 +279,7 @@ test('an aborted poller sends nothing more', async () => {
 
 test('a submission its contest plugin parks keeps polling, at the waiting pace', async () => {
   const p = poller([
-    { ok: true, result: result('Queued', { plugin_outage: DISABLED }) },
+    { ok: true, result: result('Queued', { parked_by: PARKED }) },
     {
       ok: true,
       result: result(null, {
@@ -345,7 +346,7 @@ test('an entry is in progress only while sent or judged, not while its plugin pa
   assert.equal(entryInProgress(entry(1, 'polling')), true);
   assert.equal(entryInProgress(polled(result('Running'))), true);
   assert.equal(
-    entryInProgress(polled(result('Queued', { plugin_outage: DISABLED }))),
+    entryInProgress(polled(result('Queued', { parked_by: PARKED }))),
     false,
   );
   assert.equal(

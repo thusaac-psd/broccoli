@@ -117,7 +117,7 @@ export function RecentSubmissionOverview({
       outcome: {
         status: item.status,
         withheld: item.withheld ?? null,
-        plugin_outage: item.plugin_outage ?? null,
+        parked_by: item.parked_by ?? null,
         verdict: item.verdict ?? null,
       },
       score: item.score ?? null,
@@ -161,7 +161,7 @@ export function RecentSubmissionOverview({
         outcome: {
           status: getEntryStatus(entry),
           withheld: null,
-          plugin_outage: null,
+          parked_by: null,
           verdict: null,
         },
         score: null,
@@ -180,7 +180,7 @@ export function RecentSubmissionOverview({
       outcome: {
         status: sub.status,
         withheld: sub.withheld ?? null,
-        plugin_outage: sub.plugin_outage ?? null,
+        parked_by: sub.parked_by ?? null,
         verdict: sub.result?.verdict ?? null,
       },
       score: sub.result?.score ?? null,

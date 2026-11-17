@@ -2630,6 +2630,18 @@ export interface components {
       /** @example https://app.example.com/problems/1 */
       url?: string | null;
     };
+    /**
+     * @description The plugin that keeps new work of a resource from running: every plugin
+     *     that provides what the work needs (`provides`) is disabled fleet-wide,
+     *     and this is the first of them by id. A submission it closes is accepted
+     *     by no submit path and, if already queued, waits (parked) until an
+     *     administrator enables a provider.
+     */
+    ClosedBy: {
+      /** @example my-plugin */
+      plugin_id: string;
+      provides: components['schemas']['Provided'];
+    };
     CodeRunJudgeResult: {
       compile_output?: string | null;
       error_message?: string | null;
@@ -4123,6 +4135,12 @@ export interface components {
     ProblemSamplesResponse: {
       samples: components['schemas']['SampleCase'][];
     };
+    /**
+     * @description What a unit of work (a submission or a code run) needs a plugin to
+     *     provide to run.
+     * @enum {string}
+     */
+    Provided: 'contest_type' | 'problem_type';
     /** @description What the fleet currently publishes for a plugin id. */
     PublishedPluginResponse: {
       /**
@@ -4494,7 +4512,7 @@ export interface components {
        * @example 1024
        */
       memory_used?: number | null;
-      plugin_outage?: components['schemas']['PluginOutage'] | null;
+      parked_by?: components['schemas']['ClosedBy'] | null;
       /**
        * Format: int32
        * @example 1
@@ -4556,7 +4574,7 @@ export interface components {
       judge_epoch: number;
       /** @example cpp */
       language: string;
-      plugin_outage?: components['schemas']['PluginOutage'] | null;
+      parked_by?: components['schemas']['ClosedBy'] | null;
       /**
        * Format: int32
        * @example 1

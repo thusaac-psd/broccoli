@@ -35,7 +35,7 @@ function buildRow(entry: SubmissionEntry): Row {
     outcome: {
       status: sub ? sub.status : 'Pending',
       withheld: sub?.withheld ?? null,
-      plugin_outage: sub?.plugin_outage ?? null,
+      parked_by: sub?.parked_by ?? null,
       verdict: sub?.result?.verdict ?? null,
     },
     timeUsed: sub?.result?.time_used ?? null,

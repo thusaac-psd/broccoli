@@ -53,7 +53,7 @@ impl Governed for SubmissionResponse {
         "judge_epoch",
         "target_worker_id",
         "created_at",
-        "plugin_outage",
+        "parked_by",
     ]);
 }
 
@@ -70,7 +70,7 @@ impl Governed for SubmissionListItem {
         "judge_epoch",
         "target_worker_id",
         "created_at",
-        "plugin_outage",
+        "parked_by",
     ]);
 }
 

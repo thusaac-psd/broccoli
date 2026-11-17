@@ -87,7 +87,7 @@ export function SubmissionDetailView({
       verdict: result?.verdict,
       status,
       withheld: submission.withheld,
-      plugin_outage: submission.plugin_outage,
+      parked_by: submission.parked_by,
     },
     t,
   );

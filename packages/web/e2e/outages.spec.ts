@@ -159,3 +159,29 @@ test('a practice problem closed by an outage opens for submitting once the plugi
     }),
   );
 });
+
+// A parked submission names what parks it, as the server records it.
+for (const [provides, label] of [
+  ['contest_type', 'Waiting: its contest plugin is disabled'],
+  ['problem_type', 'Waiting: its evaluator plugin is disabled'],
+] as const) {
+  test(`a submission parked by its ${provides} plugin says so`, async ({
+    page,
+  }) => {
+    await mockApi(page, 'contestant');
+    await answerGets(page, /\/api\/v1\/submissions\/4(\?|$)/, () => ({
+      ...submission(4, 2, 'Accepted'),
+      status: 'Queued',
+      verdict: null,
+      score: null,
+      files: [{ filename: 'main.cpp', content: 'int main() {}\n' }],
+      result: null,
+      parked_by: { plugin_id: 'some-plugin', provides },
+    }));
+    await page.route('**/api/v1/submissions/4/judgements', (route) =>
+      route.fulfill({ headers, json: [] }),
+    );
+    await page.goto('/submissions/4');
+    await expect(page.getByText(label).first()).toBeVisible();
+  });
+}

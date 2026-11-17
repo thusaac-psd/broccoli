@@ -57,10 +57,11 @@ pub struct SubmissionResponse {
     /// Set when the submission's outcome (status, verdict, score, result) is
     /// left out of this response, with why.
     pub withheld: Option<crate::visibility::Withheld>,
-    /// Set while the submission waits because a plugin it needs (the one
-    /// judging its contest type, or its problem type's evaluator) is
-    /// disabled: it stays queued until the plugin is enabled again.
-    pub plugin_outage: Option<crate::visibility::PluginOutage>,
+    /// Set while the submission waits (parked) because a plugin it needs is
+    /// disabled: the plugin, and what it provides for the submission (its
+    /// contest type, or its problem type's evaluator). It stays queued until
+    /// the plugin is enabled again.
+    pub parked_by: Option<crate::visibility::ClosedBy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -102,10 +103,11 @@ pub struct SubmissionListItem {
     /// Set when the submission's outcome (status, verdict, score, times) is
     /// left out of this row, with why.
     pub withheld: Option<crate::visibility::Withheld>,
-    /// Set while the submission waits because a plugin it needs (the one
-    /// judging its contest type, or its problem type's evaluator) is
-    /// disabled: it stays queued until the plugin is enabled again.
-    pub plugin_outage: Option<crate::visibility::PluginOutage>,
+    /// Set while the submission waits (parked) because a plugin it needs is
+    /// disabled: the plugin, and what it provides for the submission (its
+    /// contest type, or its problem type's evaluator). It stays queued until
+    /// the plugin is enabled again.
+    pub parked_by: Option<crate::visibility::ClosedBy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
