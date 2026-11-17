@@ -9,7 +9,8 @@ use sea_orm_migration::prelude::*;
 /// a session, so they are deleted, and the column goes with them; their CLIs
 /// see the code expire and start again.
 ///
-/// Forward-only like every migration here.
+/// Not additive (release/docs/upgrade.md): it drops a column servers of the
+/// previous release read, so they stop before it runs.
 pub struct Migration;
 
 impl MigrationName for Migration {

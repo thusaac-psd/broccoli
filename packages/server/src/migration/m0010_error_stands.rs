@@ -13,7 +13,9 @@ use sea_orm_migration::prelude::*;
 /// shows the attempt in flight awaits the system-error retry's decision and
 /// keeps `false`.
 ///
-/// Forward-only like every migration here.
+/// Additive (release/docs/upgrade.md): servers of the previous release keep
+/// working against it, so a release that adds only migrations like it rolls
+/// server by server.
 pub struct Migration;
 
 impl MigrationName for Migration {

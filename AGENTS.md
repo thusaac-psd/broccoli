@@ -265,9 +265,12 @@ binaries warn about every key they do not read.
   newer build migrated. The test
   `migration::tests::the_migrations_create_the_schema_the_code_expects` fails
   when the entities or the code-owned trigger DDL disagree with the migrated
-  schema. Migrations that old replicas can run against (adding a table, a
-  nullable or defaulted column, an index) ship in one release; anything else
-  follows expand/contract (see `release/docs/upgrade.md`).
+  schema. Old replicas keep working against an additive migration (adding a
+  table, a nullable or defaulted column, an index), so a release of only those
+  rolls server by server. A release with any other migration (a drop, a rename,
+  a type change, a tighter constraint) is upgraded with every server stopped
+  before the first new one starts, and says so in `release/docs/upgrade.md`;
+  there are no deployments to keep an old shape for, so no expand/contract.
 - When changing plugin execution behavior, check both manifest-level permissions
   and host-side registration/resolution.
 - A unit of work runs only while every plugin it needs has an enabled provider:

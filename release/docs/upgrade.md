@@ -44,16 +44,23 @@ it references. For a full backup, also copy the SeaweedFS volume.
 
 A server keeps working against a database that a newer build migrated as long as
 each new migration is additive: a new table, a new nullable or defaulted column,
-a new index. Every other change (renaming or dropping a column, changing its
-type, a new `NOT NULL` without a default, a tighter constraint) follows
-expand/contract over two releases. The first adds the new shape and keeps
-writing the old one; the second, released once no server runs the old version,
-drops the old shape. Each step is additive for the servers that run alongside
-it, so every release can roll server by server.
+a new index. A release whose migrations are all additive rolls server by server
+(see "Standard Upgrade" and "Rolling-Upgrade Rehearsal").
+
+Any other change (renaming or dropping a column, changing its type, a new
+`NOT NULL` without a default, a tighter constraint, a grant taken away) breaks
+the servers still running the previous release. A release with such a migration
+is upgraded with every server stopped: stop all of them, then start the first
+server of the new release, which applies the migrations, then the rest. Workers
+can keep running. The release notes say which kind a release is.
+
+This release is one of them: it tightens a constraint on refresh tokens, drops a
+column of device-code approvals, and takes plugin SQL's grant on failure
+diagnostics away. Stop every server before the first one of this release starts.
 
 An old server that restarts after a new one has migrated the database refuses to
 start (it does not know the new migration). Once the first upgraded server is
-up, finish the roll instead of restarting old servers.
+up, finish the upgrade instead of restarting old servers.
 
 ## Standard Upgrade
 
@@ -68,7 +75,9 @@ docker compose --env-file .env.worker -f docker-compose.worker.yaml up -d --no-d
 docker compose --env-file .env.worker -f docker-compose.worker.yaml ps worker
 ```
 
-2. Upgrade server nodes one at a time by editing `BROCCOLI_SERVER_IMAGE`, then:
+2. Upgrade server nodes one at a time by editing `BROCCOLI_SERVER_IMAGE` (for a
+   release whose migrations are not all additive, stop every server node first;
+   see "Which Upgrades Can Roll"), then:
 
 ```bash
 docker compose --env-file .env.server -f docker-compose.server.yaml up -d --no-deps server
@@ -89,8 +98,9 @@ hours instead of one at a time.
 
 ## Rolling-Upgrade Rehearsal
 
-Rehearse the upgrade on the same role topology as production: infra node, server
-node or nodes, and one worker per judge host.
+Rehearse a rolling upgrade, for a release whose migrations are all additive, on
+the same role topology as production: infra node, server node or nodes, and one
+worker per judge host.
 
 ```bash
 export OLD_VERSION=v0.2.0

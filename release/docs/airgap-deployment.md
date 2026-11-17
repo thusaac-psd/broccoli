@@ -614,9 +614,10 @@ On the **server** host:
 Repeat on each **worker** host with `--role worker` (step 6). Server and worker
 may run mixed versions briefly during a rolling upgrade — a new server judges
 correctly against an as-yet-un-upgraded worker. With several servers, upgrade
-them one at a time; once one runs the new version, do not restart a server still
-on the old one, which refuses a database a newer build migrated
-([upgrade.md](upgrade.md), "Which Upgrades Can Roll").
+them one at a time when the release's migrations are all additive; otherwise
+stop every server first ([upgrade.md](upgrade.md), "Which Upgrades Can Roll").
+Once one runs the new version, do not restart a server still on the old one,
+which refuses a database a newer build migrated.
 
 To roll back a server after its migrations ran, stop the stack, restore the dump
 and re-run the old bundle's `install.sh` ([upgrade.md](upgrade.md), "Rollback").

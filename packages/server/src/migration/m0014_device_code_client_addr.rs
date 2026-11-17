@@ -7,7 +7,9 @@ use sea_orm_migration::prelude::*;
 /// Pending codes requested before it have no address, as a code from an
 /// address the server cannot tell has; they expire within a code's lifetime.
 ///
-/// Forward-only like every migration here.
+/// Additive (release/docs/upgrade.md): servers of the previous release keep
+/// working against it, so a release that adds only migrations like it rolls
+/// server by server.
 pub struct Migration;
 
 impl MigrationName for Migration {
