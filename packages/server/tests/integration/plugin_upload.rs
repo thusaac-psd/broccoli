@@ -1154,6 +1154,24 @@ async fn one_enabled_language_pack_provides_a_locales_host_text() {
     .await;
     assert_eq!(served_en(&a, "nav.signIn").as_deref(), Some("Sign in"));
 
+    // Inspecting the archive reports what Publish would refuse.
+    let res = a
+        .post_plugin_archive(
+            routes::ADMIN_PLUGIN_UPLOAD_INSPECT,
+            translations_archive("aaa-qa", true, hijack),
+            &[],
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let summary: PluginArchiveSummary = serde_json::from_value(res.body).unwrap();
+    assert_eq!(
+        summary.language_pack_taken,
+        Some(broccoli_api_types::plugin::LanguagePackHolder {
+            locale: "en".into(),
+            plugin_id: "zzz-en".into(),
+        })
+    );
     let res = a
         .post_plugin_archive(
             routes::ADMIN_PLUGIN_UPLOAD,

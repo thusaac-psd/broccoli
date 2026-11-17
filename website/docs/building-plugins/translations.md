@@ -90,7 +90,13 @@ the language menu, without rebuilding the web app.
 
 One enabled pack provides a locale's host text. Enabling or uploading a second
 pack for a locale another enabled pack provides is refused
-(`LANGUAGE_PACK_TAKEN`): disable the first, then enable the second. Your own
+(`LANGUAGE_PACK_TAKEN`): disable the first, then enable the second.
+Inspecting an upload names the pack that already provides its locale
+(`language_pack_taken`), before Publish refuses it. A bundled pack for a locale
+an enabled plugin already provides is registered disabled, and the server logs
+it; of two new bundled packs for one locale, the one whose id sorts first is
+enabled. The database enforces the rule: a unique index over the enabled
+plugins' locales. Your own
 keys and names stay yours whatever the pack says: a pack's text for a key under
 your plugin's id is shown only where your catalog has none.
 

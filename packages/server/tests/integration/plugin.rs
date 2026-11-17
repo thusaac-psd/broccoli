@@ -113,7 +113,7 @@ mod plugin_management {
             sea_orm::Statement::from_string(
                 sea_orm::DbBackend::Postgres,
                 "INSERT INTO plugin (id, is_enabled, governs) VALUES \
-                 ('fmt-plugin', true, '{\"visibility\": false, \"contest_types\": [\"fmt-x\"], \"host_locale\": null, \"problem_types\": []}')",
+                 ('fmt-plugin', true, '{\"visibility\": false, \"contest_types\": [\"fmt-x\"], \"problem_types\": []}')",
             ),
         )
         .await

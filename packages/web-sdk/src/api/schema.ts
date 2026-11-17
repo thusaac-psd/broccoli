@@ -79,7 +79,7 @@ export interface paths {
     put?: never;
     /**
      * Check a plugin archive without publishing it
-     * @description Validates a tar.gz plugin archive exactly as an upload would and reports what it would publish: the plugin id, version, the host permissions it requests, what the fleet runs under that id now, and the stored configs of the plugin that the archive's config schemas would refuse. Publishes nothing. Requires `plugin:manage` permission.
+     * @description Validates a tar.gz plugin archive exactly as an upload would and reports what it would publish: the plugin id, version, the host permissions it requests, what the fleet runs under that id now, and the stored configs of the plugin that the archive's config schemas would refuse, and, for a language pack, the enabled pack that already provides its locale (publishing it would be refused with LANGUAGE_PACK_TAKEN). Publishes nothing. Requires `plugin:manage` permission.
      */
     post: operations['inspectPluginArchive'];
     delete?: never;
@@ -3591,6 +3591,13 @@ export interface components {
       /** @example Accepted */
       verdict?: string | null;
     };
+    /** @description An enabled language pack and the locale it provides. */
+    LanguagePackHolder: {
+      /** @example en */
+      locale: string;
+      /** @example broccoli-en */
+      plugin_id: string;
+    };
     LanguageRegistryItem: {
       /** @example solution.cpp */
       default_filename: string;
@@ -3788,6 +3795,7 @@ export interface components {
        *     error wherever it reads one, so fix or delete them.
        */
       incompatible_configs: components['schemas']['IncompatibleConfig'][];
+      language_pack_taken?: components['schemas']['LanguagePackHolder'] | null;
       /** @example My Plugin */
       name: string;
       /**

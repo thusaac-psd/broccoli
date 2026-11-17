@@ -31,6 +31,14 @@ pub struct Model {
     /// it still knows what to fail closed for. `None` until first loaded.
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub governs: Option<Json>,
+    /// The locale whose host text the plugin provides as a language pack
+    /// (`[language_pack] locale`), from its manifest when it was registered
+    /// or last published. The partial unique index
+    /// `plugin_one_enabled_per_host_locale` over the enabled rows keeps one
+    /// enabled pack per locale; the column is declared `indexed` so the
+    /// entity describes it (see `crate::migration`).
+    #[sea_orm(nullable, indexed)]
+    pub host_locale: Option<String>,
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub updated_at: DateTimeUtc,
 }
