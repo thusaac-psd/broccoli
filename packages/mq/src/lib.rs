@@ -189,27 +189,46 @@ impl Mq {
         Ok((count, std::time::Duration::from_millis(left_ms)))
     }
 
-    /// How many events fixed window `window` holds now and how long until it
-    /// closes, without counting one (see [`Self::count_in_window`]). A window
-    /// that is not open holds none. One round trip.
-    pub async fn window_count(&self, window: &str) -> Result<(u64, std::time::Duration), MqError> {
-        let key = self.topology.window_counter(window);
-        let (count, left_ms): (Option<u64>, i64) = self
+    /// Apply `op` to sliding-log quota `log`: at most `limit` events in any
+    /// span of `window`, on the Redis clock, so every node sharing the queue
+    /// shares the log whatever their clocks say. Returns whether it was
+    /// admitted, and when refused, how long until the oldest event leaves the
+    /// window. One round trip.
+    pub async fn sliding_log(
+        &self,
+        log: &str,
+        limit: u64,
+        window: std::time::Duration,
+        op: LogOp,
+    ) -> Result<LogAnswer, MqError> {
+        let key = self.topology.sliding_log(log);
+        let window_us = u64::try_from(window.as_micros()).unwrap_or(u64::MAX).max(1);
+        let op = match op {
+            LogOp::Check => "check",
+            LogOp::Count => "count",
+            LogOp::Clear => "clear",
+        };
+        let nonce: u64 = rand::random();
+        let (admitted, wait_us): (u8, i64) = self
             .conn
             .run(|mut c| async move {
-                redis::pipe()
-                    .cmd("GET")
-                    .arg(&key)
-                    .cmd("PTTL")
-                    .arg(&key)
-                    .query_async(&mut c)
+                scripts::SLIDING_LOG
+                    .key(key)
+                    .arg(limit)
+                    .arg(window_us)
+                    .arg(op)
+                    .arg(nonce)
+                    .invoke_async(&mut c)
                     .await
             })
             .await?;
-        Ok((
-            count.unwrap_or(0),
-            std::time::Duration::from_millis(left_ms.max(0) as u64),
-        ))
+        Ok(if admitted == 1 {
+            LogAnswer::Admitted
+        } else {
+            LogAnswer::Full {
+                wait: std::time::Duration::from_micros(wait_us.max(0) as u64),
+            }
+        })
     }
 
     /// Send a `PING`, for health checks.
@@ -512,4 +531,27 @@ mod tests {
         assert_eq!(redis_version(info), Some("7.4.12"));
         assert_eq!(redis_version("# Server\r\n"), None);
     }
+}
+
+/// What [`Mq::sliding_log`] does to a log once it has dropped the events
+/// older than the window. Each refuses while the log is full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogOp {
+    /// Change nothing.
+    Check,
+    /// Record one event.
+    Count,
+    /// Forget every event.
+    Clear,
+}
+
+/// The answer of [`Mq::sliding_log`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogAnswer {
+    Admitted,
+    /// The log holds its limit; `wait` is how long until its oldest event
+    /// leaves the window.
+    Full {
+        wait: std::time::Duration,
+    },
 }

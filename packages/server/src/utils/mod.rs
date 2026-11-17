@@ -6,7 +6,6 @@ pub mod filename;
 pub mod hash;
 pub mod judging;
 pub mod jwt;
-pub mod login_throttle;
 pub mod password;
 pub mod plugin;
 pub mod problem;

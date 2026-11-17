@@ -5,6 +5,7 @@ pub mod code_run_dispatch;
 pub(crate) mod config_issues;
 pub mod device_auth;
 pub mod evaluate_batch;
+pub mod failed_sign_ins;
 pub mod ip_quota;
 pub mod judging;
 pub mod judging_sessions;

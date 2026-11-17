@@ -10,8 +10,8 @@ use tracing::instrument;
 
 use crate::client_ip::{ClientIp, ForwardedHop};
 use crate::config::ServerConfig;
+use crate::services::failed_sign_ins::FailedSignIns;
 use crate::services::ip_quota;
-use crate::services::window_quota::Outcome;
 // visibility-bypass-audited: this module has no permission gate to name
 // because it has no third-party resource parameter to gate - every query is
 // scoped to the identity resolved from the request's own credentials
@@ -123,7 +123,7 @@ pub async fn register(
         (status = 200, description = "Login successful", body = LoginResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Invalid credentials (INVALID_CREDENTIALS)", body = ErrorBody),
-        (status = 429, description = "Rate limited (RATE_LIMITED): too many failed sign-ins from this address (100 a minute, counted across every server) or for this account from this address. A successful sign-in counts toward neither. Includes Retry-After.", body = ErrorBody),
+        (status = 429, description = "Rate limited (RATE_LIMITED): too many failed sign-ins for this account from this address (`auth.login_failure_limit`, 10 a minute by default, counted across every server). Other accounts' failures never refuse a sign-in, and a successful sign-in clears the account's count. Includes Retry-After.", body = ErrorBody),
     ),
 )]
 #[instrument(skip(state, payload, jar), fields(username = %payload.username))]
@@ -134,22 +134,13 @@ pub async fn login(
     jar: CookieJar,
     AppJson(payload): AppJson<LoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    ip_quota::FAILED_LOGIN.check(&state.mq, client_ip).await?;
     validate_login_request(&payload)?;
 
     let username = payload.username.trim();
-    // The throttle counts failures per account, whatever case they are typed in.
-    let throttle_key = user::username_key(username);
-
-    // Contest-safe brute-force throttle: only FAILED attempts for this
-    // (username, client IP) pair count and a success clears them, so a
-    // legitimate sign-in is never blocked even when a whole venue shares one NAT
-    // IP. Fails open when the client IP is unknown.
-    if let Some(ip) = client_ip
-        && let Some(retry_after) = state.login_throttle.check(&throttle_key, ip)
-    {
-        return Err(AppError::RateLimited { retry_after });
-    }
+    // Failures count per account, whatever case its name is typed in.
+    let account = user::username_key(username);
+    let quota = FailedSignIns::of(&state.config.auth);
+    quota.check(&state.mq, client_ip, &account).await?;
 
     let maybe_user = user::Entity::find_active()
         .filter(user::username_is_any([username]))
@@ -165,23 +156,11 @@ pub async fn login(
     .await
     .map_err(|e| AppError::Internal(format!("Password verify error: {e}")))?;
 
-    // Both quotas are settled by the outcome before it is answered: a failure
-    // past either limit, and a success while either is full, answer 429, so
-    // attempts that passed the checks above together learn no more than the
-    // limits allow.
-    let outcome = if is_valid {
-        Outcome::Free
-    } else {
-        Outcome::Counts
-    };
-    let throttled =
-        client_ip.and_then(|ip| state.login_throttle.settle(&throttle_key, ip, outcome));
-    ip_quota::FAILED_LOGIN
-        .settle(&state.mq, client_ip, outcome)
+    // Settled by the outcome before it is answered, so attempts that passed
+    // the check together learn no more failures than the quota allows.
+    quota
+        .settle(&state.mq, client_ip, &account, is_valid)
         .await?;
-    if let Some(retry_after) = throttled {
-        return Err(AppError::RateLimited { retry_after });
-    }
 
     // The hash that verified is what the new session is opened against.
     let Some((user, hash)) = maybe_user

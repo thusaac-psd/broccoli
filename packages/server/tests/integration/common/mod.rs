@@ -511,6 +511,10 @@ pub struct SpawnOptions {
     /// (mirroring `scaling.rs`), writes a heartbeat key, and passes the
     /// container's URL here.
     pub redis_url: Option<String>,
+    /// `auth.login_failure_limit`. The fixture default, `None`, turns the
+    /// failed sign-in quota off, so tests that sign in with wrong passwords
+    /// on purpose never trip it.
+    pub login_failure_limit: Option<u32>,
     /// Cross-origin frontends the server allows (`server.cors.allow_origins`).
     pub cors_origins: Vec<String>,
     /// Overrides `PluginConfig.plugins_dir` (default: the shared
@@ -702,7 +706,7 @@ impl TestApp {
             },
             auth: AuthConfig {
                 jwt_secret: "test-secret-for-integration-tests".to_string(),
-                login_failure_limit: 0,
+                login_failure_limit: options.login_failure_limit.unwrap_or(0),
                 login_failure_window_secs: 60,
             },
             plugin: PluginConfig {
@@ -895,10 +899,6 @@ impl TestApp {
             plugin_lifecycle: Default::default(),
             plugin_sql,
             last_workers: Default::default(),
-            login_throttle: std::sync::Arc::new(server::utils::login_throttle::LoginThrottle::new(
-                0,
-                std::time::Duration::from_secs(60),
-            )),
         };
         if !options.no_workers {
             state

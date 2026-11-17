@@ -342,3 +342,36 @@ return {n, left}
 "#,
     )
 });
+
+/// A sliding-log quota: the events of the last window, one member each,
+/// scored by their time on the Redis clock in microseconds. Events older
+/// than the window are dropped first; a full log refuses and records nothing,
+/// so the log never holds more than the limit and any window-long span admits
+/// at most the limit.
+///
+/// KEYS: log. ARGV: limit, window in microseconds, op (`check`: refuse while
+/// full; `count`: record one event unless full; `clear`: forget every event
+/// unless full), a nonce that makes the member unique. Returns
+/// {admitted (1 or 0), microseconds until the oldest event leaves the window}.
+pub(crate) static SLIDING_LOG: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r#"
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000000 + tonumber(t[2])
+local limit = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - window)
+if redis.call('ZCARD', KEYS[1]) >= limit then
+  local oldest = tonumber(redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')[2])
+  return {0, oldest + window - now}
+end
+if ARGV[3] == 'count' then
+  redis.call('ZADD', KEYS[1], now, now .. '-' .. ARGV[4])
+  redis.call('PEXPIRE', KEYS[1], math.ceil(window / 1000))
+elseif ARGV[3] == 'clear' then
+  redis.call('DEL', KEYS[1])
+end
+return {1, 0}
+"#,
+    )
+});
