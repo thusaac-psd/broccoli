@@ -50,7 +50,7 @@ pub(crate) fn score_submission_subtask_details(
 }
 
 /// The subtask results a submission's current judgement was scored with,
-/// once it is finalized.
+/// once the submission holds it as its standing result.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn load_current_judged_subtasks(
     host: &Host,
@@ -64,9 +64,10 @@ pub(crate) fn load_current_judged_subtasks(
          JOIN submission_judgement sj ON sj.submission_id = s.id \
          {JOIN_JUDGED_RATIOS} \
          WHERE s.id = {} AND s.contest_id = {} \
-           AND sj.is_current = TRUE AND sj.is_finalized = TRUE",
+           AND sj.is_current = TRUE AND {standing}",
         p.bind(submission_id),
-        p.bind(contest_id)
+        p.bind(contest_id),
+        standing = broccoli_server_sdk::contest::standing_result("s"),
     );
     Ok(host
         .db

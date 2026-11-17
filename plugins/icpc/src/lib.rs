@@ -98,8 +98,8 @@ fn current_submissions_sql(contest_id_placeholder: &str, user_filter: &str) -> S
          JOIN contest_problem cp ON cp.contest_id = s.contest_id \
           AND cp.problem_id = s.problem_id \
          WHERE s.contest_id = {contest_id_placeholder} \
-           AND s.status IN {final_statuses}{user_filter}",
-        final_statuses = broccoli_server_sdk::types::StatusPhase::Terminal.sql_list(),
+           AND {standing}{user_filter}",
+        standing = broccoli_server_sdk::contest::standing_result("s"),
     )
 }
 

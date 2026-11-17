@@ -14,6 +14,29 @@ async fn seed_accepted_ioi_submission(
     contest_id: i32,
     score: f64,
 ) -> i32 {
+    seed_ioi_submission(
+        app,
+        username,
+        problem_id,
+        contest_id,
+        SubmissionStatus::Judged,
+        Verdict::Accepted,
+        score,
+    )
+    .await
+}
+
+/// A submission whose current judgement is finalized as `verdict` and
+/// `score`, while the submission itself shows `status`.
+async fn seed_ioi_submission(
+    app: &E2eTestApp,
+    username: &str,
+    problem_id: i32,
+    contest_id: i32,
+    status: SubmissionStatus,
+    verdict: Verdict,
+    score: f64,
+) -> i32 {
     let user_model = user::Entity::find()
         .filter(user::Column::Username.eq(username))
         .one(&app.db)
@@ -28,8 +51,8 @@ async fn seed_accepted_ioi_submission(
         problem_id: Set(problem_id),
         contest_id: Set(Some(contest_id)),
         contest_type: Set("ioi".into()),
-        status: Set(SubmissionStatus::Judged),
-        verdict: Set(Some(Verdict::Accepted)),
+        status: Set(status),
+        verdict: Set(Some(verdict.clone())),
         score: Set(Some(score)),
         time_used: Set(Some(10)),
         memory_used: Set(Some(256)),
@@ -50,7 +73,7 @@ async fn seed_accepted_ioi_submission(
         is_finalized: Set(true),
         triggered_by_user_id: Set(None),
         status: Set(SubmissionStatus::Judged),
-        verdict: Set(Some(Verdict::Accepted)),
+        verdict: Set(Some(verdict)),
         score: Set(Some(score)),
         time_used: Set(Some(10)),
         memory_used: Set(Some(256)),
@@ -113,6 +136,60 @@ async fn ioi_scoreboard_reflects_judged_submission() {
     assert!(
         rankings_arr[0]["username"].is_string(),
         "Row should have a username"
+    );
+}
+
+/// A board reads only what a submission stands at: a newer submission whose
+/// current judgement is a system error the retry may still take back (the
+/// submission shows it in flight) leaves the cell at the last standing score.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retryable_system_error_leaves_the_last_standing_score_on_the_board() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_standing_admin", "password", "admin")
+        .await;
+    let contestant = app
+        .create_authenticated_user("ioi_standing_user", "password")
+        .await;
+    let problem_id = app.create_problem(&admin, "IOI Standing").await;
+    let contest_id = app
+        .create_typed_contest(&admin, "IOI Standing", "ioi", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &contestant).await;
+    let res = app
+        .put_with_token(
+            &format!("/api/v1/contests/{contest_id}/config/ioi/contest"),
+            &json!({ "config": { "scoring_mode": "best_tokened_or_last" }, "enabled": true }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    seed_accepted_ioi_submission(&app, "ioi_standing_user", problem_id, contest_id, 70.0).await;
+    seed_ioi_submission(
+        &app,
+        "ioi_standing_user",
+        problem_id,
+        contest_id,
+        SubmissionStatus::Running,
+        Verdict::SystemError,
+        0.0,
+    )
+    .await;
+
+    let board = app
+        .get_with_token(
+            &format!("/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}/scoreboard"),
+            &admin,
+        )
+        .await;
+    assert_eq!(board.status, 200, "{}", board.text);
+    assert_eq!(
+        board.body["rankings"][0]["total_score"].as_f64(),
+        Some(70.0),
+        "{}",
+        board.text
     );
 }
 

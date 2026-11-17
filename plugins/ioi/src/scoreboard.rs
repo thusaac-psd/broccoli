@@ -26,6 +26,8 @@ use crate::subtasks::score_all_subtasks;
 use crate::tokens::TokenState;
 #[cfg(target_arch = "wasm32")]
 use crate::{load_effective_subtasks, load_task_config};
+#[cfg(target_arch = "wasm32")]
+use broccoli_server_sdk::contest::standing_result;
 
 // Used by `scoreboard_entries_tied` (wasm32+test) and the wasm32-only cell
 // loaders below; gate broadly enough to cover both.
@@ -174,6 +176,7 @@ fn load_max_submission_scoreboard_cells(
                AND s.user_id IN ({}) \
                AND s.problem_id IN ({}) \
                AND sj.score IS NOT NULL \
+               AND {standing} \
          ), maxes AS ( \
              SELECT user_id, problem_id, MAX(score) as score \
              FROM scored \
@@ -190,6 +193,7 @@ fn load_max_submission_scoreboard_cells(
         user_placeholders.join(","),
         problem_placeholders.join(","),
         score_epsilon_placeholder,
+        standing = standing_result("s"),
     );
     let rows: Vec<MaxSubmissionScoreboardRow> = host.db.query_with_args(&sql, &p.into_args())?;
     Ok(rows
@@ -238,17 +242,12 @@ fn load_best_tokened_or_last_scoreboard_cells(
     let user_placeholders: Vec<String> = user_ids.iter().map(|id| p.bind(*id)).collect();
     let problem_placeholders: Vec<String> = problem_ids.iter().map(|id| p.bind(*id)).collect();
     let sql = format!(
-        // Gate `is_finalized = TRUE`: a dispatched-but-unjudged submission carries
-        // a current judgement with score NULL, which COALESCE would read as 0.0.
-        // Without the gate, DISTINCT ON picks that in-flight submission as "last"
-        // and the cell flips to 0 the instant a contestant submits again, then
-        // restores when judging completes -- a live-standings flicker that wrongly
-        // drops their score. Gated, "last" is the last FINALIZED submission, so a
-        // cell holds its known score until the newer one actually finishes. This
-        // also covers a rejudge whose new current judgement may carry a stale
-        // non-NULL score before finalizing. Mirrors the SumBestSubtask gate and
-        // the MaxSubmission `score IS NOT NULL` gate. `s.id DESC` breaks a
-        // same-created_at tie deterministically (highest id = truly last).
+        // Only a submission's standing result counts (`standing_result`): one
+        // in flight, or a system error the retry may still take back, would
+        // read as 0 and drop the cell until it is judged again. Gated, "last"
+        // is the last submission that stands, so a cell keeps its known score
+        // until the newer one does. `s.id DESC` breaks a same-created_at tie
+        // deterministically (highest id = truly last).
         "SELECT DISTINCT ON (s.user_id, s.problem_id) \
                 s.user_id, s.problem_id, \
                 COALESCE(sj.score, 0.0) as score, \
@@ -259,15 +258,16 @@ fn load_best_tokened_or_last_scoreboard_cells(
          JOIN submission_judgement sj \
            ON sj.submission_id = s.id \
           AND sj.is_current = TRUE \
-          AND sj.is_finalized = TRUE \
           AND sj.judge_epoch = s.judge_epoch \
          WHERE s.contest_id = {} \
            AND s.user_id IN ({}) \
            AND s.problem_id IN ({}) \
+           AND {standing} \
          ORDER BY s.user_id, s.problem_id, s.created_at DESC, s.id DESC",
         contest_placeholder,
         user_placeholders.join(","),
         problem_placeholders.join(","),
+        standing = standing_result("s"),
     );
     let last_rows: Vec<ScoreboardSubmissionRow> = host.db.query_with_args(&sql, &p.into_args())?;
 
@@ -283,10 +283,8 @@ fn load_best_tokened_or_last_scoreboard_cells(
             .map(|id| p.bind(*id))
             .collect();
         let sql = format!(
-            // Same `is_finalized = TRUE` gate as the "last" query above: a tokened
-            // submission that is in-flight (fresh) or rejudging must not fold a
-            // COALESCE-0 / stale score into the Rust-side max below. Only its
-            // finalized score should count toward the best tokened result.
+            // The same standing gate as the "last" query above: only a
+            // tokened submission's standing result counts toward its best.
             "SELECT s.user_id, s.problem_id, \
                     COALESCE(sj.score, 0.0) as score, \
                     GREATEST(EXTRACT(EPOCH FROM (s.created_at - c.start_time))::bigint, 0) \
@@ -296,16 +294,17 @@ fn load_best_tokened_or_last_scoreboard_cells(
              JOIN submission_judgement sj \
                ON sj.submission_id = s.id \
               AND sj.is_current = TRUE \
-              AND sj.is_finalized = TRUE \
               AND sj.judge_epoch = s.judge_epoch \
              WHERE s.contest_id = {} \
                AND s.user_id IN ({}) \
                AND s.problem_id IN ({}) \
-               AND s.id IN ({})",
+               AND s.id IN ({}) \
+               AND {standing}",
             contest_placeholder,
             user_placeholders.join(","),
             problem_placeholders.join(","),
             tokened_placeholders.join(","),
+            standing = standing_result("s"),
         );
         host.db
             .query_with_args::<ScoreboardSubmissionRow>(&sql, &p.into_args())?
@@ -404,11 +403,12 @@ fn load_sum_best_subtask_scoreboard_cells(
          WHERE s.contest_id = {} \
            AND s.user_id IN ({}) \
            AND s.problem_id IN ({}) \
-           AND sj.is_current = TRUE AND sj.is_finalized = TRUE \
+           AND sj.is_current = TRUE AND {standing} \
          ORDER BY s.created_at ASC",
         contest_placeholder,
         user_placeholders.join(","),
         problem_placeholders.join(","),
+        standing = standing_result("s"),
     );
     let rows: Vec<ScoreboardRatiosRow> = host.db.query_with_args(&sql, &p.into_args())?;
 

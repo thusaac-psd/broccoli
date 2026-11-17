@@ -15,6 +15,19 @@ pub fn load_config<T: serde::de::DeserializeOwned>(
     host.config.get_contest(contest_id, "contest")?.parse()
 }
 
+/// The SQL condition that submission row `alias` holds its standing result:
+/// its status is terminal. The host projects a submission's current
+/// judgement onto its row, but keeps a result that may still change (one in
+/// flight, or a system error the retry may still take back) at a status that
+/// is not terminal, so a view that reads what a submission scored reads only
+/// rows this holds for.
+pub fn standing_result(alias: &str) -> String {
+    format!(
+        "{alias}.status IN {}",
+        crate::types::StatusPhase::Terminal.sql_list()
+    )
+}
+
 /// Whether a view computed from the contest's results, such as its board, may
 /// still change: the contest has not ended, or one of its submissions is
 /// still being judged (its status is not terminal), as a submission made in
@@ -35,10 +48,10 @@ pub fn results_may_change(
     }
     let mut p = crate::db::Params::new();
     let sql = format!(
-        "SELECT EXISTS (SELECT 1 FROM submission \
-           WHERE contest_id = {} AND status NOT IN {}) AS pending",
+        "SELECT EXISTS (SELECT 1 FROM submission s \
+           WHERE s.contest_id = {} AND NOT ({})) AS pending",
         p.bind(contest_id),
-        crate::types::StatusPhase::Terminal.sql_list(),
+        standing_result("s"),
     );
     Ok(host
         .db
