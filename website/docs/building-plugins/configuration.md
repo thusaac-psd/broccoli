@@ -95,7 +95,7 @@ pub fn validate_task_config(input: String) -> FnResult<String> {
         .problem_id
         .ok_or_else(|| SdkError::Other("a task config belongs to a problem".into()))?;
     let labels = host.submission.query_test_cases(problem_id)?;
-    let errors = task
+    let issues = task
         .subtasks
         .iter()
         .enumerate()
@@ -111,7 +111,7 @@ pub fn validate_task_config(input: String) -> FnResult<String> {
         })
         .collect();
     Ok(serde_json::to_string(&ConfigValidateOutput {
-        errors,
+        issues,
         ..Default::default()
     })?)
 }
@@ -120,14 +120,20 @@ pub fn validate_task_config(input: String) -> FnResult<String> {
 The answer has two lists, and which one a violation goes in decides whether
 the host stores the value:
 
-- `errors` is what is wrong with the config itself, such as a subtask naming
-  a test case the problem does not have. The host refuses the write.
-- `issues` is what the target's data does not meet yet, whatever the config
-  says, such as a problem with no test cases. The host stores the value and
-  lists each issue on the target's config issues until the data changes.
+- `errors` is what is wrong with the config by itself, whatever else the
+  server holds, such as two subtasks with one name. The host refuses the
+  write.
+- `issues` is everything that depends on other data: a subtask naming a test
+  case the problem does not have, a problem with no test cases, more possible
+  qualifiers than the contest's problems leave places for. The host stores
+  the value and lists each issue on the target's config issues until the
+  config or the data changes.
 
-Put a condition in `issues` when no value of the config could fix it, so
-staff can save their settings before the test data is ready.
+A rule that reads anything besides the proposed value (the test data, the
+contest's problems, another scope's config) belongs in `issues`. Refusing it
+would make every later save fail, an unrelated field's included, once the
+data moves past it, and staff can fix the data and the config in either
+order.
 
 The host answers each violation as a field of the `VALIDATION_ERROR`, so the
 settings form shows it next to the field its `path` names and lists it with
@@ -149,11 +155,11 @@ change to a problem's test cases (create, edit, delete, reorder, bulk delete
 and ZIP upload) therefore runs every config stored for the problem, at the
 problem scope and in each contest that uses it, through the same checks
 before it commits, with `host.submission.query_test_cases` answering with the
-test cases as the change leaves them. A change that gives a config an error
-it did not have is refused with 409 `CONFIG_WOULD_BREAK`, its `details.issues`
-in the `incompatible_configs` shape, unless the request carries `force=true`.
-An entry of `issues` never refuses a change: the data is what it describes, so
-the change goes through and the config issues list it. Your
+test cases as the change leaves them. A change that gives a stored config an
+error or an issue it did not have is refused with 409 `CONFIG_WOULD_BREAK`,
+its `details.issues` in the `incompatible_configs` shape, unless the request
+carries `force=true`. What a namespace's defaults find where nothing is
+stored, such as a problem with no test cases yet, never refuses a change. Your
 own SQL (`host.db.*`) reads committed data during that check, so read test
 cases through `host.submission.query_test_cases` in a validator.
 
@@ -188,6 +194,14 @@ a bundle import, and when the server starts. A contest's config issues are
 checked whenever they are read. While your plugin is disabled its configs are
 not checked, so they count as having no issues until it is enabled again.
 
+Only a server that loads your plugin can run its checks. Where your plugin is
+enabled but not loaded on the server that checks (it failed to load there,
+or its files have not reached it), the answer is unknown, and unknown reads as
+having issues: the problem keeps its flag and is marked for a server that
+loads your plugin, which decides on its next plugin reconcile pass. That
+server's issues routes answer 503 `PLUGIN_UNAVAILABLE` with `Retry-After`
+rather than an empty list.
+
 A write to a problem's config holds the same lock a test data change does,
 from its check until it commits, so a config is never stored against test data
 that a concurrent change has just replaced.
@@ -204,9 +218,10 @@ problem stays to configure the imported problem that takes its id.
 
 An import runs no plugin, so it checks none of the configs it restores, and
 the problems' `config_issues` flags do not travel: they describe the source's
-plugins. The import marks every problem it restores instead, and each running
-server rechecks the marked problems on its next plugin reconcile pass, within
-a few seconds, so their flags are set without a restart.
+plugins. An imported problem's issues are unknown until a server decides them,
+so it lands flagged and marked, and a judgement claimed before then says it ran
+with config issues. A running server decides the marked problems on its next
+plugin reconcile pass, within a few seconds, without a restart.
 
 ## Read it
 
@@ -233,11 +248,19 @@ config a namespace has at one problem. Each scope that stores it sets the
 fields it stores and leaves the rest to the next scope up, in the order
 contest problem, contest, problem, the plugin-wide value, then the schema's
 defaults: objects merge field by field, and any other value, an array
-included, is replaced whole. The most specific scope that says whether the
-config is on decides it. An override switched off contributes nothing, and
-when the deciding scope is switched off the config is the plugin-wide one.
-`source` on the result names the most specific scope the config takes fields
-from.
+included, is replaced whole. The most specific scope whose row says whether
+the config is on decides it, the plugin-wide row last. An override switched
+off contributes nothing, and when the narrower scope that decides is switched
+off the config is the plugin-wide one. `source` on the result names the most
+specific scope the config takes fields from, and `fields` the scope each
+top-level field comes from.
+
+The rule is `resolve_cascade` in `broccoli-types`, and it is the one rule for
+every reader: your plugin's reads, the admin forms, which show what each scope
+inherits from `GET …/config/cascade` (`/problems/{id}`, `/contests/{id}` and
+`/contests/{id}/problems/{problem_id}`), and the host's choice of whose
+resource-scoped hooks run for a submission (a plugin runs when any of its
+namespaces is on there).
 
 ## Hold a problem's checker source
 

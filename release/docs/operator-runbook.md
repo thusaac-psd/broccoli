@@ -238,11 +238,13 @@ with a bundle_ section (`website/docs/building-plugins/configuration.md`,
 "Configuration" under "Building plugins" on the documentation site): a bundle
 carries its problems' and contest's configs, never a plugin-wide one, and an
 import replaces the configs of every problem it replaces. An import runs without
-the plugin runtime, so it checks none of the configs it restores: it marks every
-problem it restores, and the running servers recheck the marked problems within
-a few seconds (on their next plugin reconcile pass), so the imported problems
-show their config issues without a restart. A server that is down rechecks them
-when it starts.
+the plugin runtime, so it checks none of the configs it restores. Until a server
+checks them, the imported problems count as having config issues: they land
+flagged and marked, and a submission judged meanwhile is marked as judged with
+config issues. A running server checks the marked problems within a few seconds
+(on its next plugin reconcile pass), without a restart, and a server that is
+down checks them when it starts. A problem whose plugins no running server loads
+stays marked until one does; its config issues page asks to try again meanwhile.
 
 ## Logs
 

@@ -81,7 +81,7 @@ pub fn validate_task_config(input: String) -> FnResult<String> {
         .problem_id
         .ok_or_else(|| SdkError::Other("a task config belongs to a problem".into()))?;
     let labels = host.submission.query_test_cases(problem_id)?;
-    let errors = task
+    let issues = task
         .subtasks
         .iter()
         .enumerate()
@@ -97,7 +97,7 @@ pub fn validate_task_config(input: String) -> FnResult<String> {
         })
         .collect();
     Ok(serde_json::to_string(&ConfigValidateOutput {
-        errors,
+        issues,
         ..Default::default()
     })?)
 }
@@ -105,11 +105,13 @@ pub fn validate_task_config(input: String) -> FnResult<String> {
 
 返回值有两个列表，违规放在哪个列表决定宿主是否存储该值：
 
-- `errors` 是配置本身的错误，例如子任务引用了题目中不存在的测试点。宿主拒绝这次写入。
-- `issues` 是目标的数据尚未满足的条件，与配置怎么写无关，例如题目还没有测试点。宿主照常存储该值，
-  并在数据变化之前把每条问题列在目标的配置问题中。
+- `errors` 是配置本身的错误，与服务器上的其他数据无关，例如两个子任务同名。宿主拒绝这次写入。
+- `issues` 是一切依赖其他数据的条件：子任务引用了题目中不存在的测试点、题目还没有测试点、可直接晋级的人数
+  超过比赛题目所能容纳的名额。宿主照常存储该值，并在配置或数据变化之前把每条问题列在目标的配置问题中。
 
-当任何配置值都无法解决某个条件时，把它放进 `issues`，这样管理人员可以在测试数据准备好之前先保存设置。
+只要规则读取了待写入值以外的任何内容（测试数据、比赛的题目、其他作用域的配置），就应放进 `issues`。
+若拒绝保存，一旦数据越过这条规则，之后的每次保存（包括与之无关的字段）都会失败；而放进 `issues`，
+管理人员可以按任意顺序修正数据和配置。
 
 宿主把每条违规作为 `VALIDATION_ERROR` 的一个字段返回，设置表单会把它显示在 `path` 指向的字段旁，
 并在保存失败的提示中一并列出。带 `key` 的违规以用户的语言显示：表单在插件的翻译包里查找这个键并
@@ -123,9 +125,9 @@ pub fn validate_task_config(input: String) -> FnResult<String> {
 配置存储之后，它引用的测试数据也可能变化。因此，对一道题目测试点的每次修改（创建、编辑、删除、
 重新排序、批量删除和 ZIP 上传）在提交之前，都会对该题存储的每条配置（题目级别的，以及使用该题的每场
 比赛中的）重新做同样的检查，此时 `host.submission.query_test_cases` 返回的是修改之后的测试点。
-若修改会使某条配置出现原本没有的错误（`errors`），请求会以 409 `CONFIG_WOULD_BREAK` 被拒绝，`details.issues` 以
-`incompatible_configs` 的格式列出这些配置，除非请求带上 `force=true`。`issues` 中的条目从不拒绝修改：它描述的是数据本身，
-因此修改照常生效，配置问题中会列出它。检查期间，插件自己的 SQL
+若修改会使某条已保存的配置出现原本没有的错误或问题，请求会以 409 `CONFIG_WOULD_BREAK` 被拒绝，`details.issues` 以
+`incompatible_configs` 的格式列出这些配置，除非请求带上 `force=true`。在未保存配置的地方，命名空间默认值检查出的内容
+（例如题目还没有测试点）从不拒绝修改。检查期间，插件自己的 SQL
 （`host.db.*`）读到的是已提交的数据，所以校验函数应通过 `host.submission.query_test_cases` 读取测试点。
 
 `GET /api/v1/problems/{id}/config/issues` 列出插件当前对该题每条配置（题目级别的，以及使用该题的每场比赛中的）
@@ -140,6 +142,10 @@ pub fn validate_task_config(input: String) -> FnResult<String> {
 
 每当结果可能改变时，系统都会重新检查题目是否存在配置问题：题目的测试数据变更时；该题的任何一条配置（题目级别的，或某场比赛中的）被写入或删除时，无论由谁发起（管理员、插件的 `host.config.set*`、上传检查器源代码）；题目被创建、类型改变、加入或离开比赛，或其所在比赛更改比赛类型或被删除时；以及你的插件被启用、停用、重新加载或升级时，插件级配置被写入或删除时，比赛本身的配置被写入或删除时，导入导出包之后，服务器启动时，对插件检查所涉及的每道题目重新检查。比赛的配置问题在每次读取时检查。插件停用期间，其配置不会被检查，因此在重新启用之前视为没有问题。
 
+只有加载了你的插件的服务器才能运行它的检查。如果你的插件已启用，但在进行检查的服务器上没有加载（在那里加载失败，
+或其文件尚未到达），结果就是未知的，而未知视为存在问题：题目保留其标记，并被标记为等待一台加载了该插件的服务器处理，
+后者在下一次插件协调时作出判断。这台服务器的配置问题接口会返回带 `Retry-After` 的 503 `PLUGIN_UNAVAILABLE`，而不是空列表。
+
 写入题目配置时，从检查到提交一直持有与测试数据变更相同的锁，因此配置不会在并发变更刚刚替换掉的测试数据上被存储。
 
 ## 随导出包迁移
@@ -150,8 +156,9 @@ pub fn validate_task_config(input: String) -> FnResult<String> {
 去配置占用其 id 的导入题目。
 
 导入不运行任何插件，因此不检查它恢复的配置；题目的 `config_issues` 标记也不随导出包迁移，因为它描述的是源
-服务器上的插件。导入会标记它恢复的每道题目，每台运行中的服务器在下一次插件协调时（几秒之内）重新检查被标记的题目，
-无需重启即可设置它们的标记。
+服务器上的插件。导入的题目在有服务器作出判断之前，其配置问题是未知的，因此它以已标记存在问题的状态导入，
+在此之前领取的评测会注明它是在配置存在问题时运行的。运行中的服务器在下一次插件协调时（几秒之内）判断被标记的题目，
+无需重启。
 
 ## 读取配置
 
@@ -173,9 +180,13 @@ let config: ContestConfig = host.config.get_contest(contest_id, "contest")?.pars
 
 `host.config.get_effective(namespace, problem_id, contest_id)` 读取某个命名空间在一道题目上的配置：
 保存了该配置的每个作用域设定它所保存的字段，其余字段交给上一级作用域，依次为竞赛题目、竞赛、题目、
-插件全局的值，最后是 schema 的默认值：对象逐字段合并，其他值（包括数组）整体替换。由说明了是否开启的
-最具体作用域决定配置是否开启。被关闭的覆盖项不提供任何字段；起决定作用的作用域被关闭时，配置是插件全局的配置。
-结果的 `source` 指明配置从中取字段的最具体作用域。
+插件全局的值，最后是 schema 的默认值：对象逐字段合并，其他值（包括数组）整体替换。行中说明了是否开启的
+最具体作用域决定配置是否开启，插件全局的行最后考虑。被关闭的覆盖项不提供任何字段；起决定作用的较窄作用域被关闭时，
+配置是插件全局的配置。结果的 `source` 指明配置从中取字段的最具体作用域，`fields` 指明每个顶层字段来自哪个作用域。
+
+这条规则就是 `broccoli-types` 中的 `resolve_cascade`，所有读取方都使用它：插件自己的读取；管理表单，它通过
+`GET …/config/cascade`（`/problems/{id}`、`/contests/{id}` 和 `/contests/{id}/problems/{problem_id}`）显示每个作用域
+继承的内容；以及宿主决定提交运行哪些资源级钩子（插件的任一命名空间在该处开启时，该插件即运行）。
 
 ## 保存题目的检查器源代码
 
