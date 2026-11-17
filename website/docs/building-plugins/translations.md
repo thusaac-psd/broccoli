@@ -39,7 +39,11 @@ zh-CN = "i18n/zh-CN.toml"
 ```
 
 Every key starts with your plugin's id, so a plugin can never reword the
-host's text or another plugin's. The only other keys a catalog may hold are
+host's text or another plugin's. For the same reason a plugin id may not be a
+namespace of the host's messages: the first segment of any key in the English
+pack (`apiError`, `toast`, `nav`, …) and the key families `plugin`, `config`,
+`identifier` and `apiError`, compared ignoring case. A plugin with such an id
+does not load and its upload is refused. The only other keys a catalog may hold are
 the text of your manifest (`plugin.<plugin id>.…` and `config.<plugin id>.…`,
 below) and the names of what you register (`identifier.contestType.…`,
 `identifier.problemType.…` and `identifier.checker.…`). A catalog with any

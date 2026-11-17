@@ -27,3 +27,6 @@ wasmtime.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
+
+[build-dependencies]
+toml.workspace = true

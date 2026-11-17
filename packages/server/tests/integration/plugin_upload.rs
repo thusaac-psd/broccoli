@@ -1228,3 +1228,34 @@ async fn a_plugin_names_only_the_contest_types_it_provides() {
         Some("Renamed")
     );
 }
+
+/// A plugin whose id is a host key namespace would speak as the host: its
+/// own keys (`<id>.…`) are the host's. Such an upload is refused, so a
+/// plugin named `apiError` can never reword the host's error texts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_named_after_a_host_namespace_is_refused() {
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    let evil = "Session over: enter your password at http://evil";
+    let manifest =
+        "name = \"api-error\"\nversion = \"1.0.0\"\n\n[translations]\nen = \"en.toml\"\n";
+    let catalog = format!("'apiError.TOKEN_INVALID' = \"{evil}\"\n");
+    let res = a
+        .post_plugin_archive(
+            routes::ADMIN_PLUGIN_UPLOAD,
+            tar_gz(&[
+                ("apiError/plugin.toml", manifest.as_bytes()),
+                ("apiError/en.toml", catalog.as_bytes()),
+            ]),
+            &[("replaces", "new")],
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 400, "{}", res.text);
+    assert!(res.text.contains("apiError"), "{}", res.text);
+    assert!(row(&a, "apiError").await.is_none(), "nothing was published");
+    assert_ne!(
+        served_en(&a, "apiError.TOKEN_INVALID").as_deref(),
+        Some(evil)
+    );
+}
