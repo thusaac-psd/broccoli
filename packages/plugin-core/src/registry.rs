@@ -88,6 +88,17 @@ impl PluginEntry {
                  translation file for it"
             )));
         }
+        // A pack's catalog for its locale is the host's text, unconfined to
+        // the pack's id; a pack that also ran code or took settings would do
+        // so under that text.
+        if manifest.host_locale().is_some()
+            && (manifest.has_server() || manifest.has_web() || !manifest.config.is_empty())
+        {
+            return Err(PluginError::LoadFailed(format!(
+                "Plugin '{id}' is a language pack, which declares translations only: \
+                 it may not declare [server], [web] or [config]"
+            )));
+        }
         let mut router = Router::new();
 
         if let Some(server_config) = &manifest.server {
@@ -320,6 +331,32 @@ function = "second"
                 .to_string()
                 .contains("more than one server timer callback")
         );
+    }
+
+    /// A language pack declares translations only: a pack with a server,
+    /// a web bundle or config would run code or take settings under the
+    /// host's text, so it does not load.
+    #[test]
+    fn a_language_pack_declares_only_translations() {
+        let pack = |extra: &str| -> PluginManifest {
+            toml::from_str(&format!(
+                "name = \"p\"\nversion = \"0.1.0\"\n\n[language_pack]\nlocale = \"en\"\n\n\
+                 [translations]\nen = \"en.toml\"\n\n{extra}"
+            ))
+            .unwrap()
+        };
+        assert!(PluginEntry::new("p".into(), ".".into(), pack("")).is_ok());
+        for extra in [
+            "[server]\nentry = \"p.wasm\"\n",
+            "[web]\nroot = \"dist\"\nentry = \"index.js\"\n",
+            "[config.settings]\nscopes = [\"plugin\"]\n",
+        ] {
+            let error = PluginEntry::new("p".into(), ".".into(), pack(extra))
+                .err()
+                .unwrap_or_else(|| panic!("a pack with {extra} must not load"))
+                .to_string();
+            assert!(error.contains("translations only"), "{error}");
+        }
     }
 
     #[test]

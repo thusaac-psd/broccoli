@@ -83,8 +83,9 @@ ja = "locales/ja.toml"
 
 A language pack's catalog for its locale holds the host's own keys, so it is
 not confined to its id; its catalogs for other locales are, as any plugin's
-are. A plugin that ships translations without declaring `[language_pack]` is
-an ordinary plugin. Install a pack like any plugin and the language appears in
+are. A pack declares translations only: one that also declares `[server]`,
+`[web]` or `[config]` does not load. A plugin that ships translations without
+declaring `[language_pack]` is an ordinary plugin. Install a pack like any plugin and the language appears in
 the language menu, without rebuilding the web app.
 
 One enabled pack provides a locale's host text. Enabling or uploading a second
