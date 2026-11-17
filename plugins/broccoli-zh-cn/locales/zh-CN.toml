@@ -734,7 +734,7 @@
 'admin.configIssues.contestTitle' = "本比赛或其题目的部分设置存在问题。请修正这些设置或题目的测试数据，否则比赛会被错误评测。"
 'admin.configIssues.onProblem' = "本题的 {config}"
 'admin.configIssues.onContest' = "本比赛的 {config}"
-'admin.configIssues.forProblem' = "题目 {problemId} 的 {config}"
+'admin.configIssues.forProblem' = "题目 {problem} 的 {config}"
 'admin.configIssues.inContest' = "比赛 {contestId} 中的 {config}"
 'admin.configIssues.breakTitle' = "仍要保存此修改吗？"
 'admin.configIssues.breakDescription' = "以下设置将与本题的测试点不再一致，在修正之前，提交会按这些设置计分。"

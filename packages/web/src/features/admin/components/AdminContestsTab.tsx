@@ -696,7 +696,11 @@ export function ContestProblemsDialog({
           <DialogDescription>{contest.title}</DialogDescription>
         </DialogHeader>
 
-        <ContestConfigIssues contestId={contest.id} enabled={open} />
+        <ContestConfigIssues
+          contestId={contest.id}
+          problems={contestProblems}
+          enabled={open}
+        />
 
         {!isLoading && contestProblems.length > 0 && (
           <div className="rounded-md border overflow-y-auto max-h-60">

@@ -37,7 +37,7 @@ export function JudgementConfigIssuesNotice({
       {issues && issues.length > 0 && (
         <div className="mt-2 space-y-2">
           <p>{t('submissionDetail.configIssues.current')}</p>
-          <ConfigIssueList issues={issues} of="problem" />
+          <ConfigIssueList issues={issues} of={{ kind: 'problem' }} />
         </div>
       )}
       {issues && issues.length === 0 && (

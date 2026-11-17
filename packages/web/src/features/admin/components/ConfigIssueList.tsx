@@ -7,8 +7,13 @@ import { serverProblem } from '@/components/config/utils';
 
 type IncompatibleConfig = ApiSchemas['IncompatibleConfig'];
 
-/** Whose config issues a list shows: a problem's, or a contest's. */
-export type ConfigIssuesOf = 'problem' | 'contest';
+/**
+ * Whose config issues a list shows: a problem's, or a contest's, which names
+ * each of its problems the way the contest does.
+ */
+export type ConfigIssuesOf =
+  | { kind: 'problem' }
+  | { kind: 'contest'; problemLabel: (problemId: number) => string };
 
 /**
  * Configs their plugins find something wrong with, each with where it is set
@@ -29,8 +34,11 @@ export function ConfigIssueList({
     }
     if (issue.scope === 'contest_problem') {
       const [contestId, problemId] = issue.ref_id.split(':');
-      return of === 'contest'
-        ? t('admin.configIssues.forProblem', { config, problemId })
+      return of.kind === 'contest'
+        ? t('admin.configIssues.forProblem', {
+            config,
+            problem: of.problemLabel(Number(problemId)),
+          })
         : t('admin.configIssues.inContest', { config, contestId });
     }
     return t('admin.configIssues.onProblem', { config });
