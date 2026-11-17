@@ -20,7 +20,12 @@ use crate::entity::{
     code_run, dead_letter_message, submission, submission_judgement, test_case_result,
 };
 
-const NO_TYPES: &[String] = &[];
+/// Nothing loaded here.
+const NO_TYPES: &crate::providers::Provides = &crate::providers::Provides {
+    contest_types: Vec::new(),
+    problem_types: Vec::new(),
+    checker_formats: Vec::new(),
+};
 
 /// Ten rows, no in-flight cap.
 const TEN: ClaimLimit = ClaimLimit {
@@ -135,11 +140,14 @@ async fn claim_one(db: &DatabaseConnection, server: &str) -> ClaimedJudgement {
 fn dispatch_of(live: &LiveDispatches, j: &submission_judgement::Model) -> Dispatch {
     Dispatch::new(
         "p",
-        live.enter(DispatchedUnit::Judgement {
-            submission_id: j.submission_id,
-            judgement_id: j.id,
-            judge_epoch: j.judge_epoch,
-        }),
+        live.enter(
+            DispatchedUnit::Judgement {
+                submission_id: j.submission_id,
+                judgement_id: j.id,
+                judge_epoch: j.judge_epoch,
+            },
+            true,
+        ),
         DispatchFaults::default(),
     )
 }
@@ -1544,6 +1552,81 @@ async fn work_of_a_disabled_contest_plugin_is_parked_until_it_is_enabled() {
     assert_eq!(claimable(&db).await, 2, "both resume");
 }
 
+/// A replica takes a unit only when it has every plugin the unit needs
+/// loaded: its contest type's, its problem type's evaluator and its checker
+/// format's. While a live peer has one of them loaded and this replica does
+/// not yet, the unit stays `Queued` for the peer, or for this replica once
+/// it loads it; a key no live replica has loaded is taken, to fail visibly.
+#[tokio::test]
+async fn a_replica_claims_only_work_whose_every_plugin_it_has_loaded() {
+    use crate::providers::Provides;
+    let (_pg, db) = crate::test_support::postgres().await;
+    new_submission(&db).await;
+    let problem = crate::entity::problem::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let everything = Provides {
+        contest_types: vec!["standard".into()],
+        problem_types: vec![problem.problem_type.clone()],
+        checker_formats: vec![problem.checker_format.clone()],
+    };
+    let peer = |provides: &Provides| {
+        format!(
+            "INSERT INTO plugin_replica (server_id, plugins, provides, state_at, heartbeat_at) \
+             VALUES ('peer', '{{}}', '{}', NOW(), NOW()) \
+             ON CONFLICT (server_id) DO UPDATE SET provides = EXCLUDED.provides",
+            serde_json::to_string(provides).unwrap()
+        )
+    };
+    exec(&db, &peer(&everything)).await;
+    let claim = |local: Provides| {
+        let db = db.clone();
+        async move {
+            claim_judgements(&db, "here", TEN, &local)
+                .await
+                .unwrap()
+                .units
+                .len()
+        }
+    };
+    for missing in [
+        Provides {
+            problem_types: Vec::new(),
+            ..everything.clone()
+        },
+        Provides {
+            checker_formats: Vec::new(),
+            ..everything.clone()
+        },
+        Provides {
+            contest_types: Vec::new(),
+            ..everything.clone()
+        },
+    ] {
+        assert_eq!(claim(missing.clone()).await, 0, "{missing:?}");
+    }
+    // The peer has the evaluator no more: no live replica does, so the
+    // replica missing it takes the unit, to fail it visibly.
+    exec(
+        &db,
+        &peer(&Provides {
+            problem_types: Vec::new(),
+            ..everything.clone()
+        }),
+    )
+    .await;
+    assert_eq!(
+        claim(Provides {
+            problem_types: Vec::new(),
+            ..everything.clone()
+        })
+        .await,
+        1
+    );
+}
+
 /// Records `standard` (the problem type [`new_submission`] uses) as
 /// evaluated by one plugin, enabled or not.
 async fn evaluator(db: &DatabaseConnection, enabled: bool) {
@@ -1557,6 +1640,33 @@ async fn evaluator(db: &DatabaseConnection, enabled: bool) {
         ),
     )
     .await;
+}
+
+/// A unit needs its problem's checker as much as its other plugins: while
+/// every plugin that resolves its checker format is disabled, its work is
+/// parked, unclaimed, until one is enabled.
+#[tokio::test]
+async fn work_whose_checker_plugin_is_disabled_is_parked_until_it_is_enabled() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    new_submission(&db).await;
+    let format = crate::entity::problem::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap()
+        .checker_format;
+    let checker = |enabled: bool| {
+        format!(
+            "INSERT INTO plugin (id, is_enabled, governs) \
+             VALUES ('checkers', {enabled}, \
+                     '{{\"visibility\": false, \"host_locale\": null, \"checker_formats\": [\"{format}\"]}}') \
+             ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
+        )
+    };
+    exec(&db, &checker(false)).await;
+    assert_eq!(claimable(&db).await, 0, "parked work is not claimed");
+    exec(&db, &checker(true)).await;
+    assert_eq!(claimable(&db).await, 1, "it resumes");
 }
 
 /// A unit needs its problem type's evaluator as much as its contest type's

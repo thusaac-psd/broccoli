@@ -27,6 +27,7 @@
 //! All of this is plugin-agnostic: the host only knows ids, the enabled flag,
 //! and what each manifest declares.
 
+use crate::providers::{Needs, Provided, Provides};
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
@@ -79,7 +80,7 @@ pub struct PluginLifecycle {
 
 struct Reported {
     report: ReplicaReport,
-    contest_types: Vec<String>,
+    provides: Provides,
     /// Whether a write of an equal report succeeded.
     written: bool,
 }
@@ -157,43 +158,13 @@ fn mismatch(published: Option<&Fingerprint>, local: Option<&Fingerprint>) -> Opt
 pub struct Governs {
     /// It declares a `[[server.queries]] topic = "visibility"`.
     pub visibility: bool,
-    /// The contest types its `init()` registered, sorted.
-    pub contest_types: Vec<String>,
     /// The locale whose host text it provides, as a language pack: one
     /// enabled plugin at a time does (`publish_language_pack`).
     pub host_locale: Option<String>,
-    /// The problem types its `init()` registered an evaluator for, sorted.
-    pub problem_types: Vec<String>,
-}
-
-/// What a key that plugins provide names: what a unit of work needs a
-/// provider of to run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Provided {
-    /// A contest type: its plugin judges the unit.
-    ContestType,
-    /// A problem type: its evaluator plugin runs the unit's test cases.
-    ProblemType,
-}
-
-impl Provided {
-    /// The [`Governs`] field (and `plugin.governs` key) that lists the keys.
-    fn field(self) -> &'static str {
-        match self {
-            Self::ContestType => "contest_types",
-            Self::ProblemType => "problem_types",
-        }
-    }
-}
-
-impl Governs {
-    fn provides(&self, kind: Provided, key: &str) -> bool {
-        let keys = match kind {
-            Provided::ContestType => &self.contest_types,
-            Provided::ProblemType => &self.problem_types,
-        };
-        keys.iter().any(|k| k == key)
-    }
+    /// The contest types, problem types and checker formats its `init()`
+    /// registered.
+    #[serde(flatten)]
+    pub provides: Provides,
 }
 
 /// A plugin that is enabled fleet-wide but not loaded on this replica.
@@ -263,30 +234,32 @@ impl PluginLifecycle {
         self.governs.read().ok()?.get(plugin_id).cloned()
     }
 
-    /// What keeps a submission of `contest_type` on a problem of
-    /// `problem_type`, in `status`, parked, if anything: one not yet
-    /// finished that cannot run now ([`Self::closed_by`]) waits queued until
-    /// a provider is enabled (see `work_runnable`).
+    /// What keeps a submission with `needs`, in `status`, parked, if
+    /// anything: one not yet finished that cannot run now
+    /// ([`Self::closed_by`]) waits queued until a provider is enabled (see
+    /// `providers::runnable`).
     pub fn parked_by(
         &self,
-        contest_type: &str,
-        problem_type: &str,
+        needs: Needs<'_>,
         status: common::SubmissionStatus,
     ) -> Option<PluginOutage> {
         if status.is_terminal() {
             return None;
         }
-        self.closed_by(contest_type, problem_type)
+        self.closed_by(needs)
             .map(|plugin_id| PluginOutage::Disabled { plugin_id })
     }
 
-    /// The plugin that keeps work of `contest_type` on a problem of
-    /// `problem_type` from running: its contest type's, else its problem
-    /// type's ([`Self::disabled_provider`]). `None` when both have an enabled
-    /// provider (or none was ever recorded).
-    pub fn closed_by(&self, contest_type: &str, problem_type: &str) -> Option<String> {
-        self.disabled_provider(Provided::ContestType, contest_type)
-            .or_else(|| self.disabled_provider(Provided::ProblemType, problem_type))
+    /// The plugin that keeps work with `needs` from running: the disabled
+    /// provider ([`Self::disabled_provider`]) of the first of its keys, in
+    /// [`Provided::ALL`] order, that has one. `None` when every key has an
+    /// enabled provider (or none was ever recorded). `providers::runnable`
+    /// states the same rule in SQL.
+    pub fn closed_by(&self, needs: Needs<'_>) -> Option<String> {
+        needs
+            .each()
+            .into_iter()
+            .find_map(|(kind, key)| self.disabled_provider(kind, key))
     }
 
     /// The plugin that keeps `key` (a `kind` of key) closed: every plugin
@@ -297,7 +270,7 @@ impl PluginLifecycle {
         let governs = self.governs.read().ok()?;
         let mut providers: Vec<&String> = governs
             .iter()
-            .filter(|(_, g)| g.provides(kind, key))
+            .filter(|(_, g)| g.provides.provides(kind, key))
             .map(|(id, _)| id)
             .collect();
         if providers.iter().any(|id| self.is_desired_enabled(id)) {
@@ -307,7 +280,7 @@ impl PluginLifecycle {
         providers.first().map(|id| (*id).clone())
     }
 
-    // `work_runnable` below states the same rule in SQL over the rows this
+    // `providers::runnable` states the same rule in SQL over the rows this
     // reads (`plugin.is_enabled`, `plugin.governs`); change them together.
 
     /// Why plugin `plugin_id`, known not to be loaded here, cannot serve:
@@ -346,32 +319,6 @@ impl PluginLifecycle {
     }
 }
 
-/// SQL: whether work of the contest type `contest_type` on a problem of the
-/// type `problem_type` (both SQL expressions) may run now, as
-/// [`PluginLifecycle::closed_by`] decides it: unless every plugin that
-/// recorded the contest type, or every plugin that recorded the problem
-/// type's evaluator, is disabled fleet-wide. Work that cannot run because a
-/// provider was disabled on purpose is parked: it stays queued, unclaimed
-/// and unretried, and resumes once a provider is enabled again. A key no
-/// plugin ever recorded is open, so whoever takes the work fails it visibly.
-pub(crate) fn work_runnable(contest_type: &str, problem_type: &str) -> String {
-    format!(
-        "({} AND {})",
-        provider_enabled(Provided::ContestType, contest_type),
-        provider_enabled(Provided::ProblemType, problem_type),
-    )
-}
-
-/// SQL: some plugin that recorded `key` (an SQL expression) as a `kind` is
-/// enabled, or none ever recorded it.
-fn provider_enabled(kind: Provided, key: &str) -> String {
-    format!(
-        "COALESCE((SELECT bool_or(p.is_enabled) FROM plugin p \
-                    WHERE p.governs->'{field}' @> jsonb_build_array({key})), TRUE)",
-        field = kind.field(),
-    )
-}
-
 /// Why contests of `contest_type` cannot be served on this replica, if they
 /// cannot: the plugin providing the type is disabled fleet-wide, or no
 /// handler for it is loaded here. Submissions to such a contest are refused
@@ -392,19 +339,19 @@ pub async fn contest_type_outage(state: &AppState, contest_type: &str) -> Option
     (!registered).then_some(PluginOutage::Unavailable)
 }
 
-/// The handler a new submission or code run of `contest_type` on a problem
-/// of `problem_type` is accepted through, or why none can take it now: the
-/// one acceptance rule of every submit path, contest or practice. A contest
-/// type whose provider is disabled fleet-wide is closed
-/// (`CONTEST_TYPE_DISABLED`), and so is a problem type whose evaluator
-/// plugin is (`PLUGIN_DISABLED`); a contest type with no handler loaded here
+/// The handler a new submission or code run with `needs` is accepted
+/// through, or why none can take it now: the one acceptance rule of every
+/// submit path, contest or practice. A contest type whose provider is
+/// disabled fleet-wide is closed (`CONTEST_TYPE_DISABLED`), and so is work
+/// whose problem type's evaluator or checker format's plugin is
+/// (`PLUGIN_DISABLED`, naming it); a contest type with no handler loaded here
 /// is briefly unavailable (`CONTEST_TYPE_UNAVAILABLE`, retry later).
 /// Accepting any of them would park the work unseen.
 pub async fn accepting_handler(
     state: &AppState,
-    contest_type: &str,
-    problem_type: &str,
+    needs: Needs<'_>,
 ) -> Result<crate::registry::ContestTypeHandlers, AppError> {
+    let contest_type = needs.contest_type;
     let handler = match contest_type_outage(state, contest_type).await {
         Some(PluginOutage::Disabled { .. }) => {
             return Err(AppError::ContestTypeDisabled(contest_type.to_string()));
@@ -420,10 +367,7 @@ pub async fn accepting_handler(
     };
     let handler =
         handler.ok_or_else(|| AppError::ContestTypeUnavailable(contest_type.to_string()))?;
-    match state
-        .plugin_lifecycle
-        .disabled_provider(Provided::ProblemType, problem_type)
-    {
+    match state.plugin_lifecycle.closed_by(needs) {
         Some(plugin_id) => Err(AppError::PluginDisabled(plugin_id)),
         None => Ok(handler),
     }
@@ -574,11 +518,11 @@ fn build_report(
 /// pass. The row's heartbeat is [`heartbeat`]'s.
 async fn write_report(state: &AppState, applied: &HashMap<String, Applied>) {
     let report = build_report(state, applied, Instant::now());
-    let contest_types = crate::dispatcher::local_contest_types(state).await;
-    if !record_report(state, &report, &contest_types) {
+    let provides = Provides::loaded_here(&state.registries).await;
+    if !record_report(state, &report, &provides) {
         return;
     }
-    match plugin_fleet::report(&state.db, &state.config.server.id, &report, &contest_types).await {
+    match plugin_fleet::report(&state.db, &state.config.server.id, &report, &provides).await {
         Ok(()) => {
             if let Ok(mut reported) = state.plugin_lifecycle.reported.lock()
                 && let Some(last) = reported.as_mut()
@@ -594,16 +538,16 @@ async fn write_report(state: &AppState, applied: &HashMap<String, Applied>) {
 /// Keep `report` as this replica's latest, and say whether it is due to be
 /// written: it changed, or no write of it has succeeded yet. Never due once
 /// [`stop`] ran.
-fn record_report(state: &AppState, report: &ReplicaReport, contest_types: &[String]) -> bool {
+fn record_report(state: &AppState, report: &ReplicaReport, provides: &Provides) -> bool {
     let Ok(mut reported) = state.plugin_lifecycle.reported.lock() else {
         return false;
     };
     let written = reported.as_ref().is_some_and(|last| {
-        last.written && same_report(&last.report, report) && last.contest_types == contest_types
+        last.written && same_report(&last.report, report) && last.provides == *provides
     });
     *reported = Some(Reported {
         report: report.clone(),
-        contest_types: contest_types.to_vec(),
+        provides: provides.clone(),
         written,
     });
     !written
@@ -1019,31 +963,10 @@ async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
             })
         })
         .unwrap_or_default();
-    let mut contest_types: Vec<String> = state
-        .registries
-        .contest_type_registry
-        .read()
-        .await
-        .registered_by(plugin_id)
-        .into_iter()
-        .map(|(t, _)| t)
-        .collect();
-    contest_types.sort();
-    let mut problem_types: Vec<String> = state
-        .registries
-        .evaluator_registry
-        .read()
-        .await
-        .registered_by(plugin_id)
-        .into_iter()
-        .map(|(t, _)| t)
-        .collect();
-    problem_types.sort();
     Governs {
         visibility,
-        contest_types,
         host_locale,
-        problem_types,
+        provides: Provides::registered_by(&state.registries, plugin_id).await,
     }
 }
 

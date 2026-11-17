@@ -22,6 +22,7 @@ pub mod plugin_distribution;
 pub mod plugin_fleet;
 pub mod plugin_id;
 pub mod plugin_lifecycle;
+pub mod providers;
 pub mod registry;
 pub mod routes;
 pub mod runtime;

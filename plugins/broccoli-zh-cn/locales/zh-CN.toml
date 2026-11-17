@@ -1304,6 +1304,7 @@
 'apiError.OPERATION_LOST' = "消息队列重启时丢失了一个评测步骤，该步骤会重试。"
 'apiError.QUEUE_UNREACHABLE' = "某个评测步骤无法连接消息队列，将自动重试。"
 'apiError.PLATFORM_TOOL_MISSING' = "接收本次尝试的评测机缺少所需的平台工具。该尝试已退回队列，由具备该工具的评测机重新评测。"
+'apiError.PLUGIN_NOT_LOADED_HERE' = "评测它的服务器上不再加载它所需的插件；它会被重新评测。"
 'apiError.NO_CAPABLE_WORKER' = "没有在线评测机能够运行本次尝试：每台评测机都缺少平台工具。该尝试已退回队列，待有评测机具备所需工具后再评测。"
 'apiError.PLUGIN_REFUSED' = "评测插件拒绝了此提交。"
 'apiError.CHECKER_FAILED' = "本题的检查器自身出错（崩溃、被信号终止，或以其格式未定义的退出码退出）。每次尝试都会同样失败，因此不再重新评测此提交：请修复检查器后重新评测。"

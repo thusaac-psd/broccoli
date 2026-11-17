@@ -92,28 +92,27 @@ pub type ReplicaReport = BTreeMap<String, ReplicaPluginState>;
 /// when the report actually changed, so a periodic touch does not shift the
 /// retry times derived from it.
 ///
-/// `contest_types` are the contest types this replica can judge (see
-/// `crate::dispatcher::prefer_local_handler`).
+/// `provides` is what this replica has loaded, which work it can run (see
+/// `crate::providers::runs_here`).
 pub async fn report(
     db: &DatabaseConnection,
     server_id: &str,
     report: &ReplicaReport,
-    contest_types: &[String],
+    provides: &crate::providers::Provides,
 ) -> Result<(), DbErr> {
     let plugins = serde_json::to_value(report).map_err(|e| DbErr::Custom(e.to_string()))?;
-    let contest_types =
-        serde_json::to_value(contest_types).map_err(|e| DbErr::Custom(e.to_string()))?;
+    let provides = serde_json::to_value(provides).map_err(|e| DbErr::Custom(e.to_string()))?;
     db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        r#"INSERT INTO plugin_replica (server_id, plugins, contest_types, state_at, heartbeat_at)
+        r#"INSERT INTO plugin_replica (server_id, plugins, provides, state_at, heartbeat_at)
            VALUES ($1, $2, $3, NOW(), NOW())
            ON CONFLICT (server_id) DO UPDATE
              SET state_at = CASE WHEN plugin_replica.plugins = EXCLUDED.plugins
                                  THEN plugin_replica.state_at ELSE NOW() END,
                  plugins = EXCLUDED.plugins,
-                 contest_types = EXCLUDED.contest_types,
+                 provides = EXCLUDED.provides,
                  heartbeat_at = NOW()"#,
-        [server_id.into(), plugins.into(), contest_types.into()],
+        [server_id.into(), plugins.into(), provides.into()],
     ))
     .await?;
     Ok(())
@@ -175,7 +174,7 @@ pub async fn read(db: &DatabaseConnection) -> Result<FleetView, DbErr> {
     let rows = plugin_replica::Entity::find()
         .from_raw_sql(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"SELECT server_id, plugins, contest_types, state_at, heartbeat_at FROM plugin_replica
+            r#"SELECT server_id, plugins, provides, state_at, heartbeat_at FROM plugin_replica
                WHERE heartbeat_at > NOW() - make_interval(secs => $1)
                ORDER BY server_id"#,
             [(LIVE_WINDOW_SECS as f64).into()],

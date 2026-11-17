@@ -69,12 +69,15 @@ impl DispatchedUnit {
 pub struct LiveDispatches(Arc<Mutex<HashMap<DispatchedUnit, usize>>>);
 
 impl LiveDispatches {
-    /// Makes `unit` live until the returned entry is dropped.
-    pub fn enter(&self, unit: DispatchedUnit) -> LiveUnit {
+    /// Makes `unit` live until the returned entry is dropped. `needs_loaded`
+    /// says whether this replica had every plugin the unit needs loaded when
+    /// it claimed it (see [`Dispatch::not_loaded_here`]).
+    pub fn enter(&self, unit: DispatchedUnit, needs_loaded: bool) -> LiveUnit {
         *self.units().entry(unit).or_default() += 1;
         LiveUnit {
             live: self.clone(),
             unit,
+            needs_loaded,
         }
     }
 
@@ -99,11 +102,18 @@ impl LiveDispatches {
 pub struct LiveUnit {
     live: LiveDispatches,
     unit: DispatchedUnit,
+    needs_loaded: bool,
 }
 
 impl LiveUnit {
     pub fn unit(&self) -> DispatchedUnit {
         self.unit
+    }
+
+    /// Whether every plugin the unit needs was loaded here when it was
+    /// claimed.
+    pub fn needs_loaded(&self) -> bool {
+        self.needs_loaded
     }
 }
 
@@ -171,6 +181,23 @@ impl Dispatch {
         &self.0.faults
     }
 
+    /// Records that a plugin the unit needs (`what`) is not loaded here, if
+    /// that is this replica's fault: every plugin the unit needs was loaded
+    /// here when it was claimed, so the plugin is reloading or was unloaded
+    /// since, and the attempt is handed back
+    /// ([`DispatchFault::NotLoadedHere`]). A unit this replica took while
+    /// missing one (no live replica had it loaded) fails as its plugin being
+    /// missing, visibly. Returns whether it recorded the fault.
+    pub fn not_loaded_here(&self, what: &str) -> bool {
+        if self.0.live.needs_loaded {
+            self.0.faults.record(
+                super::fault::DispatchFault::NotLoadedHere,
+                format!("{what} is not loaded on this replica"),
+            );
+        }
+        self.0.live.needs_loaded
+    }
+
     /// Fresh call locals for a plugin call made for this dispatch.
     pub fn call_locals(&self) -> Arc<CallLocals> {
         let locals: Arc<CallLocals> = Arc::default();
@@ -221,8 +248,12 @@ mod tests {
     #[test]
     fn a_seeded_call_shares_the_dispatchs_faults() {
         let faults = DispatchFaults::default();
-        let locals =
-            Dispatch::new("p", LiveDispatches::default().enter(UNIT), faults.clone()).call_locals();
+        let locals = Dispatch::new(
+            "p",
+            LiveDispatches::default().enter(UNIT, true),
+            faults.clone(),
+        )
+        .call_locals();
         Dispatch::of(&locals)
             .expect("seeded")
             .faults()
@@ -238,7 +269,7 @@ mod tests {
         let dispatch = || {
             Dispatch::new(
                 "p",
-                LiveDispatches::default().enter(UNIT),
+                LiveDispatches::default().enter(UNIT, true),
                 DispatchFaults::default(),
             )
         };
@@ -269,5 +300,24 @@ mod tests {
             );
         }
         assert!(Dispatch::of(&CallLocals::default()).is_none());
+    }
+
+    /// A plugin missing mid-dispatch is recorded as this replica's fault,
+    /// losing the attempt, only for a unit claimed with every plugin loaded.
+    #[test]
+    fn a_plugin_lost_since_the_claim_is_this_replicas_fault() {
+        for needs_loaded in [true, false] {
+            let faults = DispatchFaults::default();
+            let dispatch = Dispatch::new(
+                "p",
+                LiveDispatches::default().enter(UNIT, needs_loaded),
+                faults.clone(),
+            );
+            assert_eq!(dispatch.not_loaded_here("the evaluator"), needs_loaded);
+            assert_eq!(
+                faults.lost().map(|r| r.fault),
+                needs_loaded.then_some(super::super::fault::DispatchFault::NotLoadedHere)
+            );
+        }
     }
 }

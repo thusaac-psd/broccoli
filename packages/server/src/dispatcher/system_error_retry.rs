@@ -71,11 +71,11 @@ pub async fn run(
 
 /// One scan. Rejudging on a replica without a handler for the contest type
 /// would only fail again, so a judgement is left to a replica that has one
-/// (see `dispatcher::prefer_local_handler`).
+/// (see `providers::runs_here`).
 async fn scan_once(
     state: &AppState,
     budget: RetryBudget,
 ) -> anyhow::Result<judging::SystemErrorPass> {
-    let local = super::local_contest_types(state).await;
+    let local = crate::providers::Provides::loaded_here(&state.registries).await;
     Ok(judging::retry_system_errors(&state.db, budget, SCAN_BATCH_SIZE, &local).await?)
 }

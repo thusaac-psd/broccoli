@@ -322,9 +322,9 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &state.metrics,
                 judgement_ref,
                 &faults,
-                DispatchFailure::judging(
-                    HostCode::NoHandlerRegistered,
-                    format!("No plugin registered for contest type {:?}", contest_type),
+                DispatchFailure::no_handler(
+                    live.needs_loaded(),
+                    format!("contest type {:?}", contest_type),
                 ),
             )
             .await;

@@ -33,7 +33,7 @@ use crate::hooks;
 use crate::models::problem::validate_contest_type;
 use crate::models::shared::{PageWindow, escape_like};
 use crate::models::submission::*;
-use crate::plugin_lifecycle::Provided;
+use crate::providers::{Needs, Provided};
 use crate::services::judging;
 use crate::state::AppState;
 use crate::utils::contest::{
@@ -185,8 +185,7 @@ pub async fn create_submission(
         Some(ref ct) => ct.clone(),
         None => problem.default_contest_type.clone(),
     };
-    crate::plugin_lifecycle::accepting_handler(&state, &contest_type, &problem.problem_type)
-        .await?;
+    crate::plugin_lifecycle::accepting_handler(&state, Needs::of(&contest_type, &problem)).await?;
 
     let attempt_id = uuid::Uuid::new_v4();
     let hook_event = BeforeSubmissionEvent {
@@ -780,7 +779,7 @@ pub async fn create_contest_submission(
     // The handler owns admission, so it is pinned here, before any hook
     // runs, to authorize hook effects through admission commit.
     let handler =
-        crate::plugin_lifecycle::accepting_handler(&state, &contest_type, &problem.problem_type)
+        crate::plugin_lifecycle::accepting_handler(&state, Needs::of(&contest_type, &problem))
             .await?;
     let admission_owner = handler
         .submission_admission

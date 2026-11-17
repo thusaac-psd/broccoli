@@ -87,6 +87,21 @@ work. A one-second fallback tick covers notifications lost while the
 listening connection was down; every reconnect also wakes the
 fiber.
 
+A replica claims only work it can run here. A unit needs one key of each
+kind plugins provide (`providers::Needs`): its contest type, its problem's
+type (the evaluator) and its problem's checker format. The claim, the
+system-error retry, the steal and the stuck detector take a unit only when
+this replica has every one of them loaded (`Provides::loaded_here`, read
+from its registries, so the check costs no round trip), or when no live
+replica has one loaded: then the replica that takes the unit fails it
+visibly instead of it waiting unseen (`providers::runs_here`). Each replica
+publishes what it has loaded in its `plugin_replica.provides` row. A unit
+this replica cannot run yet stays `Queued` for a replica that can, or for
+this one once it loads the plugin. A plugin that stops being loaded here
+after a unit was claimed with everything loaded (a reload, an unload) is
+this replica's fault, `PLUGIN_NOT_LOADED_HERE`: the attempt is handed back
+without spending any budget (`Dispatch::not_loaded_here`).
+
 ## Judging sessions end in a verdict
 
 A contest plugin judges a submission in a detached session: the host runs its
@@ -117,15 +132,16 @@ plugin yet.
 
 ## A disabled plugin parks the work that needs it
 
-A unit of work needs two plugins: the one that provides its contest type and
-the evaluator of its problem's type. It is parked while every plugin that
-recorded either key (`plugin.governs`, `contest_types` and `problem_types`)
-is disabled fleet-wide; `work_runnable` states that in SQL
+A unit of work needs three plugins: the one that provides its contest type,
+the evaluator of its problem's type and the checker of its problem's checker
+format. It is parked while every plugin that recorded one of those keys
+(`plugin.governs`: `contest_types`, `problem_types`, `checker_formats`) is
+disabled fleet-wide; `providers::runnable` states that in SQL
 (`judging::Unit::runnable` over a unit's scan) and
 `PluginLifecycle::closed_by` in Rust. Parked work waits `Queued` and resumes
 once a provider is enabled again. A new submission or code run that would be
 parked is refused: `503 CONTEST_TYPE_DISABLED` for its contest type,
-`503 PLUGIN_DISABLED` naming the evaluator for its problem type, neither with
+`503 PLUGIN_DISABLED` naming the evaluator or checker plugin, neither with
 `Retry-After`. A system error a plugin writes without a code is recorded as
 `PLUGIN_ERROR`, so none is shown without one:
 

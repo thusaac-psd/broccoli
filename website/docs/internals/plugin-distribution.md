@@ -51,9 +51,10 @@ have no worker section for the same reason.
 
 The row's `governs` column records what the published version governs: whether
 it declares a visibility query, every contest type its `init()` registered, and
-every problem type it registered an evaluator for. A server that cannot load
-the plugin reads it to fail closed for exactly that, and `work_runnable` reads
-it to tell which plugins provide a type. Every
+every problem type it registered an evaluator for and every checker format it
+registered a checker for. A server that cannot load the plugin reads it to
+fail closed for exactly that, and `providers::runnable` reads it to tell which
+plugins provide a key. Every
 change that loads a version (enable, reload, upload, removing an upload) writes
 it in the same statement that publishes the version, so a change refused at
 publish (`409 CONFLICT`, or a database error) leaves the record of the version

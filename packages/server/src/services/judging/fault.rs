@@ -22,6 +22,10 @@ use common::worker::OperationFault;
 pub enum DispatchFault {
     /// The platform lost one of its operations.
     Operation(OperationFault),
+    /// A plugin the unit needs, loaded on this replica when it claimed the
+    /// unit, is not loaded here any more (it is reloading or was unloaded):
+    /// the replica's fault, not the submission's.
+    NotLoadedHere,
     /// The problem's checker program failed (crashed, was killed by a
     /// signal, exited with a code its format gives no meaning), as its
     /// checker plugin reported through `CheckerVerdict::checker_failure`.
@@ -37,6 +41,7 @@ impl DispatchFault {
     pub fn code(self) -> HostCode {
         match self {
             Self::Operation(fault) => fault.code(),
+            Self::NotLoadedHere => HostCode::PluginNotLoadedHere,
             Self::CheckerFailed => HostCode::CheckerFailed,
             Self::ProblemFailed => HostCode::ProblemFailed,
         }
@@ -109,8 +114,9 @@ pub(crate) enum SystemErrorClass {
     /// system-error budget lasts.
     Judging,
     /// The platform lost the attempt (the queue was unreachable or lost an
-    /// operation, the worker that took it lacks a platform tool, or no worker
-    /// could take it): handed back to the queue at once, spending no budget,
+    /// operation, the worker that took it lacks a platform tool, no worker
+    /// could take it, or a plugin it needs stopped being loaded on the
+    /// replica that claimed it): handed back to the queue at once, spending no budget,
     /// and never finalized (see [`DispatchFaults::lost`]). A worker without
     /// its platform tools takes no work, so the next attempt goes to one that
     /// has them.
@@ -129,7 +135,8 @@ impl SystemErrorClass {
                 | OperationFault::OperationLost
                 | OperationFault::PlatformToolMissing
                 | OperationFault::NoCapableWorker,
-            ) => Self::HandBack,
+            )
+            | DispatchFault::NotLoadedHere => Self::HandBack,
             DispatchFault::CheckerFailed | DispatchFault::ProblemFailed => Self::Stands,
         }
     }
@@ -235,6 +242,14 @@ impl CallEnd {
         let bytes = match result {
             Ok(bytes) => bytes,
             Err(plugin_core::error::PluginError::ShuttingDown) => return Self::ShuttingDown,
+            // Its plugin was loaded when the unit was claimed, since the
+            // handler was registered, and is not now.
+            Err(e @ plugin_core::error::PluginError::NotLoaded(_)) => {
+                return Self::Failed(DispatchFailure::from(Recorded {
+                    fault: DispatchFault::NotLoadedHere,
+                    message: e.to_string(),
+                }));
+            }
             Err(e) if e.is_unavailable() => {
                 return Self::Failed(DispatchFailure::judging(
                     HostCode::PluginUnavailable,
@@ -265,6 +280,26 @@ impl CallEnd {
                 "The platform lost the attempt",
             )),
             None => Self::Handled,
+        }
+    }
+}
+
+impl DispatchFailure {
+    /// The dispatch's contest plugin, `what`, has no handler registered
+    /// here. A unit claimed with every plugin it needs loaded here lost it
+    /// since ([`DispatchFault::NotLoadedHere`], handed back); one claimed
+    /// while no live replica had it loaded fails as having no handler.
+    pub(crate) fn no_handler(needs_loaded: bool, what: String) -> Self {
+        if needs_loaded {
+            Self::from(Recorded {
+                fault: DispatchFault::NotLoadedHere,
+                message: format!("{what} is not loaded on this replica"),
+            })
+        } else {
+            Self::judging(
+                HostCode::NoHandlerRegistered,
+                format!("No plugin registered for {what}"),
+            )
         }
     }
 }
@@ -311,7 +346,8 @@ mod tests {
 
     /// Every way a plugin call fails maps to one outcome, the same for a
     /// judgement and a code run: a call the host could not serve is
-    /// unavailable, whatever made it so.
+    /// unavailable, whatever made it so, except a plugin that is not loaded
+    /// here any more, which is this replica's fault and hands the unit back.
     #[test]
     fn a_plugin_call_error_maps_to_one_dispatch_outcome() {
         use plugin_core::error::PluginError;
@@ -320,7 +356,6 @@ mod tests {
                 plugin_id: "p".into(),
                 func_name: "f".into(),
             },
-            PluginError::NotLoaded("p".into()),
             PluginError::InstanceBuild {
                 plugin_id: "p".into(),
                 message: "oom".into(),
@@ -329,6 +364,11 @@ mod tests {
         for e in unavailable {
             assert_eq!(code(end(Err(e))), HostCode::PluginUnavailable);
         }
+        let CallEnd::Failed(unloaded) = end(Err(PluginError::NotLoaded("p".into()))) else {
+            panic!("failed");
+        };
+        assert_eq!(unloaded.code, HostCode::PluginNotLoadedHere);
+        assert_eq!(unloaded.class, SystemErrorClass::HandBack);
         let failed = PluginError::ExecutionFailed {
             plugin_id: "p".into(),
             func_name: "f".into(),
@@ -356,6 +396,23 @@ mod tests {
             code(run),
             HostCode::PluginError,
             "a lost attempt fails, to be handed back"
+        );
+    }
+
+    /// A contest handler missing here is this replica's fault only for a
+    /// unit it claimed with every plugin loaded: handed back. One it took
+    /// while no live replica had the plugin fails visibly.
+    #[test]
+    fn a_missing_handler_hands_back_only_what_was_claimed_loaded() {
+        let lost = DispatchFailure::no_handler(true, "contest type x".into());
+        assert_eq!(
+            (lost.code, lost.class),
+            (HostCode::PluginNotLoadedHere, SystemErrorClass::HandBack)
+        );
+        let missing = DispatchFailure::no_handler(false, "contest type x".into());
+        assert_eq!(
+            (missing.code, missing.class),
+            (HostCode::NoHandlerRegistered, SystemErrorClass::Judging)
         );
     }
 

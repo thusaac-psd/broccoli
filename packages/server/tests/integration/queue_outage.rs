@@ -245,11 +245,14 @@ async fn operation_deps(slots: &WorkerSlots, faults: &DispatchFaults) -> Operati
         judgement: None,
         dispatch: Some(Dispatch::new(
             "hand-back-plugin",
-            LiveDispatches::default().enter(DispatchedUnit::Judgement {
-                submission_id: 1,
-                judgement_id: 1,
-                judge_epoch: 0,
-            }),
+            LiveDispatches::default().enter(
+                DispatchedUnit::Judgement {
+                    submission_id: 1,
+                    judgement_id: 1,
+                    judge_epoch: 0,
+                },
+                true,
+            ),
             faults.clone(),
         )),
         worker_slots: slots.clone(),

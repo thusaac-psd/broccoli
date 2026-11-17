@@ -1,3 +1,4 @@
+use crate::providers::Needs;
 use common::db::DatabaseConnection;
 use std::collections::HashMap;
 
@@ -77,11 +78,9 @@ pub(super) async fn build_submission_list_items(
             time_used: sub.time_used,
             memory_used: sub.memory_used,
             withheld: None,
-            plugin_outage: state.plugin_lifecycle.parked_by(
-                &sub.contest_type,
-                &problem_model.problem_type,
-                sub.status,
-            ),
+            plugin_outage: state
+                .plugin_lifecycle
+                .parked_by(Needs::of(&sub.contest_type, problem_model), sub.status),
         });
     }
 
@@ -395,6 +394,7 @@ struct SubmissionContext {
     username: String,
     problem_title: String,
     problem_type: String,
+    checker_format: String,
     show_test_details: bool,
     contest: Option<contest::Model>,
     current_judgement_id: Option<i32>,
@@ -405,7 +405,7 @@ impl SubmissionContext {
         let row = db
             .query_one_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                r#"SELECT u.username, p.title, p.problem_type, p.show_test_details,
+                r#"SELECT u.username, p.title, p.problem_type, p.checker_format, p.show_test_details,
                           CASE WHEN c.id IS NULL THEN NULL ELSE to_jsonb(c) END AS contest,
                           (SELECT j.id FROM submission_judgement j
                            WHERE j.submission_id = $3 AND j.is_current) AS current_judgement_id
@@ -434,6 +434,7 @@ impl SubmissionContext {
             username: row.try_get("", "username")?,
             problem_title: row.try_get("", "title")?,
             problem_type: row.try_get("", "problem_type")?,
+            checker_format: row.try_get("", "checker_format")?,
             show_test_details: row.try_get("", "show_test_details")?,
             contest,
             current_judgement_id: row.try_get("", "current_judgement_id")?,
@@ -555,8 +556,11 @@ pub(super) async fn build_submission_response_with_cases(
         result: result_response,
         withheld: None,
         plugin_outage: state.plugin_lifecycle.parked_by(
-            &sub.contest_type,
-            &context.problem_type,
+            Needs {
+                contest_type: &sub.contest_type,
+                problem_type: &context.problem_type,
+                checker_format: &context.checker_format,
+            },
             sub.status,
         ),
     })

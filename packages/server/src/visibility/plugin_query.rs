@@ -36,7 +36,7 @@
 //! `host_rules::host_decide` - only for the resources the host did not
 //! already `Deny`.
 
-use crate::plugin_lifecycle::Provided;
+use crate::providers::Provided;
 use broccoli_api_types::visibility::PluginOutage;
 use broccoli_server_sdk::types::{
     QueryContext, QueryResource, QuerySubject, VisibilityQueryInput, VisibilityQueryOutput,
@@ -94,8 +94,8 @@ pub enum ResourceScope {
 impl QuerierScope {
     fn of(state: &AppState, plugin_id: &str) -> Self {
         match state.plugin_lifecycle.governs(plugin_id) {
-            Some(g) if !g.contest_types.is_empty() => {
-                QuerierScope::ContestTypes(g.contest_types.into_iter().collect())
+            Some(g) if !g.provides.contest_types.is_empty() => {
+                QuerierScope::ContestTypes(g.provides.contest_types.into_iter().collect())
             }
             _ => QuerierScope::Everything,
         }
@@ -234,7 +234,7 @@ fn visibility_queriers(state: &AppState) -> Result<(Vec<VisibilityQuerier>, Blin
             };
             match recorded {
                 _ if !declares => continue,
-                Some(g) if !g.contest_types.is_empty() => Some(g.contest_types),
+                Some(g) if !g.provides.contest_types.is_empty() => Some(g.provides.contest_types),
                 _ => None,
             }
         } else {
@@ -242,6 +242,7 @@ fn visibility_queriers(state: &AppState) -> Result<(Vec<VisibilityQuerier>, Blin
             // provides is served, and that provider governs it now.
             let closed: Vec<String> = match recorded {
                 Some(g) if g.visibility => g
+                    .provides
                     .contest_types
                     .into_iter()
                     .filter(|t| {

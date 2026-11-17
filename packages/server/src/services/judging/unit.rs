@@ -9,10 +9,9 @@ use sea_orm::{ConnectionTrait, DbBackend, DbErr, EntityTrait, Statement, Transac
 use super::RetryBudget;
 use super::dispatch::DispatchedUnit;
 use super::fault::{DispatchFailure, SystemErrorClass};
-use crate::dispatcher::prefer_local_handler;
 use crate::dlq::{DlqService, DlqSubject};
 use crate::entity::{code_run, submission, submission_judgement};
-use crate::plugin_lifecycle::work_runnable;
+use crate::providers::{LocalPlaceholders, Provided, Provides};
 
 /// The kind of row the dispatcher judges.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,30 +51,49 @@ impl Unit {
         }
     }
 
-    /// The unit's contest type, as SQL over a [`Unit::scan_from`] scan.
-    pub(crate) fn contest_type(self) -> &'static str {
+    /// The keys the unit needs a provider of (`providers::Needs`), each as
+    /// SQL over a [`Unit::scan_from`] scan: its contest type, and its
+    /// problem's type and checker format.
+    fn needs(self) -> [(Provided, &'static str); 3] {
         match self {
-            Unit::Judgement => "s.contest_type",
-            Unit::CodeRun => "u.contest_type",
-        }
-    }
-
-    /// The type of the unit's problem, as SQL over a [`Unit::scan_from`]
-    /// scan.
-    fn problem_type(self) -> &'static str {
-        match self {
-            Unit::Judgement => {
-                "(SELECT pt.problem_type FROM problem pt WHERE pt.id = s.problem_id)"
-            }
-            Unit::CodeRun => "(SELECT pt.problem_type FROM problem pt WHERE pt.id = u.problem_id)",
+            Unit::Judgement => [
+                (Provided::ContestType, "s.contest_type"),
+                (
+                    Provided::ProblemType,
+                    "(SELECT pt.problem_type FROM problem pt WHERE pt.id = s.problem_id)",
+                ),
+                (
+                    Provided::CheckerFormat,
+                    "(SELECT pt.checker_format FROM problem pt WHERE pt.id = s.problem_id)",
+                ),
+            ],
+            Unit::CodeRun => [
+                (Provided::ContestType, "u.contest_type"),
+                (
+                    Provided::ProblemType,
+                    "(SELECT pt.problem_type FROM problem pt WHERE pt.id = u.problem_id)",
+                ),
+                (
+                    Provided::CheckerFormat,
+                    "(SELECT pt.checker_format FROM problem pt WHERE pt.id = u.problem_id)",
+                ),
+            ],
         }
     }
 
     /// SQL over a [`Unit::scan_from`] scan: the unit may run now, every
-    /// plugin it needs having an enabled provider ([`work_runnable`]). A unit
-    /// that may not is parked.
+    /// key it needs having a provider enabled fleet-wide
+    /// ([`crate::providers::runnable`]). A unit that may not is parked.
     pub(crate) fn runnable(self) -> String {
-        work_runnable(self.contest_type(), self.problem_type())
+        crate::providers::runnable(self.needs())
+    }
+
+    /// SQL over a [`Unit::scan_from`] scan: this replica may take the unit,
+    /// having every key it needs loaded, or no live replica having one
+    /// ([`crate::providers::runs_here`]); `local` binds what this replica
+    /// has loaded.
+    fn runs_here(self, local: &LocalPlaceholders) -> String {
+        crate::providers::runs_here(self.needs(), local)
     }
 
     /// `SET` items, each led by `, `, that claiming a row of this unit adds to
@@ -351,9 +369,15 @@ pub(crate) struct ClaimedJudgement {
 /// A unit the claim fiber takes, as its dispatch carries it.
 pub(crate) trait ClaimedUnit {
     fn dispatched(&self) -> DispatchedUnit;
+    /// The contest type it is judged under.
+    fn contest_type(&self) -> &str;
 }
 
 impl ClaimedUnit for ClaimedJudgement {
+    fn contest_type(&self) -> &str {
+        &self.submission.contest_type
+    }
+
     fn dispatched(&self) -> DispatchedUnit {
         DispatchedUnit::Judgement {
             submission_id: self.judgement.submission_id,
@@ -364,6 +388,10 @@ impl ClaimedUnit for ClaimedJudgement {
 }
 
 impl ClaimedUnit for code_run::Model {
+    fn contest_type(&self) -> &str {
+        &self.contest_type
+    }
+
     fn dispatched(&self) -> DispatchedUnit {
         DispatchedUnit::CodeRun {
             code_run_id: self.id,
@@ -378,8 +406,21 @@ pub(crate) struct Claim<T> {
     pub unit: T,
     /// Its problem's type (`problem.problem_type`).
     pub problem_type: String,
+    /// Its problem's checker format (`problem.checker_format`).
+    pub checker_format: String,
     /// Seconds from its creation to the claim, on the database clock.
     pub queued_secs: f64,
+}
+
+impl<T: ClaimedUnit> Claim<T> {
+    /// What the unit needs a provider of, as the claim read it.
+    pub(crate) fn needs(&self) -> crate::providers::Needs<'_> {
+        crate::providers::Needs {
+            contest_type: self.unit.contest_type(),
+            problem_type: &self.problem_type,
+            checker_format: &self.checker_format,
+        }
+    }
 }
 
 /// What one claim statement took.
@@ -426,11 +467,11 @@ fn in_flight_count(owner: &str) -> String {
 /// the cap left (`claim_room`) and the `plugin_config` change counter
 /// (`claim_epoch`); with nothing claimed it is that row alone, its unit
 /// columns NULL.
-fn claim_statement(unit: Unit, server_id: &str, limit: ClaimLimit, local: &[String]) -> Statement {
+fn claim_statement(unit: Unit, server_id: &str, limit: ClaimLimit, local: &Provides) -> Statement {
     let mut b = Binds::default();
     let rows = b.bind(i64::from(limit.rows));
     let owner = b.bind(server_id);
-    let local = b.bind(local.to_vec());
+    let local = LocalPlaceholders::bind(local, |keys| b.bind(keys));
     let (room, take) = match limit.in_flight_cap {
         Some(cap) => (
             format!(
@@ -466,14 +507,14 @@ fn claim_statement(unit: Unit, server_id: &str, limit: ClaimLimit, local: &[Stri
                             lease_heartbeat_at = NOW(), leased_at = NOW(){claim_sets} \
                         FROM picked WHERE t.id = picked.id RETURNING t.*){mirror} \
          SELECT room.n AS claim_room, (SELECT last_value FROM {epoch}) AS claim_epoch, \
-                p.problem_type AS claim_problem_type, \
+                p.problem_type AS claim_problem_type, p.checker_format AS claim_checker_format, \
                 GREATEST(EXTRACT(EPOCH FROM NOW() - moved.created_at), 0)::float8 \
                     AS claim_queued_secs, \
                 moved.*{columns} \
          FROM room LEFT JOIN moved ON TRUE {joins}",
         from = unit.scan_from(),
         queued = crate::dispatcher::QUEUED_PREDICATE,
-        handled = prefer_local_handler(unit.contest_type(), &local),
+        handled = unit.runs_here(&local),
         open = unit.runnable(),
         lock = unit.scan_lock(),
         table = unit.table(),
@@ -493,7 +534,7 @@ async fn run_claim<T>(
     unit: Unit,
     server_id: &str,
     limit: ClaimLimit,
-    local: &[String],
+    local: &Provides,
     parse: impl Fn(&sea_orm::QueryResult) -> Result<T, DbErr>,
 ) -> Result<Claimed<T>, DbErr> {
     let none = Claimed {
@@ -529,6 +570,9 @@ async fn run_claim<T>(
                     problem_type: row
                         .try_get::<Option<String>>("", "claim_problem_type")?
                         .unwrap_or_else(|| "unknown".into()),
+                    checker_format: row
+                        .try_get::<Option<String>>("", "claim_checker_format")?
+                        .unwrap_or_default(),
                     queued_secs: row.try_get("", "claim_queued_secs")?,
                 })
             })
@@ -548,13 +592,13 @@ async fn run_claim<T>(
 }
 
 /// Claims queued judgements for `server_id` within `limit`: `Queued` →
-/// `Pending`, owned, with a fresh lease. `local` is the contest types this
-/// replica handles (see [`crate::dispatcher::prefer_local_handler`]).
+/// `Pending`, owned, with a fresh lease. `local` is what this replica has
+/// loaded: it takes only work it can run (see [`crate::providers::runs_here`]).
 pub(crate) async fn claim_judgements(
     db: &DatabaseConnection,
     server_id: &str,
     limit: ClaimLimit,
-    local: &[String],
+    local: &Provides,
 ) -> Result<Claimed<ClaimedJudgement>, DbErr> {
     use sea_orm::FromQueryResult;
     run_claim(db, Unit::Judgement, server_id, limit, local, |row| {
@@ -572,7 +616,7 @@ pub(crate) async fn claim_code_runs(
     db: &DatabaseConnection,
     server_id: &str,
     limit: ClaimLimit,
-    local: &[String],
+    local: &Provides,
 ) -> Result<Claimed<code_run::Model>, DbErr> {
     use sea_orm::FromQueryResult;
     run_claim(db, Unit::CodeRun, server_id, limit, local, |row| {
@@ -944,7 +988,7 @@ pub(crate) async fn reclaim_abandoned(
     abandoned: Abandoned,
     budget: RetryBudget,
     batch: u32,
-    local: &[String],
+    local: &Provides,
 ) -> Result<Reclaimed, DbErr> {
     let batch = batch.max(1);
     let mut total = Reclaimed::default();
@@ -964,16 +1008,16 @@ async fn reclaim_batch(
     abandoned: Abandoned,
     budget: RetryBudget,
     limit: u32,
-    local: &[String],
+    local: &Provides,
 ) -> Result<(usize, Reclaimed), DbErr> {
     let txn = db.begin().await?;
     let mut b = Binds::default();
     let predicate = abandoned.predicate(&mut b);
-    let local = b.bind(local.to_vec());
+    let local = LocalPlaceholders::bind(local, |keys| b.bind(keys));
     let filter = format!(
         "u.status IN {in_flight} AND {predicate} AND {handled}",
         in_flight = StatusPhase::InFlight.sql_list(),
-        handled = prefer_local_handler(unit.contest_type(), &local),
+        handled = unit.runs_here(&local),
     );
     let picked = pick(&txn, unit, b, filter, Some(limit)).await?;
     let taken = picked.len();
@@ -1119,17 +1163,17 @@ pub(crate) async fn retry_system_errors(
     db: &DatabaseConnection,
     budget: RetryBudget,
     limit: u32,
-    local: &[String],
+    local: &Provides,
 ) -> Result<SystemErrorPass, DbErr> {
     let txn = db.begin().await?;
     let mut b = Binds::default();
     let max = b.bind(budget.max());
-    let local = b.bind(local.to_vec());
+    let local = LocalPlaceholders::bind(local, |keys| b.bind(keys));
     let filter = format!(
         "u.is_current AND {undecided} \
          AND ({handled} OR ({open} AND s.system_error_retries >= {max}))",
         undecided = awaits_retry_decision("u", "s"),
-        handled = prefer_local_handler("s.contest_type", &local),
+        handled = Unit::Judgement.runs_here(&local),
         open = Unit::Judgement.runnable(),
     );
     let picked = pick(&txn, Unit::Judgement, b, filter, Some(limit)).await?;

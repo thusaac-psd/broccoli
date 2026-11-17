@@ -1303,6 +1303,7 @@
 'apiError.OPERATION_LOST' = "A judging step was lost when the message queue restarted; it is retried."
 'apiError.QUEUE_UNREACHABLE' = "A judging step could not reach the message queue; it is retried."
 'apiError.PLATFORM_TOOL_MISSING' = "The worker that took this attempt lacks a platform tool it needs. The attempt goes back to the queue for a worker that has it."
+'apiError.PLUGIN_NOT_LOADED_HERE' = "A plugin this needs stopped being loaded on the server judging it; it is judged again."
 'apiError.NO_CAPABLE_WORKER' = "No live worker can run this attempt: every one lacks a platform tool. The attempt goes back to the queue and is judged once a worker has its tools."
 'apiError.PLUGIN_REFUSED' = "The judging plugin refused this submission."
 'apiError.CHECKER_FAILED' = "The problem's checker failed (it crashed, was killed by a signal, or exited with a code its format does not define). Every attempt would fail the same way, so the submission is not judged again: fix the checker, then rejudge."
