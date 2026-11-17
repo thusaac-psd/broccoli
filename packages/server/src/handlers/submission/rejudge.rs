@@ -38,7 +38,7 @@ use crate::services::judging::{
     self, ApplyJudgement, DiscardJudgement, OpenJudgement, apply_judgement, discard_judgement,
     open_judgement,
 };
-use crate::services::submission_dispatch::spawn_after_judging_hooks;
+use crate::services::submission_dispatch::{ResultShown, spawn_after_judging_hooks};
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, is_problem_in_contest, required_contest_type};
 use crate::utils::judging::{files_to_json, validate_code_payload, validate_submission_contract};
@@ -78,8 +78,11 @@ pub async fn apply_submission_judgement(
     auth_user.require_permission(perm::SUBMISSION_REJUDGE)?;
 
     let txn = state.db.begin().await?;
-    let updated = match apply_judgement(&txn, id, judgement_id).await? {
-        ApplyJudgement::Applied(updated) => *updated,
+    let (updated, generation) = match apply_judgement(&txn, id, judgement_id).await? {
+        ApplyJudgement::Applied {
+            submission,
+            generation,
+        } => (*submission, generation),
         ApplyJudgement::SubmissionNotFound => {
             return Err(AppError::NotFound("Submission not found".into()));
         }
@@ -99,13 +102,7 @@ pub async fn apply_submission_judgement(
     };
     txn.commit().await?;
 
-    spawn_after_judging_hooks(
-        &state,
-        updated.id,
-        updated.user_id,
-        updated.problem_id,
-        updated.contest_id,
-    );
+    spawn_after_judging_hooks(&state, updated.id, ResultShown::Applied { generation });
 
     let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
     let response = build_submission_response(&state, updated, visibility).await?;

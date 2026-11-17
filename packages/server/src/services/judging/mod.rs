@@ -62,8 +62,9 @@
 //!
 //! # Epochs
 //!
-//! A judge epoch is the fencing token of one dispatch of one unit. Every
-//! judgement epoch is allocated from `submission.max_judge_epoch`, bumped in
+//! A judge epoch is the fencing token of one dispatch of one unit and names
+//! the attempt its results belong to; applying a judgement keeps its epoch
+//! (see `apply_judgement`). Every judgement epoch is allocated from `submission.max_judge_epoch`, bumped in
 //! SQL inside an UPDATE of the submission row, so concurrent allocators for
 //! one submission serialize on its row lock and two judgements of a
 //! submission never share an epoch. A code run has one row per run, so its

@@ -53,9 +53,7 @@ pub async fn run(
                             crate::services::submission_dispatch::spawn_after_judging_hooks(
                                 &state,
                                 c.submission_id,
-                                c.user_id,
-                                c.problem_id,
-                                c.contest_id,
+                                crate::services::submission_dispatch::ResultShown::Judged,
                             );
                         }
                     }

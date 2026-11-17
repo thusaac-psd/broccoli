@@ -871,8 +871,11 @@ async fn a_contestant_verdict_or_a_failure_that_stands_is_never_retried() {
     }
 }
 
+/// An applied judgement keeps its epoch and with it every result keyed by
+/// it; the submission shows that epoch, and the apply's generation is a
+/// fresh allocation.
 #[tokio::test]
-async fn applying_a_deferred_judgement_moves_its_results_to_a_fresh_epoch() {
+async fn applying_a_judgement_keeps_its_epoch_and_its_results() {
     let (_pg, db) = crate::test_support::postgres().await;
     let (s, j1) = new_submission(&db).await;
     claim_one(&db, "srv").await;
@@ -882,24 +885,28 @@ async fn applying_a_deferred_judgement_moves_its_results_to_a_fresh_epoch() {
     finish(&db, &deferred, Verdict::Accepted).await;
 
     let txn = db.begin().await.unwrap();
-    let ApplyJudgement::Applied(applied) = apply_judgement(&txn, s.id, deferred.id).await.unwrap()
+    let ApplyJudgement::Applied {
+        submission: applied,
+        generation,
+    } = apply_judgement(&txn, s.id, deferred.id).await.unwrap()
     else {
         panic!("applied");
     };
     txn.commit().await.unwrap();
     let j = judgement(&db, deferred.id).await;
     assert!(j.is_current);
-    assert!(j.judge_epoch > deferred.judge_epoch);
+    assert_eq!(j.judge_epoch, deferred.judge_epoch, "its own epoch");
     assert_eq!(applied.judge_epoch, j.judge_epoch);
+    assert!(generation > deferred.judge_epoch, "a fresh allocation");
     assert_eq!(applied.status, SubmissionStatus::Judged);
     assert_eq!(applied.verdict, Some(Verdict::Accepted));
-    let moved = test_case_result::Entity::find()
+    let kept = test_case_result::Entity::find()
         .filter(test_case_result::Column::JudgementId.eq(deferred.id))
         .filter(test_case_result::Column::JudgeEpoch.eq(j.judge_epoch))
         .count(&db)
         .await
         .unwrap();
-    assert_eq!(moved, 1);
+    assert_eq!(kept, 1);
 }
 
 async fn new_code_run(db: &DatabaseConnection) -> code_run::Model {

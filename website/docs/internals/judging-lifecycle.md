@@ -189,12 +189,14 @@ and a terminal status is final.
 
 ## Judge epochs
 
-A judge epoch is the fencing token of one dispatch of one unit. Plugin
-writes, dispatch failures and the `after_judging:{id}:{epoch}` hook dedupe key
+A judge epoch is the fencing token of one dispatch of one unit, and the
+identity of the attempt its results belong to. Plugin writes, dispatch
+failures, result rows and the `after_judging:{id}:{epoch}` hook dedupe key
 are keyed on it.
 
-- Two judgements of one submission never share an epoch, and a submission's
-  `judge_epoch` never moves backwards.
+- Two judgements of one submission never share an epoch, and a judgement's
+  epoch never moves backwards. The submission shows its current judgement's
+  epoch, so applying an earlier judgement shows that judgement's epoch again.
 - `submission.max_judge_epoch` is the allocator. Every judgement epoch is
   allocated by bumping it inside an UPDATE of the submission row, so the row
   lock serializes concurrent allocators. A code run has one row per run and
@@ -203,8 +205,13 @@ are keyed on it.
   dispatch it replaced is rejected.
 - A judgement's `test_case_result` rows carry the judgement's own epoch.
   Plugins join results to their judgement on it (IOI's
-  `sj.judge_epoch = tcr.judge_epoch`). `apply_judgement` gives the applied
-  judgement a fresh epoch and moves its kept results to it.
+  `sj.judge_epoch = tcr.judge_epoch`), and a plugin keys the rows it stores
+  for a judgement by (judgement, epoch) the same way. `apply_judgement` keeps
+  the applied judgement's epoch, so every result row, the host's and every
+  plugin's, stays attached without being re-keyed. The apply still allocates
+  from `max_judge_epoch`, which locks the submission and names the apply's
+  after-judging event (`after_judging:{id}:applied:{n}`), so re-applying a
+  judgement fires its hooks again.
 - A judgement that stops being current while still in flight is finalized as
   `Superseded`, a status of its own: it never got a verdict, so it is
   history, not a system error. No retry takes it, and applying it is refused
