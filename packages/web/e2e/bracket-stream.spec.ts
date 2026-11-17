@@ -128,7 +128,10 @@ test("a match's submission feed names outcomes and times in the UI language", as
           problem_id: 2,
           status: 'Queued',
           verdict: null,
-          plugin_outage: { state: 'disabled', plugin_id: 'codelink-bracket' },
+          parked_by: {
+            plugin_id: 'codelink-bracket',
+            provides: 'contest_type',
+          },
         },
       ]),
     }),
