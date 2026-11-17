@@ -1,4 +1,3 @@
-import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { isStaff } from '@broccoli/web-sdk/permissions';
 import { useSlotPermissions } from '@broccoli/web-sdk/slot';
@@ -632,6 +631,8 @@ export function IoiSubmissionResult({
   const feedbackNeedsSubtasks =
     visibility?.effectiveFeedback === 'subtask_scores' ||
     visibility?.effectiveFeedback === 'full';
+  // The server answers once the judgement stands; the key carries the
+  // submission's status, so the query asks again when it changes.
   const subtaskScoresQuery = useQuery<SubtaskScoresResponse>({
     queryKey: [
       'ioi-subtask-scores',
@@ -640,9 +641,6 @@ export function IoiSubmissionResult({
       submission?.judge_epoch,
       submission?.status,
     ],
-    refetchInterval: pollInterval(() =>
-      submission?.status === 'Running' ? 1000 : false,
-    ),
     enabled: !!contestId && !!submission?.id && feedbackNeedsSubtasks,
     queryFn: () => api.getSubmissionSubtaskScores(contestId!, submission!.id),
     retry: 2,
