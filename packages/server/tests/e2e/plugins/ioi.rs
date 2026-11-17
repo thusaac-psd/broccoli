@@ -349,6 +349,19 @@ async fn ioi_feedback_none_shows_a_submissions_scores_only_by_token_or_after_the
 
     for (who, sub_id) in [(&tokened, subs[0]), (&plain, subs[1])] {
         assert_eq!(shown(who, sub_id).await, (false, false), "withheld");
+        // The owner's own submission says it is withheld, never "judged"
+        // without a verdict.
+        let own = app
+            .get_with_token(&format!("/api/v1/submissions/{sub_id}"), who)
+            .await;
+        assert_eq!(own.status, 200, "{}", own.text);
+        assert_eq!(
+            own.body["withheld"],
+            json!({ "reason": "hidden" }),
+            "{}",
+            own.text
+        );
+        assert_eq!(own.body["status"], json!(null), "{}", own.text);
     }
     let spent = app
         .post_with_token(
@@ -359,6 +372,11 @@ async fn ioi_feedback_none_shows_a_submissions_scores_only_by_token_or_after_the
         .await;
     assert_eq!(spent.status, 200, "{}", spent.text);
     assert_eq!(shown(&tokened, subs[0]).await, (true, true), "the token");
+    let own = app
+        .get_with_token(&format!("/api/v1/submissions/{}", subs[0]), &tokened)
+        .await;
+    assert_eq!(own.body["withheld"], json!(null), "{}", own.text);
+    assert_eq!(own.body["status"], "Judged", "{}", own.text);
     assert_eq!(shown(&plain, subs[1]).await, (false, false), "no token");
 
     let now = Utc::now();

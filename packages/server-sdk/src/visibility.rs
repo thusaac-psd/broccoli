@@ -9,10 +9,21 @@
 
 /// The submission field whose hiding withholds the submission's whole
 /// outcome. A visibility decision that redacts this path presents the
-/// submission to that viewer as still running with no result (no verdict,
-/// score, resources or test case results), and a submission list filtered or
-/// sorted by status does not place it, so neither reveals the outcome.
+/// submission to that viewer as withheld (`withheld: {"reason": "hidden"}`)
+/// with no result (no verdict, score, resources or test case results), and a
+/// submission list filtered or sorted by status does not place it, so neither
+/// reveals the outcome.
 pub const SUBMISSION_STATUS_PATH: &str = "status";
+
+/// The decision that withholds a submission's whole outcome from a viewer
+/// ([`SUBMISSION_STATUS_PATH`]), as a scoreboard freeze or a feedback level
+/// that shows nothing does: every client reads the submission as withheld,
+/// never as judged without a result.
+pub fn hide_outcome() -> crate::types::WireDecision {
+    crate::types::WireDecision::Redact {
+        fields: vec![SUBMISSION_STATUS_PATH.into()],
+    }
+}
 
 /// Byte cap for a free-text field echoed back in a submission-detail response,
 /// so a pathological compiler dump / checker output / test-case blob cannot
@@ -285,9 +296,7 @@ mod contest_submission_tests {
     }
 
     fn hidden() -> WireDecision {
-        WireDecision::Redact {
-            fields: vec![SUBMISSION_STATUS_PATH.into()],
-        }
+        hide_outcome()
     }
 
     #[test]

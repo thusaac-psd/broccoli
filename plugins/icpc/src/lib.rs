@@ -72,17 +72,6 @@ pub(crate) fn standings_restriction(
     }
 }
 
-/// Field mask for a submission whose outcome is hidden from the viewer. It
-/// hides the submission's status, which makes the host withhold the whole
-/// outcome on every submission shape: the submission reads as still running
-/// with no verdict, score, resources or test results, and no list filtered
-/// or sorted by status places it. A frozen submission therefore discloses
-/// only that it was submitted, and when, never whether it compiled.
-#[cfg(any(target_arch = "wasm32", test))]
-fn hidden_result_mask_fields() -> Vec<String> {
-    vec![broccoli_server_sdk::visibility::SUBMISSION_STATUS_PATH.to_string()]
-}
-
 /// Every contest submission whose result is final, read off the submission
 /// row: the host's projection of its current judgement, which keeps a
 /// result that may still change at a status that is not terminal (see
@@ -239,13 +228,6 @@ mod filter_tests {
             standings_restriction("after", false, false, Some(42)),
             StandingsRestriction::Unrestricted
         );
-    }
-
-    #[test]
-    fn hidden_result_mask_withholds_the_status_itself() {
-        // Hiding the verdict alone would leave the status column, a status
-        // filter and a status sort disclosing a compilation error.
-        assert_eq!(hidden_result_mask_fields(), vec!["status".to_string()]);
     }
 
     fn subject(user_id: Option<i32>) -> QuerySubject {
@@ -830,9 +812,9 @@ fn decide_visibility_decisions(
     // The host never asks this about staff (`contest:manage` or
     // `submission:view_all`): organizers see the real data by the host's
     // rule, so nothing here decides for them.
-    let hidden = WireDecision::Redact {
-        fields: hidden_result_mask_fields(),
-    };
+    // A frozen submission discloses only that it was submitted, and when,
+    // never whether it compiled.
+    let hidden = broccoli_server_sdk::visibility::hide_outcome();
     let viewer_id = req.subject.user_id;
     decide_contest_submissions(
         host,
