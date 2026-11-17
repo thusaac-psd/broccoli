@@ -275,7 +275,7 @@ fn add_contest_type_owner(enablements: &mut ResourceEnablements, owner: Option<&
 /// The plugins whose resource-scoped hooks run for a submission to
 /// `problem_id`: those enabled by plugin config for the problem, contest,
 /// contest problem or plugin-wide, by the rule their own config reads use
-/// ([`merge_resource_enablements`]), plus, for a contest submission, the plugin that owns the
+/// (`broccoli_server_sdk::types::decides_enabled`), plus, for a contest submission, the plugin that owns the
 /// contest's type. Practice submissions (`contest_id: None`) get
 /// config-enabled plugins only; a practice submission has no contest whose
 /// rules apply.

@@ -115,7 +115,7 @@ pub fn decides_enabled(scopes: impl IntoIterator<Item = Option<bool>>) -> Option
 /// The effective config of a namespace at one problem. Each scope that
 /// stores the namespace sets the fields it stores and leaves the rest to the
 /// next scope up: contest problem, contest, problem, the plugin-wide row, then
-/// the schema's defaults (see [`overlay`]). Whether it is on is
+/// the schema's defaults. Whether it is on is
 /// [`decides_enabled`] over the rows. A switched-off override contributes
 /// nothing and leaves what it overrode, so when the narrower scope that
 /// decides is switched off the config is the plugin-wide one.
