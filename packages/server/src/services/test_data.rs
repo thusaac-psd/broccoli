@@ -1,17 +1,17 @@
 //! Changes to a problem's test data, and the stored configs that refer to it.
 //!
 //! A config can name test data (a subtask lists test case labels), so a
-//! change to the test data can leave a config its plugin refuses, and judging
-//! would score with it. Every change therefore goes through a
-//! [`TestDataEdit`], whose only way to commit checks the problem's stored
-//! configs against the data as the change leaves it, before it commits: the
-//! same schema and `validate` check a config write passes
-//! ([`issues_of`]). A change that would leave a config refused is refused
-//! with [`AppError::ConfigWouldBreak`] unless the caller confirms it; a
-//! condition of the data alone, such as no test cases yet, never refuses
-//! one. Either
-//! way the problem's `config_issues` flag records whether any config has
-//! issues, which judging copies onto the judgements it claims.
+//! change to the test data can leave a config its plugin finds wrong, and
+//! judging would score with it. Every change therefore goes through a
+//! [`TestDataEdit`], whose only way to commit checks the problem's configs
+//! against the data as the change leaves it, before it commits: the same
+//! schema and `validate` check a config write passes ([`issues_of`]). A
+//! change that gives a config someone saved something wrong it did not have
+//! is refused with [`AppError::ConfigWouldBreak`] unless the caller confirms
+//! it; what the namespace's defaults find where nothing is stored, such as
+//! no test cases yet, never refuses one. Either way the problem's
+//! `config_issues` flag records whether any config has issues, which judging
+//! copies onto the judgements it claims.
 
 use std::sync::Arc;
 
@@ -77,12 +77,11 @@ impl TestDataEdit {
     /// problem scope and in every contest, stored or the defaults its
     /// plugins check; see [`crate::services::config_issues`]) against the
     /// test data as it leaves them. With [`OnConfigBreak::Refuse`], a change
-    /// that gives a config a refusal it did not have, something a write of
-    /// that config would now be refused for, is refused with those
-    /// refusals. A refusal the problem already had never refuses a change,
-    /// and neither does an issue of the data alone (no test cases yet), nor
-    /// what a plugin not loaded here would say: the flag records all three
-    /// ([`crate::services::config_issues::Outcome`]).
+    /// that gives a stored config an error or an issue it did not have is
+    /// refused with what it gives. What the config already had never refuses
+    /// a change, nor does what a namespace's defaults find where nothing is
+    /// stored, nor what a plugin not loaded here would say: the flag records
+    /// all of it ([`crate::services::config_issues::Outcome`]).
     pub(crate) async fn commit(
         self,
         checker: &ConfigChecker<'_>,
@@ -91,21 +90,21 @@ impl TestDataEdit {
         let problem_id = self.problem.id;
         let subject = Subject::flag_of(problem_id);
         let after = issues_of(self.db(), checker, subject, Reads::Through(&self.txn)).await?;
-        let refused_after: Vec<_> = after
+        let broken_after: Vec<_> = after
             .issues
             .iter()
-            .filter_map(ConfigIssue::refused)
+            .filter_map(ConfigIssue::of_stored)
             .collect();
-        if on_break == OnConfigBreak::Refuse && !refused_after.is_empty() {
+        if on_break == OnConfigBreak::Refuse && !broken_after.is_empty() {
             let before = issues_of(self.db(), checker, subject, Reads::Committed).await?;
-            let refused_before: Vec<_> = before
+            let broken_before: Vec<_> = before
                 .issues
                 .iter()
-                .filter_map(ConfigIssue::refused)
+                .filter_map(ConfigIssue::of_stored)
                 .collect();
-            let caused: Vec<_> = refused_after
+            let caused: Vec<_> = broken_after
                 .into_iter()
-                .filter(|issue| !refused_before.contains(issue))
+                .filter(|issue| !broken_before.contains(issue))
                 .collect();
             if !caused.is_empty() {
                 return Err(AppError::ConfigWouldBreak(caused));

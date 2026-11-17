@@ -213,7 +213,7 @@ async fn config_for_nonexistent_problem_returns_404() {
 /// read, against the contest as it is now: a qualifier contest config whose
 /// advancement places fit its problems is accepted, a problem added later
 /// that lets more contestants qualify directly than there are places makes
-/// it an issue there, and writing it again as it stands is refused.
+/// it an issue there, and saving the config again is not refused for it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_problem_added_to_a_contest_shows_the_contest_config_it_outgrows() {
     let app = E2eTestApp::spawn().await;
@@ -256,11 +256,19 @@ async fn a_problem_added_to_a_contest_shows_the_contest_config_it_outgrows() {
         "{issues:?}"
     );
 
-    let res = app.put_with_token(&config_path, &config, &admin).await;
-    assert_eq!(res.status, 400, "{}", res.text);
+    // The problems outgrew the places as much as the other way round: a save
+    // is never refused for it, an unrelated field's included, and the issue
+    // stays listed until the places or the problems change.
+    let mut refreshed = config.clone();
+    refreshed["config"]["scoreboard_refresh_seconds"] = json!(30);
+    let res = app.put_with_token(&config_path, &refreshed, &admin).await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let issues = app.get_with_token(&issues_path, &admin).await;
     assert_eq!(
-        res.body["details"]["fields"][0]["path"],
-        "advancement_slots"
+        issues.body.as_array().map(Vec::len),
+        Some(1),
+        "{}",
+        issues.text
     );
 }
 

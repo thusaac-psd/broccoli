@@ -139,6 +139,7 @@ struct Check {
     plugin_id: String,
     namespace: String,
     config: serde_json::Value,
+    stored: bool,
 }
 
 /// A config its plugin found something wrong with, and what.
@@ -148,6 +149,9 @@ pub(crate) struct ConfigIssue {
     target: ConfigTarget,
     namespace: String,
     findings: Findings,
+    /// Whether someone saved the config, rather than the namespace's
+    /// defaults being checked where none is stored.
+    stored: bool,
 }
 
 impl ConfigIssue {
@@ -166,11 +170,10 @@ impl ConfigIssue {
         self.as_listed(self.findings.clone().into_all())
     }
 
-    /// What a write of the config would be refused for now, if anything:
-    /// what is wrong with the config itself, never what the target's data
-    /// does not meet yet.
-    pub(crate) fn refused(&self) -> Option<IncompatibleConfig> {
-        (!self.findings.refusals.is_empty()).then(|| self.as_listed(self.findings.refusals.clone()))
+    /// The issue as the API lists it when the config is one someone saved:
+    /// what a change to the data it is checked against breaks.
+    pub(crate) fn of_stored(&self) -> Option<IncompatibleConfig> {
+        self.stored.then(|| self.listed())
     }
 }
 
@@ -266,6 +269,7 @@ pub(crate) async fn issues_of<C: ConnectionTrait>(
             target: check.target,
             namespace: check.namespace,
             findings,
+            stored: check.stored,
         });
     }
     issues.sort_by(|a, b| {
@@ -437,6 +441,7 @@ async fn checks_at<C: ConnectionTrait>(
             plugin_id: plugin_id.to_string(),
             namespace: strip_namespace_prefix(&row.namespace).to_string(),
             config: row.config,
+            stored: true,
         });
     }
     for checked in targets {
@@ -459,6 +464,7 @@ async fn checks_at<C: ConnectionTrait>(
                     plugin_id: plugin_id.clone(),
                     namespace: name.clone(),
                     config: ns.defaults(),
+                    stored: false,
                 });
             }
         }

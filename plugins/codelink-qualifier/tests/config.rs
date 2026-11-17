@@ -135,11 +135,11 @@ fn the_default_places_hold_every_possible_direct_qualifier_of_the_default_event(
     let config = ContestConfig::load(&host, 7).unwrap();
     let points: Vec<usize> = [1; 16].into_iter().chain([2; 4]).collect();
     assert_eq!(config.most_direct_qualifiers(&points), 16);
-    assert!(config.violations(&points).is_empty());
+    assert!(config.capacity_issues(&points).is_empty());
 }
 
 #[test]
-fn fewer_places_than_possible_direct_qualifiers_are_refused() {
+fn fewer_places_than_possible_direct_qualifiers_are_a_capacity_issue() {
     let host = Host::mock();
     host.config.seed(
         "contest",
@@ -148,7 +148,7 @@ fn fewer_places_than_possible_direct_qualifiers_are_refused() {
         json!({"solves_to_qualify": 1, "advancement_slots": 3}),
     );
     let config = ContestConfig::load(&host, 7).unwrap();
-    let violations = config.violations(&[1, 1]);
+    let violations = config.capacity_issues(&[1, 1]);
     assert_eq!(violations.len(), 1);
     assert_eq!(violations[0].path, "advancement_slots");
     assert_eq!(
@@ -179,6 +179,7 @@ fn the_validate_hook_reads_the_contests_problem_points() {
     }))
     .unwrap();
     let output = codelink_qualifier::api::validate_contest_config(&host, &input).unwrap();
-    assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
-    assert_eq!(output.errors[0].params["most"], json!(6));
+    assert_eq!(output.errors, [], "the places fit the config by itself");
+    assert_eq!(output.issues.len(), 1, "{:?}", output.issues);
+    assert_eq!(output.issues[0].params["most"], json!(6));
 }

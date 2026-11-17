@@ -72,7 +72,7 @@ pub enum AppError {
     /// does not allow it at the requested scope.
     ConfigNamespaceNotFound(String),
     /// A change to a problem's test data that would leave these stored
-    /// configs refused by their plugins; nothing was changed.
+    /// configs with something wrong their plugins report; nothing was changed.
     ConfigWouldBreak(Vec<broccoli_api_types::plugin::IncompatibleConfig>),
     PayloadTooLarge(String),
     TokenMissing,
@@ -197,7 +197,7 @@ impl AppError {
                 ErrorBody {
                     code: HostCode::ConfigWouldBreak.as_str().into(),
                     message: format!(
-                        "The change would leave {} stored config(s) refused by their plugins; \
+                        "The change would leave {} stored config(s) with something wrong their plugins report; \
                          send it again with force=true to make it anyway",
                         issues.len()
                     ),

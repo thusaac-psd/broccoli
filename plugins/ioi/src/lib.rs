@@ -195,9 +195,9 @@ pub fn api_submission_subtask_scores(input: String) -> FnResult<String> {
     run_api_handler(&input, api::handle_submission_subtask_scores)
 }
 
-/// The `task` namespace's validate function: refuses subtasks the problem's
-/// current test cases cannot score as written, and reports a problem judging
-/// would refuse ([`validate::check_task`]).
+/// The `task` namespace's validate function: refuses subtasks that are wrong
+/// by themselves, and reports what the problem's current test cases leave
+/// them unable to score, as issues ([`validate::check_task`]).
 #[cfg(target_arch = "wasm32")]
 #[plugin_fn]
 pub fn validate_task_config(input: String) -> FnResult<String> {

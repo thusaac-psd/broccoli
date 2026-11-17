@@ -1711,10 +1711,12 @@ async fn create_labelled_test_case(
 }
 
 /// A subtask naming a test case the problem does not have would score 0 for
-/// every submission, so the write is refused with the field that names it and
-/// nothing is stored.
+/// every submission. Whether it names one depends on the test data, so the
+/// config is stored and its issue listed for staff to resolve either way; a
+/// subtask that is wrong by itself, two with one name, is refused with the
+/// field and nothing is stored.
 #[tokio::test(flavor = "multi_thread")]
-async fn ioi_task_config_naming_a_missing_test_case_is_refused() {
+async fn ioi_task_config_naming_a_missing_test_case_is_stored_with_its_issue() {
     let app = E2eTestApp::spawn().await;
     let admin = app
         .create_user_with_role("ioi_validate_admin", "password", "admin")
@@ -1739,20 +1741,37 @@ async fn ioi_task_config_naming_a_missing_test_case_is_refused() {
     let res = app
         .put_with_token(&path, &subtasks(&["nope"]), &admin)
         .await;
-    assert_eq!(res.status, 400, "{}", res.text);
-    assert_eq!(res.body["code"], "VALIDATION_ERROR", "{}", res.text);
-    let paths: Vec<&str> = res.body["details"]["fields"]
-        .as_array()
-        .expect("the refused fields")
-        .iter()
-        .filter_map(|field| field["path"].as_str())
-        .collect();
-    assert!(paths.contains(&"subtasks[0].test_cases[0]"), "{}", res.text);
-    let stored = app.get_with_token(&path, &admin).await;
-    assert_eq!(stored.status, 404, "{}", stored.text);
+    assert_eq!(res.status, 200, "{}", res.text);
+    let issues = app
+        .get_with_token(
+            &format!("/api/v1/problems/{problem_id}/config/issues"),
+            &admin,
+        )
+        .await;
+    assert_eq!(
+        task_issue_keys(&issues.body, contest_id, problem_id),
+        vec!["ioi.config.task.unknownTestCase".to_string()],
+        "{}",
+        issues.text
+    );
+    assert!(app.config_issues_flag(problem_id).await);
 
     let res = app.put_with_token(&path, &subtasks(&["t1"]), &admin).await;
     assert_eq!(res.status, 200, "{}", res.text);
+    assert!(!app.config_issues_flag(problem_id).await);
+
+    let two_named_s = json!({ "config": { "subtasks": [
+        { "name": "S", "test_cases": ["t1"] },
+        { "name": "S", "test_cases": ["t1"] },
+    ]}});
+    let res = app.put_with_token(&path, &two_named_s, &admin).await;
+    assert_eq!(res.status, 400, "{}", res.text);
+    assert_eq!(res.body["code"], "VALIDATION_ERROR", "{}", res.text);
+    assert_eq!(
+        res.body["details"]["fields"][0]["path"], "subtasks[1].name",
+        "{}",
+        res.text
+    );
 }
 
 /// An IOI problem whose contest-problem `task` config splits test cases
@@ -2225,18 +2244,8 @@ async fn an_ioi_problem_with_nothing_to_judge_is_a_config_issue_with_no_config_s
         "the contest's new type checks the problem"
     );
 
-    let task = format!("/api/v1/contests/{contest_id}/problems/{problem_id}/config/ioi/task");
-    let res = app
-        .put_with_token(&task, &json!({ "config": { "subtasks": [] } }), &admin)
-        .await;
-    assert_eq!(
-        res.status, 200,
-        "data that is not ready refuses no config: {}",
-        res.text
-    );
-    assert_eq!(keys(&problem_issues).await, no_test_cases);
-    assert!(app.config_issues_flag(problem_id).await);
-
+    // A test case that scores nothing leaves nothing to judge; no config is
+    // stored yet, so the change needs no confirmation.
     let res = app
         .post_with_token(
             &format!("/api/v1/problems/{problem_id}/test-cases"),
@@ -2251,6 +2260,16 @@ async fn an_ioi_problem_with_nothing_to_judge_is_a_config_issue_with_no_config_s
         .await;
     assert_eq!(res.status, 201, "{}", res.text);
     let weightless = res.id();
+
+    let task = format!("/api/v1/contests/{contest_id}/problems/{problem_id}/config/ioi/task");
+    let res = app
+        .put_with_token(&task, &json!({ "config": { "subtasks": [] } }), &admin)
+        .await;
+    assert_eq!(
+        res.status, 200,
+        "data that is not ready refuses no config: {}",
+        res.text
+    );
     assert_eq!(
         keys(&problem_issues).await,
         vec!["ioi.config.task.nothingToScore".to_string()]
@@ -2284,7 +2303,8 @@ async fn an_ioi_problem_with_nothing_to_judge_is_a_config_issue_with_no_config_s
 /// A config write holds the problem's row lock, the lock a test-data change
 /// holds, from its check until it commits: a rename that commits while the
 /// write waits is what the write is checked against, so a config naming the
-/// old label is refused instead of stored unflagged.
+/// old label is stored with its issue listed and the problem flagged, never
+/// stored as clean.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_config_write_is_checked_against_test_data_a_concurrent_change_commits() {
     use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
@@ -2346,12 +2366,18 @@ async fn a_config_write_is_checked_against_test_data_a_concurrent_change_commits
     edit.commit().await.expect("commit the rename");
 
     let res = write.await;
-    assert_eq!(res.status, 400, "{}", res.text);
+    assert_eq!(res.status, 200, "{}", res.text);
+    let issues = app
+        .get_with_token(
+            &format!("/api/v1/problems/{problem_id}/config/issues"),
+            &admin,
+        )
+        .await;
     assert_eq!(
-        res.body["details"]["fields"][0]["key"], "ioi.config.task.unknownTestCase",
-        "{}",
-        res.text
+        task_issue_keys(&issues.body, contest_id, problem_id),
+        vec!["ioi.config.task.unknownTestCase".to_string()],
+        "the write was checked against the renamed test case: {}",
+        issues.text
     );
-    let stored = app.get_with_token(&path, &admin).await;
-    assert_eq!(stored.status, 404, "{}", stored.text);
+    assert!(app.config_issues_flag(problem_id).await);
 }
