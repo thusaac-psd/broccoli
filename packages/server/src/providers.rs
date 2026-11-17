@@ -12,10 +12,10 @@
 //! Two rules read them, alike for every kind:
 //!
 //! - a unit is runnable while every key it needs has a provider enabled
-//!   fleet-wide ([`runnable`]); work that is not is parked;
+//!   fleet-wide (`runnable`); work that is not is parked;
 //! - a replica takes a unit only when it has every key the unit needs loaded,
 //!   or no live replica has that key loaded (then the replica that takes it
-//!   fails it visibly instead of it waiting unseen) ([`runs_here`]).
+//!   fails it visibly instead of it waiting unseen) (`runs_here`).
 
 use serde::{Deserialize, Serialize};
 
