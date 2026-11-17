@@ -505,6 +505,12 @@ async fn a_judgements_subtask_scores_are_the_ones_it_was_scored_with_after_the_c
         "{}",
         scores.text
     );
+    assert_eq!(
+        scores.body["max_score"].as_f64(),
+        Some(100.0),
+        "the judged total reads against the maximum it was scored with: {}",
+        scores.text
+    );
 }
 
 /// A judgement whose later attempt stands as a system error scores nothing

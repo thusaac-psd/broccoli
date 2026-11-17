@@ -50,6 +50,8 @@ export interface SubtaskScoreEntry {
 
 export interface SubtaskScoresResponse {
   subtasks: SubtaskScoreEntry[] | null;
+  /** The maximum the judgement was scored against; `null` until it stands, or when the viewer reads no total. */
+  max_score: number | null;
 }
 
 export interface ScoreboardProblemScore {

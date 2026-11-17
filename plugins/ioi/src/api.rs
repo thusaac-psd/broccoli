@@ -261,7 +261,7 @@ pub(crate) fn handle_task_config(
     let mut body = serde_json::json!({
         "scoring_mode": contest_config.scoring_mode,
         "feedback_level": contest_config.feedback_level,
-        "max_score": problem_max_score(&effective_subtasks),
+        "max_score": problem_max_score(&effective_subtasks, &test_cases_list),
     });
 
     if let Some(subtasks) = subtasks {
@@ -614,6 +614,9 @@ pub(crate) enum SubtaskScoresAccess {
     },
     Allowed {
         can_view_subtask_scores: bool,
+        /// Whether the viewer reads the total, and so the maximum the
+        /// judgement was scored against.
+        can_view_total: bool,
     },
 }
 
@@ -662,12 +665,12 @@ pub(crate) fn subtask_scores_access_decision(
         }
     }
 
-    let can_view_subtask_scores = feedback_level
-        .for_submission_scores(can_view_all_submissions, phase, tokened_feedback)
-        .shows_subtask_scores();
+    let level =
+        feedback_level.for_submission_scores(can_view_all_submissions, phase, tokened_feedback);
 
     SubtaskScoresAccess::Allowed {
-        can_view_subtask_scores,
+        can_view_subtask_scores: level.shows_subtask_scores(),
+        can_view_total: level.shows_total(),
     }
 }
 
@@ -720,7 +723,7 @@ pub(crate) fn handle_submission_subtask_scores(
         contest_config.feedback_level,
     );
 
-    let can_view_subtask_scores = match access {
+    let (can_view_subtask_scores, can_view_total) = match access {
         SubtaskScoresAccess::Denied {
             status,
             code,
@@ -730,25 +733,28 @@ pub(crate) fn handle_submission_subtask_scores(
         }
         SubtaskScoresAccess::Allowed {
             can_view_subtask_scores,
-        } => can_view_subtask_scores,
+            can_view_total,
+        } => (can_view_subtask_scores, can_view_total),
     };
 
     // What the judgement was scored with, even when the problem's subtasks
-    // changed since.
-    let subtasks = if can_view_subtask_scores {
-        serde_json::to_value(load_current_judged_subtasks(
-            host,
-            contest_id,
-            submission_id,
-        )?)?
+    // changed since: its subtasks and the maximum they add up to, which every
+    // view shows the judged total against.
+    let judged = if can_view_total {
+        load_current_judged_subtasks(host, contest_id, submission_id)?
     } else {
-        serde_json::Value::Null
+        None
     };
+    let max_score = judged
+        .as_ref()
+        .map(|subtasks| round_score(subtasks.iter().map(|s| s.max_score).sum()));
+    let subtasks = judged.filter(|_| can_view_subtask_scores);
 
     Ok(PluginHttpResponse {
         status: 200,
         body: Some(serde_json::json!({
-            "subtasks": subtasks
+            "subtasks": subtasks,
+            "max_score": max_score,
         })),
     })
 }
@@ -772,7 +778,8 @@ mod subtask_scores_access_tests {
         assert_eq!(
             subtask_scores,
             SubtaskScoresAccess::Allowed {
-                can_view_subtask_scores: true
+                can_view_subtask_scores: true,
+                can_view_total: true
             },
             "SubtaskScores level must expose the per-subtask breakdown"
         );
@@ -788,7 +795,8 @@ mod subtask_scores_access_tests {
         assert_eq!(
             total_only,
             SubtaskScoresAccess::Allowed {
-                can_view_subtask_scores: false
+                can_view_subtask_scores: false,
+                can_view_total: true
             },
             "TotalOnly level must NOT expose the per-subtask breakdown"
         );
@@ -801,7 +809,8 @@ mod subtask_scores_access_tests {
         assert_eq!(
             decision,
             SubtaskScoresAccess::Allowed {
-                can_view_subtask_scores: true
+                can_view_subtask_scores: true,
+                can_view_total: true
             }
         );
     }
@@ -813,7 +822,8 @@ mod subtask_scores_access_tests {
         assert_eq!(
             decision,
             SubtaskScoresAccess::Allowed {
-                can_view_subtask_scores: false
+                can_view_subtask_scores: false,
+                can_view_total: false
             }
         );
     }
@@ -834,7 +844,8 @@ mod subtask_scores_access_tests {
         assert_eq!(
             decision,
             SubtaskScoresAccess::Allowed {
-                can_view_subtask_scores: true
+                can_view_subtask_scores: true,
+                can_view_total: true
             }
         );
     }
@@ -852,7 +863,8 @@ mod subtask_scores_access_tests {
         assert_eq!(
             decision,
             SubtaskScoresAccess::Allowed {
-                can_view_subtask_scores: true
+                can_view_subtask_scores: true,
+                can_view_total: true
             }
         );
     }
@@ -872,7 +884,8 @@ mod subtask_scores_access_tests {
         assert_eq!(
             decision,
             SubtaskScoresAccess::Allowed {
-                can_view_subtask_scores: true
+                can_view_subtask_scores: true,
+                can_view_total: true
             }
         );
     }
