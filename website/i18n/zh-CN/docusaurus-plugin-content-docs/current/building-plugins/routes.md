@@ -135,3 +135,12 @@ PluginHttpResponse::refuse(413, Refusal::TooManyPages, "too long")
 响应只有状态码和 JSON 响应体：所有响应头都由服务器自己写入。响应体总是以 `application/json` 发送，并带有 `X-Content-Type-Options: nosniff` 和不允许运行任何内容的 `Content-Security-Policy`，因此路由永远无法在服务器的源上设置 Cookie、重定向或提供页面。
 
 对于调用者无权查看的资源，返回与不存在的资源相同的 `404`，使路由不会向调用者透露哪些 ID 已被使用。
+
+## 读取比赛结果
+
+排行榜或比赛结果的其他视图通过 SDK 的比赛辅助函数读取结果，因此每个插件都按同样的规则读取：
+
+- `contest::problems(host, contest_id)` 按比赛的顺序给出比赛的题目，以及比赛给每道题目的标签。请用这些标签命名排行榜的各列，与宿主自己的比赛页面一致。
+- `contest::standing_result("s")` 是提交行 `s` 持有已确定结果的 SQL 条件。宿主把仍可能改变的结果（评测中的结果，或重试仍可能收回的系统错误）保持在非终态，因此只读取已确定结果的排行榜，不会在提交重新评测期间把某格降为 0。
+- `contest::results_may_change(host, contest_id, phase)` 说明排行榜是否仍可能改变：比赛进行中，或仍有提交在评测。请把它作为排行榜的 `live` 返回，Web SDK 的 `liveBoardPace` 会据此安排排行榜的刷新节奏。
+- `visibility::hide_outcome()` 是向查看者隐藏提交全部结果的可见性决定，与封榜或不显示任何信息的反馈级别一样。此后每个客户端都把该提交读作已隐藏，而不会读作已评测却没有结果。
