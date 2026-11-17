@@ -332,13 +332,22 @@ fn build_default_subtasks(test_cases: &[TestCaseRow]) -> Vec<SubtaskDef> {
         return vec![];
     }
     let max_score = total_score(scoring_test_cases.iter().map(|tc| tc.score));
+    // A label can be another case's id, so each case goes by a key that
+    // names it alone: its label, else its id.
+    let members = MemberIndex::new(test_cases);
     vec![SubtaskDef {
         name: "All Tests".into(),
         scoring_method: SubtaskScoringMethod::Sum,
         max_score,
         test_cases: scoring_test_cases
             .iter()
-            .map(|tc| resolve_tc_label(tc))
+            .filter_map(|tc| {
+                test_case_reference_keys(tc).into_iter().find(|key| {
+                    members
+                        .test_case(key)
+                        .is_some_and(|named| named.id == tc.id)
+                })
+            })
             .collect(),
     }]
 }
@@ -661,6 +670,23 @@ mod tests {
         let results = score_all_subtasks(&defs, &test_cases, &HashMap::new());
         assert_eq!(results[1].max_score, 0.0);
         assert_eq!(problem_max_score(&[missing], &test_cases), 0.0);
+    }
+
+    /// The default subtask names every case it scores by a key that names
+    /// exactly that case, so a label that is another case's id (labels start
+    /// from a position, ids from 1) never drops a case from the subtask, its
+    /// score or the problem's maximum.
+    #[test]
+    fn the_default_subtask_names_each_case_by_a_key_only_it_has() {
+        let test_cases = vec![
+            test_case(1, 10.0, true, Some("0")),
+            test_case(2, 90.0, false, Some("1")),
+        ];
+        let subtasks = effective_subtasks(&[], &test_cases);
+        assert_eq!(problem_max_score(&subtasks, &test_cases), 90.0);
+        let ratios: HashMap<i32, f64> = [(2, 1.0)].into_iter().collect();
+        let results = score_all_subtasks(&subtasks, &test_cases, &ratios);
+        assert_eq!(results[0].score, 90.0);
     }
 
     #[test]
