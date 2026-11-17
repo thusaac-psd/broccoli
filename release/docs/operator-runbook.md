@@ -74,6 +74,17 @@ For server redundancy, restart one server machine at a time and confirm the
 gateway stays healthy before moving to the next server. Avoid restarting infra
 during a contest window.
 
+### Command lines
+
+Both binaries refuse any argument they do not know, positional ones included,
+and exit with status 2 and a usage message. `broccoli-worker` takes only
+`--healthcheck`, `--node-id`, `--help` and `--version`; with none it runs the
+worker, which reads every setting from its config file and environment.
+`broccoli-server` also takes `serve`, `bundle`, `--openapi` and
+`--plugin-group-role`. A compose `command:` override that passes anything else,
+such as a config path or a word after the binary's name, stops the container at
+start instead of being ignored, so set settings through the role's env file.
+
 ## Plugin Updates
 
 A plugin runs from one of two sources, shown on the admin Plugins page:
