@@ -193,6 +193,75 @@ async fn a_retryable_system_error_leaves_the_last_standing_score_on_the_board() 
     );
 }
 
+/// A board stays live after its contest ends while any submission is still
+/// being judged, so a last-minute submission reaches it, and stops once
+/// every submission stands.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_board_stays_live_after_the_end_until_every_submission_stands() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_live_admin", "password", "admin")
+        .await;
+    let contestant = app
+        .create_authenticated_user("ioi_live_user", "password")
+        .await;
+    let problem_id = app.create_problem(&admin, "IOI Live").await;
+    let contest_id = app
+        .create_typed_contest(&admin, "IOI Live", "ioi", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &contestant).await;
+    let sub_id = seed_ioi_submission(
+        &app,
+        "ioi_live_user",
+        problem_id,
+        contest_id,
+        SubmissionStatus::Running,
+        Verdict::Accepted,
+        100.0,
+    )
+    .await;
+    let now = Utc::now();
+    let mut ended: server::entity::contest::ActiveModel =
+        server::entity::contest::Entity::find_by_id(contest_id)
+            .one(&app.db)
+            .await
+            .expect("query contest")
+            .expect("contest exists")
+            .into();
+    ended.start_time = Set(now - Duration::hours(2));
+    ended.end_time = Set(now - Duration::minutes(1));
+    ended.update(&app.db).await.expect("end the contest");
+
+    let path = format!("/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}/scoreboard");
+    let board = app.get_with_token(&path, &admin).await;
+    assert_eq!(board.status, 200, "{}", board.text);
+    assert_eq!(board.body["phase"], "after", "{}", board.text);
+    assert_eq!(
+        board.body["live"],
+        json!(true),
+        "judging is pending: {}",
+        board.text
+    );
+
+    let mut judged: submission::ActiveModel = submission::Entity::find_by_id(sub_id)
+        .one(&app.db)
+        .await
+        .expect("query submission")
+        .expect("the submission exists")
+        .into();
+    judged.status = Set(SubmissionStatus::Judged);
+    judged.update(&app.db).await.expect("judge the submission");
+    let board = app.get_with_token(&path, &admin).await;
+    assert_eq!(
+        board.body["live"],
+        json!(false),
+        "every submission stands: {}",
+        board.text
+    );
+}
+
 /// At `feedback_level = "none"` a contestant reads no score off the
 /// scoreboard, their own row included: no totals, no score times, and no
 /// ranks or score order to read them from. Staff still see every score.
