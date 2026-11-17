@@ -2048,7 +2048,7 @@ export interface paths {
     put?: never;
     /**
      * Apply a finalized submission judgement
-     * @description Makes a finalized judgement the current version and copies its cached result fields onto the submission. Requires `submission:rejudge` permission.
+     * @description Makes a finalized judgement the current version and copies its cached result fields onto the submission. A judgement judged against test data the problem has changed since is applied only with `force=true`. Requires `submission:rejudge` permission.
      */
     post: operations['applySubmissionJudgement'];
     delete?: never;
@@ -13291,7 +13291,14 @@ export interface operations {
   };
   applySubmissionJudgement: {
     parameters: {
-      query?: never;
+      query?: {
+        /**
+         * @description Apply it even if it was judged against test data the problem has
+         *     changed since, which is otherwise refused with
+         *     `JUDGED_ON_OTHER_TEST_DATA`.
+         */
+        force?: boolean;
+      };
       header?: never;
       path: {
         /** @description Submission ID */
@@ -13341,6 +13348,15 @@ export interface operations {
       };
       /** @description Submission or judgement not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The judgement was judged against test data the problem has changed since, which `force=true` applies anyway (JUDGED_ON_OTHER_TEST_DATA) */
+      409: {
         headers: {
           [name: string]: unknown;
         };

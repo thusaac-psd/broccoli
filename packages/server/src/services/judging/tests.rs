@@ -888,7 +888,9 @@ async fn applying_a_judgement_keeps_its_epoch_and_its_results() {
     let ApplyJudgement::Applied {
         submission: applied,
         generation,
-    } = apply_judgement(&txn, s.id, deferred.id).await.unwrap()
+    } = apply_judgement(&txn, s.id, deferred.id, false)
+        .await
+        .unwrap()
     else {
         panic!("applied");
     };
@@ -1829,7 +1831,7 @@ async fn a_judgement_superseded_unfinished_ends_superseded() {
 
     let txn = db.begin().await.unwrap();
     assert!(matches!(
-        apply_judgement(&txn, s.id, first.id).await.unwrap(),
+        apply_judgement(&txn, s.id, first.id, false).await.unwrap(),
         ApplyJudgement::Superseded
     ));
 }

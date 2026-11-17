@@ -1589,6 +1589,42 @@ mod judgement_history {
         );
     }
 
+    /// A judgement judged against test data the problem has since changed
+    /// would show its verdicts beside data it was not judged with: applying
+    /// it is refused with `JUDGED_ON_OTHER_TEST_DATA` unless the request says
+    /// `force=true`.
+    #[tokio::test]
+    async fn applying_a_judgement_made_before_a_test_data_change_needs_force() {
+        let app = TestApp::spawn().await;
+        let admin_token = app
+            .create_user_with_role("admin_jhist_data", "pass1234", "admin")
+            .await;
+        let problem_id = app.create_problem(&admin_token, "Changed Data").await;
+        let (submission_id, old_judgement_id, _current) =
+            seed_history(&app, "admin_jhist_data", problem_id).await;
+        app.create_test_case(problem_id, &admin_token).await;
+
+        let apply = routes::submission_judgement_apply(submission_id, old_judgement_id);
+        let res = app.post_with_token(&apply, &json!({}), &admin_token).await;
+        assert_eq!(res.status, 409, "{}", res.text);
+        assert_eq!(
+            res.body["code"], "JUDGED_ON_OTHER_TEST_DATA",
+            "{}",
+            res.text
+        );
+        let kept = submission_judgement::Entity::find_by_id(old_judgement_id)
+            .one(&app.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!kept.is_current, "refused, nothing changed");
+
+        let res = app
+            .post_with_token(&format!("{apply}?force=true"), &json!({}), &admin_token)
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+    }
+
     #[tokio::test]
     async fn discard_non_current_judgement_deletes_only_that_version_and_results() {
         let app = TestApp::spawn().await;

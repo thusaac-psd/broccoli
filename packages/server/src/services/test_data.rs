@@ -11,13 +11,17 @@
 //! condition of the data alone, such as no test cases yet, never refuses
 //! one. Either
 //! way the problem's `config_issues` flag records whether any config has
-//! issues, which judging copies onto the judgements it claims.
+//! issues, which judging copies onto the judgements it claims, and the
+//! problem's `test_data_version` counts the change, which judging copies too:
+//! applying a judgement judged against other test data needs `force`
+//! (`judging::apply_judgement`).
 
 use std::sync::Arc;
 
 use common::db::{DatabaseConnection, DatabaseTransaction};
+use sea_orm::sea_query::Expr;
 use sea_orm::sea_query::LockType;
-use sea_orm::{QuerySelect, TransactionTrait};
+use sea_orm::{ColumnTrait, EntityTrait, ExprTrait, QueryFilter, QuerySelect, TransactionTrait};
 
 use crate::entity::problem;
 use crate::error::AppError;
@@ -106,6 +110,14 @@ impl TestDataEdit {
         if has_issues != self.problem.config_issues {
             set_config_issues(self.db(), problem_id, has_issues).await?;
         }
+        problem::Entity::update_many()
+            .col_expr(
+                problem::Column::TestDataVersion,
+                Expr::col(problem::Column::TestDataVersion).add(1),
+            )
+            .filter(problem::Column::Id.eq(problem_id))
+            .exec(self.db())
+            .await?;
         let txn = Arc::try_unwrap(self.txn).map_err(|_| {
             AppError::Internal("a config check still holds the test data change".into())
         })?;

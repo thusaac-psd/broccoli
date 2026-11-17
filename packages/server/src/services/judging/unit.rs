@@ -80,12 +80,15 @@ impl Unit {
 
     /// `SET` items, each led by `, `, that claiming a row of this unit adds to
     /// its lease columns: a judgement records whether its problem's stored
-    /// configs had issues (`problem.config_issues`) when it was dispatched.
+    /// configs had issues (`problem.config_issues`) and the version of the
+    /// test data it is judged against (`problem.test_data_version`) when it
+    /// was dispatched.
     fn claim_sets(self) -> &'static str {
         match self {
             Unit::Judgement => {
-                ", config_issues = (SELECT p.config_issues FROM submission s \
-                 JOIN problem p ON p.id = s.problem_id WHERE s.id = t.submission_id)"
+                ", (config_issues, test_data_version) = \
+                   (SELECT p.config_issues, p.test_data_version FROM submission s \
+                    JOIN problem p ON p.id = s.problem_id WHERE s.id = t.submission_id)"
             }
             Unit::CodeRun => "",
         }

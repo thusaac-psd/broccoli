@@ -784,6 +784,7 @@ mod judgement_history_tests {
             dispatch_retries: 0,
             config_issues: false,
             error_stands,
+            test_data_version: 0,
             created_at: now,
             queued_at: now,
             finalized_at: Some(now),

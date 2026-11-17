@@ -10,7 +10,7 @@ use sea_orm::{
 
 use super::unit::mirror_current;
 use crate::dlq::{DlqService, DlqSubject};
-use crate::entity::{submission, submission_judgement, test_case_result};
+use crate::entity::{problem, submission, submission_judgement, test_case_result};
 
 /// Chainable on `submission::Entity::update_many()`: allocates one fresh
 /// judge epoch per matched submission. The new epoch is the returned row's
@@ -227,11 +227,16 @@ pub(crate) enum ApplyJudgement {
     NotFinalized,
     /// It was superseded before it got a verdict: there is no result to show.
     Superseded,
+    /// It was judged against test data the problem has changed since (its
+    /// `test_data_version` is not the problem's), and the apply was not
+    /// forced: its verdicts would show beside data they were not judged with.
+    OtherTestData,
 }
 
 /// Makes a finalized judgement the submission's current one, in the
 /// caller's transaction. A superseded judgement never had a result and is
-/// refused.
+/// refused, and so, unless `force`, is one judged against test data the
+/// problem has changed since.
 ///
 /// The judgement keeps its own epoch: the epoch names the attempt its
 /// results belong to, so every result row keyed by (judgement, epoch), the
@@ -247,6 +252,7 @@ pub(crate) async fn apply_judgement(
     txn: &DatabaseTransaction,
     submission_id: i32,
     judgement_id: i32,
+    force: bool,
 ) -> Result<ApplyJudgement, DbErr> {
     // Allocating first also locks the submission row for the rest of the
     // transaction, serializing this against rejudge and discard.
@@ -272,6 +278,17 @@ pub(crate) async fn apply_judgement(
     }
     if judgement.status == SubmissionStatus::Superseded {
         return Ok(ApplyJudgement::Superseded);
+    }
+    if !force {
+        let test_data_version: Option<i32> = problem::Entity::find_by_id(sub.problem_id)
+            .select_only()
+            .column(problem::Column::TestDataVersion)
+            .into_tuple()
+            .one(txn)
+            .await?;
+        if test_data_version != Some(judgement.test_data_version) {
+            return Ok(ApplyJudgement::OtherTestData);
+        }
     }
 
     supersede_current_judgement(txn, submission_id).await?;

@@ -89,6 +89,9 @@ host_codes! {
     ValidationError = "VALIDATION_ERROR", generic;
     ConfigNamespaceNotFound = "CONFIG_NAMESPACE_NOT_FOUND";
     ConfigWouldBreak = "CONFIG_WOULD_BREAK";
+    /// A judgement to apply was judged against test data its problem has
+    /// changed since; the request may force it.
+    JudgedOnOtherTestData = "JUDGED_ON_OTHER_TEST_DATA";
     PayloadTooLarge = "PAYLOAD_TOO_LARGE";
     TokenMissing = "TOKEN_MISSING";
     TokenInvalid = "TOKEN_INVALID";

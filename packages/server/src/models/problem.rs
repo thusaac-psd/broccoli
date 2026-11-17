@@ -137,6 +137,17 @@ pub struct UploadTestCasesRequest {
     pub strategy: UploadTestCasesMergeStrategy,
 }
 
+/// The query of applying a judgement.
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ApplyJudgementQuery {
+    /// Apply it even if it was judged against test data the problem has
+    /// changed since, which is otherwise refused with
+    /// `JUDGED_ON_OTHER_TEST_DATA`.
+    #[serde(default)]
+    pub force: bool,
+}
+
 /// The query of a change to a problem's test data.
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
