@@ -152,8 +152,15 @@ fn mismatch(published: Option<&Fingerprint>, local: Option<&Fingerprint>) -> Opt
 /// What a plugin governs, recorded fleet-wide whenever a replica loads it.
 /// A replica that cannot load the plugin (it failed, or the files are not
 /// on its disk) uses this to fail closed for exactly what the plugin would
-/// have decided, instead of for everything or nothing.
+/// have decided, instead of for everything or nothing, and to name the
+/// identifiers the plugin last provided.
+///
+/// One shape on both sides: Rust reads every field and no other, and the
+/// `plugin_governs_shape` check (migration m0017) stores only rows with
+/// exactly these keys, so the SQL that reads `plugin.governs` and this
+/// struct never see different rows.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Governs {
     /// It declares a `[[server.queries]] topic = "visibility"`.
     pub visibility: bool,
@@ -161,6 +168,8 @@ pub struct Governs {
     pub contest_types: Vec<String>,
     /// The problem types its `init()` registered an evaluator for, sorted.
     pub problem_types: Vec<String>,
+    /// The checker formats its `init()` registered a resolver for, sorted.
+    pub checkers: Vec<String>,
 }
 
 /// What a key that plugins provide names: what a unit of work needs a
@@ -714,12 +723,16 @@ async fn reconcile_locked(
     }
     let published_archives = published_archives(&rows);
     for row in rows {
-        if let Some(governs) = row
-            .governs
-            .clone()
-            .and_then(|g| serde_json::from_value::<Governs>(g).ok())
-        {
-            state.plugin_lifecycle.set_governs(&row.id, governs);
+        if let Some(governs) = row.governs.clone() {
+            match serde_json::from_value::<Governs>(governs) {
+                Ok(governs) => state.plugin_lifecycle.set_governs(&row.id, governs),
+                // The table's shape check stores only rows this reads.
+                Err(e) => tracing::error!(
+                    plugin_id = %row.id,
+                    error = %e,
+                    "A plugin's recorded governs does not have the one shape both readers share"
+                ),
+            }
         }
         let desired = Desired::of(&row);
         // Record the desired state BEFORE applying it: while an enabled
@@ -1081,10 +1094,21 @@ async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
         .map(|(t, _)| t)
         .collect();
     problem_types.sort();
+    let mut checkers: Vec<String> = state
+        .registries
+        .checker_stage_registry
+        .read()
+        .await
+        .registered_by(plugin_id)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
+    checkers.sort();
     Governs {
         visibility,
         contest_types,
         problem_types,
+        checkers,
     }
 }
 
@@ -1952,6 +1976,54 @@ mod tests {
                 ("zh".to_string(), true),
             ]
         );
+    }
+
+    /// `plugin.governs` has the one shape [`Governs`] reads: a row missing a
+    /// field or carrying another is refused when it is written, so the SQL
+    /// that reads the column and the struct never read a row differently.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn governs_is_stored_only_in_the_shape_both_readers_share() {
+        let (_container, db) = migrated_database().await;
+        let write = |governs: serde_json::Value| {
+            db.execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO plugin (id, is_enabled, generation, governs) VALUES ('p', TRUE, 0, $1) \
+                 ON CONFLICT (id) DO UPDATE SET governs = EXCLUDED.governs",
+                [governs.into()],
+            ))
+        };
+        for partial in [
+            serde_json::json!({"visibility": false, "contest_types": ["x"]}),
+            serde_json::json!({
+                "visibility": false, "contest_types": [], "problem_types": [], "checkers": [],
+                "host_locale": null,
+            }),
+            serde_json::json!({
+                "visibility": "no", "contest_types": [], "problem_types": [], "checkers": [],
+            }),
+            serde_json::json!([]),
+        ] {
+            assert!(
+                write(partial.clone()).await.is_err(),
+                "{partial} was stored"
+            );
+        }
+        let whole = Governs {
+            visibility: true,
+            contest_types: vec!["x".into()],
+            problem_types: vec![],
+            checkers: vec!["lines".into()],
+        };
+        write(serde_json::to_value(&whole).unwrap())
+            .await
+            .expect("the whole shape is stored");
+        let stored = plugin_entity::Entity::find_by_id("p")
+            .one(&db)
+            .await
+            .expect("row")
+            .and_then(|row| row.governs)
+            .expect("governs");
+        assert_eq!(serde_json::from_value::<Governs>(stored).unwrap(), whole);
     }
 
     /// A migrated database in a container of its own.

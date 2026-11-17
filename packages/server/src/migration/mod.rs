@@ -37,6 +37,7 @@ mod m0013_device_approval_session;
 mod m0014_device_code_client_addr;
 mod m0015_config_recheck;
 mod m0016_plugin_host_locale;
+mod m0017_plugin_governs_shape;
 
 pub use m0001_baseline::{PLUGIN_READABLE, PLUGIN_READABLE_COLUMNS};
 
@@ -184,6 +185,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0014_device_code_client_addr::Migration),
             Box::new(m0015_config_recheck::Migration),
             Box::new(m0016_plugin_host_locale::Migration),
+            Box::new(m0017_plugin_governs_shape::Migration),
         ]
     }
 }

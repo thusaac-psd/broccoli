@@ -252,7 +252,7 @@ mod backlog {
         app.db
             .execute_unprepared(
                 "INSERT INTO plugin (id, is_enabled, governs) VALUES \
-                 ('backlog-parked', false, '{\"visibility\": false, \"contest_types\": [\"parked-x\"], \"problem_types\": []}')",
+                 ('backlog-parked', false, '{\"visibility\": false, \"contest_types\": [\"parked-x\"], \"problem_types\": [], \"checkers\": []}')",
             )
             .await
             .unwrap();

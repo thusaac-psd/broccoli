@@ -1470,7 +1470,7 @@ async fn provider(db: &DatabaseConnection, enabled: bool) {
         db,
         &format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
-             VALUES ('std', {enabled}, '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": []}}') \
+             VALUES ('std', {enabled}, '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": [], \"checkers\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         ),
     )
@@ -1543,7 +1543,7 @@ async fn evaluator(db: &DatabaseConnection, enabled: bool) {
         &format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
              VALUES ('eval', {enabled}, \
-                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"standard\"]}}') \
+                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"standard\"], \"checkers\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         ),
     )

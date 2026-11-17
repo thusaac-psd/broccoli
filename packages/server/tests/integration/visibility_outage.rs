@@ -58,7 +58,7 @@ async fn fixture(app: &TestApp) -> Fixture {
     app.register_for_contest(governed, &contestant).await;
     for sql in [
         format!(
-            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"{GOVERNED_TYPE}\"], \"problem_types\": []}}' \
+            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"{GOVERNED_TYPE}\"], \"problem_types\": [], \"checkers\": []}}' \
              WHERE id = '{PLUGIN}'"
         ),
         format!("UPDATE contest SET contest_type = '{GOVERNED_TYPE}' WHERE id = {governed}"),
