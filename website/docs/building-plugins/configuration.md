@@ -43,7 +43,7 @@ A property's `type` is one of `string`, `integer`, `number`, `boolean`,
 an array, and the `properties` and `required` fields of an object. An object
 that declares properties refuses fields it does not declare, unless it sets
 `additional_properties = true`. `step`, `precision`, `unit` and `span` only
-shape the form.
+shape the form; `secret` hides a value (see below).
 
 A manifest whose defaults break its own schema, or that names an unknown
 type, does not load.
@@ -64,6 +64,34 @@ pass the namespace's `validate` function, when it declares one (see below):
 A stored value may leave fields out: they read as their defaults. When an
 upgrade changes a schema, inspecting or uploading the archive lists every
 stored config the new schema refuses under `incompatible_configs`.
+
+A write that leaves out the row's `enabled` toggle or its `position` keeps
+what the stored row has; `"enabled": null` clears the toggle, so the level
+above decides.
+
+## Keep a secret
+
+Mark a string field `secret = true` when its value is a credential, such as a
+token a print station signs in with:
+
+```toml
+[config.print.properties.stations.items.properties.token]
+type = "string"
+title = "Token"
+secret = true
+```
+
+The JSON schema marks the field `writeOnly`. No read route sends its value:
+the admin config routes and the cascade answer the field as `null`, and the
+config's `secrets` list names each secret field that holds a value, by path
+(`stations[0].token`). A write that sends `null` for a secret field keeps the
+value stored at that path; a field inside an array item is matched by the
+item's position. Any other value replaces it, and an empty string clears it.
+The settings form shows a set secret as an empty password field that keeps
+the stored value unless you type a new one.
+
+Your plugin reads the real value: `host.config.get*` and the cascade a plugin
+reads are not redacted.
 
 ## Refuse what a schema cannot say
 
