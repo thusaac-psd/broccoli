@@ -199,10 +199,17 @@ hooks as part of itself (a contest plugin's submission call, a detached
 session); the reaper and an applied judgement start them in a task of their
 own that counts as judging work until they have run
 (`spawn_after_judging_hooks`), so neither waits for a hook. A hook event
-fires at most once fleet-wide: the replica that dispatches it first inserts
-its id into `hook_event`, so no other replica and no restart dispatches it
-again, and a dispatch dropped before it completes deletes the row, so the
-event is dispatched again. A client therefore never sees a terminal status
+is delivered at least once fleet-wide. The replica that dispatches it first
+records it in `hook_event` (its id, topic, payload and enablements) with a
+lease, before its hooks run, so a duplicate dispatch on any replica, or after
+a restart, is skipped. A dispatch that completes marks the event done. One
+whose hooks could not answer (a busy plugin, a database outage), or that is
+dropped, gives the lease back, without waiting on the database, so shutdown
+is never held up. Every replica re-scans the table every 10 s: it runs again
+each event that is not done and whose lease is free or has lapsed (10 min, so
+the event of a replica that died runs again), records and runs the events it
+could not record itself, and deletes completed events after 7 days. Plugins
+take a hook event as idempotent. A client therefore never sees a terminal status
 that a retry takes back: within an attempt the statuses only move forward,
 and a terminal status is final.
 
