@@ -3692,16 +3692,34 @@ export interface components {
      */
     IncompatibleConfig: {
       /**
+       * Format: int32
+       * @description The contest the config belongs to, at the contest and contest
+       *     problem scopes.
+       */
+      contest_id?: number | null;
+      /**
        * @description What the plugin finds: what its schema or its namespace's validate
        *     function refuses in the config itself, then what the target's data
        *     does not meet yet. A namespace the plugin no longer declares at this
        *     scope has one error with an empty path.
        */
       errors: components['schemas']['FieldError'][];
+      /**
+       * @description The problem's label in its contest (`A`), at the contest problem
+       *     scope.
+       * @example A
+       */
+      label?: string | null;
       /** @example contest */
       namespace: string;
       /** @example my-plugin */
       plugin_id: string;
+      /**
+       * Format: int32
+       * @description The problem the config belongs to, at the problem and contest
+       *     problem scopes.
+       */
+      problem_id?: number | null;
       /**
        * @description What the config belongs to: the problem id, contest id or
        *     `contest_id:problem_id`; the plugin id at the plugin scope.

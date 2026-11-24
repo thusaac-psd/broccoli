@@ -14,7 +14,7 @@ export function ProblemConfigIssues({ problemId }: { problemId: number }) {
     <ConfigIssuesAlert
       title={t('admin.configIssues.title')}
       issues={issues}
-      of={{ kind: 'problem' }}
+      of="problem"
     />
   );
 }

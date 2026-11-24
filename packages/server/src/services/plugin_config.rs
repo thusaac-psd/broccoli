@@ -942,6 +942,47 @@ pub(crate) async fn config_cascade<C: ConnectionTrait>(
 
 pub use broccoli_api_types::plugin::IncompatibleConfig;
 
+/// `issues` with each contest problem named by its label in its contest, as
+/// every route that lists config issues answers them.
+pub(crate) async fn labelled<C: ConnectionTrait>(
+    db: &C,
+    mut issues: Vec<IncompatibleConfig>,
+) -> Result<Vec<IncompatibleConfig>, AppError> {
+    let pairs: BTreeSet<(i32, i32)> = issues
+        .iter()
+        .filter(|issue| issue.scope == ConfigScope::ContestProblem)
+        .filter_map(|issue| Some((issue.contest_id?, issue.problem_id?)))
+        .collect();
+    if pairs.is_empty() {
+        return Ok(issues);
+    }
+    let rows = contest_problem::Entity::find()
+        .filter(pairs.iter().fold(
+            sea_orm::Condition::any(),
+            |any, &(contest_id, problem_id)| {
+                any.add(
+                    sea_orm::Condition::all()
+                        .add(contest_problem::Column::ContestId.eq(contest_id))
+                        .add(contest_problem::Column::ProblemId.eq(problem_id)),
+                )
+            },
+        ))
+        .all(db)
+        .await?;
+    for issue in &mut issues {
+        if issue.scope != ConfigScope::ContestProblem {
+            continue;
+        }
+        issue.label = rows
+            .iter()
+            .find(|row| {
+                Some(row.contest_id) == issue.contest_id && Some(row.problem_id) == issue.problem_id
+            })
+            .map(|row| row.label.clone());
+    }
+    Ok(issues)
+}
+
 /// Every stored config of `plugin_id` that `manifest` would refuse, so an
 /// admin sees what an upgrade breaks before publishing it.
 pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
@@ -997,13 +1038,13 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
                 },
             )],
         };
-        incompatible.push(IncompatibleConfig {
-            plugin_id: plugin_id.to_string(),
+        incompatible.push(IncompatibleConfig::new(
+            plugin_id.to_string(),
             scope,
-            ref_id: row.ref_id,
-            namespace: namespace.to_string(),
+            row.ref_id,
+            namespace.to_string(),
             errors,
-        });
+        ));
     }
     incompatible.sort_by(|a, b| {
         (a.scope.as_str(), &a.ref_id, &a.namespace).cmp(&(
@@ -1012,7 +1053,7 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
             &b.namespace,
         ))
     });
-    Ok(incompatible)
+    labelled(db, incompatible).await
 }
 
 #[cfg(test)]

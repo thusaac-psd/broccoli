@@ -71,7 +71,7 @@ use crate::host_funcs::config::{extract_plugin_id, strip_namespace_prefix};
 use crate::plugin_lifecycle::Governs;
 use crate::registry::TypeProviders;
 use crate::services::plugin_config::{
-    ConfigScope, ConfigTarget, Findings, IncompatibleConfig, Reads, check_config,
+    ConfigScope, ConfigTarget, Findings, IncompatibleConfig, Reads, check_config, labelled,
 };
 use crate::state::AppState;
 
@@ -156,13 +156,13 @@ pub(crate) struct ConfigIssue {
 
 impl ConfigIssue {
     fn as_listed(&self, errors: Vec<FieldError>) -> IncompatibleConfig {
-        IncompatibleConfig {
-            plugin_id: self.plugin_id.clone(),
-            scope: self.target.scope(),
-            ref_id: self.target.ref_id().to_string(),
-            namespace: self.namespace.clone(),
+        IncompatibleConfig::new(
+            self.plugin_id.clone(),
+            self.target.scope(),
+            self.target.ref_id().to_string(),
+            self.namespace.clone(),
             errors,
-        }
+        )
     }
 
     /// The issue as the API lists it: everything found.
@@ -219,7 +219,7 @@ pub(crate) async fn config_issues<C: ConnectionTrait>(
         );
         return Err(AppError::PluginUnavailable);
     }
-    Ok(outcome.issues.iter().map(ConfigIssue::listed).collect())
+    labelled(db, outcome.issues.iter().map(ConfigIssue::listed).collect()).await
 }
 
 /// Every config of `subject` its plugin finds something wrong with, as
