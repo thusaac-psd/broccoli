@@ -3209,9 +3209,10 @@ mod rejudge_lifecycle {
     }
 
     /// Every judgement of a submission gets its own `judge_epoch`, even when a deferred
-    /// rejudge is followed by an immediate one, and applying a judgement never moves the
-    /// submission's epoch backwards. The epoch fences late worker results and keys the
-    /// `after_judging` hook dedupe, so two judgements must never share one.
+    /// rejudge is followed by an immediate one, and after an apply. Applying a judgement
+    /// shows that judgement's own epoch on the submission and still advances
+    /// `max_judge_epoch`, so the next rejudge takes an epoch no judgement holds. The
+    /// epoch fences late worker results, so two judgements must never share one.
     #[tokio::test]
     async fn rejudge_epochs_are_unique() {
         let app = TestApp::spawn().await;
@@ -3249,15 +3250,15 @@ mod rejudge_lifecycle {
             "duplicate judge_epoch across judgements: {epochs:?}"
         );
 
-        // Applying the (finalized) deferred judgement must not move the
-        // submission's epoch backwards, and the next rejudge must still get an
-        // epoch no other judgement holds.
+        // Applying the (finalized) deferred judgement shows its own epoch and
+        // still advances the allocator, and the next rejudge gets an epoch no
+        // other judgement holds.
         let before = submission::Entity::find_by_id(sid)
             .one(&app.db)
             .await
             .expect("db")
             .expect("submission")
-            .judge_epoch;
+            .max_judge_epoch;
         let deferred_id = rows[1].id;
         assert!(!rows[1].is_current, "control: v2 is the deferred judgement");
         let mut finalize: submission_judgement::ActiveModel = rows[1].clone().into();
@@ -3279,10 +3280,14 @@ mod rejudge_lifecycle {
             .await
             .expect("db")
             .expect("submission");
+        assert_eq!(
+            after.judge_epoch, rows[1].judge_epoch,
+            "the submission shows the applied judgement's epoch"
+        );
         assert!(
-            after.judge_epoch > before,
-            "apply moved judge_epoch from {before} to {}",
-            after.judge_epoch
+            after.max_judge_epoch > before,
+            "apply moved max_judge_epoch from {before} to {}",
+            after.max_judge_epoch
         );
         let again = app
             .post_with_token(&routes::submission_rejudge(sid), &json!({}), &token)
@@ -3303,10 +3308,9 @@ mod rejudge_lifecycle {
         );
     }
 
-    /// Applying a deferred judgement re-stamps it with a fresh epoch, and its
-    /// `test_case_result` rows move to that epoch with it. Plugins such as IOI join
-    /// results to their judgement on the epoch, so stale result epochs would score the
-    /// applied judgement as 0.
+    /// Applying a deferred judgement keeps its epoch, so its `test_case_result` rows
+    /// still match it. Plugins such as IOI join results to their judgement on the
+    /// epoch, so results under another epoch would score the applied judgement as 0.
     #[tokio::test]
     async fn applied_judgement_results_keep_matching_its_epoch() {
         use sea_orm::{ConnectionTrait, DbBackend, Statement};
@@ -3368,9 +3372,9 @@ mod rejudge_lifecycle {
             .find(|j| j.is_current)
             .expect("current judgement");
         assert_eq!(current.id, j2.id);
-        assert!(
-            current.judge_epoch > j2.judge_epoch,
-            "apply takes a fresh epoch"
+        assert_eq!(
+            current.judge_epoch, j2.judge_epoch,
+            "apply keeps the judgement's epoch"
         );
 
         // IOI's join (`plugins/ioi/src/score.rs`), minus its contest filter.
