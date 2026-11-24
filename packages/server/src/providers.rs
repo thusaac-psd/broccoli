@@ -14,7 +14,7 @@
 //!
 //! One rule resolves a key: to its fleet-wide provider, the plugin with the
 //! first id among the enabled ones that provide it
-//! (`PluginLifecycle::provider`, and [`provider`] in SQL, over the rows
+//! (`PluginLifecycle::provider`, and `provider` in SQL, over the rows
 //! `plugin.is_enabled` and `plugin.governs`). A key no plugin ever recorded
 //! resolves among the plugins loaded here. The claim, the dispatch
 //! ([`resolve`]) and the parking rule all read it:

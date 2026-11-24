@@ -193,7 +193,7 @@ impl Dispatch {
     }
 
     /// Records that a plugin the unit needs did not resolve here
-    /// (`unresolved`), as [`super::fault::missing_plugin`] decides: handed
+    /// (`unresolved`), as `judging::fault::missing_plugin` decides: handed
     /// back when the unit was claimed with every plugin it needs loaded
     /// here (it is reloading or was unloaded since), standing when this
     /// replica took it while no live replica had the plugin.
