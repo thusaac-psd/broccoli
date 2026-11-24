@@ -57,7 +57,7 @@ pub async fn upload_checker_source(
         &owner.plugin_id,
         &owner.namespace,
         serde_json::json!({ "files": files }),
-        RowSettings::Kept,
+        RowSettings::KEPT,
     )
     .await?;
     change

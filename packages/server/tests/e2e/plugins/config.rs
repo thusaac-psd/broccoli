@@ -546,3 +546,30 @@ async fn a_secret_config_field_is_never_read_back_and_survives_an_unchanged_save
     assert!(!res.text.contains("station-secret-token"), "{}", res.text);
     assert_eq!(station_works().await, 200, "the stored token is kept");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_config_write_that_leaves_the_toggle_out_keeps_it() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("cfg_toggle_admin", "password", "admin")
+        .await;
+    let path = "/api/v1/admin/plugins/print/config/print";
+    let put = |body: serde_json::Value| {
+        let (app, admin) = (&app, &admin);
+        async move {
+            let res = app.put_with_token(path, &body, admin).await;
+            assert_eq!(res.status, 200, "{}", res.text);
+            res.body
+        }
+    };
+
+    put(json!({ "config": { "banner": "one" }, "enabled": false, "position": 3 })).await;
+    let kept = put(json!({ "config": { "banner": "two" } })).await;
+    assert_eq!(kept["enabled"], json!(false), "{kept}");
+    assert_eq!(kept["position"], json!(3), "{kept}");
+    assert_eq!(kept["config"]["banner"], json!("two"), "{kept}");
+
+    let cleared = put(json!({ "config": { "banner": "two" }, "enabled": null })).await;
+    assert_eq!(cleared["enabled"], json!(null), "{cleared}");
+    assert_eq!(cleared["position"], json!(3), "{cleared}");
+}

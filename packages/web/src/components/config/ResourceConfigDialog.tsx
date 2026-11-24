@@ -680,7 +680,7 @@ function SinglePluginContent({
   const propagateEnabled = useCallback(
     async (
       savedNamespace: string,
-      enabled: boolean | undefined,
+      enabled: boolean | null,
     ): Promise<{ error?: unknown }> => {
       for (const schema of schemas) {
         const namespace = schema.namespace;
@@ -703,16 +703,12 @@ function SinglePluginContent({
               if (parseApiError(getError)?.code === 'NOT_FOUND') continue;
               return { error: getError };
             }
-            if (!row || (row.enabled ?? undefined) === enabled) continue;
+            if (!row || (row.enabled ?? null) === enabled) continue;
             const { error } = await apiClient.PUT(
               '/contests/{id}/config/{plugin_id}/{namespace}',
               {
                 params: { path },
-                body: {
-                  config: row.config ?? {},
-                  position: row.position,
-                  ...(enabled !== undefined ? { enabled } : {}),
-                },
+                body: { config: row.config ?? {}, enabled },
               },
             );
             if (error) return { error };
@@ -730,16 +726,12 @@ function SinglePluginContent({
               if (parseApiError(getError)?.code === 'NOT_FOUND') continue;
               return { error: getError };
             }
-            if (!row || (row.enabled ?? undefined) === enabled) continue;
+            if (!row || (row.enabled ?? null) === enabled) continue;
             const { error } = await apiClient.PUT(
               '/problems/{id}/config/{plugin_id}/{namespace}',
               {
                 params: { path },
-                body: {
-                  config: row.config ?? {},
-                  position: row.position,
-                  ...(enabled !== undefined ? { enabled } : {}),
-                },
+                body: { config: row.config ?? {}, enabled },
               },
             );
             if (error) return { error };
@@ -762,11 +754,11 @@ function SinglePluginContent({
           ...cbs,
           putConfig: async (config: Record<string, unknown>) => {
             const enabledValue = enabledRef.current;
-            const enabled = enabledValue === 'unset' ? undefined : enabledValue;
+            const enabled = enabledValue === 'unset' ? null : enabledValue;
             const result = await (
               cbs.putConfig as (
                 c: Record<string, unknown>,
-                e?: boolean,
+                e?: boolean | null,
               ) => Promise<{ error?: unknown }>
             )(config, enabled);
             if (result.error) return result;

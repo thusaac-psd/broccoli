@@ -391,17 +391,22 @@ fn plugin_field_errors(plugin_id: &str, violations: Vec<ConfigViolation>) -> Vec
         .collect()
 }
 
-/// What a config write sets on its row besides the config.
+/// What a config write sets on its row besides the config. A setting the
+/// write leaves `None` keeps a stored row's value; a new row gets no toggle
+/// and position 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RowSettings {
-    /// An admin's write: the row's `enabled` toggle and its position.
-    Set {
-        enabled: Option<bool>,
-        position: i32,
-    },
-    /// A write that leaves a stored row's toggle and position as they are,
-    /// and gives a new row none and position 0.
-    Kept,
+pub(crate) struct RowSettings {
+    /// The row's `enabled` toggle; `Some(None)` clears it.
+    pub(crate) enabled: Option<Option<bool>>,
+    pub(crate) position: Option<i32>,
+}
+
+impl RowSettings {
+    /// A write of the config alone.
+    pub(crate) const KEPT: Self = Self {
+        enabled: None,
+        position: None,
+    };
 }
 
 /// A change to the configs, or to what they are checked against, as the
@@ -564,20 +569,17 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     if !findings.refusals.is_empty() {
         return Err(AppError::InvalidConfig(findings.refusals));
     }
-    let (enabled, position, kept) = match settings {
-        RowSettings::Set { enabled, position } => (enabled, position, false),
-        RowSettings::Kept => (None, 0, true),
-    };
     let mut updated = vec![
         plugin_config::Column::Config,
         plugin_config::Column::UpdatedAt,
     ];
-    if !kept {
-        updated.extend([
-            plugin_config::Column::Enabled,
-            plugin_config::Column::Position,
-        ]);
+    if settings.enabled.is_some() {
+        updated.push(plugin_config::Column::Enabled);
     }
+    if settings.position.is_some() {
+        updated.push(plugin_config::Column::Position);
+    }
+    let (enabled, position) = (settings.enabled.flatten(), settings.position.unwrap_or(0));
     let row = plugin_config::Entity::insert(plugin_config::ActiveModel {
         scope: Set(target.scope().as_str().to_string()),
         ref_id: Set(target.ref_id().to_string()),

@@ -28,8 +28,8 @@ use crate::models::plugin_config::{
 use crate::services::config_issues::ConfigChecker;
 use crate::services::config_issues::{Subject, config_issues};
 use crate::services::plugin_config::{
-    ConfigScope, ConfigTarget, IncompatibleConfig, Readable, Reads, RowSettings, cascade_view,
-    config_cascade, declared, delete_config, get_config, shown, write_config,
+    ConfigScope, ConfigTarget, IncompatibleConfig, Readable, Reads, cascade_view, config_cascade,
+    declared, delete_config, get_config, shown, write_config,
 };
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, find_contest_problem};
@@ -293,6 +293,7 @@ pub async fn upsert_plugin_global_config(
     validate_plugin_id(&plugin_id)?;
     validate_namespace(&namespace)?;
     let target = ConfigTarget::plugin(&plugin_id);
+    let settings = payload.row_settings();
     let (result, change) = write_config(
         &state.db,
         state.plugins.as_ref(),
@@ -301,10 +302,7 @@ pub async fn upsert_plugin_global_config(
         &plugin_id,
         &namespace,
         payload.config,
-        RowSettings::Set {
-            enabled: payload.enabled,
-            position: payload.position,
-        },
+        settings,
     )
     .await?;
     change
@@ -529,6 +527,7 @@ pub async fn upsert_problem_config(
     let txn = state.db.begin().await?;
     find_problem(&txn, problem_id).await?;
     let target = ConfigTarget::problem(problem_id);
+    let settings = payload.row_settings();
     let (result, change) = write_config(
         &txn,
         state.plugins.as_ref(),
@@ -537,10 +536,7 @@ pub async fn upsert_problem_config(
         &plugin_id,
         &namespace,
         payload.config,
-        RowSettings::Set {
-            enabled: payload.enabled,
-            position: payload.position,
-        },
+        settings,
     )
     .await?;
     txn.commit().await?;
@@ -739,6 +735,7 @@ pub async fn upsert_contest_problem_config(
     let txn = state.db.begin().await?;
     find_contest_problem(&txn, contest_id, problem_id).await?;
     let target = ConfigTarget::contest_problem(contest_id, problem_id);
+    let settings = payload.row_settings();
     let (result, change) = write_config(
         &txn,
         state.plugins.as_ref(),
@@ -747,10 +744,7 @@ pub async fn upsert_contest_problem_config(
         &plugin_id,
         &namespace,
         payload.config,
-        RowSettings::Set {
-            enabled: payload.enabled,
-            position: payload.position,
-        },
+        settings,
     )
     .await?;
     txn.commit().await?;
@@ -979,6 +973,7 @@ pub async fn upsert_contest_config(
     let txn = state.db.begin().await?;
     find_contest(&txn, contest_id).await?;
     let target = ConfigTarget::contest(contest_id);
+    let settings = payload.row_settings();
     let (result, change) = write_config(
         &txn,
         state.plugins.as_ref(),
@@ -987,10 +982,7 @@ pub async fn upsert_contest_config(
         &plugin_id,
         &namespace,
         payload.config,
-        RowSettings::Set {
-            enabled: payload.enabled,
-            position: payload.position,
-        },
+        settings,
     )
     .await?;
     txn.commit().await?;

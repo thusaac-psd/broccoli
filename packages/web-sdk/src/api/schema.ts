@@ -5197,9 +5197,18 @@ export interface components {
     };
     UpsertPluginConfigRequest: {
       config: unknown;
+      /**
+       * @description The row's toggle: `true` or `false` decides whether the plugin runs
+       *     here, `null` leaves it to the scope above. Left out, a stored row
+       *     keeps its toggle.
+       */
       enabled?: boolean | null;
-      /** Format: int32 */
-      position?: number;
+      /**
+       * Format: int32
+       * @description The row's position. Left out, a stored row keeps its position and a
+       *     new row gets 0.
+       */
+      position?: number | null;
     };
     UserResponse: {
       /**

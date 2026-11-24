@@ -204,7 +204,7 @@ fn config_set_fn(
                 plugin_id,
                 &input.namespace,
                 input.config,
-                RowSettings::Kept,
+                RowSettings::KEPT,
             )
             .await?;
             // The plugin may read its write back before the change

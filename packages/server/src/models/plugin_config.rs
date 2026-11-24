@@ -74,10 +74,35 @@ pub struct CascadeLevelsView {
 #[derive(Deserialize, ToSchema)]
 pub struct UpsertPluginConfigRequest {
     pub config: serde_json::Value,
+    /// The row's toggle: `true` or `false` decides whether the plugin runs
+    /// here, `null` leaves it to the scope above. Left out, a stored row
+    /// keeps its toggle.
+    #[serde(default, deserialize_with = "present")]
     #[schema(value_type = Option<bool>)]
-    pub enabled: Option<bool>,
+    pub enabled: Option<Option<bool>>,
+    /// The row's position. Left out, a stored row keeps its position and a
+    /// new row gets 0.
     #[serde(default)]
-    pub position: i32,
+    pub position: Option<i32>,
+}
+
+impl UpsertPluginConfigRequest {
+    pub(crate) fn row_settings(&self) -> crate::services::plugin_config::RowSettings {
+        crate::services::plugin_config::RowSettings {
+            enabled: self.enabled,
+            position: self.position,
+        }
+    }
+}
+
+/// A field the body names, `null` included: `Some(None)` is an explicit
+/// `null`, and `#[serde(default)]` makes a left-out field `None`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
 pub mod config_key {
