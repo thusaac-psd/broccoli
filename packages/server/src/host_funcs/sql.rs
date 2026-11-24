@@ -1393,6 +1393,28 @@ mod tests {
             .expect("migrate");
     }
 
+    /// Reading a connection's backend pid is the host's bookkeeping for the
+    /// cancel, not a statement of the caller's: the metric callback sees the
+    /// statements run on the connection and not the pid read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_backend_pid_read_is_not_a_measured_statement() {
+        let (_container, _url, mut db) = one_connection().await;
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        db.set_metric_callback({
+            let seen = seen.clone();
+            move |_| {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let mut conn = db.acquire().await.expect("checked out");
+        assert!(conn.backend_pid().await.expect("pid") > 0);
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 0);
+        conn.execute(Statement::from_string(DbBackend::Postgres, "SELECT 1"))
+            .await
+            .expect("ran");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     /// A database outage on a plugin's own statement is no answer about the
     /// statement: the call fails as unavailable, which its caller answers
     /// with a retryable 503, not as an error the plugin reads.

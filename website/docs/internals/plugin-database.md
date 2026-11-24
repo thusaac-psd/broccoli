@@ -182,7 +182,10 @@ A plugin's SQL runs within the deadline of the call that runs it
   cancel lands is rolled back, and one that finished between the deadline and
   the cancel has applied, so a write retried after an unavailable answer must
   tolerate having applied. A statement outside a transaction runs on a
-  connection the host leased for it and whose backend pid it read first; a
+  connection the host leased for it and whose backend pid it read first (one
+  round trip per statement: sqlx keeps a connection's pid private and gives
+  it no slot to keep one in, and the read is not reported to the metric
+  callback); a
   transaction records its backend's pid when it begins, and a cut statement
   of it ends the transaction: it leaves the map and its lock at once, and the
   task rolls it back after the cancel, returning its connection and permit.
