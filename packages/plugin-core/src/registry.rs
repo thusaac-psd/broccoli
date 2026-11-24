@@ -163,15 +163,28 @@ impl PluginEntry {
     /// replaced: its pool, and the pools it took over in turn, stay this
     /// load's, so calls still running on them are retired when the plugin
     /// is unloaded ([`Self::retire`]). Pools no call runs on any more are
-    /// dropped.
+    /// dropped: each is checked where `previous` holds it, before it is
+    /// cloned, since the clone would itself count as a holder.
     pub fn succeed(&mut self, previous: &PluginEntry) {
         self.superseded = previous
             .superseded
             .iter()
-            .cloned()
-            .chain(previous.runtime.as_ref().map(InstancePool::liveness))
             .filter(|pool| pool.in_use())
+            .cloned()
+            .chain(
+                previous
+                    .runtime
+                    .as_ref()
+                    .filter(|pool| pool.has_calls())
+                    .map(InstancePool::liveness),
+            )
             .collect();
+    }
+
+    /// How many replaced pools this load keeps.
+    #[cfg(test)]
+    pub(crate) fn superseded_count(&self) -> usize {
+        self.superseded.len()
     }
 
     /// Unload: retire this version's pool and every pool it took over, so

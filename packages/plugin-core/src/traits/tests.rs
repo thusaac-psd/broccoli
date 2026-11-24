@@ -327,6 +327,32 @@ impl Harness {
         let registry = self.manager.get_registry().read().unwrap();
         registry[PLUGIN].runtime.as_ref().unwrap().count()
     }
+
+    /// A reload as the host's lifecycle does it: a fresh entry, a load, and
+    /// the fresh version taking over from the one it replaced.
+    fn reload(&self) {
+        let fresh = crate::registry::PluginEntry::from_dir(&self.dir.path().join(PLUGIN)).unwrap();
+        let previous = self
+            .manager
+            .get_registry()
+            .write()
+            .unwrap()
+            .insert(PLUGIN.to_string(), fresh)
+            .unwrap();
+        self.manager.load_plugin(PLUGIN).unwrap();
+        self.manager
+            .get_registry()
+            .write()
+            .unwrap()
+            .get_mut(PLUGIN)
+            .unwrap()
+            .succeed(&previous);
+    }
+
+    /// How many replaced pools the plugin's entry keeps.
+    fn superseded(&self) -> usize {
+        self.manager.get_registry().read().unwrap()[PLUGIN].superseded_count()
+    }
 }
 
 impl Drop for Harness {
@@ -677,29 +703,29 @@ async fn an_unload_retires_a_call_still_running_on_a_version_a_reload_replaced()
     let running = h.spawn("hold", CallOptions::background(later()));
     until(|| h.fixture.read(|c| c.running) == 1).await;
     h.write_guest(2);
-    // A reload as the host's lifecycle does it: a fresh entry, a load, and
-    // the fresh version taking over from the one it replaced.
-    let fresh = crate::registry::PluginEntry::from_dir(&h.dir.path().join(PLUGIN)).unwrap();
-    let previous = h
-        .manager
-        .get_registry()
-        .write()
-        .unwrap()
-        .insert(PLUGIN.to_string(), fresh)
-        .unwrap();
-    h.manager.load_plugin(PLUGIN).unwrap();
-    h.manager
-        .get_registry()
-        .write()
-        .unwrap()
-        .get_mut(PLUGIN)
-        .unwrap()
-        .succeed(&previous);
-    drop(previous);
+    h.reload();
     h.manager.unload_plugin(PLUGIN).unwrap();
     h.fixture.release();
     running.await.unwrap().unwrap();
     assert_eq!(h.fixture.read(|c| c.retired.clone()), vec![true]);
+}
+
+/// A reload keeps only the replaced pools a call still runs on: with no
+/// call running nothing is kept, and a pool whose last call ended is
+/// dropped at the next reload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reload_keeps_only_the_replaced_pools_a_call_still_runs_on() {
+    let h = Harness::new(2);
+    h.reload();
+    assert_eq!(h.superseded(), 0, "no call ran on the replaced pool");
+    let running = h.spawn("hold", CallOptions::background(later()));
+    until(|| h.fixture.read(|c| c.running) == 1).await;
+    h.reload();
+    assert_eq!(h.superseded(), 1, "a call still runs on the replaced pool");
+    h.fixture.release();
+    running.await.unwrap().unwrap();
+    h.reload();
+    assert_eq!(h.superseded(), 0, "its call ended");
 }
 
 /// A reload that does not take is dropped alone: a call running on it is
