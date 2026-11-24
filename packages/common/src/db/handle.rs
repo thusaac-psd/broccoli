@@ -19,6 +19,9 @@
 //! there by one rule, so while the database cannot be reached a caller is
 //! refused at once, and a pool that is only busy is never taken for one that
 //! is lost.
+//!
+//! A mock connection (tests) has no pool to check out from and no outage:
+//! its statements run on sea-orm's mock as they are, NUL rule included.
 
 use std::backtrace::Backtrace;
 use std::future::Future;
@@ -41,7 +44,44 @@ use super::reachability::{Held, Reachability};
 /// while the database is unreachable (see the module docs). Clones share the
 /// pool and what it knows.
 #[derive(Clone, Debug)]
-pub struct DatabaseConnection(sea_orm::DatabaseConnection, Arc<Reachability>);
+pub struct DatabaseConnection(sea_orm::DatabaseConnection, Arc<Reachability>, Metric);
+
+/// The callback [`DatabaseConnection::set_metric_callback`] installs. sea-orm
+/// calls it for a transaction's statements; the handle calls it for the
+/// statements it runs on a [`PooledConnection`], which bypass sea-orm's
+/// executor, so every statement reaches it once.
+#[derive(Clone, Default)]
+struct Metric(Option<Arc<dyn Fn(&sea_orm::metric::Info<'_>) + Send + Sync>>);
+
+impl std::fmt::Debug for Metric {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "Metric(set)"
+        } else {
+            "Metric(none)"
+        })
+    }
+}
+
+impl Metric {
+    async fn observe<T>(
+        &self,
+        stmt: &Statement,
+        op: impl Future<Output = Result<T, DbErr>>,
+    ) -> Result<T, DbErr> {
+        let Some(callback) = &self.0 else {
+            return op.await;
+        };
+        let start = std::time::Instant::now();
+        let outcome = op.await;
+        callback(&sea_orm::metric::Info {
+            elapsed: start.elapsed(),
+            statement: stmt,
+            failed: outcome.is_err(),
+        });
+        outcome
+    }
+}
 
 /// A transaction opened from a [`DatabaseConnection`], with the same guarantee.
 /// While it is open, the connection it holds counts as busy, not lost, in the
@@ -60,6 +100,7 @@ pub struct DatabaseTransaction(sea_orm::DatabaseTransaction, Held);
 pub struct PooledConnection {
     conn: sea_orm::sqlx::pool::PoolConnection<sea_orm::sqlx::Postgres>,
     held: Held,
+    metric: Metric,
 }
 
 /// How many connections a pool has open, and how many of them are idle.
@@ -73,11 +114,13 @@ impl PooledConnection {
     /// Run `stmt`.
     pub async fn execute(&mut self, stmt: Statement) -> Result<ExecResult, DbErr> {
         let stmt = without_nul(stmt);
-        let outcome = sqlx_query(&stmt)
-            .execute(&mut *self.conn)
-            .await
-            .map(ExecResult::from)
-            .map_err(exec_err);
+        let run = sqlx_query(&stmt).execute(&mut *self.conn);
+        let outcome = self
+            .metric
+            .observe(&stmt, async {
+                run.await.map(ExecResult::from).map_err(exec_err)
+            })
+            .await;
         self.settle(outcome)
     }
 
@@ -101,22 +144,30 @@ impl PooledConnection {
     /// Run `stmt` and return its first row, if any.
     pub async fn query_one(&mut self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
         let stmt = without_nul(stmt);
-        let outcome = sqlx_query(&stmt)
-            .fetch_optional(&mut *self.conn)
-            .await
-            .map(|row| row.map(QueryResult::from))
-            .map_err(query_err);
+        let run = sqlx_query(&stmt).fetch_optional(&mut *self.conn);
+        let outcome = self
+            .metric
+            .observe(&stmt, async {
+                run.await
+                    .map(|row| row.map(QueryResult::from))
+                    .map_err(query_err)
+            })
+            .await;
         self.settle(outcome)
     }
 
     /// Run `stmt` and return every row.
     pub async fn query_all(&mut self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
         let stmt = without_nul(stmt);
-        let outcome = sqlx_query(&stmt)
-            .fetch_all(&mut *self.conn)
-            .await
-            .map(|rows| rows.into_iter().map(QueryResult::from).collect())
-            .map_err(query_err);
+        let run = sqlx_query(&stmt).fetch_all(&mut *self.conn);
+        let outcome = self
+            .metric
+            .observe(&stmt, async {
+                run.await
+                    .map(|rows| rows.into_iter().map(QueryResult::from).collect())
+                    .map_err(query_err)
+            })
+            .await;
         self.settle(outcome)
     }
 
@@ -175,7 +226,7 @@ fn sqlx_query(
 
 impl From<sea_orm::DatabaseConnection> for DatabaseConnection {
     fn from(inner: sea_orm::DatabaseConnection) -> Self {
-        Self(inner, Arc::default())
+        Self(inner, Arc::default(), Metric::default())
     }
 }
 
@@ -197,26 +248,46 @@ impl DatabaseConnection {
         self.acquire().await?.ping().await
     }
 
+    /// Call `callback` with every statement this handle runs, as sea-orm's
+    /// `set_metric_callback` does.
+    pub fn set_metric_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(&sea_orm::metric::Info<'_>) + Send + Sync + 'static,
+    {
+        let callback = Arc::new(callback);
+        let shared = Arc::clone(&callback);
+        self.0.set_metric_callback(move |info| shared(info));
+        self.2 = Metric(Some(callback));
+    }
+
     /// Check a connection out of the pool (see [`PooledConnection`]).
     pub async fn acquire(&self) -> Result<PooledConnection, DbErr> {
-        let pool = self.0.get_postgres_connection_pool();
+        let pool = self
+            .pool()
+            .ok_or_else(|| DbErr::Custom("a mock connection has no pool".into()))?;
         self.checked_out(async { pool.acquire().await.map_err(acquire_err) })
             .await
-            .map(|(conn, held)| PooledConnection { conn, held })
+            .map(|(conn, held)| PooledConnection {
+                conn,
+                held,
+                metric: self.2.clone(),
+            })
     }
 
     /// How many connections the pool has open, and how many are idle.
     pub fn connections(&self) -> PoolConnections {
-        let pool = self.0.get_postgres_connection_pool();
-        PoolConnections {
-            open: pool.size(),
-            idle: pool.num_idle(),
-        }
+        self.pool()
+            .map_or(PoolConnections { open: 0, idle: 0 }, |pool| {
+                PoolConnections {
+                    open: pool.size(),
+                    idle: pool.num_idle(),
+                }
+            })
     }
 
     /// Close one idle connection, if the pool has one; true when it did.
     pub async fn close_idle(&self) -> bool {
-        let Some(conn) = self.0.get_postgres_connection_pool().try_acquire() else {
+        let Some(conn) = self.pool().and_then(|pool| pool.try_acquire()) else {
             return false;
         };
         if let Err(e) = conn.close().await {
@@ -236,19 +307,36 @@ impl DatabaseConnection {
         self.1.settle_acquire(pass, outcome)
     }
 
+    /// The pool connections are checked out of; `None` for a mock.
+    fn pool(&self) -> Option<&sea_orm::sqlx::PgPool> {
+        (!self.0.is_mock_connection()).then(|| self.0.get_postgres_connection_pool())
+    }
+
     async fn exec(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
+        if self.0.is_mock_connection() {
+            return self.0.execute_raw(without_nul(stmt)).await;
+        }
         self.acquire().await?.execute(stmt).await
     }
 
     async fn unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
+        if self.0.is_mock_connection() {
+            return self.0.execute_unprepared(&sanitize_text_field(sql)).await;
+        }
         self.acquire().await?.execute_unprepared(sql).await
     }
 
     async fn one(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
+        if self.0.is_mock_connection() {
+            return self.0.query_one_raw(without_nul(stmt)).await;
+        }
         self.acquire().await?.query_one(stmt).await
     }
 
     async fn all(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
+        if self.0.is_mock_connection() {
+            return self.0.query_all_raw(without_nul(stmt)).await;
+        }
         self.acquire().await?.query_all(stmt).await
     }
 

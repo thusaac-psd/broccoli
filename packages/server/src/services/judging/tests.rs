@@ -60,14 +60,12 @@ async fn in_flight(db: &DatabaseConnection, server: &str) -> i64 {
 /// A handle on `db`'s pool that counts the statements run through it.
 fn counting(db: &DatabaseConnection) -> (DatabaseConnection, Arc<AtomicUsize>) {
     let statements = Arc::new(AtomicUsize::new(0));
-    let mut counted = sea_orm::SqlxPostgresConnector::from_sqlx_postgres_pool(
-        db.as_sea_orm().get_postgres_connection_pool().clone(),
-    );
+    let mut counted = db.clone();
     let seen = Arc::clone(&statements);
     counted.set_metric_callback(move |_| {
         seen.fetch_add(1, Ordering::Relaxed);
     });
-    (counted.into(), statements)
+    (counted, statements)
 }
 
 /// The test user and problem, seeded on first use.
@@ -1487,7 +1485,7 @@ async fn provider(db: &DatabaseConnection, enabled: bool) {
         db,
         &format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
-             VALUES ('std', {enabled}, '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": [], \"checkers\": []}}') \
+             VALUES ('std', {enabled}, '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": [], \"checker_formats\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         ),
     )
@@ -1635,7 +1633,7 @@ async fn evaluator(db: &DatabaseConnection, enabled: bool) {
         &format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
              VALUES ('eval', {enabled}, \
-                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"standard\"], \"checkers\": []}}') \
+                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"standard\"], \"checker_formats\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         ),
     )
@@ -1659,7 +1657,7 @@ async fn work_whose_checker_plugin_is_disabled_is_parked_until_it_is_enabled() {
         format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
              VALUES ('checkers', {enabled}, \
-                     '{{\"visibility\": false, \"host_locale\": null, \"checker_formats\": [\"{format}\"]}}') \
+                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [\"{format}\"]}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         )
     };
