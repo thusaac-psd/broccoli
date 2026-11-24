@@ -298,3 +298,152 @@ async fn error_stands_marks_the_system_errors_decided_before_it() {
         "the shown and the past system errors stand; the undecided one and a verdict do not"
     );
 }
+
+/// The last migration of the release installations run (`master`). Every
+/// migration after it is part of this release's upgrade.
+const RELEASED: &str = "m0009_config_issues";
+
+/// A database the released build ran, with rows in that build's shapes:
+/// users with sessions, refresh tokens and device codes, a plugin group role,
+/// enabled and disabled plugins with what they governed and a replica's
+/// heartbeat, a problem, a contest, submissions and judgements, a code run
+/// and a stored config. Migrated to the released schema first.
+async fn released_database(db: &DatabaseConnection) {
+    use sea_orm_migration::MigratorTrait;
+
+    let released = super::Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == RELEASED)
+        .expect("the released migration is known");
+    super::Migrator::up(db.as_sea_orm(), Some(released as u32 + 1))
+        .await
+        .expect("migrate to the released schema");
+    db.execute_unprepared(
+        "DO $$ BEGIN \
+             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'released_plugins') THEN \
+                 CREATE ROLE released_plugins NOLOGIN; \
+             END IF; \
+         END $$; \
+         INSERT INTO plugin_group_role (name) VALUES ('released_plugins'); \
+         GRANT SELECT (id, error_message) ON submission, submission_judgement, code_run \
+             TO released_plugins; \
+         INSERT INTO \"user\" (id, username, display_name, password, created_at) VALUES \
+             (1, 'alice', 'Alice', 'x', NOW()), (2, 'bob', 'Bob', 'x', NOW()); \
+         INSERT INTO auth_session (id, user_id, created_at) VALUES (1, 1, NOW()); \
+         INSERT INTO refresh_tokens (selector, validator, user_id, expires_at, created_at, \
+             session_id) VALUES \
+             ('s1', 'v', 1, NOW() + interval '1 day', NOW(), 1), \
+             ('s2', 'v', 2, NOW() + interval '1 day', NOW(), NULL); \
+         INSERT INTO device_authorization (device_code_hash, user_code, authorized_user_id, \
+             created_at, expires_at) VALUES \
+             ('pending', 'AAAA-AAAA', NULL, NOW(), NOW() + interval '10 minutes'), \
+             ('approved', 'BBBB-BBBB', 1, NOW(), NOW() + interval '10 minutes'); \
+         INSERT INTO plugin (id, is_enabled, generation, version, governs, updated_at) VALUES \
+             ('icpc', TRUE, 3, '1.0.0', \
+                 '{\"visibility\": false, \"contest_types\": [\"icpc\"]}', NOW()), \
+             ('ioi', FALSE, 2, '1.0.0', \
+                 '{\"visibility\": true, \"contest_types\": [\"ioi\"]}', NOW()), \
+             ('notes', TRUE, 1, '0.1.0', NULL, NOW()), \
+             ('odd', TRUE, 1, '0.1.0', '[\"icpc\"]', NOW()); \
+         INSERT INTO plugin_replica (server_id, plugins, contest_types, state_at, \
+             heartbeat_at) VALUES \
+             ('server-a', '{\"icpc\": \"1.0.0\"}', '[\"icpc\"]', NOW(), NOW()); \
+         INSERT INTO plugin_config (scope, ref_id, namespace, config, enabled) VALUES \
+             ('problem', '1', 'icpc', '{}', TRUE); \
+         INSERT INTO problem (id, title, content, time_limit, memory_limit, problem_type, \
+             default_contest_type, checker_format, created_at, updated_at) VALUES \
+             (1, 'p', 'c', 1000, 1024, 'batch', 'icpc', 'exact', NOW(), NOW()); \
+         INSERT INTO contest (id, title, description, start_time, end_time, contest_type, \
+             created_at, updated_at) VALUES \
+             (1, 'c', 'd', NOW(), NOW() + interval '1 hour', 'icpc', NOW(), NOW()); \
+         INSERT INTO contest_problem (contest_id, problem_id, label) VALUES (1, 1, 'A'); \
+         INSERT INTO contest_user (contest_id, user_id, registered_at) VALUES (1, 2, NOW()); \
+         INSERT INTO submission (id, files, language, user_id, problem_id, contest_id, \
+             contest_type, status, verdict, judge_epoch, max_judge_epoch, created_at) VALUES \
+             (1, '[]', 'cpp', 2, 1, 1, 'icpc', 'Judged', 'Accepted', 1, 1, NOW()), \
+             (2, '[]', 'cpp', 2, 1, 1, 'icpc', 'SystemError', 'SystemError', 1, 1, NOW()), \
+             (3, '[]', 'cpp', 2, 1, NULL, 'ioi', 'Queued', NULL, 0, 0, NOW()); \
+         INSERT INTO submission_judgement (id, submission_id, version, is_current, \
+             is_finalized, status, verdict, judge_epoch, created_at, queued_at) VALUES \
+             (1, 1, 1, TRUE, TRUE, 'Judged', 'Accepted', 1, NOW(), NOW()), \
+             (2, 2, 1, TRUE, TRUE, 'SystemError', 'SystemError', 1, NOW(), NOW()); \
+         INSERT INTO code_run (id, files, language, user_id, problem_id, contest_type, status, \
+             custom_test_cases, created_at) VALUES \
+             (1, '[]', 'cpp', 2, 1, 'icpc', 'Judged', '[]', NOW());",
+    )
+    .await
+    .expect("seed the released build's rows");
+}
+
+/// An installation upgrades from the released build: boot migrates a database
+/// that build ran, with its rows in its shapes, to this build's schema, and
+/// every row then reads through the code's entities. A pending migration that
+/// assumes an empty table fails here, not on an operator's upgrade.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_database_the_released_build_ran_upgrades_to_this_build() {
+    use crate::entity;
+    use crate::plugin_lifecycle::Governs;
+    use sea_orm::EntityTrait;
+
+    let (_pg, port) = postgres().await;
+    let db_url = url(port, "postgres");
+    released_database(&connect(&db_url).await).await;
+
+    let boot = BootSession::acquire(&db_url).await.expect("boot session");
+    boot.migrate()
+        .await
+        .expect("boot migrates a database the released build ran");
+    let db = boot.conn().as_sea_orm();
+
+    let plugins = entity::plugin::Entity::find()
+        .all(db)
+        .await
+        .expect("plugins");
+    assert_eq!(plugins.len(), 4);
+    for plugin in &plugins {
+        if let Some(governs) = &plugin.governs {
+            serde_json::from_value::<Governs>(governs.clone()).unwrap_or_else(|e| {
+                panic!("{}'s governs reads as this build's shape: {e}", plugin.id)
+            });
+        }
+    }
+    let ioi = plugins.iter().find(|p| p.id == "ioi").expect("ioi");
+    let governs: Governs = serde_json::from_value(ioi.governs.clone().expect("kept")).unwrap();
+    assert!(governs.visibility);
+    assert_eq!(
+        governs.provides.contest_types,
+        ["ioi"],
+        "a disabled plugin still closes the contest types it governed"
+    );
+
+    let odd = plugins.iter().find(|p| p.id == "odd").expect("odd");
+    assert_eq!(
+        odd.governs, None,
+        "a row in no known shape is cleared for its next load to record"
+    );
+
+    macro_rules! reads {
+        ($($table:ident),* $(,)?) => {$(
+            entity::$table::Entity::find()
+                .all(db)
+                .await
+                .unwrap_or_else(|e| panic!("{} rows read: {e}", stringify!($table)));
+        )*};
+    }
+    reads!(
+        user,
+        auth_session,
+        refresh_token,
+        device_authorization,
+        plugin_replica,
+        plugin_config,
+        problem,
+        contest,
+        contest_problem,
+        contest_user,
+        submission,
+        submission_judgement,
+        code_run,
+    );
+    boot.release().await.expect("release");
+}

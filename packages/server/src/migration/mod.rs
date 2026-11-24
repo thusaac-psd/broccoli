@@ -10,6 +10,11 @@
 //!   the code expects; the test `the_migrations_create_the_schema_the_code_expects`
 //!   fails when the migrated database differs from them, so an entity change
 //!   without its migration cannot pass CI.
+//! - The test `a_database_the_released_build_ran_upgrades_to_this_build`
+//!   migrates a database the released build ran, with rows in that build's
+//!   shapes, through every pending migration, so a migration that assumes an
+//!   empty table fails in CI instead of on an operator's upgrade. Its
+//!   `RELEASED` names the last migration of the release installations run.
 //!
 //! The server only migrates forward: boot runs `up` for the pending
 //! migrations, and nothing in the server or its tools calls `down`. Each

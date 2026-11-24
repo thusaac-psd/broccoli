@@ -273,9 +273,12 @@ binaries warn about every key they do not read.
   newer build migrated. The test
   `migration::tests::the_migrations_create_the_schema_the_code_expects` fails
   when the entities or the code-owned trigger DDL disagree with the migrated
-  schema. Old replicas keep working against an additive migration (adding a
-  table, a nullable or defaulted column, an index), so a release of only those
-  rolls server by server; the shipped gateways pin each browser to one server by
+  schema, and `a_database_the_released_build_ran_upgrades_to_this_build`
+  migrates a database the released build ran, with its rows, through every
+  pending migration: a migration brings existing rows to what it requires. Old
+  replicas keep working against an additive migration (adding a table, a
+  nullable or defaulted column, an index), so a release of only those rolls
+  server by server; the shipped gateways pin each browser to one server by
   cookie, so it never loads one build's page with another's chunks. A release
   with any other migration (a drop, a rename, a type change, a tighter
   constraint) is upgraded with every server stopped before the first new one
