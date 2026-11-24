@@ -28,7 +28,7 @@ use crate::error::AppError;
 use crate::services::config_issues::{
     ConfigChecker, ConfigIssue, Subject, issues_of, record_outcome,
 };
-use crate::services::plugin_config::Reads;
+use crate::services::plugin_config::{Reads, labelled};
 use crate::utils::soft_delete::SoftDeletable;
 
 /// A change to one problem's test data, open in a transaction that holds the
@@ -111,7 +111,9 @@ impl TestDataEdit {
                 .filter(|issue| !broken_before.contains(issue))
                 .collect();
             if !caused.is_empty() {
-                return Err(AppError::ConfigWouldBreak(caused));
+                return Err(AppError::ConfigWouldBreak(
+                    labelled(self.db(), caused).await?,
+                ));
             }
         }
         record_outcome(self.db(), problem_id, &after).await?;

@@ -37,7 +37,8 @@ min = 0
 属性的 `type` 是 `string`、`integer`、`number`、`boolean`、`array` 和 `object` 之一。宿主
 检查数字的 `min` 和 `max`，字符串的 `min_length`、`max_length` 和 `pattern`，`enum`，数组的
 `items`，以及对象的 `properties` 和 `required` 字段。声明了属性的对象会拒绝未声明的字段，除非
-设置 `additional_properties = true`。`step`、`precision`、`unit` 和 `span` 只影响表单的外观。
+设置 `additional_properties = true`。`step`、`precision`、`unit` 和 `span` 只影响表单的外观；`secret`
+会隐藏取值（见下文）。
 
 默认值不符合自身 schema 的清单，或者使用了未知类型的清单，无法加载。
 
@@ -54,6 +55,28 @@ schema，写入才会被接受。命名空间声明了 `validate` 函数时，�
 
 存储的值可以省略字段，读取时这些字段取默认值。升级插件改变了 schema 时，检查或上传压缩包的
 结果会在 `incompatible_configs` 中列出新 schema 拒绝的每一条已存储配置。
+
+写入时省略记录的 `enabled` 开关或 `position`，会保留已存储记录中的值；`"enabled": null` 会清除
+开关，交由上一级决定。
+
+## 保管密钥
+
+字段的取值是凭据时（例如打印站登录用的令牌），把这个字符串字段标记为 `secret = true`：
+
+```toml
+[config.print.properties.stations.items.properties.token]
+type = "string"
+title = "Token"
+secret = true
+```
+
+JSON schema 会把该字段标记为 `writeOnly`。任何读取路由都不会发送它的值：管理配置路由和级联结果
+都把这个字段返回为 `null`，配置的 `secrets` 列表按路径（`stations[0].token`）列出每个已有取值的
+密钥字段。写入时为密钥字段发送 `null`，会保留该路径上已存储的值；数组项中的字段按项的位置对应。
+其他任何值都会替换它，空字符串会清除它。设置表单把已设置的密钥显示为空的密码框，除非你输入新值，
+否则保留已存储的值。
+
+插件自己读取的是真实取值：`host.config.get*` 和插件读取的级联结果都不会隐藏密钥。
 
 ## 拒绝 schema 表达不了的值
 

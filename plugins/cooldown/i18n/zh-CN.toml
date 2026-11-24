@@ -29,3 +29,4 @@
 'config.cooldown.cooldown.description' = '冷却计时设置'
 'config.cooldown.cooldown.cooldown_seconds.title' = '冷却时间（秒）'
 'config.cooldown.cooldown.cooldown_seconds.description' = '两次提交之间的最短间隔（秒）。设为 0 则关闭。'
+'config.cooldown.cooldown.cooldown_seconds.unit' = '秒'

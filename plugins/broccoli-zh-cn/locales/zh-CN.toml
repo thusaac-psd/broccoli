@@ -981,6 +981,8 @@
 'config.level.contest' = "比赛"
 'config.level.problem' = "题目"
 'config.level.plugin' = "全服务器"
+'config.withheldValue' = "已隐藏"
+'config.secretKept' = "留空则保留已保存的密钥"
 
 # Language switcher
 'locale.switch' = "语言"

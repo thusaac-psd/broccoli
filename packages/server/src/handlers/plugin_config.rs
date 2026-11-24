@@ -5,7 +5,7 @@ use tracing::instrument;
 
 use std::collections::HashSet;
 
-use plugin_core::registry::PluginStatus;
+use plugin_core::registry::{PluginRegistry, PluginStatus};
 use plugin_core::traits::PluginManager;
 
 // visibility-bypass-audited: the global config endpoints require
@@ -28,8 +28,8 @@ use crate::models::plugin_config::{
 use crate::services::config_issues::ConfigChecker;
 use crate::services::config_issues::{Subject, config_issues};
 use crate::services::plugin_config::{
-    ConfigScope, ConfigTarget, IncompatibleConfig, Reads, RowSettings, config_cascade,
-    delete_config, get_config, write_config,
+    ConfigScope, ConfigTarget, IncompatibleConfig, Readable, Reads, cascade_view, config_cascade,
+    declared, delete_config, get_config, shown, write_config,
 };
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, find_contest_problem};
@@ -93,6 +93,7 @@ fn collect_schemas_for_scope(
 
 async fn list_config_inner<C: ConnectionTrait>(
     db: &C,
+    registry: &PluginRegistry,
     target: &ConfigTarget,
     available_schemas: &[AvailableSchema],
 ) -> Result<Json<Vec<PluginConfigResponse>>, AppError> {
@@ -122,10 +123,12 @@ async fn list_config_inner<C: ConnectionTrait>(
 
             seen_keys.insert((plugin_id.clone(), namespace.clone()));
 
+            let (config, secrets) = shown(registry, &plugin_id, &namespace, r.config);
             PluginConfigResponse {
                 plugin_id,
                 namespace,
-                config: r.config,
+                config,
+                secrets,
                 enabled: r.enabled,
                 position: r.position,
                 updated_at: Some(r.updated_at),
@@ -142,6 +145,7 @@ async fn list_config_inner<C: ConnectionTrait>(
                 plugin_id: schema.plugin_id.clone(),
                 namespace: schema.namespace.clone(),
                 config: serde_json::Value::Null,
+                secrets: Vec::new(),
                 enabled: None,
                 position: 0,
                 updated_at: None,
@@ -159,6 +163,7 @@ async fn cascade_inner<C: ConnectionTrait>(
     db: &C,
     plugins: &dyn PluginManager,
     target: &ConfigTarget,
+    readable: Readable,
 ) -> Result<Json<Vec<ConfigCascadeResponse>>, AppError> {
     let namespaces: Vec<(String, String)> = collect_schemas_for_scope(plugins, target.scope())
         .into_iter()
@@ -168,11 +173,14 @@ async fn cascade_inner<C: ConnectionTrait>(
     Ok(Json(
         cascades
             .into_iter()
-            .map(|c| ConfigCascadeResponse {
-                plugin_id: c.plugin_id,
-                namespace: c.namespace,
-                effective: c.effective,
-                inherited: c.inherited,
+            .map(|c| {
+                let ns = declared(plugins.get_registry(), &c.plugin_id, &c.namespace);
+                ConfigCascadeResponse {
+                    effective: cascade_view(c.effective, readable, ns.as_ref()),
+                    inherited: cascade_view(c.inherited, readable, ns.as_ref()),
+                    plugin_id: c.plugin_id,
+                    namespace: c.namespace,
+                }
             })
             .collect(),
     ))
@@ -210,7 +218,7 @@ pub async fn list_plugin_global_config(
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
     validate_plugin_id(&plugin_id)?;
     let target = ConfigTarget::plugin(&plugin_id);
-    list_config_inner(&state.db, &target, &[]).await
+    list_config_inner(&state.db, state.plugins.get_registry(), &target, &[]).await
 }
 
 #[utoipa::path(
@@ -242,7 +250,14 @@ pub async fn get_plugin_global_config(
     validate_plugin_id(&plugin_id)?;
     validate_namespace(&namespace)?;
     let target = ConfigTarget::plugin(&plugin_id);
-    get_config(&state.db, &target, &plugin_id, &namespace).await
+    get_config(
+        &state.db,
+        state.plugins.get_registry(),
+        &target,
+        &plugin_id,
+        &namespace,
+    )
+    .await
 }
 
 #[utoipa::path(
@@ -278,6 +293,7 @@ pub async fn upsert_plugin_global_config(
     validate_plugin_id(&plugin_id)?;
     validate_namespace(&namespace)?;
     let target = ConfigTarget::plugin(&plugin_id);
+    let settings = payload.row_settings();
     let (result, change) = write_config(
         &state.db,
         state.plugins.as_ref(),
@@ -286,10 +302,7 @@ pub async fn upsert_plugin_global_config(
         &plugin_id,
         &namespace,
         payload.config,
-        RowSettings::Set {
-            enabled: payload.enabled,
-            position: payload.position,
-        },
+        settings,
     )
     .await?;
     change
@@ -359,7 +372,7 @@ pub async fn list_problem_config(
     find_problem(&state.db, problem_id).await?;
     let target = ConfigTarget::problem(problem_id);
     let schemas = collect_schemas_for_scope(&*state.plugins, ConfigScope::Problem);
-    list_config_inner(&state.db, &target, &schemas).await
+    list_config_inner(&state.db, state.plugins.get_registry(), &target, &schemas).await
 }
 
 #[utoipa::path(
@@ -429,6 +442,7 @@ pub async fn list_problem_config_cascade(
         &state.db,
         state.plugins.as_ref(),
         &ConfigTarget::problem(problem_id),
+        Readable::of(&auth_user),
     )
     .await
 }
@@ -464,7 +478,14 @@ pub async fn get_problem_config(
     validate_namespace(&namespace)?;
     find_problem(&state.db, problem_id).await?;
     let target = ConfigTarget::problem(problem_id);
-    get_config(&state.db, &target, &plugin_id, &namespace).await
+    get_config(
+        &state.db,
+        state.plugins.get_registry(),
+        &target,
+        &plugin_id,
+        &namespace,
+    )
+    .await
 }
 
 #[utoipa::path(
@@ -506,6 +527,7 @@ pub async fn upsert_problem_config(
     let txn = state.db.begin().await?;
     find_problem(&txn, problem_id).await?;
     let target = ConfigTarget::problem(problem_id);
+    let settings = payload.row_settings();
     let (result, change) = write_config(
         &txn,
         state.plugins.as_ref(),
@@ -514,10 +536,7 @@ pub async fn upsert_problem_config(
         &plugin_id,
         &namespace,
         payload.config,
-        RowSettings::Set {
-            enabled: payload.enabled,
-            position: payload.position,
-        },
+        settings,
     )
     .await?;
     txn.commit().await?;
@@ -594,7 +613,7 @@ pub async fn list_contest_problem_config(
     find_contest_problem(&state.db, contest_id, problem_id).await?;
     let target = ConfigTarget::contest_problem(contest_id, problem_id);
     let schemas = collect_schemas_for_scope(&*state.plugins, ConfigScope::ContestProblem);
-    list_config_inner(&state.db, &target, &schemas).await
+    list_config_inner(&state.db, state.plugins.get_registry(), &target, &schemas).await
 }
 
 #[utoipa::path(
@@ -626,6 +645,7 @@ pub async fn list_contest_problem_config_cascade(
         &state.db,
         state.plugins.as_ref(),
         &ConfigTarget::contest_problem(contest_id, problem_id),
+        Readable::of(&auth_user),
     )
     .await
 }
@@ -665,7 +685,14 @@ pub async fn get_contest_problem_config(
     validate_namespace(&namespace)?;
     find_contest_problem(&state.db, contest_id, problem_id).await?;
     let target = ConfigTarget::contest_problem(contest_id, problem_id);
-    get_config(&state.db, &target, &plugin_id, &namespace).await
+    get_config(
+        &state.db,
+        state.plugins.get_registry(),
+        &target,
+        &plugin_id,
+        &namespace,
+    )
+    .await
 }
 
 #[utoipa::path(
@@ -708,6 +735,7 @@ pub async fn upsert_contest_problem_config(
     let txn = state.db.begin().await?;
     find_contest_problem(&txn, contest_id, problem_id).await?;
     let target = ConfigTarget::contest_problem(contest_id, problem_id);
+    let settings = payload.row_settings();
     let (result, change) = write_config(
         &txn,
         state.plugins.as_ref(),
@@ -716,10 +744,7 @@ pub async fn upsert_contest_problem_config(
         &plugin_id,
         &namespace,
         payload.config,
-        RowSettings::Set {
-            enabled: payload.enabled,
-            position: payload.position,
-        },
+        settings,
     )
     .await?;
     txn.commit().await?;
@@ -797,7 +822,7 @@ pub async fn list_contest_config(
     find_contest(&state.db, contest_id).await?;
     let target = ConfigTarget::contest(contest_id);
     let schemas = collect_schemas_for_scope(&*state.plugins, ConfigScope::Contest);
-    list_config_inner(&state.db, &target, &schemas).await
+    list_config_inner(&state.db, state.plugins.get_registry(), &target, &schemas).await
 }
 
 #[utoipa::path(
@@ -863,6 +888,7 @@ pub async fn list_contest_config_cascade(
         &state.db,
         state.plugins.as_ref(),
         &ConfigTarget::contest(contest_id),
+        Readable::of(&auth_user),
     )
     .await
 }
@@ -898,7 +924,14 @@ pub async fn get_contest_config(
     validate_namespace(&namespace)?;
     find_contest(&state.db, contest_id).await?;
     let target = ConfigTarget::contest(contest_id);
-    get_config(&state.db, &target, &plugin_id, &namespace).await
+    get_config(
+        &state.db,
+        state.plugins.get_registry(),
+        &target,
+        &plugin_id,
+        &namespace,
+    )
+    .await
 }
 
 #[utoipa::path(
@@ -940,6 +973,7 @@ pub async fn upsert_contest_config(
     let txn = state.db.begin().await?;
     find_contest(&txn, contest_id).await?;
     let target = ConfigTarget::contest(contest_id);
+    let settings = payload.row_settings();
     let (result, change) = write_config(
         &txn,
         state.plugins.as_ref(),
@@ -948,10 +982,7 @@ pub async fn upsert_contest_config(
         &plugin_id,
         &namespace,
         payload.config,
-        RowSettings::Set {
-            enabled: payload.enabled,
-            position: payload.position,
-        },
+        settings,
     )
     .await?;
     txn.commit().await?;

@@ -980,6 +980,8 @@
 'config.level.contest' = "Contest"
 'config.level.problem' = "Problem"
 'config.level.plugin' = "Server-wide"
+'config.withheldValue' = "hidden"
+'config.secretKept' = "Leave empty to keep the stored secret"
 
 # Language switcher
 'locale.switch' = "Language"

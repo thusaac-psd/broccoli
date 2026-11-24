@@ -2052,6 +2052,12 @@ fn assert_s2_issue(issues: &serde_json::Value, contest_id: i32, problem_id: i32)
     assert_eq!(issues[0]["plugin_id"], "ioi");
     assert_eq!(issues[0]["scope"], "contest_problem");
     assert_eq!(issues[0]["ref_id"], format!("{contest_id}:{problem_id}"));
+    assert_eq!(issues[0]["contest_id"], contest_id, "{issues:?}");
+    assert_eq!(issues[0]["problem_id"], problem_id, "{issues:?}");
+    assert_eq!(
+        issues[0]["label"], "A",
+        "a contest problem is named by its label: {issues:?}"
+    );
     assert_eq!(issues[0]["namespace"], "task");
     assert_eq!(
         issues[0]["errors"][0]["path"], "subtasks[1].test_cases[0]",

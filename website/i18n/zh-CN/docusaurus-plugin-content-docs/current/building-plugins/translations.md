@@ -114,7 +114,7 @@ host.submission.update(&SubmissionUpdate::standing_system_error(
 
 ## 翻译清单和配置模式
 
-插件列表和配置表单显示清单中的 `name` 和 `description`，以及配置模式中的 `title` 和 `description` 字段。它们在词条目录中各有一个键；缺少该键时显示 `plugin.toml` 中的原文。
+插件列表和配置表单显示清单中的 `name` 和 `description`，以及配置模式中的 `title`、`description` 和 `unit` 字段。它们在词条目录中各有一个键；缺少该键时显示 `plugin.toml` 中的原文。
 
 | 文本 | 键 |
 | --- | --- |
@@ -123,6 +123,7 @@ host.submission.update(&SubmissionUpdate::standing_system_error(
 | 配置模式描述 | `config.<plugin id>.<namespace>.description` |
 | 字段标题 | `config.<plugin id>.<namespace>.<field path>.title` |
 | 字段描述 | `config.<plugin id>.<namespace>.<field path>.description` |
+| 字段单位 | `config.<plugin id>.<namespace>.<field path>.unit` |
 
 字段路径以点连接嵌套的属性名，因此 `batch-evaluator` 中 `[config.sandbox.properties.compile_time_limit_s]` 字段的标题键为 `config.batch-evaluator.sandbox.compile_time_limit_s.title`。
 

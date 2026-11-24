@@ -1,5 +1,5 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { useRegistries } from '@broccoli/web-sdk/hooks';
+import { useQueryState, useRegistries } from '@broccoli/web-sdk/hooks';
 import { useIdentifierLabel, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -9,6 +9,7 @@ import {
   DropdownMenuTrigger,
   Input,
   Label,
+  QueryErrorState,
   Select,
   SelectContent,
   SelectItem,
@@ -59,6 +60,8 @@ export function ProblemForm({
     queryFn: () => fetchSupportedLanguages(apiClient),
     staleTime: 5 * 60 * 1000,
   });
+  // A language list that could not load says so instead of offering none.
+  const languages = useQueryState(languagesQuery);
   const supportedLanguages = languagesQuery.data ?? NO_LANGUAGES;
   const [selectedLanguage, setSelectedLanguage] = useState('');
   const [newFilenameByLanguage, setNewFilenameByLanguage] = useState<
@@ -419,6 +422,9 @@ export function ProblemForm({
             {t('admin.submissionFormat.addLanguage')}
           </Button>
         </div>
+        {languages.status === 'error' && (
+          <QueryErrorState state={languages} className="py-4" />
+        )}
 
         {configuredLanguages.length === 0 ? (
           <div className="text-sm text-muted-foreground">

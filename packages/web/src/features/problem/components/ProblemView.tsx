@@ -254,6 +254,7 @@ export default function ProblemView({
   });
   // A sample without inline content offers a download instead, so samples
   // still work when their content could not be loaded here.
+  // eslint-disable-next-line query/no-defaulted-query-data -- a sample without loaded content offers its download
   const sampleContents = samplesQuery.data ?? NO_SAMPLE_CONTENTS;
 
   const submissions = useSubmissions({ problemId, contestId });

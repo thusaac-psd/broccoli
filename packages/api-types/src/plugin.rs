@@ -328,6 +328,16 @@ pub struct IncompatibleConfig {
     /// `contest_id:problem_id`; the plugin id at the plugin scope.
     #[schema(example = "12")]
     pub ref_id: String,
+    /// The contest the config belongs to, at the contest and contest
+    /// problem scopes.
+    pub contest_id: Option<i32>,
+    /// The problem the config belongs to, at the problem and contest
+    /// problem scopes.
+    pub problem_id: Option<i32>,
+    /// The problem's label in its contest (`A`), at the contest problem
+    /// scope.
+    #[schema(example = "A")]
+    pub label: Option<String>,
     #[schema(example = "contest")]
     pub namespace: String,
     /// What the plugin finds: what its schema or its namespace's validate
@@ -335,6 +345,40 @@ pub struct IncompatibleConfig {
     /// does not meet yet. A namespace the plugin no longer declares at this
     /// scope has one error with an empty path.
     pub errors: Vec<FieldError>,
+}
+
+impl IncompatibleConfig {
+    /// The issue of the config stored at `scope` and `ref_id`, with the ids
+    /// `ref_id` names. The label is the server's to fill in.
+    pub fn new(
+        plugin_id: String,
+        scope: broccoli_types::manifest::ConfigScope,
+        ref_id: String,
+        namespace: String,
+        errors: Vec<FieldError>,
+    ) -> Self {
+        use broccoli_types::manifest::ConfigScope;
+        let id = |part: Option<&str>| part.and_then(|part| part.parse().ok());
+        let (contest_id, problem_id) = match scope {
+            ConfigScope::Contest => (id(Some(&ref_id)), None),
+            ConfigScope::Problem => (None, id(Some(&ref_id))),
+            ConfigScope::ContestProblem => {
+                let mut parts = ref_id.splitn(2, ':');
+                (id(parts.next()), id(parts.next()))
+            }
+            ConfigScope::Plugin => (None, None),
+        };
+        Self {
+            plugin_id,
+            scope,
+            ref_id,
+            contest_id,
+            problem_id,
+            label: None,
+            namespace,
+            errors,
+        }
+    }
 }
 
 #[cfg(test)]

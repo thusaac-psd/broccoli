@@ -11,9 +11,11 @@ import type { ApiSchemas } from '@/api/types';
  * server resolves it (`GET …/config/cascade`) with the cascade rule plugins
  * read configs by: the config a problem would read with nothing stored at
  * this scope, every field filled, the scope each field comes from
- * (`fields`), and each scope's row as stored (`levels`).
+ * (`fields`), and each scope's row as stored (`levels`). A scope the viewer
+ * may not read is left out (`null`), and so is each field it sets, named in
+ * `withheld`.
  */
-export type InheritedConfig = ApiSchemas['EffectiveConfig'];
+export type InheritedConfig = ApiSchemas['ConfigCascadeView'];
 
 export type ConfigScope =
   | { scope: 'plugin'; pluginId: string }
@@ -104,8 +106,11 @@ export interface ConfigFieldSlotProps {
 
 /** The value a field inherits, and the scope that sets it. */
 export interface InheritedValue {
+  /** `undefined` when the value is withheld from the viewer. */
   value: unknown;
   source: Exclude<ApiSchemas['ConfigSource'], 'default' | 'disabled'>;
+  /** Whether a scope the viewer may not read sets the value. */
+  withheld: boolean;
 }
 
 /**
@@ -120,5 +125,6 @@ export function inheritedValueOf(
   const source = inherited?.fields?.[fieldKey];
   if (!source || source === 'default' || source === 'disabled') return null;
   const config = inherited?.config as Record<string, unknown> | null;
-  return { value: config?.[fieldKey], source };
+  const withheld = inherited?.withheld.includes(fieldKey) ?? false;
+  return { value: withheld ? undefined : config?.[fieldKey], source, withheld };
 }

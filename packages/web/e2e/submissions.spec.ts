@@ -154,6 +154,9 @@ test('staff see that a judgement ran while its problem had config issues, with t
           plugin_id: 'ioi',
           scope: 'problem',
           ref_id: '2',
+          contest_id: null,
+          problem_id: 2,
+          label: null,
           namespace: 'task',
           errors: [
             {

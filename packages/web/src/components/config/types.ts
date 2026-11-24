@@ -18,6 +18,8 @@ export interface JsonSchemaProperty {
   'x-precision'?: number;
   'x-unit'?: string;
   'x-span'?: number;
+  /** A secret: the server never sends its value back (it reads `null`). */
+  writeOnly?: boolean;
 }
 
 export interface JsonSchema extends JsonSchemaProperty {

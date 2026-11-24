@@ -84,6 +84,13 @@ export function SchemaField({
           prop.description,
         )
       : prop.description;
+  const unit =
+    pluginId && namespace && prop['x-unit']
+      ? pluginText(
+          pluginKeys.configField(pluginId, namespace, path, 'unit'),
+          prop['x-unit'],
+        )
+      : prop['x-unit'];
   const dotPath = path.join('.');
   const error = errors[dotPath];
   const isFieldExplicit = isExplicitValue(path);
@@ -95,6 +102,10 @@ export function SchemaField({
     path.length === 1 ? inheritedValueOf(path[0], inherited) : null;
   const inheritedResult = inheritedValue && {
     value: inheritedValue.value,
+    // A value from a scope the viewer may not read is shown as withheld.
+    display: inheritedValue.withheld
+      ? t('config.withheldValue')
+      : String(inheritedValue.value),
     source: configSourceName(inheritedValue.source, t),
   };
   const showAsPlaceholder = !isFieldExplicit && !isFieldDirty;
@@ -111,7 +122,7 @@ export function SchemaField({
     return (
       <InheritedAnnotation
         source={inheritedResult.source}
-        value={String(inheritedResult.value)}
+        value={inheritedResult.display}
         isOverride={isFieldExplicit || isFieldDirty}
       />
     );
@@ -213,7 +224,7 @@ export function SchemaField({
     if (prop.type === 'boolean') {
       const inheritedBoolLabel =
         showAsPlaceholder && inheritedResult
-          ? `(${String(inheritedResult.value)})`
+          ? `(${inheritedResult.display})`
           : undefined;
 
       return (
@@ -253,7 +264,7 @@ export function SchemaField({
     if (prop.type === 'string' && prop.enum) {
       const selectPlaceholder =
         showAsPlaceholder && inheritedResult
-          ? String(inheritedResult.value)
+          ? inheritedResult.display
           : undefined;
 
       return (
@@ -306,7 +317,7 @@ export function SchemaField({
     if (prop.type === 'number' || prop.type === 'integer') {
       const inheritedPlaceholder =
         showAsPlaceholder && inheritedResult
-          ? String(inheritedResult.value)
+          ? inheritedResult.display
           : undefined;
 
       return (
@@ -341,7 +352,7 @@ export function SchemaField({
               integer={prop.type === 'integer'}
               step={prop.multipleOf}
               precision={prop['x-precision']}
-              unit={prop['x-unit']}
+              unit={unit}
               inheritedPlaceholder={inheritedPlaceholder}
             />
             <FieldError problem={error} />
@@ -427,11 +438,14 @@ export function SchemaField({
       );
     }
 
-    // Default: string input
+    // Default: string input. A secret is never read back: an empty input
+    // writes `null`, which keeps whatever secret is stored.
     {
-      const stringPlaceholder =
-        showAsPlaceholder && inheritedResult
-          ? String(inheritedResult.value)
+      const secret = prop.writeOnly === true;
+      const stringPlaceholder = secret
+        ? t('config.secretKept')
+        : showAsPlaceholder && inheritedResult
+          ? inheritedResult.display
           : undefined;
 
       return (
@@ -456,7 +470,14 @@ export function SchemaField({
               value={
                 showAsPlaceholder ? '' : typeof value === 'string' ? value : ''
               }
-              onChange={(e) => updateValue(path, e.target.value)}
+              onChange={(e) =>
+                updateValue(
+                  path,
+                  secret && e.target.value === '' ? null : e.target.value,
+                )
+              }
+              type={secret ? 'password' : undefined}
+              autoComplete={secret ? 'off' : undefined}
               placeholder={stringPlaceholder}
               minLength={prop.minLength}
               maxLength={prop.maxLength}

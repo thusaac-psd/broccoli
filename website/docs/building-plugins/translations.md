@@ -192,7 +192,7 @@ submission as `Accepted` with score 0: it would read as a solve.
 ## Translate your manifest and config schemas
 
 The plugin list and the config forms show the manifest's `name` and
-`description` and the schema's `title` and `description` fields. Each has a key
+`description` and the schema's `title`, `description` and `unit` fields. Each has a key
 in your catalog; a missing key shows the text from `plugin.toml`.
 
 | Text | Key |
@@ -202,6 +202,7 @@ in your catalog; a missing key shows the text from `plugin.toml`.
 | Config schema description | `config.<plugin id>.<namespace>.description` |
 | Field title | `config.<plugin id>.<namespace>.<field path>.title` |
 | Field description | `config.<plugin id>.<namespace>.<field path>.description` |
+| Field unit | `config.<plugin id>.<namespace>.<field path>.unit` |
 
 The field path joins nested property names with dots, so the field
 `[config.sandbox.properties.compile_time_limit_s]` in `batch-evaluator` has

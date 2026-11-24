@@ -57,7 +57,7 @@ pub async fn upload_checker_source(
         &owner.plugin_id,
         &owner.namespace,
         serde_json::json!({ "files": files }),
-        RowSettings::Kept,
+        RowSettings::KEPT,
     )
     .await?;
     change
@@ -145,6 +145,7 @@ pub async fn get_checker_source(
     };
     let files = match get_config(
         &state.db,
+        state.plugins.get_registry(),
         &ConfigTarget::problem(id),
         &owner.plugin_id,
         &owner.namespace,

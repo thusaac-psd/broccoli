@@ -6,6 +6,7 @@ import {
   Label,
   QueryErrorState,
   QueryLoading,
+  RefreshFailedNotice,
   Sheet,
   SheetContent,
   SheetDescription,
@@ -641,15 +642,22 @@ function SinglePluginContent({
     queryFn: () => fetchCascade(apiClient, scope),
     enabled: open && scope.scope !== 'plugin',
   });
+  // A form shown without what it inherits would read the schema's defaults
+  // as inherited, so it waits for the cascade and says when it failed.
+  const cascade = useQueryState(cascadeQuery);
+  const cascadeEntries =
+    cascade.status === 'data' || cascade.status === 'empty'
+      ? cascade.data
+      : undefined;
   const inheritedByNamespace = useMemo(() => {
     const byNamespace: Record<string, InheritedConfig> = {};
-    for (const entry of cascadeQuery.data ?? []) {
+    for (const entry of cascadeEntries ?? []) {
       if (entry.plugin_id === pluginId) {
         byNamespace[entry.namespace] = entry.inherited;
       }
     }
     return byNamespace;
-  }, [cascadeQuery.data, pluginId]);
+  }, [cascadeEntries, pluginId]);
 
   const rawCallbacks = useMemo(
     () =>
@@ -680,7 +688,7 @@ function SinglePluginContent({
   const propagateEnabled = useCallback(
     async (
       savedNamespace: string,
-      enabled: boolean | undefined,
+      enabled: boolean | null,
     ): Promise<{ error?: unknown }> => {
       for (const schema of schemas) {
         const namespace = schema.namespace;
@@ -703,16 +711,12 @@ function SinglePluginContent({
               if (parseApiError(getError)?.code === 'NOT_FOUND') continue;
               return { error: getError };
             }
-            if (!row || (row.enabled ?? undefined) === enabled) continue;
+            if (!row || (row.enabled ?? null) === enabled) continue;
             const { error } = await apiClient.PUT(
               '/contests/{id}/config/{plugin_id}/{namespace}',
               {
                 params: { path },
-                body: {
-                  config: row.config ?? {},
-                  position: row.position,
-                  ...(enabled !== undefined ? { enabled } : {}),
-                },
+                body: { config: row.config ?? {}, enabled },
               },
             );
             if (error) return { error };
@@ -730,16 +734,12 @@ function SinglePluginContent({
               if (parseApiError(getError)?.code === 'NOT_FOUND') continue;
               return { error: getError };
             }
-            if (!row || (row.enabled ?? undefined) === enabled) continue;
+            if (!row || (row.enabled ?? null) === enabled) continue;
             const { error } = await apiClient.PUT(
               '/problems/{id}/config/{plugin_id}/{namespace}',
               {
                 params: { path },
-                body: {
-                  config: row.config ?? {},
-                  position: row.position,
-                  ...(enabled !== undefined ? { enabled } : {}),
-                },
+                body: { config: row.config ?? {}, enabled },
               },
             );
             if (error) return { error };
@@ -762,11 +762,11 @@ function SinglePluginContent({
           ...cbs,
           putConfig: async (config: Record<string, unknown>) => {
             const enabledValue = enabledRef.current;
-            const enabled = enabledValue === 'unset' ? undefined : enabledValue;
+            const enabled = enabledValue === 'unset' ? null : enabledValue;
             const result = await (
               cbs.putConfig as (
                 c: Record<string, unknown>,
-                e?: boolean,
+                e?: boolean | null,
               ) => Promise<{ error?: unknown }>
             )(config, enabled);
             if (result.error) return result;
@@ -817,9 +817,20 @@ function SinglePluginContent({
     </div>
   ) : null;
 
+  if (cascade.status === 'error') {
+    return <QueryErrorState state={cascade} failure={t('config.loadFailed')} />;
+  }
+  if (cascade.status === 'loading') return <QueryLoading />;
+  const refreshFailed =
+    (cascade.status === 'data' || cascade.status === 'empty') &&
+    cascade.refreshError != null ? (
+      <RefreshFailedNotice retry={cascade.retry} />
+    ) : null;
+
   if (schemas.length === 1) {
     return (
       <div className="space-y-4">
+        {refreshFailed}
         {enabledToggle}
         <ConfigForm
           schema={schemas[0]}
@@ -836,6 +847,7 @@ function SinglePluginContent({
 
   return (
     <div className="space-y-4">
+      {refreshFailed}
       {enabledToggle}
       <Tabs value={activeNs} onValueChange={setActiveNs}>
         <TabsList>

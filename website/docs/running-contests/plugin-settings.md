@@ -45,6 +45,15 @@ actually use and the level it comes from, global values included. The server
 works this out by the same rule the plugin reads its settings by, so what the
 form shows is what judging uses.
 
+The form shows only the levels you may read. A contest manager without
+plugin manage does not see the global level, and one without problem edit
+does not see the problem level: a field set there shows as "hidden", with the
+level it comes from but not its value.
+
+A secret, such as a print station's token, is never shown at any level, to
+anyone. Its field stays empty with a note that the stored secret is kept:
+leave it empty to keep it, or type a new one to replace it.
+
 ## Where to set them
 
 In the admin area, open Plugins, pick the plugin, and open its settings. The

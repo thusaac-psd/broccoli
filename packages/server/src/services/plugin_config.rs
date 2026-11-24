@@ -6,8 +6,8 @@ use sea_orm::{
 };
 
 use broccoli_server_sdk::types::{
-    ConfigResult, ConfigValidateInput, ConfigValidateOutput, ConfigViolation, EffectiveConfig,
-    resolve_cascade,
+    ConfigResult, ConfigSource, ConfigValidateInput, ConfigValidateOutput, ConfigViolation,
+    EffectiveConfig, resolve_cascade,
 };
 use plugin_core::config_schema::{self, FieldError, FieldErrorKind};
 pub(crate) use plugin_core::manifest::ConfigScope;
@@ -24,7 +24,9 @@ use crate::entity::{contest_problem, plugin_config, problem};
 use crate::error::AppError;
 use crate::host_funcs::config::{resolve_namespace, strip_namespace_prefix};
 use crate::host_funcs::sql::ReadThrough;
-use crate::models::plugin_config::{PluginConfigResponse, config_key};
+use crate::models::plugin_config::{
+    CascadeLevelsView, ConfigCascadeView, PluginConfigResponse, config_key,
+};
 use crate::services::config_issues::{
     ConfigChecker, Recheck, problems_checked_by, recheck_problems,
 };
@@ -143,8 +145,42 @@ impl ConfigTargetPattern {
     }
 }
 
+/// The namespace `plugin_id` declares as `namespace`, as this replica knows
+/// its manifest.
+pub(crate) fn declared(
+    registry: &PluginRegistry,
+    plugin_id: &str,
+    namespace: &str,
+) -> Option<ConfigNamespace> {
+    registry
+        .read()
+        .ok()?
+        .get(plugin_id)?
+        .manifest
+        .config
+        .get(namespace)
+        .cloned()
+}
+
+/// A stored config as a read shows it: each secret field its namespace
+/// declares `null`, with the paths of those that hold a value. Every route
+/// that answers a stored config builds its answer here, so a secret never
+/// leaves the server.
+pub(crate) fn shown(
+    registry: &PluginRegistry,
+    plugin_id: &str,
+    namespace: &str,
+    mut config: serde_json::Value,
+) -> (serde_json::Value, Vec<String>) {
+    let secrets = declared(registry, plugin_id, namespace)
+        .map(|ns| ns.withhold_secrets(&mut config))
+        .unwrap_or_default();
+    (config, secrets)
+}
+
 pub(crate) async fn get_config<C: ConnectionTrait>(
     db: &C,
+    registry: &PluginRegistry,
     target: &ConfigTarget,
     plugin_id: &str,
     namespace: &str,
@@ -161,10 +197,12 @@ pub(crate) async fn get_config<C: ConnectionTrait>(
     match row {
         Some(r) => {
             let namespace = strip_namespace_prefix(&r.namespace).to_string();
+            let (config, secrets) = shown(registry, plugin_id, &namespace, r.config);
             Ok(Json(PluginConfigResponse {
                 plugin_id: plugin_id.to_string(),
                 namespace,
-                config: r.config,
+                config,
+                secrets,
                 enabled: r.enabled,
                 position: r.position,
                 updated_at: Some(r.updated_at),
@@ -353,17 +391,22 @@ fn plugin_field_errors(plugin_id: &str, violations: Vec<ConfigViolation>) -> Vec
         .collect()
 }
 
-/// What a config write sets on its row besides the config.
+/// What a config write sets on its row besides the config. A setting the
+/// write leaves `None` keeps a stored row's value; a new row gets no toggle
+/// and position 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RowSettings {
-    /// An admin's write: the row's `enabled` toggle and its position.
-    Set {
-        enabled: Option<bool>,
-        position: i32,
-    },
-    /// A write that leaves a stored row's toggle and position as they are,
-    /// and gives a new row none and position 0.
-    Kept,
+pub(crate) struct RowSettings {
+    /// The row's `enabled` toggle; `Some(None)` clears it.
+    pub(crate) enabled: Option<Option<bool>>,
+    pub(crate) position: Option<i32>,
+}
+
+impl RowSettings {
+    /// A write of the config alone.
+    pub(crate) const KEPT: Self = Self {
+        enabled: None,
+        position: None,
+    };
 }
 
 /// A change to the configs, or to what they are checked against, as the
@@ -509,24 +552,34 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
             .one(&txn)
             .await?;
     }
+    // A secret the client sends back as `null` (it reads them so) keeps the
+    // stored value.
+    let mut config = config;
+    if let Some(ns) = declared(plugins.get_registry(), plugin_id, namespace) {
+        let stored = plugin_config::Entity::find_by_id((
+            target.scope().as_str().to_string(),
+            target.ref_id().to_string(),
+            target.stored_namespace(plugin_id, namespace),
+        ))
+        .one(&txn)
+        .await?;
+        ns.keep_secrets(&mut config, stored.as_ref().map(|row| &row.config));
+    }
     let findings = check_config(plugins, target, plugin_id, namespace, &config, reads).await?;
     if !findings.refusals.is_empty() {
         return Err(AppError::InvalidConfig(findings.refusals));
     }
-    let (enabled, position, kept) = match settings {
-        RowSettings::Set { enabled, position } => (enabled, position, false),
-        RowSettings::Kept => (None, 0, true),
-    };
     let mut updated = vec![
         plugin_config::Column::Config,
         plugin_config::Column::UpdatedAt,
     ];
-    if !kept {
-        updated.extend([
-            plugin_config::Column::Enabled,
-            plugin_config::Column::Position,
-        ]);
+    if settings.enabled.is_some() {
+        updated.push(plugin_config::Column::Enabled);
     }
+    if settings.position.is_some() {
+        updated.push(plugin_config::Column::Position);
+    }
+    let (enabled, position) = (settings.enabled.flatten(), settings.position.unwrap_or(0));
     let row = plugin_config::Entity::insert(plugin_config::ActiveModel {
         scope: Set(target.scope().as_str().to_string()),
         ref_id: Set(target.ref_id().to_string()),
@@ -549,11 +602,13 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     .await?;
     let change = ConfigChange::of(&txn, target).await?;
     txn.commit().await?;
+    let (config, secrets) = shown(plugins.get_registry(), plugin_id, namespace, row.config);
     Ok((
         PluginConfigResponse {
             plugin_id: plugin_id.to_string(),
             namespace: strip_namespace_prefix(&row.namespace).to_string(),
-            config: row.config,
+            config,
+            secrets,
             enabled: row.enabled,
             position: row.position,
             updated_at: Some(row.updated_at),
@@ -702,6 +757,110 @@ pub(crate) struct Cascade {
     pub(crate) inherited: EffectiveConfig,
 }
 
+/// The scopes whose rows a caller may read directly, by the permissions the
+/// config routes of each scope require.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Readable {
+    pub(crate) plugin: bool,
+    pub(crate) problem: bool,
+    pub(crate) contest: bool,
+}
+
+impl Readable {
+    pub(crate) fn of(user: &crate::extractors::auth::AuthUser) -> Self {
+        use broccoli_server_sdk::permissions as perm;
+        Self {
+            plugin: user.has_permission(perm::PLUGIN_MANAGE),
+            problem: user.has_permission(perm::PROBLEM_EDIT),
+            contest: user.has_permission(perm::CONTEST_MANAGE),
+        }
+    }
+
+    fn reads(self, source: ConfigSource) -> bool {
+        match source {
+            ConfigSource::ContestProblem | ConfigSource::Contest => self.contest,
+            ConfigSource::Problem => self.problem,
+            ConfigSource::Plugin => self.plugin,
+            ConfigSource::Default | ConfigSource::Disabled => true,
+        }
+    }
+}
+
+/// `effective` as a caller who may read `readable` may see it: each row of a
+/// scope they may not read is left out, and so is every top-level field such
+/// a row sets, which is named in `withheld` instead. Only the fields a row
+/// actually contributes count: a switched-off row contributes nothing.
+pub(crate) fn cascade_view(
+    effective: EffectiveConfig,
+    readable: Readable,
+    ns: Option<&ConfigNamespace>,
+) -> ConfigCascadeView {
+    use broccoli_server_sdk::types::CascadeLevel;
+    let EffectiveConfig {
+        mut config,
+        source,
+        is_enabled,
+        fields,
+        levels,
+    } = effective;
+    let rows: [(Option<CascadeLevel>, ConfigSource); 4] = [
+        (levels.contest_problem, ConfigSource::ContestProblem),
+        (levels.contest, ConfigSource::Contest),
+        (Some(levels.problem), ConfigSource::Problem),
+        (Some(levels.plugin), ConfigSource::Plugin),
+    ];
+    let contributes = |level: &CascadeLevel, at: ConfigSource, key: &str| {
+        let switched_off = at != ConfigSource::Plugin
+            && (source == ConfigSource::Disabled || level.enabled == Some(false));
+        !switched_off && level.stored.as_ref().and_then(|s| s.get(key)).is_some()
+    };
+    let withheld: Vec<String> = fields
+        .keys()
+        .filter(|key| {
+            rows.iter().any(|(level, at)| {
+                level
+                    .as_ref()
+                    .is_some_and(|level| !readable.reads(*at) && contributes(level, *at, key))
+            })
+        })
+        .cloned()
+        .collect();
+    if let serde_json::Value::Object(map) = &mut config {
+        for key in &withheld {
+            map.remove(key);
+        }
+    }
+    // No scope's secret is shown, whoever reads: each value is `null`.
+    let withhold = |value: &mut serde_json::Value| {
+        if let Some(ns) = ns {
+            ns.withhold_secrets(value);
+        }
+    };
+    withhold(&mut config);
+    let [cp, c, p, plugin] = rows.map(|(level, at)| {
+        level.filter(|_| readable.reads(at)).map(|mut level| {
+            withhold(&mut level.config);
+            if let Some(stored) = &mut level.stored {
+                withhold(stored);
+            }
+            level
+        })
+    });
+    ConfigCascadeView {
+        config,
+        source,
+        is_enabled,
+        fields,
+        withheld,
+        levels: CascadeLevelsView {
+            contest_problem: cp,
+            contest: c,
+            problem: p,
+            plugin,
+        },
+    }
+}
+
 /// The cascade ([`resolve_cascade`], the rule the guest SDK reads configs
 /// by) of each of `namespaces` (plugin id, namespace) at `target`, a problem,
 /// contest or contest problem. A contest is resolved for a problem of it
@@ -783,6 +942,47 @@ pub(crate) async fn config_cascade<C: ConnectionTrait>(
 
 pub use broccoli_api_types::plugin::IncompatibleConfig;
 
+/// `issues` with each contest problem named by its label in its contest, as
+/// every route that lists config issues answers them.
+pub(crate) async fn labelled<C: ConnectionTrait>(
+    db: &C,
+    mut issues: Vec<IncompatibleConfig>,
+) -> Result<Vec<IncompatibleConfig>, AppError> {
+    let pairs: BTreeSet<(i32, i32)> = issues
+        .iter()
+        .filter(|issue| issue.scope == ConfigScope::ContestProblem)
+        .filter_map(|issue| Some((issue.contest_id?, issue.problem_id?)))
+        .collect();
+    if pairs.is_empty() {
+        return Ok(issues);
+    }
+    let rows = contest_problem::Entity::find()
+        .filter(pairs.iter().fold(
+            sea_orm::Condition::any(),
+            |any, &(contest_id, problem_id)| {
+                any.add(
+                    sea_orm::Condition::all()
+                        .add(contest_problem::Column::ContestId.eq(contest_id))
+                        .add(contest_problem::Column::ProblemId.eq(problem_id)),
+                )
+            },
+        ))
+        .all(db)
+        .await?;
+    for issue in &mut issues {
+        if issue.scope != ConfigScope::ContestProblem {
+            continue;
+        }
+        issue.label = rows
+            .iter()
+            .find(|row| {
+                Some(row.contest_id) == issue.contest_id && Some(row.problem_id) == issue.problem_id
+            })
+            .map(|row| row.label.clone());
+    }
+    Ok(issues)
+}
+
 /// Every stored config of `plugin_id` that `manifest` would refuse, so an
 /// admin sees what an upgrade breaks before publishing it.
 pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
@@ -838,13 +1038,13 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
                 },
             )],
         };
-        incompatible.push(IncompatibleConfig {
-            plugin_id: plugin_id.to_string(),
+        incompatible.push(IncompatibleConfig::new(
+            plugin_id.to_string(),
             scope,
-            ref_id: row.ref_id,
-            namespace: namespace.to_string(),
+            row.ref_id,
+            namespace.to_string(),
             errors,
-        });
+        ));
     }
     incompatible.sort_by(|a, b| {
         (a.scope.as_str(), &a.ref_id, &a.namespace).cmp(&(
@@ -853,7 +1053,7 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
             &b.namespace,
         ))
     });
-    Ok(incompatible)
+    labelled(db, incompatible).await
 }
 
 #[cfg(test)]
