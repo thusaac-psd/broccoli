@@ -488,7 +488,7 @@ pub fn dispatch_hooks_background(
 
 /// Dispatch an event whose response no one waits for, once per `event_id`
 /// fleet-wide (an event dispatched, or being dispatched, under the same id on
-/// any replica is skipped; see [`EventClaim`]), as [`CallClass::Background`]
+/// any replica is skipped; see `EventClaim`), as [`CallClass::Background`]
 /// calls. Completes when every hook has run, so a caller that awaits it can
 /// count the hooks as part of its own work. Dropped before it completes, it
 /// gives the event back to be dispatched again. When the claim cannot be
