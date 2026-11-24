@@ -41,7 +41,7 @@ export const pluginKeys = {
   configDescription: (pluginId: string, namespace: string) =>
     `config.${pluginId}.${namespace}.description`,
   /**
-   * A schema field's title or description. The key names the field as the
+   * A schema field's title, description or unit. The key names the field as the
    * schema declares it, so the fields of every item of an array share one
    * key: the item positions in `path` are left out.
    */
@@ -49,7 +49,7 @@ export const pluginKeys = {
     pluginId: string,
     namespace: string,
     path: readonly string[],
-    part: 'title' | 'description',
+    part: 'title' | 'description' | 'unit',
   ) =>
     `config.${pluginId}.${namespace}.${path.filter((segment) => !/^\d+$/.test(segment)).join('.')}.${part}`,
 };

@@ -84,6 +84,13 @@ export function SchemaField({
           prop.description,
         )
       : prop.description;
+  const unit =
+    pluginId && namespace && prop['x-unit']
+      ? pluginText(
+          pluginKeys.configField(pluginId, namespace, path, 'unit'),
+          prop['x-unit'],
+        )
+      : prop['x-unit'];
   const dotPath = path.join('.');
   const error = errors[dotPath];
   const isFieldExplicit = isExplicitValue(path);
@@ -345,7 +352,7 @@ export function SchemaField({
               integer={prop.type === 'integer'}
               step={prop.multipleOf}
               precision={prop['x-precision']}
-              unit={prop['x-unit']}
+              unit={unit}
               inheritedPlaceholder={inheritedPlaceholder}
             />
             <FieldError problem={error} />

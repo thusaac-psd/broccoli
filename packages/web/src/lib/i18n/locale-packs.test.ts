@@ -44,6 +44,7 @@ const plugins = readdirSync(PLUGINS_DIR).filter((name) =>
 interface SchemaProperty {
   title?: string;
   description?: string;
+  unit?: string;
   properties?: Record<string, SchemaProperty>;
   items?: SchemaProperty;
 }
@@ -74,7 +75,7 @@ function schemaText(
     ) => {
       for (const [name, property] of Object.entries(properties)) {
         const at = [...path, name];
-        for (const part of ['title', 'description'] as const) {
+        for (const part of ['title', 'description', 'unit'] as const) {
           const value = property[part];
           if (value) {
             text[pluginKeys.configField(plugin, namespace, at, part)] = value;
