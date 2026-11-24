@@ -27,6 +27,10 @@ const ROLE_TEXT: Record<Provided, Record<ClosedByPlace, TranslationKey>> = {
     parked: 'submissions.parkedBy.checker_format',
     closed: 'problem.closedBy.checker_format',
   },
+  language: {
+    parked: 'submissions.parkedBy.language',
+    closed: 'problem.closedBy.language',
+  },
 };
 
 /**
