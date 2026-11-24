@@ -271,13 +271,40 @@ pub fn connect_lazy_with(
 /// 57P01-57P03, 53300). A caller answers it as a retryable outage; every
 /// other error is about the statement.
 pub fn is_outage(err: &DbErr) -> bool {
+    outage(err).is_some()
+}
+
+/// Why the database cannot serve a statement right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outage {
+    /// It cannot be reached or cannot serve connections.
+    Lost,
+    /// It answers, but every pooled connection is in use and none came free
+    /// in time: the pool is saturated, and a moment later serves again.
+    Busy,
+}
+
+/// The outage `err` reports, if it reports one ([`is_outage`]), and which
+/// kind. Only the handle's acquire decides a pool is busy (it knows whether a
+/// connection is checked out), and says so with the error this reads as
+/// [`Outage::Busy`].
+pub fn outage(err: &DbErr) -> Option<Outage> {
     match err {
-        DbErr::ConnectionAcquire(_) => true,
+        DbErr::Conn(RuntimeErr::Internal(message)) if message == POOL_BUSY => Some(Outage::Busy),
+        DbErr::ConnectionAcquire(_) => Some(Outage::Lost),
         DbErr::Conn(RuntimeErr::SqlxError(e))
         | DbErr::Exec(RuntimeErr::SqlxError(e))
-        | DbErr::Query(RuntimeErr::SqlxError(e)) => sqlx_outage(e),
-        _ => false,
+        | DbErr::Query(RuntimeErr::SqlxError(e)) => sqlx_outage(e).then_some(Outage::Lost),
+        _ => None,
     }
+}
+
+/// The message of the error an acquire on a saturated pool fails with.
+const POOL_BUSY: &str = "every pooled database connection is in use";
+
+/// The error an acquire on a saturated pool fails with ([`Outage::Busy`]).
+pub fn pool_busy() -> DbErr {
+    DbErr::Conn(RuntimeErr::Internal(POOL_BUSY.to_owned()))
 }
 
 fn sqlx_outage(e: &sea_orm::sqlx::Error) -> bool {

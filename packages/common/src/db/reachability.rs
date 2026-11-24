@@ -8,8 +8,8 @@
 //! count is exact. Two rules decide what an outage error means:
 //!
 //! - An acquire that times out while the pool is busy is saturation: every
-//!   connection is in use, so that request answers as unavailable and nothing
-//!   else changes. An acquire that times out with no connection checked out
+//!   connection is in use, so that request fails as busy
+//!   ([`super::Outage::Busy`]) and nothing else changes. An acquire that times out with no connection checked out
 //!   could not open one, and marks the database unreachable, as any other
 //!   outage error of an acquire does.
 //! - A statement that fails as an outage on a connection it holds
@@ -102,10 +102,12 @@ impl Reachability {
                 Ok((conn, Held(self.clone())))
             }
             Err(e) => {
-                let saturated = is_acquire_timeout(&e) && self.busy.load(Ordering::Acquire) > 0;
-                if super::is_outage(&e) && !saturated {
+                if is_acquire_timeout(&e) && self.busy.load(Ordering::Acquire) > 0 {
+                    return Err(super::pool_busy());
+                }
+                if super::is_outage(&e) {
                     self.lost();
-                } else if !super::is_outage(&e) {
+                } else {
                     self.answered();
                 }
                 Err(e)
@@ -180,7 +182,7 @@ mod tests {
 
         let probe = reach.pass().expect("the first acquire probes");
         let err = reach.pass().err().expect("the others are refused");
-        assert!(super::super::is_outage(&err));
+        assert_eq!(super::super::outage(&err), Some(super::super::Outage::Lost));
 
         // A probe that finds the database still unreachable hands the slot on.
         let _ = reach.settle_acquire(probe, timeout());
@@ -206,7 +208,9 @@ mod tests {
         let reach = Arc::new(Reachability::default());
         let running = acquire(&reach, Ok(())).unwrap();
         for _ in 0..3 {
-            acquire(&reach, timeout());
+            let pass = reach.pass().unwrap();
+            let err = reach.settle_acquire(pass, timeout()).err().unwrap();
+            assert_eq!(super::super::outage(&err), Some(super::super::Outage::Busy));
             assert!(!refused(&reach), "a busy pool is not a lost database");
         }
         drop(running);

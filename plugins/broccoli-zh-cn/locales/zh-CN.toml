@@ -1303,6 +1303,7 @@
 'apiError.CHECKER_SOURCE_UNSUPPORTED' = "此题目的检查器格式不使用检查器源代码。"
 'apiError.STORAGE_UNAVAILABLE' = "文件存储暂时不可用，请稍后重试。"
 'apiError.DATABASE_UNAVAILABLE' = "服务器数据库暂时不可用，请稍后重试。"
+'apiError.DATABASE_BUSY' = "服务器正忙，请稍后重试。"
 'apiError.QUEUE_UNAVAILABLE' = "服务器消息队列暂时不可用，请稍后重试。"
 'apiError.PLUGIN_ERROR' = "插件处理此请求时出错。请重试，或联系管理员。"
 'apiError.PLUGIN_SESSION_ABORTED' = "评测此提交的插件出错或已停用，评测已中止。"

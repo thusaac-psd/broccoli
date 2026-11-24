@@ -76,7 +76,11 @@ async fn a_saturated_pool_is_not_taken_for_an_unreachable_database() {
     let first = db.begin().await.unwrap();
     let second = db.begin().await.unwrap();
     let timed_out = db.query_one_raw(select()).await.unwrap_err();
-    assert!(common::db::is_outage(&timed_out), "{timed_out}");
+    assert_eq!(
+        common::db::outage(&timed_out),
+        Some(common::db::Outage::Busy),
+        "{timed_out}"
+    );
 
     // Were the database taken for unreachable, one of these would probe and
     // the other be refused at once.
@@ -159,7 +163,11 @@ async fn assert_busy_not_lost(
     let select = || Statement::from_string(DbBackend::Postgres, "SELECT 1");
 
     let timed_out = db.query_one_raw(select()).await.unwrap_err();
-    assert!(common::db::is_outage(&timed_out), "{timed_out}");
+    assert_eq!(
+        common::db::outage(&timed_out),
+        Some(common::db::Outage::Busy),
+        "{timed_out}"
+    );
 
     // Were the database taken for unreachable, one of these would probe and
     // the other be refused at once.
