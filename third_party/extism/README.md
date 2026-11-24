@@ -9,8 +9,8 @@ from the patches. The upstream SDK documentation is the crate's page on
 crates.io and docs.rs.
 
 The patches make a call's cancel (`CancelHandle::cancel`) and its manifest
-timeout bound every piece of guest code the call runs. All of them are in
-`src/plugin.rs`.
+timeout bound every piece of guest code the call runs, and leave a failed call's
+report to the caller. All of them are in `src/plugin.rs`.
 
 ## The deadline is armed before the call registers
 
@@ -59,6 +59,17 @@ memory. An error the guest reports through its output returns normally and keeps
 the store. The decision sits in `raw_call` because only there is the outcome
 still typed: the error a caller receives has turned an interrupt into the
 message `timeout` and a memory limit into `oom`.
+
+## The caller reports a failed call
+
+`raw_call` logs a failed call, an error the guest set or an error from wasmtime,
+at `debug`, not `error`. The caller has the error and knows what it means: a
+host function that marked its call unavailable (a busy host, a database outage,
+a deadline cut) expects it, and any other failure the caller logs itself once.
+At `error`, the published crate logs each such call with the error's `Debug`
+form, which carries the whole wasm backtrace on many lines.
+`a_failed_call_logs_one_line_and_an_unavailable_one_logs_nothing` in
+`packages/plugin-core/src/traits/tests.rs` pins it.
 
 ## The test hook
 

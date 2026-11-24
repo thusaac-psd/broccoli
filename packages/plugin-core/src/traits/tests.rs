@@ -29,6 +29,8 @@ fn guest(version: i64) -> String {
         (import "extism:host/user" "db_down" (func $db_down (param i64) (result i64)))
         (import "extism:host/user" "nest_hold" (func $nest_hold (param i64) (result i64)))
         (import "extism:host/user" "nest_spin" (func $nest_spin (param i64) (result i64)))
+        (import "extism:host/user" "broken" (func $broken (param i64) (result i64)))
+        (func (export "broken") (result i32) (drop (call $broken (i64.const 0))) (i32.const 0))
         (func (export "nest_spin") (result i32) (drop (call $nest_spin (i64.const 0))) (i32.const 0))
         (func (export "busy") (result i32) (drop (call $busy (i64.const 0))) (i32.const 0))
         (func (export "db_down") (result i32) (drop (call $db_down (i64.const 0))) (i32.const 0))
@@ -272,6 +274,11 @@ fn db_down(_: &Ctx, _: i64) -> Result<(), extism::Error> {
     Err(extism::Error::msg("the database is unreachable"))
 }
 
+/// A host function that fails for a reason no retry changes.
+fn broken(_: &Ctx, _: i64) -> Result<(), extism::Error> {
+    Err(extism::Error::msg("the host function is broken"))
+}
+
 fn mark(ctx: &Ctx, version: i64) -> Result<(), extism::Error> {
     ctx.0.update(|c| c.marks.push(version));
     Ok(())
@@ -323,6 +330,7 @@ impl Harness {
                     host_fn("db_down", ctx.clone(), db_down),
                     host_fn("nest_hold", ctx.clone(), nest_hold),
                     host_fn("nest_spin", ctx.clone(), nest_spin),
+                    host_fn("broken", ctx.clone(), broken),
                 ]
             });
             TestManager {
@@ -915,4 +923,73 @@ async fn a_host_function_can_fail_its_call_as_unavailable() {
         .call_raw(PLUGIN, "mark", vec![], CallOptions::interactive(later()))
         .await
         .expect("the next call runs");
+}
+
+/// Every event logged while the tests run, rendered as its message and
+/// fields, with its level.
+fn captured_logs() -> &'static Mutex<Vec<(tracing::Level, String)>> {
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+
+    static LOGS: std::sync::OnceLock<Mutex<Vec<(tracing::Level, String)>>> =
+        std::sync::OnceLock::new();
+
+    struct Render(String);
+    impl tracing::field::Visit for Render {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, " {}={:?}", field.name(), value);
+        }
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, " {}={}", field.name(), value);
+        }
+    }
+    struct Capture;
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            let mut render = Render(String::new());
+            event.record(&mut render);
+            captured_logs()
+                .lock()
+                .push((*event.metadata().level(), render.0));
+        }
+    }
+
+    LOGS.get_or_init(|| {
+        tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Capture))
+            .expect("no other test sets a global subscriber");
+        Mutex::new(Vec::new())
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_call_logs_one_line_and_an_unavailable_one_logs_nothing() {
+    let logs = captured_logs();
+    let h = Harness::new(2);
+    for func in ["busy", "db_down", "broken"] {
+        h.manager
+            .call_raw(PLUGIN, func, vec![], CallOptions::interactive(later()))
+            .await
+            .unwrap_err();
+    }
+    // Other tests log too, so only the events naming these calls count, at
+    // the levels a deployment logs.
+    let logs = logs.lock();
+    let naming = |func: &str| -> Vec<(tracing::Level, String)> {
+        logs.iter()
+            .filter(|(level, text)| *level <= tracing::Level::INFO && text.contains(func))
+            .cloned()
+            .collect()
+    };
+    // A call the host could not serve now is the caller's answer, not a fault.
+    for func in ["busy", "db_down"] {
+        assert_eq!(naming(func), vec![], "{func}");
+    }
+    // A failure is one line, without the wasm backtrace.
+    let broken = naming("broken");
+    assert_eq!(broken.len(), 1, "{broken:#?}");
+    let (level, text) = &broken[0];
+    assert_eq!(*level, tracing::Level::WARN);
+    assert!(!text.contains('\n'), "{text}");
+    assert!(text.contains("the host function is broken"), "{text}");
 }

@@ -1044,7 +1044,7 @@ impl Plugin {
                 match self.current_plugin_mut().memory_str(handle) {
                     Ok(e) => {
                         let x = e.to_string();
-                        error!(
+                        debug!(
                             plugin = self.id.to_string(),
                             "call to {name} returned with error message: {}", x
                         );
@@ -1146,7 +1146,7 @@ impl Plugin {
                     return Err((Error::msg(cause), rc));
                 }
 
-                error!(
+                debug!(
                     plugin = self.id.to_string(),
                     "call to {name} encountered an error: {e:?}"
                 );

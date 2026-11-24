@@ -219,6 +219,12 @@ a connection permit no longer and has each statement cut there (see
 A call still queued at its deadline, or cancelled at it, fails with
 `PluginError::Unavailable`.
 
+A call that fails as unavailable logs nothing of its own: the caller answers
+it, and the host function that marked it logs one line for its cause. Any
+other failed call logs one `Plugin call failed` warning with its reason
+(`failure_reason`), every cause of its error without the wasm backtrace.
+extism logs a failed call only at `debug`.
+
 ## Unloaded instances
 
 Each loaded plugin's instance pool carries a `pool::Liveness`, live until the
