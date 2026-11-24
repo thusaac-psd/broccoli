@@ -343,14 +343,22 @@ impl E2eTestApp {
     /// periodic reconcile does: what a change another replica published does
     /// here.
     pub async fn reconcile_plugins(&self) {
+        let failed = self.reconcile_plugins_failing().await;
+        assert!(failed.is_empty(), "reconcile failed to apply {failed:?}");
+    }
+
+    /// [`Self::reconcile_plugins`], returning the plugins it could not load.
+    pub async fn reconcile_plugins_failing(&self) -> Vec<String> {
         let state = self
             .state
             .as_ref()
             .expect("reconcile_plugins needs the in-process server");
-        let failures = server::plugin_lifecycle::reconcile(state)
+        server::plugin_lifecycle::reconcile(state)
             .await
-            .expect("reconcile the plugin table");
-        assert!(failures.is_empty(), "reconcile failed to apply a plugin");
+            .expect("reconcile the plugin table")
+            .into_iter()
+            .map(|failure| failure.plugin_id)
+            .collect()
     }
 
     /// Takes a sample burst on the in-process server's platform clock, as

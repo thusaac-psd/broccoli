@@ -107,7 +107,10 @@ stuck detector take a unit only when this replica has every key's
 fleet-wide provider loaded (`Loaded::here`, read from its registries, so the
 check costs no round trip), or when no live replica has one loaded: then the
 replica that takes the unit fails it visibly instead of it waiting unseen
-(`providers::runs_here`). Each replica publishes what it has loaded, each key
+(`providers::runs_here`). Every attempt would meet the same, so its system
+error stands on the first attempt, never retried, as `PLUGIN_NOT_LOADED`
+with a message naming the plugin, its role and the key
+(`judging::fault::missing_plugin`). Each replica publishes what it has loaded, each key
 with the plugins that registered it there, in its `plugin_replica.provides`
 row. A unit
 this replica cannot run yet stays `Queued` for a replica that can, or for

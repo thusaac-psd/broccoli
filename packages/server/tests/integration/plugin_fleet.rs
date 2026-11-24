@@ -243,7 +243,7 @@ async fn a_replica_without_the_plugin_leaves_due_timers_for_one_that_has_it() {
 
 /// The claim fiber of a replica that has no handler for a submission's
 /// contest type leaves the submission `Queued` for a replica that has one,
-/// instead of claiming it only to fail it with `NO_HANDLER_REGISTERED`.
+/// instead of claiming it only to fail it with `PLUGIN_NOT_LOADED`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_replica_without_the_contest_type_leaves_queued_work_for_one_that_has_it() {
     use common::SubmissionStatus;

@@ -26,6 +26,10 @@ pub enum DispatchFault {
     /// unit, is not loaded here any more (it is reloading or was unloaded):
     /// the replica's fault, not the submission's.
     NotLoadedHere,
+    /// A plugin the unit needs was loaded on no live replica when this
+    /// replica took the unit, or no plugin provides what it needs: every
+    /// attempt would meet the same, so the failure stands.
+    NotLoaded,
     /// The database did not answer a statement the dispatch's plugins ran
     /// (`common::db::is_outage`): the platform's fault, not the submission's.
     DatabaseUnavailable,
@@ -45,6 +49,7 @@ impl DispatchFault {
         match self {
             Self::Operation(fault) => fault.code(),
             Self::NotLoadedHere => HostCode::PluginNotLoadedHere,
+            Self::NotLoaded => HostCode::PluginNotLoaded,
             Self::DatabaseUnavailable => HostCode::DatabaseUnavailable,
             Self::CheckerFailed => HostCode::CheckerFailed,
             Self::ProblemFailed => HostCode::ProblemFailed,
@@ -103,6 +108,30 @@ impl DispatchFaults {
     }
 }
 
+/// The fault of a plugin a unit needs that did not resolve here
+/// (`unresolved`). A unit claimed with every plugin it needs loaded here
+/// lost it since: this replica's fault, handed back
+/// ([`DispatchFault::NotLoadedHere`]). A unit taken while no live replica
+/// had it loaded, or that needs what no plugin provides, stands on its first
+/// attempt ([`DispatchFault::NotLoaded`]), its message naming the plugin and
+/// its role.
+pub(crate) fn missing_plugin(
+    needs_loaded: bool,
+    unresolved: &crate::providers::Unresolved,
+) -> Recorded {
+    if needs_loaded {
+        Recorded {
+            fault: DispatchFault::NotLoadedHere,
+            message: unresolved.to_string(),
+        }
+    } else {
+        Recorded {
+            fault: DispatchFault::NotLoaded,
+            message: unresolved.nowhere(),
+        }
+    }
+}
+
 /// Whether `fault` loses the attempt it meets.
 fn loses(fault: DispatchFault) -> bool {
     SystemErrorClass::of_fault(fault) == SystemErrorClass::HandBack
@@ -142,7 +171,9 @@ impl SystemErrorClass {
             )
             | DispatchFault::NotLoadedHere
             | DispatchFault::DatabaseUnavailable => Self::HandBack,
-            DispatchFault::CheckerFailed | DispatchFault::ProblemFailed => Self::Stands,
+            DispatchFault::NotLoaded
+            | DispatchFault::CheckerFailed
+            | DispatchFault::ProblemFailed => Self::Stands,
         }
     }
 }
@@ -290,22 +321,13 @@ impl CallEnd {
 }
 
 impl DispatchFailure {
-    /// The dispatch's contest plugin, `what`, has no handler registered
-    /// here. A unit claimed with every plugin it needs loaded here lost it
-    /// since ([`DispatchFault::NotLoadedHere`], handed back); one claimed
-    /// while no live replica had it loaded fails as having no handler.
+    /// The dispatch's contest plugin did not resolve here (`unresolved`):
+    /// the fault [`missing_plugin`] names.
     pub(crate) fn no_handler(
         needs_loaded: bool,
         unresolved: &crate::providers::Unresolved,
     ) -> Self {
-        if needs_loaded {
-            Self::from(Recorded {
-                fault: DispatchFault::NotLoadedHere,
-                message: unresolved.to_string(),
-            })
-        } else {
-            Self::judging(HostCode::NoHandlerRegistered, unresolved.to_string())
-        }
+        Self::from(missing_plugin(needs_loaded, unresolved))
     }
 }
 
@@ -406,7 +428,7 @@ mod tests {
 
     /// A contest handler missing here is this replica's fault only for a
     /// unit it claimed with every plugin loaded: handed back. One it took
-    /// while no live replica had the plugin fails visibly.
+    /// while no live replica had the plugin stands, naming it.
     #[test]
     fn a_missing_handler_hands_back_only_what_was_claimed_loaded() {
         let unresolved = crate::providers::Unresolved {
@@ -422,7 +444,7 @@ mod tests {
         let missing = DispatchFailure::no_handler(false, &unresolved);
         assert_eq!(
             (missing.code, missing.class),
-            (HostCode::NoHandlerRegistered, SystemErrorClass::Judging)
+            (HostCode::PluginNotLoaded, SystemErrorClass::Stands)
         );
     }
 

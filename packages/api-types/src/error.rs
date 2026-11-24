@@ -137,7 +137,6 @@ host_codes! {
     /// The submission arrived after the plugin's admission window closed.
     SubmissionTooLate = "SUBMISSION_TOO_LATE";
     // Judgement and code run errors.
-    NoHandlerRegistered = "NO_HANDLER_REGISTERED";
     ProblemNotFound = "PROBLEM_NOT_FOUND";
     DatabaseError = "DATABASE_ERROR";
     InvalidFiles = "INVALID_FILES";
@@ -160,6 +159,10 @@ host_codes! {
     /// A plugin the work needs stopped being loaded on the replica that
     /// took it; the work goes back to the queue.
     PluginNotLoadedHere = "PLUGIN_NOT_LOADED_HERE";
+    /// A plugin the work needs was loaded on no live replica when the work
+    /// was taken (or no plugin provides what it needs): the work stands
+    /// failed, naming the plugin and its role.
+    PluginNotLoaded = "PLUGIN_NOT_LOADED";
     /// The problem's checker program failed.
     CheckerFailed = "CHECKER_FAILED";
     /// A program the problem supplies besides its checker (an interactor or

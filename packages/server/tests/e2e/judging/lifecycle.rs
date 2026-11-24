@@ -324,3 +324,75 @@ async fn mixed_contest_with_multiple_problems_and_contestants() {
 }
 
 use super::CPP_SUM;
+
+/// A unit taken while no live replica has a plugin it needs loaded fails on
+/// its first attempt and stands: every attempt would meet the same. Its
+/// system error names the plugin and its role (`PLUGIN_NOT_LOADED`); it is
+/// judged once, never retried. Here the problem's checker plugin is enabled
+/// fleet-wide but loaded on no replica.
+#[tokio::test(flavor = "multi_thread")]
+async fn work_whose_plugin_is_loaded_nowhere_stands_at_once_naming_it() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("nowhere_admin", "pass1234", "admin")
+        .await;
+    let problem_id = app.create_problem(&admin, "Checker loaded nowhere").await;
+    app.create_test_case_with(problem_id, "5\n1 2 3 4 5", "15", 100, true, &admin)
+        .await;
+    let res = app
+        .patch_with_token(
+            &format!("/api/v1/problems/{problem_id}"),
+            &json!({"is_public": true}),
+            &admin,
+        )
+        .await;
+    assert!(res.status < 300, "{}", res.text);
+    for sql in [
+        "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
+         ('absent-checker', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [], \
+           \"problem_types\": [], \"checker_formats\": [\"absent-format\"], \
+           \"languages\": [], \"unchecked_problem_types\": []}')"
+            .to_string(),
+        format!("UPDATE problem SET checker_format = 'absent-format' WHERE id = {problem_id}"),
+    ] {
+        app.db
+            .execute_raw(Statement::from_string(DbBackend::Postgres, sql))
+            .await
+            .unwrap();
+    }
+    // Converge on the table; the recorded plugin cannot load here (it has
+    // no files), which is the point.
+    assert_eq!(app.reconcile_plugins_failing().await, ["absent-checker"]);
+    let contestant = app
+        .create_authenticated_user("nowhere_user", "pass1234")
+        .await;
+
+    let id = app
+        .create_submission(problem_id, &contestant, "cpp", CPP_SUM)
+        .await;
+    app.wait_for_submission_terminal(id, &contestant, 120).await;
+    app.judging_idle().await;
+
+    let staff = app
+        .get_with_token(&format!("/api/v1/submissions/{id}"), &admin)
+        .await;
+    assert_eq!(staff.status, 200, "{}", staff.text);
+    let result = &staff.body["result"];
+    assert_eq!(result["verdict"], "SystemError", "{}", staff.text);
+    assert_eq!(result["error_code"], "PLUGIN_NOT_LOADED", "{}", staff.text);
+    assert_eq!(
+        result["error_message"],
+        "the checker plugin absent-checker for checker format \"absent-format\" \
+         is loaded on no live replica",
+        "{}",
+        staff.text
+    );
+    let row = submission::Entity::find_by_id(id)
+        .one(&app.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.system_error_retries, 0, "never retried");
+    assert_eq!(row.judge_epoch, 0, "judged once");
+}

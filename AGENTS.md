@@ -325,8 +325,9 @@ binaries warn about every key they do not read.
   stolen.
 - A failure every attempt would repeat stands: its `DispatchFault` classes as
   standing (a problem's checker or its own program failing, `CHECKER_FAILED`,
-  `PROBLEM_FAILED`), and the system-error retry never re-judges it. An evaluator
-  reports a problem's failure generically, in
+  `PROBLEM_FAILED`; a plugin the unit needs loaded on no live replica when it
+  was taken, `PLUGIN_NOT_LOADED`), and the system-error retry never re-judges
+  it. An evaluator reports a problem's failure generically, in
   `TestCaseVerdict::problem_failure`; the host never reads a plugin's verdict
   for it. A system error the retry may still take back is not shown: the
   submission and its judgement history show the attempt in flight until the

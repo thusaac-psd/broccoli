@@ -1329,7 +1329,7 @@
 'apiError.SUBMISSION_IN_FLIGHT' = "Another submission of yours is still being accepted. Try again in a moment."
 'apiError.SUBMISSION_STATE_CHANGED' = "Something changed while you submitted. Reload and submit again."
 'apiError.SUBMISSION_TOO_LATE' = "The submission arrived after submissions closed."
-'apiError.NO_HANDLER_REGISTERED' = "No plugin judges this contest type on this server."
+'apiError.PLUGIN_NOT_LOADED' = "A plugin this work needs is loaded on no server, so it could not be judged."
 'apiError.PROBLEM_NOT_FOUND' = "The problem was removed before it could be judged."
 'apiError.DATABASE_ERROR' = "Judging could not start because the database did not answer."
 'apiError.INVALID_FILES' = "The submitted files could not be read."

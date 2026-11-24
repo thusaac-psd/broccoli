@@ -67,10 +67,10 @@ pub async fn start_evaluate_batch_with(
     let evaluator = match evaluator {
         Ok(evaluator) => evaluator,
         Err(unresolved) => {
-            // Lost since the claim, a fault of this replica's (see
-            // `Dispatch::not_loaded_here`).
+            // Handed back or standing, by how the unit was claimed (see
+            // `Dispatch::missing_plugin`).
             if let Some(dispatch) = &deps.operation_deps.dispatch {
-                dispatch.not_loaded_here(&unresolved);
+                dispatch.missing_plugin(&unresolved);
             }
             anyhow::bail!("{unresolved}");
         }

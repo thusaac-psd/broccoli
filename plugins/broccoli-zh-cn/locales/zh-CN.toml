@@ -1330,7 +1330,7 @@
 'apiError.SUBMISSION_IN_FLIGHT' = "你的另一份提交仍在受理中，请稍后重试。"
 'apiError.SUBMISSION_STATE_CHANGED' = "提交期间状态发生了变化。请刷新后重新提交。"
 'apiError.SUBMISSION_TOO_LATE' = "提交在截止之后才送达。"
-'apiError.NO_HANDLER_REGISTERED' = "此服务器上没有评测该比赛类型的插件。"
+'apiError.PLUGIN_NOT_LOADED' = "此工作所需的插件未在任何服务器上加载，因此无法评测。"
 'apiError.PROBLEM_NOT_FOUND' = "题目在评测前已被删除。"
 'apiError.DATABASE_ERROR' = "数据库未响应，无法开始评测。"
 'apiError.INVALID_FILES' = "无法读取提交的文件。"

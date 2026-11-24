@@ -106,10 +106,10 @@ fn checker_stage_call(
     let handler = match handler {
         Ok(handler) => handler,
         Err(unresolved) => {
-            // Lost since the claim, a fault of this replica's (see
-            // `Dispatch::not_loaded_here`).
+            // Handed back or standing, by how the unit was claimed (see
+            // `Dispatch::missing_plugin`).
             if let Some(dispatch) = crate::services::judging::Dispatch::of_current_call() {
-                dispatch.not_loaded_here(&unresolved);
+                dispatch.missing_plugin(&unresolved);
             }
             return Err(extism::Error::msg(unresolved.to_string()));
         }

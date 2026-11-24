@@ -198,6 +198,22 @@ impl std::fmt::Display for Unresolved {
     }
 }
 
+impl Unresolved {
+    /// The message of a unit taken while no live replica had the key's
+    /// provider loaded: the plugin, its role and the key.
+    pub fn nowhere(&self) -> String {
+        match &self.provider {
+            Some(plugin_id) => format!(
+                "{} plugin {plugin_id} for {} {:?} is loaded on no live replica",
+                role(self.kind),
+                noun(self.kind),
+                self.key
+            ),
+            None => self.to_string(),
+        }
+    }
+}
+
 /// What a plugin providing a key of `kind` is to the unit.
 pub fn role(kind: Provided) -> &'static str {
     match kind {
