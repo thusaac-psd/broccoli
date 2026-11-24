@@ -6,6 +6,9 @@ const ISSUE = {
   plugin_id: 'ioi',
   scope: 'contest_problem',
   ref_id: '1:1',
+  contest_id: 1,
+  problem_id: 1,
+  label: 'B',
   namespace: 'task',
   errors: [
     {
@@ -109,6 +112,9 @@ test("the contest's problems dialog shows the contest's config issues", async ({
           plugin_id: 'codelink-qualifier',
           scope: 'contest',
           ref_id: '1',
+          contest_id: 1,
+          problem_id: null,
+          label: null,
           namespace: 'contest',
           errors: [
             {
