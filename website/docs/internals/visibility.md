@@ -115,8 +115,10 @@ Degrading is per resource and per field, never per batch:
   keeps the row. A shape with no host-decided fields (a problem statement, its
   samples, its attachments) fails the request with the outage, and so does
   every action other than reading.
-- An outage is `503 PLUGIN_DISABLED` (no `Retry-After`) or
-  `503 PLUGIN_UNAVAILABLE` (with `Retry-After`). A disabled plugin's own routes
+- An outage is `503 PLUGIN_DISABLED` or `503 PLUGIN_UNAVAILABLE`, each with
+  `Retry-After`: every 503 is retryable. A disabled plugin's answer asks again
+  after 30 seconds (`DISABLED_RETRY_AFTER_SECS`), since what needs it is
+  parked and serves once an administrator enables it. A disabled plugin's own routes
   answer `PLUGIN_DISABLED` too; a submission to a contest whose type its
   disabled plugin provides is `CONTEST_TYPE_DISABLED`.
 

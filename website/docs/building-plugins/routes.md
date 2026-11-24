@@ -69,7 +69,7 @@ endpoint for the same resource:
 | `401` | `TOKEN_MISSING`, `TOKEN_INVALID` | No token on a route that needs one, or a token that is invalid or stale. |
 | `403` | `PERMISSION_DENIED` | The caller lacks `permission`, or is not a participant of a public contest on a `participant` route. |
 | `404` | `NOT_FOUND` | The caller cannot read the contest or problem, it does not exist, the problem is not in the contest, or the contest has another `contest_type`. |
-| `503` | `PLUGIN_DISABLED` | Your plugin, or the plugin that decides who may read the route's problem, is disabled. No `Retry-After`: nothing changes until an administrator enables it. |
+| `503` | `PLUGIN_DISABLED` | Your plugin, or the plugin that decides who may read the route's problem, is disabled. Carries a `Retry-After` of 30 seconds: it serves again once an administrator enables it. |
 | `503` | `PLUGIN_UNAVAILABLE` | The plugin that decides who may read the route's problem cannot answer right now. Carries `Retry-After`. |
 
 While a contest-type plugin is disabled or not loaded, the server keeps its

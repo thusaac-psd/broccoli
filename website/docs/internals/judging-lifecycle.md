@@ -111,7 +111,8 @@ Every end goes through `fail_dispatch`, fenced on the judgement's epoch and on
 it being open, so a verdict the plugin already wrote stands. The after-judging
 hooks fire after it, for a judgement it left terminal. While the plugin providing a contest
 type is disabled, a submission to its contests is refused with
-`503 CONTEST_TYPE_DISABLED` and no `Retry-After`; `CONTEST_TYPE_UNAVAILABLE`
+`503 CONTEST_TYPE_DISABLED`, with a `Retry-After` of 30 seconds (the work
+is parked and serves once an administrator enables the plugin); `CONTEST_TYPE_UNAVAILABLE`
 (with `Retry-After`) means only that the serving replica has not loaded the
 plugin yet.
 
@@ -125,8 +126,8 @@ is disabled fleet-wide; `work_runnable` states that in SQL
 `PluginLifecycle::closed_by` in Rust. Parked work waits `Queued` and resumes
 once a provider is enabled again. A new submission or code run that would be
 parked is refused: `503 CONTEST_TYPE_DISABLED` for its contest type,
-`503 PLUGIN_DISABLED` naming the evaluator for its problem type, neither with
-`Retry-After`. A system error a plugin writes without a code is recorded as
+`503 PLUGIN_DISABLED` naming the evaluator for its problem type, both with a
+`Retry-After` of 30 seconds. A system error a plugin writes without a code is recorded as
 `PLUGIN_ERROR`, so none is shown without one:
 
 - The claim statement takes no judgement or code run of a parked type, so

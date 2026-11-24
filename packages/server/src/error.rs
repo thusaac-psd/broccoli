@@ -18,6 +18,12 @@ const CONTEST_TYPE_RETRY_AFTER_SECS: u64 = 5;
 /// couple of seconds usually sees.
 pub const PLUGIN_RETRY_AFTER_SECS: u64 = 2;
 
+/// The `Retry-After` of a `PLUGIN_DISABLED` or `CONTEST_TYPE_DISABLED`
+/// answer. What needs a disabled plugin is parked, not failed, and serves
+/// again once an administrator enables it; that is an operator's change, so
+/// a client asks again at this pace rather than a plugin call's.
+pub const DISABLED_RETRY_AFTER_SECS: u64 = 30;
+
 /// The `Retry-After` of a `STORAGE_UNAVAILABLE` answer.
 pub const STORAGE_RETRY_AFTER_SECS: u64 = 5;
 
@@ -116,8 +122,10 @@ pub enum AppError {
     /// The plugin providing the problem's checker format declares no checker
     /// source, so the problem `id` has none to set.
     CheckerSourceUnsupported(i32),
-    /// The plugin providing this contest type is disabled fleet-wide. Not
-    /// retryable: nothing changes until an admin enables it again.
+    /// The plugin providing this contest type is disabled fleet-wide. The
+    /// work waits parked; a client asks again after
+    /// [`DISABLED_RETRY_AFTER_SECS`], since it serves once an admin enables
+    /// the plugin.
     ContestTypeDisabled(String),
     /// Server is overloaded; client should retry after the given duration.
     /// Distinct from `RateLimited` (429): 429 means "your client is too fast",
@@ -131,8 +139,8 @@ pub enum AppError {
     /// the request; the client retries after [`PLUGIN_RETRY_AFTER_SECS`].
     PluginUnavailable,
     /// What the request needs is provided by plugin `id`, which an
-    /// administrator disabled. Not retryable: nothing changes until it is
-    /// enabled again.
+    /// administrator disabled. A client asks again after
+    /// [`DISABLED_RETRY_AFTER_SECS`]: it serves once the plugin is enabled.
     PluginDisabled(String),
     /// Blob storage did not answer through its retries: an outage, retried
     /// by the client after [`STORAGE_RETRY_AFTER_SECS`].
@@ -474,6 +482,9 @@ impl IntoResponse for AppError {
             }
             AppError::ContestTypeUnavailable(_) => Some(CONTEST_TYPE_RETRY_AFTER_SECS),
             AppError::PluginUnavailable => Some(PLUGIN_RETRY_AFTER_SECS),
+            AppError::PluginDisabled(_) | AppError::ContestTypeDisabled(_) => {
+                Some(DISABLED_RETRY_AFTER_SECS)
+            }
             AppError::StorageUnavailable => Some(STORAGE_RETRY_AFTER_SECS),
             AppError::DatabaseUnavailable => Some(DATABASE_RETRY_AFTER_SECS),
             AppError::QueueUnavailable => Some(QUEUE_RETRY_AFTER_SECS),
@@ -723,15 +734,27 @@ mod tests {
         }
     }
 
+    /// Every 503 is retryable and says when to ask again. A disabled plugin
+    /// is one: what needs it is parked, not failed, and serves again once an
+    /// administrator enables it, so the answer carries Retry-After.
     #[tokio::test]
-    async fn a_disabled_plugin_is_a_503_naming_it_without_retry_after() {
+    async fn a_disabled_plugin_is_a_503_naming_it_with_retry_after() {
         use broccoli_api_types::visibility::PluginOutage;
+        let disabled = AppError::ContestTypeDisabled("icpc".into()).into_response();
+        assert_eq!(disabled.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            disabled.headers().get("Retry-After").unwrap(),
+            &DISABLED_RETRY_AFTER_SECS.to_string()
+        );
         let response = AppError::from(PluginOutage::Disabled {
             plugin_id: "ioi".into(),
         })
         .into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert!(response.headers().get("Retry-After").is_none());
+        assert_eq!(
+            response.headers().get("Retry-After").unwrap(),
+            &DISABLED_RETRY_AFTER_SECS.to_string()
+        );
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["code"], "PLUGIN_DISABLED");
