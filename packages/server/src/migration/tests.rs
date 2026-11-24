@@ -607,6 +607,20 @@ async fn every_change_to_a_problems_judging_inputs_counts_in_its_version() {
             true,
         ),
         (
+            "problem config saved as it was",
+            "UPDATE plugin_config SET config = config, updated_at = NOW() + interval '1 minute' \
+             WHERE scope = 'problem' AND ref_id = '{p}'"
+                .into(),
+            false,
+        ),
+        (
+            "problem config changed",
+            "UPDATE plugin_config SET config = '{\"k\": 1}' \
+             WHERE scope = 'problem' AND ref_id = '{p}'"
+                .into(),
+            true,
+        ),
+        (
             "contest-problem config",
             "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
              VALUES ('contest_problem', '7:{p}', 'ioi', '{{}}', 0, NOW())"

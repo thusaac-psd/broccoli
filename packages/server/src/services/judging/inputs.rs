@@ -76,7 +76,9 @@ END $$";
 
     /// Counts a change to a row of an input table on the problem it belongs
     /// to: a test case's or additional file's `problem_id`, a problem- or
-    /// contest-problem-scoped config's problem.
+    /// contest-problem-scoped config's problem. A rewrite that changes only
+    /// `updated_at` (a config saved as it was) changes nothing judging reads,
+    /// so it counts nothing.
     const ROW_FUNCTION: &str =
         "CREATE OR REPLACE FUNCTION public.broccoli_inputs_changed() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -85,6 +87,9 @@ DECLARE
   target integer;
 BEGIN
   IF current_setting('broccoli.restoring', true) = 'on' THEN
+    RETURN NULL;
+  END IF;
+  IF TG_OP = 'UPDATE' AND to_jsonb(OLD) - 'updated_at' = to_jsonb(NEW) - 'updated_at' THEN
     RETURN NULL;
   END IF;
   FOR changed IN

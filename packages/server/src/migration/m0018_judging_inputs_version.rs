@@ -6,7 +6,8 @@ use sea_orm_migration::prelude::*;
 /// and its problem-scoped plugin configs (its checker source among them). The
 /// triggers below count every change to any of them, whatever path makes it,
 /// so no write path can forget to (`services::judging::inputs::expected`
-/// states them as the code expects them). A transaction that restores rows
+/// states them as the code expects them); a rewrite that changes only a row's
+/// `updated_at` counts nothing. A transaction that restores rows
 /// as they were (a bundle import) sets `broccoli.restoring`, and the triggers
 /// count nothing in it: a restore is no change.
 /// A judgement records the version it was judged against
@@ -73,6 +74,9 @@ DECLARE
   target integer;
 BEGIN
   IF current_setting('broccoli.restoring', true) = 'on' THEN
+    RETURN NULL;
+  END IF;
+  IF TG_OP = 'UPDATE' AND to_jsonb(OLD) - 'updated_at' = to_jsonb(NEW) - 'updated_at' THEN
     RETURN NULL;
   END IF;
   FOR changed IN
