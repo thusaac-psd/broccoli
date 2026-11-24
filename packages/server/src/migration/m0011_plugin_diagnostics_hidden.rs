@@ -7,7 +7,9 @@ use sea_orm_migration::prelude::*;
 /// `plugin_group_role`, see m0001) gives up its grant on them; a plugin that
 /// declares one is granted it when its role is provisioned.
 ///
-/// Forward-only like every migration here.
+/// Not additive (release/docs/upgrade.md): it takes a grant away from
+/// plugin SQL that servers of the previous release run, so they stop before it
+/// runs.
 pub struct Migration;
 
 impl MigrationName for Migration {

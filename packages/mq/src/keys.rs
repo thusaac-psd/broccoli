@@ -76,6 +76,11 @@ impl Topology {
         format!("{}:outstanding:{server_id}", self.base)
     }
 
+    /// The log of sliding-log quota `log` (see [`crate::Mq::sliding_log`]).
+    pub fn sliding_log(&self, log: &str) -> String {
+        format!("{}:log:{log}", self.base)
+    }
+
     /// The counter of fixed window `window` (see [`crate::Mq::count_in_window`]).
     pub fn window_counter(&self, window: &str) -> String {
         format!("{}:window:{window}", self.base)

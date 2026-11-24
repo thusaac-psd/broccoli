@@ -35,11 +35,13 @@ reports the current state.
 
 ## Sign-in limits
 
-Each client address may fail to sign in 100 times a minute, counted across all
-servers. A successful sign-in counts nothing, so a venue whose contestants all
-reach the server through one NAT address signs every one of them in with no
-setting changed. One account may fail 10 times a minute from one address
-(`auth.login_failure_limit`). Each address may register 30 times a minute. CLI
+One account may fail to sign in 10 times in any minute from one client address
+(`auth.login_failure_limit` and `auth.login_failure_window_secs`), counted
+across all servers. Only that account's own failures count against it, and a
+successful sign-in clears them, so a venue whose contestants all reach the
+server through one NAT address signs every one of them in, however many of them
+mistype a password, with no setting changed. Each address may register 30 times
+a minute. CLI
 device codes have no rate: each address may have at most 1000 device codes that
 a CLI is still waiting on. A code a contestant approves is collected at once,
 and a code whose CLI was stopped or gave up stops counting a minute after its

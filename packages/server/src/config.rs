@@ -354,16 +354,16 @@ pub struct AuthConfig {
     /// or shorter than [`MIN_JWT_SECRET_BYTES`].
     #[serde(default)]
     pub jwt_secret: String,
-    /// Max FAILED login attempts per (username, client IP) within
-    /// `login_failure_window_secs` before the pair is briefly throttled. Counts
-    /// only failures and clears on success, so it never throttles a legitimate
-    /// sign-in even when hundreds of contestants share one venue NAT IP. `0`
-    /// disables it. Deliberately generous - a false throttle during a live
-    /// contest is worse than a slightly looser brute-force bound.
+    /// Most failed sign-ins for one account from one client address in any
+    /// `login_failure_window_secs`, counted across the fleet
+    /// (`services::failed_sign_ins`). Only the account's own failures count
+    /// and a success clears them, so it never refuses a sign-in for other
+    /// contestants' typos, even when a whole venue shares one NAT address.
+    /// `0` turns it off.
     #[serde(default = "default_login_failure_limit")]
     pub login_failure_limit: u32,
-    /// Sliding window (seconds) over which `login_failure_limit` is counted, and
-    /// the maximum a throttled pair ever waits before it frees on its own.
+    /// The sliding window (seconds) `login_failure_limit` is counted over,
+    /// and the longest a refused account waits before it frees on its own.
     #[serde(default = "default_login_failure_window_secs")]
     pub login_failure_window_secs: u64,
 }

@@ -11,6 +11,12 @@
 //!   fails when the migrated database differs from them, so an entity change
 //!   without its migration cannot pass CI.
 //!
+//! The server only migrates forward: boot runs `up` for the pending
+//! migrations, and nothing in the server or its tools calls `down`. Each
+//! migration's `down` reverses its `up` for a developer stepping a scratch
+//! database back; an installation rolls back by restoring the dump taken
+//! before the upgrade (`release/docs/upgrade.md`).
+//!
 //! A database is refused when its history is not a prefix of this build's
 //! list: one that runs past this build's latest migration was migrated by a
 //! newer build, and one that does not start from this build's baseline (or

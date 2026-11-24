@@ -4,7 +4,8 @@ use sea_orm_migration::prelude::*;
 /// (`entity::refresh_token::Model::session_id`). A row without one can never
 /// be presented successfully, so it is deleted.
 ///
-/// Forward-only like every migration here.
+/// Not additive (release/docs/upgrade.md): it tightens a constraint servers
+/// of the previous release do not keep, so they stop before it runs.
 pub struct Migration;
 
 impl MigrationName for Migration {

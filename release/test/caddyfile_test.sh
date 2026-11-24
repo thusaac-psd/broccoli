@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Both gateway Caddyfiles health-check upstreams on the shallow /livez and
-# retry unreachable upstreams, every shipped Caddyfile keeps the internal
+# Both gateway Caddyfiles health-check upstreams on the shallow /livez, retry
+# unreachable upstreams and pin each browser to one upstream by cookie (so a
+# rolling upgrade never serves it one build's page and another's chunks),
+# every shipped Caddyfile keeps the internal
 # endpoints (/metrics, the API docs) off the public edge, and all parse with a
 # real Caddy. The Caddy
 # check skips unless a Caddy image is already local (offline-safe).
@@ -14,6 +16,8 @@ for cf in "${files[@]}"; do
   name="$(basename "$cf")"
   grep -Eq '^[[:space:]]*health_uri[[:space:]]+/livez$' "$cf" || fail "$name does not probe /livez"
   [ "$(grep -Ec '^[[:space:]]*health_uri' "$cf")" = 1 ] || fail "$name has more than one health_uri"
+  grep -Eq '^[[:space:]]*lb_policy[[:space:]]+cookie[[:space:]]' "$cf" || fail "$name does not pin browsers by cookie"
+  grep -Eq '^[[:space:]]*fallback[[:space:]]+round_robin$' "$cf" || fail "$name has no round_robin fallback"
   for directive in health_interval health_timeout health_fails lb_try_duration; do
     grep -Eq "^[[:space:]]*$directive[[:space:]]" "$cf" || fail "$name has no $directive"
   done
@@ -62,4 +66,30 @@ import json, sys
 srv = json.load(sys.stdin)["apps"]["http"]["servers"]["srv0"]
 assert srv["routes"][0]["match"][0]["host"] == ["contest.lan", "10.0.0.5"], srv["routes"][0]["match"]
 ' || fail "Caddyfile.airgap does not serve LAN_HOST_ALIASES"
+# Each gateway picks an upstream by its cookie, and one without the cookie (or
+# whose upstream is down) by round robin.
+for cf in "${files[@]}"; do
+  docker run --rm -v "$cf:/etc/caddy/Caddyfile:ro" -v "$T:/tls:ro" \
+    -e BROCCOLI_UPSTREAMS='10.0.0.21:3000 10.0.0.22:3000' -e LAN_HOST=contest.lan \
+    -e LAN_HOST_ALIASES= -e TLS_CERT=/tls/server.crt -e TLS_KEY=/tls/server.key \
+    "$image" caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile 2>/dev/null \
+    | python3 -c '
+import json, sys
+def handlers(node):
+    if isinstance(node, dict):
+        if node.get("handler") == "reverse_proxy":
+            yield node
+        for v in node.values():
+            yield from handlers(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from handlers(v)
+proxies = list(handlers(json.load(sys.stdin)))
+assert proxies, "no reverse_proxy"
+for p in proxies:
+    policy = p["load_balancing"]["selection_policy"]
+    assert policy["policy"] == "cookie", policy
+    assert policy["fallback"]["policy"] == "round_robin", policy
+' || fail "$(basename "$cf") does not pick upstreams by cookie with a round-robin fallback"
+done
 echo "PASS: gateway Caddyfiles probe /livez and validate with $image"

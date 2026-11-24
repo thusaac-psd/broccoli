@@ -3696,6 +3696,7 @@ name = "mq"
 version = "0.1.0"
 dependencies = [
  "common",
+ "rand 0.9.5",
  "redis",
  "serde",
  "serde_json",

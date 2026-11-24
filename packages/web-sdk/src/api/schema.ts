@@ -6552,7 +6552,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Rate limited (RATE_LIMITED): too many failed sign-ins from this address (100 a minute, counted across every server) or for this account from this address. A successful sign-in counts toward neither. Includes Retry-After. */
+      /** @description Rate limited (RATE_LIMITED): too many failed sign-ins for this account from this address (`auth.login_failure_limit`, 10 a minute by default, counted across every server). Other accounts' failures never refuse a sign-in, and a successful sign-in clears the account's count. Includes Retry-After. */
       429: {
         headers: {
           [name: string]: unknown;

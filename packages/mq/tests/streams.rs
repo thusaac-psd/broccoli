@@ -1067,23 +1067,82 @@ async fn a_fixed_window_counts_every_event_and_is_never_extended() {
     assert_eq!(other, 1);
 }
 
-/// Reading a window's count counts nothing, and a window never opened holds
-/// none.
+/// A sliding log admits at most its limit in any window-long span: a full
+/// log refuses every op and records nothing, and says how long until its
+/// oldest event leaves the window.
 #[tokio::test]
-async fn reading_a_window_counts_no_event() {
+async fn a_sliding_log_admits_at_most_its_limit_in_any_window() {
+    use mq::{LogAnswer, LogOp};
     let (_container, url) = redis().await;
     let mq = Mq::connect(&url, BASE).await.unwrap();
-    let length = Duration::from_secs(60);
+    let window = Duration::from_secs(60);
+    let log = "sign-in:10.0.0.1:alice";
+    for _ in 0..3 {
+        assert_eq!(
+            mq.sliding_log(log, 3, window, LogOp::Count).await.unwrap(),
+            LogAnswer::Admitted
+        );
+    }
+    for op in [LogOp::Count, LogOp::Check, LogOp::Clear] {
+        match mq.sliding_log(log, 3, window, op).await.unwrap() {
+            LogAnswer::Full { wait } => {
+                assert!(wait <= window && wait > Duration::from_secs(55), "{wait:?}")
+            }
+            LogAnswer::Admitted => panic!("{op:?} was admitted on a full log"),
+        }
+    }
+    // Another log is its own.
     assert_eq!(
-        mq.window_count("failed-login:10.0.0.1").await.unwrap(),
-        (0, Duration::ZERO)
+        mq.sliding_log("sign-in:10.0.0.1:bob", 3, window, LogOp::Check)
+            .await
+            .unwrap(),
+        LogAnswer::Admitted
     );
-    mq.count_in_window("failed-login:10.0.0.1", length)
+}
+
+/// Events leave a sliding log one by one as each grows older than the
+/// window, and a clear forgets them all.
+#[tokio::test]
+async fn a_sliding_log_forgets_events_older_than_its_window() {
+    use mq::{LogAnswer, LogOp};
+    let (_container, url) = redis().await;
+    let mq = Mq::connect(&url, BASE).await.unwrap();
+    let log = "sign-in:10.0.0.2:alice";
+    // Events recorded with a one-microsecond window are older than the
+    // window by the next op.
+    let tiny = Duration::from_micros(1);
+    for _ in 0..5 {
+        mq.sliding_log(log, 1, tiny, LogOp::Count).await.unwrap();
+    }
+    let window = Duration::from_secs(60);
+    assert_eq!(
+        mq.sliding_log(log, 2, window, LogOp::Count).await.unwrap(),
+        LogAnswer::Admitted,
+        "events older than the window do not count"
+    );
+    mq.sliding_log(log, 2, window, LogOp::Count).await.unwrap();
+    assert!(matches!(
+        mq.sliding_log(log, 2, window, LogOp::Check).await.unwrap(),
+        LogAnswer::Full { .. }
+    ));
+    let other = "sign-in:10.0.0.2:bob";
+    mq.sliding_log(other, 2, window, LogOp::Count)
         .await
         .unwrap();
-    for _ in 0..3 {
-        let (count, left) = mq.window_count("failed-login:10.0.0.1").await.unwrap();
-        assert_eq!(count, 1);
-        assert!(left <= length && left > Duration::from_secs(55), "{left:?}");
-    }
+    assert_eq!(
+        mq.sliding_log(other, 2, window, LogOp::Clear)
+            .await
+            .unwrap(),
+        LogAnswer::Admitted
+    );
+    mq.sliding_log(other, 2, window, LogOp::Count)
+        .await
+        .unwrap();
+    assert_eq!(
+        mq.sliding_log(other, 2, window, LogOp::Check)
+            .await
+            .unwrap(),
+        LogAnswer::Admitted,
+        "a clear forgets every event"
+    );
 }

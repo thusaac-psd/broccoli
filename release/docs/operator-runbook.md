@@ -74,6 +74,17 @@ For server redundancy, restart one server machine at a time and confirm the
 gateway stays healthy before moving to the next server. Avoid restarting infra
 during a contest window.
 
+### Command lines
+
+Both binaries refuse any argument they do not know, positional ones included,
+and exit with status 2 and a usage message. `broccoli-worker` takes only
+`--healthcheck`, `--node-id`, `--help` and `--version`; with none it runs the
+worker, which reads every setting from its config file and environment.
+`broccoli-server` also takes `serve`, `bundle`, `--openapi` and
+`--plugin-group-role`. A compose `command:` override that passes anything else,
+such as a config path or a word after the binary's name, stops the container at
+start instead of being ignored, so set settings through the role's env file.
+
 ## Plugin Updates
 
 A plugin runs from one of two sources, shown on the admin Plugins page:
@@ -375,14 +386,13 @@ Redis every 10 seconds, so an operation lost in that second fails within about
 without spending one of its system-error retries; so does a submission whose
 operation could not be published while Redis was down. The same holds for a
 Redis restored from an older snapshot. While a server cannot reach Redis it
-claims no new submissions; they stay queued for a server that can. The
-per-address quotas on failed sign-ins and registration are counted in Redis, so
-while it is down they admit every request: they guard against scripted abuse,
-and an outage must not lock a venue out of signing in. The bound on device codes
-is counted in the database and still applies. The per-account failed-login
-throttle (`auth.login_failure_limit`) is kept by each server in memory and still
-applies. A worker that crashes loses nothing: the tasks it held are redelivered
-to another worker 30 to 35 seconds after it stopped refreshing them.
+claims no new submissions; they stay queued for a server that can. The failed
+sign-in quota (`auth.login_failure_limit`) and the registration quota are
+counted in Redis, so while it is down they admit every request: they guard
+against scripted abuse, and an outage must not lock a venue out of signing in.
+The bound on device codes is counted in the database and still applies. A worker
+that crashes loses nothing: the tasks it held are redelivered to another worker
+30 to 35 seconds after it stopped refreshing them.
 
 Useful checks on the infra node (`operation_tasks` is
 `mq.operation_queue_name`):

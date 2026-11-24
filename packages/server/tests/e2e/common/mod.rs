@@ -725,10 +725,6 @@ impl E2eTestApp {
             plugin_lifecycle: Default::default(),
             plugin_sql,
             last_workers: Default::default(),
-            login_throttle: Arc::new(server::utils::login_throttle::LoginThrottle::new(
-                0,
-                std::time::Duration::from_secs(60),
-            )),
         };
 
         let mut result_consumer_handle_opt = None;

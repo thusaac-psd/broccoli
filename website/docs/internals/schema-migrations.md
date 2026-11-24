@@ -46,8 +46,10 @@ A schema change is a new migration, never an edit to a shipped one:
 2. Change the entities (and any code-owned trigger definition) to match.
 3. Run the schema test.
 
-`down` is not implemented: a rollback restores the backup taken before the
-upgrade.
+The server only migrates forward: boot runs `up` for the pending migrations,
+and nothing in the server or its tools calls `down`. A migration's `down`
+reverses its `up` for a developer stepping a scratch database back; an
+installation rolls back by restoring the backup taken before the upgrade.
 
 ## The schema test
 
@@ -75,10 +77,12 @@ cargo test -p server --lib migration::
 
 An older server keeps working against a database a newer build migrated while
 each new migration is additive: a new table, a new nullable or defaulted
-column, a new index. Anything else (a rename, a drop, a type change, a new
-`NOT NULL` without a default, a tighter constraint) follows expand/contract
-over two releases. The first adds the new shape and keeps writing the old;
-the second, once no server runs the old release, drops the old shape. An older
-server that restarts after the database moved ahead refuses to boot, so an
-operator finishes a roll once it starts. The operator steps are in
-`release/docs/upgrade.md`.
+column, a new index. A release of only those rolls server by server. Anything
+else (a rename, a drop, a type change, a new `NOT NULL` without a default, a
+tighter constraint, a grant taken away) breaks the older servers, so a release
+with such a migration is upgraded with every server stopped before the first
+new one starts, and its notes say so; there are no deployments to keep an old
+shape for, so no change goes through expand/contract. Each migration's doc
+says which kind it is. An older server that restarts after the database moved
+ahead refuses to boot, so an operator finishes an upgrade once it starts. The
+operator steps are in `release/docs/upgrade.md`.

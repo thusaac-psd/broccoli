@@ -354,6 +354,7 @@ server, so it keeps working offline.
 | `2`    | The command line was not understood                                |
 | `3`    | `test` had a sample fail, or `submit -w` got a verdict other than Accepted |
 | `4`    | `submit -w` or `test` stopped waiting for the judge; the work is not cancelled |
+| `5`    | `submit -w` got a result the contest hides until it releases it    |
 
 ## Every command
 

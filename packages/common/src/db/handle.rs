@@ -10,11 +10,15 @@
 //! the statement and the call stack, so no statement fails on a NUL and no
 //! unsanitized source goes unnoticed.
 //!
-//! It is also the one owner of fail-fast on an outage: every statement,
-//! transaction and checked-out connection ([`PooledConnection`]) it starts
-//! passes the pool's [`Reachability`], so while the database cannot be
-//! reached a caller is refused at once instead of waiting out the acquire
-//! timeout.
+//! It is also the one owner of fail-fast on an outage. Every connection the
+//! handle uses is checked out through it: a standalone statement runs on a
+//! connection the handle checks out for it, a transaction holds the one it
+//! began on, and a caller that needs a backend of its own holds a
+//! [`PooledConnection`]. Each checkout passes the pool's [`Reachability`] and
+//! counts as busy until it is returned, and each statement's outcome settles
+//! there by one rule, so while the database cannot be reached a caller is
+//! refused at once, and a pool that is only busy is never taken for one that
+//! is lost.
 
 use std::backtrace::Backtrace;
 use std::future::Future;
@@ -23,6 +27,7 @@ use std::sync::Arc;
 
 use broccoli_types::types::sanitize_text_field;
 use sea_orm::sea_query::Value;
+use sea_orm::sqlx::Connection as _;
 use sea_orm::{
     AccessMode, ConnAcquireErr, ConnectionTrait, DbBackend, DbErr, ExecResult, IsolationLevel,
     QueryResult, RuntimeErr, Statement, TransactionError, TransactionOptions, TransactionSession,
@@ -44,18 +49,24 @@ pub struct DatabaseConnection(sea_orm::DatabaseConnection, Arc<Reachability>);
 #[derive(Debug)]
 pub struct DatabaseTransaction(sea_orm::DatabaseTransaction, Held);
 
-/// A connection checked out of a [`DatabaseConnection`]'s pool, for a caller
-/// that must know which backend runs its statements (a plugin's own SQL,
-/// which the host cancels on that backend at its call's deadline). Checking
-/// it out fails fast while the database is unreachable, like every statement
-/// the handle starts; while it is held it counts as busy, not lost, as a
-/// transaction's connection does. Its statements are NUL-free and record
-/// their answers as a transaction's do. Dropping it returns the connection to
-/// the pool.
+/// A connection checked out of a [`DatabaseConnection`]'s pool. The handle
+/// runs each standalone statement on one; a caller that must know which
+/// backend runs its statements (a plugin's own SQL, which the host cancels on
+/// that backend at its call's deadline) holds one itself. Checking it out
+/// fails fast while the database is unreachable; while it is held it counts
+/// as busy, not lost. Its statements are NUL-free and settle as every
+/// statement does. Dropping it returns the connection to the pool.
 #[derive(Debug)]
 pub struct PooledConnection {
     conn: sea_orm::sqlx::pool::PoolConnection<sea_orm::sqlx::Postgres>,
     held: Held,
+}
+
+/// How many connections a pool has open, and how many of them are idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolConnections {
+    pub open: u32,
+    pub idle: usize,
 }
 
 impl PooledConnection {
@@ -66,7 +77,24 @@ impl PooledConnection {
             .execute(&mut *self.conn)
             .await
             .map(ExecResult::from)
-            .map_err(|e| DbErr::Exec(RuntimeErr::SqlxError(e.into())));
+            .map_err(exec_err);
+        self.settle(outcome)
+    }
+
+    /// Run `sql`, which may hold several statements, unprepared.
+    pub async fn execute_unprepared(&mut self, sql: &str) -> Result<ExecResult, DbErr> {
+        use sea_orm::sqlx::Executor as _;
+        let sql = if sql.contains('\0') {
+            report(sql, 1);
+            sanitize_text_field(sql).into_owned()
+        } else {
+            sql.to_owned()
+        };
+        let outcome = (&mut *self.conn)
+            .execute(sea_orm::sqlx::AssertSqlSafe(sql))
+            .await
+            .map(ExecResult::from)
+            .map_err(exec_err);
         self.settle(outcome)
     }
 
@@ -77,7 +105,28 @@ impl PooledConnection {
             .fetch_optional(&mut *self.conn)
             .await
             .map(|row| row.map(QueryResult::from))
-            .map_err(|e| DbErr::Query(RuntimeErr::SqlxError(e.into())));
+            .map_err(query_err);
+        self.settle(outcome)
+    }
+
+    /// Run `stmt` and return every row.
+    pub async fn query_all(&mut self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
+        let stmt = without_nul(stmt);
+        let outcome = sqlx_query(&stmt)
+            .fetch_all(&mut *self.conn)
+            .await
+            .map(|rows| rows.into_iter().map(QueryResult::from).collect())
+            .map_err(query_err);
+        self.settle(outcome)
+    }
+
+    /// Check that the backend answers.
+    pub async fn ping(&mut self) -> Result<(), DbErr> {
+        let outcome = self
+            .conn
+            .ping()
+            .await
+            .map_err(|e| DbErr::Conn(RuntimeErr::SqlxError(e.into())));
         self.settle(outcome)
     }
 
@@ -92,13 +141,25 @@ impl PooledConnection {
         .try_get_by_index(0)
     }
 
-    /// Record an answer, as a transaction's statements do.
+    /// The raw connection, for bulk work sea-orm has no statement for
+    /// (`COPY`). Statements run on it skip the NUL rule and settle nothing;
+    /// the connection still counts as busy while this is held.
+    pub fn raw(&mut self) -> &mut sea_orm::sqlx::PgConnection {
+        &mut self.conn
+    }
+
     fn settle<T>(&self, outcome: Result<T, DbErr>) -> Result<T, DbErr> {
-        if !matches!(&outcome, Err(e) if super::is_outage(e)) {
-            self.held.reachability().answered();
-        }
+        self.held.settle(&outcome);
         outcome
     }
+}
+
+fn exec_err(e: sea_orm::sqlx::Error) -> DbErr {
+    DbErr::Exec(RuntimeErr::SqlxError(e.into()))
+}
+
+fn query_err(e: sea_orm::sqlx::Error) -> DbErr {
+    DbErr::Query(RuntimeErr::SqlxError(e.into()))
 }
 
 /// `stmt` as a sqlx query, bound as sea-orm binds a statement.
@@ -120,7 +181,8 @@ impl From<sea_orm::DatabaseConnection> for DatabaseConnection {
 
 impl DatabaseConnection {
     /// The underlying sea-orm connection, for APIs that take it by concrete
-    /// type (schema migrations). Statements run on it skip the NUL check.
+    /// type (schema migrations). Statements run on it skip the NUL check and
+    /// the pool's reachability.
     pub fn as_sea_orm(&self) -> &sea_orm::DatabaseConnection {
         &self.0
     }
@@ -132,57 +194,126 @@ impl DatabaseConnection {
 
     /// Check that the database answers.
     pub async fn ping(&self) -> Result<(), DbErr> {
-        self.guarded(self.0.ping()).await
+        self.acquire().await?.ping().await
     }
 
     /// Check a connection out of the pool (see [`PooledConnection`]).
     pub async fn acquire(&self) -> Result<PooledConnection, DbErr> {
         let pool = self.0.get_postgres_connection_pool();
-        self.guarded(async { pool.acquire().await.map_err(acquire_err) })
+        self.checked_out(async { pool.acquire().await.map_err(acquire_err) })
             .await
-            .map(|conn| PooledConnection {
-                conn,
-                held: self.reachability().hold(),
-            })
+            .map(|(conn, held)| PooledConnection { conn, held })
     }
 
-    /// Run `op`, which acquires a connection from the pool, past the pool's
-    /// [`Reachability`].
-    async fn guarded<T>(&self, op: impl Future<Output = Result<T, DbErr>>) -> Result<T, DbErr> {
+    /// How many connections the pool has open, and how many are idle.
+    pub fn connections(&self) -> PoolConnections {
+        let pool = self.0.get_postgres_connection_pool();
+        PoolConnections {
+            open: pool.size(),
+            idle: pool.num_idle(),
+        }
+    }
+
+    /// Close one idle connection, if the pool has one; true when it did.
+    pub async fn close_idle(&self) -> bool {
+        let Some(conn) = self.0.get_postgres_connection_pool().try_acquire() else {
+            return false;
+        };
+        if let Err(e) = conn.close().await {
+            tracing::debug!(error = %e, "Closing an idle connection failed");
+        }
+        true
+    }
+
+    /// Run `op`, which checks a connection out of the pool, past the pool's
+    /// [`Reachability`], and count what it checked out busy.
+    async fn checked_out<T>(
+        &self,
+        op: impl Future<Output = Result<T, DbErr>>,
+    ) -> Result<(T, Held), DbErr> {
         let pass = self.1.pass()?;
         let outcome = op.await;
-        self.1.settle(&pass, &outcome);
-        outcome
+        self.1.settle_acquire(pass, outcome)
     }
 
-    fn reachability(&self) -> &Arc<Reachability> {
-        &self.1
+    async fn exec(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
+        self.acquire().await?.execute(stmt).await
+    }
+
+    async fn unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
+        self.acquire().await?.execute_unprepared(sql).await
+    }
+
+    async fn one(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
+        self.acquire().await?.query_one(stmt).await
+    }
+
+    async fn all(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
+        self.acquire().await?.query_all(stmt).await
+    }
+
+    async fn open(
+        &self,
+        begin: impl Future<Output = Result<sea_orm::DatabaseTransaction, DbErr>>,
+    ) -> Result<DatabaseTransaction, DbErr> {
+        self.checked_out(begin)
+            .await
+            .map(|(txn, held)| DatabaseTransaction(txn, held))
     }
 }
 
 impl DatabaseTransaction {
     /// Commit the transaction.
     pub async fn commit(self) -> Result<(), DbErr> {
-        self.0.commit().await
+        let outcome = self.0.commit().await;
+        self.1.settle(&outcome);
+        outcome
     }
 
     /// Roll the transaction back.
     pub async fn rollback(self) -> Result<(), DbErr> {
-        self.0.rollback().await
-    }
-
-    /// A transaction's statements run on the connection it holds, so none
-    /// waits for the pool; each answer still shows the database reachable.
-    async fn guarded<T>(&self, op: impl Future<Output = Result<T, DbErr>>) -> Result<T, DbErr> {
-        let outcome = op.await;
-        if !matches!(&outcome, Err(e) if super::is_outage(e)) {
-            self.reachability().answered();
-        }
+        let outcome = self.0.rollback().await;
+        self.1.settle(&outcome);
         outcome
     }
 
-    fn reachability(&self) -> &Arc<Reachability> {
-        self.1.reachability()
+    /// A transaction's statements run on the connection it holds.
+    async fn settled<T>(&self, op: impl Future<Output = Result<T, DbErr>>) -> Result<T, DbErr> {
+        let outcome = op.await;
+        self.1.settle(&outcome);
+        outcome
+    }
+
+    async fn exec(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
+        self.settled(self.0.execute_raw(without_nul(stmt))).await
+    }
+
+    async fn unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
+        if sql.contains('\0') {
+            report(sql, 1);
+            return self
+                .settled(self.0.execute_unprepared(&sanitize_text_field(sql)))
+                .await;
+        }
+        self.settled(self.0.execute_unprepared(sql)).await
+    }
+
+    async fn one(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
+        self.settled(self.0.query_one_raw(without_nul(stmt))).await
+    }
+
+    async fn all(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
+        self.settled(self.0.query_all_raw(without_nul(stmt))).await
+    }
+
+    /// A nested transaction (a savepoint) shares the connection, which this
+    /// transaction already counts busy.
+    async fn open(
+        &self,
+        begin: impl Future<Output = Result<sea_orm::DatabaseTransaction, DbErr>>,
+    ) -> Result<DatabaseTransaction, DbErr> {
+        let txn = self.settled(begin).await?;
+        Ok(DatabaseTransaction(txn, self.1.share()))
     }
 }
 
@@ -206,25 +337,19 @@ macro_rules! checked_connection {
             }
 
             async fn execute_raw(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
-                self.guarded(self.0.execute_raw(without_nul(stmt))).await
+                self.exec(stmt).await
             }
 
             async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
-                if sql.contains('\0') {
-                    report(sql, 1);
-                    return self
-                        .guarded(self.0.execute_unprepared(&sanitize_text_field(sql)))
-                        .await;
-                }
-                self.guarded(self.0.execute_unprepared(sql)).await
+                self.unprepared(sql).await
             }
 
             async fn query_one_raw(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
-                self.guarded(self.0.query_one_raw(without_nul(stmt))).await
+                self.one(stmt).await
             }
 
             async fn query_all_raw(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
-                self.guarded(self.0.query_all_raw(without_nul(stmt))).await
+                self.all(stmt).await
             }
 
             fn support_returning(&self) -> bool {
@@ -241,9 +366,7 @@ macro_rules! checked_connection {
             type Transaction = DatabaseTransaction;
 
             async fn begin(&self) -> Result<DatabaseTransaction, DbErr> {
-                self.guarded(self.0.begin())
-                    .await
-                    .map(|txn| DatabaseTransaction(txn, self.reachability().hold()))
+                self.open(self.0.begin()).await
             }
 
             async fn begin_with_config(
@@ -251,18 +374,15 @@ macro_rules! checked_connection {
                 isolation_level: Option<IsolationLevel>,
                 access_mode: Option<AccessMode>,
             ) -> Result<DatabaseTransaction, DbErr> {
-                self.guarded(self.0.begin_with_config(isolation_level, access_mode))
+                self.open(self.0.begin_with_config(isolation_level, access_mode))
                     .await
-                    .map(|txn| DatabaseTransaction(txn, self.reachability().hold()))
             }
 
             async fn begin_with_options(
                 &self,
                 options: TransactionOptions,
             ) -> Result<DatabaseTransaction, DbErr> {
-                self.guarded(self.0.begin_with_options(options))
-                    .await
-                    .map(|txn| DatabaseTransaction(txn, self.reachability().hold()))
+                self.open(self.0.begin_with_options(options)).await
             }
 
             async fn transaction<F, T, E>(&self, callback: F) -> Result<T, TransactionError<E>>
@@ -309,11 +429,11 @@ checked_connection!(DatabaseTransaction);
 #[async_trait::async_trait]
 impl TransactionSession for DatabaseTransaction {
     async fn commit(self) -> Result<(), DbErr> {
-        self.0.commit().await
+        DatabaseTransaction::commit(self).await
     }
 
     async fn rollback(self) -> Result<(), DbErr> {
-        self.0.rollback().await
+        DatabaseTransaction::rollback(self).await
     }
 }
 

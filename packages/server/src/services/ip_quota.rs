@@ -1,6 +1,7 @@
 //! Per-client-address quotas on the unauthenticated endpoints a script could
-//! hammer: failed sign-ins and registering. Device codes are bounded by what
-//! an address leaves pending (`services::device_auth`), not by a rate.
+//! hammer: registering. Failed sign-ins are bounded per account and address
+//! (`services::failed_sign_ins`), and device codes by what an address leaves
+//! pending (`services::device_auth`), not by a rate.
 //!
 //! Each quota is a fixed window per address, counted in Redis by
 //! [`super::window_quota`].
@@ -17,18 +18,6 @@ pub struct IpQuota {
     pub limit: u64,
     pub window: Duration,
 }
-
-/// Failed `POST /auth/login` attempts ([`IpQuota::check`] and
-/// [`IpQuota::settle`]): a successful sign-in counts nothing, so a venue that
-/// shows the server one address for hundreds of contestants signs them all
-/// in, while one source guessing passwords across many accounts is capped.
-/// The per-account throttle (`utils::login_throttle`) bounds guessing at one
-/// account.
-pub const FAILED_LOGIN: IpQuota = IpQuota {
-    name: "failed-login",
-    limit: 100,
-    window: Duration::from_secs(60),
-};
 
 /// `POST /auth/register`: generous, so a venue behind one NAT can register,
 /// while account spam from one source is capped.
@@ -47,32 +36,6 @@ impl IpQuota {
             return Ok(());
         };
         super::window_quota::admit(mq, &self.window_of(ip), self.limit, self.window).await
-    }
-
-    /// Refuse a request from `ip` with `RATE_LIMITED` once the window holds
-    /// `limit` events, without counting it; the caller
-    /// [`settle`](Self::settle)s its outcome. A request whose client address
-    /// is unknown is admitted.
-    pub async fn check(&self, mq: &mq::Mq, ip: Option<IpAddr>) -> Result<(), AppError> {
-        let Some(ip) = ip else {
-            return Ok(());
-        };
-        super::window_quota::check(mq, &self.window_of(ip), self.limit).await
-    }
-
-    /// Decide a [`check`](Self::check)ed request from `ip` by its outcome
-    /// ([`super::window_quota::settle`]). A request whose client address is
-    /// unknown is admitted.
-    pub async fn settle(
-        &self,
-        mq: &mq::Mq,
-        ip: Option<IpAddr>,
-        outcome: super::window_quota::Outcome,
-    ) -> Result<(), AppError> {
-        let Some(ip) = ip else {
-            return Ok(());
-        };
-        super::window_quota::settle(mq, &self.window_of(ip), self.limit, self.window, outcome).await
     }
 
     fn window_of(&self, ip: IpAddr) -> String {
