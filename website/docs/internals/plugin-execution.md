@@ -226,7 +226,9 @@ plugin is unloaded (`unload_plugin` retires it). A reload replaces the pool
 without retiring the old one, so a call made across a reload finishes on the
 version it started on, and the new version takes the old pools over
 (`PluginEntry::succeed`): the unload retires every pool a call of the plugin
-still runs on, whichever version it started on. A reload that does not take
+still runs on, whichever version it started on. A version takes over only the
+replaced pools a call still runs on; a pool whose calls have all ended is
+dropped at the next reload. A reload that does not take
 (its load fails, or the fleet refuses it) puts the old version back and
 retires the refused version's pool alone (`PluginEntry::discard`). Every unload, a disable or the fleet forgetting the
 plugin, goes through `plugin_lifecycle::deactivate`, which also cuts the
