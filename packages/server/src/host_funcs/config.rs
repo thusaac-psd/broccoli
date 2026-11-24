@@ -1,4 +1,3 @@
-use broccoli_server_sdk::types::ConfigResult;
 use broccoli_server_sdk::types::host_io::{ConfigGetInput, ConfigSetInput};
 use common::db::DatabaseConnection;
 use extism::{Function, UserData, Val, ValType};
@@ -9,7 +8,9 @@ use super::context::ManagerRef;
 use crate::error::AppError;
 use crate::registry::TypeProviders;
 use crate::services::config_issues::ConfigChecker;
-use crate::services::plugin_config::{ConfigTarget, Reads, RowSettings, write_config};
+use crate::services::plugin_config::{
+    ConfigTarget, Reads, RowSettings, config_result, write_config,
+};
 use crate::services::plugin_config_cache::PluginConfigCache;
 use plugin_core::config_schema;
 
@@ -152,22 +153,12 @@ fn config_get_fn(
 
     // The plugin reads its config with every default its schema declares
     // filled in, so it never needs defaults of its own.
-    let stored = result.as_ref().map(|row| &row.config);
-    let config = registry
-        .read()
-        .ok()
-        .and_then(|reg| {
-            reg.get(plugin_id)
-                .and_then(|entry| entry.manifest.config.get(&raw_namespace))
-                .map(|ns| ns.resolve(stored))
-        })
-        .or_else(|| stored.cloned())
-        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-    let output = ConfigResult {
-        config,
-        stored: stored.cloned(),
-        enabled: result.as_ref().and_then(|row| row.enabled),
-    };
+    let ns = registry.read().ok().and_then(|reg| {
+        reg.get(plugin_id)
+            .and_then(|entry| entry.manifest.config.get(&raw_namespace))
+            .cloned()
+    });
+    let output = config_result(ns.as_ref(), result.as_deref());
 
     super::write_json(plugin, outputs, &output, "config_get output")
 }

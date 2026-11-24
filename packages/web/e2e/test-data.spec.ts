@@ -83,13 +83,24 @@ test('deleting a test case a config names lists the configs it breaks and delete
 });
 
 // A contest's problems dialog lists what the plugins find wrong with the
-// contest's configs and its problems' configs in it.
+// contest's configs and its problems' configs in it, naming each problem by
+// its label in the contest.
 test("the contest's problems dialog shows the contest's config issues", async ({
   page,
 }) => {
   await mockApi(page, 'admin');
   await page.route('**/api/v1/contests/1/problems', (route) =>
-    route.fulfill({ json: [] }),
+    route.fulfill({
+      json: [
+        {
+          contest_id: 1,
+          problem_id: 1,
+          label: 'B',
+          position: 0,
+          problem_title: 'A + B',
+        },
+      ],
+    }),
   );
   await page.route('**/api/v1/contests/1/config/issues', (route) =>
     route.fulfill({
@@ -126,5 +137,5 @@ test("the contest's problems dialog shows the contest's config issues", async ({
     'codelink-qualifier/contest on this contest',
   );
   await expect(alert).toContainText('advancement_slots');
-  await expect(alert).toContainText('ioi/task for problem 1');
+  await expect(alert).toContainText('ioi/task for problem B');
 });

@@ -66,11 +66,13 @@ impl ContestConfig {
         credit / self.solves_to_qualify
     }
 
-    /// What the `contest` namespace refuses beyond its schema, for a contest
-    /// whose problems are worth `problem_points`: fewer advancement places
-    /// than contestants who can qualify directly, since every direct
-    /// qualifier is promised a place.
-    pub fn violations(&self, problem_points: &[usize]) -> Vec<ConfigViolation> {
+    /// What the `contest` namespace's places do not fit in a contest whose
+    /// problems are worth `problem_points`: fewer advancement places than
+    /// contestants who can qualify directly, since every direct qualifier is
+    /// promised a place. It depends on the contest's problems as well as the
+    /// config, so it is an issue for staff to resolve either way, never a
+    /// refusal of a save.
+    pub fn capacity_issues(&self, problem_points: &[usize]) -> Vec<ConfigViolation> {
         let most = self.most_direct_qualifiers(problem_points);
         if self.advancement_slots >= most {
             return Vec::new();

@@ -213,7 +213,7 @@ async fn config_for_nonexistent_problem_returns_404() {
 /// read, against the contest as it is now: a qualifier contest config whose
 /// advancement places fit its problems is accepted, a problem added later
 /// that lets more contestants qualify directly than there are places makes
-/// it an issue there, and writing it again as it stands is refused.
+/// it an issue there, and saving the config again is not refused for it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_problem_added_to_a_contest_shows_the_contest_config_it_outgrows() {
     let app = E2eTestApp::spawn().await;
@@ -256,11 +256,19 @@ async fn a_problem_added_to_a_contest_shows_the_contest_config_it_outgrows() {
         "{issues:?}"
     );
 
-    let res = app.put_with_token(&config_path, &config, &admin).await;
-    assert_eq!(res.status, 400, "{}", res.text);
+    // The problems outgrew the places as much as the other way round: a save
+    // is never refused for it, an unrelated field's included, and the issue
+    // stays listed until the places or the problems change.
+    let mut refreshed = config.clone();
+    refreshed["config"]["scoreboard_refresh_seconds"] = json!(30);
+    let res = app.put_with_token(&config_path, &refreshed, &admin).await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let issues = app.get_with_token(&issues_path, &admin).await;
     assert_eq!(
-        res.body["details"]["fields"][0]["path"],
-        "advancement_slots"
+        issues.body.as_array().map(Vec::len),
+        Some(1),
+        "{}",
+        issues.text
     );
 }
 
@@ -284,4 +292,66 @@ async fn contest_config_issues_need_contest_manage() {
         .get_with_token("/api/v1/contests/999999/config/issues", &admin)
         .await;
     assert_eq!(res.status, 404, "{}", res.text);
+}
+
+/// The admin form of a contest problem reads what it inherits from the
+/// server, resolved by the rule plugins read configs by: a field the
+/// deployment sets plugin-wide comes from there, with every default filled,
+/// and a narrower scope switched off leaves the plugin-wide config in place.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_contest_problem_form_inherits_what_the_plugin_reads() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("cfg_cascade_admin", "password", "admin")
+        .await;
+    let problem_id = app.create_problem(&admin, "Cascade").await;
+    let contest_id = app.create_contest(&admin, "Cascade Cup", true, true).await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    let res = app
+        .put_with_token(
+            "/api/v1/admin/plugins/standard-languages/config/compilation",
+            &json!({ "config": { "cpp": { "compiler": "/opt/gcc-14/bin/g++" } } }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let res = app
+        .put_with_token(
+            &format!("/api/v1/problems/{problem_id}/config/standard-languages/compilation"),
+            &json!({ "config": { "cpp": { "flags": ["-O3"] } }, "enabled": false }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+
+    let res = app
+        .get_with_token(
+            &format!("/api/v1/contests/{contest_id}/problems/{problem_id}/config/cascade"),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let compilation = res
+        .body
+        .as_array()
+        .expect("an array")
+        .iter()
+        .find(|c| c["plugin_id"] == "standard-languages" && c["namespace"] == "compilation")
+        .expect("the compilation namespace")
+        .clone();
+    let inherited = &compilation["inherited"];
+    assert_eq!(
+        inherited["config"]["cpp"]["compiler"], "/opt/gcc-14/bin/g++",
+        "the switched-off problem row leaves the deployment's compiler: {inherited}"
+    );
+    assert_eq!(
+        inherited["config"]["cpp"]["flags"],
+        json!(["-O2"]),
+        "with the schema's defaults filled in"
+    );
+    assert_eq!(inherited["source"], "disabled");
+    assert_eq!(inherited["fields"]["cpp"], "plugin");
+    assert_eq!(inherited["levels"]["problem"]["enabled"], false);
+    assert_eq!(compilation["effective"]["config"], inherited["config"]);
 }

@@ -25,7 +25,6 @@ import {
   extractDefaults,
   hasOwnDescendantValue,
   hasOwnValueAtPath,
-  resolveInheritedValue,
   serverFieldErrors,
   setAtPath,
   validateAll,
@@ -93,15 +92,16 @@ function ConfigFormFields({
     [jsonSchema],
   );
 
-  const defaults = useMemo(() => {
-    if (!inherited) return schemaDefaults;
-    const merged = { ...schemaDefaults };
-    for (const key of Object.keys(merged)) {
-      const iv = resolveInheritedValue(key, inherited);
-      if (iv !== null) merged[key] = iv.value;
-    }
-    return merged;
-  }, [schemaDefaults, inherited]);
+  // What the scope shows where it stores nothing: what it inherits, as the
+  // server resolved it, else (the plugin-wide scope) the schema's defaults.
+  const defaults = useMemo(
+    () =>
+      inherited
+        ? ((inherited.config as Record<string, unknown> | null) ??
+          schemaDefaults)
+        : schemaDefaults,
+    [schemaDefaults, inherited],
+  );
 
   const [storedValues, setStoredValues] = useState(initialStored);
   // The form shows the stored config over the defaults (or the defaults

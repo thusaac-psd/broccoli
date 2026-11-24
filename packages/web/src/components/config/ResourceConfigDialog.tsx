@@ -291,6 +291,41 @@ function useResourceConfigList(
   });
 }
 
+/**
+ * What each namespace reads and inherits at a resource scope, as the server
+ * resolves it with the cascade rule plugins read configs by.
+ */
+async function fetchCascade(
+  apiClient: ReturnType<typeof useApiClient>,
+  scope: ConfigScope,
+) {
+  const result = await (() => {
+    switch (scope.scope) {
+      case 'problem':
+        return apiClient.GET('/problems/{id}/config/cascade', {
+          params: { path: { id: scope.problemId } },
+        });
+      case 'contest':
+        return apiClient.GET('/contests/{id}/config/cascade', {
+          params: { path: { id: scope.contestId } },
+        });
+      case 'contest_problem':
+        return apiClient.GET(
+          '/contests/{id}/problems/{problem_id}/config/cascade',
+          {
+            params: {
+              path: { id: scope.contestId, problem_id: scope.problemId },
+            },
+          },
+        );
+      case 'plugin':
+        return Promise.resolve({ data: [], error: undefined });
+    }
+  })();
+  if (result.error) throw result.error;
+  return result.data ?? [];
+}
+
 function configListQueryKey(scope: ConfigScope): string[] {
   switch (scope.scope) {
     case 'problem':
@@ -425,7 +460,8 @@ export function ResourceConfigDialog({
     }
   }, [open, pluginsWithSchemas, activePlugin, activeNamespace]);
 
-  const invalidateKeys = [configListQueryKey(scope)];
+  // A save changes what every narrower scope inherits.
+  const invalidateKeys = [configListQueryKey(scope), ['config-cascade']];
   if (scope.scope === 'plugin') invalidateKeys.push(['admin-plugins']);
   if (scope.scope === 'contest' || scope.scope === 'contest_problem')
     invalidateKeys.push(['admin-contests']);
@@ -604,76 +640,21 @@ function SinglePluginContent({
     }
   }, [open, schemas, controlledNamespace]);
 
-  const [inheritedByNamespace, setInheritedByNamespace] = useState<
-    Record<string, InheritedConfig>
-  >({});
-
-  useEffect(() => {
-    if (!open || scope.scope !== 'contest_problem' || schemas.length === 0)
-      return;
-
-    let cancelled = false;
-    const s = scope as { contestId: number; problemId: number };
-
-    Promise.all(
-      schemas.map(async (schema) => {
-        const [contestRes, problemRes] = await Promise.all([
-          apiClient
-            .GET('/contests/{id}/config/{plugin_id}/{namespace}', {
-              params: {
-                path: {
-                  id: s.contestId,
-                  plugin_id: pluginId,
-                  namespace: schema.namespace,
-                },
-              },
-            })
-            .catch(() => ({ data: undefined })),
-          apiClient
-            .GET('/problems/{id}/config/{plugin_id}/{namespace}', {
-              params: {
-                path: {
-                  id: s.problemId,
-                  plugin_id: pluginId,
-                  namespace: schema.namespace,
-                },
-              },
-            })
-            .catch(() => ({ data: undefined })),
-        ]);
-
-        const inherited: InheritedConfig = {
-          contest: contestRes.data
-            ? {
-                values:
-                  (contestRes.data.config as Record<string, unknown>) ?? null,
-                enabled:
-                  (contestRes.data as { enabled?: boolean | null }).enabled ??
-                  null,
-              }
-            : undefined,
-          problem: problemRes.data
-            ? {
-                values:
-                  (problemRes.data.config as Record<string, unknown>) ?? null,
-                enabled:
-                  (problemRes.data as { enabled?: boolean | null }).enabled ??
-                  null,
-              }
-            : undefined,
-        };
-
-        return [schema.namespace, inherited] as const;
-      }),
-    ).then((entries) => {
-      if (cancelled) return;
-      setInheritedByNamespace(Object.fromEntries(entries));
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [open, scope, pluginId, schemas, apiClient]);
+  // What each namespace inherits at this scope, as the server resolves it.
+  const cascadeQuery = useQuery({
+    queryKey: ['config-cascade', scope],
+    queryFn: () => fetchCascade(apiClient, scope),
+    enabled: open && scope.scope !== 'plugin',
+  });
+  const inheritedByNamespace = useMemo(() => {
+    const byNamespace: Record<string, InheritedConfig> = {};
+    for (const entry of cascadeQuery.data ?? []) {
+      if (entry.plugin_id === pluginId) {
+        byNamespace[entry.namespace] = entry.inherited;
+      }
+    }
+    return byNamespace;
+  }, [cascadeQuery.data, pluginId]);
 
   const rawCallbacks = useMemo(
     () =>

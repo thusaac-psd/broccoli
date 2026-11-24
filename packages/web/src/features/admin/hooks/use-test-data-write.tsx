@@ -71,7 +71,10 @@ export function useTestDataWrite(): [
           </DialogDescription>
         </DialogHeader>
         <div className="max-h-72 overflow-y-auto text-sm">
-          <ConfigIssueList issues={pending?.issues ?? []} of="problem" />
+          <ConfigIssueList
+            issues={pending?.issues ?? []}
+            of={{ kind: 'problem' }}
+          />
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => pending?.decide(false)}>

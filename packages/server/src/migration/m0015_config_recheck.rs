@@ -1,8 +1,10 @@
 use sea_orm_migration::prelude::*;
 
-/// Whether a problem waits for a config issues recheck
-/// (`entity::problem::Model::config_recheck`): a bundle import marks the
-/// problems it restores, and every running server rechecks the marked ones.
+/// Which plugins a replica must load to decide a problem's config issues
+/// (`entity::problem::Model::config_recheck`), `NULL` once decided: a bundle
+/// import marks the problems it restores for any replica, a check a plugin
+/// not loaded here could not run marks them for the replicas that load it,
+/// and the replica that decides clears the mark.
 ///
 /// Plugins read the problem table, so the plugin group role (named in
 /// `plugin_group_role`, see m0001) may read the new column as it reads every
@@ -20,9 +22,9 @@ impl MigrationName for Migration {
 }
 
 const UP: &str = r#"
-ALTER TABLE public.problem ADD COLUMN config_recheck boolean NOT NULL DEFAULT false;
+ALTER TABLE public.problem ADD COLUMN config_recheck jsonb;
 CREATE INDEX "idx-problem-config_recheck"
-    ON public.problem USING btree (id) WHERE config_recheck;
+    ON public.problem USING btree (id) WHERE config_recheck IS NOT NULL;
 DO $$
 DECLARE
   plugin_group name;

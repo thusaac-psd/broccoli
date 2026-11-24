@@ -1,4 +1,3 @@
-export * from '@/slot/config-cascade';
 export * from '@/slot/config-field-slot-props';
 export * from '@/slot/contest-slot-context';
 export * from '@/slot/InheritedFieldIndicators';

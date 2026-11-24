@@ -25,7 +25,7 @@ pub use checker::{
 pub use code_run::{OnCodeRunInput, OnCodeRunOutput};
 pub use config::{
     CascadeLevel, CascadeLevels, ConfigResult, ConfigSource, ConfigValidateInput,
-    ConfigValidateOutput, ConfigViolation, EffectiveConfig,
+    ConfigValidateOutput, ConfigViolation, EffectiveConfig, decides_enabled, resolve_cascade,
 };
 pub use contest::{ContestPhase, RouteContest};
 pub use evaluate::{

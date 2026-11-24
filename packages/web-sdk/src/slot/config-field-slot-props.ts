@@ -4,19 +4,16 @@
  * or wraps a config form field via the `config.field.*` slot.
  */
 
-/** Inherited config from a parent scope in the cascade. */
-export interface ParentScopeConfig {
-  values: Record<string, unknown> | null;
-  /** Whether the scope switches the config on or off; `null` leaves that to
-   * the next scope up. */
-  enabled: boolean | null;
-}
+import type { ApiSchemas } from '@/api/types';
 
-/** Inherited config from parent scopes (contest and/or problem). */
-export interface InheritedConfig {
-  contest?: ParentScopeConfig;
-  problem?: ParentScopeConfig;
-}
+/**
+ * What a config form's scope inherits from the scopes above it, as the
+ * server resolves it (`GET …/config/cascade`) with the cascade rule plugins
+ * read configs by: the config a problem would read with nothing stored at
+ * this scope, every field filled, the scope each field comes from
+ * (`fields`), and each scope's row as stored (`levels`).
+ */
+export type InheritedConfig = ApiSchemas['EffectiveConfig'];
 
 export type ConfigScope =
   | { scope: 'plugin'; pluginId: string }
@@ -45,7 +42,7 @@ export interface ConfigFormSlotProps {
   schema: Record<string, unknown>;
   /** Whether no explicit values are stored (all values are schema defaults). */
   isUsingDefaultsOnly: boolean;
-  /** Inherited config from parent scopes. */
+  /** What this scope inherits from the scopes above it. */
   inherited?: InheritedConfig;
   /** Check whether a field path has an explicit value in the DB. */
   hasExplicitValue: (path: string | string[]) => boolean;
@@ -85,7 +82,7 @@ export interface ConfigFieldSlotProps {
   hasExplicitDescendant: boolean;
   /** Whether the user has modified this field in the current editing session. */
   isDirty: boolean;
-  /** Full inherited config from parent scopes (raw). */
+  /** What this scope inherits from the scopes above it. */
   inherited?: InheritedConfig;
   /**
    * Whether this field should render as a placeholder (not explicitly set
@@ -98,14 +95,30 @@ export interface ConfigFieldSlotProps {
    */
   inheritedValue?: unknown;
   /**
-   * The human-readable source label for the inherited value
-   * (e.g., "Contest", "Problem"). `undefined` when no inherited value.
+   * The name of the scope the inherited value comes from, in the user's
+   * language (e.g., "Contest", "Problem"). `undefined` when no inherited
+   * value.
    */
   inheritedSource?: string;
 }
 
-/** Resolved inherited value for a field. */
+/** The value a field inherits, and the scope that sets it. */
 export interface InheritedValue {
   value: unknown;
-  source: string;
+  source: Exclude<ApiSchemas['ConfigSource'], 'default' | 'disabled'>;
+}
+
+/**
+ * The value top-level field `fieldKey` inherits and the scope that sets it,
+ * read from what the server resolved; `null` when no scope sets it and the
+ * schema's default stands.
+ */
+export function inheritedValueOf(
+  fieldKey: string,
+  inherited: InheritedConfig | undefined,
+): InheritedValue | null {
+  const source = inherited?.fields?.[fieldKey];
+  if (!source || source === 'default' || source === 'disabled') return null;
+  const config = inherited?.config as Record<string, unknown> | null;
+  return { value: config?.[fieldKey], source };
 }

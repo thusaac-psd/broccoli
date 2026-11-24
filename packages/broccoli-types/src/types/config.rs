@@ -39,7 +39,8 @@ fn parse<T: serde::de::DeserializeOwned>(config: &serde_json::Value) -> Result<T
 }
 
 /// The most specific scope whose row an effective config takes fields from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigSource {
     ContestProblem,
@@ -54,9 +55,15 @@ pub enum ConfigSource {
     Disabled,
 }
 
+/// One scope's row of a namespace, as the cascade read it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct CascadeLevel {
+    /// The row with its schema's defaults filled in; the defaults alone when
+    /// nothing is stored.
     pub config: serde_json::Value,
+    /// The row as stored, without defaults; `None` when nothing is stored.
+    pub stored: Option<serde_json::Value>,
     pub is_default: bool,
     pub enabled: Option<bool>,
 }
@@ -65,6 +72,7 @@ impl From<&ConfigResult> for CascadeLevel {
     fn from(r: &ConfigResult) -> Self {
         Self {
             config: r.config.clone(),
+            stored: r.stored.clone(),
             is_default: r.is_default(),
             enabled: r.enabled,
         }
@@ -72,6 +80,7 @@ impl From<&ConfigResult> for CascadeLevel {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct CascadeLevels {
     pub contest_problem: Option<CascadeLevel>,
     pub contest: Option<CascadeLevel>,
@@ -79,12 +88,145 @@ pub struct CascadeLevels {
     pub plugin: CascadeLevel,
 }
 
+/// The config a plugin reads for a namespace at one problem, as
+/// [`resolve_cascade`] decides it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct EffectiveConfig {
     pub config: serde_json::Value,
     pub source: ConfigSource,
     pub is_enabled: bool,
+    /// Where each top-level field of `config` comes from: the scope whose
+    /// row sets it, else the plugin-wide row, else the schema's defaults.
+    #[serde(default)]
+    pub fields: BTreeMap<String, ConfigSource>,
     pub levels: CascadeLevels,
+}
+
+/// Whether a namespace is on, from the `enabled` each scope's row says, most
+/// specific first (contest problem, contest, problem, the plugin-wide row):
+/// the first scope that says decides, and a row that says nothing leaves it
+/// to the next scope up. `None` when none says, which is off. The one rule
+/// for every reader: the cascade below, and the host's hook enablement.
+pub fn decides_enabled(scopes: impl IntoIterator<Item = Option<bool>>) -> Option<bool> {
+    scopes.into_iter().flatten().next()
+}
+
+/// The effective config of a namespace at one problem. Each scope that
+/// stores the namespace sets the fields it stores and leaves the rest to the
+/// next scope up: contest problem, contest, problem, the plugin-wide row, then
+/// the schema's defaults. Whether it is on is
+/// [`decides_enabled`] over the rows. A switched-off override contributes
+/// nothing and leaves what it overrode, so when the narrower scope that
+/// decides is switched off the config is the plugin-wide one.
+///
+/// The guest SDK reads configs through it, and the host answers the admin
+/// forms with it, so both show and use the same config.
+pub fn resolve_cascade(
+    cp: Option<ConfigResult>,
+    c: Option<ConfigResult>,
+    p: ConfigResult,
+    plugin: ConfigResult,
+) -> EffectiveConfig {
+    // Most specific first, only the scopes that store the namespace.
+    let stored: Vec<(&ConfigResult, &serde_json::Value, ConfigSource)> = [
+        (cp.as_ref(), ConfigSource::ContestProblem),
+        (c.as_ref(), ConfigSource::Contest),
+        (Some(&p), ConfigSource::Problem),
+    ]
+    .into_iter()
+    .filter_map(|(r, source)| {
+        let r = r?;
+        Some((r, r.stored.as_ref()?, source))
+    })
+    .collect();
+    let is_enabled = decides_enabled(
+        [cp.as_ref(), c.as_ref(), Some(&p), Some(&plugin)]
+            .into_iter()
+            .map(|r| r.and_then(|r| r.enabled)),
+    ) == Some(true);
+    let narrower_decides = decides_enabled(stored.iter().map(|(r, _, _)| r.enabled));
+
+    let base = if plugin.is_default() {
+        ConfigSource::Default
+    } else {
+        ConfigSource::Plugin
+    };
+    let mut config = plugin.config.clone();
+    let mut fields: BTreeMap<String, ConfigSource> = match &config {
+        serde_json::Value::Object(map) => map
+            .keys()
+            .map(|key| {
+                let set = plugin.stored.as_ref().and_then(|s| s.get(key)).is_some();
+                (
+                    key.clone(),
+                    if set {
+                        ConfigSource::Plugin
+                    } else {
+                        ConfigSource::Default
+                    },
+                )
+            })
+            .collect(),
+        _ => BTreeMap::new(),
+    };
+    let source = match (stored.first(), narrower_decides) {
+        (None, _) => base,
+        (Some(_), Some(false)) => ConfigSource::Disabled,
+        (Some((_, _, source)), _) => {
+            for (row, raw, row_source) in stored.iter().rev() {
+                if row.enabled == Some(false) {
+                    continue;
+                }
+                overlay(&mut config, raw, Some(&row.config));
+                if let serde_json::Value::Object(raw) = raw {
+                    for key in raw.keys() {
+                        fields.insert(key.clone(), *row_source);
+                    }
+                }
+            }
+            *source
+        }
+    };
+    EffectiveConfig {
+        config,
+        source,
+        is_enabled,
+        fields,
+        levels: CascadeLevels {
+            contest_problem: cp.as_ref().map(CascadeLevel::from),
+            contest: c.as_ref().map(CascadeLevel::from),
+            problem: CascadeLevel::from(&p),
+            plugin: CascadeLevel::from(&plugin),
+        },
+    }
+}
+
+/// Lay a narrower scope's stored row over the config of the scopes above it:
+/// a field the row stores replaces the one above, except that two objects
+/// merge field by field, and a field it does not store keeps the one above.
+/// A value the row brings takes its schema defaults from `filled`, the row
+/// as the host resolved it.
+fn overlay(
+    above: &mut serde_json::Value,
+    stored: &serde_json::Value,
+    filled: Option<&serde_json::Value>,
+) {
+    use serde_json::Value;
+    match (above, stored) {
+        (Value::Object(above), Value::Object(stored)) => {
+            for (key, value) in stored {
+                let filled = filled.and_then(|f| f.get(key));
+                match above.get_mut(key) {
+                    Some(slot) => overlay(slot, value, filled),
+                    None => {
+                        above.insert(key.clone(), filled.unwrap_or(value).clone());
+                    }
+                }
+            }
+        }
+        (above, stored) => *above = filled.unwrap_or(stored).clone(),
+    }
 }
 
 impl EffectiveConfig {
@@ -175,5 +317,110 @@ impl ConfigViolation {
     pub fn param(mut self, name: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
         self.params.insert(name.into(), value.into());
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn row(stored: Option<Value>, config: Value, enabled: Option<bool>) -> ConfigResult {
+        ConfigResult {
+            config,
+            stored,
+            enabled,
+        }
+    }
+
+    fn unset() -> ConfigResult {
+        row(None, json!({}), None)
+    }
+
+    /// The defaults the host fills into a narrower row never hide what a
+    /// wider scope stores; they reach the effective config only where no
+    /// scope stores the field.
+    #[test]
+    fn a_narrower_rows_filled_defaults_never_hide_a_wider_scopes_field() {
+        let row = |stored: Option<Value>, config: Value| row(stored, config, Some(true));
+        let plugin = row(
+            Some(json!({"cpp": {"compiler": "gcc-14"}})),
+            json!({"cpp": {"compiler": "gcc-14", "flags": ["-O2"]}, "java": {"runner": "java"}}),
+        );
+        let problem = row(
+            Some(json!({"cpp": {"flags": ["-O3"]}, "kotlin": {"compiler": "kotlinc-2"}})),
+            json!({
+                "cpp": {"compiler": "g++", "flags": ["-O3"]},
+                "java": {"runner": "java"},
+                "kotlin": {"compiler": "kotlinc-2", "flags": ["-Werror"]},
+            }),
+        );
+        let eff = resolve_cascade(None, None, problem, plugin);
+        assert_eq!(
+            eff.config,
+            json!({
+                "cpp": {"compiler": "gcc-14", "flags": ["-O3"]},
+                "java": {"runner": "java"},
+                "kotlin": {"compiler": "kotlinc-2", "flags": ["-Werror"]},
+            })
+        );
+    }
+
+    /// The first scope whose row says decides, the plugin-wide row last; a
+    /// row that stores fields but says nothing leaves it to the next scope.
+    #[test]
+    fn the_most_specific_scope_that_says_decides_whether_it_is_on() {
+        assert_eq!(
+            decides_enabled([None, Some(false), Some(true)]),
+            Some(false)
+        );
+        assert_eq!(decides_enabled([None, None]), None);
+
+        let plugin = row(Some(json!({"v": 1})), json!({"v": 1}), Some(true));
+        let problem = row(Some(json!({"v": 2})), json!({"v": 2}), None);
+        let eff = resolve_cascade(None, None, problem, plugin);
+        assert!(eff.is_enabled, "the plugin-wide row decides");
+        assert_eq!(eff.source, ConfigSource::Problem);
+        assert_eq!(eff.config, json!({"v": 2}));
+    }
+
+    /// Each field names the scope it comes from, so a form can say where an
+    /// inherited value is set.
+    #[test]
+    fn each_field_names_the_scope_that_sets_it() {
+        let plugin = row(
+            Some(json!({"compiler": "gcc-14"})),
+            json!({"compiler": "gcc-14", "flags": [], "timeout": 5}),
+            None,
+        );
+        let contest = row(
+            Some(json!({"flags": ["-O2"]})),
+            json!({"compiler": "g++", "flags": ["-O2"], "timeout": 5}),
+            None,
+        );
+        let eff = resolve_cascade(None, Some(contest), unset(), plugin);
+        assert_eq!(eff.config["compiler"], "gcc-14");
+        assert_eq!(
+            eff.fields,
+            BTreeMap::from([
+                ("compiler".to_string(), ConfigSource::Plugin),
+                ("flags".to_string(), ConfigSource::Contest),
+                ("timeout".to_string(), ConfigSource::Default),
+            ])
+        );
+    }
+
+    /// A switched-off narrower scope leaves the plugin-wide config, with its
+    /// fields' sources, in place.
+    #[test]
+    fn a_switched_off_override_keeps_the_plugin_wide_fields() {
+        let plugin = row(Some(json!({"v": 99})), json!({"v": 99}), None);
+        let problem = row(Some(json!({"v": 1})), json!({"v": 1}), Some(false));
+        let eff = resolve_cascade(None, None, problem, plugin);
+        assert_eq!(eff.source, ConfigSource::Disabled);
+        assert_eq!(eff.config, json!({"v": 99}));
+        assert_eq!(eff.fields["v"], ConfigSource::Plugin);
+        assert!(!eff.is_enabled);
     }
 }

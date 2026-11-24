@@ -34,12 +34,16 @@ seconds, and one contest problem in that contest sets it to thirty seconds.
 Every problem in the contest waits sixty seconds between submissions, except
 the one contest problem with its own override, which waits thirty seconds.
 
-Turning a setting off works the same way, for the levels where the admin
-form offers an on or off switch, which are contest and problem. Whichever
-level is the most specific one you have set decides whether the feature is
-on or off, no matter what a broader level says. Disabling a setting at the
+Turning a setting off works the same way. The most specific level whose
+on/off switch you set decides whether the feature is on, the global level
+last, no matter what a broader level says. Disabling a setting at the
 contest level turns it off for that whole contest even if the problem level
-leaves it on.
+leaves it on, and its values then fall back to the global ones.
+
+For every field you leave unset, the form shows the value the plugin will
+actually use and the level it comes from, global values included. The server
+works this out by the same rule the plugin reads its settings by, so what the
+form shows is what judging uses.
 
 ## Where to set them
 
@@ -62,3 +66,17 @@ Every setting has a type and often a range, and the server checks each value
 when you save it. A value of the wrong type, out of range, or not among a
 setting's choices is not saved, and the form marks the field the server
 refused. A saved value therefore always means what the form showed.
+
+A plugin can also check a value against the rest of what the server holds:
+whether a subtask's test cases exist, whether a qualifier has enough places
+for its problems. Such a check never refuses a save, since the test data or
+the problems may be what needs to change. It is listed as a config issue of
+the problem or the contest until one of them changes. A save is refused only
+for what is wrong with the value by itself, such as two subtasks with the
+same name.
+
+If a plugin is not loaded on the server you are using (it failed to load
+there), that server cannot tell what the plugin would say about its
+settings. The config issues then ask you to try again rather than showing
+none, and any problem the plugin checks stays marked as having issues until
+a server that loads the plugin checks it.

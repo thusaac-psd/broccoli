@@ -59,8 +59,9 @@ impl Drop for EventClaim {
 
 use crate::entity::plugin_config;
 use crate::error::AppError;
-use crate::host_funcs::config::extract_plugin_id;
+use crate::host_funcs::config::{extract_plugin_id, strip_namespace_prefix};
 use crate::services::plugin_output::PluginRefusal;
+use plugin_core::manifest::ConfigScope;
 
 const MAX_CHAIN_DEPTH: u8 = 3;
 
@@ -161,94 +162,95 @@ pub fn new_shared_registry() -> SharedHookRegistry {
 
 pub type ResourceEnablements = HashMap<String, i32>;
 
-fn scope_priority(scope: &str) -> u8 {
-    match scope {
-        "contest_problem" => 3,
-        "contest" => 2,
-        "problem" => 1,
-        _ => 0,
+/// One stored config row of a plugin that applies to a resource, as the
+/// enablement reads it.
+#[derive(Debug, Clone)]
+struct EnablementRow {
+    plugin_id: String,
+    namespace: String,
+    scope: ConfigScope,
+    enabled: Option<bool>,
+    position: i32,
+}
+
+impl EnablementRow {
+    fn of(row: plugin_config::Model) -> Option<Self> {
+        let scope = ConfigScope::parse(&row.scope)?;
+        let plugin_id = match scope {
+            ConfigScope::Plugin => row.ref_id,
+            _ => extract_plugin_id(&row.namespace).to_string(),
+        };
+        Some(Self {
+            plugin_id,
+            namespace: strip_namespace_prefix(&row.namespace).to_string(),
+            scope,
+            enabled: row.enabled,
+            position: row.position,
+        })
     }
 }
 
-/// Merge the plugin_config rows that apply to one resource (multiple scopes ×
-/// multiple namespaces per plugin) into a single enablement + position per
-/// plugin, ORDER-INDEPENDENTLY.
+/// The cascade's scopes, most specific first: the order
+/// [`broccoli_server_sdk::types::decides_enabled`] reads them in.
+const SCOPES: [ConfigScope; 4] = [
+    ConfigScope::ContestProblem,
+    ConfigScope::Contest,
+    ConfigScope::Problem,
+    ConfigScope::Plugin,
+];
+
+fn specificity(scope: ConfigScope) -> usize {
+    SCOPES
+        .iter()
+        .position(|s| *s == scope)
+        .unwrap_or(SCOPES.len())
+}
+
+/// Merge the plugin_config rows that apply to one resource (scopes ×
+/// namespaces per plugin) into a single enablement + position per plugin,
+/// ORDER-INDEPENDENTLY (the source query has no `ORDER BY`).
 ///
-/// The source query has no `ORDER BY`, so Postgres may return these rows in any
-/// order; the reducer must therefore be commutative. Semantics (as the per-row
-/// `enabled.is_some()` guard has always intended):
-///   * position — from the most specific scope present
-///     (contest_problem > contest > problem); ties across a plugin's namespaces
-///     take the smallest position.
-///   * enabled  — inherited from the most specific scope that actually *sets*
-///     it; a more specific row whose `enabled` is NULL overrides position only,
-///     never enablement. Within one scope, any `true` wins over `false`.
-///
-/// A plugin is enabled iff its merged enablement is `Some(true)`.
-///
-/// Rows are `(stored_namespace, scope, enabled, position)`.
+/// * enabled — each of the plugin's namespaces is on or off by the one rule
+///   the plugin's own config reads use
+///   ([`broccoli_server_sdk::types::decides_enabled`]): the most specific scope
+///   whose row says decides, the plugin-wide row last. The plugin runs for
+///   the resource when any of its namespaces is on.
+/// * position — from the most specific scope present (contest_problem >
+///   contest > problem > plugin); ties across a plugin's namespaces take the
+///   smallest position.
 fn merge_resource_enablements<I>(rows: I) -> ResourceEnablements
 where
-    I: IntoIterator<Item = (String, String, Option<bool>, i32)>,
+    I: IntoIterator<Item = EnablementRow>,
 {
-    struct Agg {
-        pos_pri: u8,
-        pos: i32,
-        enabled_pri: Option<u8>,
-        enabled: Option<bool>,
-    }
-
-    let mut best: HashMap<String, Agg> = HashMap::new();
-
-    for (namespace, scope, enabled, position) in rows {
-        let pid = extract_plugin_id(&namespace).to_string();
-        let pri = scope_priority(&scope);
-
-        let agg = best.entry(pid).or_insert(Agg {
-            pos_pri: 0,
-            pos: 0,
-            enabled_pri: None,
-            enabled: None,
-        });
-
-        // Position: the most specific scope wins; within a scope take the min.
-        match pri.cmp(&agg.pos_pri) {
-            std::cmp::Ordering::Greater => {
-                agg.pos_pri = pri;
-                agg.pos = position;
-            }
-            std::cmp::Ordering::Equal => {
-                agg.pos = agg.pos.min(position);
-            }
-            std::cmp::Ordering::Less => {}
+    let mut enabled: HashMap<(String, String), [Option<bool>; 4]> = HashMap::new();
+    let mut position: HashMap<String, (usize, i32)> = HashMap::new();
+    for row in rows {
+        let at = specificity(row.scope);
+        if let Some(slot) = enabled
+            .entry((row.plugin_id.clone(), row.namespace))
+            .or_default()
+            .get_mut(at)
+        {
+            *slot = row.enabled;
         }
-
-        // Enablement: only rows that actually set it participate, so a NULL at a
-        // more specific scope can never clobber an inherited value. Priority
-        // decides which scope's value wins; ties OR together (true beats false).
-        if let Some(e) = enabled {
-            match agg.enabled_pri {
-                None => {
-                    agg.enabled_pri = Some(pri);
-                    agg.enabled = Some(e);
-                }
-                Some(cur) => match pri.cmp(&cur) {
-                    std::cmp::Ordering::Greater => {
-                        agg.enabled_pri = Some(pri);
-                        agg.enabled = Some(e);
-                    }
-                    std::cmp::Ordering::Equal => {
-                        agg.enabled = Some(agg.enabled == Some(true) || e);
-                    }
-                    std::cmp::Ordering::Less => {}
-                },
-            }
-        }
+        position
+            .entry(row.plugin_id)
+            .and_modify(|(best, pos)| match at.cmp(best) {
+                std::cmp::Ordering::Less => (*best, *pos) = (at, row.position),
+                std::cmp::Ordering::Equal => *pos = (*pos).min(row.position),
+                std::cmp::Ordering::Greater => {}
+            })
+            .or_insert((at, row.position));
     }
-
-    best.into_iter()
-        .filter(|(_, agg)| agg.enabled == Some(true))
-        .map(|(pid, agg)| (pid, agg.pos))
+    let on: std::collections::HashSet<String> = enabled
+        .into_iter()
+        .filter(|(_, scopes)| broccoli_server_sdk::types::decides_enabled(*scopes) == Some(true))
+        .map(|((plugin_id, _), _)| plugin_id)
+        .collect();
+    position
+        .into_iter()
+        .filter(|(plugin_id, _)| on.contains(plugin_id))
+        .map(|(plugin_id, (_, pos))| (plugin_id, pos))
         .collect()
 }
 
@@ -271,8 +273,9 @@ fn add_contest_type_owner(enablements: &mut ResourceEnablements, owner: Option<&
 }
 
 /// The plugins whose resource-scoped hooks run for a submission to
-/// `problem_id`: those enabled by plugin config for the problem, contest, or
-/// contest problem, plus, for a contest submission, the plugin that owns the
+/// `problem_id`: those enabled by plugin config for the problem, contest,
+/// contest problem or plugin-wide, by the rule their own config reads use
+/// (`broccoli_server_sdk::types::decides_enabled`), plus, for a contest submission, the plugin that owns the
 /// contest's type. Practice submissions (`contest_id: None`) get
 /// config-enabled plugins only; a practice submission has no contest whose
 /// rules apply.
@@ -341,14 +344,15 @@ async fn fetch_resource_enablements<C: ConnectionTrait>(
             );
     }
 
+    // The plugin-wide rows decide a namespace no narrower row decides.
+    condition = condition.add(plugin_config::Column::Scope.eq(ConfigScope::Plugin.as_str()));
     let rows = plugin_config::Entity::find()
         .filter(condition)
         .all(db)
         .await?;
 
     Ok(merge_resource_enablements(
-        rows.into_iter()
-            .map(|r| (r.namespace, r.scope, r.enabled, r.position)),
+        rows.into_iter().filter_map(EnablementRow::of),
     ))
 }
 
@@ -1085,18 +1089,20 @@ mod tests {
         // `contest_problem` row that sets only position (enabled = NULL). The
         // inherited `true` must survive whichever order the rows arrive in, and
         // the position must come from the more specific scope.
-        let problem_row = (
-            "cooldown:main".to_string(),
-            "problem".to_string(),
-            Some(true),
-            5,
-        );
-        let cp_row = (
-            "cooldown:main".to_string(),
-            "contest_problem".to_string(),
-            None,
-            10,
-        );
+        let problem_row = EnablementRow {
+            plugin_id: "cooldown".to_string(),
+            namespace: "main".to_string(),
+            scope: ConfigScope::Problem,
+            enabled: Some(true),
+            position: 5,
+        };
+        let cp_row = EnablementRow {
+            plugin_id: "cooldown".to_string(),
+            namespace: "main".to_string(),
+            scope: ConfigScope::ContestProblem,
+            enabled: None,
+            position: 10,
+        };
 
         let forward = merge_resource_enablements([problem_row.clone(), cp_row.clone()]);
         let reverse = merge_resource_enablements([cp_row, problem_row]);
@@ -1109,18 +1115,20 @@ mod tests {
     fn merge_resource_enablements_specific_disable_overrides_inherited_enable() {
         // An explicit `false` at the more specific scope must win over an
         // inherited `true`, in either arrival order.
-        let problem_row = (
-            "cooldown:main".to_string(),
-            "problem".to_string(),
-            Some(true),
-            5,
-        );
-        let cp_row = (
-            "cooldown:main".to_string(),
-            "contest_problem".to_string(),
-            Some(false),
-            10,
-        );
+        let problem_row = EnablementRow {
+            plugin_id: "cooldown".to_string(),
+            namespace: "main".to_string(),
+            scope: ConfigScope::Problem,
+            enabled: Some(true),
+            position: 5,
+        };
+        let cp_row = EnablementRow {
+            plugin_id: "cooldown".to_string(),
+            namespace: "main".to_string(),
+            scope: ConfigScope::ContestProblem,
+            enabled: Some(false),
+            position: 10,
+        };
 
         let forward = merge_resource_enablements([problem_row.clone(), cp_row.clone()]);
         let reverse = merge_resource_enablements([cp_row, problem_row]);
@@ -1131,26 +1139,53 @@ mod tests {
 
     #[test]
     fn merge_resource_enablements_true_wins_within_a_scope() {
-        // Two namespaces of the same plugin at the same scope: any `true` wins,
-        // and position is the min across the scope's namespaces.
-        let a = (
-            "cooldown:a".to_string(),
-            "problem".to_string(),
-            Some(false),
-            3,
-        );
-        let b = (
-            "cooldown:b".to_string(),
-            "problem".to_string(),
-            Some(true),
-            7,
-        );
+        // Two namespaces of the same plugin at the same scope: the plugin runs
+        // when either namespace is on, and position is the min across the
+        // scope's namespaces.
+        let a = EnablementRow {
+            plugin_id: "cooldown".to_string(),
+            namespace: "a".to_string(),
+            scope: ConfigScope::Problem,
+            enabled: Some(false),
+            position: 3,
+        };
+        let b = EnablementRow {
+            plugin_id: "cooldown".to_string(),
+            namespace: "b".to_string(),
+            scope: ConfigScope::Problem,
+            enabled: Some(true),
+            position: 7,
+        };
 
         let forward = merge_resource_enablements([a.clone(), b.clone()]);
         let reverse = merge_resource_enablements([b, a]);
 
         assert_eq!(forward, reverse);
         assert_eq!(forward.get("cooldown"), Some(&3));
+    }
+
+    /// The plugin-wide row decides a namespace no narrower row decides, as
+    /// it does for the plugin's own config reads, and a narrower row that
+    /// says decides over it.
+    #[test]
+    fn merge_resource_enablements_reads_the_plugin_wide_row_last() {
+        let row = |scope, enabled| EnablementRow {
+            plugin_id: "cooldown".to_string(),
+            namespace: "main".to_string(),
+            scope,
+            enabled,
+            position: 0,
+        };
+        let on = merge_resource_enablements([
+            row(ConfigScope::Plugin, Some(true)),
+            row(ConfigScope::Problem, None),
+        ]);
+        assert!(on.contains_key("cooldown"));
+        let off = merge_resource_enablements([
+            row(ConfigScope::Plugin, Some(true)),
+            row(ConfigScope::Contest, Some(false)),
+        ]);
+        assert!(!off.contains_key("cooldown"));
     }
 
     #[tokio::test]

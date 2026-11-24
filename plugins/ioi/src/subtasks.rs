@@ -778,7 +778,7 @@ mod tests {
                 &[make_def(SubtaskScoringMethod::GroupMin, 60.0, vec!["dup"])],
                 &cases
             )
-            .errors
+            .issues
             .iter()
             .any(|v| v.key.as_deref() == Some("ioi.config.task.ambiguousTestCase"))
         );

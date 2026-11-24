@@ -40,3 +40,16 @@
 'icpc.apiError.NO_FREEZE_TO_REVEAL' = '本场比赛没有可揭晓的封榜。'
 'icpc.apiError.INVALID_PATH_PARAMETER' = '此链接无效。'
 'icpc.apiError.SIGN_IN_REQUIRED' = '请先登录。'
+
+# Config schema text
+'config.icpc.contest.description' = 'ICPC 比赛级配置'
+'config.icpc.contest.penalty_minutes.title' = '罚时（分钟）'
+'config.icpc.contest.penalty_minutes.description' = '通过前每次错误提交增加的罚时（分钟）'
+'config.icpc.contest.count_compile_error.title' = '计入编译错误'
+'config.icpc.contest.count_compile_error.description' = '编译错误是否计为罚时尝试'
+'config.icpc.contest.show_test_details.title' = '显示测试点详情'
+'config.icpc.contest.show_test_details.description' = '选手是否能看到每个测试点的结果'
+'config.icpc.contest.public_standings.title' = '公开实时排行榜'
+'config.icpc.contest.public_standings.description' = '比赛期间向选手显示完整排行榜（默认：比赛结束前每位选手只能看到自己的那一行）'
+'config.icpc.contest.freeze_minutes.title' = '封榜（分钟）'
+'config.icpc.contest.freeze_minutes.description' = '在最后 N 分钟冻结选手可见的排行榜（ICPC 风格：排名停止更新，封榜期间的提交显示为待定）。0 表示不封榜。组织者始终看到真实榜单。'

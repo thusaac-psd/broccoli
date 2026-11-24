@@ -6,8 +6,11 @@
  * displays the full cascade hierarchy.
  */
 import { useTranslation } from '@/i18n';
-import { resolveInheritedValue } from '@/slot/config-cascade';
-import type { ConfigFormSlotProps } from '@/slot/config-field-slot-props';
+import { configSourceName } from '@/plugin/config-source';
+import {
+  type ConfigFormSlotProps,
+  inheritedValueOf,
+} from '@/slot/config-field-slot-props';
 import { cn } from '@/utils';
 
 /**
@@ -35,12 +38,10 @@ export interface ConfigInheritanceInfoProps
   };
 }
 
-function extractField(
-  config: Record<string, unknown> | null | undefined,
-  key: string,
-): unknown | undefined {
-  if (!config) return undefined;
-  const v = config[key];
+/** The value a scope's row stores for `key`, if it stores one. */
+function storedField(stored: unknown, key: string): unknown | undefined {
+  if (typeof stored !== 'object' || stored === null) return undefined;
+  const v = (stored as Record<string, unknown>)[key];
   return v !== undefined && v !== null ? v : undefined;
 }
 
@@ -65,12 +66,16 @@ export function ConfigInheritanceInfo({
     );
   }
 
-  const rawEffective = resolveInheritedValue(fieldKey, inherited);
-  const effective = rawEffective
+  const inheritedValue = inheritedValueOf(fieldKey, inherited);
+  const effective = inheritedValue
     ? {
-        value: rawEffective.value,
+        value: inheritedValue.value,
         source:
-          rawEffective.source === 'Contest' ? labels.contest : labels.problem,
+          inheritedValue.source === 'contest'
+            ? labels.contest
+            : inheritedValue.source === 'problem'
+              ? labels.problem
+              : configSourceName(inheritedValue.source, t),
       }
     : null;
 
@@ -86,10 +91,12 @@ export function ConfigInheritanceInfo({
   const defaultLabel =
     schemaDefault !== undefined ? formatValue(schemaDefault) : null;
 
-  const contestValue = extractField(inherited?.contest?.values, fieldKey);
-  const problemValue = extractField(inherited?.problem?.values, fieldKey);
-  const contestDisabled = inherited?.contest?.enabled === false;
-  const problemDisabled = inherited?.problem?.enabled === false;
+  const contest = inherited?.levels.contest;
+  const problem = inherited?.levels.problem;
+  const contestValue = storedField(contest?.stored, fieldKey);
+  const problemValue = storedField(problem?.stored, fieldKey);
+  const contestDisabled = contest?.enabled === false;
+  const problemDisabled = problem?.enabled === false;
 
   const rows: {
     label: string;
