@@ -87,3 +87,43 @@ test('the upload dialog inspects the same archive again, and drops a summary a c
   await expect(dialog.getByTestId('plugin-archive-summary')).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: 'Publish' })).toBeDisabled();
 });
+
+// A language pack for a locale an enabled pack already provides cannot be
+// published, so the summary names the pack that holds the locale and the
+// dialog does not offer to publish.
+test("the upload dialog names the pack that already provides a language pack's locale", async ({
+  page,
+}) => {
+  await mockApi(page, 'admin');
+  await page.route('**/api/v1/admin/plugins/upload/inspect', (route) =>
+    route.fulfill({
+      json: {
+        id: 'broccoli-en-gb',
+        name: 'English (UK)',
+        version: '1.0.0',
+        description: null,
+        size_bytes: 2048,
+        archive_hash: 'abc123',
+        current: null,
+        has_server: false,
+        has_web: false,
+        permissions: [],
+        sql_read: [],
+        incompatible_configs: [],
+        language_pack_taken: { locale: 'en', plugin_id: 'broccoli-en' },
+      },
+    }),
+  );
+  await page.goto('/admin/plugins');
+  await page.getByRole('button', { name: 'Upload plugin' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Upload a plugin' });
+  await dialog.getByTestId('plugin-archive-input').setInputFiles({
+    name: 'en-gb.tar.gz',
+    mimeType: 'application/gzip',
+    buffer: Buffer.from('not really an archive'),
+  });
+  await expect(dialog.getByTestId('plugin-language-pack-taken')).toHaveText(
+    'This language pack provides en, which the enabled pack broccoli-en already provides. Disable broccoli-en to publish this one.',
+  );
+  await expect(dialog.getByRole('button', { name: 'Publish' })).toBeDisabled();
+});

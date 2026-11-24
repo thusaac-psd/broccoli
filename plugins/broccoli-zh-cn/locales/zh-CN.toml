@@ -939,6 +939,7 @@
 'plugins.upload.permissions' = "请求的主机权限"
 'plugins.upload.noPermissions' = "无"
 'plugins.upload.sqlRead' = "其 SQL 读取的内容"
+'plugins.upload.languagePackTaken' = "此语言包提供 {locale}，而已启用的语言包 {plugin} 已提供该语言。请先禁用 {plugin}，再发布此语言包。"
 'plugins.upload.rollout' = "所有服务器会在几秒内加载此版本。无法加载的服务器会继续运行当前版本并报告原因。"
 'plugins.upload.publish' = "发布"
 'plugins.upload.publishing' = "正在发布…"

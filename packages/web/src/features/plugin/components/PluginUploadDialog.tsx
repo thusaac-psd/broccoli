@@ -255,6 +255,18 @@ export function PluginUploadDialog({
                   </div>
                 </div>
               )}
+              {summary.language_pack_taken && (
+                <p
+                  className="text-xs text-destructive break-words"
+                  role="alert"
+                  data-testid="plugin-language-pack-taken"
+                >
+                  {t('plugins.upload.languagePackTaken', {
+                    locale: summary.language_pack_taken.locale,
+                    plugin: summary.language_pack_taken.plugin_id,
+                  })}
+                </p>
+              )}
               <p className="font-mono text-[11px] text-muted-foreground break-all">
                 {t('plugins.archiveHash', { hash: summary.archive_hash })}
               </p>
@@ -268,7 +280,7 @@ export function PluginUploadDialog({
         <DialogFooter>
           <Button
             type="button"
-            disabled={!summary || busy}
+            disabled={!summary || busy || !!summary.language_pack_taken}
             onClick={() => void publish()}
           >
             {publishing && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}

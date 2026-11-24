@@ -873,6 +873,7 @@
 'plugins.upload.permissions' = "Host permissions it requests"
 'plugins.upload.noPermissions' = "None"
 'plugins.upload.sqlRead' = "Content its SQL reads"
+'plugins.upload.languagePackTaken' = "This language pack provides {locale}, which the enabled pack {plugin} already provides. Disable {plugin} to publish this one."
 'plugins.upload.rollout' = "Every server loads this version within a few seconds. A server that cannot load it keeps its current version and reports why."
 'plugins.upload.publish' = "Publish"
 'plugins.upload.publishing' = "Publishing…"
