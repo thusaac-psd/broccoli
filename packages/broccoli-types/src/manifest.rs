@@ -29,7 +29,8 @@ pub struct PluginManifest {
 
 /// What a language pack declares: `[language_pack] locale = "<locale>"`. Its
 /// translation file for that locale holds the host's text in the locale;
-/// one enabled plugin at a time provides a locale's host text.
+/// one enabled plugin at a time provides a locale's host text. A pack
+/// declares translations only: no `[server]`, `[web]` or `[config]`.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LanguagePack {

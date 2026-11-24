@@ -39,15 +39,21 @@ zh-CN = "i18n/zh-CN.toml"
 ```
 
 Every key starts with your plugin's id, so a plugin can never reword the
-host's text or another plugin's. The only other keys a catalog may hold are
+host's text or another plugin's. For the same reason a plugin id may not be a
+namespace of the host's messages: the first segment of any key in the English
+pack (`apiError`, `toast`, `nav`, …) and the key families `plugin`, `config`,
+`identifier` and `apiError`, compared ignoring case. A plugin with such an id
+does not load and its upload is refused. The only other keys a catalog may hold are
 the text of your manifest (`plugin.<plugin id>.…` and `config.<plugin id>.…`,
 below) and the names of what you register (`identifier.contestType.…`,
 `identifier.problemType.…` and `identifier.checker.…`). A catalog with any
 other key does not load, and an upload with one is refused; the error names
 the keys. An identifier's name is shown only from the plugin the identifier
-resolves to while that plugin is loaded: naming a contest type you do not
-register shows nothing. A plugin that is disabled, or failed to load, keeps
-only its manifest text, which the plugin list shows.
+resolves to: naming a contest type you do not register shows nothing. While no
+loaded plugin provides an identifier, it keeps the name the plugin that last
+provided it gave it, so a disabled evaluator's problem type still reads
+"Batch", not `batch`. A plugin that is disabled, or failed to load, keeps only
+its manifest text, which the plugin list shows, and those names.
 
 A frontend reads them with `t()` from `useTranslation()` in
 `@broccoli/web-sdk/i18n`. `{name}` inserts a parameter.
@@ -79,13 +85,20 @@ ja = "locales/ja.toml"
 
 A language pack's catalog for its locale holds the host's own keys, so it is
 not confined to its id; its catalogs for other locales are, as any plugin's
-are. A plugin that ships translations without declaring `[language_pack]` is
-an ordinary plugin. Install a pack like any plugin and the language appears in
+are. A pack declares translations only: one that also declares `[server]`,
+`[web]` or `[config]` does not load. A plugin that ships translations without
+declaring `[language_pack]` is an ordinary plugin. Install a pack like any plugin and the language appears in
 the language menu, without rebuilding the web app.
 
 One enabled pack provides a locale's host text. Enabling or uploading a second
 pack for a locale another enabled pack provides is refused
-(`LANGUAGE_PACK_TAKEN`): disable the first, then enable the second. Your own
+(`LANGUAGE_PACK_TAKEN`): disable the first, then enable the second.
+Inspecting an upload names the pack that already provides its locale
+(`language_pack_taken`), before Publish refuses it. A bundled pack for a locale
+an enabled plugin already provides is registered disabled, and the server logs
+it; of two new bundled packs for one locale, the one whose id sorts first is
+enabled. The database enforces the rule: a unique index over the enabled
+plugins' locales. Your own
 keys and names stay yours whatever the pack says: a pack's text for a key under
 your plugin's id is shown only where your catalog has none.
 

@@ -38,28 +38,40 @@ impl PluginSql {
     /// Run `statement`, a plugin statement outside any transaction, for
     /// `call` on a connection of its own, cut at the call's deadline. The
     /// connection's backend is known before the statement starts, so a cut
-    /// statement is cancelled there: it never applies after its call was
-    /// answered "unavailable", and its connection returns to the pool once
-    /// the cancel lands, not when the statement would have finished. The
-    /// bound is the host's own cancel, whatever the session's settings say.
+    /// statement is cancelled there: one still running when the cancel lands
+    /// is rolled back, and its connection returns to the pool then, not when
+    /// the statement would have finished. A statement that finished between
+    /// the deadline and the cancel has applied: the call is answered
+    /// unavailable either way, so a plugin's write retried after that answer
+    /// must tolerate having applied. The call answers at the deadline; a task
+    /// that owns the connection (and the lease's permit) sends the cancel and
+    /// only then returns it, so the cancel never lands on a later statement
+    /// and costs the answer nothing. The bound is the host's own cancel,
+    /// whatever the session's settings say. An outage of the database fails
+    /// the call as unavailable ([`crate::plugin_db::Unavailable::settle`]).
     async fn standalone<T>(
         &self,
         plugin_id: &str,
         call: &crate::plugin_db::SqlCall,
         statement: impl AsyncFnOnce(&mut common::db::PooledConnection) -> Result<T, sea_orm::DbErr>,
     ) -> Result<Result<T, sea_orm::DbErr>, crate::plugin_db::Unavailable> {
+        use crate::plugin_db::Unavailable;
+
         let lease = self.lease(plugin_id, call).await?;
-        let (mut conn, pid) = match by_deadline(call.deadline, lease.connection()).await? {
-            Ok(opened) => opened,
-            Err(e) => return Ok(Err(e)),
-        };
+        let (mut conn, pid) =
+            match Unavailable::settle(by_deadline(call.deadline, lease.connection()).await?)? {
+                Ok(opened) => opened,
+                Err(e) => return Ok(Err(e)),
+            };
         match by_deadline(call.deadline, statement(&mut conn)).await {
-            Ok(result) => Ok(result),
+            Ok(answer) => Unavailable::settle(answer),
             Err(cut) => {
-                // The connection stays held until the cancel is sent, so the
-                // cancel never lands on a later statement that reuses it.
-                self.pools.cancel_backend(pid).await;
-                drop(conn);
+                let pools = self.pools.clone();
+                tokio::spawn(async move {
+                    pools.cancel_backend(pid).await;
+                    drop(conn);
+                    drop(lease);
+                });
                 Err(cut)
             }
         }
@@ -259,24 +271,29 @@ fn lookup_owned_txn<'a>(
 /// call's `deadline`. The map lock is held only for the ownership lookup;
 /// the statement runs under the transaction's own lock, which serializes
 /// statements on that one transaction (they share one connection) and
-/// nothing else. A statement cut at the deadline is cancelled on its backend
-/// and its transaction ends: the call that ran it is over.
-fn with_owned_txn<R>(
+/// nothing else. A statement cut at the deadline ends its transaction: the
+/// call that ran it is over, and answers now. The transaction leaves its
+/// lock and the map at once, so no later statement can reach its connection,
+/// and a task that owns it cancels the statement on its backend and then
+/// rolls it back, returning its connection and permit. An outage of the
+/// database fails the call as unavailable
+/// ([`crate::plugin_db::Unavailable::settle`]).
+fn with_owned_txn<T>(
     sql: &PluginSql,
     txn_map: &TransactionMap,
     txn_id: &str,
     plugin_id: &str,
     host_fn: &str,
     deadline: Option<Instant>,
-    statement: impl AsyncFnOnce(&DatabaseTransaction) -> R,
-) -> Result<R, extism::Error> {
+    statement: impl AsyncFnOnce(&DatabaseTransaction) -> Result<T, sea_orm::DbErr>,
+) -> Result<Result<T, sea_orm::DbErr>, extism::Error> {
     let entry = {
         let map = txn_map
             .lock()
             .map_err(|_| extism::Error::msg("Transaction map lock poisoned"))?;
         lookup_owned_txn(&map, txn_id, plugin_id, host_fn)?.clone()
     };
-    let guard = entry
+    let mut guard = entry
         .txn
         .lock()
         .map_err(|_| extism::Error::msg("Transaction lock poisoned"))?;
@@ -285,17 +302,26 @@ fn with_owned_txn<R>(
         .ok_or_else(|| extism::Error::msg(format!("Transaction not found: {txn_id}")))?;
     let runtime = tokio::runtime::Handle::current();
     match runtime.block_on(by_deadline(deadline, statement(txn))) {
-        Ok(result) => Ok(result),
+        Ok(answer) => crate::plugin_db::Unavailable::settle(answer).map_err(unavailable),
         Err(cut) => {
-            // Cancelled under the transaction's lock, so the cancel never
-            // lands on another statement that takes the lock next.
-            runtime.block_on(sql.pools.cancel_backend(entry.pid));
+            let txn = guard.take();
+            drop(guard);
             txn_map
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .remove(txn_id);
-            drop(guard);
-            entry.discard();
+            let pools = sql.pools.clone();
+            let pid = entry.pid;
+            runtime.spawn(async move {
+                pools.cancel_backend(pid).await;
+                if let Some(txn) = txn
+                    && let Err(e) = txn.rollback().await
+                {
+                    error!("Failed to roll back a cut plugin DB transaction: {e}");
+                }
+                // Its permit returns with it.
+                drop(entry);
+            });
             Err(unavailable(cut))
         }
     }
@@ -832,10 +858,12 @@ host_fn!(pub db_begin(user_data: Arc<(String, PluginSql, TransactionMap)>; _inpu
         .await?;
         Ok::<_, crate::plugin_db::Unavailable>(begun.map(|(txn, pid)| (txn, pid, lease.permit)))
     }).map_err(unavailable)?;
-    let (txn, pid, permit) = opened.map_err(|e| {
-        error!("DB begin error: {}", e);
-        extism::Error::msg(e.to_string())
-    })?;
+    let (txn, pid, permit) = crate::plugin_db::Unavailable::settle(opened)
+        .map_err(unavailable)?
+        .map_err(|e| {
+            error!("DB begin error: {}", e);
+            extism::Error::msg(e.to_string())
+        })?;
 
     let txn_id = Uuid::new_v4().to_string();
     txn_map.lock()
@@ -918,7 +946,9 @@ host_fn!(pub db_commit(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_
     let txn = entry.take()
         .ok_or_else(|| extism::Error::msg(format!("Transaction not found: {txn_id}")))?;
 
-    let result = tokio::runtime::Handle::current().block_on(txn.commit());
+    let result = crate::plugin_db::Unavailable::settle(
+        tokio::runtime::Handle::current().block_on(txn.commit()),
+    ).map_err(unavailable)?;
 
     match result {
         Ok(()) => HostDbResponse::ok(serde_json::json!({"ok": true})).to_json_string(),
@@ -956,7 +986,9 @@ host_fn!(pub db_rollback(user_data: Arc<(String, PluginSql, TransactionMap)>; tx
 
     match entry.and_then(|entry| entry.take()) {
         Some(txn) => {
-            let result = tokio::runtime::Handle::current().block_on(txn.rollback());
+            let result = crate::plugin_db::Unavailable::settle(
+                tokio::runtime::Handle::current().block_on(txn.rollback()),
+            ).map_err(unavailable)?;
             match result {
                 Ok(()) => HostDbResponse::ok(serde_json::json!({"ok": true})).to_json_string(),
                 Err(e) => {
@@ -1298,6 +1330,129 @@ mod tests {
         }
     }
 
+    /// [`plugin_sql`], provisioning and cancelling through `host`.
+    fn plugin_sql_on(host: DatabaseConnection, url: &str) -> PluginSql {
+        PluginSql {
+            pools: PluginSqlPools::new(
+                host,
+                url,
+                2,
+                Duration::from_secs(20),
+                &crate::database::app_session(&crate::config::DatabaseConfig::default()),
+            ),
+            registry: Default::default(),
+        }
+    }
+
+    async fn migrate(url: &str) {
+        crate::database::BootSession::acquire(url)
+            .await
+            .expect("boot session")
+            .migrate()
+            .await
+            .expect("migrate");
+    }
+
+    /// A database outage on a plugin's own statement is no answer about the
+    /// statement: the call fails as unavailable, which its caller answers
+    /// with a retryable 503, not as an error the plugin reads.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_outage_on_a_plugin_statement_fails_the_call_as_unavailable() {
+        let (container, url, _db) = one_connection().await;
+        migrate(&url).await;
+        let sql = plugin_sql(&url).await;
+        let call = crate::plugin_db::SqlCall::default();
+        let statement = || Statement::from_string(DbBackend::Postgres, "SELECT 1");
+        sql.execute("p", &call, statement())
+            .await
+            .expect("leased")
+            .expect("ran");
+        container.stop().await.expect("stop the database");
+        let answer = sql.execute("p", &call, statement()).await;
+        assert!(
+            matches!(answer, Err(crate::plugin_db::Unavailable::Outage(_))),
+            "{answer:?}"
+        );
+    }
+
+    /// A statement cut at its call's deadline answers at once, whatever the
+    /// cancel costs: here the cancel cannot run until the host connection it
+    /// needs is free, and the cut is answered while the statement still
+    /// runs. The cancel then lands, so the write never applies.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cut_statement_answers_before_its_cancel_lands() {
+        let (_container, url, host) = one_connection().await;
+        migrate(&url).await;
+        let sql = plugin_sql_on(host.clone(), &url);
+        let call = |deadline: Option<Instant>| crate::plugin_db::SqlCall {
+            deadline,
+            ..Default::default()
+        };
+        sql.execute(
+            "p",
+            &call(None),
+            Statement::from_string(DbBackend::Postgres, "CREATE TABLE t (v text)"),
+        )
+        .await
+        .expect("leased")
+        .expect("created");
+
+        let observer: DatabaseConnection = Database::connect(&url).await.expect("connect").into();
+        let running = async || {
+            observer
+                .query_one_raw(Statement::from_string(
+                    DbBackend::Postgres,
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE state = 'active' AND query LIKE 'INSERT INTO t %'",
+                ))
+                .await
+                .expect("activity")
+                .expect("row")
+                .try_get_by_index::<i64>(0)
+                .expect("count")
+        };
+
+        // The host's only connection is busy: no cancel can be sent.
+        let holding = host.begin().await.expect("hold the host connection");
+        let cut = tokio::time::timeout(
+            Duration::from_secs(60),
+            sql.execute(
+                "p",
+                &call(Some(Instant::now() + Duration::from_millis(300))),
+                Statement::from_string(
+                    DbBackend::Postgres,
+                    "INSERT INTO t SELECT 'late' FROM pg_sleep(30)",
+                ),
+            ),
+        )
+        .await
+        .expect("the cut answers without waiting for its cancel");
+        assert!(
+            matches!(cut, Err(crate::plugin_db::Unavailable::Deadline)),
+            "{cut:?}"
+        );
+        assert_eq!(
+            running().await,
+            1,
+            "the call answered while its statement still ran, before any cancel"
+        );
+        holding.rollback().await.expect("free the host connection");
+        while running().await > 0 {
+            tokio::task::yield_now().await;
+        }
+        let rows = observer
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT count(*) FROM plugin_p.t",
+            ))
+            .await
+            .expect("count")
+            .expect("row")
+            .try_get_by_index::<i64>(0)
+            .expect("int");
+        assert_eq!(rows, 0, "the cancel landed once it could run");
+    }
+
     /// A transaction on `db` as `db_begin` records it, under `txn_id`.
     async fn open(db: &DatabaseConnection, txn_map: &TransactionMap, txn_id: &str, owner: &str) {
         let txn = db.begin().await.expect("begin");
@@ -1551,9 +1706,10 @@ mod tests {
                         owner,
                         "db_execute_in",
                         None,
-                        async |txn| txn.execute_unprepared(sql).await.expect("statement"),
+                        async |txn| txn.execute_unprepared(sql).await,
                     )
                     .expect("owned transaction")
+                    .expect("statement")
                 })
             };
 

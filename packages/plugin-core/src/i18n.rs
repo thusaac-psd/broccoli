@@ -46,10 +46,36 @@ impl IdentifierKind {
     }
 }
 
+include!(concat!(env!("OUT_DIR"), "/host_namespaces.rs"));
+
+/// The namespace of identifier names (`identifier.<kind>.<id>`).
+const IDENTIFIER: &str = "identifier";
+/// The namespaces of a plugin's manifest text (`plugin.<id>.…`,
+/// `config.<id>.…`).
+const MANIFEST_TEXT: [&str; 2] = ["plugin", "config"];
+/// The namespace of the host's error texts (`apiError.<CODE>`).
+const API_ERROR: &str = "apiError";
+
+/// Whether `id` is a namespace the host speaks in: the first segment of a key
+/// of the host's catalog, or a key family the platform reads for every plugin
+/// (identifier names, manifest text, error texts). A plugin's own keys are the
+/// ones under its id, so a plugin with such an id would speak as the host; no
+/// plugin may take one (compared ignoring ASCII case).
+pub fn is_host_namespace(id: &str) -> bool {
+    HOST_CATALOG_NAMESPACES
+        .iter()
+        .chain(&MANIFEST_TEXT)
+        .chain(&[IDENTIFIER, API_ERROR])
+        .any(|ns| ns.eq_ignore_ascii_case(id))
+}
+
 /// The identifier `key` names, when it is the name of an identifier a
 /// plugin registers.
 fn plugin_identifier(key: &str) -> Option<(IdentifierKind, &str)> {
-    let (kind, id) = key.strip_prefix("identifier.")?.split_once('.')?;
+    let (kind, id) = key
+        .strip_prefix(IDENTIFIER)?
+        .strip_prefix('.')?
+        .split_once('.')?;
     IdentifierKind::ALL
         .into_iter()
         .find(|k| k.as_str() == kind)
@@ -61,9 +87,11 @@ fn plugin_identifier(key: &str) -> Option<(IdentifierKind, &str)> {
 /// description and config text, which the admin pages show for a plugin
 /// whether it runs or not.
 fn is_manifest_text(plugin_id: &str, key: &str) -> bool {
-    [("plugin.", plugin_id), ("config.", plugin_id)]
-        .iter()
-        .any(|(kind, id)| under(key.strip_prefix(kind), id))
+    MANIFEST_TEXT.iter().any(|ns| {
+        key.strip_prefix(ns)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .is_some_and(|rest| under(Some(rest), plugin_id))
+    })
 }
 
 /// Whether `key` (with its prefix stripped) is `id` followed by a `.`.
@@ -121,6 +149,16 @@ impl IdentifierOwners {
         self.0.insert((kind, id.to_string()), plugin_id.to_string());
     }
 
+    /// Record that `plugin_id` last provided identifier `id` of `kind`,
+    /// unless a loaded provider already resolves it: the identifier then
+    /// keeps the name its last provider gave it while that provider is
+    /// disabled or not loaded.
+    pub fn insert_last_provider(&mut self, kind: IdentifierKind, id: &str, plugin_id: &str) {
+        self.0
+            .entry((kind, id.to_string()))
+            .or_insert_with(|| plugin_id.to_string());
+    }
+
     fn owns(&self, plugin_id: &str, (kind, id): (IdentifierKind, &str)) -> bool {
         self.0
             .get(&(kind, id.to_string()))
@@ -137,11 +175,14 @@ impl IdentifierOwners {
 ///   wins a locale by how its id sorts;
 /// - every loaded plugin's own keys (`<plugin_id>.…`) and manifest text,
 ///   over a pack's text for the same key: a plugin speaks for itself;
-/// - an identifier's name only from the plugin it resolves to (`owners`):
-///   a plugin never renames another's contest type, problem type or checker;
+/// - an identifier's name only from the plugin it resolves to (`owners`),
+///   or, while no loaded plugin provides it, from the plugin that last did
+///   ([`IdentifierOwners::insert_last_provider`]): a plugin never renames
+///   another's contest type, problem type or checker;
 /// - a plugin installed but not loaded (disabled, or failed to load) adds
-///   only its manifest text, which the admin pages show for it, to the
-///   locales the loaded plugins serve.
+///   only its manifest text, which the admin pages show for it, and the
+///   names of the identifiers it last provided, to the locales the loaded
+///   plugins serve.
 pub fn served_translations<'a>(
     plugins: impl IntoIterator<Item = InstalledPacks<'a>>,
     owners: &IdentifierOwners,
@@ -180,10 +221,9 @@ pub fn served_translations<'a>(
     for plugin in &plugins {
         let speaks = |key: &str| {
             is_manifest_text(plugin.plugin_id, key)
-                || (plugin.loaded
-                    && (under(Some(key), plugin.plugin_id)
-                        || plugin_identifier(key)
-                            .is_some_and(|identifier| owners.owns(plugin.plugin_id, identifier))))
+                || plugin_identifier(key)
+                    .is_some_and(|identifier| owners.owns(plugin.plugin_id, identifier))
+                || (plugin.loaded && under(Some(key), plugin.plugin_id))
         };
         for (lang, map) in plugin.packs {
             let Some(served) = merged.get_mut(lang) else {
@@ -292,8 +332,7 @@ mod tests {
             ),
             pack("fr", &[("plugin.ioi.name", "IOI")]),
         ];
-        let mut owners = IdentifierOwners::default();
-        owners.insert(IdentifierKind::ContestType, "ioi", "ioi");
+        let owners = IdentifierOwners::default();
         let served = served_translations(
             [
                 InstalledPacks {
@@ -320,6 +359,43 @@ mod tests {
             ),
         ]);
         assert_eq!(served["zh-CN"].0, expected);
+    }
+
+    /// An identifier no loaded plugin provides keeps the name its last
+    /// provider gave it while that provider is disabled; a disabled plugin
+    /// still never names an identifier a loaded plugin provides.
+    #[test]
+    fn a_disabled_provider_still_names_the_identifiers_it_last_provided() {
+        let batch = [pack(
+            "zh-CN",
+            &[
+                ("identifier.problemType.batch", "传统题"),
+                ("identifier.contestType.icpc", "冒名"),
+            ],
+        )];
+        let host = [pack("zh-CN", &[("sidebar.plugins", "插件")])];
+        let mut owners = IdentifierOwners::default();
+        owners.insert(IdentifierKind::ContestType, "icpc", "icpc");
+        owners.insert_last_provider(IdentifierKind::ProblemType, "batch", "batch-evaluator");
+        owners.insert_last_provider(IdentifierKind::ContestType, "icpc", "batch-evaluator");
+        let served = served_translations(
+            [
+                InstalledPacks {
+                    plugin_id: "batch-evaluator",
+                    loaded: false,
+                    host_locale: None,
+                    packs: &batch,
+                },
+                language_pack("broccoli-zh-cn", "zh-CN", &host),
+            ],
+            &owners,
+        );
+        assert_eq!(served["zh-CN"].0["identifier.problemType.batch"], "传统题");
+        assert!(
+            !served["zh-CN"]
+                .0
+                .contains_key("identifier.contestType.icpc")
+        );
     }
 
     #[test]
@@ -365,6 +441,28 @@ mod tests {
             &owners,
         );
         assert!(two["en"].0.is_empty(), "{:?}", two["en"].0);
+    }
+
+    /// Every namespace the host's catalog speaks in, and every key family
+    /// the platform reads for all plugins, is refused as a plugin id.
+    #[test]
+    fn no_plugin_id_names_a_host_namespace() {
+        let catalog: toml::Table = include_str!(env!("HOST_CATALOG")).parse().unwrap();
+        assert!(!catalog.is_empty());
+        for key in catalog.keys() {
+            let namespace = key.split('.').next().unwrap();
+            assert!(super::is_host_namespace(namespace), "{key}");
+            assert!(
+                super::is_host_namespace(&namespace.to_ascii_uppercase()),
+                "{key}"
+            );
+        }
+        for family in ["plugin", "config", "identifier", "apiError"] {
+            assert!(super::is_host_namespace(family), "{family}");
+        }
+        for plugin in ["ioi", "icpc", "batch-evaluator", "apiErrors"] {
+            assert!(!super::is_host_namespace(plugin), "{plugin}");
+        }
     }
 
     #[test]

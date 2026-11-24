@@ -437,7 +437,7 @@ pub async fn get_plugin_upload_policy(
     tag = "Admin",
     operation_id = "inspectPluginArchive",
     summary = "Check a plugin archive without publishing it",
-    description = "Validates a tar.gz plugin archive exactly as an upload would and reports what it would publish: the plugin id, version, the host permissions it requests, what the fleet runs under that id now, and the stored configs of the plugin that the archive's config schemas would refuse. Publishes nothing. Requires `plugin:manage` permission.",
+    description = "Validates a tar.gz plugin archive exactly as an upload would and reports what it would publish: the plugin id, version, the host permissions it requests, what the fleet runs under that id now, and the stored configs of the plugin that the archive's config schemas would refuse, and, for a language pack, the enabled pack that already provides its locale (publishing it would be refused with LANGUAGE_PACK_TAKEN). Publishes nothing. Requires `plugin:manage` permission.",
     request_body(content_type = "multipart/form-data", content = PluginArchiveForm),
     responses(
         (status = 200, description = "The archive is valid", body = PluginArchiveSummary),
@@ -472,6 +472,15 @@ pub async fn inspect_plugin_archive(
     let manifest = archive.manifest();
     let incompatible_configs =
         incompatible_configs(&state.db, archive.id().as_str(), manifest).await?;
+    let language_pack_taken = match manifest.host_locale() {
+        Some(locale) => crate::plugin_lifecycle::locale_taken(&state.db, archive.id(), locale)
+            .await?
+            .map(|plugin_id| broccoli_api_types::plugin::LanguagePackHolder {
+                locale: locale.to_string(),
+                plugin_id,
+            }),
+        None => None,
+    };
     Ok(Json(PluginArchiveSummary {
         id: archive.id().to_string(),
         name: manifest.name.clone(),
@@ -493,6 +502,7 @@ pub async fn inspect_plugin_archive(
         size_bytes: archive.bytes().len() as u64,
         current,
         incompatible_configs,
+        language_pack_taken,
     }))
 }
 

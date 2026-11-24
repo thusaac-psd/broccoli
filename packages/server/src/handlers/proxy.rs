@@ -312,7 +312,7 @@ macro_rules! proxy_handler {
                 (status = 413, description = "The plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
                 (status = 429, description = "The plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
                 (status = 500, description = "The plugin failed (INTERNAL_ERROR); the detail is logged, never returned", body = ErrorBody),
-                (status = 503, description = "The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After)", body = ErrorBody),
+                (status = 503, description = "The plugin is disabled (PLUGIN_DISABLED, carries Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After)", body = ErrorBody),
             ),
             security(("jwt" = []))
         )]
@@ -352,7 +352,7 @@ macro_rules! proxy_handler {
                 (status = 413, description = "The plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
                 (status = 429, description = "The plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
                 (status = 500, description = "The plugin failed (INTERNAL_ERROR); the detail is logged, never returned", body = ErrorBody),
-                (status = 503, description = "The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After)", body = ErrorBody),
+                (status = 503, description = "The plugin is disabled (PLUGIN_DISABLED, carries Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After)", body = ErrorBody),
             ),
             security(("jwt" = []))
         )]

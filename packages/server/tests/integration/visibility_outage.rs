@@ -58,7 +58,7 @@ async fn fixture(app: &TestApp) -> Fixture {
     app.register_for_contest(governed, &contestant).await;
     for sql in [
         format!(
-            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"{GOVERNED_TYPE}\"], \"host_locale\": null, \"problem_types\": []}}' \
+            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"{GOVERNED_TYPE}\"], \"problem_types\": [], \"checkers\": []}}' \
              WHERE id = '{PLUGIN}'"
         ),
         format!("UPDATE contest SET contest_type = '{GOVERNED_TYPE}' WHERE id = {governed}"),
@@ -163,7 +163,14 @@ async fn a_disabled_contest_plugin_withholds_only_what_it_governs() {
         .await;
     assert_eq!(res.status, 503, "{}", res.text);
     assert_eq!(res.body["code"], "PLUGIN_DISABLED");
-    assert!(!res.headers.contains_key("retry-after"));
+    assert_eq!(
+        res.headers.get("retry-after").map(|v| v.to_str().unwrap()),
+        Some(
+            server::error::DISABLED_RETRY_AFTER_SECS
+                .to_string()
+                .as_str()
+        )
+    );
 
     // The same problem read on its own is not governed by the contest plugin.
     let res = app

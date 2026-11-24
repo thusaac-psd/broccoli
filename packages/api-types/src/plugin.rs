@@ -152,6 +152,20 @@ pub struct PluginArchiveSummary {
     /// refuse. Publishing it leaves them in place, and the plugin reports an
     /// error wherever it reads one, so fix or delete them.
     pub incompatible_configs: Vec<IncompatibleConfig>,
+    /// The enabled language pack that already provides the locale this
+    /// archive's language pack declares. One enabled pack provides a locale,
+    /// so publishing it is refused (`LANGUAGE_PACK_TAKEN`) until that pack
+    /// is disabled.
+    pub language_pack_taken: Option<LanguagePackHolder>,
+}
+
+/// An enabled language pack and the locale it provides.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LanguagePackHolder {
+    #[schema(example = "en")]
+    pub locale: String,
+    #[schema(example = "broccoli-en")]
+    pub plugin_id: String,
 }
 
 impl PluginArchiveSummary {
@@ -341,6 +355,7 @@ mod tests {
             size_bytes: 1,
             current,
             incompatible_configs: vec![],
+            language_pack_taken: None,
         }
     }
 

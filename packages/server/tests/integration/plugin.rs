@@ -113,7 +113,7 @@ mod plugin_management {
             sea_orm::Statement::from_string(
                 sea_orm::DbBackend::Postgres,
                 "INSERT INTO plugin (id, is_enabled, governs) VALUES \
-                 ('fmt-plugin', true, '{\"visibility\": false, \"contest_types\": [\"fmt-x\"], \"host_locale\": null, \"problem_types\": []}')",
+                 ('fmt-plugin', true, '{\"visibility\": false, \"contest_types\": [\"fmt-x\"], \"problem_types\": [], \"checkers\": []}')",
             ),
         )
         .await
@@ -648,9 +648,14 @@ mod sql {
             "{}",
             res.text
         );
-        assert!(
-            !res.headers.contains_key("retry-after"),
-            "a disabled plugin is not a retry-later answer"
+        assert_eq!(
+            res.headers.get("retry-after").map(|v| v.to_str().unwrap()),
+            Some(
+                server::error::DISABLED_RETRY_AFTER_SECS
+                    .to_string()
+                    .as_str()
+            ),
+            "a disabled plugin's 503 says when to ask again"
         );
 
         let res = app

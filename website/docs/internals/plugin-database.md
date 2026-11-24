@@ -174,15 +174,25 @@ A plugin's SQL runs within the deadline of the call that runs it
 
 - a lease waits for a permit no longer than the earlier of the deadline and
   the pool's acquire timeout, then fails the call as unavailable;
-- every statement, in a transaction or not, is cut at the deadline and
-  cancelled on its backend (`pg_cancel_backend`, through the app role, which
-  holds every plugin role), so a cut write never applies after its call was
-  answered "unavailable". A statement outside a transaction runs on a
+- every statement, in a transaction or not, is cut at the deadline, and the
+  call answers then: a cut is unavailable (a retryable 503) within the
+  request's budget whatever the cancel costs. The statement is cancelled on
+  its backend (`pg_cancel_backend`, through the app role, which holds every
+  plugin role) by a task that owns its connection: one still running when the
+  cancel lands is rolled back, and one that finished between the deadline and
+  the cancel has applied, so a write retried after an unavailable answer must
+  tolerate having applied. A statement outside a transaction runs on a
   connection the host leased for it and whose backend pid it read first; a
-  transaction records its backend's pid when it begins, and a statement of it
-  that is cut also rolls the transaction back, returning its connection and
-  permit. The cancel is sent while the connection (or the transaction's lock)
-  is still held, so it never lands on a later statement;
+  transaction records its backend's pid when it begins, and a cut statement
+  of it ends the transaction: it leaves the map and its lock at once, and the
+  task rolls it back after the cancel, returning its connection and permit.
+  No later statement can reach the connection before the cancel is sent, so
+  the cancel never lands on one;
+- an outage of the database on a plugin's statement, its transaction's
+  begin, commit or rollback (`common::db::is_outage`) says nothing about the
+  statement: the call fails as unavailable, like a busy pool
+  (`plugin_db::Unavailable::settle`), and any other error goes back to the
+  plugin in its response;
 - a transaction lives no longer than the call tree that opened it: one still
   open when the tree ends (the guest trapped, was cancelled or returned
   without committing) is rolled back then, from the tree's `CallLocals`;

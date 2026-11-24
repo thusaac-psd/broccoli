@@ -91,8 +91,8 @@ impl Liveness {
         self.0.store(true, Ordering::Release);
     }
 
-    /// Whether anything but this handle still holds the pool's liveness: the
-    /// pool itself, or a call that started on it.
+    /// Whether anything but this handle holds the pool's liveness: the pool
+    /// itself, or a call that started on it.
     pub fn in_use(&self) -> bool {
         Arc::strong_count(&self.0) > 1
     }
@@ -132,6 +132,12 @@ impl<T: Send + 'static> InstancePool<T> {
         let trimmable: Arc<dyn Trimmable> = shared.clone();
         budget.register(Arc::downgrade(&trimmable));
         Self { shared }
+    }
+
+    /// Whether a call that started on this pool still runs: anything but
+    /// the pool holds its liveness (each running call's scope holds one).
+    pub fn has_calls(&self) -> bool {
+        self.shared.liveness.in_use()
     }
 
     /// This pool's liveness: live until [`Self::retire`].

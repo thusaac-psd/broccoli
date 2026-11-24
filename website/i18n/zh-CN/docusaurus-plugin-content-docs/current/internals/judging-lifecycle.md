@@ -53,11 +53,11 @@ sidebar_position: 2
 - `Lost`：平台丢失了这次尝试（见重试预算一节）。会话在下一个事件到达插件之前结束，插件从不依据丢失的操作作出判定，评测记录回到 `Queued`。
 - `Interrupted`：本服务器正在关闭。不记录任何内容；关闭流程会释放该评测记录，由其他服务器重新评测。
 
-每种结束都经由 `fail_dispatch`，以评测记录的纪元及其尚未定稿为栅栏，因此插件已写入的判定保持不变。之后对其留在终态的评测记录触发评测后钩子。当提供某竞赛类型的插件被禁用时，提交到其竞赛的请求以 `503 CONTEST_TYPE_DISABLED` 拒绝，且不带 `Retry-After`；`CONTEST_TYPE_UNAVAILABLE`（带 `Retry-After`）只表示当前副本尚未加载该插件。
+每种结束都经由 `fail_dispatch`，以评测记录的纪元及其尚未定稿为栅栏，因此插件已写入的判定保持不变。之后对其留在终态的评测记录触发评测后钩子。当提供某竞赛类型的插件被禁用时，提交到其竞赛的请求以 `503 CONTEST_TYPE_DISABLED` 拒绝，并带 30 秒的 `Retry-After`（工作被暂存，并在管理员启用插件后恢复）；`CONTEST_TYPE_UNAVAILABLE`（带 `Retry-After`）只表示当前副本尚未加载该插件。
 
 ## 被禁用的插件让需要它的工作暂停等待
 
-一个工作单元需要两个插件：提供其竞赛类型的插件，以及其题目类型的评测器。当记录了其中任一键（`plugin.governs` 的 `contest_types` 与 `problem_types`）的所有插件都在整个集群中被禁用时，该单元处于暂停状态；`work_runnable` 用 SQL 表述这一规则（在单元的扫描上为 `judging::Unit::runnable`），`PluginLifecycle::closed_by` 用 Rust 表述。暂停的工作以 `Queued` 等待，重新启用任一提供者后继续。会被暂停的新提交或代码运行会被拒绝：因竞赛类型为 `503 CONTEST_TYPE_DISABLED`，因题目类型为指明该评测器的 `503 PLUGIN_DISABLED`，均不带 `Retry-After`。插件写入的不带错误码的系统错误记为 `PLUGIN_ERROR`，因此不会显示没有错误码的系统错误：
+一个工作单元需要两个插件：提供其竞赛类型的插件，以及其题目类型的评测器。当记录了其中任一键（`plugin.governs` 的 `contest_types` 与 `problem_types`）的所有插件都在整个集群中被禁用时，该单元处于暂停状态；`work_runnable` 用 SQL 表述这一规则（在单元的扫描上为 `judging::Unit::runnable`），`PluginLifecycle::closed_by` 用 Rust 表述。暂停的工作以 `Queued` 等待，重新启用任一提供者后继续。会被暂停的新提交或代码运行会被拒绝：因竞赛类型为 `503 CONTEST_TYPE_DISABLED`，因题目类型为指明该评测器的 `503 PLUGIN_DISABLED`，均带 30 秒的 `Retry-After`。插件写入的不带错误码的系统错误记为 `PLUGIN_ERROR`，因此不会显示没有错误码的系统错误：
 
 - 领取语句不领取暂停类型的评测记录或代码运行，因此不会把工作分发给不存在的插件。
 - 彻底卸载一个插件时，该副本上它运行的每个评测会话都立即被切断（`JudgingSessions::cut`），

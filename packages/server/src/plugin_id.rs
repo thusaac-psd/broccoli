@@ -7,20 +7,26 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// A plugin id that is safe as a single path segment: 1 to 128 characters,
-/// starting with an ASCII letter or digit, otherwise only ASCII letters,
-/// digits, `_` and `-`.
+/// A plugin id that is safe as a single path segment and speaks only for
+/// its plugin: 1 to 128 characters, starting with an ASCII letter or digit,
+/// otherwise only ASCII letters, digits, `_` and `-`, and not a namespace
+/// of the host's messages ([`plugin_core::i18n::is_host_namespace`]), whose
+/// keys a plugin with that id would own.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct PluginId(String);
 
 /// A string that is not a valid [`PluginId`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "Invalid plugin ID '{0}': it must be 1-128 characters, start with a letter or digit, and \
-     contain only letters, digits, '-' or '_'"
-)]
-pub struct InvalidPluginId(pub String);
+pub enum InvalidPluginId {
+    #[error(
+        "Invalid plugin ID '{0}': it must be 1-128 characters, start with a letter or digit, and \
+         contain only letters, digits, '-' or '_'"
+    )]
+    Shape(String),
+    #[error("Invalid plugin ID '{0}': it names a namespace of the host's own messages")]
+    HostNamespace(String),
+}
 
 impl PluginId {
     pub fn parse(id: impl Into<String>) -> Result<Self, InvalidPluginId> {
@@ -30,11 +36,13 @@ impl PluginId {
             && id
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-        if valid {
-            Ok(Self(id))
-        } else {
-            Err(InvalidPluginId(id))
+        if !valid {
+            return Err(InvalidPluginId::Shape(id));
         }
+        if plugin_core::i18n::is_host_namespace(&id) {
+            return Err(InvalidPluginId::HostNamespace(id));
+        }
+        Ok(Self(id))
     }
 
     pub fn as_str(&self) -> &str {
@@ -84,6 +92,23 @@ mod tests {
             &"a".repeat(129),
         ] {
             assert!(PluginId::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_host_namespace_is_not_a_plugin_id() {
+        for host in [
+            "apiError",
+            "apierror",
+            "plugin",
+            "config",
+            "identifier",
+            "toast",
+        ] {
+            assert_eq!(
+                PluginId::parse(host),
+                Err(InvalidPluginId::HostNamespace(host.to_string())),
+            );
         }
     }
 

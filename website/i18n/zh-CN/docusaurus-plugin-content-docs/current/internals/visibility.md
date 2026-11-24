@@ -52,7 +52,7 @@ DTO 只能经由 `Visible::into_masked_json` 进入响应体，该函数应用�
 
 - 比赛和澄清是主机记录（`Resource::degrades_in_outage`），故障不会从中拿走任何内容。
 - 无法判断的题目部分或提交为 `Decision::Withheld`。其响应只显示其 `Governed` 形状列出的字段，其余字段为 `null`，`withheld` 为 `{"reason": "plugin_outage", "outage": ...}`。列表保留该行。没有主机决定字段的形状（题面、样例、附件）会以该故障使请求失败，读取以外的所有操作也是如此。
-- 故障对应 `503 PLUGIN_DISABLED`（不带 `Retry-After`）或 `503 PLUGIN_UNAVAILABLE`（带 `Retry-After`）。已禁用插件自己的路由同样返回 `PLUGIN_DISABLED`；向由已禁用插件提供比赛类型的比赛提交，返回 `CONTEST_TYPE_DISABLED`。
+- 故障对应 `503 PLUGIN_DISABLED` 或 `503 PLUGIN_UNAVAILABLE`，均带 `Retry-After`：每个 503 都可重试。已禁用插件的答复要求 30 秒后再试（`DISABLED_RETRY_AFTER_SECS`），因为需要它的工作被暂存，并在管理员启用后恢复。已禁用插件自己的路由同样返回 `PLUGIN_DISABLED`；向由已禁用插件提供比赛类型的比赛提交，返回 `CONTEST_TYPE_DISABLED`。
 
 `ContestResponse.plugin_outage` 和 `ContestListItem.plugin_outage` 来自 `plugin_lifecycle::contest_type_outage`：提供该比赛类型的插件已禁用，或本地没有加载其处理程序。客户端据此展示提交会被拒绝、结果不可用的比赛。
 

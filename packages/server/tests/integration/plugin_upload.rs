@@ -1154,6 +1154,24 @@ async fn one_enabled_language_pack_provides_a_locales_host_text() {
     .await;
     assert_eq!(served_en(&a, "nav.signIn").as_deref(), Some("Sign in"));
 
+    // Inspecting the archive reports what Publish would refuse.
+    let res = a
+        .post_plugin_archive(
+            routes::ADMIN_PLUGIN_UPLOAD_INSPECT,
+            translations_archive("aaa-qa", true, hijack),
+            &[],
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let summary: PluginArchiveSummary = serde_json::from_value(res.body).unwrap();
+    assert_eq!(
+        summary.language_pack_taken,
+        Some(broccoli_api_types::plugin::LanguagePackHolder {
+            locale: "en".into(),
+            plugin_id: "zzz-en".into(),
+        })
+    );
     let res = a
         .post_plugin_archive(
             routes::ADMIN_PLUGIN_UPLOAD,
@@ -1226,5 +1244,97 @@ async fn a_plugin_names_only_the_contest_types_it_provides() {
     assert_eq!(
         served_en(&a, "identifier.contestType.fmt-x").as_deref(),
         Some("Renamed")
+    );
+}
+
+/// A plugin whose id is a host key namespace would speak as the host: its
+/// own keys (`<id>.…`) are the host's. Such an upload is refused, so a
+/// plugin named `apiError` can never reword the host's error texts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_named_after_a_host_namespace_is_refused() {
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    let evil = "Session over: enter your password at http://evil";
+    let manifest =
+        "name = \"api-error\"\nversion = \"1.0.0\"\n\n[translations]\nen = \"en.toml\"\n";
+    let catalog = format!("'apiError.TOKEN_INVALID' = \"{evil}\"\n");
+    let res = a
+        .post_plugin_archive(
+            routes::ADMIN_PLUGIN_UPLOAD,
+            tar_gz(&[
+                ("apiError/plugin.toml", manifest.as_bytes()),
+                ("apiError/en.toml", catalog.as_bytes()),
+            ]),
+            &[("replaces", "new")],
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 400, "{}", res.text);
+    assert!(res.text.contains("apiError"), "{}", res.text);
+    assert!(row(&a, "apiError").await.is_none(), "nothing was published");
+    assert_ne!(
+        served_en(&a, "apiError.TOKEN_INVALID").as_deref(),
+        Some(evil)
+    );
+}
+
+/// A disabled provider keeps naming the identifiers it last provided: the
+/// type shows its name, not its raw id, while no loaded plugin provides it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_disabled_provider_still_names_the_contest_types_it_provided() {
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    upload(
+        &a,
+        &token,
+        translations_archive("zzz-en", true, "'nav.signIn' = \"Sign in\"\n"),
+    )
+    .await;
+    let manifest = std::fs::read_to_string(fixture(BUNDLED).join("plugin.toml")).unwrap()
+        + "\n[translations]\nen = \"i18n/en.toml\"\n";
+    let wasm = std::fs::read(fixture(BUNDLED).join("server_plugin.wasm")).unwrap();
+    upload(
+        &a,
+        &token,
+        tar_gz(&[
+            (&format!("{UPLOAD_ONLY}/plugin.toml"), manifest.as_bytes()),
+            (&format!("{UPLOAD_ONLY}/server_plugin.wasm"), &wasm),
+            (
+                &format!("{UPLOAD_ONLY}/i18n/en.toml"),
+                b"'identifier.contestType.fmt-y' = \"Format Y\"\n",
+            ),
+        ]),
+    )
+    .await;
+    // What the plugin provided when it last loaded, as the fleet records it.
+    a.db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE plugin SET governs = $1 WHERE id = $2",
+        [
+            json!({
+                "visibility": false,
+                "contest_types": ["fmt-y"],
+                "problem_types": [],
+                "checkers": [],
+            })
+            .into(),
+            UPLOAD_ONLY.into(),
+        ],
+    ))
+    .await
+    .unwrap();
+    plugin_lifecycle::reconcile(&a.state).await.unwrap();
+
+    let res = a
+        .post_with_token(
+            &routes::admin_plugin_disable(UPLOAD_ONLY),
+            &json!({}),
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(
+        served_en(&a, "identifier.contestType.fmt-y").as_deref(),
+        Some("Format Y")
     );
 }

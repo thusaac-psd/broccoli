@@ -102,12 +102,28 @@ const PROVISION_BACKOFF: Duration = Duration::from_secs(30);
 pub enum Unavailable {
     #[error("no plugin SQL connection was free within the call's deadline")]
     Busy,
-    #[error("the plugin SQL statement reached the call's deadline and was cancelled")]
+    #[error("the plugin SQL statement was cut at the call's deadline; its backend is cancelled")]
     Deadline,
     #[error("the plugin was unloaded while this call ran")]
     Unloaded,
     #[error("the plugin's database role could not be provisioned: {0}")]
     Unprovisioned(String),
+    #[error("the database is unreachable: {0}")]
+    Outage(String),
+}
+
+impl Unavailable {
+    /// A plugin statement's answer, as the call takes it: an outage of the
+    /// database ([`common::db::is_outage`]) says nothing about the
+    /// statement, so it fails the call as unavailable, which callers answer
+    /// with "try again" as they answer a busy pool; any other error is the
+    /// statement's own and goes back to the plugin.
+    pub fn settle<T>(answer: Result<T, DbErr>) -> Result<Result<T, DbErr>, Self> {
+        match answer {
+            Err(e) if common::db::is_outage(&e) => Err(Self::Outage(e.to_string())),
+            answer => Ok(answer),
+        }
+    }
 }
 
 /// The plugin call a lease is for.

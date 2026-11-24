@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use broccoli_api_types::visibility::PluginOutage;
 use plugin_core::error::PluginError;
 use plugin_core::registry::PluginStatus;
-use sea_orm::{ConnectionTrait, DbBackend, DbErr, EntityTrait, Set, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, DbErr, EntityTrait, Statement};
 
 use crate::entity::plugin as plugin_entity;
 use crate::error::AppError;
@@ -152,18 +152,24 @@ fn mismatch(published: Option<&Fingerprint>, local: Option<&Fingerprint>) -> Opt
 /// What a plugin governs, recorded fleet-wide whenever a replica loads it.
 /// A replica that cannot load the plugin (it failed, or the files are not
 /// on its disk) uses this to fail closed for exactly what the plugin would
-/// have decided, instead of for everything or nothing.
+/// have decided, instead of for everything or nothing, and to name the
+/// identifiers the plugin last provided.
+///
+/// One shape on both sides: Rust reads every field and no other, and the
+/// `plugin_governs_shape` check (migration m0017) stores only rows with
+/// exactly these keys, so the SQL that reads `plugin.governs` and this
+/// struct never see different rows.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Governs {
     /// It declares a `[[server.queries]] topic = "visibility"`.
     pub visibility: bool,
     /// The contest types its `init()` registered, sorted.
     pub contest_types: Vec<String>,
-    /// The locale whose host text it provides, as a language pack: one
-    /// enabled plugin at a time does (`publish_language_pack`).
-    pub host_locale: Option<String>,
     /// The problem types its `init()` registered an evaluator for, sorted.
     pub problem_types: Vec<String>,
+    /// The checker formats its `init()` registered a resolver for, sorted.
+    pub checkers: Vec<String>,
 }
 
 /// What a key that plugins provide names: what a unit of work needs a
@@ -329,6 +335,17 @@ impl PluginLifecycle {
         }
     }
 
+    /// Every plugin's recorded [`Governs`], in plugin id order.
+    pub fn recorded_governs(&self) -> Vec<(String, Governs)> {
+        let mut recorded: Vec<(String, Governs)> = self
+            .governs
+            .read()
+            .map(|map| map.iter().map(|(id, g)| (id.clone(), g.clone())).collect())
+            .unwrap_or_default();
+        recorded.sort_by(|a, b| a.0.cmp(&b.0));
+        recorded
+    }
+
     fn set_governs(&self, plugin_id: &str, governs: Governs) {
         if let Ok(mut map) = self.governs.write() {
             map.insert(plugin_id.to_string(), governs);
@@ -478,7 +495,7 @@ pub async fn boot(state: &AppState) -> anyhow::Result<Vec<PluginActivationFailur
         .into_iter()
         .map(|p| p.id)
         .collect();
-    register_rows(&state.db, &ids).await?;
+    register_rows(&state.db, &registrations(state, &ids)).await?;
     let failures = with_applied(state, async |applied| {
         reconcile_locked(state, applied).await
     })
@@ -717,12 +734,16 @@ async fn reconcile_locked(
     }
     let published_archives = published_archives(&rows);
     for row in rows {
-        if let Some(governs) = row
-            .governs
-            .clone()
-            .and_then(|g| serde_json::from_value::<Governs>(g).ok())
-        {
-            state.plugin_lifecycle.set_governs(&row.id, governs);
+        if let Some(governs) = row.governs.clone() {
+            match serde_json::from_value::<Governs>(governs) {
+                Ok(governs) => state.plugin_lifecycle.set_governs(&row.id, governs),
+                // The table's shape check stores only rows this reads.
+                Err(e) => tracing::error!(
+                    plugin_id = %row.id,
+                    error = %e,
+                    "A plugin's recorded governs does not have the one shape both readers share"
+                ),
+            }
         }
         let desired = Desired::of(&row);
         // Record the desired state BEFORE applying it: while an enabled
@@ -962,34 +983,72 @@ async fn deactivate(state: &AppState, plugin_id: &str) -> Result<(), PluginError
 }
 
 /// Record plugins found on this replica's disk that have no row yet, as
-/// enabled (a newly installed plugin is on by default). Idempotent, so
-/// replicas booting together cannot fail on the primary key, and in id
-/// order, so they cannot deadlock either: each insert locks its rows in the
-/// order it lists them, and replicas that list the same rows in one order
-/// wait for each other instead of each holding a row the other wants.
-async fn register_rows(db: &impl ConnectionTrait, ids: &[String]) -> Result<(), DbErr> {
+/// enabled (a newly installed plugin is on by default), each with the locale
+/// it provides as a language pack (`plugins`: id and locale). A pack for a
+/// locale another enabled plugin provides is recorded disabled instead,
+/// since one enabled pack provides a locale, and logged; of two new packs for
+/// one locale the one whose id sorts first is enabled.
+///
+/// Idempotent, so replicas booting together cannot fail on the primary key,
+/// and in id order, so they cannot deadlock either: each insert locks its
+/// rows in the order it lists them, and replicas that list the same rows in
+/// one order wait for each other instead of each holding a row the other
+/// wants.
+async fn register_rows(
+    db: &impl ConnectionTrait,
+    plugins: &[(String, Option<String>)],
+) -> Result<(), DbErr> {
     // A bundle directory whose name is not a valid id is never a plugin.
-    let ids: std::collections::BTreeSet<&String> = ids
+    let plugins: std::collections::BTreeMap<&String, &Option<String>> = plugins
         .iter()
-        .filter(|id| {
+        .filter(|(id, _)| {
             PluginId::parse(id.as_str())
                 .inspect_err(|e| tracing::warn!(error = %e, "Ignoring a bundled plugin directory"))
                 .is_ok()
         })
+        .map(|(id, locale)| (id, locale))
         .collect();
-    if ids.is_empty() {
+    if plugins.is_empty() {
         return Ok(());
     }
-    plugin_entity::Entity::insert_many(ids.into_iter().map(|id| plugin_entity::ActiveModel {
-        id: Set(id.clone()),
-        is_enabled: Set(true),
-        generation: Set(0),
-        ..Default::default()
-    }))
-    .on_conflict_do_nothing_on([plugin_entity::Column::Id])
-    .exec(db)
-    .await?;
+    let insert = |enabled: bool, conflict: &str| {
+        let rows: Vec<String> = (0..plugins.len())
+            .map(|i| format!("(${}, {enabled}, 0, ${})", 2 * i + 1, 2 * i + 2))
+            .collect();
+        let values = plugins
+            .iter()
+            .flat_map(|(id, locale)| [id.as_str().into(), locale.as_deref().into()]);
+        Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!(
+                "INSERT INTO plugin (id, is_enabled, generation, host_locale) VALUES {} \
+                 ON CONFLICT {conflict} DO NOTHING RETURNING id",
+                rows.join(", ")
+            ),
+            values.collect::<Vec<sea_orm::Value>>(),
+        )
+    };
+    // Enabled where nothing conflicts: neither the id nor, for a pack, the
+    // locale an enabled plugin provides (the locale index).
+    db.query_all_raw(insert(true, "")).await?;
+    // What is still missing was kept out by a taken locale.
+    for row in db.query_all_raw(insert(false, "(id)")).await? {
+        let id: String = row.try_get("", "id")?;
+        tracing::warn!(
+            plugin_id = %id,
+            locale = ?plugins.iter().find(|(p, _)| p.as_str() == id).and_then(|(_, l)| l.as_deref()),
+            "Registered a language pack disabled: another enabled plugin provides its locale"
+        );
+    }
     Ok(())
+}
+
+/// What [`register_rows`] records for each of `ids` registered here: the id
+/// and the locale its manifest provides as a language pack.
+fn registrations(state: &AppState, ids: &[String]) -> Vec<(String, Option<String>)> {
+    ids.iter()
+        .map(|id| (id.clone(), registered_host_locale(state, id)))
+        .collect()
 }
 
 /// Pick up plugin directories added to this replica's disk. Returns whether
@@ -999,26 +1058,33 @@ async fn register_new_dirs(state: &AppState) -> Result<bool, DbErr> {
         tracing::error!(error = %e, "Failed to rediscover plugins");
         Vec::new()
     });
-    register_rows(&state.db, &new_ids).await?;
+    register_rows(&state.db, &registrations(state, &new_ids)).await?;
     Ok(!new_ids.is_empty())
+}
+
+/// The locale `plugin_id`'s manifest registered here provides as a
+/// language pack.
+fn registered_host_locale(state: &AppState, plugin_id: &str) -> Option<String> {
+    state
+        .plugins
+        .get_registry()
+        .read()
+        .ok()?
+        .get(plugin_id)?
+        .manifest
+        .host_locale()
+        .map(str::to_string)
 }
 
 /// What the plugin loaded here governs.
 async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
-    let (visibility, host_locale) = state
+    let visibility = state
         .plugins
         .get_registry()
         .read()
         .ok()
-        .and_then(|r| {
-            r.get(plugin_id).map(|e| {
-                (
-                    declares_visibility(&e.manifest),
-                    e.manifest.host_locale().map(str::to_string),
-                )
-            })
-        })
-        .unwrap_or_default();
+        .and_then(|r| r.get(plugin_id).map(|e| declares_visibility(&e.manifest)))
+        .unwrap_or(false);
     let mut contest_types: Vec<String> = state
         .registries
         .contest_type_registry
@@ -1039,11 +1105,21 @@ async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
         .map(|(t, _)| t)
         .collect();
     problem_types.sort();
+    let mut checkers: Vec<String> = state
+        .registries
+        .checker_stage_registry
+        .read()
+        .await
+        .registered_by(plugin_id)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
+    checkers.sort();
     Governs {
         visibility,
         contest_types,
-        host_locale,
         problem_types,
+        checkers,
     }
 }
 
@@ -1120,8 +1196,11 @@ enum Change<'a> {
 /// `loaded` is what the serving replica loaded from `source`: its
 /// fingerprint becomes the version every other replica checks its own copy
 /// against, and what it governs is recorded in the same statement, so the
-/// record only ever describes a published version. `None` (a disable, or
-/// publishing a source that is not loaded) keeps the recorded ones.
+/// record only ever describes a published version, and so is the locale
+/// it provides as a language pack: a second enabled pack for a locale breaks
+/// the plugin table's unique index, which [`locale_taken`] reads. `None` (a
+/// disable, or publishing a source that is not loaded) keeps the recorded
+/// ones.
 async fn publish(
     db: &impl ConnectionTrait,
     plugin_id: &str,
@@ -1132,19 +1211,22 @@ async fn publish(
     let version = loaded.fingerprint.map(|f| f.version.clone());
     let hash = loaded.fingerprint.map(|f| f.hash.clone());
     let governs = loaded.governs.and_then(|g| serde_json::to_value(g).ok());
+    let host_locale = loaded.host_locale.map(str::to_string);
     let archive = source.archive_hash().map(str::to_string);
     let statement = match change {
         Change::Enable => Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash, governs)
-               VALUES ($1, TRUE, 1, NOW(), $2, $3, $4, $5)
+            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash, governs, host_locale)
+               VALUES ($1, TRUE, 1, NOW(), $2, $3, $4, $5, $6)
                ON CONFLICT (id) DO UPDATE
                  SET is_enabled = TRUE,
                      generation = plugin.generation + 1,
                      updated_at = NOW(),
                      version = COALESCE(EXCLUDED.version, plugin.version),
                      content_hash = COALESCE(EXCLUDED.content_hash, plugin.content_hash),
-                     governs = COALESCE(EXCLUDED.governs, plugin.governs)
+                     governs = COALESCE(EXCLUDED.governs, plugin.governs),
+                     host_locale = CASE WHEN EXCLUDED.governs IS NULL THEN plugin.host_locale
+                                        ELSE EXCLUDED.host_locale END
                  WHERE plugin.archive_hash IS NOT DISTINCT FROM EXCLUDED.archive_hash
                RETURNING generation"#,
             [
@@ -1153,6 +1235,7 @@ async fn publish(
                 hash.into(),
                 archive.into(),
                 governs.into(),
+                host_locale.into(),
             ],
         ),
         Change::Disable => Statement::from_sql_and_values(
@@ -1169,8 +1252,8 @@ async fn publish(
         // clause decides; without either, nothing is written.
         Change::Upload(replaces) => Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash, governs)
-               SELECT $1, TRUE, 1, NOW(), $2, $3, $4, $7
+            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash, governs, host_locale)
+               SELECT $1, TRUE, 1, NOW(), $2, $3, $4, $7, $8
                 WHERE $5 OR EXISTS (SELECT 1 FROM plugin WHERE id = $1)
                ON CONFLICT (id) DO UPDATE
                  SET is_enabled = TRUE,
@@ -1179,7 +1262,9 @@ async fn publish(
                      version = COALESCE(EXCLUDED.version, plugin.version),
                      content_hash = COALESCE(EXCLUDED.content_hash, plugin.content_hash),
                      archive_hash = EXCLUDED.archive_hash,
-                     governs = COALESCE(EXCLUDED.governs, plugin.governs)
+                     governs = COALESCE(EXCLUDED.governs, plugin.governs),
+                     host_locale = CASE WHEN EXCLUDED.governs IS NULL THEN plugin.host_locale
+                                        ELSE EXCLUDED.host_locale END
                  WHERE NOT $5 AND plugin.archive_hash IS NOT DISTINCT FROM $6
                RETURNING generation"#,
             [
@@ -1193,6 +1278,7 @@ async fn publish(
                     .map(str::to_string)
                     .into(),
                 governs.into(),
+                host_locale.into(),
             ],
         ),
         Change::Reload => Statement::from_sql_and_values(
@@ -1201,7 +1287,8 @@ async fn publish(
                   SET generation = generation + 1, updated_at = NOW(),
                       version = COALESCE($2, version),
                       content_hash = COALESCE($3, content_hash),
-                      governs = COALESCE($5, governs)
+                      governs = COALESCE($5, governs),
+                      host_locale = CASE WHEN $5 IS NULL THEN host_locale ELSE $6 END
                WHERE id = $1 AND is_enabled AND archive_hash IS NOT DISTINCT FROM $4
                RETURNING generation"#,
             [
@@ -1210,6 +1297,7 @@ async fn publish(
                 hash.into(),
                 archive.into(),
                 governs.into(),
+                host_locale.into(),
             ],
         ),
         Change::RemoveUpload(removed) => Statement::from_sql_and_values(
@@ -1218,7 +1306,8 @@ async fn publish(
                   SET generation = generation + 1, updated_at = NOW(), archive_hash = NULL,
                       version = COALESCE($2, version),
                       content_hash = COALESCE($3, content_hash),
-                      governs = COALESCE($5, governs)
+                      governs = COALESCE($5, governs),
+                      host_locale = CASE WHEN $5 IS NULL THEN host_locale ELSE $6 END
                WHERE id = $1 AND archive_hash = $4
                RETURNING generation"#,
             [
@@ -1227,6 +1316,7 @@ async fn publish(
                 hash.into(),
                 removed.into(),
                 governs.into(),
+                host_locale.into(),
             ],
         ),
     };
@@ -1236,45 +1326,38 @@ async fn publish(
     }
 }
 
-/// [`publish`] `change` for a language pack that provides `locale`'s host
-/// text, unless another enabled plugin provides it: one enabled pack at a
-/// time provides a locale, so a second never takes it over. Under a lock on
-/// the locale, so two packs enabled at once cannot both pass the check.
-async fn publish_language_pack(
-    state: &AppState,
+/// The unique index that keeps one enabled language pack per locale
+/// (migration m0016).
+const LOCALE_INDEX: &str = "plugin_one_enabled_per_host_locale";
+
+/// Whether `err` is a write refused because another enabled plugin provides
+/// its row's locale ([`LOCALE_INDEX`]).
+fn breaks_locale_index(err: &DbErr) -> bool {
+    match err {
+        DbErr::Exec(sea_orm::RuntimeErr::SqlxError(e))
+        | DbErr::Query(sea_orm::RuntimeErr::SqlxError(e)) => e
+            .as_database_error()
+            .and_then(|db| db.constraint())
+            .is_some_and(|constraint| constraint == LOCALE_INDEX),
+        _ => false,
+    }
+}
+
+/// The enabled plugin other than `plugin_id` that provides `locale`'s host
+/// text, if any.
+pub(crate) async fn locale_taken(
+    db: &impl ConnectionTrait,
     plugin_id: &str,
     locale: &str,
-    change: Change<'_>,
-    loaded: Loaded<'_>,
-    source: &PluginSource,
-) -> Result<Option<i64>, ChangeError> {
-    use sea_orm::TransactionTrait;
-
-    let txn = state.db.begin().await.map_err(ChangeError::Db)?;
-    crate::utils::advisory_lock::lock_xact(&txn, &format!("language-pack:{locale}"))
-        .await
-        .map_err(ChangeError::Db)?;
-    let taken = txn
+) -> Result<Option<String>, DbErr> {
+    let row = db
         .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT id FROM plugin \
-              WHERE id <> $1 AND is_enabled AND governs->>'host_locale' = $2 \
-              ORDER BY id LIMIT 1",
-            [plugin_id.into(), locale.into()],
+            "SELECT id FROM plugin WHERE is_enabled AND host_locale = $1 AND id <> $2",
+            [locale.into(), plugin_id.into()],
         ))
-        .await
-        .map_err(ChangeError::Db)?;
-    if let Some(row) = taken {
-        return Err(ChangeError::LanguagePackTaken {
-            locale: locale.to_string(),
-            by: row.try_get("", "id").map_err(ChangeError::Db)?,
-        });
-    }
-    let generation = publish(&txn, plugin_id, change, loaded, source)
-        .await
-        .map_err(ChangeError::Db)?;
-    txn.commit().await.map_err(ChangeError::Db)?;
-    Ok(generation)
+        .await?;
+    row.map(|row| row.try_get("", "id")).transpose()
 }
 
 /// What the serving replica loaded for a change it publishes.
@@ -1282,6 +1365,9 @@ async fn publish_language_pack(
 struct Loaded<'a> {
     fingerprint: Option<&'a Fingerprint>,
     governs: Option<&'a Governs>,
+    /// The locale its manifest provides as a language pack; recorded with
+    /// `governs`.
+    host_locale: Option<&'a str>,
 }
 
 /// Why a lifecycle change did not go through.
@@ -1378,22 +1464,24 @@ async fn load_then_publish(
     };
     let fingerprint = plugin_utils::fingerprint(&root).await;
     let governs = loaded_governs(state, plugin_id).await;
+    let host_locale = registered_host_locale(state, plugin_id);
     let loaded = Loaded {
         fingerprint: fingerprint.as_ref(),
         governs: Some(&governs),
+        host_locale: host_locale.as_deref(),
     };
-    let published = match &governs.host_locale {
-        Some(locale) => {
-            publish_language_pack(state, plugin_id, locale, change, loaded, source).await
-        }
-        None => publish(&state.db, plugin_id, change, loaded, source)
-            .await
-            .map_err(ChangeError::Db),
-    };
-    let published = match published {
+    let published = match publish(&state.db, plugin_id, change, loaded, source).await {
         Ok(Some(generation)) => Ok(generation),
         Ok(None) => Err(refused(state, plugin_id, change).await),
-        Err(e) => Err(e),
+        Err(e) if breaks_locale_index(&e) => {
+            let locale = host_locale.clone().unwrap_or_default();
+            match locale_taken(&state.db, plugin_id, &locale).await {
+                Ok(Some(by)) => Err(ChangeError::LanguagePackTaken { locale, by }),
+                Ok(None) => Err(ChangeError::Stale(plugin_id.to_string())),
+                Err(e) => Err(ChangeError::Db(e)),
+            }
+        }
+        Err(e) => Err(ChangeError::Db(e)),
     };
     let generation = match published {
         Ok(generation) => generation,
@@ -1744,6 +1832,7 @@ pub async fn remove_upload(
                 let loaded = Loaded {
                     fingerprint: fingerprint.as_ref(),
                     governs: None,
+                    host_locale: None,
                 };
                 let generation = publish(&state.db, plugin_id, change, loaded, &PluginSource::Bundle)
                 .await?
@@ -1819,7 +1908,7 @@ pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError>
             tracing::error!("Failed to rediscover plugins: {}", e);
             Vec::new()
         });
-        register_rows(&state.db, &new_ids).await?;
+        register_rows(&state.db, &registrations(state, &new_ids)).await?;
         // A new row starts enabled unless an operator already recorded it as
         // disabled; apply whatever the table says.
         let rows = plugin_entity::Entity::find().all(&state.db).await?;
@@ -1860,6 +1949,122 @@ pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError>
 mod tests {
     use super::*;
 
+    /// One enabled pack provides a locale: a new pack for a locale an enabled
+    /// plugin provides is registered disabled, and of two new packs for one
+    /// locale only one is enabled, whatever order they are listed in.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_language_pack_for_a_taken_locale_is_registered_disabled() {
+        let (_container, db) = migrated_database().await;
+        let pack = |id: &str, locale: &str| (id.to_string(), Some(locale.to_string()));
+        register_rows(
+            &db,
+            &[
+                pack("en-b", "en"),
+                ("other".to_string(), None),
+                pack("en-a", "en"),
+            ],
+        )
+        .await
+        .expect("register");
+        register_rows(&db, &[pack("en-c", "en"), pack("zh", "zh-CN")])
+            .await
+            .expect("register again");
+        let mut rows: Vec<(String, bool)> = plugin_entity::Entity::find()
+            .all(&db)
+            .await
+            .expect("rows")
+            .into_iter()
+            .map(|row| (row.id, row.is_enabled))
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            [
+                ("en-a".to_string(), true),
+                ("en-b".to_string(), false),
+                ("en-c".to_string(), false),
+                ("other".to_string(), true),
+                ("zh".to_string(), true),
+            ]
+        );
+    }
+
+    /// `plugin.governs` has the one shape [`Governs`] reads: a row missing a
+    /// field or carrying another is refused when it is written, so the SQL
+    /// that reads the column and the struct never read a row differently.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn governs_is_stored_only_in_the_shape_both_readers_share() {
+        let (_container, db) = migrated_database().await;
+        let write = |governs: serde_json::Value| {
+            db.execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO plugin (id, is_enabled, generation, governs) VALUES ('p', TRUE, 0, $1) \
+                 ON CONFLICT (id) DO UPDATE SET governs = EXCLUDED.governs",
+                [governs.into()],
+            ))
+        };
+        for partial in [
+            serde_json::json!({"visibility": false, "contest_types": ["x"]}),
+            serde_json::json!({
+                "visibility": false, "contest_types": [], "problem_types": [], "checkers": [],
+                "host_locale": null,
+            }),
+            serde_json::json!({
+                "visibility": "no", "contest_types": [], "problem_types": [], "checkers": [],
+            }),
+            serde_json::json!([]),
+        ] {
+            assert!(
+                write(partial.clone()).await.is_err(),
+                "{partial} was stored"
+            );
+        }
+        let whole = Governs {
+            visibility: true,
+            contest_types: vec!["x".into()],
+            problem_types: vec![],
+            checkers: vec!["lines".into()],
+        };
+        write(serde_json::to_value(&whole).unwrap())
+            .await
+            .expect("the whole shape is stored");
+        let stored = plugin_entity::Entity::find_by_id("p")
+            .one(&db)
+            .await
+            .expect("row")
+            .and_then(|row| row.governs)
+            .expect("governs");
+        assert_eq!(serde_json::from_value::<Governs>(stored).unwrap(), whole);
+    }
+
+    /// A migrated database in a container of its own.
+    async fn migrated_database() -> (
+        testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
+        common::db::DatabaseConnection,
+    ) {
+        use testcontainers::ImageExt;
+        use testcontainers::runners::AsyncRunner;
+
+        let container = testcontainers_modules::postgres::Postgres::default()
+            .with_tag("17-alpine")
+            .start()
+            .await
+            .expect("start postgres");
+        let port = container.get_host_port_ipv4(5432).await.expect("port");
+        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        crate::database::BootSession::acquire(&url)
+            .await
+            .expect("boot session")
+            .migrate()
+            .await
+            .expect("migrate");
+        let db = sea_orm::Database::connect(&url)
+            .await
+            .expect("connect")
+            .into();
+        (container, db)
+    }
+
     /// Two replicas booting together register overlapping plugin rows. One
     /// holds the row of `a` (its insert has not committed) while the other
     /// registers `b` and `a`, listed in the order a hash map gave them: the
@@ -1892,11 +2097,11 @@ mod tests {
         let (first, second, observer) = (connect().await, connect().await, connect().await);
 
         let holding = first.begin().await.expect("begin");
-        register_rows(&holding, &["a".to_string()])
+        register_rows(&holding, &[("a".to_string(), None)])
             .await
             .expect("insert");
         let registering = tokio::spawn(async move {
-            register_rows(&second, &["b".to_string(), "a".to_string()]).await
+            register_rows(&second, &[("b".to_string(), None), ("a".to_string(), None)]).await
         });
         // The second replica waits on the row the first holds.
         loop {
@@ -1904,7 +2109,7 @@ mod tests {
                 .query_one_raw(Statement::from_string(
                     DbBackend::Postgres,
                     "SELECT count(*) FROM pg_stat_activity \
-                     WHERE wait_event_type = 'Lock' AND query LIKE 'INSERT INTO \"plugin\"%'",
+                     WHERE wait_event_type = 'Lock' AND query LIKE 'INSERT INTO plugin %'",
                 ))
                 .await
                 .expect("activity")
@@ -1920,7 +2125,7 @@ mod tests {
             .execute_unprepared("SET LOCAL lock_timeout = '10s'")
             .await
             .expect("lock timeout");
-        register_rows(&holding, &["b".to_string()])
+        register_rows(&holding, &[("b".to_string(), None)])
             .await
             .expect("insert");
         holding.commit().await.expect("commit");
