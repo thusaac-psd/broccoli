@@ -63,6 +63,8 @@ export interface SubtaskScoresResponse {
 export interface ScoreboardProblemScore {
   problem_id: number;
   score: number;
+  /** The maximum this cell's score was judged against. */
+  max_score: number;
 }
 
 export interface ScoreboardEntry extends UserDisplayIdentity {
@@ -83,6 +85,7 @@ export interface ScoreboardResponse {
   feedback_level: FeedbackLevel;
   scoreboard_visibility: ScoreboardVisibility;
   scoreboard_tiebreaker: ScoreboardTiebreaker;
+  /** Each problem's maximum under its current subtasks. */
   max_scores: Record<string, number>;
   /** The contest's problems in its order, with the labels the contest gives them. */
   problems: { problem_id: number; label: string }[];

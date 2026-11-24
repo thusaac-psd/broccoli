@@ -101,9 +101,12 @@ The submission view itself hides per test case results at every level below
 A submission shows the subtasks it was judged with and the score each one
 got, and its total against the maximum it was judged with, so a change to a
 problem's subtasks after judging changes no result a submission already
-shows; judge it again to score it under the new subtasks. The
-`sum_best_subtask` scoreboard combines every submission under the
-problem's current subtasks.
+shows; judge it again to score it under the new subtasks. A result shows
+no maximum until the one it was judged with is known. The `sum_best_subtask`
+scoreboard combines every submission under the problem's current subtasks,
+so its cells read against the current maximum; under the other scoring modes
+a cell holds one submission's result and reads against the maximum that
+result was judged with.
 
 A subtask that cannot score is worth nothing: it adds nothing to the
 problem's maximum and shows a maximum of 0, so a problem none of whose

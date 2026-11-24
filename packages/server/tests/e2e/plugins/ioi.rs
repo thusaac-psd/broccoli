@@ -683,6 +683,44 @@ async fn a_judgements_subtask_scores_are_the_ones_it_was_scored_with_after_the_c
         "the judged total reads against the maximum it was scored with: {}",
         scores.text
     );
+
+    // A board cell shows its score against the maximum it was scored
+    // against: summed from the best subtasks, the cell is scored now under
+    // the current subtasks; holding one submission's result, it reads
+    // against the maximum that result was judged with.
+    let cell = || {
+        let app = &app;
+        let admin = admin.clone();
+        async move {
+            let board = app
+                .get_with_token(
+                    &format!("/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}/scoreboard"),
+                    &admin,
+                )
+                .await;
+            assert_eq!(board.status, 200, "{}", board.text);
+            let cell = &board.body["rankings"][0]["problems"][0];
+            (cell["score"].as_f64(), cell["max_score"].as_f64())
+        }
+    };
+    assert_eq!(
+        cell().await,
+        (Some(30.0), Some(30.0)),
+        "sum of best subtasks"
+    );
+    let res = app
+        .put_with_token(
+            &format!("/api/v1/contests/{contest_id}/config/ioi/contest"),
+            &json!({ "config": { "scoring_mode": "max_submission" }, "enabled": true }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(
+        cell().await,
+        (Some(100.0), Some(100.0)),
+        "the best submission"
+    );
 }
 
 /// A judgement whose later attempt stands as a system error scores nothing

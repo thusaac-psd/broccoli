@@ -287,14 +287,11 @@ function Rankings({
     : [];
   const problemIds = columns.map((p) => p.problem_id);
 
-  // The server sends every problem's maximum: the sum of its subtasks'
-  // maximums, the default subtask's for a problem with no subtask config.
-  const maxPerProblem: Record<number, number> = {};
-  for (const pid of problemIds) {
-    maxPerProblem[pid] = scoreboard.max_scores[String(pid)] ?? 0;
-  }
-  const maxTotal =
-    Object.values(maxPerProblem).reduce((sum, v) => sum + v, 0) || 1;
+  // A row without cells is shown against the problems' current maximums.
+  const currentMaxTotal = Object.values(scoreboard.max_scores).reduce(
+    (sum, v) => sum + v,
+    0,
+  );
 
   // The board never widens its container: a narrow screen scrolls the
   // table inside its border instead of clipping its last columns.
@@ -396,8 +393,7 @@ function Rankings({
                   key={entry.user_id}
                   entry={entry}
                   problemIds={problemIds}
-                  maxPerProblem={maxPerProblem}
-                  maxTotal={maxTotal}
+                  currentMaxTotal={currentMaxTotal}
                   showTimeTiebreaker={showTimeTiebreaker}
                 />
               ))}
@@ -412,22 +408,23 @@ function Rankings({
 function RankRow({
   entry,
   problemIds,
-  maxPerProblem,
-  maxTotal,
+  currentMaxTotal,
   showTimeTiebreaker,
 }: {
   entry: ScoreboardEntry;
   problemIds: number[];
-  maxPerProblem: Record<number, number>;
-  maxTotal: number;
+  currentMaxTotal: number;
   showTimeTiebreaker: boolean;
 }) {
-  const problemScoreMap: Record<number, number> = {};
-  if (entry.problems) {
-    for (const p of entry.problems) {
-      problemScoreMap[p.problem_id] = p.score;
-    }
-  }
+  // Each cell comes with the maximum its score was judged against, so a
+  // result judged before the problem's subtasks changed keeps its colour.
+  const cells = new Map(
+    (entry.problems ?? []).map((cell) => [cell.problem_id, cell]),
+  );
+  const maxTotal =
+    (entry.problems
+      ? entry.problems.reduce((sum, cell) => sum + cell.max_score, 0)
+      : currentMaxTotal) || 1;
 
   return (
     <tr className="transition-colors duration-150">
@@ -445,9 +442,14 @@ function RankRow({
         {getUserDisplayName(entry)}
       </td>
       {problemIds.map((pid) => {
-        const score = problemScoreMap[pid] ?? 0;
-        const max = maxPerProblem[pid] ?? 0;
-        return <ScoreCell key={pid} score={score} max={max} />;
+        const cell = cells.get(pid);
+        return (
+          <ScoreCell
+            key={pid}
+            score={cell?.score ?? 0}
+            max={cell?.max_score ?? 0}
+          />
+        );
       })}
       {showTimeTiebreaker && (
         <td className="py-1.5 px-3 text-center font-mono tabular-nums text-[13px] border-b border-border text-muted-foreground whitespace-nowrap">

@@ -425,7 +425,7 @@ export const PLUGIN_ROUTES: [string, RegExp, Handler][] = [
           display_name: 'Alice',
           total_score: 40,
           total_time_seconds: 600,
-          problems: [{ problem_id: 1, score: 40 }],
+          problems: [{ problem_id: 1, score: 40, max_score: 100 }],
         },
       ],
     }),

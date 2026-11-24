@@ -343,7 +343,8 @@ function TotalScoreSummary({
   tokened,
 }: {
   totalScore: number;
-  maxScore: number;
+  /** The maximum the total was judged against; unknown until it arrives. */
+  maxScore: number | undefined;
   tokened?: boolean;
 }) {
   const { t } = useTranslation();
@@ -357,12 +358,18 @@ function TotalScoreSummary({
         </div>
         <div
           className="flex items-baseline justify-center font-mono tabular-nums text-2xl font-bold"
-          style={{ color: scoreColor(totalScore, maxScore) }}
+          style={
+            maxScore === undefined
+              ? undefined
+              : { color: scoreColor(totalScore, maxScore) }
+          }
         >
           {totalScore.toFixed(totalScore === Math.floor(totalScore) ? 0 : 2)}
-          <span className="text-base font-normal text-muted-foreground">
-            /{maxScore.toFixed(maxScore === Math.floor(maxScore) ? 0 : 2)}
-          </span>
+          {maxScore !== undefined && (
+            <span className="text-base font-normal text-muted-foreground">
+              /{maxScore.toFixed(maxScore === Math.floor(maxScore) ? 0 : 2)}
+            </span>
+          )}
         </div>
       </div>
     </div>
@@ -706,9 +713,10 @@ export function IoiSubmissionResult({
     );
   }
 
-  // A judged total reads against the maximum its judgement was scored with;
-  // the problem's current maximum stands in only until that arrives.
-  const configMaxScore = subtaskScoresData?.max_score ?? taskConfig.max_score;
+  // A judged total reads against the maximum its judgement was scored with,
+  // and shows no maximum until that arrives: the problem's current one may
+  // differ.
+  const configMaxScore = subtaskScoresData?.max_score ?? undefined;
 
   // Feedback: total_only
   if (effectiveFeedback === 'total_only') {
@@ -752,6 +760,12 @@ export function IoiSubmissionResult({
         <TotalScoreSummary totalScore={totalScore} maxScore={configMaxScore} />
       </div>
     );
+  }
+
+  // The subtasks the judgement was scored with are still on their way: the
+  // problem's current ones may differ, so show neither yet.
+  if (!subtaskScores && subtaskScoresQuery.isPending) {
+    return <LoadingSkeleton />;
   }
 
   const totalScore = subtaskResults.reduce(

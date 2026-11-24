@@ -493,6 +493,8 @@ pub(crate) fn handle_scoreboard(
     struct ProblemScore {
         problem_id: i32,
         score: f64,
+        /// The maximum this cell's score was judged against.
+        max_score: f64,
     }
 
     /// A row's score. Absent when the viewer's feedback level shows no
@@ -562,6 +564,10 @@ pub(crate) fn handle_scoreboard(
                     prob_scores.push(ProblemScore {
                         problem_id: pid,
                         score: round_score(cell.score),
+                        max_score: round_score(
+                            cell.judged_max_score
+                                .unwrap_or_else(|| max_scores.get(&pid).copied().unwrap_or(0.0)),
+                        ),
                     });
                 }
                 let score = RankScore {

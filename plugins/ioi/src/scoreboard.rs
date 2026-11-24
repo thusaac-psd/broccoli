@@ -13,7 +13,7 @@ use serde::Deserialize;
 // are also used directly by the #[cfg(test)] unit tests, so gate the latter
 // two more broadly.
 #[cfg(target_arch = "wasm32")]
-use crate::case_ratios::{CaseRatios, JOIN_JUDGED_RATIOS};
+use crate::case_ratios::{CaseRatios, JOIN_JUDGED_RATIOS, JUDGED_MAX_SCORE};
 #[cfg(target_arch = "wasm32")]
 use crate::config::{ContestConfig, ScoringMode, SubtaskDef};
 #[cfg(any(target_arch = "wasm32", test))]
@@ -113,6 +113,7 @@ struct MaxSubmissionScoreboardRow {
     problem_id: i32,
     score: f64,
     score_time_seconds: i64,
+    max_score: Option<f64>,
 }
 
 // Only constructed by the wasm32-gated cell loaders below.
@@ -121,6 +122,11 @@ struct MaxSubmissionScoreboardRow {
 pub(crate) struct ScoreboardCell {
     pub(crate) score: f64,
     pub(crate) score_time_seconds: i64,
+    /// The maximum the cell's score was judged against, when the cell holds
+    /// one judged result (`JUDGED_MAX_SCORE`). `None` for a cell scored now
+    /// against the problem's current subtasks, or holding nothing: its
+    /// maximum is the problem's current one.
+    pub(crate) judged_max_score: Option<f64>,
 }
 
 // Only constructed by the wasm32-gated
@@ -132,6 +138,7 @@ struct ScoreboardSubmissionRow {
     problem_id: i32,
     score: f64,
     elapsed_seconds: i64,
+    max_score: Option<f64>,
 }
 
 // Only constructed by the wasm32-gated `load_sum_best_subtask_scoreboard_cells`
@@ -165,13 +172,15 @@ fn load_max_submission_scoreboard_cells(
         "WITH scored AS ( \
              SELECT s.user_id, s.problem_id, sj.score as score, \
                     GREATEST(EXTRACT(EPOCH FROM (s.created_at - c.start_time))::bigint, 0) \
-                      as elapsed_seconds \
+                      as elapsed_seconds, \
+                    {JUDGED_MAX_SCORE} as max_score, s.id \
              FROM submission s \
              JOIN contest c ON c.id = s.contest_id \
              JOIN submission_judgement sj \
                ON sj.submission_id = s.id \
               AND sj.is_current = TRUE \
               AND sj.judge_epoch = s.judge_epoch \
+             LEFT {JOIN_JUDGED_RATIOS} \
              WHERE s.contest_id = {} \
                AND s.user_id IN ({}) \
                AND s.problem_id IN ({}) \
@@ -184,15 +193,17 @@ fn load_max_submission_scoreboard_cells(
          ) \
          SELECT m.user_id, m.problem_id, m.score, \
                 COALESCE(MIN(s.elapsed_seconds) FILTER \
-                    (WHERE m.score > 0.0 AND s.score >= m.score - {}), 0) \
-                    as score_time_seconds \
+                    (WHERE m.score > 0.0 AND s.score >= m.score - {eps}), 0) \
+                    as score_time_seconds, \
+                (ARRAY_AGG(s.max_score ORDER BY s.elapsed_seconds, s.id) \
+                    FILTER (WHERE s.score >= m.score - {eps}))[1] as max_score \
          FROM maxes m \
          JOIN scored s ON s.user_id = m.user_id AND s.problem_id = m.problem_id \
          GROUP BY m.user_id, m.problem_id, m.score",
         contest_placeholder,
         user_placeholders.join(","),
         problem_placeholders.join(","),
-        score_epsilon_placeholder,
+        eps = score_epsilon_placeholder,
         standing = standing_result("s"),
     );
     let rows: Vec<MaxSubmissionScoreboardRow> = host.db.query_with_args(&sql, &p.into_args())?;
@@ -204,6 +215,7 @@ fn load_max_submission_scoreboard_cells(
                 ScoreboardCell {
                     score: r.score,
                     score_time_seconds: r.score_time_seconds,
+                    judged_max_score: r.max_score,
                 },
             )
         })
@@ -252,13 +264,15 @@ fn load_best_tokened_or_last_scoreboard_cells(
                 s.user_id, s.problem_id, \
                 COALESCE(sj.score, 0.0) as score, \
                 GREATEST(EXTRACT(EPOCH FROM (s.created_at - c.start_time))::bigint, 0) \
-                  as elapsed_seconds \
+                  as elapsed_seconds, \
+                {JUDGED_MAX_SCORE} as max_score \
          FROM submission s \
          JOIN contest c ON c.id = s.contest_id \
          JOIN submission_judgement sj \
            ON sj.submission_id = s.id \
           AND sj.is_current = TRUE \
           AND sj.judge_epoch = s.judge_epoch \
+         LEFT {JOIN_JUDGED_RATIOS} \
          WHERE s.contest_id = {} \
            AND s.user_id IN ({}) \
            AND s.problem_id IN ({}) \
@@ -288,13 +302,15 @@ fn load_best_tokened_or_last_scoreboard_cells(
             "SELECT s.user_id, s.problem_id, \
                     COALESCE(sj.score, 0.0) as score, \
                     GREATEST(EXTRACT(EPOCH FROM (s.created_at - c.start_time))::bigint, 0) \
-                      as elapsed_seconds \
+                      as elapsed_seconds, \
+                    {JUDGED_MAX_SCORE} as max_score \
              FROM submission s \
              JOIN contest c ON c.id = s.contest_id \
              JOIN submission_judgement sj \
                ON sj.submission_id = s.id \
               AND sj.is_current = TRUE \
               AND sj.judge_epoch = s.judge_epoch \
+             LEFT {JOIN_JUDGED_RATIOS} \
              WHERE s.contest_id = {} \
                AND s.user_id IN ({}) \
                AND s.problem_id IN ({}) \
@@ -333,28 +349,23 @@ fn load_best_tokened_or_last_scoreboard_cells(
                 .unwrap_or(0.0);
             let last_score = last_by_cell.get(&key).map(|row| row.score).unwrap_or(0.0);
             let score = score_best_tokened_or_last(tokened_best, last_score);
-            let mut score_time_seconds = 0;
-            if score > 0.0 {
-                let mut eligible_times = Vec::new();
-                if let Some(rows) = tokened_by_cell.get(&key) {
-                    eligible_times.extend(
-                        rows.iter()
-                            .filter(|row| row.score >= score - SCORE_EPSILON)
-                            .map(|row| row.elapsed_seconds),
-                    );
-                }
-                if let Some(row) = last_by_cell.get(&key)
-                    && row.score >= score - SCORE_EPSILON
-                {
-                    eligible_times.push(row.elapsed_seconds);
-                }
-                score_time_seconds = eligible_times.into_iter().min().unwrap_or(0);
-            }
+            // The earliest submission holding the cell's score gives its
+            // score time and the maximum it was judged against.
+            let holder = tokened_by_cell
+                .get(&key)
+                .into_iter()
+                .flatten()
+                .chain(last_by_cell.get(&key))
+                .filter(|row| row.score >= score - SCORE_EPSILON)
+                .min_by_key(|row| row.elapsed_seconds);
             cells.insert(
                 key,
                 ScoreboardCell {
                     score,
-                    score_time_seconds,
+                    score_time_seconds: holder
+                        .filter(|_| score > 0.0)
+                        .map_or(0, |row| row.elapsed_seconds),
+                    judged_max_score: holder.and_then(|row| row.max_score),
                 },
             );
         }
@@ -476,6 +487,8 @@ fn load_sum_best_subtask_scoreboard_cells(
                 ScoreboardCell {
                     score,
                     score_time_seconds,
+                    // Scored now, against the problem's current subtasks.
+                    judged_max_score: None,
                 },
             );
         }

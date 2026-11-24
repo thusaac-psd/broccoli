@@ -56,6 +56,15 @@ pub struct JudgedSubtasks {
 pub const JOIN_JUDGED_RATIOS: &str =
     "JOIN case_ratio cr ON cr.judgement_id = sj.id AND cr.judge_epoch = sj.judge_epoch";
 
+/// The maximum judgement `sj` was scored against: the sum of the maxima of
+/// the subtasks its `case_ratio` row (joined as `cr`, `LEFT` of
+/// `JOIN_JUDGED_RATIOS`) stores. NULL when no row was stored. A view of one
+/// judged result shows it against this maximum, not the problem's current
+/// one, as the subtask-scores route does.
+#[cfg(target_arch = "wasm32")]
+pub const JUDGED_MAX_SCORE: &str = "(SELECT SUM((st->>'max_score')::float8) \
+     FROM jsonb_array_elements(cr.subtasks) st)";
+
 /// The plugin-owned table: one row per judgement, its ratios as a JSON object
 /// keyed by test case id and its subtask results as a JSON array in the
 /// order of the subtasks it was scored by.
