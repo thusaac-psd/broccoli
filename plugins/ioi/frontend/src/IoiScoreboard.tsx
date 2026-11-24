@@ -11,8 +11,6 @@ import { useEffect, useRef, useState } from 'react';
 import { useIoiApi } from './hooks/useIoiApi';
 import type { ScoreboardEntry, ScoreboardResponse } from './types';
 
-/** How often a live board asks for new results. */
-
 interface IoiScoreboardProps {
   contestId?: number;
 }

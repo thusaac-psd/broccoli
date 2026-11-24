@@ -17,8 +17,6 @@ import { type ReactNode, useEffect, useState } from 'react';
 import { useIcpcApi } from './hooks/useIcpcApi';
 import type { ProblemCell, StandingsEntry, StandingsResponse } from './types';
 
-/** How often a live board asks for new results. */
-
 interface IcpcScoreboardProps {
   contestId?: number;
 }
