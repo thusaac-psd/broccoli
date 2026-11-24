@@ -488,6 +488,17 @@ impl Client {
 
     /// The languages the server's plugins registered, with the file
     /// extensions each one claims.
+    /// Plugin names as the server's English catalog gives them, read the
+    /// first time one is named. A catalog that cannot be read names every
+    /// plugin by its id.
+    pub fn plugin_names(&self) -> crate::model::PluginNames<'_> {
+        crate::model::PluginNames::new(move || {
+            self.get("/api/v1/i18n/translations/en")
+                .and_then(|resp| self.parse_response(resp))
+                .unwrap_or_default()
+        })
+    }
+
     pub fn languages(&self) -> ClientResult<Vec<LanguageRegistryItem>> {
         let resp = self.get("/api/v1/plugins/registries")?;
         let registries: RegistriesResponse = self.parse_response(resp)?;

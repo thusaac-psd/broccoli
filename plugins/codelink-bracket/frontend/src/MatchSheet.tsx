@@ -682,8 +682,8 @@ function OutcomeBadge({
 }: {
   submission: Parameters<typeof getVerdictBadge>[0];
 }) {
-  const { t } = useTranslation();
-  const { label, variant } = getVerdictBadge(submission, t);
+  const { t, lookup } = useTranslation();
+  const { label, variant } = getVerdictBadge(submission, { t, lookup });
   return (
     <Badge variant={variant} className="text-[11px]">
       {label}

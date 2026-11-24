@@ -98,7 +98,7 @@ pub async fn list_queues(
     tag = "System",
     operation_id = "getSystemOverview",
     summary = "Aggregated system health",
-    description = "Returns workers, queue depths, whether the fleet takes work (`intake`), submissions in flight, queued and parked behind a disabled contest type, and the unresolved DLQ count in a single response. While the message queue is unreachable, `queue_state` is `unreachable`, `queues` is empty and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.",
+    description = "Returns workers, queue depths, whether the fleet takes work (`intake`), submissions in flight, queued and parked (waiting until every plugin they need, of any kind `Provided` names, has an enabled provider), and the unresolved DLQ count in a single response. While the message queue is unreachable, `queue_state` is `unreachable`, `queues` is empty and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.",
     responses(
         (status = 200, description = "System overview", body = SystemOverviewResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),

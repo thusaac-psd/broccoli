@@ -36,7 +36,7 @@ export function SubmissionDetailView({
   submissionId,
   contestId,
 }: SubmissionDetailViewProps) {
-  const { t } = useTranslation();
+  const { t, lookup } = useTranslation();
   const languageName = useLanguageName();
   const format = useFormat();
   const detail = useQueryState(useSubmissionDetail(submissionId));
@@ -89,7 +89,7 @@ export function SubmissionDetailView({
       withheld: submission.withheld,
       parked_by: submission.parked_by,
     },
-    t,
+    { t, lookup },
   );
   const phase = submissionPhase(submission);
   const scoreDisplay = getSubmissionScoreDisplay(submission, result?.score, t);

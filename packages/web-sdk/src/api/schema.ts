@@ -296,7 +296,7 @@ export interface paths {
     };
     /**
      * Aggregated system health
-     * @description Returns workers, queue depths, whether the fleet takes work (`intake`), submissions in flight, queued and parked behind a disabled contest type, and the unresolved DLQ count in a single response. While the message queue is unreachable, `queue_state` is `unreachable`, `queues` is empty and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.
+     * @description Returns workers, queue depths, whether the fleet takes work (`intake`), submissions in flight, queued and parked (waiting until every plugin they need, of any kind `Provided` names, has an enabled provider), and the unresolved DLQ count in a single response. While the message queue is unreachable, `queue_state` is `unreachable`, `queues` is empty and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.
      */
     get: operations['getSystemOverview'];
     put?: never;
@@ -4885,9 +4885,9 @@ export interface components {
       submissions_in_progress: number;
       /**
        * Format: int64
-       * @description Submissions waiting `Queued` that a plugin they need (their contest
-       *     type's, or their problem type's evaluator) keeps parked: it has no
-       *     enabled provider, so no server claims them until one is enabled again.
+       * @description Submissions waiting `Queued` that a plugin they need keeps parked: a
+       *     kind of key they need (any `Provided` names) has no enabled provider,
+       *     so no server claims them until one is enabled again.
        * @example 0
        */
       submissions_parked: number;

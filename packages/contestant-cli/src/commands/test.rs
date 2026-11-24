@@ -211,7 +211,8 @@ const RUN_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 
 fn poll_code_run(client: &Client, run_id: i32) -> anyhow::Result<CodeRunResponse> {
     let check_later = "run the test again later, or test with --local.";
-    let (run, _) = wait::until_final(RUN_WAIT, check_later, || {
+    let names = client.plugin_names();
+    let (run, _) = wait::until_final(RUN_WAIT, check_later, &names, || {
         let run = client.get_code_run(run_id)?;
         Ok((Standing::Status(run.status), run))
     })?;

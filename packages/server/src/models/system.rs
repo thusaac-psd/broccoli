@@ -109,9 +109,9 @@ pub struct SystemOverviewResponse {
     /// claimed unless `intake` is `accepting`.
     #[schema(example = 0)]
     pub submissions_queued: u64,
-    /// Submissions waiting `Queued` that a plugin they need (their contest
-    /// type's, or their problem type's evaluator) keeps parked: it has no
-    /// enabled provider, so no server claims them until one is enabled again.
+    /// Submissions waiting `Queued` that a plugin they need keeps parked: a
+    /// kind of key they need (any `Provided` names) has no enabled provider,
+    /// so no server claims them until one is enabled again.
     #[schema(example = 0)]
     pub submissions_parked: u64,
     /// DLQ messages with `resolved = false`.

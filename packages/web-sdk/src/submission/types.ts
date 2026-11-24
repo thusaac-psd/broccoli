@@ -47,6 +47,9 @@ export type PluginOutage = components['schemas']['PluginOutage'];
  */
 export type ClosedBy = components['schemas']['ClosedBy'];
 
+/** What a unit of work needs a plugin to provide (`ClosedBy.provides`). */
+export type Provided = components['schemas']['Provided'];
+
 /**
  * A status as the server shows it to this viewer: `null` (or absent) while
  * the outcome is withheld (see `Withheld`).

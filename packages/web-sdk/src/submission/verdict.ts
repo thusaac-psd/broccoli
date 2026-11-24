@@ -3,6 +3,7 @@ import type { SubmissionOutcome } from '@/submission/progress';
 import type { ShownStatus, Verdict } from '@/submission/types';
 import type { BadgeProps } from '@/ui/badge';
 
+import { closedByText } from './closed-by.ts';
 import { getStatusLabel, withheldLabel } from './utils.ts';
 
 type BadgeVariant = NonNullable<BadgeProps['variant']>;
@@ -70,22 +71,23 @@ export type RowOutcome = {
 /**
  * The badge of a submission's outcome. A withheld outcome (`status` `null`)
  * says why it is withheld (`withheld`), never that it is still running; a
- * parked submission names the plugin role that parks it (`parked_by`),
- * never just "Queued".
+ * parked submission names the plugin that parks it and its role
+ * (`closedByText`), never just "Queued".
  */
 export function getVerdictBadge(
   { verdict, status, withheld, parked_by }: VerdictOutcome,
-  t: I18nContextValue['t'],
+  i18n: Pick<I18nContextValue, 't' | 'lookup'>,
 ): {
   label: string;
   variant: BadgeVariant;
 } {
+  const { t } = i18n;
   if (status == null) {
     return { label: withheldLabel(withheld, t), variant: 'outline' };
   }
   if (parked_by) {
     return {
-      label: t(`submissions.parkedBy.${parked_by.provides}`),
+      label: closedByText(parked_by, 'parked', i18n),
       variant: 'outline',
     };
   }

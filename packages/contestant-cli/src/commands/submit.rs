@@ -193,7 +193,8 @@ const VERDICT_WAIT: Duration = Duration::from_secs(300);
 fn watch_verdict(client: &Client, submission_id: i32) -> anyhow::Result<()> {
     let id = submission_id.to_string();
     let check_later = format!("check it later with `broccoli status {submission_id}`.");
-    let (sub, elapsed) = wait::until_final(VERDICT_WAIT, &check_later, || {
+    let names = client.plugin_names();
+    let (sub, elapsed) = wait::until_final(VERDICT_WAIT, &check_later, &names, || {
         let sub = client
             .get_submission(&id)
             .context("Failed to poll submission status")?;

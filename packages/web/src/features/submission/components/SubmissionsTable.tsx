@@ -287,13 +287,13 @@ function SubmissionRow({
   colSpan: number;
   rowClassName?: string;
 }) {
-  const { t } = useTranslation();
+  const { t, lookup } = useTranslation();
   const languageName = useLanguageName();
   const format = useFormat();
   const { onSubmissionClick } = useSubmissionNavigation();
   const { label: verdictLabel, variant: verdictVariant } = getVerdictBadge(
     submission,
-    t,
+    { t, lookup },
   );
 
   const px = compact ? 'px-2' : 'px-4';

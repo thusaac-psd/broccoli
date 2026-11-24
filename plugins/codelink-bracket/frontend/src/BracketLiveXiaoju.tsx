@@ -70,7 +70,7 @@ export function BracketLiveXiaoju({
   problemId,
   submissions,
 }: LiveXiaojuViewProps) {
-  const { t } = useTranslation();
+  const { t, lookup } = useTranslation();
   const now = useServerNow(1_000);
   // Keeps the problem lists fresh as the viewer's match moves on (see
   // `useRevealRefresh`); the result itself is not needed here.
@@ -173,7 +173,7 @@ export function BracketLiveXiaoju({
                         ...entry.submission,
                         verdict: entry.submission.result?.verdict,
                       },
-                      t,
+                      { t, lookup },
                     ).label
                   : getStatusLabel('Pending', t)}
               </li>

@@ -44,7 +44,7 @@ function buildRow(entry: SubmissionEntry): Row {
 }
 
 export function PinnedSubmissionGroup({ entries, linkBuilder }: Props) {
-  const { t } = useTranslation();
+  const { t, lookup } = useTranslation();
   const errorMessage = useErrorMessage();
   const { openSubmission } = useSubmissionNavigation();
 
@@ -106,7 +106,10 @@ export function PinnedSubmissionGroup({ entries, linkBuilder }: Props) {
         {rows.map((row) => {
           const submissionId = row.entry.submission?.id ?? null;
           const canOpen = submissionId != null && !!linkBuilder;
-          const { label, variant } = getVerdictBadge(row.outcome, t);
+          const { label, variant } = getVerdictBadge(row.outcome, {
+            t,
+            lookup,
+          });
           const isPolling = entryInProgress(row.entry);
           return (
             <div

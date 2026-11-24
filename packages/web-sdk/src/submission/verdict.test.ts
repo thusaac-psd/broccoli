@@ -6,7 +6,14 @@ import type { I18nContextValue } from '@/i18n';
 import { SUBMISSION_STATUS_FILTER_OPTIONS } from './utils.ts';
 import { getVerdictBadge, progressLabel } from './verdict.ts';
 
-const t = ((key: string) => key) as I18nContextValue['t'];
+const t = ((key: string, params?: Record<string, string | number>) =>
+  params
+    ? `${key}(${Object.values(params).join(',')})`
+    : key) as I18nContextValue['t'];
+/** A catalog that names only the plugin `named`. */
+const lookup = (key: string) =>
+  key === 'plugin.named.name' ? 'Named Plugin' : undefined;
+const i18n = { t, lookup };
 
 test('a queued submission reads as waiting for a judge, not as being judged', () => {
   assert.equal(progressLabel('Queued', t), 'result.waitingForJudge');
@@ -17,7 +24,7 @@ test('a queued submission reads as waiting for a judge, not as being judged', ()
 
 test('a superseded judgement reads as superseded, and no submission filters by it', () => {
   assert.deepEqual(
-    getVerdictBadge({ status: 'Superseded', verdict: null }, t),
+    getVerdictBadge({ status: 'Superseded', verdict: null }, i18n),
     {
       label: 'result.superseded',
       variant: 'outline',
@@ -26,7 +33,7 @@ test('a superseded judgement reads as superseded, and no submission filters by i
   assert.equal(SUBMISSION_STATUS_FILTER_OPTIONS.includes('Superseded'), false);
 });
 
-test('a parked submission names what parks it, as the server records it', () => {
+test('a parked submission names what parks it and the plugin, as the server records it', () => {
   for (const provides of [
     'contest_type',
     'problem_type',
@@ -34,10 +41,24 @@ test('a parked submission names what parks it, as the server records it', () => 
   ] as const) {
     assert.deepEqual(
       getVerdictBadge(
-        { status: 'Queued', parked_by: { plugin_id: 'p', provides } },
-        t,
+        { status: 'Queued', parked_by: { plugin_id: 'named', provides } },
+        i18n,
       ),
-      { label: `submissions.parkedBy.${provides}`, variant: 'outline' },
+      {
+        label: `submissions.parkedBy.${provides}(Named Plugin)`,
+        variant: 'outline',
+      },
     );
   }
+  // A plugin no catalog names is named by its id.
+  assert.equal(
+    getVerdictBadge(
+      {
+        status: 'Queued',
+        parked_by: { plugin_id: 'unnamed', provides: 'contest_type' },
+      },
+      i18n,
+    ).label,
+    'submissions.parkedBy.contest_type(unnamed)',
+  );
 });
