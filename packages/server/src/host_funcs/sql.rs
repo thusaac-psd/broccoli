@@ -48,23 +48,20 @@ impl PluginSql {
     /// only then returns it, so the cancel never lands on a later statement
     /// and costs the answer nothing. The bound is the host's own cancel,
     /// whatever the session's settings say. An outage of the database fails
-    /// the call as unavailable ([`crate::plugin_db::Unavailable::settle`]).
+    /// the call as unavailable ([`settle`]).
     async fn standalone<T>(
         &self,
         plugin_id: &str,
         call: &crate::plugin_db::SqlCall,
         statement: impl AsyncFnOnce(&mut common::db::PooledConnection) -> Result<T, sea_orm::DbErr>,
     ) -> Result<Result<T, sea_orm::DbErr>, crate::plugin_db::Unavailable> {
-        use crate::plugin_db::Unavailable;
-
         let lease = self.lease(plugin_id, call).await?;
-        let (mut conn, pid) =
-            match Unavailable::settle(by_deadline(call.deadline, lease.connection()).await?)? {
-                Ok(opened) => opened,
-                Err(e) => return Ok(Err(e)),
-            };
+        let (mut conn, pid) = match settle(by_deadline(call.deadline, lease.connection()).await?)? {
+            Ok(opened) => opened,
+            Err(e) => return Ok(Err(e)),
+        };
         match by_deadline(call.deadline, statement(&mut conn)).await {
-            Ok(answer) => Unavailable::settle(answer),
+            Ok(answer) => settle(answer),
             Err(cut) => {
                 let pools = self.pools.clone();
                 tokio::spawn(async move {
@@ -226,20 +223,44 @@ async fn by_deadline<T>(
     }
 }
 
-/// Fail the running call as unavailable: the plugin's SQL cannot run right
-/// now (no connection free in time, or its role unprovisioned), which says
-/// nothing about the request, so callers answer it with "try again".
-/// The answer to a plugin statement that failed with `e`. A database outage
-/// under a dispatch is the platform's, not the submission's: it is recorded
-/// on the dispatch (`judging::Dispatch::note_database_error`), which hands
-/// the attempt back instead of spending its budget.
-fn db_error(e: &sea_orm::DbErr) -> Result<String, extism::Error> {
-    if let Some(dispatch) = crate::services::judging::Dispatch::of_current_call() {
+/// A plugin statement's answer, as the call takes it: the one rule for a
+/// database outage on every plugin SQL path. An outage
+/// ([`common::db::is_outage`]) fails the call as unavailable
+/// ([`crate::plugin_db::Unavailable::settle`]), and under a dispatch it is
+/// the platform's, not the submission's, so it is also recorded on the
+/// dispatch (`judging::Dispatch::note_database_error`), which hands the
+/// attempt back instead of spending its budget. Any other error is the
+/// statement's own and goes back to the plugin.
+fn settle<T>(
+    answer: Result<T, sea_orm::DbErr>,
+) -> Result<Result<T, sea_orm::DbErr>, crate::plugin_db::Unavailable> {
+    settle_under(
+        crate::services::judging::Dispatch::of_current_call(),
+        answer,
+    )
+}
+
+/// [`settle`] for a call running under `dispatch`.
+fn settle_under<T>(
+    dispatch: Option<crate::services::judging::Dispatch>,
+    answer: Result<T, sea_orm::DbErr>,
+) -> Result<Result<T, sea_orm::DbErr>, crate::plugin_db::Unavailable> {
+    if let (Err(e), Some(dispatch)) = (&answer, dispatch) {
         dispatch.note_database_error(e);
     }
+    crate::plugin_db::Unavailable::settle(answer)
+}
+
+/// The plugin's answer to its statement that failed with `e`, an error of
+/// the statement's own (an outage never reaches here, see [`settle`]).
+fn db_error(e: &sea_orm::DbErr) -> Result<String, extism::Error> {
     HostDbResponse::err(e.to_string()).to_json_string()
 }
 
+/// Fail the running call as unavailable: the plugin's SQL cannot run right
+/// now (no connection free in time, its role unprovisioned, the database
+/// unreachable or the statement cut at its deadline), which says nothing
+/// about the request, so callers answer it with "try again".
 fn unavailable(e: crate::plugin_db::Unavailable) -> extism::Error {
     tracing::warn!(error = %e, "Plugin SQL unavailable");
     plugin_core::executor::fail_unavailable();
@@ -288,7 +309,7 @@ fn lookup_owned_txn<'a>(
 /// and a task that owns it cancels the statement on its backend and then
 /// rolls it back, returning its connection and permit. An outage of the
 /// database fails the call as unavailable
-/// ([`crate::plugin_db::Unavailable::settle`]).
+/// ([`settle`]).
 fn with_owned_txn<T>(
     sql: &PluginSql,
     txn_map: &TransactionMap,
@@ -313,7 +334,7 @@ fn with_owned_txn<T>(
         .ok_or_else(|| extism::Error::msg(format!("Transaction not found: {txn_id}")))?;
     let runtime = tokio::runtime::Handle::current();
     match runtime.block_on(by_deadline(deadline, statement(txn))) {
-        Ok(answer) => crate::plugin_db::Unavailable::settle(answer).map_err(unavailable),
+        Ok(answer) => settle(answer).map_err(unavailable),
         Err(cut) => {
             let txn = guard.take();
             drop(guard);
@@ -869,7 +890,7 @@ host_fn!(pub db_begin(user_data: Arc<(String, PluginSql, TransactionMap)>; _inpu
         .await?;
         Ok::<_, crate::plugin_db::Unavailable>(begun.map(|(txn, pid)| (txn, pid, lease.permit)))
     }).map_err(unavailable)?;
-    let (txn, pid, permit) = crate::plugin_db::Unavailable::settle(opened)
+    let (txn, pid, permit) = settle(opened)
         .map_err(unavailable)?
         .map_err(|e| {
             error!("DB begin error: {}", e);
@@ -957,7 +978,7 @@ host_fn!(pub db_commit(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_
     let txn = entry.take()
         .ok_or_else(|| extism::Error::msg(format!("Transaction not found: {txn_id}")))?;
 
-    let result = crate::plugin_db::Unavailable::settle(
+    let result = settle(
         tokio::runtime::Handle::current().block_on(txn.commit()),
     ).map_err(unavailable)?;
 
@@ -997,7 +1018,7 @@ host_fn!(pub db_rollback(user_data: Arc<(String, PluginSql, TransactionMap)>; tx
 
     match entry.and_then(|entry| entry.take()) {
         Some(txn) => {
-            let result = crate::plugin_db::Unavailable::settle(
+            let result = settle(
                 tokio::runtime::Handle::current().block_on(txn.rollback()),
             ).map_err(unavailable)?;
             match result {
@@ -1026,7 +1047,8 @@ pub(super) fn execute_on_pool(
     let values = parse_args(&args)?;
     let stmt = plugin_statement(&sql, values);
 
-    let exec_result = tokio::runtime::Handle::current().block_on(db.execute_raw(stmt));
+    let exec_result = settle(tokio::runtime::Handle::current().block_on(db.execute_raw(stmt)))
+        .map_err(unavailable)?;
 
     match exec_result {
         Ok(res) => HostDbResponse::ok(JsonValue::from(res.rows_affected())).to_json_string(),
@@ -1087,12 +1109,13 @@ pub(super) fn query_on_pool(
     let stmt = plugin_statement(&wrapped_sql, values);
 
     let through = ReadThrough::current()?;
-    let query_result = tokio::runtime::Handle::current().block_on(async {
+    let query_result = settle(tokio::runtime::Handle::current().block_on(async {
         match &through {
             Some(txn) => txn.query_one_raw(stmt).await,
             None => db.query_one_raw(stmt).await,
         }
-    });
+    }))
+    .map_err(unavailable)?;
 
     match query_result {
         Ok(Some(res)) => {
@@ -1367,6 +1390,51 @@ mod tests {
     /// A database outage on a plugin's own statement is no answer about the
     /// statement: the call fails as unavailable, which its caller answers
     /// with a retryable 503, not as an error the plugin reads.
+    /// Under a dispatch, a database outage both fails the plugin's call as
+    /// unavailable and hands the attempt back; a statement's own error does
+    /// neither.
+    #[test]
+    fn an_outage_under_a_dispatch_fails_the_call_and_hands_the_attempt_back() {
+        use crate::services::judging::{
+            Dispatch, DispatchFault, DispatchFaults, DispatchedUnit, LiveDispatches,
+        };
+
+        let faults = DispatchFaults::default();
+        let dispatch = Dispatch::new(
+            "p",
+            LiveDispatches::default().enter(
+                DispatchedUnit::Judgement {
+                    submission_id: 1,
+                    judgement_id: 1,
+                    judge_epoch: 1,
+                },
+                true,
+            ),
+            faults.clone(),
+        );
+        let own = settle_under::<()>(
+            Some(dispatch.clone()),
+            Err(sea_orm::DbErr::Custom("duplicate key".into())),
+        );
+        assert!(matches!(own, Ok(Err(_))), "the plugin's own error");
+        assert!(faults.get().is_none());
+
+        let outage = settle_under::<()>(
+            Some(dispatch),
+            Err(sea_orm::DbErr::ConnectionAcquire(
+                sea_orm::error::ConnAcquireErr::Timeout,
+            )),
+        );
+        assert!(matches!(
+            outage,
+            Err(crate::plugin_db::Unavailable::Outage(_))
+        ));
+        assert_eq!(
+            faults.lost().map(|r| r.fault),
+            Some(DispatchFault::DatabaseUnavailable)
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_outage_on_a_plugin_statement_fails_the_call_as_unavailable() {
         let (container, url, _db) = one_connection().await;
