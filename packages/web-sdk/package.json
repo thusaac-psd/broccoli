@@ -16,6 +16,7 @@
   ],
   "scripts": {
     "build": "tsdown --dts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "dev": "tsdown --watch ./src --dts --no-clean"
   },
   "tsdown": {
@@ -29,6 +30,7 @@
     ]
   },
   "devDependencies": {
+    "@types/node": "catalog:",
     "@types/react": "catalog:",
     "tailwindcss": "catalog:",
     "tsdown": "catalog:",

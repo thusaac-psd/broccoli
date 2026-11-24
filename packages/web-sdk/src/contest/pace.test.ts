@@ -10,6 +10,7 @@ import {
   PHASE_DUE_POLL_MS,
   PHASE_DUE_SPREAD_MS,
   RUNNING_CONTEST_POLL_MS,
+  type SeatPace,
   seatPace,
 } from './pace.ts';
 
@@ -32,9 +33,10 @@ test('the phase changes next at the start, then at the end', () => {
 });
 
 /** A seat at `phaseOffsetMs` that asks about a running contest every minute. */
-const seat = (phaseOffsetMs: number) => ({
+const seat = (phaseOffsetMs: number): SeatPace => ({
   phaseOffsetMs,
   runningPollMs: 60_000,
+  liveBoardPollMs: LIVE_BOARD_POLL_MS,
 });
 
 const start = Date.parse(times.start_time);
