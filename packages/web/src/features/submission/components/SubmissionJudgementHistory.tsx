@@ -306,7 +306,7 @@ function JudgementRow({
 }) {
   const { t, lookup } = useTranslation();
   const format = useFormat();
-  const { label, variant } = getVerdictBadge(judgement, t);
+  const { label, variant } = getVerdictBadge(judgement, { t, lookup });
 
   // The code's translation, when the packs have one.
   const errorText = judgement.error_code

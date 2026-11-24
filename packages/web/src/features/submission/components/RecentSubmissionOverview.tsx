@@ -80,7 +80,7 @@ export function RecentSubmissionOverview({
   visibleCount = DEFAULT_VISIBLE_COUNT,
   linkBuilder,
 }: RecentSubmissionOverviewProps) {
-  const { t } = useTranslation();
+  const { t, lookup } = useTranslation();
   const errorMessage = useErrorMessage();
   const format = useFormat();
   const { openSubmission } = useSubmissionNavigation();
@@ -248,7 +248,10 @@ export function RecentSubmissionOverview({
           />
         ))}
         {mergedRows.map((row) => {
-          const { label, variant } = getVerdictBadge(row.outcome, t);
+          const { label, variant } = getVerdictBadge(row.outcome, {
+            t,
+            lookup,
+          });
           const scoreToneClass = getScoreToneClass(variant);
           const scoreDisplay = getSubmissionScoreDisplay(
             row.outcome,

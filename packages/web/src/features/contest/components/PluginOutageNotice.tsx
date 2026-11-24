@@ -1,5 +1,5 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import type { PluginOutage } from '@broccoli/web-sdk/submission';
+import { closedByText, type PluginOutage } from '@broccoli/web-sdk/submission';
 import { cn } from '@broccoli/web-sdk/utils';
 import { PlugZap } from 'lucide-react';
 
@@ -55,7 +55,8 @@ export function SubmitClosureNotice({
   closure: SubmitClosure | null;
   className?: string;
 }) {
-  const { t } = useTranslation();
+  const i18n = useTranslation();
+  const { t } = i18n;
   if (!closure) return null;
   switch (closure.kind) {
     case 'contest':
@@ -65,7 +66,7 @@ export function SubmitClosureNotice({
     case 'closed':
       return (
         <Notice
-          text={t(`problem.closedBy.${closure.closedBy.provides}`)}
+          text={closedByText(closure.closedBy, 'closed', i18n)}
           className={className}
         />
       );

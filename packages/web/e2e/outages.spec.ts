@@ -198,7 +198,7 @@ for (const [name, path, api] of [
     await page.goto(path);
     await expect(
       page.getByText(
-        'Submitting is unavailable while the plugin that evaluates this problem is disabled.',
+        'Submitting is unavailable while batch-evaluator, the plugin that evaluates this problem, is disabled.',
       ),
     ).toHaveCount(1);
     await expect(page.getByRole('button', { name: 'Submit' })).toHaveCount(0);
@@ -212,15 +212,31 @@ for (const [name, path, api] of [
   });
 }
 
-// A parked submission names what parks it, as the server records it.
-for (const [provides, label] of [
-  ['contest_type', 'Waiting: its contest plugin is disabled'],
-  ['problem_type', 'Waiting: its evaluator plugin is disabled'],
+// A parked submission names what parks it, as the server records it: the
+// plugin's role and the plugin itself, by its translated name where its pack
+// gives one and by its id where none does.
+for (const [name, locale, plugins, parkedBy, label] of [
+  [
+    'its contest type plugin, by its translated name',
+    'zh-CN',
+    ['icpc'],
+    { plugin_id: 'icpc', provides: 'contest_type' },
+    '等待中：其比赛插件 ICPC 赛制 已被禁用',
+  ],
+  [
+    'its evaluator plugin, by its id when no pack names it',
+    'en',
+    [],
+    { plugin_id: 'some-plugin', provides: 'problem_type' },
+    'Waiting: its evaluator plugin some-plugin is disabled',
+  ],
 ] as const) {
-  test(`a submission parked by its ${provides} plugin says so`, async ({
-    page,
-  }) => {
-    await mockApi(page, 'contestant');
+  test(`a submission parked by ${name} says so`, async ({ page }) => {
+    await page.addInitScript(
+      (l) => localStorage.setItem('broccoli-locale', l),
+      locale,
+    );
+    await mockApi(page, 'contestant', { plugins: [...plugins] });
     await answerGets(page, /\/api\/v1\/submissions\/4(\?|$)/, () => ({
       ...submission(4, 2, 'Accepted'),
       status: 'Queued',
@@ -228,7 +244,7 @@ for (const [provides, label] of [
       score: null,
       files: [{ filename: 'main.cpp', content: 'int main() {}\n' }],
       result: null,
-      parked_by: { plugin_id: 'some-plugin', provides },
+      parked_by: parkedBy,
     }));
     await page.route('**/api/v1/submissions/4/judgements', (route) =>
       route.fulfill({ headers, json: [] }),

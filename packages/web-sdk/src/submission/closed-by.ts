@@ -1,0 +1,46 @@
+import type { I18nContextValue, TranslationKey } from '@/i18n';
+import type { ClosedBy, Provided } from '@/submission/types';
+
+import { pluginKeys } from '../i18n/labels.ts';
+
+/**
+ * Where work a plugin holds back is spoken of: a parked submission
+ * (`parked_by`), or a problem view that takes no submission (`closed_by`).
+ */
+export type ClosedByPlace = 'parked' | 'closed';
+
+/**
+ * The text of each role a plugin plays for the work, in each place. Every
+ * kind `Provided` names has its texts here, so a new kind does not compile
+ * until it can be said. Each text takes the plugin's name as `{plugin}`.
+ */
+const ROLE_TEXT: Record<Provided, Record<ClosedByPlace, TranslationKey>> = {
+  contest_type: {
+    parked: 'submissions.parkedBy.contest_type',
+    closed: 'problem.closedBy.contest_type',
+  },
+  problem_type: {
+    parked: 'submissions.parkedBy.problem_type',
+    closed: 'problem.closedBy.problem_type',
+  },
+  checker_format: {
+    parked: 'submissions.parkedBy.checker_format',
+    closed: 'problem.closedBy.checker_format',
+  },
+};
+
+/**
+ * What holds work back (`ClosedBy`), in the user's language: the role the
+ * plugin plays for the work, and the plugin by its translated name
+ * (`plugin.<id>.name`), or by its id where no catalog names it, so whoever
+ * can enable it knows which plugin to act on. Every view of a parked
+ * submission or a closed submit says it through this.
+ */
+export function closedByText(
+  { plugin_id, provides }: ClosedBy,
+  place: ClosedByPlace,
+  { t, lookup }: Pick<I18nContextValue, 't' | 'lookup'>,
+): string {
+  const plugin = lookup(pluginKeys.name(plugin_id)) ?? plugin_id;
+  return t(ROLE_TEXT[provides][place], { plugin });
+}
