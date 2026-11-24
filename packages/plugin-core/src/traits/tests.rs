@@ -27,6 +27,7 @@ fn guest(version: i64) -> String {
         (import "extism:host/user" "await_child" (func $await_child (param i64) (result i64)))
         (import "extism:host/user" "busy" (func $busy (param i64) (result i64)))
         (import "extism:host/user" "db_down" (func $db_down (param i64) (result i64)))
+        (import "extism:host/user" "db_busy" (func $db_busy (param i64) (result i64)))
         (import "extism:host/user" "nest_hold" (func $nest_hold (param i64) (result i64)))
         (import "extism:host/user" "nest_spin" (func $nest_spin (param i64) (result i64)))
         (import "extism:host/user" "broken" (func $broken (param i64) (result i64)))
@@ -34,6 +35,7 @@ fn guest(version: i64) -> String {
         (func (export "nest_spin") (result i32) (drop (call $nest_spin (i64.const 0))) (i32.const 0))
         (func (export "busy") (result i32) (drop (call $busy (i64.const 0))) (i32.const 0))
         (func (export "db_down") (result i32) (drop (call $db_down (i64.const 0))) (i32.const 0))
+        (func (export "db_busy") (result i32) (drop (call $db_busy (i64.const 0))) (i32.const 0))
         (func (export "nest_hold") (result i32) (drop (call $nest_hold (i64.const 0))) (i32.const 0))
         (func (export "parent") (result i32) (drop (call $await_child (i64.const 0))) (i32.const 0))
         (func (export "hold") (result i32) (drop (call $hold (i64.const 0))) (i32.const 0))
@@ -274,6 +276,14 @@ fn db_down(_: &Ctx, _: i64) -> Result<(), extism::Error> {
     Err(extism::Error::msg("the database is unreachable"))
 }
 
+/// A host function whose database pool has no connection free. It marks the
+/// call busy too: the saturated pool is the cause the call reports.
+fn db_busy(_: &Ctx, _: i64) -> Result<(), extism::Error> {
+    crate::executor::fail_unavailable();
+    crate::executor::fail_database_busy();
+    Err(extism::Error::msg("every database connection is in use"))
+}
+
 /// A host function that fails for a reason no retry changes.
 fn broken(_: &Ctx, _: i64) -> Result<(), extism::Error> {
     Err(extism::Error::msg("the host function is broken"))
@@ -328,6 +338,7 @@ impl Harness {
                     host_fn("await_child", ctx.clone(), await_child),
                     host_fn("busy", ctx.clone(), busy),
                     host_fn("db_down", ctx.clone(), db_down),
+                    host_fn("db_busy", ctx.clone(), db_busy),
                     host_fn("nest_hold", ctx.clone(), nest_hold),
                     host_fn("nest_spin", ctx.clone(), nest_spin),
                     host_fn("broken", ctx.clone(), broken),
@@ -918,6 +929,14 @@ async fn a_host_function_can_fail_its_call_as_unavailable() {
         "{err:?}"
     );
     assert!(err.is_unavailable());
+    // A call that could not run for its database's saturated pool says so.
+    let err = h
+        .manager
+        .call_raw(PLUGIN, "db_busy", vec![], CallOptions::interactive(later()))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PluginError::DatabaseBusy { .. }), "{err:?}");
+    assert!(err.is_unavailable());
     // The mark belongs to that call alone.
     h.manager
         .call_raw(PLUGIN, "mark", vec![], CallOptions::interactive(later()))
@@ -966,7 +985,7 @@ fn captured_logs() -> &'static Mutex<Vec<(tracing::Level, String)>> {
 async fn a_failed_call_logs_one_line_and_an_unavailable_one_logs_nothing() {
     let logs = captured_logs();
     let h = Harness::new(2);
-    for func in ["busy", "db_down", "broken"] {
+    for func in ["busy", "db_down", "db_busy", "broken"] {
         h.manager
             .call_raw(PLUGIN, func, vec![], CallOptions::interactive(later()))
             .await
@@ -982,7 +1001,7 @@ async fn a_failed_call_logs_one_line_and_an_unavailable_one_logs_nothing() {
             .collect()
     };
     // A call the host could not serve now is the caller's answer, not a fault.
-    for func in ["busy", "db_down"] {
+    for func in ["busy", "db_down", "db_busy"] {
         assert_eq!(naming(func), vec![], "{func}");
     }
     // A failure is one line, without the wasm backtrace.

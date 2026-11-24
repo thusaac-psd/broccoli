@@ -108,8 +108,8 @@ pub enum Unavailable {
     Unloaded,
     #[error("the plugin's database role could not be provisioned: {0}")]
     Unprovisioned(String),
-    #[error("the database is unreachable: {0}")]
-    Outage(String),
+    #[error("the database cannot serve the statement: {1}")]
+    Outage(common::db::Outage, String),
 }
 
 impl Unavailable {
@@ -120,7 +120,10 @@ impl Unavailable {
     /// statement's own and goes back to the plugin.
     pub fn settle<T>(answer: Result<T, DbErr>) -> Result<Result<T, DbErr>, Self> {
         match answer {
-            Err(e) if common::db::is_outage(&e) => Err(Self::Outage(e.to_string())),
+            Err(e) => match common::db::outage(&e) {
+                Some(outage) => Err(Self::Outage(outage, e.to_string())),
+                None => Ok(Err(e)),
+            },
             answer => Ok(answer),
         }
     }

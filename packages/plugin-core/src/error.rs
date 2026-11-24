@@ -77,6 +77,18 @@ pub enum PluginError {
         func_name: String,
     },
 
+    /// The call could not run to completion because every connection to the
+    /// host's database was in use (a host function failed it with
+    /// [`crate::executor::fail_database_busy`]). The database answers; a
+    /// moment later it serves again.
+    #[error(
+        "Plugin '{plugin_id}' could not finish '{func_name}': every database connection is in use"
+    )]
+    DatabaseBusy {
+        plugin_id: String,
+        func_name: String,
+    },
+
     /// No instance of the plugin could be built for this call (out of memory,
     /// the module file gone). Not an answer from the plugin.
     #[error("Plugin '{plugin_id}' could not start an instance: {message}")]
@@ -97,7 +109,7 @@ pub enum PluginError {
 impl PluginError {
     /// Whether this says the plugin cannot answer right now rather than
     /// anything about the request: the call reached its deadline, the
-    /// host's database is unreachable, the server is draining, the plugin is
+    /// host's database is unreachable or busy, the server is draining, the plugin is
     /// between loads, or no instance could be built. Callers answer these as
     /// "try again", never as a decision.
     pub fn is_unavailable(&self) -> bool {
@@ -105,6 +117,7 @@ impl PluginError {
             self,
             PluginError::Unavailable { .. }
                 | PluginError::DatabaseUnavailable { .. }
+                | PluginError::DatabaseBusy { .. }
                 | PluginError::ShuttingDown
                 | PluginError::NotLoaded(_)
                 | PluginError::InstanceBuild { .. }

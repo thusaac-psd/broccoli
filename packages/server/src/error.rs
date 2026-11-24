@@ -605,6 +605,10 @@ impl From<PluginError> for AppError {
                 tracing::warn!("{err}");
                 AppError::DatabaseUnavailable
             }
+            PluginError::DatabaseBusy { .. } => {
+                tracing::warn!("{err}");
+                AppError::DatabaseBusy
+            }
             _ => AppError::Internal(err.to_string()),
         }
     }
@@ -822,6 +826,25 @@ mod tests {
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["code"], "DATABASE_UNAVAILABLE");
+    }
+
+    /// A plugin call failed by its database's saturated pool names the
+    /// database as busy: a 503 DATABASE_BUSY with the busy Retry-After.
+    #[tokio::test]
+    async fn a_plugin_call_failed_by_a_busy_database_is_the_databases_busy_503() {
+        let response = AppError::from(PluginError::DatabaseBusy {
+            plugin_id: "p".into(),
+            func_name: "f".into(),
+        })
+        .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get("Retry-After").unwrap(),
+            &DATABASE_BUSY_RETRY_AFTER_SECS.to_string()
+        );
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "DATABASE_BUSY");
     }
 
     /// Every 503 is retryable and says when to ask again. A disabled plugin

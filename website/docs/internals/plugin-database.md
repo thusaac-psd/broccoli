@@ -173,7 +173,9 @@ A plugin's SQL runs within the deadline of the call that runs it
 (`executor::current_deadline`, carried in `plugin_db::SqlCall`):
 
 - a lease waits for a permit no longer than the earlier of the deadline and
-  the pool's acquire timeout, then fails the call as unavailable;
+  the pool's acquire timeout, then fails the call as the database being busy
+  (`executor::fail_database_busy`, `PluginError::DatabaseBusy`,
+  `503 DATABASE_BUSY`);
 - every statement, in a transaction or not, is cut at the deadline, and the
   call answers then: a cut is unavailable (a retryable 503) within the
   request's budget whatever the cancel costs. The statement is cancelled on
@@ -196,8 +198,10 @@ A plugin's SQL runs within the deadline of the call that runs it
   statement: the call fails as the database's outage
   (`executor::fail_database_unavailable`, `PluginError::DatabaseUnavailable`),
   which a request answers with `503 DATABASE_UNAVAILABLE` and the database's
-  `Retry-After`, not the plugin's "busy" (a statement cut at its deadline
-  stays `PLUGIN_UNAVAILABLE`), and under a judging dispatch the attempt is handed back
+  `Retry-After`, or, when the host's pool had no connection free, as the
+  database being busy (`503 DATABASE_BUSY`), not the plugin's "busy" (a
+  statement cut at its deadline stays `PLUGIN_UNAVAILABLE`); one mapping
+  decides which (`host_funcs::sql::Unanswered`), and under a judging dispatch the attempt is handed back
   (`DispatchFault::DatabaseUnavailable`) instead of spending its budget. One
   rule decides both (`host_funcs::sql::settle`), for raw plugin SQL and the
   host-pool writes of `host.submission.*` and `host.code_run.*` alike; any

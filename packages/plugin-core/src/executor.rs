@@ -221,8 +221,11 @@ pub(crate) enum MarkedUnavailable {
     No,
     /// The host could not serve it right now (busy, cut at its deadline).
     Busy,
-    /// The host's database was unreachable. It outranks `Busy`: it is the
-    /// cause, whatever else the call then met.
+    /// The host's database answered, but every connection to it was in use.
+    /// It outranks `Busy`: the saturated pool is why the host could not serve.
+    DatabaseBusy,
+    /// The host's database was unreachable. It outranks the others: it is
+    /// the cause, whatever else the call then met.
     Database,
 }
 
@@ -248,6 +251,14 @@ pub fn fail_unavailable() {
 /// answer it as the database's outage rather than the plugin's.
 pub fn fail_database_unavailable() {
     MarkedUnavailable::mark(MarkedUnavailable::Database);
+}
+
+/// Mark the call running on this thread as one the host could not serve
+/// because every connection to its database was in use. The call then fails
+/// with [`PluginError::DatabaseBusy`], unless its database was also found
+/// unreachable, so callers answer it as the database's saturated pool.
+pub fn fail_database_busy() {
+    MarkedUnavailable::mark(MarkedUnavailable::DatabaseBusy);
 }
 
 /// The state shared by the call running on this thread and the calls nested

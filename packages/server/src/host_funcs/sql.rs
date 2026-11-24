@@ -258,19 +258,45 @@ fn db_error(e: &sea_orm::DbErr) -> Result<String, extism::Error> {
 }
 
 /// Fail the running call as unavailable: the plugin's SQL cannot run right
-/// now (no connection free in time, its role unprovisioned, the database
-/// unreachable or the statement cut at its deadline), which says nothing
-/// about the request, so callers answer it with "try again".
+/// now, which says nothing about the request, so callers answer it with "try
+/// again". The call names why, by one mapping: a database that cannot be
+/// reached fails it as `DATABASE_UNAVAILABLE`; a pool with no connection
+/// free in time, the host's or the plugin's own, as `DATABASE_BUSY`; a
+/// statement cut at its deadline, an unloaded plugin or an unprovisioned role
+/// as the plugin's `PLUGIN_UNAVAILABLE`.
 fn unavailable(e: crate::plugin_db::Unavailable) -> extism::Error {
     tracing::warn!(error = %e, "Plugin SQL unavailable");
-    match e {
-        // The database's outage: the call reports it as the database's.
-        crate::plugin_db::Unavailable::Outage(_) => {
-            plugin_core::executor::fail_database_unavailable()
-        }
-        _ => plugin_core::executor::fail_unavailable(),
+    match Unanswered::of(&e) {
+        Unanswered::DatabaseLost => plugin_core::executor::fail_database_unavailable(),
+        Unanswered::DatabaseBusy => plugin_core::executor::fail_database_busy(),
+        Unanswered::Plugin => plugin_core::executor::fail_unavailable(),
     }
     extism::Error::msg(e.to_string())
+}
+
+/// What a call whose SQL is unavailable fails as (see [`unavailable`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Unanswered {
+    /// `DATABASE_UNAVAILABLE`.
+    DatabaseLost,
+    /// `DATABASE_BUSY`.
+    DatabaseBusy,
+    /// `PLUGIN_UNAVAILABLE`.
+    Plugin,
+}
+
+impl Unanswered {
+    fn of(e: &crate::plugin_db::Unavailable) -> Self {
+        use crate::plugin_db::Unavailable;
+        use common::db::Outage;
+        match e {
+            Unavailable::Outage(Outage::Lost, _) => Self::DatabaseLost,
+            Unavailable::Outage(Outage::Busy, _) | Unavailable::Busy => Self::DatabaseBusy,
+            Unavailable::Deadline | Unavailable::Unloaded | Unavailable::Unprovisioned(_) => {
+                Self::Plugin
+            }
+        }
+    }
 }
 
 /// Look up a transaction by id, enforcing that the caller is the plugin that
@@ -1455,12 +1481,43 @@ mod tests {
         );
         assert!(matches!(
             outage,
-            Err(crate::plugin_db::Unavailable::Outage(_))
+            Err(crate::plugin_db::Unavailable::Outage(
+                common::db::Outage::Lost,
+                _
+            ))
         ));
         assert_eq!(
             faults.lost().map(|r| r.fault),
             Some(DispatchFault::DatabaseUnavailable)
         );
+    }
+
+    /// Plugin SQL that cannot run fails its call by one mapping: a lost
+    /// database as the database's outage, a saturated pool (the host's or
+    /// the plugin's own) as the database being busy, and a deadline cut, an
+    /// unloaded plugin or an unprovisioned role as the plugin's.
+    #[test]
+    fn unavailable_sql_fails_its_call_as_what_stopped_it() {
+        use crate::plugin_db::Unavailable;
+        let settled = |e| match Unavailable::settle::<()>(Err(e)) {
+            Err(unavailable) => Unanswered::of(&unavailable),
+            Ok(answer) => panic!("not an outage: {answer:?}"),
+        };
+        assert_eq!(
+            settled(sea_orm::DbErr::ConnectionAcquire(
+                sea_orm::error::ConnAcquireErr::Timeout
+            )),
+            Unanswered::DatabaseLost
+        );
+        assert_eq!(settled(common::db::pool_busy()), Unanswered::DatabaseBusy);
+        assert_eq!(Unanswered::of(&Unavailable::Busy), Unanswered::DatabaseBusy);
+        for plugin in [
+            Unavailable::Deadline,
+            Unavailable::Unloaded,
+            Unavailable::Unprovisioned("x".into()),
+        ] {
+            assert_eq!(Unanswered::of(&plugin), Unanswered::Plugin, "{plugin}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1477,7 +1534,13 @@ mod tests {
         container.stop().await.expect("stop the database");
         let answer = sql.execute("p", &call, statement()).await;
         assert!(
-            matches!(answer, Err(crate::plugin_db::Unavailable::Outage(_))),
+            matches!(
+                answer,
+                Err(crate::plugin_db::Unavailable::Outage(
+                    common::db::Outage::Lost,
+                    _
+                ))
+            ),
             "{answer:?}"
         );
     }
