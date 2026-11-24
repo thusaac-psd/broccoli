@@ -190,9 +190,12 @@ A plugin's SQL runs within the deadline of the call that runs it
   the cancel never lands on one;
 - an outage of the database on a plugin's statement, its transaction's
   begin, commit or rollback (`common::db::is_outage`) says nothing about the
-  statement: the call fails as unavailable, like a busy pool
-  (`plugin_db::Unavailable::settle`), and any other error goes back to the
-  plugin in its response;
+  statement: the call fails as unavailable, like a busy pool, and under a
+  judging dispatch the attempt is handed back
+  (`DispatchFault::DatabaseUnavailable`) instead of spending its budget. One
+  rule decides both (`host_funcs::sql::settle`), for raw plugin SQL and the
+  host-pool writes of `host.submission.*` and `host.code_run.*` alike; any
+  other error goes back to the plugin in its response;
 - a transaction lives no longer than the call tree that opened it: one still
   open when the tree ends (the guest trapped, was cancelled or returned
   without committing) is rolled back then, from the tree's `CallLocals`;
