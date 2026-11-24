@@ -1,4 +1,4 @@
-use crate::common::{TestApp, routes};
+use crate::common::{SpawnOptions, TestApp, routes};
 use serde_json::json;
 
 mod problem_config {
@@ -1241,6 +1241,59 @@ mod unknown_checks {
             flags(&app, problem_id).await,
             "true/none",
             "a replica that loads the plugin decides: the config is refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn replicas_that_each_lack_a_plugin_the_other_loads_leave_the_mark_for_one_that_loads_both()
+     {
+        let a = TestApp::spawn_with_plugins().await;
+        let admin = a
+            .create_user_with_role("split_fleet_admin", "password123", "admin")
+            .await;
+        let problem_id = problem_with_a_refused_config(&a).await;
+        a.db.execute_unprepared(&format!(
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+             VALUES ('problem', '{problem_id}', 'web-plugin:settings', '{{}}', 0, now()); \
+             UPDATE plugin SET is_enabled = true WHERE id IN ('server-plugin', 'web-plugin')"
+        ))
+        .await
+        .unwrap();
+        let b = a.spawn_replica(SpawnOptions::default()).await;
+        a.state
+            .plugins
+            .unload_plugin("web-plugin")
+            .expect("unload on a only");
+        b.state
+            .plugins
+            .unload_plugin("server-plugin")
+            .expect("unload on b only");
+
+        a.create_test_case(problem_id, &admin).await;
+        assert_eq!(flags(&a, problem_id).await, r#"true/["web-plugin"]"#);
+
+        // b loads the plugin the mark names but not the one a decided, so it
+        // cannot decide either: the mark names both.
+        server::services::recheck_marked(&b.state).await;
+        let both = r#"true/["server-plugin", "web-plugin"]"#;
+        assert_eq!(flags(&a, problem_id).await, both);
+        server::services::recheck_marked(&a.state).await;
+        server::services::recheck_marked(&b.state).await;
+        assert_eq!(
+            flags(&a, problem_id).await,
+            both,
+            "neither replica can decide, so neither takes the mark"
+        );
+
+        a.state
+            .plugins
+            .load_plugin("web-plugin")
+            .expect("a loads both");
+        server::services::recheck_marked(&a.state).await;
+        assert_eq!(
+            flags(&a, problem_id).await,
+            "true/none",
+            "a replica that loads both decides: the config is refused"
         );
     }
 

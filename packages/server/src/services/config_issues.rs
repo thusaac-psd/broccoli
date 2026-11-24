@@ -817,7 +817,9 @@ enum Claim {
 /// Rechecks one problem under its row lock, the lock a test-data change and
 /// a write of one of its configs hold, so a recheck never races the data it
 /// checks against. An undecided outcome only ever sets the flag and the mark
-/// ([`Outcome::flagged`]); a decided one replaces both.
+/// ([`Outcome::flagged`]); a decided one replaces both. A marked problem this
+/// replica cannot decide keeps the plugins its mark named, so the mark only
+/// grows until one replica loads every plugin it takes.
 async fn try_recheck(
     db: &DatabaseConnection,
     checker: &ConfigChecker<'_>,
@@ -841,7 +843,20 @@ async fn try_recheck(
         Claim::Mark if row.config_recheck.is_none() => return Ok(()),
         _ => {}
     }
-    let outcome = issues_of(&txn, checker, Subject::flag_of(problem_id), reads).await?;
+    let mut outcome = issues_of(&txn, checker, Subject::flag_of(problem_id), reads).await?;
+    if claim == Claim::Mark && !outcome.undecided.is_empty() {
+        // The plugins of the mark this replica claimed are loaded here, and
+        // deciding still takes them: a replica that loads only the plugins
+        // missing here would leave a mark naming these, so the two would hand
+        // the problem back and forth. The mark names both, for a replica that
+        // loads them all.
+        let claimed: BTreeSet<String> = row
+            .config_recheck
+            .as_ref()
+            .and_then(|mark| serde_json::from_value(mark.clone()).ok())
+            .unwrap_or_default();
+        outcome.undecided.extend(claimed);
+    }
     let record = match claim {
         // A change that can only resolve issues never sets the flag.
         Claim::Change(Recheck::ClearOnly) => !outcome.flagged() || outcome.mark().is_some(),
