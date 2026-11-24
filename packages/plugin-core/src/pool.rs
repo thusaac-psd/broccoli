@@ -135,7 +135,8 @@ impl<T: Send + 'static> InstancePool<T> {
     }
 
     /// Whether a call that started on this pool still runs: anything but
-    /// the pool holds its liveness (each running call's scope holds one).
+    /// the pool holds its liveness. A call holds one from the moment it looks
+    /// the pool up, under the registry lock, until its guest returns.
     pub fn has_calls(&self) -> bool {
         self.shared.liveness.in_use()
     }

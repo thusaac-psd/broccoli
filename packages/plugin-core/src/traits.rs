@@ -139,7 +139,12 @@ pub trait PluginInvoker: Send + Sync {
                 None => None,
             };
 
-            let pool = {
+            // The pool and its liveness, taken together under the registry
+            // lock: from here the call holds its version, so a reload that
+            // replaces it before the guest thread enters the call keeps it
+            // with the plugin (`PluginEntry::succeed` counts this handle),
+            // and the unload that follows retires it.
+            let (pool, instance) = {
                 let registry = self.get_registry().read().map_err(|_| {
                     PluginError::Internal("Failed to acquire registry read lock".into())
                 })?;
@@ -152,11 +157,13 @@ pub trait PluginInvoker: Send + Sync {
                     return Err(PluginError::NotLoaded(plugin_id.to_string()));
                 }
 
-                plugin_entry
+                let pool = plugin_entry
                     .runtime
                     .as_ref()
                     .ok_or_else(|| PluginError::NoRuntime(plugin_id.to_string()))?
-                    .clone()
+                    .clone();
+                let instance = pool.liveness();
+                (pool, instance)
             };
 
             let metrics = self.get_metrics().cloned();
@@ -184,6 +191,7 @@ pub trait PluginInvoker: Send + Sync {
                         admission,
                         resolved,
                         pool,
+                        instance,
                         plugin_id,
                         func_name,
                         input,
@@ -248,6 +256,7 @@ fn run_guest(
     admission: crate::admission::Admission,
     resolved: crate::executor::Resolved,
     pool: crate::pool::InstancePool,
+    instance: crate::pool::Liveness,
     plugin_id: String,
     func_name: String,
     input: Vec<u8>,
@@ -272,7 +281,7 @@ fn run_guest(
     let locals = resolved.locals.clone();
     let _scope = ScopeGuard::enter(NewScope {
         admission: Some(admission),
-        instance: pool.liveness(),
+        instance: instance.clone(),
         class: resolved.class,
         deadline: resolved.deadline,
         depth: resolved.depth,
@@ -288,7 +297,7 @@ fn run_guest(
         return Err(unavailable());
     }
     // Unloaded since the call looked its pool up.
-    if !pool.liveness().is_live() {
+    if !instance.is_live() {
         return Err(PluginError::NotLoaded(plugin_id));
     }
     let mut plugin = pool.get().map_err(|e| PluginError::InstanceBuild {

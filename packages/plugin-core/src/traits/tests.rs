@@ -27,10 +27,12 @@ fn guest(version: i64) -> String {
         (import "extism:host/user" "await_child" (func $await_child (param i64) (result i64)))
         (import "extism:host/user" "busy" (func $busy (param i64) (result i64)))
         (import "extism:host/user" "db_down" (func $db_down (param i64) (result i64)))
+        (import "extism:host/user" "nest_hold" (func $nest_hold (param i64) (result i64)))
         (import "extism:host/user" "nest_spin" (func $nest_spin (param i64) (result i64)))
         (func (export "nest_spin") (result i32) (drop (call $nest_spin (i64.const 0))) (i32.const 0))
         (func (export "busy") (result i32) (drop (call $busy (i64.const 0))) (i32.const 0))
         (func (export "db_down") (result i32) (drop (call $db_down (i64.const 0))) (i32.const 0))
+        (func (export "nest_hold") (result i32) (drop (call $nest_hold (i64.const 0))) (i32.const 0))
         (func (export "parent") (result i32) (drop (call $await_child (i64.const 0))) (i32.const 0))
         (func (export "hold") (result i32) (drop (call $hold (i64.const 0))) (i32.const 0))
         (func (export "park") (result i32) (drop (call $park (i64.const 0))) (i32.const 0))
@@ -54,6 +56,8 @@ struct Counts {
     marks: Vec<i64>,
     /// Whether each `hold` found its instance retired once released.
     retired: Vec<bool>,
+    /// Opened by the test to let `nest_hold` make its nested call.
+    nest_open: bool,
 }
 
 /// What the host functions report to the test, and the gate they wait on.
@@ -78,6 +82,13 @@ impl Fixture {
 
     fn release(&self) {
         self.update(|c| c.released = true);
+    }
+
+    fn wait_nest_open(&self) {
+        let mut counts = self.counts.lock();
+        while !counts.nest_open {
+            self.changed.wait(&mut counts);
+        }
     }
 
     fn read<R>(&self, f: impl FnOnce(&Counts) -> R) -> R {
@@ -190,6 +201,26 @@ fn nest(ctx: &Ctx, _: i64) -> Result<(), extism::Error> {
     })
 }
 
+/// Parks, waits until the test opens it, then calls `hold` as a nested
+/// call.
+fn nest_hold(ctx: &Ctx, _: i64) -> Result<(), extism::Error> {
+    let (fixture, manager) = ctx;
+    let manager = manager.upgrade().expect("manager alive");
+    crate::executor::parked(|| {
+        fixture.update(|c| c.parked += 1);
+        fixture.wait_nest_open();
+        fixture.update(|c| c.parked -= 1);
+        tokio::runtime::Handle::current().block_on(manager.call_raw(
+            PLUGIN,
+            "hold",
+            vec![],
+            CallOptions::nested(),
+        ))
+    })
+    .map(|_| ())
+    .map_err(|e| extism::Error::msg(e.to_string()))
+}
+
 /// A contest call waiting for its verdicts: parks and waits for a separate
 /// top-level background call, as `on_submission` waits for the evaluator
 /// calls it started.
@@ -290,6 +321,7 @@ impl Harness {
                     host_fn("await_child", ctx.clone(), await_child),
                     host_fn("busy", ctx.clone(), busy),
                     host_fn("db_down", ctx.clone(), db_down),
+                    host_fn("nest_hold", ctx.clone(), nest_hold),
                     host_fn("nest_spin", ctx.clone(), nest_spin),
                 ]
             });
@@ -738,6 +770,44 @@ async fn a_reload_keeps_only_the_replaced_pools_a_call_still_runs_on() {
     running.await.unwrap().unwrap();
     h.reload();
     assert_eq!(h.superseded(), 0, "its call ended");
+}
+
+/// A call holds its version from the moment it looks the pool up, before
+/// its guest thread enters the call: a reload in between keeps that version
+/// with the plugin, and the unload that follows retires it. The nested call
+/// here has looked up v2 and waits for a token when v2 is replaced and the
+/// plugin unloaded; it never runs on v2 un-retired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_between_its_lookup_and_its_guest_is_retired_by_a_later_unload() {
+    let h = Harness::new(crate::admission::MIN_TOKENS);
+    // v1: a parent call parks in a host function, giving its token up.
+    let parent = h.spawn("nest_hold", CallOptions::background(later()));
+    until(|| h.fixture.read(|c| c.parked) == 1).await;
+    // Other calls take every token and hold them.
+    let holding = [
+        h.spawn("hold", CallOptions::background(later())),
+        h.spawn("hold", CallOptions::interactive(later())),
+    ];
+    until(|| h.fixture.read(|c| c.running) == 2).await;
+    // v2, then the parent's nested call looks v2 up and waits for the token.
+    h.write_guest(2);
+    h.reload();
+    h.fixture.update(|c| c.nest_open = true);
+    until(|| h.admission().resuming(CallClass::Background) == 1).await;
+    // v3 replaces v2 while the nested call waits, then the plugin unloads.
+    h.write_guest(3);
+    h.reload();
+    h.manager.unload_plugin(PLUGIN).unwrap();
+    h.fixture.release();
+    for call in holding {
+        call.await.unwrap().unwrap();
+    }
+    let _ = parent.await.unwrap();
+    assert!(
+        !h.fixture.read(|c| c.retired.clone()).contains(&false),
+        "a call ran on a replaced version the unload did not retire: {:?}",
+        h.fixture.read(|c| c.retired.clone())
+    );
 }
 
 /// A reload that does not take is dropped alone: a call running on it is
