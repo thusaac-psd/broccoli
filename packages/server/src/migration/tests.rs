@@ -447,3 +447,50 @@ async fn a_database_the_released_build_ran_upgrades_to_this_build() {
     );
     boot.release().await.expect("release");
 }
+
+/// Each migration of this release says in its docs whether it is additive
+/// (`Additive` or `Not additive`), and the upgrade guide names every one that
+/// is not, since such a release is upgraded with every server stopped.
+#[test]
+fn the_upgrade_guide_names_every_migration_of_this_release_that_is_not_additive() {
+    use sea_orm_migration::MigratorTrait;
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/migration");
+    let guide = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../release/docs/upgrade.md"),
+    )
+    .expect("release/docs/upgrade.md");
+    let names: Vec<String> = super::Migrator::migrations()
+        .iter()
+        .map(|m| m.name().to_owned())
+        .collect();
+    let released = names
+        .iter()
+        .position(|name| name == RELEASED)
+        .expect("the released migration is known");
+    for name in &names[released + 1..] {
+        let source = std::fs::read_to_string(dir.join(format!("{name}.rs")))
+            .unwrap_or_else(|e| panic!("{name}.rs: {e}"));
+        let docs: String = source
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix("///"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let not_additive = docs.contains("Not additive");
+        assert!(
+            not_additive || docs.contains("Additive"),
+            "{name} does not say whether it is additive"
+        );
+        assert_eq!(
+            guide.contains(&format!("`{name}`")),
+            not_additive,
+            "release/docs/upgrade.md must name exactly the migrations that are not additive; \
+             {name} is {}",
+            if not_additive {
+                "not additive"
+            } else {
+                "additive"
+            }
+        );
+    }
+}

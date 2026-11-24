@@ -54,9 +54,18 @@ is upgraded with every server stopped: stop all of them, then start the first
 server of the new release, which applies the migrations, then the rest. Workers
 can keep running. The release notes say which kind a release is.
 
-This release is one of them: it tightens a constraint on refresh tokens, drops a
-column of device-code approvals, and takes plugin SQL's grant on failure
-diagnostics away. Stop every server before the first one of this release starts.
+This release is one of them. Its migrations that are not additive:
+
+- `m0011_plugin_diagnostics_hidden`: takes plugin SQL's grant on failure
+  diagnostics away.
+- `m0012_refresh_token_session_required`: makes a refresh token's session
+  required.
+- `m0013_device_approval_session`: drops a column of device-code approvals.
+- `m0017_plugin_governs_shape`: adds a check on what a plugin governs, which
+  rows the previous release writes do not meet.
+- `m0019_replica_provides`: renames a column of the server replica table.
+
+Stop every server before the first one of this release starts.
 
 An old server that restarts after a new one has migrated the database refuses to
 start (it does not know the new migration). Once the first upgraded server is
