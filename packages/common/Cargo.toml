@@ -14,7 +14,7 @@ testing = ["object-storage", "dep:testcontainers"]
 test-util = ["dep:testcontainers", "dep:testcontainers-modules"]
 # Clock hooks only tests call (`PlatformClock::sync`, a clock with no
 # database). Never enabled by a release build.
-test-hooks = ["sea-orm"]
+test-hooks = ["sea-orm", "sea-orm/mock"]
 
 [dependencies]
 libc = "0.2"

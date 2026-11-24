@@ -20,8 +20,14 @@
 //! refused at once, and a pool that is only busy is never taken for one that
 //! is lost.
 //!
-//! A mock connection (tests) has no pool to check out from and no outage:
-//! its statements run on sea-orm's mock as they are, NUL rule included.
+//! Every statement reaches the metric callback once: sea-orm reports a
+//! transaction's prepared statements, and the handle reports the rest (the
+//! statements it runs on a [`PooledConnection`] and every unprepared one,
+//! which sea-orm runs unreported).
+//!
+//! With the `test-hooks` feature only, a handle may wrap sea-orm's mock
+//! connection (`MockDatabase`) for unit tests; a production build has no
+//! mock path.
 
 use std::backtrace::Backtrace;
 use std::future::Future;
@@ -89,7 +95,7 @@ impl Metric {
 /// While it is open, the connection it holds counts as busy, not lost, in the
 /// pool's record of whether the database can be reached.
 #[derive(Debug)]
-pub struct DatabaseTransaction(sea_orm::DatabaseTransaction, Held);
+pub struct DatabaseTransaction(sea_orm::DatabaseTransaction, Held, Metric);
 
 /// A connection checked out of a [`DatabaseConnection`]'s pool. The handle
 /// runs each standalone statement on one; a caller that must know which
@@ -135,11 +141,14 @@ impl PooledConnection {
         } else {
             sql.to_owned()
         };
-        let outcome = (&mut *self.conn)
-            .execute(sea_orm::sqlx::AssertSqlSafe(sql))
-            .await
-            .map(ExecResult::from)
-            .map_err(exec_err);
+        let stmt = Statement::from_string(DbBackend::Postgres, sql);
+        let run = (&mut *self.conn).execute(sea_orm::sqlx::AssertSqlSafe(stmt.sql.clone()));
+        let outcome = self
+            .metric
+            .observe(&stmt, async {
+                run.await.map(ExecResult::from).map_err(exec_err)
+            })
+            .await;
         self.settle(outcome)
     }
 
@@ -227,8 +236,19 @@ fn sqlx_query(
 }
 
 impl From<sea_orm::DatabaseConnection> for DatabaseConnection {
+    /// A handle on `inner`'s Postgres pool.
     fn from(inner: sea_orm::DatabaseConnection) -> Self {
         Self(inner, Arc::default(), Metric::default())
+    }
+}
+
+/// Unit tests' sea-orm mock behind the handle: its statements run on the
+/// mock as they are, NUL rule included. It has no pool, so nothing checks a
+/// connection out and no outage is decided.
+#[cfg(feature = "test-hooks")]
+impl DatabaseConnection {
+    fn as_mock(&self) -> Option<&sea_orm::DatabaseConnection> {
+        self.0.is_mock_connection().then_some(&self.0)
     }
 }
 
@@ -264,9 +284,7 @@ impl DatabaseConnection {
 
     /// Check a connection out of the pool (see [`PooledConnection`]).
     pub async fn acquire(&self) -> Result<PooledConnection, DbErr> {
-        let pool = self
-            .pool()
-            .ok_or_else(|| DbErr::Custom("a mock connection has no pool".into()))?;
+        let pool = self.pool()?;
         self.checked_out(async { pool.acquire().await.map_err(acquire_err) })
             .await
             .map(|(conn, held)| PooledConnection {
@@ -289,7 +307,7 @@ impl DatabaseConnection {
 
     /// Close one idle connection, if the pool has one; true when it did.
     pub async fn close_idle(&self) -> bool {
-        let Some(conn) = self.pool().and_then(|pool| pool.try_acquire()) else {
+        let Some(conn) = self.pool().ok().and_then(|pool| pool.try_acquire()) else {
             return false;
         };
         if let Err(e) = conn.close().await {
@@ -309,35 +327,43 @@ impl DatabaseConnection {
         self.1.settle_acquire(pass, outcome)
     }
 
-    /// The pool connections are checked out of; `None` for a mock.
-    fn pool(&self) -> Option<&sea_orm::sqlx::PgPool> {
-        (!self.0.is_mock_connection()).then(|| self.0.get_postgres_connection_pool())
+    /// The pool connections are checked out of.
+    fn pool(&self) -> Result<&sea_orm::sqlx::PgPool, DbErr> {
+        #[cfg(feature = "test-hooks")]
+        if self.0.is_mock_connection() {
+            return Err(DbErr::Custom("a mock connection has no pool".into()));
+        }
+        Ok(self.0.get_postgres_connection_pool())
     }
 
     async fn exec(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
-        if self.0.is_mock_connection() {
-            return self.0.execute_raw(without_nul(stmt)).await;
+        #[cfg(feature = "test-hooks")]
+        if let Some(mock) = self.as_mock() {
+            return mock.execute_raw(without_nul(stmt)).await;
         }
         self.acquire().await?.execute(stmt).await
     }
 
     async fn unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
-        if self.0.is_mock_connection() {
-            return self.0.execute_unprepared(&sanitize_text_field(sql)).await;
+        #[cfg(feature = "test-hooks")]
+        if let Some(mock) = self.as_mock() {
+            return mock.execute_unprepared(&sanitize_text_field(sql)).await;
         }
         self.acquire().await?.execute_unprepared(sql).await
     }
 
     async fn one(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
-        if self.0.is_mock_connection() {
-            return self.0.query_one_raw(without_nul(stmt)).await;
+        #[cfg(feature = "test-hooks")]
+        if let Some(mock) = self.as_mock() {
+            return mock.query_one_raw(without_nul(stmt)).await;
         }
         self.acquire().await?.query_one(stmt).await
     }
 
     async fn all(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
-        if self.0.is_mock_connection() {
-            return self.0.query_all_raw(without_nul(stmt)).await;
+        #[cfg(feature = "test-hooks")]
+        if let Some(mock) = self.as_mock() {
+            return mock.query_all_raw(without_nul(stmt)).await;
         }
         self.acquire().await?.query_all(stmt).await
     }
@@ -348,7 +374,7 @@ impl DatabaseConnection {
     ) -> Result<DatabaseTransaction, DbErr> {
         self.checked_out(begin)
             .await
-            .map(|(txn, held)| DatabaseTransaction(txn, held))
+            .map(|(txn, held)| DatabaseTransaction(txn, held, self.2.clone()))
     }
 }
 
@@ -381,11 +407,10 @@ impl DatabaseTransaction {
     async fn unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
         if sql.contains('\0') {
             report(sql, 1);
-            return self
-                .settled(self.0.execute_unprepared(&sanitize_text_field(sql)))
-                .await;
         }
-        self.settled(self.0.execute_unprepared(sql)).await
+        let stmt = Statement::from_string(DbBackend::Postgres, sanitize_text_field(sql));
+        let run = self.0.execute_unprepared(&stmt.sql);
+        self.settled(self.2.observe(&stmt, run)).await
     }
 
     async fn one(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
@@ -403,7 +428,7 @@ impl DatabaseTransaction {
         begin: impl Future<Output = Result<sea_orm::DatabaseTransaction, DbErr>>,
     ) -> Result<DatabaseTransaction, DbErr> {
         let txn = self.settled(begin).await?;
-        Ok(DatabaseTransaction(txn, self.1.share()))
+        Ok(DatabaseTransaction(txn, self.1.share(), self.2.clone()))
     }
 }
 
