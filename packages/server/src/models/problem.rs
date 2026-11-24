@@ -193,7 +193,7 @@ pub async fn problem_response(
         crate::plugin_lifecycle::contest_type_outage(state, &m.default_contest_type).await;
     let closed_by = state
         .plugin_lifecycle
-        .closed_by(&m.default_contest_type, &m.problem_type);
+        .closed_by(crate::providers::Needs::of(&m.default_contest_type, &m));
     let submission_format: Option<std::collections::HashMap<String, Vec<String>>> = m
         .submission_format
         .and_then(|v| serde_json::from_value(v).ok());

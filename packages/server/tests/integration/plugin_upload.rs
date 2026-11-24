@@ -1315,7 +1315,7 @@ async fn a_disabled_provider_still_names_the_contest_types_it_provided() {
                 "visibility": false,
                 "contest_types": ["fmt-y"],
                 "problem_types": [],
-                "checkers": [],
+                "checker_formats": [],
             })
             .into(),
             UPLOAD_ONLY.into(),

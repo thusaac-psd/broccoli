@@ -144,6 +144,7 @@ impl Standing {
                 let role = match provides {
                     Provided::ContestType => "its contest plugin",
                     Provided::ProblemType => "its evaluator plugin",
+                    Provided::CheckerFormat => "its checker plugin",
                 };
                 Some(format!(
                     "Waiting for {role}: '{plugin_id}' is disabled until an administrator \
@@ -292,6 +293,16 @@ mod tests {
                 .waiting_for()
                 .unwrap()
                 .starts_with("Waiting for its evaluator plugin: 'batch'")
+        );
+        let checker = ClosedBy {
+            plugin_id: "standard-checkers".into(),
+            provides: Provided::CheckerFormat,
+        };
+        assert!(
+            Standing::new(Some(SubmissionStatus::Queued), None, Some(&checker))
+                .waiting_for()
+                .unwrap()
+                .starts_with("Waiting for its checker plugin: 'standard-checkers'")
         );
         // A finished submission is finished whatever its plugin does now.
         let judged = Standing::new(Some(SubmissionStatus::Judged), None, Some(&disabled));

@@ -384,7 +384,7 @@ pub async fn accepting_handler(
     let handler =
         handler.ok_or_else(|| AppError::ContestTypeUnavailable(contest_type.to_string()))?;
     match state.plugin_lifecycle.closed_by(needs) {
-        Some(plugin_id) => Err(AppError::PluginDisabled(plugin_id)),
+        Some(closed) => Err(AppError::PluginDisabled(closed.plugin_id)),
         None => Ok(handler),
     }
 }
@@ -1917,11 +1917,11 @@ mod tests {
         for partial in [
             serde_json::json!({"visibility": false, "contest_types": ["x"]}),
             serde_json::json!({
-                "visibility": false, "contest_types": [], "problem_types": [], "checkers": [],
+                "visibility": false, "contest_types": [], "problem_types": [], "checker_formats": [],
                 "host_locale": null,
             }),
             serde_json::json!({
-                "visibility": "no", "contest_types": [], "problem_types": [], "checkers": [],
+                "visibility": "no", "contest_types": [], "problem_types": [], "checker_formats": [],
             }),
             serde_json::json!([]),
         ] {
@@ -1932,9 +1932,11 @@ mod tests {
         }
         let whole = Governs {
             visibility: true,
-            contest_types: vec!["x".into()],
-            problem_types: vec![],
-            checkers: vec!["lines".into()],
+            provides: Provides {
+                contest_types: vec!["x".into()],
+                problem_types: vec![],
+                checker_formats: vec!["lines".into()],
+            },
         };
         write(serde_json::to_value(&whole).unwrap())
             .await
@@ -1976,51 +1978,73 @@ mod tests {
         (container, db)
     }
 
-    /// A lifecycle where `judge` provides contest type `t` and `eval` the
-    /// evaluator of problem type `p`, enabled as given.
-    fn providers(judge_enabled: bool, eval_enabled: bool) -> PluginLifecycle {
+    /// A lifecycle where `judge` provides contest type `t`, `eval` the
+    /// evaluator of problem type `p` and `check` the checker of format `c`,
+    /// enabled as given.
+    fn providers(judge_enabled: bool, eval_enabled: bool, check_enabled: bool) -> PluginLifecycle {
         let lifecycle = PluginLifecycle::default();
+        let provides = |provides: Provides| Governs {
+            provides,
+            ..Governs::default()
+        };
         lifecycle.set_governs(
             "judge",
-            Governs {
+            provides(Provides {
                 contest_types: vec!["t".into()],
-                ..Governs::default()
-            },
+                ..Provides::default()
+            }),
         );
         lifecycle.set_governs(
             "eval",
-            Governs {
+            provides(Provides {
                 problem_types: vec!["p".into()],
-                ..Governs::default()
-            },
+                ..Provides::default()
+            }),
+        );
+        lifecycle.set_governs(
+            "check",
+            provides(Provides {
+                checker_formats: vec!["c".into()],
+                ..Provides::default()
+            }),
         );
         lifecycle.set_desired("judge", judge_enabled);
         lifecycle.set_desired("eval", eval_enabled);
+        lifecycle.set_desired("check", check_enabled);
         lifecycle
     }
 
     #[test]
     fn closed_work_names_the_plugin_and_what_it_provides_for_the_work() {
         let queued = common::SubmissionStatus::Queued;
+        let needs = Needs {
+            contest_type: "t",
+            problem_type: "p",
+            checker_format: "c",
+        };
         let closed = |provides, plugin_id: &str| {
             Some(ClosedBy {
                 plugin_id: plugin_id.into(),
                 provides,
             })
         };
-        assert_eq!(providers(true, true).closed_by("t", "p"), None);
+        assert_eq!(providers(true, true, true).closed_by(needs), None);
         assert_eq!(
-            providers(true, false).parked_by("t", "p", queued),
+            providers(true, false, true).parked_by(needs, queued),
             closed(Provided::ProblemType, "eval"),
+        );
+        assert_eq!(
+            providers(true, true, false).parked_by(needs, queued),
+            closed(Provided::CheckerFormat, "check"),
         );
         // The contest type is what work of it needs first.
         assert_eq!(
-            providers(false, false).parked_by("t", "p", queued),
+            providers(false, false, false).parked_by(needs, queued),
             closed(Provided::ContestType, "judge"),
         );
         // Finished work is parked by nothing.
         assert_eq!(
-            providers(false, false).parked_by("t", "p", common::SubmissionStatus::Judged),
+            providers(false, false, false).parked_by(needs, common::SubmissionStatus::Judged),
             None,
         );
     }

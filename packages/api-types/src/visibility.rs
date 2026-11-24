@@ -42,6 +42,9 @@ pub enum Provided {
     ContestType,
     /// Its problem type: the plugin's evaluator runs the unit's test cases.
     ProblemType,
+    /// Its problem's checker format: the plugin's checker checks the unit's
+    /// output.
+    CheckerFormat,
 }
 
 /// The plugin that keeps new work of a resource from running: every plugin

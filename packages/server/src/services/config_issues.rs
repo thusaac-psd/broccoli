@@ -524,10 +524,10 @@ async fn undecided_at<C: ConnectionTrait>(
             let of_its_types = t
                 .contest_types
                 .iter()
-                .any(|key| governs.contest_types.contains(key))
+                .any(|key| governs.provides.contest_types.contains(key))
                 || t.problem_types
                     .iter()
-                    .any(|key| governs.problem_types.contains(key));
+                    .any(|key| governs.provides.problem_types.contains(key));
             of_its_types && checks_at(t.target.scope())
         });
         if provides {

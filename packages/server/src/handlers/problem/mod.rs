@@ -339,9 +339,11 @@ async fn get_problem_in(
     // Under a contest, its work runs in the contest's type.
     if let Some(contest) = contest {
         response.closed_by = contest.contest_type.and_then(|contest_type| {
-            state
-                .plugin_lifecycle
-                .closed_by(&contest_type, &response.problem_type)
+            state.plugin_lifecycle.closed_by(crate::providers::Needs {
+                contest_type: &contest_type,
+                problem_type: &response.problem_type,
+                checker_format: &response.checker_format,
+            })
         });
     }
     response.samples = load_sample_test_cases(&state.db, scope.problem_id).await?;

@@ -27,7 +27,11 @@ test('a superseded judgement reads as superseded, and no submission filters by i
 });
 
 test('a parked submission names what parks it, as the server records it', () => {
-  for (const provides of ['contest_type', 'problem_type'] as const) {
+  for (const provides of [
+    'contest_type',
+    'problem_type',
+    'checker_format',
+  ] as const) {
     assert.deepEqual(
       getVerdictBadge(
         { status: 'Queued', parked_by: { plugin_id: 'p', provides } },

@@ -21,38 +21,29 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::RegistryState;
 
-/// A kind of key plugins provide.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Provided {
-    /// A contest type: its plugin judges the unit.
-    ContestType,
-    /// A problem type: its evaluator plugin runs the unit's test cases.
-    ProblemType,
-    /// A checker format: its checker plugin checks the unit's output.
-    CheckerFormat,
-}
+pub use broccoli_api_types::visibility::Provided;
 
-impl Provided {
-    pub const ALL: [Provided; 3] = [Self::ContestType, Self::ProblemType, Self::CheckerFormat];
+/// Every kind of key, in the order [`Needs::each`] lists a unit's needs.
+pub const KINDS: [Provided; 3] = [
+    Provided::ContestType,
+    Provided::ProblemType,
+    Provided::CheckerFormat,
+];
 
-    /// The [`Provides`] field, and JSON key, that lists the keys of this kind.
-    pub(crate) fn field(self) -> &'static str {
-        match self {
-            Self::ContestType => "contest_types",
-            Self::ProblemType => "problem_types",
-            Self::CheckerFormat => "checker_formats",
-        }
+/// The [`Provides`] field, and JSON key, that lists the keys of `kind`.
+pub(crate) fn field(kind: Provided) -> &'static str {
+    match kind {
+        Provided::ContestType => "contest_types",
+        Provided::ProblemType => "problem_types",
+        Provided::CheckerFormat => "checker_formats",
     }
 }
 
 /// The keys of each kind some plugins provide, each list sorted.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provides {
-    #[serde(default)]
     pub contest_types: Vec<String>,
-    #[serde(default)]
     pub problem_types: Vec<String>,
-    #[serde(default)]
     pub checker_formats: Vec<String>,
 }
 
@@ -123,7 +114,7 @@ impl<'a> Needs<'a> {
         }
     }
 
-    /// Each need with its kind, in [`Provided::ALL`] order.
+    /// Each need with its kind, in [`KINDS`] order.
     pub fn each(self) -> [(Provided, &'a str); 3] {
         [
             (Provided::ContestType, self.contest_type),
@@ -145,7 +136,7 @@ pub(crate) fn runnable(needs: [(Provided, &str); 3]) -> String {
             format!(
                 "COALESCE((SELECT bool_or(p.is_enabled) FROM plugin p \
                             WHERE p.governs->'{field}' @> jsonb_build_array({key})), TRUE)",
-                field = kind.field(),
+                field = field(*kind),
             )
         })
         .collect();
@@ -167,7 +158,7 @@ pub(crate) fn runs_here(needs: [(Provided, &str); 3], local: &LocalPlaceholders)
                     WHERE r.heartbeat_at > NOW() - make_interval(secs => {live}) \
                       AND r.provides->'{field}' @> jsonb_build_array({key})))",
                 local = local.of(*kind),
-                field = kind.field(),
+                field = field(*kind),
                 live = crate::plugin_fleet::LIVE_WINDOW_SECS,
             )
         })
@@ -183,14 +174,14 @@ impl LocalPlaceholders {
     /// Binds each kind of `local` with `bind`, which returns the placeholder
     /// of the value it bound.
     pub(crate) fn bind(local: &Provides, mut bind: impl FnMut(Vec<String>) -> String) -> Self {
-        Self(Provided::ALL.map(|kind| bind(local.keys(kind).to_vec())))
+        Self(KINDS.map(|kind| bind(local.keys(kind).to_vec())))
     }
 
     fn of(&self, kind: Provided) -> &str {
-        let index = Provided::ALL
+        let index = KINDS
             .iter()
             .position(|k| *k == kind)
-            .expect("every kind is in ALL");
+            .expect("every kind is in KINDS");
         &self.0[index]
     }
 }

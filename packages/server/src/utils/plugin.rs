@@ -141,9 +141,9 @@ pub async fn update_translations(state: &AppState) {
             continue;
         }
         for (kind, ids) in [
-            (IdentifierKind::ContestType, &governs.contest_types),
-            (IdentifierKind::ProblemType, &governs.problem_types),
-            (IdentifierKind::Checker, &governs.checkers),
+            (IdentifierKind::ContestType, &governs.provides.contest_types),
+            (IdentifierKind::ProblemType, &governs.provides.problem_types),
+            (IdentifierKind::Checker, &governs.provides.checker_formats),
         ] {
             for id in ids {
                 owners.insert_last_provider(kind, id, &plugin_id);
