@@ -10,6 +10,7 @@ import {
   useQueryState,
 } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { announceSubmissionVisibilityChange } from '@broccoli/web-sdk/submission';
 import {
   Button,
   QueryErrorState,
@@ -26,10 +27,10 @@ import type { TokenStatusResponse } from './types';
 interface TokenPanelProps {
   submission?: {
     id: number;
-    status: string;
     contest_id?: number | null;
   } | null;
   contestId?: number;
+  problemId?: number;
 }
 
 /** Fetches of the token status after a regeneration time passes, at most. */
@@ -42,7 +43,11 @@ function formatCountdown(totalSeconds: number) {
   return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 }
 
-export function TokenPanel({ submission, contestId }: TokenPanelProps) {
+export function TokenPanel({
+  submission,
+  contestId,
+  problemId,
+}: TokenPanelProps) {
   const cId = contestId ?? submission?.contest_id ?? undefined;
   const infoQuery = useIoiContestInfo(cId);
   const contestInfo = infoQuery.data;
@@ -147,21 +152,26 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
   }
   if (!showTokens || !tokenStatus) return null;
 
-  const canUseToken =
-    submission &&
-    submission.status === 'Judged' &&
-    tokenStatus.available > 0 &&
-    !tokenStatus.tokened_submission_ids.includes(submission.id);
+  // The submission a token would go to: the one the page shows, or else the
+  // newest of this problem's, whichever the plugin says a token can be spent
+  // on. Its own status cannot say: feedback may withhold it from its owner.
+  const usable = tokenStatus.usable_submissions.filter(
+    (u) => u.problem_id === problemId,
+  );
+  const targetId = submission
+    ? usable.find((u) => u.submission_id === submission.id)?.submission_id
+    : usable[0]?.submission_id;
+  const canUseToken = targetId !== undefined && tokenStatus.available > 0;
 
   const alreadyTokened =
     submission && tokenStatus.tokened_submission_ids.includes(submission.id);
 
-  const handleUseToken = async () => {
-    if (!submission || !cId) return;
+  const handleUseToken = async (submissionId: number) => {
+    if (!cId) return;
     setIsUsing(true);
     setError(null);
     try {
-      const result = await api.useToken(cId, submission.id);
+      const result = await api.useToken(cId, submissionId);
       // The token may or may not be spent: say so, and the refetch below
       // shows which, instead of inviting a second use.
       if (!result.settled) setError(t(unsettledMessageKey(result.outcome)));
@@ -173,8 +183,11 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
       // outcome) or the count may have changed under us.
       queryClient.invalidateQueries({ queryKey: ['ioi-token-status', cId] });
       queryClient.invalidateQueries({
-        queryKey: ['ioi-subtask-scores', cId, submission.id],
+        queryKey: ['ioi-subtask-scores', cId, submissionId],
       });
+      // A token unlocks the submission's hidden outcome: every view of it
+      // reads it again.
+      announceSubmissionVisibilityChange(submissionId);
     }
   };
 
@@ -241,11 +254,11 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
       {/* Use token button with confirmation */}
       {canUseToken && (
         <div className="relative">
-          {confirmingSubmissionId === submission.id ? (
+          {confirmingSubmissionId === targetId ? (
             <div className="p-2.5 px-3 rounded-md border border-amber-500/30 bg-amber-500/[0.06] flex flex-col gap-2">
               <div className="text-xs text-foreground leading-normal">
                 {t('ioi.tokenPanel.confirmUse', {
-                  id: submission.id,
+                  id: targetId,
                   remaining: tokenStatus.available - 1,
                 })}
               </div>
@@ -255,7 +268,7 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
                   className="flex-1"
                   onClick={() => {
                     setConfirmingSubmissionId(null);
-                    handleUseToken();
+                    void handleUseToken(targetId);
                   }}
                   disabled={isUsing}
                 >
@@ -276,9 +289,9 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
           ) : (
             <Button
               className="w-full"
-              onClick={() => setConfirmingSubmissionId(submission.id)}
+              onClick={() => setConfirmingSubmissionId(targetId)}
             >
-              {t('ioi.tokenPanel.useToken')}
+              {t('ioi.tokenPanel.useToken', { id: targetId })}
             </Button>
           )}
         </div>

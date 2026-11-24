@@ -59,6 +59,15 @@ export interface ConfigFormSlotProps {
 export interface ConfigFieldSlotProps {
   /** Current field value (from the form state). */
   value: unknown;
+  /**
+   * The field's title in the user's language: the plugin pack's
+   * translation of the field (`pluginKeys.configField`), else the schema's
+   * `title`, else the field's name. Show this, never `schema.title`, which
+   * is the text the plugin wrote in one language.
+   */
+  label: string;
+  /** The field's description, chosen the same way as `label`. */
+  description?: string;
   /** JSON schema for this field. */
   schema: {
     type?: string;

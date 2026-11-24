@@ -8,11 +8,9 @@
 'config-ui-test.collapsible.collapsedHint' = 'Scoring section collapsed — click Expand to configure'
 
 # ColorPickerField
-'config-ui-test.colorPicker.defaultTitle' = 'Color'
 'config-ui-test.colorPicker.preview' = 'Preview'
 
 # ModeCardSelector
-'config-ui-test.modeCard.defaultTitle' = 'Mode'
 'config-ui-test.modeCard.fast.description' = 'Quick checks, minimal validation'
 'config-ui-test.modeCard.balanced.description' = 'Good trade-off between speed and coverage'
 'config-ui-test.modeCard.thorough.description' = 'Full validation, slower but comprehensive'

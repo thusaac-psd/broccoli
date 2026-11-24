@@ -1197,3 +1197,60 @@ async fn icpc_contest_wrong_answer_through_detached_driver() {
         "a wrong-answer ICPC submission scores 0.0"
     );
 }
+
+/// A board polls while it may still change: after the end, a frozen board
+/// stays live until it is revealed, even with nothing left to judge, and
+/// stops once the reveal shows the final results.
+#[tokio::test(flavor = "multi_thread")]
+async fn icpc_a_frozen_board_stays_live_after_the_end_until_it_is_revealed() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("icpc_live_admin", "password", "admin")
+        .await;
+    // A team reads the frozen board; organizers always see the real one.
+    let team = app
+        .create_authenticated_user("icpc_live_team", "password")
+        .await;
+    let problem_id = app.create_problem(&admin, "ICPC Live Problem").await;
+    app.create_test_case(problem_id, &admin).await;
+    let contest_id = app
+        .create_typed_contest(&admin, "ICPC Live Contest", "icpc", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &team).await;
+    open_icpc_freeze_window(&app, contest_id, &admin).await;
+
+    let now = Utc::now();
+    let mut ended: contest::ActiveModel = contest::Entity::find_by_id(contest_id)
+        .one(&app.db)
+        .await
+        .expect("query contest")
+        .expect("contest should exist")
+        .into();
+    ended.end_time = Set(now - Duration::minutes(1));
+    ended.update(&app.db).await.expect("end the contest");
+
+    let base = format!("/api/v1/p/icpc/api/plugins/icpc/contests/{contest_id}");
+    let board = app
+        .get_with_token(&format!("{base}/standings"), &team)
+        .await;
+    assert_eq!(board.status, 200, "{}", board.text);
+    assert_eq!(board.body["frozen"], json!(true), "{}", board.text);
+    assert_eq!(
+        board.body["live"],
+        json!(true),
+        "awaits its reveal: {}",
+        board.text
+    );
+
+    let revealed = app
+        .post_with_token(&format!("{base}/reveal"), &json!({}), &admin)
+        .await;
+    assert_eq!(revealed.status, 200, "{}", revealed.text);
+    let board = app
+        .get_with_token(&format!("{base}/standings"), &team)
+        .await;
+    assert_eq!(board.status, 200, "{}", board.text);
+    assert_eq!(board.body["live"], json!(false), "final: {}", board.text);
+}

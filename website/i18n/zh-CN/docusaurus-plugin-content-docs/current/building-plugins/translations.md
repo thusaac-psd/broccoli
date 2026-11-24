@@ -127,6 +127,8 @@ host.submission.update(&SubmissionUpdate::standing_system_error(
 
 字段路径以点连接嵌套的属性名，因此 `batch-evaluator` 中 `[config.sandbox.properties.compile_time_limit_s]` 字段的标题键为 `config.batch-evaluator.sandbox.compile_time_limit_s.title`。
 
+在插件自己的位置渲染某个字段的组件（`config.field.<plugin id>.<namespace>.<field path>` 插槽）会收到按同样方式选出的字段 `label` 和 `description`。请显示这两项，而不要显示 `schema.title` 或 `schema.description`，后两者只包含 `plugin.toml` 中的原文。
+
 ```toml
 'plugin.batch-evaluator.description' = 'Judges batch problems: compile, run against each test, check the output.'
 'config.batch-evaluator.sandbox.description' = 'Sandbox resource limits for compilation and execution steps'

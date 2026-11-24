@@ -70,7 +70,6 @@
 'ioi.submission.method.groupMul' = '乘积 (MUL)'
 
 # ScoringModeSelector
-'ioi.scoringMode.label' = '计分模式'
 'ioi.scoringMode.bestTokenedOrLast.title' = '最佳令牌提交或最后提交'
 'ioi.scoringMode.bestTokenedOrLast.description' = '官方得分为得分最高的已使用令牌的提交与最新一次提交中的较高者'
 'ioi.scoringMode.bestTokenedOrLast.era' = '2010–2012'
@@ -84,7 +83,6 @@
 'ioi.scoringMode.explanation' = '计分分为两级：(1) 在单次提交中，根据每个子任务配置的方法（取最小值、求和、相乘）计算子任务得分。(2) 该题的最终得分由上方选择的计分模式决定。'
 
 # SubtaskEditor
-'ioi.subtask.title' = '子任务定义'
 'ioi.subtask.testCasesAvailable' = '可用测试点：{count} 个'
 'ioi.subtask.testCaseAvailable' = '可用测试点：{count} 个'
 'ioi.subtask.subtaskCount' = '{count} 个子任务'
@@ -162,7 +160,6 @@
 'ioi.subtask.method.groupMul.hint' = '乘积计算：各测试点得分的乘积 × 该子任务最高分'
 
 # TokenConfigPanel
-'ioi.tokenConfig.title' = '令牌 (Token) 配置'
 'ioi.tokenConfig.mode.none.label' = '已禁用'
 'ioi.tokenConfig.mode.none.desc' = '不使用令牌系统'
 'ioi.tokenConfig.mode.fixedBudget.label' = '固定数量'
@@ -188,7 +185,7 @@
 'ioi.tokenPanel.loadFailed' = '无法加载你的令牌。'
 'ioi.tokenPanel.title' = '令牌'
 'ioi.tokenPanel.available' = '可用：{available} / {total}'
-'ioi.tokenPanel.useToken' = '在此提交上使用令牌'
+'ioi.tokenPanel.useToken' = '在提交 #{id} 上使用令牌'
 'ioi.tokenPanel.usingToken' = '正在使用令牌…'
 'ioi.tokenPanel.useFailed' = '使用令牌失败。'
 'ioi.tokenPanel.alreadyUsed' = '此提交已使用令牌'
@@ -203,12 +200,10 @@
 'ioi.config.beforeContestInfo' = '本场比赛尚未开始。修改配置是安全的。'
 
 # Feedback levels (used in FeedbackLevelSelector)
-'ioi.feedbackLevel.label' = '反馈级别'
 'ioi.feedbackLevel.tokenEnabledHint' = '这是不使用令牌时显示的基础反馈。使用令牌的提交将始终显示完整反馈。'
 'ioi.feedbackLevel.tokenDisabledHint' = '这是比赛期间显示的提交反馈。'
 
 # ScoreboardVisibilitySelector
-'ioi.scoreboardVisibility.label' = '比赛结束前计分板可见性'
 'ioi.scoreboardVisibility.description' = '设置在比赛结束前谁可以查看完整的计分板'
 'ioi.scoreboardVisibility.adminsOnly.label' = '仅管理员'
 'ioi.scoreboardVisibility.adminsOnly.description' = '参赛者在比赛结束前仅能看到自己的排名信息。'
@@ -216,7 +211,6 @@
 'ioi.scoreboardVisibility.allContestViewers.description' = '任何有权访问比赛的用户均可查看完整的实时排名。'
 
 # ScoreboardTiebreakerSelector
-'ioi.scoreboardTiebreaker.label' = '计分板同分规则'
 'ioi.scoreboardTiebreaker.description' = '设置总分相同时如何决定排名'
 'ioi.scoreboardTiebreaker.equalRank.label' = '并列排名'
 'ioi.scoreboardTiebreaker.equalRank.description' = '总分相同的参赛者使用相同名次。'

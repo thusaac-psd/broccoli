@@ -27,7 +27,14 @@ sidebar_position: 1
 （manager）标准输出的第一行解析成一个 `f64`，把它限制在 `[0.0, 1.0]` 范
 围内，然后原样写进 `TestCaseVerdict.score`。限制后只要分数不满 `1.0`，判
 定就是 `Verdict::WrongAnswer`，而不是"部分通过"
-（`communication-evaluator/src/interpret.rs:325-357`）。
+（`communication-evaluator/src/interpret.rs:263-299`）。
+
+管理程序自身出错（以非零码退出、被其自身导致的信号终止，或未输出有效分数）
+是本题的失败，直接成立（`PROBLEM_FAILED`），无论选手程序多早退出：选手程序
+通常在管理程序评分之前就已退出，时间先后无法区分提前离开的选手程序和正常结
+束的选手程序。只有协议上的证据才归咎于选手：管理程序在向已退出的选手程序写
+入时被 SIGPIPE 终止（判为答案错误），或管理程序自己为过短的交互给出分数，例
+如 `0`。
 
 ## 评分与题目类型是解耦的
 

@@ -70,7 +70,6 @@
 'ioi.submission.method.groupMul' = 'MUL'
 
 # ScoringModeSelector
-'ioi.scoringMode.label' = 'Scoring Mode'
 'ioi.scoringMode.bestTokenedOrLast.title' = 'Best Tokened or Last'
 'ioi.scoringMode.bestTokenedOrLast.description' = 'Official score is the better of your best tokened submission and your latest submission'
 'ioi.scoringMode.bestTokenedOrLast.era' = '2010–2012'
@@ -84,7 +83,6 @@
 'ioi.scoringMode.explanation' = 'Scoring is two-level: (1) Within each submission, subtask scores are computed using the method configured per-subtask (Min, Sum, Multiply). (2) Your final problem score across all submissions is determined by the scoring mode selected above.'
 
 # SubtaskEditor
-'ioi.subtask.title' = 'Subtask Definitions'
 'ioi.subtask.testCasesAvailable' = '{count} test cases available'
 'ioi.subtask.testCaseAvailable' = '{count} test case available'
 'ioi.subtask.subtaskCount' = '{count} subtasks'
@@ -162,7 +160,6 @@
 'ioi.subtask.method.groupMul.hint' = 'Multiplicative: product of test case scores x max score'
 
 # TokenConfigPanel
-'ioi.tokenConfig.title' = 'Token Configuration'
 'ioi.tokenConfig.mode.none.label' = 'Disabled'
 'ioi.tokenConfig.mode.none.desc' = 'No token system'
 'ioi.tokenConfig.mode.fixedBudget.label' = 'Fixed'
@@ -188,7 +185,7 @@
 'ioi.tokenPanel.loadFailed' = 'Could not load your tokens.'
 'ioi.tokenPanel.title' = 'Tokens'
 'ioi.tokenPanel.available' = '{available} / {total} available'
-'ioi.tokenPanel.useToken' = 'Use Token on This Submission'
+'ioi.tokenPanel.useToken' = 'Use a token on submission #{id}'
 'ioi.tokenPanel.usingToken' = 'Using token...'
 'ioi.tokenPanel.useFailed' = 'Failed to use the token.'
 'ioi.tokenPanel.alreadyUsed' = 'Token used on this submission'
@@ -203,12 +200,10 @@
 'ioi.config.beforeContestInfo' = 'This contest has not started yet. Configuration changes are safe.'
 
 # Feedback levels (used in FeedbackLevelSelector)
-'ioi.feedbackLevel.label' = 'Feedback Level'
 'ioi.feedbackLevel.tokenEnabledHint' = 'This is the baseline feedback shown without spending a token. A tokened submission always reveals full feedback.'
 'ioi.feedbackLevel.tokenDisabledHint' = 'This is the submission feedback shown during the contest.'
 
 # ScoreboardVisibilitySelector
-'ioi.scoreboardVisibility.label' = 'Scoreboard Visibility Before End'
 'ioi.scoreboardVisibility.description' = 'Who can see the full scoreboard before the contest ends'
 'ioi.scoreboardVisibility.adminsOnly.label' = 'Admins only'
 'ioi.scoreboardVisibility.adminsOnly.description' = 'Contestants see only their own row until the contest ends.'
@@ -216,7 +211,6 @@
 'ioi.scoreboardVisibility.allContestViewers.description' = 'Everyone who can access the contest sees full live standings.'
 
 # ScoreboardTiebreakerSelector
-'ioi.scoreboardTiebreaker.label' = 'Scoreboard Tiebreaker'
 'ioi.scoreboardTiebreaker.description' = 'How tied total scores are ranked on the scoreboard'
 'ioi.scoreboardTiebreaker.equalRank.label' = 'Equal rank'
 'ioi.scoreboardTiebreaker.equalRank.description' = 'Contestants with the same total score share the same rank.'

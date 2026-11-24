@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 import { mockApi } from './api';
+import plugin from './fixture-plugin.json' with { type: 'json' };
 
 // A dialog belongs to the page it opened on: moving to another page closes
 // it, so it never covers the page it led to.
@@ -126,4 +127,53 @@ test("the upload dialog names the pack that already provides a language pack's l
     'This language pack provides en, which the enabled pack broccoli-en already provides. Disable broccoli-en to publish this one.',
   );
   await expect(dialog.getByRole('button', { name: 'Publish' })).toBeDisabled();
+});
+
+// A plugin's own widget for a config field shows the field's title in the
+// user's language, as the host's form does: the plugin pack's translation,
+// with the schema's text only as the fallback.
+test("a plugin's field widget names its field in the user's language", async ({
+  page,
+}) => {
+  await mockApi(page, 'admin', { plugins: ['config-ui-test'] });
+  await page.addInitScript(() =>
+    localStorage.setItem('broccoli-locale', 'zh-CN'),
+  );
+  await page.route('**/api/v1/admin/plugins', (route) =>
+    route.fulfill({
+      json: [
+        {
+          ...plugin,
+          id: 'config-ui-test',
+          name: 'config-ui-test',
+          config_schemas: [
+            {
+              namespace: 'appearance',
+              description: 'Visual appearance settings',
+              scopes: ['plugin'],
+              json_schema: {
+                type: 'object',
+                properties: {
+                  accent_color: {
+                    type: 'string',
+                    title: 'Accent Color',
+                    description: 'CSS color value',
+                  },
+                },
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  await page.route('**/api/v1/admin/plugins/config-ui-test/config', (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await page.goto('/admin/plugins');
+  await page.getByRole('button', { name: '配置' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByText('强调色').first()).toBeVisible();
+  await expect(dialog.getByText('CSS 颜色值')).toBeVisible();
+  await expect(dialog.getByText('Accent Color')).toHaveCount(0);
 });

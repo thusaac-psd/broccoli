@@ -29,7 +29,16 @@ fractional score directly from the interactor's stdout, bypassing
 manager's first stdout line as an `f64`, clamps it to `[0.0, 1.0]`, and writes
 it straight onto `TestCaseVerdict.score`. A capped score below `1.0` still
 yields `Verdict::WrongAnswer`, not a partial Accepted
-(`communication-evaluator/src/interpret.rs:325-357`).
+(`communication-evaluator/src/interpret.rs:263-299`).
+
+A manager that fails on its own (exits non-zero, dies of its own signal, or
+prints no valid score) is the problem's failure, which stands
+(`PROBLEM_FAILED`), however early the contestants exited: contestants
+normally exit before the manager scores, so timing cannot tell a contestant
+that left early from one that finished. The contestant is at fault only on
+protocol evidence: the manager died of SIGPIPE writing to a contestant that
+had exited (a wrong answer), or the manager scored the short interaction
+itself, for example with `0`.
 
 ## Scoring is decoupled from task type
 

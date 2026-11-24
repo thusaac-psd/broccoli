@@ -147,3 +147,48 @@ test("a match's submission feed names outcomes and times in the UI language", as
   await expect(sheet.getByText('Queued', { exact: true })).toHaveCount(0);
   await expect(sheet.getByText(/[AP]M/)).toHaveCount(0);
 });
+
+test('a bracket stream the server refused for a while waits as long as it asked, online or not', async ({
+  page,
+}) => {
+  await page.clock.install({ time: NOW });
+  // The stream: refused for a minute, every time.
+  await page.addInitScript(() => {
+    const fetch = window.fetch.bind(window);
+    (window as unknown as { streams: number }).streams = 0;
+    window.fetch = (input, init) => {
+      const accept = new Headers(init?.headers).get('Accept');
+      if (accept === 'text/event-stream') {
+        (window as unknown as { streams: number }).streams += 1;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ code: 'SERVICE_UNAVAILABLE', message: 'busy' }),
+            {
+              status: 503,
+              headers: {
+                'content-type': 'application/json',
+                'retry-after': '60',
+              },
+            },
+          ),
+        );
+      }
+      return fetch(input, init);
+    };
+  });
+  await mockApi(page, 'contestant', {
+    plugins: ['codelink-bracket'],
+    pluginRoutes: [['GET', BRACKET, () => SNAPSHOT], ...PLUGIN_ROUTES],
+  });
+  const streams = () =>
+    page.evaluate(() => (window as unknown as { streams: number }).streams);
+  await page.goto('/contests/5');
+  await expect.poll(streams).toBe(1);
+  // Coming back online says nothing about the server's own wait.
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await page.clock.runFor(30_000);
+  expect(await streams()).toBe(1);
+  // The wait is the server's, spread by up to as much again.
+  await page.clock.runFor(100_000);
+  await expect.poll(streams).toBe(2);
+});

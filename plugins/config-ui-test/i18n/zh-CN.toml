@@ -8,11 +8,9 @@
 'config-ui-test.collapsible.collapsedHint' = '评分设置已折叠 — 点击“展开”进行配置'
 
 # ColorPickerField
-'config-ui-test.colorPicker.defaultTitle' = '颜色'
 'config-ui-test.colorPicker.preview' = '预览'
 
 # ModeCardSelector
-'config-ui-test.modeCard.defaultTitle' = '模式'
 'config-ui-test.modeCard.fast.description' = '快速检查，最少校验'
 'config-ui-test.modeCard.balanced.description' = '在速度与覆盖面之间取得平衡'
 'config-ui-test.modeCard.thorough.description' = '完整校验，较慢但更全面'

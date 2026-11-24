@@ -2,7 +2,7 @@
  * Replaces the plain text input for `accent_color` with a native color picker
  * plus a text input showing the hex value, and a live preview swatch.
  *
- * Receives slot props: { value, schema, onChange, showAsPlaceholder, inheritedValue, inheritedSource, ... }
+ * Receives slot props: { value, label, description, schema, onChange, showAsPlaceholder, inheritedValue, inheritedSource, ... }
  */
 
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -13,7 +13,8 @@ import { cn } from '@broccoli/web-sdk/utils';
 
 export function ColorPickerField({
   value,
-  schema,
+  label,
+  description,
   onChange,
   showAsPlaceholder,
   inheritedValue,
@@ -32,7 +33,7 @@ export function ColorPickerField({
     <div className="flex flex-col gap-1.5 col-span-2">
       <div className="flex items-center gap-2">
         <Label className="text-[11px] font-medium uppercase tracking-wide opacity-60">
-          {schema.title ?? t('config-ui-test.colorPicker.defaultTitle')}
+          {label}
           <span className="ml-1.5 text-[10px] font-normal normal-case tracking-normal text-amber-600">
             {t('config-ui-test.pluginOverrideBadge')}
           </span>
@@ -41,15 +42,11 @@ export function ColorPickerField({
           <InheritedBadge source={inheritedSource} />
         )}
       </div>
-      {schema.description && (
-        <p className="text-xs opacity-60 m-0">{schema.description}</p>
-      )}
+      {description && <p className="text-xs opacity-60 m-0">{description}</p>}
       <div className="flex items-center gap-3">
         {/* Native color picker */}
         <input
-          aria-label={
-            schema.title ?? t('config-ui-test.colorPicker.defaultTitle')
-          }
+          aria-label={label}
           type="color"
           value={displayColor}
           onChange={(e) => onChange(e.target.value)}
@@ -60,9 +57,7 @@ export function ColorPickerField({
         />
         {/* Hex text input */}
         <Input
-          aria-label={
-            schema.title ?? t('config-ui-test.colorPicker.defaultTitle')
-          }
+          aria-label={label}
           type="text"
           value={showAsPlaceholder ? '' : displayColor}
           placeholder={

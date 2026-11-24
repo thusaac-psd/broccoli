@@ -76,13 +76,18 @@ export type EntryAction =
   /** The server refused the submit or run: nothing was created. */
   | { type: 'rejected'; id: number; error: unknown }
   | { type: 'failed'; id: number; error: unknown }
+  /**
+   * What the viewer may see of a settled submission changed (a plugin
+   * unlocked its hidden outcome): every `done` entry of it takes `result`.
+   */
+  | { type: 'reread'; submissionId: number; result: EntryResult }
   /** The entry has nothing to show here (it is in the submissions list). */
   | { type: 'withdrawn'; id: number }
   | { type: 'reset' };
 
 /** The statuses each action may move an entry out of. */
 const FROM: Record<
-  Exclude<EntryAction['type'], 'added' | 'withdrawn' | 'reset'>,
+  Exclude<EntryAction['type'], 'added' | 'withdrawn' | 'reset' | 'reread'>,
   ReadonlySet<EntryStatus>
 > = {
   accepted: new Set(['submitting']),
@@ -120,6 +125,15 @@ export function entriesReducer(
         : entries;
     case 'reset':
       return entries.length === 0 ? entries : [];
+    case 'reread': {
+      const rereads = (e: SubmissionEntry) =>
+        e.status === 'done' &&
+        !e.isRun &&
+        e.submission?.id === action.submissionId;
+      return entries.some(rereads)
+        ? entries.map((e) => (rereads(e) ? withResult(e, action.result) : e))
+        : entries;
+    }
     default: {
       const index = entries.findIndex((e) => e.id === action.id);
       const entry = entries[index];

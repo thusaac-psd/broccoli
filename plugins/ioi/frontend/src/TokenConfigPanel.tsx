@@ -38,7 +38,7 @@ const TOKEN_MODES = [
 
 export function TokenConfigPanel({
   value,
-  schema,
+  label,
   onChange,
   formValues,
   showAsPlaceholder,
@@ -74,7 +74,7 @@ export function TokenConfigPanel({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="text-[11px] font-semibold uppercase tracking-wide opacity-55">
-            {schema.title ?? t('ioi.tokenConfig.title')}
+            {label}
           </div>
           {showAsPlaceholder && inheritedSource && (
             <InheritedBadge source={inheritedSource} />

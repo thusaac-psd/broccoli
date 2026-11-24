@@ -2,7 +2,7 @@
  * Replaces the `mode` dropdown with a visual card selector.
  * Each mode gets a card with an icon, name, and description.
  *
- * Receives slot props: { value, schema, onChange, showAsPlaceholder, inheritedValue, inheritedSource, ... }
+ * Receives slot props: { value, label, description, schema, onChange, showAsPlaceholder, inheritedValue, inheritedSource, ... }
  */
 
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -37,6 +37,8 @@ const UNKNOWN_MODE_ICON = '\u2753';
 export function ModeCardSelector({
   value,
   schema,
+  label,
+  description,
   onChange,
   showAsPlaceholder,
   inheritedValue,
@@ -60,7 +62,7 @@ export function ModeCardSelector({
     <div className="flex flex-col gap-1.5 col-span-2">
       <div className="flex items-center gap-2">
         <Label className="text-[11px] font-medium uppercase tracking-wide opacity-60">
-          {schema.title ?? t('config-ui-test.modeCard.defaultTitle')}
+          {label}
           <span className="ml-1.5 text-[10px] font-normal normal-case tracking-normal text-amber-600">
             {t('config-ui-test.pluginOverrideBadge')}
           </span>
@@ -69,9 +71,7 @@ export function ModeCardSelector({
           <InheritedBadge source={inheritedSource} />
         )}
       </div>
-      {schema.description && (
-        <p className="text-xs opacity-60 m-0">{schema.description}</p>
-      )}
+      {description && <p className="text-xs opacity-60 m-0">{description}</p>}
       <div className="grid grid-cols-2 gap-2">
         {modes.map((mode) => {
           const info = MODE_INFO[mode];

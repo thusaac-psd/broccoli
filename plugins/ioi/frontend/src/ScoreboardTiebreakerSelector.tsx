@@ -44,7 +44,7 @@ function isScoreboardTiebreaker(value: unknown): value is ScoreboardTiebreaker {
 
 export function ScoreboardTiebreakerSelector({
   value,
-  schema,
+  label,
   onChange,
   showAsPlaceholder,
   inheritedValue,
@@ -67,7 +67,7 @@ export function ScoreboardTiebreakerSelector({
     <div className="flex flex-col gap-2">
       <div className="flex items-center gap-2">
         <Label className="text-[11px] font-semibold uppercase tracking-wider opacity-55">
-          {t('ioi.scoreboardTiebreaker.label')}
+          {label}
         </Label>
         {showAsPlaceholder && inheritedSource && (
           <InheritedBadge source={inheritedSource} />
@@ -78,14 +78,8 @@ export function ScoreboardTiebreakerSelector({
       </p>
 
       <Select value={selectedValue} onValueChange={(v) => onChange(v)}>
-        <SelectTrigger aria-label={t('ioi.scoreboardTiebreaker.label')}>
-          <SelectValue
-            placeholder={
-              inheritedDisplay ??
-              schema.title ??
-              t('ioi.scoreboardTiebreaker.label')
-            }
-          />
+        <SelectTrigger aria-label={label}>
+          <SelectValue placeholder={inheritedDisplay ?? label} />
         </SelectTrigger>
         <SelectContent>
           {TIEBREAKER_OPTIONS.map((option) => (

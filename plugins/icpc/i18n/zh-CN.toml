@@ -52,4 +52,4 @@
 'config.icpc.contest.public_standings.title' = '公开实时排行榜'
 'config.icpc.contest.public_standings.description' = '比赛期间向选手显示完整排行榜（默认：比赛结束前每位选手只能看到自己的那一行）'
 'config.icpc.contest.freeze_minutes.title' = '封榜（分钟）'
-'config.icpc.contest.freeze_minutes.description' = '在最后 N 分钟冻结选手可见的排行榜（ICPC 风格：排名停止更新，封榜期间的提交显示为待定）。0 表示不封榜。组织者始终看到真实榜单。'
+'config.icpc.contest.freeze_minutes.description' = '在最后 N 分钟冻结选手可见的排行榜（ICPC 风格：排名停止更新，其他队伍在封榜期间的提交显示为待定；队伍始终能看到自己的结果）。0 表示不封榜。组织者始终看到真实榜单。'

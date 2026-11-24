@@ -110,10 +110,6 @@ pub fn interpret_result(
         runs.push(run);
     }
 
-    let last_contestant_wall = runs
-        .iter()
-        .map(|run| run.sandbox_result.wall_time_used)
-        .fold(0.0_f64, f64::max);
     let mut contestants_exited = true;
     for (i, run) in runs.into_iter().enumerate() {
         let sandbox = &run.sandbox_result;
@@ -207,14 +203,6 @@ pub fn interpret_result(
     // again.
     let judged_again =
         |how: &str| manager_failed(Verdict::SystemError, format!("{how}: {}", detail()), None);
-    // Every contestant exited on its own (none of them was cut off by a
-    // closed pipe), and no later than the manager ended: the steps start
-    // together on their shared pipes, so the manager failed after it was left
-    // without the interaction it needed. Whatever the manager then did, the
-    // contestant left early, and no contestant can make a correct problem
-    // look broken.
-    let left_by_contestants =
-        contestants_exited && last_contestant_wall <= mgr_sandbox.wall_time_used;
     let left_early = || {
         manager_failed(
             Verdict::WrongAnswer,
@@ -222,14 +210,13 @@ pub fn interpret_result(
             None,
         )
     };
-    // The manager failed on its own while a contestant still ran: every
-    // attempt fails alike, so the problem's failure stands.
+    // The manager failed on its own: a non-zero exit, its own signal or a
+    // missing score. Contestants normally exit before the manager scores, so
+    // their timing says nothing about whose fault this is; every attempt
+    // fails alike, and the problem's failure stands. A manager that blames a
+    // short interaction on the contestant says so with a score.
     let own_failure = |failure: String, message: String| {
-        if left_by_contestants {
-            left_early()
-        } else {
-            manager_failed(Verdict::SystemError, message, Some(failure))
-        }
+        manager_failed(Verdict::SystemError, message, Some(failure))
     };
     match RunOutcome::of(run_mgr) {
         RunOutcome::Exited => {}
@@ -399,15 +386,6 @@ mod tests {
         )
     }
 
-    /// A contestant that exited 0 but still ran when the manager ended, so a
-    /// manager failure is the manager's own.
-    fn outlasting_contestant() -> ExecutionResult {
-        ExecutionResult {
-            wall_time_used: 5.0,
-            ..ok_sandbox(0, 0.3, 2048)
-        }
-    }
-
     fn mgr_result(score: &str, message: &str) -> ExecutionResult {
         ExecutionResult {
             exit_code: Some(0),
@@ -441,7 +419,7 @@ mod tests {
         operation(vec![
             task_result("compile_manager", true, ok_sandbox(0, 1.0, 8192)),
             task_result("compile_contestant_0", true, ok_sandbox(0, 1.0, 8192)),
-            task_result("run_contestant_0", true, outlasting_contestant()),
+            task_result("run_contestant_0", true, ok_sandbox(0, 0.3, 2048)),
             task_result("run_manager", success, sandbox),
         ])
     }
@@ -585,27 +563,29 @@ mod tests {
         assert_eq!(verdict.problem_failure, None, "the platform's failure");
     }
 
-    /// When a manager fails on its own decides whose fault it is. One that
-    /// fails after every contestant exited was left without the interaction
-    /// it needed: the contestant's failure, a wrong answer, whatever the
-    /// manager then did. One that fails while a contestant still runs fails
-    /// on its own: the problem's, which stands.
+    /// Timing never decides whose fault a manager's failure is: contestants
+    /// normally exit before the manager scores. The manager's own failure
+    /// (a non-zero exit, its own signal, a missing or invalid score) is the
+    /// problem's and stands, however early the contestant left. The
+    /// contestant is at fault only on protocol evidence: the manager died
+    /// of SIGPIPE writing to a contestant that had exited, or it scored the
+    /// short interaction itself.
     #[test]
-    fn a_manager_failing_after_every_contestant_left_is_the_contestants_failure() {
+    fn a_managers_own_failure_stands_however_early_the_contestant_left() {
         let contestant = |wall: f64| ExecutionResult {
             wall_time_used: wall,
             ..ok_sandbox(0, 0.1, 2048)
         };
-        let manager = |sandbox: ExecutionResult, wall: f64| ExecutionResult {
-            wall_time_used: wall,
+        let manager = |sandbox: ExecutionResult| ExecutionResult {
+            wall_time_used: 0.5,
             ..sandbox
         };
-        let abort = || ExecutionResult {
-            signal: Some(6),
+        let signaled = |signal: i32| ExecutionResult {
+            signal: Some(signal),
             ..ended(SandboxStatus::Signaled, None, "")
         };
-        let exit_3 = || ended(SandboxStatus::NonZeroExit, Some(3), "assertion failed");
-        let no_score = || mgr_result("abc\n", "");
+        const SIGFPE: i32 = 8;
+        const SIGABRT: i32 = 6;
         let case = |contestant_wall: f64, mgr: ExecutionResult| {
             interpret_result(
                 42,
@@ -613,56 +593,80 @@ mod tests {
                     task_result("compile_manager", true, ok_sandbox(0, 1.0, 8192)),
                     task_result("compile_contestant_0", true, ok_sandbox(0, 1.0, 8192)),
                     task_result("run_contestant_0", true, contestant(contestant_wall)),
-                    task_result("run_manager", true, mgr),
+                    task_result("run_manager", true, manager(mgr)),
                 ]),
                 1,
             )
         };
-        for (name, contestant_wall, mgr, contestants_fault) in [
+        enum Expect {
+            ProblemFailure,
+            WrongAnswer,
+            Accepted,
+        }
+        for (name, contestant_wall, mgr, expect) in [
             (
-                "abort after the contestant left",
+                "prints AC",
                 0.2,
-                manager(abort(), 0.5),
-                true,
+                mgr_result("AC\n", ""),
+                Expect::ProblemFailure,
             ),
             (
-                "exit 3 after the contestant left",
+                "prints no score",
                 0.2,
-                manager(exit_3(), 0.5),
-                true,
+                mgr_result("", ""),
+                Expect::ProblemFailure,
             ),
             (
-                "no score after the contestant left",
-                0.5,
-                manager(no_score(), 0.5),
-                true,
+                "SIGFPE while scoring",
+                0.2,
+                signaled(SIGFPE),
+                Expect::ProblemFailure,
+            ),
+            ("aborts", 0.2, signaled(SIGABRT), Expect::ProblemFailure),
+            (
+                "exits 3",
+                0.2,
+                ended(SandboxStatus::NonZeroExit, Some(3), "assertion failed"),
+                Expect::ProblemFailure,
             ),
             (
-                "abort while the contestant ran",
+                "exits 3 while the contestant ran",
                 0.9,
-                manager(abort(), 0.5),
-                false,
+                ended(SandboxStatus::NonZeroExit, Some(3), ""),
+                Expect::ProblemFailure,
             ),
             (
-                "exit 3 while the contestant ran",
-                0.9,
-                manager(exit_3(), 0.5),
-                false,
+                "SIGPIPE writing to the contestant",
+                0.2,
+                signaled(SIGPIPE),
+                Expect::WrongAnswer,
             ),
             (
-                "no score while the contestant ran",
-                0.9,
-                manager(no_score(), 0.5),
-                false,
+                "scores the short read 0",
+                0.2,
+                mgr_result("0\n", "too few answers"),
+                Expect::WrongAnswer,
+            ),
+            (
+                "scores the interaction 1",
+                0.2,
+                mgr_result("1\n", ""),
+                Expect::Accepted,
             ),
         ] {
             let verdict = case(contestant_wall, mgr);
-            if contestants_fault {
-                assert_eq!(verdict.verdict, Verdict::WrongAnswer, "{name}: {verdict:?}");
-                assert_eq!(verdict.problem_failure, None, "{name}");
-            } else {
-                assert_eq!(verdict.verdict, Verdict::SystemError, "{name}: {verdict:?}");
-                assert!(verdict.problem_failure.is_some(), "{name}: {verdict:?}");
+            match expect {
+                Expect::ProblemFailure => {
+                    assert_eq!(verdict.verdict, Verdict::SystemError, "{name}: {verdict:?}");
+                    assert!(verdict.problem_failure.is_some(), "{name}: {verdict:?}");
+                }
+                Expect::WrongAnswer => {
+                    assert_eq!(verdict.verdict, Verdict::WrongAnswer, "{name}: {verdict:?}");
+                    assert_eq!(verdict.problem_failure, None, "{name}");
+                }
+                Expect::Accepted => {
+                    assert_eq!(verdict.verdict, Verdict::Accepted, "{name}: {verdict:?}");
+                }
             }
         }
     }
@@ -1055,7 +1059,7 @@ mod tests {
             success: false,
             task_results: HashMap::from([
                 task_result("run_manager", false, mgr),
-                task_result("run_contestant_0", true, outlasting_contestant()),
+                task_result("run_contestant_0", true, ok_sandbox(0, 0.3, 2048)),
             ]),
             error: None,
         };
@@ -1070,7 +1074,7 @@ mod tests {
             success: true,
             task_results: HashMap::from([
                 task_result("run_manager", true, mgr_result("not_a_number", "")),
-                task_result("run_contestant_0", true, outlasting_contestant()),
+                task_result("run_contestant_0", true, ok_sandbox(0, 0.3, 2048)),
             ]),
             error: None,
         };
@@ -1086,7 +1090,7 @@ mod tests {
             success: true,
             task_results: HashMap::from([
                 task_result("run_manager", true, mgr_result("NaN", "")),
-                task_result("run_contestant_0", true, outlasting_contestant()),
+                task_result("run_contestant_0", true, ok_sandbox(0, 0.3, 2048)),
             ]),
             error: None,
         };
@@ -1102,7 +1106,7 @@ mod tests {
             success: true,
             task_results: HashMap::from([
                 task_result("run_manager", true, mgr_result("inf", "")),
-                task_result("run_contestant_0", true, outlasting_contestant()),
+                task_result("run_contestant_0", true, ok_sandbox(0, 0.3, 2048)),
             ]),
             error: None,
         };

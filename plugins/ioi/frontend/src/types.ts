@@ -35,6 +35,12 @@ export interface TokenStatusResponse {
   total: number;
   next_regen_at?: string | null;
   tokened_submission_ids: number[];
+  /**
+   * The viewer's submissions a token can be spent on now, newest first:
+   * judged and not yet tokened. A submission's own status cannot say so,
+   * since feedback may withhold it from its owner.
+   */
+  usable_submissions: { submission_id: number; problem_id: number }[];
 }
 
 export interface UseTokenResponse {
@@ -57,6 +63,8 @@ export interface SubtaskScoresResponse {
 export interface ScoreboardProblemScore {
   problem_id: number;
   score: number;
+  /** The maximum this cell's score was judged against. */
+  max_score: number;
 }
 
 export interface ScoreboardEntry extends UserDisplayIdentity {
@@ -77,6 +85,7 @@ export interface ScoreboardResponse {
   feedback_level: FeedbackLevel;
   scoreboard_visibility: ScoreboardVisibility;
   scoreboard_tiebreaker: ScoreboardTiebreaker;
+  /** Each problem's maximum under its current subtasks. */
   max_scores: Record<string, number>;
   /** The contest's problems in its order, with the labels the contest gives them. */
   problems: { problem_id: number; label: string }[];
