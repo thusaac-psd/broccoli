@@ -11,6 +11,11 @@
 //!   with the columns the manifest lists for it;
 //! - `blobs/<hash>` for each blob those rows reference.
 //!
+//! No bundle carries a secret config field (`secret = true` in its plugin's
+//! schema): the export withholds each one as the read routes do and lists
+//! where in [`Manifest::withheld`], and the import keeps what the target
+//! stores there, else leaves the field unset.
+//!
 //! Columns are read from the database at export and named at import, so a
 //! bundle restores onto any build that knows its schema version: a column
 //! added since then takes its default.
@@ -18,7 +23,8 @@
 pub mod cli;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Seek, Write};
+use std::io::{BufRead, BufReader, Read, Seek, Write};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, bail, ensure};
@@ -31,8 +37,11 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::io::SyncIoBridge;
 
 use crate::entity::user::username_key_sql;
+use crate::host_funcs::config::{extract_plugin_id, strip_namespace_prefix};
 use crate::migration::{Migrator, known_migrations};
+use crate::plugin_archive::PluginArchive;
 use crate::services::plugin_config::ConfigScope;
+use plugin_core::manifest::{ConfigNamespace, keep_withheld};
 
 /// [`Manifest::format`] of every bundle this build writes and reads.
 pub const FORMAT: &str = "broccoli-bundle/v1";
@@ -57,7 +66,8 @@ pub enum Selection {
 pub struct ExportOptions {
     pub selection: Selection,
     /// Carry the accounts' password hashes. Without it no account has a
-    /// password, so the archive holds no credentials.
+    /// password, so the archive holds no credentials. Secret config fields
+    /// are withheld either way.
     pub with_secrets: bool,
 }
 
@@ -85,6 +95,18 @@ pub struct Manifest {
     pub tables: Vec<TableRows>,
     /// The blobs under `blobs/`, by hash.
     pub blobs: Vec<String>,
+    /// The secret config fields the export withheld.
+    pub withheld: Vec<Withheld>,
+}
+
+/// The secret fields of one `plugin_config` row that an export withheld:
+/// `null` in the bundle at each of `paths` (`stations[0].token`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Withheld {
+    pub scope: String,
+    pub ref_id: String,
+    pub namespace: String,
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,12 +121,22 @@ pub struct TableRows {
 pub struct Summary {
     pub tables: Vec<(String, u64)>,
     pub blobs: usize,
+    /// The plugins whose configs an export left out: no manifest of theirs
+    /// is at hand, so no one could say which of their fields are secret.
+    pub configs_left_out: Vec<String>,
 }
 
 impl std::fmt::Display for Summary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (table, rows) in &self.tables {
             writeln!(f, "{table}: {rows} rows")?;
+        }
+        if !self.configs_left_out.is_empty() {
+            writeln!(
+                f,
+                "configs left out (no manifest of the plugin here): {}",
+                self.configs_left_out.join(", ")
+            )?;
         }
         write!(f, "blobs: {}", self.blobs)
     }
@@ -382,6 +414,7 @@ async fn columns(tx: &mut Transaction<'_, Postgres>, table: &str) -> anyhow::Res
 pub async fn export(
     db: &DatabaseConnection,
     store: &dyn BlobStore,
+    plugins_dir: &Path,
     options: &ExportOptions,
     out: impl Write,
 ) -> anyhow::Result<Summary> {
@@ -403,6 +436,10 @@ pub async fn export(
         ensure!(exists, "there is no contest {id}");
     }
     let schema = schema_version(&mut tx).await?;
+    let schemas = config_schemas(&mut tx, store, plugins_dir, &scope).await?;
+    let mut withheld = Vec::new();
+    let mut config_hashes = BTreeSet::new();
+    let mut configs_left_out = Vec::new();
 
     let mut tables = Vec::new();
     for table in TABLES {
@@ -434,6 +471,14 @@ pub async fn export(
             spool.write_all(&chunk)?;
         }
         drop(stream);
+        if table.name == "plugin_config" {
+            let written = withhold_secrets(spool, &columns, &schemas)?;
+            spool = written.rows;
+            lines = written.count;
+            withheld = written.withheld;
+            config_hashes = written.hashes;
+            configs_left_out = written.left_out.into_iter().collect();
+        }
         tables.push((
             TableRows {
                 name: table.name.to_string(),
@@ -444,7 +489,8 @@ pub async fn export(
         ));
     }
 
-    let hashes = referenced_blobs(&mut tx, &scope).await?;
+    let mut hashes = referenced_blobs(&mut tx, &scope).await?;
+    hashes.extend(config_hashes);
     tx.commit().await?;
     let mut sizes = BTreeMap::new();
     let mut missing = Vec::new();
@@ -472,6 +518,7 @@ pub async fn export(
         contest: scope.contest,
         tables: tables.iter().map(|(t, _)| t.clone()).collect(),
         blobs: sizes.keys().cloned().collect(),
+        withheld,
     };
     let gz = flate2::write::GzEncoder::new(out, flate2::Compression::default());
     let mut archive = tar::Builder::new(gz);
@@ -482,7 +529,10 @@ pub async fn export(
         manifest_json.len() as u64,
         &manifest_json[..],
     )?;
-    let mut summary = Summary::default();
+    let mut summary = Summary {
+        configs_left_out,
+        ..Summary::default()
+    };
     for (rows, mut spool) in tables {
         let len = spool.stream_position()?;
         spool.rewind()?;
@@ -527,25 +577,20 @@ fn append<W: Write>(
         .with_context(|| format!("write {path} to the archive"))
 }
 
-/// Every blob the bundle's rows reference: test case bodies, attachments,
-/// additional files, and the hashes plugin config holds.
+/// Every blob the bundle's table rows reference: test case bodies,
+/// attachments and additional files. The hashes plugin config holds come
+/// from the configs as the bundle writes them ([`withhold_secrets`]), so a
+/// withheld secret is never read as one.
 async fn referenced_blobs(
     tx: &mut Transaction<'_, Postgres>,
     scope: &Scope,
 ) -> anyhow::Result<BTreeSet<String>> {
-    let config = TABLES
-        .iter()
-        .find(|t| t.name == "plugin_config")
-        .and_then(|t| (t.rows)(scope))
-        .unwrap_or_else(|| "false".into());
     let p = &scope.problems;
     let sql = format!(
         "SELECT input_blob_hash FROM test_case WHERE problem_id IN ({p}) \
          UNION SELECT expected_output_blob_hash FROM test_case WHERE problem_id IN ({p}) \
          UNION SELECT content_hash FROM problem_attachment WHERE problem_id IN ({p}) \
-         UNION SELECT content_hash FROM additional_file WHERE problem_id IN ({p}) \
-         UNION SELECT (regexp_matches(config::text, '[0-9a-f]{{64}}', 'g'))[1] \
-           FROM plugin_config WHERE {config}"
+         UNION SELECT content_hash FROM additional_file WHERE problem_id IN ({p})"
     );
     let hashes: Vec<Option<String>> = sqlx::query_scalar(AssertSqlSafe(sql))
         .fetch_all(&mut **tx)
@@ -555,6 +600,251 @@ async fn referenced_blobs(
         .flatten()
         .filter(|h| ContentHash::from_hex(h).is_ok())
         .collect())
+}
+
+/// The config schemas of every plugin the bundle's configs belong to, by
+/// plugin id then namespace, from the plugin's published upload in `store`
+/// or its copy in `plugins_dir`, as the server would load it. The export
+/// runs no plugin, and withholds secrets by these schemas. A plugin with no
+/// manifest at hand (`None`: removed, or never installed here) is one no one
+/// could say the secret fields of, and whose configs nothing here reads.
+async fn config_schemas(
+    tx: &mut Transaction<'_, Postgres>,
+    store: &dyn BlobStore,
+    plugins_dir: &Path,
+    scope: &Scope,
+) -> anyhow::Result<BTreeMap<String, Option<BTreeMap<String, ConfigNamespace>>>> {
+    let Some(rows) = table("plugin_config").ok().and_then(|t| (t.rows)(scope)) else {
+        return Ok(BTreeMap::new());
+    };
+    let plugins: Vec<(String, Option<String>)> = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT ids.id, plugin.archive_hash FROM \
+           (SELECT DISTINCT split_part(namespace, ':', 1) AS id FROM plugin_config WHERE {rows}) ids \
+         LEFT JOIN plugin ON plugin.id = ids.id"
+    )))
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut schemas = BTreeMap::new();
+    for (id, archive) in plugins {
+        let config = match archive {
+            Some(hex) => {
+                let hash = ContentHash::from_hex(&hex)
+                    .with_context(|| format!("plugin {id}'s published archive hash"))?;
+                let bytes = store
+                    .get(&hash)
+                    .await
+                    .with_context(|| format!("read plugin {id}'s published archive"))?;
+                PluginArchive::parse(bytes)
+                    .with_context(|| format!("read plugin {id}'s published archive"))?
+                    .manifest()
+                    .config
+                    .clone()
+            }
+            None => {
+                let root = plugins_dir.join(&id);
+                if !root.join("plugin.toml").is_file() {
+                    schemas.insert(id, None);
+                    continue;
+                }
+                plugin_core::registry::PluginEntry::from_dir(&root)
+                    .with_context(|| format!("read plugin {id}'s manifest"))?
+                    .manifest
+                    .config
+            }
+        };
+        schemas.insert(id, Some(config.into_iter().collect()));
+    }
+    Ok(schemas)
+}
+
+/// The `plugin_config` rows of an export, as the bundle carries them.
+struct Withholding {
+    rows: std::fs::File,
+    count: u64,
+    withheld: Vec<Withheld>,
+    /// The plugins whose rows were left out.
+    left_out: BTreeSet<String>,
+    /// The blob hashes the configs hold.
+    hashes: BTreeSet<String>,
+}
+
+/// `rows` (`plugin_config` in `COPY` text format, with `columns`) with each
+/// secret field its namespace declares withheld
+/// ([`ConfigNamespace::withhold_secrets`]), and where, leaving out the rows
+/// of a plugin whose schemas are unknown.
+fn withhold_secrets(
+    mut rows: std::fs::File,
+    columns: &[String],
+    schemas: &BTreeMap<String, Option<BTreeMap<String, ConfigNamespace>>>,
+) -> anyhow::Result<Withholding> {
+    let at = |name: &str| {
+        columns
+            .iter()
+            .position(|c| c == name)
+            .with_context(|| format!("plugin_config has no {name} column"))
+    };
+    let (scope, ref_id, namespace, config) =
+        (at("scope")?, at("ref_id")?, at("namespace")?, at("config")?);
+    rows.rewind()?;
+    let mut out = tempfile::tempfile()?;
+    let mut withheld = Vec::new();
+    let mut hashes = BTreeSet::new();
+    let mut left_out = BTreeSet::new();
+    let mut count = 0;
+    for line in BufReader::new(rows).lines() {
+        let line = line?;
+        let mut fields: Vec<String> = line.split('\t').map(str::to_string).collect();
+        ensure!(
+            fields.len() == columns.len(),
+            "a plugin_config row has the wrong field count"
+        );
+        let stored = copy_text::decode(&fields[namespace])?;
+        let mut value: serde_json::Value =
+            serde_json::from_str(&copy_text::decode(&fields[config])?)
+                .context("a plugin_config row's config is not JSON")?;
+        let plugin = extract_plugin_id(&stored);
+        let Some(Some(namespaces)) = schemas.get(plugin) else {
+            left_out.insert(plugin.to_string());
+            continue;
+        };
+        if let Some(ns) = namespaces.get(strip_namespace_prefix(&stored)) {
+            let paths = ns.withhold_secrets(&mut value);
+            if !paths.is_empty() {
+                withheld.push(Withheld {
+                    scope: copy_text::decode(&fields[scope])?,
+                    ref_id: copy_text::decode(&fields[ref_id])?,
+                    namespace: stored,
+                    paths,
+                });
+            }
+        }
+        let text = value.to_string();
+        hashes.extend(content_hashes(&text));
+        fields[config] = copy_text::encode(&text);
+        writeln!(out, "{}", fields.join("\t"))?;
+        count += 1;
+    }
+    Ok(Withholding {
+        rows: out,
+        count,
+        withheld,
+        left_out,
+        hashes,
+    })
+}
+
+/// Each run of 64 lowercase hex digits in `text`, left to right, as the
+/// content hashes a config may name.
+fn content_hashes(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let hex = |b: &u8| b.is_ascii_digit() || (b'a'..=b'f').contains(b);
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i + 64 <= bytes.len() {
+        if bytes[i..i + 64].iter().all(hex) {
+            found.push(text[i..i + 64].to_string());
+            i += 64;
+        } else {
+            i += 1;
+        }
+    }
+    found
+}
+
+/// The field escapes of Postgres `COPY` text format.
+mod copy_text {
+    /// A field as `COPY ... TO` writes it, decoded. A `NULL` is refused: no
+    /// field this module reads may be one.
+    pub(super) fn decode(field: &str) -> anyhow::Result<String> {
+        anyhow::ensure!(field != "\\N", "an unexpected NULL field");
+        let mut out = String::with_capacity(field.len());
+        let mut chars = field.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            out.push(match chars.next() {
+                Some('\\') => '\\',
+                Some('n') => '\n',
+                Some('r') => '\r',
+                Some('t') => '\t',
+                Some('b') => '\u{8}',
+                Some('f') => '\u{c}',
+                Some('v') => '\u{b}',
+                other => anyhow::bail!("an unknown COPY escape \\{other:?}"),
+            });
+        }
+        Ok(out)
+    }
+
+    /// `text` as a `COPY ... FROM` field.
+    pub(super) fn encode(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for c in text.chars() {
+            match c {
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                '\u{8}' => out.push_str("\\b"),
+                '\u{c}' => out.push_str("\\f"),
+                '\u{b}' => out.push_str("\\v"),
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_field_round_trips_every_escape() {
+            let text = "a\\b\nc\rd\te\u{8}f\u{c}g\u{b}h \"q\"";
+            assert_eq!(decode(&encode(text)).unwrap(), text);
+            assert_eq!(encode("x\ty"), "x\\ty");
+        }
+    }
+}
+
+/// Keeps, in the staged `plugin_config` rows, each secret the export
+/// withheld: the value the target stores at the same row and path, else
+/// nothing, so the field reads unset until someone sets it.
+async fn keep_withheld_secrets(
+    tx: &mut Transaction<'_, Postgres>,
+    withheld: &[Withheld],
+) -> anyhow::Result<()> {
+    let staged = staging("plugin_config");
+    for row in withheld {
+        let found: Option<(serde_json::Value, Option<serde_json::Value>)> =
+            sqlx::query_as(AssertSqlSafe(format!(
+                "SELECT s.config, t.config FROM {staged} s LEFT JOIN plugin_config t \
+                   ON (t.scope, t.ref_id, t.namespace) = (s.scope, s.ref_id, s.namespace) \
+                 WHERE s.scope = $1 AND s.ref_id = $2 AND s.namespace = $3"
+            )))
+            .bind(&row.scope)
+            .bind(&row.ref_id)
+            .bind(&row.namespace)
+            .fetch_optional(&mut **tx)
+            .await?;
+        let Some((mut config, stored)) = found else {
+            continue;
+        };
+        keep_withheld(&mut config, stored.as_ref(), &row.paths);
+        sqlx::query(AssertSqlSafe(format!(
+            "UPDATE {staged} SET config = $4 \
+             WHERE scope = $1 AND ref_id = $2 AND namespace = $3"
+        )))
+        .bind(&row.scope)
+        .bind(&row.ref_id)
+        .bind(&row.namespace)
+        .bind(&config)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
 }
 
 /// Restore the bundle in `input` onto the database and `store`. The rows go
@@ -657,6 +947,12 @@ pub async fn import(
         manifest.blobs.len()
     );
 
+    if loaded
+        .iter()
+        .any(|(table, _)| table.name == "plugin_config")
+    {
+        keep_withheld_secrets(&mut tx, &manifest.withheld).await?;
+    }
     if loaded.iter().any(|(table, _)| table.name == "contest") {
         prepare_contest(&mut tx, options).await?;
     }

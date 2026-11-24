@@ -37,6 +37,7 @@ enum Command {
         problems: Option<Vec<i32>>,
         /// Keep the accounts' password hashes. Without it no account in the
         /// bundle has a password; an admin sets one before it can sign in.
+        /// Secret plugin config fields stay out either way.
         #[arg(long, requires = "contest")]
         with_secrets: bool,
         /// Write the archive here instead of stdout.
@@ -127,7 +128,14 @@ async fn execute(config: &AppConfig, command: Command) -> anyhow::Result<super::
                 Some(path) => {
                     let file = File::create(&path)
                         .with_context(|| format!("create {}", path.display()))?;
-                    let result = super::export(&db, &*store, &options, BufWriter::new(file)).await;
+                    let result = super::export(
+                        &db,
+                        &*store,
+                        &config.plugin.plugins_dir,
+                        &options,
+                        BufWriter::new(file),
+                    )
+                    .await;
                     if result.is_err() {
                         let _ = std::fs::remove_file(&path);
                     }
@@ -135,7 +143,14 @@ async fn execute(config: &AppConfig, command: Command) -> anyhow::Result<super::
                 }
                 None => {
                     let stdout: Box<dyn Write> = Box::new(std::io::stdout().lock());
-                    super::export(&db, &*store, &options, BufWriter::new(stdout)).await
+                    super::export(
+                        &db,
+                        &*store,
+                        &config.plugin.plugins_dir,
+                        &options,
+                        BufWriter::new(stdout),
+                    )
+                    .await
                 }
             }
         }

@@ -602,6 +602,62 @@ fn at_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_jso
     })
 }
 
+/// [`at_path`], for writing.
+fn at_path_mut<'a>(
+    value: &'a mut serde_json::Value,
+    path: &str,
+) -> Option<&'a mut serde_json::Value> {
+    path.split('.').try_fold(value, |value, segment| {
+        let (key, indices) = segment.split_once('[').unwrap_or((segment, ""));
+        let mut value = value.get_mut(key)?;
+        for index in indices.split('[').filter(|i| !i.is_empty()) {
+            value = value.get_mut(index.trim_end_matches(']').parse::<usize>().ok()?)?;
+        }
+        Some(value)
+    })
+}
+
+/// Keeps the secret at `path`, field `key` of `fields`, when it is `null`:
+/// the value `stored` holds at that path, else nothing, so it reads unset.
+fn keep(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    path: &str,
+    stored: Option<&serde_json::Value>,
+) {
+    if !fields.get(key).is_some_and(serde_json::Value::is_null) {
+        return;
+    }
+    match stored.and_then(|stored| at_path(stored, path)) {
+        Some(kept) => {
+            fields.insert(key.to_string(), kept.clone());
+        }
+        None => {
+            fields.remove(key);
+        }
+    }
+}
+
+/// [`ConfigNamespace::keep_secrets`] for the `paths` a
+/// [`ConfigNamespace::withhold_secrets`] returned, without the schema: what
+/// restores a config whose secrets were withheld where the schema is not at
+/// hand.
+pub fn keep_withheld(
+    value: &mut serde_json::Value,
+    stored: Option<&serde_json::Value>,
+    paths: &[String],
+) {
+    for path in paths {
+        let (parent, key) = match path.rsplit_once('.') {
+            Some((parent, key)) => (at_path_mut(value, parent), key),
+            None => (Some(&mut *value), path.as_str()),
+        };
+        if let Some(serde_json::Value::Object(fields)) = parent {
+            keep(fields, key, path, stored);
+        }
+    }
+}
+
 impl ConfigNamespace {
     /// Replaces each secret field of `value` that holds a value with `null`,
     /// and returns the paths of those fields: what a read may say about a
@@ -625,16 +681,7 @@ impl ConfigNamespace {
     /// matched by the item's position.
     pub fn keep_secrets(&self, value: &mut serde_json::Value, stored: Option<&serde_json::Value>) {
         each_secret(&self.properties, value, "", &mut |path, fields, key| {
-            if fields.get(key).is_some_and(serde_json::Value::is_null) {
-                match stored.and_then(|stored| at_path(stored, path)) {
-                    Some(kept) => {
-                        fields.insert(key.to_string(), kept.clone());
-                    }
-                    None => {
-                        fields.remove(key);
-                    }
-                }
-            }
+            keep(fields, key, path, stored)
         });
     }
 
@@ -897,6 +944,30 @@ mod tests {
         let mut replaced = json!({"stations": [{"name": "a", "token": "s2"}]});
         stations().keep_secrets(&mut replaced, Some(&stored));
         assert_eq!(replaced["stations"][0]["token"], "s2");
+    }
+
+    #[test]
+    fn the_withheld_paths_restore_a_config_as_its_schema_would() {
+        let stored = json!({"stations": [{"name": "a", "token": "s1"}]});
+        let mut exported =
+            json!({"stations": [{"name": "a", "token": "s1"}, {"name": "b", "token": "s2"}]});
+        let paths = stations().withhold_secrets(&mut exported);
+        assert_eq!(paths, ["stations[0].token", "stations[1].token"]);
+        let mut by_schema = exported.clone();
+        stations().keep_secrets(&mut by_schema, Some(&stored));
+        let mut by_paths = exported.clone();
+        keep_withheld(&mut by_paths, Some(&stored), &paths);
+        assert_eq!(by_paths, by_schema);
+        assert_eq!(
+            by_paths,
+            json!({"stations": [{"name": "a", "token": "s1"}, {"name": "b"}]})
+        );
+        let mut nothing_stored = exported;
+        keep_withheld(&mut nothing_stored, None, &paths);
+        assert_eq!(
+            nothing_stored,
+            json!({"stations": [{"name": "a"}, {"name": "b"}]})
+        );
     }
 
     fn route(extra: &str) -> Result<RouteAccess, String> {

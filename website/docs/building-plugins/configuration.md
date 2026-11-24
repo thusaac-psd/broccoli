@@ -91,7 +91,9 @@ The settings form shows a set secret as an empty password field that keeps
 the stored value unless you type a new one.
 
 Your plugin reads the real value: `host.config.get*` and the cascade a plugin
-reads are not redacted.
+reads are not redacted. A secret can still read unset, for example in a config
+a bundle restored onto another server, so read it with a default and treat an
+unset secret as granting nothing.
 
 ## Refuse what a schema cannot say
 
@@ -243,6 +245,13 @@ config: those are each server's own settings, and an import leaves the
 target's as they are. An import replaces every problem and contest-problem
 config the target had along with its problems, so no config of a replaced
 problem stays to configure the imported problem that takes its id.
+
+A bundle never carries a secret field (see _Keep a secret_). The export
+withholds each one by the namespace's schema, read from the plugin's published
+upload or the server's plugin directory, and lists where in the bundle. The
+configs of a plugin with neither stay out, and the export names the plugin. The
+import keeps the value the target already stores at that config and path, and
+otherwise leaves the field unset.
 
 An import runs no plugin, so it checks none of the configs it restores, and
 the problems' `config_issues` flags do not travel: they describe the source's
