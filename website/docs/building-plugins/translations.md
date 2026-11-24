@@ -43,7 +43,8 @@ host's text or another plugin's. For the same reason a plugin id may not be a
 namespace of the host's messages: the first segment of any key in the English
 pack (`apiError`, `toast`, `nav`, …) and the key families `plugin`, `config`,
 `identifier` and `apiError`, compared ignoring case. A plugin with such an id
-does not load and its upload is refused. The only other keys a catalog may hold are
+does not load, its upload is refused, and `broccoli-dev plugin new` does
+not scaffold it. The only other keys a catalog may hold are
 the text of your manifest (`plugin.<plugin id>.…` and `config.<plugin id>.…`,
 below) and the names of what you register (`identifier.contestType.…`,
 `identifier.problemType.…` and `identifier.checker.…`). A catalog with any

@@ -229,19 +229,17 @@ impl PluginEntry {
     /// names it): `plugin.toml`, the config schemas it includes and its
     /// translation files. Loading a plugin directory and checking an
     /// uploaded archive both build the entry here, so an archive uploads
-    /// exactly when it would load. An id that names a namespace of the
-    /// host's messages ([`crate::i18n::is_host_namespace`]) is refused: its
-    /// plugin's own keys would be the host's.
+    /// exactly when it would load. An id the one plugin id rule refuses
+    /// ([`broccoli_api_types::plugin_id::check_plugin_id`]) is refused here:
+    /// one naming a namespace of the host's messages would own the host's
+    /// keys.
     pub fn read(
         id: String,
         root_dir: PathBuf,
         mut read: impl FnMut(&str) -> Result<String, String>,
     ) -> Result<Self, PluginError> {
-        if crate::i18n::is_host_namespace(&id) {
-            return Err(PluginError::LoadFailed(format!(
-                "Plugin id '{id}' names a namespace of the host's own messages; choose another"
-            )));
-        }
+        broccoli_api_types::plugin_id::check_plugin_id(&id)
+            .map_err(|e| PluginError::LoadFailed(e.to_string()))?;
         let toml_content = read("plugin.toml")
             .map_err(|e| PluginError::LoadFailed(format!("Failed to read manifest: {e}")))?;
         let mut manifest = parse_manifest(&toml_content)?;

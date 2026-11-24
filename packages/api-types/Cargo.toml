@@ -22,3 +22,6 @@ utoipa.workspace = true
 
 [dev-dependencies]
 toml.workspace = true
+
+[build-dependencies]
+toml.workspace = true

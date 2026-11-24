@@ -13,6 +13,9 @@ pub fn validate_plugin_name(name: &str) -> Result<()> {
     if name.is_empty() {
         bail!("Plugin name cannot be empty");
     }
+    // The one plugin id rule the server applies, so a scaffolded plugin
+    // always loads; the scaffold's own naming convention narrows it below.
+    broccoli_api_types::plugin_id::check_plugin_id(name)?;
 
     if name.starts_with('-') || name.ends_with('-') {
         bail!("Plugin name cannot start or end with a hyphen");
@@ -72,6 +75,16 @@ mod tests {
         assert!(validate_plugin_name("Upper").is_err());
         assert!(validate_plugin_name("has space").is_err());
         assert!(validate_plugin_name("has_underscore").is_err());
+    }
+
+    /// A scaffolded plugin's id passes the server's one id rule: a host
+    /// message namespace is refused here as the server refuses it.
+    #[test]
+    fn a_host_namespace_is_not_a_plugin_name() {
+        for host in ["users", "toast", "plugin", "config", "identifier"] {
+            let error = validate_plugin_name(host).expect_err(host).to_string();
+            assert!(error.contains("namespace"), "{host}: {error}");
+        }
     }
 
     #[test]

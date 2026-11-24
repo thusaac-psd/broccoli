@@ -842,6 +842,7 @@ name = "broccoli-dev-cli"
 version = "0.1.2"
 dependencies = [
  "anyhow",
+ "broccoli-api-types",
  "broccoli-cli-core",
  "broccoli-types",
  "clap",
