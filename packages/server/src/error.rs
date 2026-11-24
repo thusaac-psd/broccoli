@@ -64,6 +64,11 @@ impl AdmissionRefused {
 /// served again soon after a probe finds the database back.
 pub const DATABASE_RETRY_AFTER_SECS: u64 = 5;
 
+/// The `Retry-After` of a `DATABASE_BUSY` answer: every pooled connection was
+/// in use for the whole acquire timeout, and statements finish and free one
+/// within moments.
+pub const DATABASE_BUSY_RETRY_AFTER_SECS: u64 = 2;
+
 /// The `Retry-After` of a `QUEUE_UNAVAILABLE` answer: about one Redis
 /// command timeout, after which a queue that came back serves again.
 pub const QUEUE_RETRY_AFTER_SECS: u64 = common::redis_conn::COMMAND_TIMEOUT.as_secs();
@@ -158,6 +163,11 @@ pub enum AppError {
     /// ([`common::db::is_outage`]): an outage, retried by the client after
     /// [`DATABASE_RETRY_AFTER_SECS`].
     DatabaseUnavailable,
+    /// The database answers, but every pooled connection was in use for the
+    /// whole acquire timeout ([`common::db::Outage::Busy`]): the server is
+    /// saturated, not cut off, and is retried after
+    /// [`DATABASE_BUSY_RETRY_AFTER_SECS`].
+    DatabaseBusy,
     /// The message queue (Redis) cannot be reached
     /// ([`common::redis_conn::is_outage`]): an outage, retried by the client
     /// after [`QUEUE_RETRY_AFTER_SECS`].
@@ -415,6 +425,15 @@ impl AppError {
                     ),
                 ),
             ),
+            AppError::DatabaseBusy => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                simple(
+                    HostCode::DatabaseBusy,
+                    format!(
+                        "The server is busy; retry in {DATABASE_BUSY_RETRY_AFTER_SECS} seconds"
+                    ),
+                ),
+            ),
             AppError::QueueUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 simple(
@@ -499,6 +518,7 @@ impl IntoResponse for AppError {
             }
             AppError::StorageUnavailable => Some(STORAGE_RETRY_AFTER_SECS),
             AppError::DatabaseUnavailable => Some(DATABASE_RETRY_AFTER_SECS),
+            AppError::DatabaseBusy => Some(DATABASE_BUSY_RETRY_AFTER_SECS),
             AppError::QueueUnavailable => Some(QUEUE_RETRY_AFTER_SECS),
             _ => None,
         };
@@ -515,11 +535,16 @@ impl IntoResponse for AppError {
 
 impl From<DbErr> for AppError {
     fn from(err: DbErr) -> Self {
-        if common::db::is_outage(&err) {
-            tracing::warn!("Database unavailable: {err}");
-            AppError::DatabaseUnavailable
-        } else {
-            AppError::Internal(err.to_string())
+        match common::db::outage(&err) {
+            Some(common::db::Outage::Lost) => {
+                tracing::warn!("Database unavailable: {err}");
+                AppError::DatabaseUnavailable
+            }
+            Some(common::db::Outage::Busy) => {
+                tracing::warn!("Database busy: {err}");
+                AppError::DatabaseBusy
+            }
+            None => AppError::Internal(err.to_string()),
         }
     }
 }
@@ -647,6 +672,32 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
         assert_eq!(body["code"], "STORAGE_UNAVAILABLE");
+    }
+
+    /// A saturated pool and a lost database are both retryable, and say
+    /// which they are: a busy server is not a down one.
+    #[tokio::test]
+    async fn a_busy_database_and_a_lost_one_answer_apart() {
+        for (err, code, retry_after) in [
+            (
+                common::db::pool_busy(),
+                "DATABASE_BUSY",
+                DATABASE_BUSY_RETRY_AFTER_SECS,
+            ),
+            (
+                DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout),
+                "DATABASE_UNAVAILABLE",
+                DATABASE_RETRY_AFTER_SECS,
+            ),
+        ] {
+            let response = AppError::from(err).into_response();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()["Retry-After"], retry_after.to_string());
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["code"], code);
+        }
     }
 
     #[tokio::test]

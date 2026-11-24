@@ -345,8 +345,8 @@ struct VisibilityQueryOutputOut {
 ///   what a plugin answers (`plugin_cannot_widen_host_decision`). Resources
 ///   nominated (by `"kind:id"`) via `deny_resource_keys` get `Deny`;
 ///   resources nominated via `redact_resource_keys` get `Redact` with the
-///   fields from `redact_resource_fields` (defaulting to `label` /
-///   `problem_title`, the contest-problem list DTO's own fields); submission
+///   fields from `redact_resource_fields` (defaulting to `problem_title`,
+///   the contest-problem list DTO's own field a plugin may leave out); submission
 ///   ids nominated via the older, submission-only `redact_submission_ids`
 ///   key get `Redact` on `result.verdict` / `result.score` - kept unchanged
 ///   so `plugin_cannot_author_a_verdict` still exercises exactly the
@@ -441,7 +441,7 @@ pub fn decide_visibility(input: String) -> FnResult<String> {
     let redact_fields = {
         let fields = read_kv_csv("redact_resource_fields")?;
         if fields.is_empty() {
-            vec!["label".to_string(), "problem_title".to_string()]
+            vec!["problem_title".to_string()]
         } else {
             fields
         }

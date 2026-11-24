@@ -446,7 +446,7 @@ impl<'a> VisibilityKernel<'a> {
     /// list by dropping `None` and render a detail 404 on `None` - a denied
     /// resource is never rendered as a placeholder, because a placeholder
     /// confirms it exists.
-    pub async fn fetch_visible<T: serde::Serialize + Governed>(
+    pub async fn fetch_visible<T: serde::Serialize + serde::de::DeserializeOwned + Governed>(
         &self,
         action: Action,
         resource: Resource,
@@ -464,7 +464,9 @@ impl<'a> VisibilityKernel<'a> {
 
     /// Batched form. Input and output are positionally aligned; denied
     /// entries come back as `None`.
-    pub async fn fetch_visible_batch<T: serde::Serialize + Governed>(
+    pub async fn fetch_visible_batch<
+        T: serde::Serialize + serde::de::DeserializeOwned + Governed,
+    >(
         &self,
         action: Action,
         items: Vec<(Resource, T)>,
@@ -503,7 +505,10 @@ impl<'a> VisibilityKernel<'a> {
     }
 }
 
-/// Wraps `entity` under `decision`, or `None` when denied.
+/// Wraps `entity` under `decision`, or `None` when denied. A mask that
+/// blanks a value the response type requires ([`visible::admits`]) denies
+/// too: the viewer is shown less than the plugin asked, never more, and every
+/// answer parses as its API type.
 ///
 /// A submission's status is the root of its outcome: every submission shape
 /// carries one, and a verdict, score or result implies it. A decision that
@@ -513,7 +518,7 @@ impl<'a> VisibilityKernel<'a> {
 /// `null` status with no reason.
 ///
 /// [`SUBMISSION_STATUS_PATH`]: broccoli_server_sdk::visibility::SUBMISSION_STATUS_PATH
-fn wrap_visible<T: serde::Serialize + Governed>(
+fn wrap_visible<T: serde::Serialize + serde::de::DeserializeOwned + Governed>(
     resource: &Resource,
     entity: T,
     decision: Decision,
@@ -521,6 +526,17 @@ fn wrap_visible<T: serde::Serialize + Governed>(
 ) -> Option<Visible<T>> {
     use crate::services::submission_feedback::Feedback;
     use broccoli_server_sdk::visibility::SUBMISSION_STATUS_PATH;
+    if let Decision::Redact(mask) | Decision::Withheld { mask, .. } = &decision
+        && !visible::admits(&entity, mask)
+    {
+        tracing::warn!(
+            ?resource,
+            ?mask,
+            shape = std::any::type_name::<T>(),
+            "A visibility mask blanks a value its response cannot leave out; the resource is withheld"
+        );
+        return None;
+    }
     let presented = match (resource, &decision) {
         (_, Decision::Deny) => return None,
         (Resource::Submission(_), Decision::Redact(mask))
@@ -1273,7 +1289,7 @@ mod tests {
     // `fetch_visible` / `fetch_visible_batch`
     // -----------------------------------------------------------------
 
-    #[derive(Debug, Clone, serde::Serialize)]
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     struct ScoredEntity {
         id: i32,
         score: Option<i32>,

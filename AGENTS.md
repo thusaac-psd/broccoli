@@ -255,12 +255,14 @@ binaries warn about every key they do not read.
   `Retry-After` through one `AppError` variant per dependency
   (`DATABASE_UNAVAILABLE`, `QUEUE_UNAVAILABLE`, `STORAGE_UNAVAILABLE`), each
   decided by that dependency's one outage rule (`common::db::is_outage`,
-  `common::redis_conn::is_outage`); an answer no retry changes stays a 500.
-  Every 503 carries `Retry-After`: a disabled plugin or contest type
-  (`PLUGIN_DISABLED`, `CONTEST_TYPE_DISABLED`) is one too, since what needs it
-  is parked and serves once an administrator enables it
-  (`DISABLED_RETRY_AFTER_SECS`). Per-address quotas admit while Redis is down,
-  so an outage never locks a venue out.
+  `common::redis_conn::is_outage`); an answer no retry changes stays a 500. The
+  database's rule also says which outage it is (`common::db::outage`): a
+  saturated pool, every connection in use, answers `DATABASE_BUSY`, not
+  `DATABASE_UNAVAILABLE`, since the server is busy, not cut off. Every 503
+  carries `Retry-After`: a disabled plugin or contest type (`PLUGIN_DISABLED`,
+  `CONTEST_TYPE_DISABLED`) is one too, since what needs it is parked and serves
+  once an administrator enables it (`DISABLED_RETRY_AFTER_SECS`). Per-address
+  quotas admit while Redis is down, so an outage never locks a venue out.
 - A per-address quota counts what abuse leaves behind, never what a venue does:
   failed sign-ins, not sign-ins; device codes left pending, not device codes
   requested. A venue shows the server one address for all its contestants.
@@ -273,9 +275,12 @@ binaries warn about every key they do not read.
   newer build migrated. The test
   `migration::tests::the_migrations_create_the_schema_the_code_expects` fails
   when the entities or the code-owned trigger DDL disagree with the migrated
-  schema. Old replicas keep working against an additive migration (adding a
-  table, a nullable or defaulted column, an index), so a release of only those
-  rolls server by server; the shipped gateways pin each browser to one server by
+  schema, and `a_database_the_released_build_ran_upgrades_to_this_build`
+  migrates a database the released build ran, with its rows, through every
+  pending migration: a migration brings existing rows to what it requires. Old
+  replicas keep working against an additive migration (adding a table, a
+  nullable or defaulted column, an index), so a release of only those rolls
+  server by server; the shipped gateways pin each browser to one server by
   cookie, so it never loads one build's page with another's chunks. A release
   with any other migration (a drop, a rename, a type change, a tighter
   constraint) is upgraded with every server stopped before the first new one

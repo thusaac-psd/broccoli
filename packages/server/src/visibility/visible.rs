@@ -25,7 +25,7 @@
 use broccoli_api_types::visibility::Withheld;
 use broccoli_server_sdk::visibility::cap_submission_detail_texts;
 
-use super::Decision;
+use super::{Decision, FieldMask};
 use crate::error::AppError;
 use crate::services::submission_feedback::Feedback;
 
@@ -118,6 +118,25 @@ impl<T: serde::Serialize + Governed> Visible<T> {
     }
 }
 
+/// Whether every path of `mask` blanked in `entity` leaves a value `T`
+/// parses: whether a client can read the answer the mask makes. A path that
+/// blanks a value the API type requires (an id, a label every client reads)
+/// does not; the kernel then withholds the whole resource instead of serving
+/// an answer no client can read or skipping a blank the plugin asked for.
+pub(super) fn admits<T>(entity: &T, mask: &FieldMask) -> bool
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    if mask.is_empty() {
+        return true;
+    }
+    let Ok(mut value) = serde_json::to_value(entity) else {
+        return false;
+    };
+    super::apply_mask(&mut value, mask);
+    serde_json::from_value::<T>(value).is_ok()
+}
+
 /// Blank every field of `value` but the ones `T` declares host-decided, and
 /// say why in its `withheld` field.
 fn withhold<T: Governed>(value: &mut serde_json::Value, reason: Withheld) -> Result<(), AppError> {
@@ -149,24 +168,24 @@ fn withhold<T: Governed>(value: &mut serde_json::Value, reason: Withheld) -> Res
 
 #[cfg(test)]
 mod tests {
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
 
     use super::*;
     use crate::visibility::FieldMask;
 
-    #[derive(Debug, Clone, Serialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     struct SampleDto {
         verdict: Option<String>,
         score: Option<i32>,
     }
 
-    #[derive(Debug, Clone, Serialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     struct FakeJudgeResult {
         compile_output: Option<String>,
     }
 
-    #[derive(Debug, Clone, Serialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     struct FakeSubmissionDto {
         result: FakeJudgeResult,
     }

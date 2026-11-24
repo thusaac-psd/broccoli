@@ -67,7 +67,8 @@ srv = json.load(sys.stdin)["apps"]["http"]["servers"]["srv0"]
 assert srv["routes"][0]["match"][0]["host"] == ["contest.lan", "10.0.0.5"], srv["routes"][0]["match"]
 ' || fail "Caddyfile.airgap does not serve LAN_HOST_ALIASES"
 # Each gateway picks an upstream by its cookie, and one without the cookie (or
-# whose upstream is down) by round robin.
+# whose upstream is down) by round robin. The cookie carries no secret, so a
+# browser keeps its upstream across gateway restarts and gateways.
 for cf in "${files[@]}"; do
   docker run --rm -v "$cf:/etc/caddy/Caddyfile:ro" -v "$T:/tls:ro" \
     -e BROCCOLI_UPSTREAMS='10.0.0.21:3000 10.0.0.22:3000' -e LAN_HOST=contest.lan \
@@ -90,6 +91,9 @@ for p in proxies:
     policy = p["load_balancing"]["selection_policy"]
     assert policy["policy"] == "cookie", policy
     assert policy["fallback"]["policy"] == "round_robin", policy
+    # No secret: the cookie is a hash of the upstream address alone, the same
+    # after a gateway restart and on every gateway.
+    assert not policy.get("secret"), policy
 ' || fail "$(basename "$cf") does not pick upstreams by cookie with a round-robin fallback"
 done
 echo "PASS: gateway Caddyfiles probe /livez and validate with $image"

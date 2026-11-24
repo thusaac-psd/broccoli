@@ -503,6 +503,15 @@ second process with the same ID refuses to start. A replica whose ID changes at
 every restart (the random fallback when no stable ID can be derived) leaves its
 old reply stream behind until it expires, 10 minutes later.
 
+A running node renews its claim on its id every few seconds. If another live
+process holds the id (two nodes were started with one id, or one booted while
+Redis was down and its twin was already running), the node loses its renewals
+and, after about 15 seconds of losing them, exits at once with status 75. A
+supervisor restarts it (the compose templates use `restart: unless-stopped`),
+and the restarted node refuses to start while the twin is alive, naming the id.
+An exit with status 75 therefore means two nodes share an id: give one of them
+its own.
+
 If you bypass the installer, check that no two replicas' env files name the same
 id before starting them.
 
