@@ -205,6 +205,7 @@ async fn dispatch_after_judging_hooks(
     // Awaited, not spawned: the hooks are part of the judging work that
     // calls this (see `judging_sessions`).
     hooks::dispatch_hooks_once(
+        db,
         AfterJudgingEvent::TOPIC,
         payload,
         enabled_plugins.as_ref(),

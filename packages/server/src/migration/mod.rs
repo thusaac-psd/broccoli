@@ -38,6 +38,7 @@ mod m0014_device_code_client_addr;
 mod m0015_config_recheck;
 mod m0016_test_data_version;
 mod m0017_replica_provides;
+mod m0018_hook_event;
 
 pub use m0001_baseline::{PLUGIN_READABLE, PLUGIN_READABLE_COLUMNS};
 
@@ -186,6 +187,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0015_config_recheck::Migration),
             Box::new(m0016_test_data_version::Migration),
             Box::new(m0017_replica_provides::Migration),
+            Box::new(m0018_hook_event::Migration),
         ]
     }
 }

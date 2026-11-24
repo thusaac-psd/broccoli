@@ -197,9 +197,11 @@ projects it and fires the after-judging hooks. Judging work runs those
 hooks as part of itself (a contest plugin's submission call, a detached
 session); the reaper and an applied judgement start them in a task of their
 own that counts as judging work until they have run
-(`spawn_after_judging_hooks`), so neither waits for a hook. The hook event
-counts as dispatched once its dispatch completes, so one dropped midway is
-dispatched again. A client therefore never sees a terminal status
+(`spawn_after_judging_hooks`), so neither waits for a hook. A hook event
+fires at most once fleet-wide: the replica that dispatches it first inserts
+its id into `hook_event`, so no other replica and no restart dispatches it
+again, and a dispatch dropped before it completes deletes the row, so the
+event is dispatched again. A client therefore never sees a terminal status
 that a retry takes back: within an attempt the statuses only move forward,
 and a terminal status is final.
 
