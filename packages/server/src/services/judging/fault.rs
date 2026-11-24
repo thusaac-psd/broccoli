@@ -32,6 +32,8 @@ pub enum DispatchFault {
     NotLoaded,
     /// The database did not answer a statement the dispatch's plugins ran
     /// (`common::db::is_outage`): the platform's fault, not the submission's.
+    /// A busy pool and a lost database are one fault, since both hand back
+    /// without spending a retry; only a client's answer tells them apart.
     DatabaseUnavailable,
     /// The problem's checker program failed (crashed, was killed by a
     /// signal, exited with a code its format gives no meaning), as its
