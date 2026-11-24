@@ -4,7 +4,11 @@ import {
   useServerNow,
   useServerTimeReached,
 } from '@broccoli/web-sdk/api';
-import { pollInterval, unsettledMessageKey } from '@broccoli/web-sdk/hooks';
+import {
+  pollInterval,
+  unsettledMessageKey,
+  useQueryState,
+} from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -75,6 +79,8 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
     refetchInterval: pollInterval(60000),
   });
   const tokenStatus = tokenQuery.data;
+  const infoState = useQueryState(infoQuery);
+  const tokenState = useQueryState(tokenQuery);
 
   const countdownTargetMs = useMemo(() => {
     if (!tokenStatus) return null;
@@ -125,14 +131,14 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
 
   // Mounted only on IOI contests (the slot's `contest_type`): a failure to
   // read the contest's rules or tokens is said, never read as "no tokens".
-  const failed = !contestInfo ? infoQuery : !tokenStatus ? tokenQuery : null;
-  if (failed?.isError) {
+  const failed = [infoState, tokenState].find(
+    (state) => state.status === 'error',
+  );
+  if (failed) {
     return (
       <div className="rounded-lg border border-border bg-card">
         <QueryErrorState
-          error={failed.error}
-          retry={() => void failed.refetch()}
-          retrying={failed.isFetching}
+          state={failed}
           failure={t('ioi.tokenPanel.loadFailed')}
           className="py-4"
         />

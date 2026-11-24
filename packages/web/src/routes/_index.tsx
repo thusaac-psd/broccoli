@@ -97,11 +97,7 @@ export default function Index() {
     return (
       <div className="flex flex-col gap-6 p-6">
         <h1 className="text-2xl font-bold">{t('homepage.title')}</h1>
-        <QueryErrorState
-          error={list.error}
-          retry={list.retry}
-          retrying={list.retrying}
-        />
+        <QueryErrorState state={list} />
       </div>
     );
   }

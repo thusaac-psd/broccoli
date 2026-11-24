@@ -56,6 +56,8 @@ DTO 只能经由 `Visible::into_masked_json` 进入响应体，该函数应用�
 
 `ContestResponse.plugin_outage` 和 `ContestListItem.plugin_outage` 来自 `plugin_lifecycle::contest_type_outage`：提供该比赛类型的插件已禁用，或本地没有加载其处理程序。客户端据此展示提交会被拒绝、结果不可用的比赛。
 
+`SubmissionResponse.parked_by`、`SubmissionListItem.parked_by` 和 `ProblemResponse.closed_by` 来自停放工作的规则 `PluginLifecycle::closed_by`：使工作无法运行的已禁用插件，以及它为该工作提供的内容（`contest_type`，或题目类型评测程序的 `problem_type`）。被停放的提交会指明它；题目按读取时所用的比赛类型（所在比赛的类型，单独读取时为其 `default_contest_type`）指明它，因此无论是哪个插件，客户端都只显示一条提示，并且不提供服务器会拒绝的提交。
+
 ## 被暂扣的结果
 
 对受插件收窄的查看者，当插件暂扣提交的反馈（`submission_feedback`）或某个决定隐藏其 `status` 时，提交的结果即被暂扣。提交只显示其 `Governed` 字段，`status` 为 `null`，`withheld` 为 `{"reason": "hidden"}`，客户端因此停止轮询。在 SQL 中其状态为 `NULL`（`submission_feedback::public_status`）：任何状态筛选都不匹配它。按状态排序时，所有状态被暂扣的行作为单独一组排在其余行之后，只按 id 排序，因此其位置不透露其状态。

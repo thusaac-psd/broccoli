@@ -115,9 +115,7 @@ export default function ContestQAPage() {
     if (listState.status === 'error') {
       return (
         <QueryErrorState
-          error={listState.error}
-          retry={listState.retry}
-          retrying={listState.retrying}
+          state={listState}
           failure={t('contest.qa.loadFailed')}
         />
       );

@@ -3,7 +3,7 @@
 
 use crate::tui::theme::THEME;
 use broccoli_api_types::submission::{SubmissionListItem, SubmissionResponse};
-use broccoli_api_types::visibility::{PluginOutage, Withheld};
+use broccoli_api_types::visibility::{ClosedBy, PluginOutage, Provided, Withheld};
 pub use broccoli_api_types::{SubmissionStatus, Verdict};
 use ratatui::style::Color;
 use std::fmt;
@@ -73,7 +73,7 @@ impl StatusDisplay for SubmissionStatus {
 }
 
 /// Where a submission stands for its viewer: one reading of the response's
-/// `status`, `withheld` and `plugin_outage`, which together say whether
+/// `status`, `withheld` and `parked_by`, which together say whether
 /// anything is still to come. Every command that shows or waits on a
 /// submission goes through it, so they agree on what is final.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +83,9 @@ pub enum Standing {
     /// The contest's plugin cannot judge or decide right now: the outcome is
     /// still to come, once the plugin is back.
     WaitingForPlugin(PluginOutage),
+    /// Queued while a plugin it needs is disabled (`parked_by`): judging
+    /// starts once an administrator enables it.
+    Parked(ClosedBy),
     /// The contest's plugin hides the outcome from this viewer (a freeze,
     /// results released later). Final for now: polling changes nothing.
     Hidden,
@@ -92,15 +95,15 @@ impl Standing {
     pub fn new(
         status: Option<SubmissionStatus>,
         withheld: Option<&Withheld>,
-        plugin_outage: Option<&PluginOutage>,
+        parked_by: Option<&ClosedBy>,
     ) -> Self {
-        match (status, withheld, plugin_outage) {
+        match (status, withheld, parked_by) {
             (_, Some(Withheld::Hidden), _) => Self::Hidden,
             (_, Some(Withheld::PluginOutage { outage }), _) => {
                 Self::WaitingForPlugin(outage.clone())
             }
-            (Some(status), None, Some(outage)) if !status.is_terminal() => {
-                Self::WaitingForPlugin(outage.clone())
+            (Some(status), None, Some(closed)) if !status.is_terminal() => {
+                Self::Parked(closed.clone())
             }
             (Some(status), None, _) => Self::Status(status),
             // A status left out without a reason is left out by the plugin.
@@ -109,19 +112,11 @@ impl Standing {
     }
 
     pub fn of_submission(sub: &SubmissionResponse) -> Self {
-        Self::new(
-            sub.status,
-            sub.withheld.as_ref(),
-            sub.plugin_outage.as_ref(),
-        )
+        Self::new(sub.status, sub.withheld.as_ref(), sub.parked_by.as_ref())
     }
 
     pub fn of_item(item: &SubmissionListItem) -> Self {
-        Self::new(
-            item.status,
-            item.withheld.as_ref(),
-            item.plugin_outage.as_ref(),
-        )
+        Self::new(item.status, item.withheld.as_ref(), item.parked_by.as_ref())
     }
 
     /// What the submission waits for, as a sentence for a wait line; `None`
@@ -142,6 +137,19 @@ impl Standing {
             Self::WaitingForPlugin(PluginOutage::Unavailable) => {
                 Some("Waiting for the contest's plugin, which cannot answer right now".into())
             }
+            Self::Parked(ClosedBy {
+                plugin_id,
+                provides,
+            }) => {
+                let role = match provides {
+                    Provided::ContestType => "its contest plugin",
+                    Provided::ProblemType => "its evaluator plugin",
+                };
+                Some(format!(
+                    "Waiting for {role}: '{plugin_id}' is disabled until an administrator \
+                     enables it"
+                ))
+            }
         }
     }
 }
@@ -150,7 +158,7 @@ impl StatusDisplay for Standing {
     fn human(&self) -> &str {
         match self {
             Self::Status(status) => status.human(),
-            Self::WaitingForPlugin(_) => "Waiting for plugin",
+            Self::WaitingForPlugin(_) | Self::Parked(_) => "Waiting for plugin",
             Self::Hidden => "Hidden",
         }
     }
@@ -158,7 +166,7 @@ impl StatusDisplay for Standing {
     fn is_in_progress(&self) -> bool {
         match self {
             Self::Status(status) => status.is_in_progress(),
-            Self::WaitingForPlugin(_) => true,
+            Self::WaitingForPlugin(_) | Self::Parked(_) => true,
             Self::Hidden => false,
         }
     }
@@ -166,7 +174,7 @@ impl StatusDisplay for Standing {
     fn color(&self) -> Color {
         match self {
             Self::Status(status) => status.color(),
-            Self::WaitingForPlugin(_) => THEME.warning,
+            Self::WaitingForPlugin(_) | Self::Parked(_) => THEME.warning,
             Self::Hidden => THEME.muted,
         }
     }
@@ -261,17 +269,29 @@ mod tests {
     }
 
     #[test]
-    fn a_queued_submission_whose_plugin_is_disabled_waits_for_the_plugin() {
-        let disabled = PluginOutage::Disabled {
+    fn a_queued_submission_whose_plugin_is_disabled_waits_for_that_plugin() {
+        let disabled = ClosedBy {
             plugin_id: "ioi".into(),
+            provides: Provided::ContestType,
         };
         let standing = Standing::new(Some(SubmissionStatus::Queued), None, Some(&disabled));
-        assert_eq!(standing, Standing::WaitingForPlugin(disabled.clone()));
+        assert_eq!(standing, Standing::Parked(disabled.clone()));
+        assert_eq!(
+            standing.waiting_for().as_deref(),
+            Some(
+                "Waiting for its contest plugin: 'ioi' is disabled until an administrator \
+                 enables it"
+            )
+        );
+        let evaluator = ClosedBy {
+            plugin_id: "batch".into(),
+            provides: Provided::ProblemType,
+        };
         assert!(
-            standing
+            Standing::new(Some(SubmissionStatus::Queued), None, Some(&evaluator))
                 .waiting_for()
                 .unwrap()
-                .contains("'ioi' is disabled")
+                .starts_with("Waiting for its evaluator plugin: 'batch'")
         );
         // A finished submission is finished whatever its plugin does now.
         let judged = Standing::new(Some(SubmissionStatus::Judged), None, Some(&disabled));

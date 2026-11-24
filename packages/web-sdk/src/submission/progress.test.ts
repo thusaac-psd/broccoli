@@ -9,6 +9,7 @@ import {
 } from './progress.ts';
 
 const DISABLED = { state: 'disabled', plugin_id: 'icpc' } as const;
+const PARKED = { plugin_id: 'icpc', provides: 'contest_type' } as const;
 const UNAVAILABLE = { state: 'unavailable' } as const;
 
 describe('where a submission stands', () => {
@@ -19,10 +20,7 @@ describe('where a submission stands', () => {
       'Compiling',
       'Running',
     ] as const) {
-      assert.equal(
-        submissionPhase({ status, plugin_outage: DISABLED }),
-        'waiting',
-      );
+      assert.equal(submissionPhase({ status, parked_by: PARKED }), 'waiting');
       assert.equal(submissionPhase({ status }), 'judging');
     }
   });
@@ -33,10 +31,7 @@ describe('where a submission stands', () => {
       'CompilationError',
       'SystemError',
     ] as const) {
-      assert.equal(
-        submissionPhase({ status, plugin_outage: DISABLED }),
-        'final',
-      );
+      assert.equal(submissionPhase({ status, parked_by: PARKED }), 'final');
     }
   });
 
@@ -65,7 +60,7 @@ describe('how often a submission is asked for', () => {
   it('polls fast while judged, slowly while waiting, and stops once nothing can change', () => {
     assert.equal(submissionPollPace({ status: 'Running' }), JUDGING_POLL_MS);
     assert.equal(
-      submissionPollPace({ status: 'Queued', plugin_outage: DISABLED }),
+      submissionPollPace({ status: 'Queued', parked_by: PARKED }),
       PLUGIN_OUTAGE_POLL_MS,
     );
     assert.equal(

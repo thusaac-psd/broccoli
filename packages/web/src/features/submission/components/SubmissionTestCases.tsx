@@ -1,3 +1,4 @@
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   type ShownStatus,
@@ -30,6 +31,7 @@ export function SubmissionTestCases({
   const { t } = useTranslation();
   const [page, setPage] = useState(1);
   const query = useTestCasePage({ submissionId, judgementId, page, live });
+  const queryView = useQueryState(query);
   const cases = query.data?.test_case_results ?? [];
   const comparison = useTestCasePage({
     submissionId,
@@ -43,19 +45,17 @@ export function SubmissionTestCases({
   const current = new Map(
     comparison.data?.test_case_results.map((tc) => [tc.test_case_id, tc]),
   );
-  if (query.isLoading)
+  if (queryView.status === 'loading')
     return (
       <div className="py-3 text-sm text-muted-foreground">
         {t('result.loadingOutput')}
       </div>
     );
-  if (query.isError && !query.data)
+  if (queryView.status === 'error')
     return (
       <QueryErrorState
         className="py-3"
-        error={query.error}
-        retry={() => void query.refetch()}
-        retrying={query.isFetching}
+        state={queryView}
         failure={t('result.caseLoadError')}
       />
     );

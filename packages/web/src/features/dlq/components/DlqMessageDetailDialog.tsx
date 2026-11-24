@@ -1,4 +1,5 @@
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
@@ -35,7 +36,8 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
   const open = messageId !== null;
 
   const messageQuery = useDlqMessage(messageId);
-  const { data, isLoading, error } = messageQuery;
+  const { data } = messageQuery;
+  const messageState = useQueryState(messageQuery);
   const meta = data ? messageTypeMeta(data.message_type) : null;
 
   const [busy, setBusy] = useState(false);
@@ -87,17 +89,15 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
           <DialogDescription>{t('dlq.detail.description')}</DialogDescription>
         </DialogHeader>
 
-        {isLoading && (
+        {messageState.status === 'loading' && (
           <div className="flex items-center justify-center py-10 text-muted-foreground">
             <Loader2 className="h-5 w-5 animate-spin" />
           </div>
         )}
 
-        {error && !data && (
+        {messageState.status === 'error' && (
           <QueryErrorState
-            error={error}
-            retry={() => void messageQuery.refetch()}
-            retrying={messageQuery.isFetching}
+            state={messageState}
             failure={t('dlq.detail.loadError')}
           />
         )}

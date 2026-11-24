@@ -25,3 +25,15 @@ test('a superseded judgement reads as superseded, and no submission filters by i
   );
   assert.equal(SUBMISSION_STATUS_FILTER_OPTIONS.includes('Superseded'), false);
 });
+
+test('a parked submission names what parks it, as the server records it', () => {
+  for (const provides of ['contest_type', 'problem_type'] as const) {
+    assert.deepEqual(
+      getVerdictBadge(
+        { status: 'Queued', parked_by: { plugin_id: 'p', provides } },
+        t,
+      ),
+      { label: `submissions.parkedBy.${provides}`, variant: 'outline' },
+    );
+  }
+});

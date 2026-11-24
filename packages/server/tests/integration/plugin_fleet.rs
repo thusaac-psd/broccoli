@@ -1276,3 +1276,39 @@ async fn work_on_a_problem_type_whose_evaluator_is_disabled_is_refused_and_parke
     assert_eq!(res.status, 200, "{}", res.text);
     assert_eq!(res.body["submissions_parked"], 1, "{}", res.text);
 }
+
+/// Every plugin a submission needs is reported where it is submitted from:
+/// a problem whose evaluator plugin is disabled names it and what it
+/// provides, on its own and under a contest, as its parked submissions do.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_problem_whose_evaluator_is_disabled_names_what_closes_its_submissions() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    let a = TestApp::spawn().await;
+    let token = admin(&a).await;
+    let contest_id = a.create_contest(&token, "Evaluated", true, true).await;
+    let problem_id = a.create_problem(&token, "Closed").await;
+    a.add_problem_to_contest(contest_id, problem_id, &token)
+        .await;
+    for sql in [
+        "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
+         ('off-evaluator', FALSE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [], \"host_locale\": null, \"problem_types\": [\"closed-type\"]}')"
+            .to_string(),
+        format!("UPDATE problem SET problem_type = 'closed-type' WHERE id = {problem_id}"),
+    ] {
+        a.db.execute_raw(Statement::from_string(DbBackend::Postgres, sql))
+            .await
+            .unwrap();
+    }
+    plugin_lifecycle::reconcile(&a.state).await.unwrap();
+
+    let closed = json!({"plugin_id": "off-evaluator", "provides": "problem_type"});
+    for route in [
+        routes::problem(problem_id),
+        routes::contest_problem(contest_id, problem_id),
+    ] {
+        let res = a.get_with_token(&route, &token).await;
+        assert_eq!(res.status, 200, "{route}: {}", res.text);
+        assert_eq!(res.body["closed_by"], closed, "{route}: {}", res.text);
+    }
+}

@@ -41,6 +41,13 @@ export type Withheld = components['schemas']['Withheld'];
 export type PluginOutage = components['schemas']['PluginOutage'];
 
 /**
+ * The plugin that keeps new work of a resource (a submission, a code run)
+ * from running, and what it provides for the work (`provides`): the server's
+ * one rule for it, which also parks a submission.
+ */
+export type ClosedBy = components['schemas']['ClosedBy'];
+
+/**
  * A status as the server shows it to this viewer: `null` (or absent) while
  * the outcome is withheld (see `Withheld`).
  */

@@ -127,6 +127,15 @@ Degrading is per resource and per field, never per batch:
 is disabled, or no handler for it is loaded here. Clients use it to show a
 contest whose submissions are refused and whose results are unavailable.
 
+`SubmissionResponse.parked_by`, `SubmissionListItem.parked_by` and
+`ProblemResponse.closed_by` come from `PluginLifecycle::closed_by`, the rule
+that parks work: the disabled plugin that keeps the work from running, and
+what it provides for it (`contest_type`, or `problem_type` for the problem
+type's evaluator). A parked submission names it; a problem names it for the
+contest type it is read under (the contest's, or its `default_contest_type`
+on its own), so clients show one notice and offer no submit the server would
+refuse, whichever plugin it is.
+
 ## Withheld outcomes
 
 A submission's outcome is withheld from a viewer plugins narrow when a plugin

@@ -59,9 +59,7 @@ export function BracketScoreboard({
   if (bracket.status === 'error') {
     return (
       <QueryErrorState
-        error={bracket.error}
-        retry={bracket.retry}
-        retrying={bracket.retrying}
+        state={bracket}
         failure={t('codelink-bracket.bracket.loadError')}
       />
     );

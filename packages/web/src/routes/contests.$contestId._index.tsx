@@ -1,4 +1,5 @@
 import { useAuth } from '@broccoli/web-sdk/auth';
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
 import { QueryErrorState } from '@broccoli/web-sdk/ui';
@@ -23,6 +24,7 @@ export default function ContestOverviewPage() {
   const { contestId } = useParams();
   const id = Number(contestId);
   const { contest, query: contestQuery } = useContestInfo(id);
+  const contestState = useQueryState(contestQuery);
   const canManageContest = !!user?.permissions.includes(CONTEST_MANAGE);
   const enrollState = useContestEnroll({
     contestId: id,
@@ -38,7 +40,7 @@ export default function ContestOverviewPage() {
     );
   }
 
-  if (!contest && contestQuery.isError) {
+  if (contestState.status === 'error') {
     return (
       <PageLayout
         pageId="contest-overview"
@@ -46,9 +48,7 @@ export default function ContestOverviewPage() {
         icon={<Trophy className="h-6 w-6 text-primary" />}
       >
         <QueryErrorState
-          error={contestQuery.error}
-          retry={() => void contestQuery.refetch()}
-          retrying={contestQuery.isFetching}
+          state={contestState}
           notFound={t('contests.notFound')}
           failure={t('contests.loadFailed')}
         />
@@ -66,7 +66,7 @@ export default function ContestOverviewPage() {
     >
       <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_20rem]">
         <div className="min-w-0 space-y-4">
-          <PluginOutageNotice outage={contest?.plugin_outage} of="contest" />
+          <PluginOutageNotice outage={contest?.plugin_outage} />
           <ContestProblemsCard contestId={id} />
         </div>
         <div className="space-y-4 md:sticky md:top-6 h-fit">

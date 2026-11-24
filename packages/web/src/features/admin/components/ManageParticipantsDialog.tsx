@@ -339,9 +339,7 @@ function AddParticipantsTab({
       <div className="overflow-y-auto max-h-[420px] rounded-md border">
         {usersState.status === 'error' ? (
           <QueryErrorState
-            error={usersState.error}
-            retry={usersState.retry}
-            retrying={usersState.retrying}
+            state={usersState}
             failure={t('admin.participants.usersLoadFailed')}
           />
         ) : usersState.status === 'loading' ? (

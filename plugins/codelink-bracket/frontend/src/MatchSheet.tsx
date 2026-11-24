@@ -142,9 +142,7 @@ function MatchDetail({
   if (state.status === 'error') {
     return (
       <QueryErrorState
-        error={state.error}
-        retry={state.retry}
-        retrying={state.retrying}
+        state={state}
         failure={t('codelink-bracket.match.loadFailed')}
         className="p-6"
       />

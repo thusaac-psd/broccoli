@@ -1743,14 +1743,15 @@ async fn cut_by_a_disable(change: Change) {
     assert!(res.body["withheld"].is_null(), "{}", res.text);
     assert_eq!(res.body["status"], "Queued", "{}", res.text);
     let outage = json!({"state": "disabled", "plugin_id": "ioi"});
-    assert_eq!(res.body["plugin_outage"], outage, "{}", res.text);
+    let parked = json!({"plugin_id": "ioi", "provides": "contest_type"});
+    assert_eq!(res.body["parked_by"], parked, "{}", res.text);
     let res = app
         .get_with_token(
             &format!("/api/v1/contests/{contest_id}/submissions"),
             &admin,
         )
         .await;
-    assert_eq!(res.body["data"][0]["plugin_outage"], outage, "{}", res.text);
+    assert_eq!(res.body["data"][0]["parked_by"], parked, "{}", res.text);
     let res = app
         .get_with_token(&format!("/api/v1/submissions/{sub_id}"), &contestant)
         .await;
@@ -1814,6 +1815,7 @@ async fn cut_by_a_disable(change: Change) {
         .get_with_token(&format!("/api/v1/problems/{problem_id}"), &admin)
         .await;
     assert_eq!(res.body["plugin_outage"], outage, "{}", res.text);
+    assert_eq!(res.body["closed_by"], parked, "{}", res.text);
 
     let cut_statuses = app.logged_statuses().await;
     assert!(

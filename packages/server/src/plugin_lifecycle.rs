@@ -31,7 +31,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
-use broccoli_api_types::visibility::PluginOutage;
+use broccoli_api_types::visibility::{ClosedBy, PluginOutage};
 use plugin_core::error::PluginError;
 use plugin_core::registry::PluginStatus;
 use sea_orm::{ConnectionTrait, DbBackend, DbErr, EntityTrait, Statement};
@@ -172,23 +172,14 @@ pub struct Governs {
     pub checkers: Vec<String>,
 }
 
-/// What a key that plugins provide names: what a unit of work needs a
-/// provider of to run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Provided {
-    /// A contest type: its plugin judges the unit.
-    ContestType,
-    /// A problem type: its evaluator plugin runs the unit's test cases.
-    ProblemType,
-}
+pub use broccoli_api_types::visibility::Provided;
 
-impl Provided {
-    /// The [`Governs`] field (and `plugin.governs` key) that lists the keys.
-    fn field(self) -> &'static str {
-        match self {
-            Self::ContestType => "contest_types",
-            Self::ProblemType => "problem_types",
-        }
+/// The [`Governs`] field (and `plugin.governs` key) that lists the keys of
+/// `kind`.
+fn governs_field(kind: Provided) -> &'static str {
+    match kind {
+        Provided::ContestType => "contest_types",
+        Provided::ProblemType => "problem_types",
     }
 }
 
@@ -278,21 +269,30 @@ impl PluginLifecycle {
         contest_type: &str,
         problem_type: &str,
         status: common::SubmissionStatus,
-    ) -> Option<PluginOutage> {
+    ) -> Option<ClosedBy> {
         if status.is_terminal() {
             return None;
         }
         self.closed_by(contest_type, problem_type)
-            .map(|plugin_id| PluginOutage::Disabled { plugin_id })
     }
 
     /// The plugin that keeps work of `contest_type` on a problem of
-    /// `problem_type` from running: its contest type's, else its problem
-    /// type's ([`Self::disabled_provider`]). `None` when both have an enabled
-    /// provider (or none was ever recorded).
-    pub fn closed_by(&self, contest_type: &str, problem_type: &str) -> Option<String> {
-        self.disabled_provider(Provided::ContestType, contest_type)
-            .or_else(|| self.disabled_provider(Provided::ProblemType, problem_type))
+    /// `problem_type` from running, with what it provides for the work: its
+    /// contest type's, else its problem type's ([`Self::disabled_provider`]).
+    /// `None` when both have an enabled provider (or none was ever recorded).
+    pub fn closed_by(&self, contest_type: &str, problem_type: &str) -> Option<ClosedBy> {
+        [
+            (Provided::ContestType, contest_type),
+            (Provided::ProblemType, problem_type),
+        ]
+        .into_iter()
+        .find_map(|(provides, key)| {
+            self.disabled_provider(provides, key)
+                .map(|plugin_id| ClosedBy {
+                    plugin_id,
+                    provides,
+                })
+        })
     }
 
     /// The plugin that keeps `key` (a `kind` of key) closed: every plugin
@@ -385,7 +385,7 @@ fn provider_enabled(kind: Provided, key: &str) -> String {
     format!(
         "COALESCE((SELECT bool_or(p.is_enabled) FROM plugin p \
                     WHERE p.governs->'{field}' @> jsonb_build_array({key})), TRUE)",
-        field = kind.field(),
+        field = governs_field(kind),
     )
 }
 
@@ -2063,6 +2063,55 @@ mod tests {
             .expect("connect")
             .into();
         (container, db)
+    }
+
+    /// A lifecycle where `judge` provides contest type `t` and `eval` the
+    /// evaluator of problem type `p`, enabled as given.
+    fn providers(judge_enabled: bool, eval_enabled: bool) -> PluginLifecycle {
+        let lifecycle = PluginLifecycle::default();
+        lifecycle.set_governs(
+            "judge",
+            Governs {
+                contest_types: vec!["t".into()],
+                ..Governs::default()
+            },
+        );
+        lifecycle.set_governs(
+            "eval",
+            Governs {
+                problem_types: vec!["p".into()],
+                ..Governs::default()
+            },
+        );
+        lifecycle.set_desired("judge", judge_enabled);
+        lifecycle.set_desired("eval", eval_enabled);
+        lifecycle
+    }
+
+    #[test]
+    fn closed_work_names_the_plugin_and_what_it_provides_for_the_work() {
+        let queued = common::SubmissionStatus::Queued;
+        let closed = |provides, plugin_id: &str| {
+            Some(ClosedBy {
+                plugin_id: plugin_id.into(),
+                provides,
+            })
+        };
+        assert_eq!(providers(true, true).closed_by("t", "p"), None);
+        assert_eq!(
+            providers(true, false).parked_by("t", "p", queued),
+            closed(Provided::ProblemType, "eval"),
+        );
+        // The contest type is what work of it needs first.
+        assert_eq!(
+            providers(false, false).parked_by("t", "p", queued),
+            closed(Provided::ContestType, "judge"),
+        );
+        // Finished work is parked by nothing.
+        assert_eq!(
+            providers(false, false).parked_by("t", "p", common::SubmissionStatus::Judged),
+            None,
+        );
     }
 
     /// Two replicas booting together register overlapping plugin rows. One

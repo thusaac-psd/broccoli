@@ -39,7 +39,7 @@ export default function ContestRankingPage() {
       >
         {(contest) =>
           contest.plugin_outage ? (
-            <PluginOutageNotice outage={contest.plugin_outage} of="contest" />
+            <PluginOutageNotice outage={contest.plugin_outage} />
           ) : (
             <>
               <Slot name="ranking.header" as="div" />

@@ -40,6 +40,8 @@ test('a long problem title stays on one line on a phone, in full in its title', 
 });
 
 const DISABLED_OUTAGE = { state: 'disabled', plugin_id: 'icpc' };
+/** What the server says closes work while `icpc` is disabled. */
+const CLOSED_BY_ICPC = { plugin_id: 'icpc', provides: 'contest_type' };
 const WAITING = 'Waiting: its contest plugin is disabled';
 
 /** A submission parked because its contest type's provider is disabled. */
@@ -50,7 +52,7 @@ const parked = (id: number) => ({
   score: null,
   time_used: null,
   memory_used: null,
-  plugin_outage: DISABLED_OUTAGE,
+  parked_by: CLOSED_BY_ICPC,
 });
 
 test('a submission parked while its contest plugin is disabled says it is waiting, not queued', async ({
@@ -112,7 +114,11 @@ test('a problem whose practice contest type has no provider offers no submit', a
   await mockApi(page, 'contestant');
   await page.route(/\/api\/v1\/problems\/1(\?|$)/, (route) =>
     route.fulfill({
-      json: { ...problem(1), plugin_outage: DISABLED_OUTAGE },
+      json: {
+        ...problem(1),
+        plugin_outage: DISABLED_OUTAGE,
+        closed_by: CLOSED_BY_ICPC,
+      },
     }),
   );
   await page.goto('/problems/1?tab=coding');

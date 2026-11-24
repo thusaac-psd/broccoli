@@ -33,6 +33,29 @@ impl PluginOutage {
     }
 }
 
+/// What a unit of work (a submission or a code run) needs a plugin to
+/// provide to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Provided {
+    /// Its contest type: the plugin judges the unit.
+    ContestType,
+    /// Its problem type: the plugin's evaluator runs the unit's test cases.
+    ProblemType,
+}
+
+/// The plugin that keeps new work of a resource from running: every plugin
+/// that provides what the work needs (`provides`) is disabled fleet-wide,
+/// and this is the first of them by id. A submission it closes is accepted
+/// by no submit path and, if already queued, waits (parked) until an
+/// administrator enables a provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ClosedBy {
+    #[schema(example = "my-plugin")]
+    pub plugin_id: String,
+    pub provides: Provided,
+}
+
 /// Why the plugin-governed fields of a resource are left out (`null`) of a
 /// response. Every field the host decides alone is still present.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

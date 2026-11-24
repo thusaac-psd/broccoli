@@ -77,7 +77,7 @@ pub(super) async fn build_submission_list_items(
             time_used: sub.time_used,
             memory_used: sub.memory_used,
             withheld: None,
-            plugin_outage: state.plugin_lifecycle.parked_by(
+            parked_by: state.plugin_lifecycle.parked_by(
                 &sub.contest_type,
                 &problem_model.problem_type,
                 sub.status,
@@ -554,7 +554,7 @@ pub(super) async fn build_submission_response_with_cases(
         created_at: sub.created_at,
         result: result_response,
         withheld: None,
-        plugin_outage: state.plugin_lifecycle.parked_by(
+        parked_by: state.plugin_lifecycle.parked_by(
             &sub.contest_type,
             &context.problem_type,
             sub.status,

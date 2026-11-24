@@ -1,6 +1,6 @@
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { pollInterval } from '@broccoli/web-sdk/hooks';
+import { pollInterval, useQueryState } from '@broccoli/web-sdk/hooks';
 import {
   pluginKeys,
   useFormat,
@@ -89,7 +89,9 @@ export default function PluginsPage() {
       return data;
     },
   });
-  const { data: plugins, isLoading, error } = pluginsQuery;
+  const { data: plugins } = pluginsQuery;
+  const pluginsState = useQueryState(pluginsQuery);
+  const isLoading = pluginsState.status === 'loading';
 
   const { data: uploadPolicy } = useQuery({
     queryKey: ['admin-plugin-upload-policy'],
@@ -341,11 +343,9 @@ export default function PluginsPage() {
         </div>
       )}
 
-      {error && !plugins && (
+      {pluginsState.status === 'error' && (
         <QueryErrorState
-          error={error}
-          retry={() => void pluginsQuery.refetch()}
-          retrying={pluginsQuery.isFetching}
+          state={pluginsState}
           failure={t('plugins.loadError')}
         />
       )}

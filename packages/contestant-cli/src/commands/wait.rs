@@ -40,7 +40,7 @@ impl std::error::Error for StillWaiting {}
 /// waits for a plugin an administrator has to bring back.
 fn interval(standing: &Standing) -> Duration {
     match standing {
-        Standing::WaitingForPlugin(_) => Duration::from_secs(5),
+        Standing::WaitingForPlugin(_) | Standing::Parked(_) => Duration::from_secs(5),
         Standing::Status(SubmissionStatus::Queued) => Duration::from_secs(1),
         _ => Duration::from_millis(250),
     }

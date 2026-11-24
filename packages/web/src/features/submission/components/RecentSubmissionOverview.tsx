@@ -1,4 +1,5 @@
 import { useErrorMessage } from '@broccoli/web-sdk/api';
+import type { QueryFailure } from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   getVerdictBadge,
@@ -22,7 +23,7 @@ interface RecentSubmissionOverviewProps {
   entries: SubmissionEntry[];
   history: SubmissionSummary[];
   /** Set when the earlier submissions could not be loaded. */
-  historyError?: { error: unknown; retry: () => void } | null;
+  historyError?: QueryFailure | null;
   isSubmitting?: boolean;
   visibleCount?: number;
   linkBuilder?: (submissionId: number) => string;
@@ -116,7 +117,7 @@ export function RecentSubmissionOverview({
       outcome: {
         status: item.status,
         withheld: item.withheld ?? null,
-        plugin_outage: item.plugin_outage ?? null,
+        parked_by: item.parked_by ?? null,
         verdict: item.verdict ?? null,
       },
       score: item.score ?? null,
@@ -160,7 +161,7 @@ export function RecentSubmissionOverview({
         outcome: {
           status: getEntryStatus(entry),
           withheld: null,
-          plugin_outage: null,
+          parked_by: null,
           verdict: null,
         },
         score: null,
@@ -179,7 +180,7 @@ export function RecentSubmissionOverview({
       outcome: {
         status: sub.status,
         withheld: sub.withheld ?? null,
-        plugin_outage: sub.plugin_outage ?? null,
+        parked_by: sub.parked_by ?? null,
         verdict: sub.result?.verdict ?? null,
       },
       score: sub.result?.score ?? null,
@@ -214,8 +215,7 @@ export function RecentSubmissionOverview({
         {historyError && !isSubmitting ? (
           <QueryErrorState
             className="py-4"
-            error={historyError.error}
-            retry={historyError.retry}
+            state={historyError}
             failure={t('submissions.loadFailed')}
           />
         ) : (

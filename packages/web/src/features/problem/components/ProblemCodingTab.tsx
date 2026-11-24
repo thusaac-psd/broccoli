@@ -1,3 +1,4 @@
+import type { QueryFailure } from '@broccoli/web-sdk/hooks';
 import { Slot } from '@broccoli/web-sdk/slot';
 import type {
   Submission,
@@ -26,7 +27,7 @@ interface ProblemCodingTabProps {
   submissionFormat?: Record<string, string[]> | null;
   latestSubmission: Submission | null;
   submissionHistory: SubmissionSummary[];
-  submissionHistoryError: { error: unknown; retry: () => void } | null;
+  submissionHistoryError: QueryFailure | null;
   submissions?: SubmissionEntry[];
   isSubmitting: boolean;
   overviewVisibleCount?: number;

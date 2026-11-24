@@ -3,6 +3,7 @@ import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import {
   PLUGIN_OUTAGE_POLL_MS,
   pollInterval,
+  useQueryState,
   useRegistries,
 } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -12,7 +13,10 @@ import {
   useProblemPresentation,
 } from '@broccoli/web-sdk/problem';
 import type { SubmissionSummary } from '@broccoli/web-sdk/submission';
-import { SubmitGatingProvider } from '@broccoli/web-sdk/submission';
+import {
+  SubmitGatingProvider,
+  useSubmitGate,
+} from '@broccoli/web-sdk/submission';
 import { QueryErrorState } from '@broccoli/web-sdk/ui';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useState } from 'react';
@@ -21,13 +25,14 @@ import { toast } from 'sonner';
 
 import type { EditorFile } from '@/components/CodeEditor';
 import { ContestRegisterGate } from '@/features/contest/components/ContestRegisterGate';
-import { PluginOutageNotice } from '@/features/contest/components/PluginOutageNotice';
+import { SubmitClosureNotice } from '@/features/contest/components/PluginOutageNotice';
 import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
 import { useContestProblems } from '@/features/contest/hooks/use-contest-problems';
 import { useRestoreSubmissionScroll } from '@/features/submission/hooks/use-submission-navigation';
 import { useSubmissions } from '@/features/submission/hooks/use-submissions';
 
 import { fetchProblem, fetchSampleCase } from '../api/problem-scope';
+import { submitClosure } from '../utils/submit-closure';
 import { ProblemCodingTab } from './ProblemCodingTab';
 import { ProblemContentTabs, type ProblemViewTab } from './ProblemContentTabs';
 import { ProblemDescriptionTab } from './ProblemDescriptionTab';
@@ -64,6 +69,7 @@ export default function ProblemView({
     presentation.allowedProblemIds === null ||
     presentation.allowedProblemIds.includes(problemId);
   const queryClient = useQueryClient();
+  const scope = contestId ? 'contest' : 'practice';
   const viewerKey = viewerCacheKey(user);
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -124,19 +130,21 @@ export default function ProblemView({
     enabled: authReady && allowed && Number.isFinite(problemId),
     queryFn: ({ signal }) =>
       fetchProblem(apiClient, problemId, contestId, signal),
-    // While its contest type's plugin is out, asked whether it is back, so
-    // the page opens submissions again once it is (a contest problem's
-    // outage is the contest's, which `useContestInfo` polls).
+    // While a plugin its submissions need is out, asked whether it is back,
+    // so the page opens submissions again once it is (a contest's own
+    // outage is polled by `useContestInfo`).
     refetchInterval: pollInterval<Awaited<ReturnType<typeof fetchProblem>>>(
       (problem) =>
-        !contestId && problem?.plugin_outage ? PLUGIN_OUTAGE_POLL_MS : false,
+        submitClosure(scope, null, problem) ? PLUGIN_OUTAGE_POLL_MS : false,
     ),
   });
-  const { data: problem, isLoading, error } = problemQuery;
-  // A contest problem is out with its contest's plugin; a problem on its own
-  // with the plugin of the contest type its practice submit uses.
-  const outage = contestId ? contest?.plugin_outage : problem?.plugin_outage;
-  const outageOf = contestId ? 'contest' : 'problem';
+  const { data: problem, error } = problemQuery;
+  // A first load that failed shows its failure while it is asked again.
+  const problemState = useQueryState(problemQuery);
+  const isLoading = problemState.status === 'loading';
+  const closure = submitClosure(scope, contest?.plugin_outage, problem);
+  // What the contest's plugin governs of the problem is withheld with it.
+  const contestOutage = closure?.kind === 'contest' ? closure.outage : null;
 
   useEffect(() => {
     if (allowed || !user) return;
@@ -195,10 +203,9 @@ export default function ProblemView({
     },
   });
   const submissionHistory = historyQuery.data ?? [];
+  const historyState = useQueryState(historyQuery);
   const submissionHistoryError =
-    historyQuery.isError && !historyQuery.data
-      ? { error: historyQuery.error, retry: () => void historyQuery.refetch() }
-      : null;
+    historyState.status === 'error' ? historyState : null;
 
   const samplesQuery = useQuery<SampleContentMap>({
     queryKey: [
@@ -407,26 +414,24 @@ export default function ProblemView({
 
   // The contest says its plugin is out: what that plugin governs of the
   // problem is withheld, so there is nothing to wait for.
-  if (outage && !problem) {
+  if (contestOutage && !problem) {
     return (
       <div className="flex flex-col flex-1 min-h-0">
         <ProblemViewHeader
           problem={undefined}
           headerId={headerId}
           contestId={contestId}
-          withheld={<PluginOutageNotice outage={outage} of={outageOf} />}
+          withheld={<SubmitClosureNotice closure={closure} />}
         />
       </div>
     );
   }
 
-  if (error && !problem) {
+  if (problemState.status === 'error') {
     return (
       <QueryErrorState
         className="p-6"
-        error={error}
-        retry={() => void problemQuery.refetch()}
-        retrying={problemQuery.isFetching}
+        state={problemState}
         notFound={t('problem.notFound')}
         failure={t('problem.loadFailed')}
       />
@@ -453,6 +458,7 @@ export default function ProblemView({
 
   return (
     <SubmitGatingProvider>
+      <ProblemLoadedGate loaded={!!problem} />
       <div className="flex flex-col flex-1 min-h-0">
         {copiedNotice && (
           <div
@@ -468,11 +474,7 @@ export default function ProblemView({
           headerId={headerId}
           contestId={contestId}
         />
-        <PluginOutageNotice
-          outage={outage}
-          of={outageOf}
-          className="mx-4 mb-4 md:mx-6"
-        />
+        <SubmitClosureNotice closure={closure} className="mx-4 mb-4 md:mx-6" />
 
         <ProblemContentTabs
           activeTab={activeTab}
@@ -496,8 +498,8 @@ export default function ProblemView({
             </div>
           }
           codingContent={
-            // Submissions are refused while the contest's plugin is out.
-            outage ? null : (
+            // Submissions are refused while a plugin they need is out.
+            closure ? null : (
               <ContestRegisterGate contestId={contestId}>
                 <ProblemCodingTab
                   isCodeFullscreen={isCodeFullscreen}
@@ -535,4 +537,10 @@ export default function ProblemView({
       </div>
     </SubmitGatingProvider>
   );
+}
+
+/** Holds Submit back until the problem it submits to has loaded. */
+function ProblemLoadedGate({ loaded }: { loaded: boolean }) {
+  useSubmitGate('problem-loaded', !loaded);
+  return null;
 }

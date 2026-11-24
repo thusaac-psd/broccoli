@@ -70,10 +70,11 @@ export type RowOutcome = {
 /**
  * The badge of a submission's outcome. A withheld outcome (`status` `null`)
  * says why it is withheld (`withheld`), never that it is still running; a
- * submission waiting for its contest's plugin says so, never just "Queued".
+ * parked submission names the plugin role that parks it (`parked_by`),
+ * never just "Queued".
  */
 export function getVerdictBadge(
-  { verdict, status, withheld, plugin_outage }: VerdictOutcome,
+  { verdict, status, withheld, parked_by }: VerdictOutcome,
   t: I18nContextValue['t'],
 ): {
   label: string;
@@ -82,12 +83,9 @@ export function getVerdictBadge(
   if (status == null) {
     return { label: withheldLabel(withheld, t), variant: 'outline' };
   }
-  if (plugin_outage) {
+  if (parked_by) {
     return {
-      label:
-        plugin_outage.state === 'disabled'
-          ? t('submissions.waitingForPlugin.disabled')
-          : t('submissions.waitingForPlugin.unavailable'),
+      label: t(`submissions.parkedBy.${parked_by.provides}`),
       variant: 'outline',
     };
   }

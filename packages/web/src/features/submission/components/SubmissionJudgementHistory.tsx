@@ -4,6 +4,7 @@ import {
   useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
+import { useQueryState } from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   SUBMISSION_REJUDGE,
@@ -80,7 +81,8 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
       return data;
     },
   });
-  const isLoading = judgementsQuery.isLoading;
+  const judgementsState = useQueryState(judgementsQuery);
+  const isLoading = judgementsState.status === 'loading';
   const judgements = judgementsQuery.data ?? NO_JUDGEMENTS;
 
   const currentJudgement = useMemo(
@@ -233,12 +235,10 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
         )}
       </div>
 
-      {judgementsQuery.isError && !judgementsQuery.data && (
+      {judgementsState.status === 'error' && (
         <QueryErrorState
           className="py-6"
-          error={judgementsQuery.error}
-          retry={() => void judgementsQuery.refetch()}
-          retrying={judgementsQuery.isFetching}
+          state={judgementsState}
           failure={t('submissionDetail.versionsLoadFailed')}
         />
       )}
