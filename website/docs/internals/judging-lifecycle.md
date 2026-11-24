@@ -150,16 +150,19 @@ plugin yet.
 
 ## A disabled plugin parks the work that needs it
 
-A unit of work needs three plugins: the one that provides its contest type,
-the evaluator of its problem's type and the checker of its problem's checker
-format. It is parked while every plugin that recorded one of those keys
-(`plugin.governs`: `contest_types`, `problem_types`, `checker_formats`) is
-disabled fleet-wide; `providers::runnable` states that in SQL
+A unit of work needs exactly the plugins it uses (`providers::Needs`, built by
+`PluginLifecycle::needs`): the one that provides its contest type, the
+evaluator of its problem's type, the resolver of its language, and the checker
+of its problem's checker format only when the evaluator registered with
+`uses_checker` (an evaluator that does not is recorded in
+`unchecked_problem_types`). It is parked while every plugin that recorded one
+of those keys (`plugin.governs`: `contest_types`, `problem_types`,
+`checker_formats`, `languages`) is disabled fleet-wide; `providers::runnable` states that in SQL
 (`judging::Unit::runnable` over a unit's scan) and
 `PluginLifecycle::closed_by` in Rust. Parked work waits `Queued` and resumes
 once a provider is enabled again. A new submission or code run that would be
 parked is refused: `503 CONTEST_TYPE_DISABLED` for its contest type,
-`503 PLUGIN_DISABLED` naming the evaluator or checker plugin, both with a
+`503 PLUGIN_DISABLED` naming the evaluator, language or checker plugin, both with a
 `Retry-After` of 30 seconds. A system error a plugin writes without a code is recorded as
 `PLUGIN_ERROR`, so none is shown without one:
 
