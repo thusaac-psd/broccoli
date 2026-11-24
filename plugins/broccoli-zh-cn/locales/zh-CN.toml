@@ -157,7 +157,7 @@
 'problem.closedBy.contest_type' = "评测此题的插件 {plugin} 已被禁用，暂时无法提交。"
 'problem.closedBy.problem_type' = "运行此题测试点的评测插件 {plugin} 已被禁用，暂时无法提交。"
 'problem.closedBy.checker_format' = "检查此题输出的检查器插件 {plugin} 已被禁用，暂时无法提交。"
-'problem.closedBy.language' = "该语言的插件 {plugin} 已被禁用，暂时无法提交。"
+'problem.closedBy.language' = "{plugin}（此题所用语言的插件）已被禁用，暂时无法提交。"
 'problem.sampleLoadFailed' = "无法加载此样例。"
 'problem.notAvailableNow' = "当前无法查看此题目。"
 'problem.loadError' = "加载题目失败。"

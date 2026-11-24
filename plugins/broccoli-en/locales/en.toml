@@ -156,7 +156,7 @@
 'problem.closedBy.contest_type' = "Submitting is unavailable while {plugin}, the plugin that judges this problem, is disabled."
 'problem.closedBy.problem_type' = "Submitting is unavailable while {plugin}, the plugin that evaluates this problem, is disabled."
 'problem.closedBy.checker_format' = "Submitting is unavailable while {plugin}, the plugin that checks this problem's output, is disabled."
-'problem.closedBy.language' = "Submitting is unavailable while {plugin}, the plugin for this language, is disabled."
+'problem.closedBy.language' = "Submitting is unavailable while {plugin}, the plugin for this problem's language, is disabled."
 'problem.sampleLoadFailed' = "Could not load this sample."
 'problem.notAvailableNow' = "This problem is not available right now."
 'problem.loadError' = "Failed to load problem."
