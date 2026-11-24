@@ -95,6 +95,7 @@ export function I18nProvider({
     // Keep previous translations while loading new ones to prevent UI flickering
     placeholderData: (prev) => prev,
   });
+  // eslint-disable-next-line query/no-defaulted-query-data -- the bundled catalogs stand in for plugin translations that could not load
   const pluginTranslations = pluginQuery.data ?? EMPTY_TRANSLATIONS;
   const isLoading = pluginQuery.isLoading;
 
@@ -113,6 +114,7 @@ export function I18nProvider({
     enabled: locale !== defaultLocale,
     placeholderData: (prev) => prev,
   });
+  // eslint-disable-next-line query/no-defaulted-query-data -- the bundled catalogs stand in for plugin translations that could not load
   const fallbackPluginTranslations = fallbackQuery.data ?? EMPTY_TRANSLATIONS;
 
   const lookup = useCallback(

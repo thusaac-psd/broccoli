@@ -6,6 +6,7 @@ import {
   Label,
   QueryErrorState,
   QueryLoading,
+  RefreshFailedNotice,
   Sheet,
   SheetContent,
   SheetDescription,
@@ -641,15 +642,22 @@ function SinglePluginContent({
     queryFn: () => fetchCascade(apiClient, scope),
     enabled: open && scope.scope !== 'plugin',
   });
+  // A form shown without what it inherits would read the schema's defaults
+  // as inherited, so it waits for the cascade and says when it failed.
+  const cascade = useQueryState(cascadeQuery);
+  const cascadeEntries =
+    cascade.status === 'data' || cascade.status === 'empty'
+      ? cascade.data
+      : undefined;
   const inheritedByNamespace = useMemo(() => {
     const byNamespace: Record<string, InheritedConfig> = {};
-    for (const entry of cascadeQuery.data ?? []) {
+    for (const entry of cascadeEntries ?? []) {
       if (entry.plugin_id === pluginId) {
         byNamespace[entry.namespace] = entry.inherited;
       }
     }
     return byNamespace;
-  }, [cascadeQuery.data, pluginId]);
+  }, [cascadeEntries, pluginId]);
 
   const rawCallbacks = useMemo(
     () =>
@@ -809,9 +817,20 @@ function SinglePluginContent({
     </div>
   ) : null;
 
+  if (cascade.status === 'error') {
+    return <QueryErrorState state={cascade} failure={t('config.loadFailed')} />;
+  }
+  if (cascade.status === 'loading') return <QueryLoading />;
+  const refreshFailed =
+    (cascade.status === 'data' || cascade.status === 'empty') &&
+    cascade.refreshError != null ? (
+      <RefreshFailedNotice retry={cascade.retry} />
+    ) : null;
+
   if (schemas.length === 1) {
     return (
       <div className="space-y-4">
+        {refreshFailed}
         {enabledToggle}
         <ConfigForm
           schema={schemas[0]}
@@ -828,6 +847,7 @@ function SinglePluginContent({
 
   return (
     <div className="space-y-4">
+      {refreshFailed}
       {enabledToggle}
       <Tabs value={activeNs} onValueChange={setActiveNs}>
         <TabsList>

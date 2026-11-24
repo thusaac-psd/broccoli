@@ -13,6 +13,7 @@ import reactX from 'eslint-plugin-react-x';
 import globals from 'globals';
 
 import a11y from './eslint-rules/a11y.js';
+import query from './eslint-rules/query.js';
 
 export default defineConfig([
   // Base config for all files
@@ -162,6 +163,19 @@ export default defineConfig([
       'a11y/input-label': 'error',
       'a11y/select-label': 'error',
       'a11y/text-token-opacity': 'error',
+    },
+  },
+
+  // A query's data is read with a fallback only where its state is shown.
+  {
+    files: [
+      'packages/web/src/**/*.{ts,tsx}',
+      'packages/web-sdk/src/**/*.{ts,tsx}',
+      'plugins/*/frontend/src/**/*.{ts,tsx}',
+    ],
+    plugins: { query },
+    rules: {
+      'query/no-defaulted-query-data': 'error',
     },
   },
 
