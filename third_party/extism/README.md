@@ -62,12 +62,16 @@ message `timeout` and a memory limit into `oom`.
 
 ## The caller reports a failed call
 
-`raw_call` logs a failed call, an error the guest set or an error from wasmtime,
-at `debug`, not `error`. The caller has the error and knows what it means: a
-host function that marked its call unavailable (a busy host, a database outage,
-a deadline cut) expects it, and any other failure the caller logs itself once.
-At `error`, the published crate logs each such call with the error's `Debug`
-form, which carries the whole wasm backtrace on many lines.
+`raw_call` logs a failed call at `debug`, not `error`, in one line: an error the
+guest set with its message, and an error from wasmtime (a trap, a failed host
+function) with its root cause. The published crate logs each at `error`, the
+wasmtime one in the error's `Debug` form, which carries the whole wasm backtrace
+wasmtime attaches as context: tens of lines for every expected failure (a
+plugin's missing dependency, a statement cut at its deadline). The caller has
+the error and knows what it means: a host function that marked its call
+unavailable (a busy host, a database outage, a deadline cut) expects it, and
+Broccoli's host logs any other failure once, with its reason (`plugin_core`
+"Plugin call failed").
 `a_failed_call_logs_one_line_and_an_unavailable_one_logs_nothing` in
 `packages/plugin-core/src/traits/tests.rs` pins it.
 

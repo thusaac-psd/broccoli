@@ -1,4 +1,5 @@
 use super::*;
+use crate::providers::Provided;
 
 /// The evaluator plugin a batch dispatches to, with what every call into it
 /// needs.
@@ -56,17 +57,23 @@ pub async fn start_evaluate_batch_with(
     problem: &ProblemInputsCache,
 ) -> anyhow::Result<String> {
     let problem_type = input.problem_type.clone();
-    let evaluator = {
-        let registry = deps.evaluator_registry.read().await;
-        registry.get(&problem_type).cloned()
-    };
-    let Some(evaluator) = evaluator else {
-        // Lost since the claim, a fault of this replica's (see
-        // `Dispatch::not_loaded_here`).
-        if let Some(dispatch) = &deps.operation_deps.dispatch {
-            dispatch.not_loaded_here(&format!("the evaluator of problem type {problem_type}"));
+    let evaluator = crate::providers::resolve(
+        &*deps.evaluator_registry.read().await,
+        deps.plugin_lifecycle
+            .provider(Provided::ProblemType, &problem_type),
+        Provided::ProblemType,
+        &problem_type,
+    );
+    let evaluator = match evaluator {
+        Ok(evaluator) => evaluator,
+        Err(unresolved) => {
+            // Handed back or standing, by how the unit was claimed (see
+            // `Dispatch::missing_plugin`).
+            if let Some(dispatch) = &deps.operation_deps.dispatch {
+                dispatch.missing_plugin(&unresolved);
+            }
+            anyhow::bail!("{unresolved}");
         }
-        anyhow::bail!("No evaluator registered for problem type: {problem_type}");
     };
 
     let batch_id = Uuid::new_v4().to_string();

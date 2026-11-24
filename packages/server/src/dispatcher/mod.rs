@@ -74,6 +74,14 @@ impl Dispatcher {
             cancel_rx.clone(),
         )));
 
+        // Background hook events are run again (a hook could not answer, a
+        // dispatch was dropped, a replica died) whatever judging does.
+        handles.push(tokio::spawn(crate::hooks::run_redelivery(
+            deps.state.db.clone(),
+            deps.state.registries.hook_registry.clone(),
+            cancel_rx.clone(),
+        )));
+
         if !lease_steal_enabled && !claim_enabled {
             info!(
                 "Dispatcher submission-judging fibers fully disabled by config (lease/steal \

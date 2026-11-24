@@ -33,7 +33,7 @@ use crate::hooks;
 use crate::models::problem::validate_contest_type;
 use crate::models::shared::{PageWindow, escape_like};
 use crate::models::submission::*;
-use crate::providers::{Needs, Provided};
+use crate::providers::Provided;
 use crate::services::judging;
 use crate::state::AppState;
 use crate::utils::contest::{
@@ -185,7 +185,13 @@ pub async fn create_submission(
         Some(ref ct) => ct.clone(),
         None => problem.default_contest_type.clone(),
     };
-    crate::plugin_lifecycle::accepting_handler(&state, Needs::of(&contest_type, &problem)).await?;
+    crate::plugin_lifecycle::accepting_handler(
+        &state,
+        state
+            .plugin_lifecycle
+            .needs_on(&contest_type, &problem, Some(&payload.language)),
+    )
+    .await?;
 
     let attempt_id = uuid::Uuid::new_v4();
     let hook_event = BeforeSubmissionEvent {
@@ -549,6 +555,9 @@ async fn build_visible_judgement(
     let show_test_details = visibility.has_view_all || problem_model.show_test_details;
 
     let config_issues = visibility.has_view_all.then_some(judgement.config_issues);
+    let judged_on_earlier_inputs = visibility
+        .has_view_all
+        .then_some(judgement.judged_on_earlier_inputs);
     let judgement = response::as_its_submission_shows(judgement, sub);
     let mut response = build_judgement_response(
         &state.db,
@@ -561,6 +570,7 @@ async fn build_visible_judgement(
     )
     .await?;
     response.config_issues = config_issues;
+    response.judged_on_earlier_inputs = judged_on_earlier_inputs;
     if visibility.has_view_all && !response.is_current {
         let row = state
             .db
@@ -778,9 +788,13 @@ pub async fn create_contest_submission(
     let contest_type = required_contest_type(&contest_model)?;
     // The handler owns admission, so it is pinned here, before any hook
     // runs, to authorize hook effects through admission commit.
-    let handler =
-        crate::plugin_lifecycle::accepting_handler(&state, Needs::of(&contest_type, &problem))
-            .await?;
+    let handler = crate::plugin_lifecycle::accepting_handler(
+        &state,
+        state
+            .plugin_lifecycle
+            .needs_on(&contest_type, &problem, Some(&payload.language)),
+    )
+    .await?;
     let admission_owner = handler
         .submission_admission
         .then_some(handler.plugin_id.as_str());

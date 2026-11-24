@@ -761,9 +761,12 @@ impl TestApp {
             std::time::Duration::from_secs(30),
             &server::database::app_session(&app_config.database),
         );
+        let plugin_lifecycle: std::sync::Arc<server::plugin_lifecycle::PluginLifecycle> =
+            Default::default();
         let server_plugins = ServerManager::new(
             app_config.plugin.clone(),
             server::host_funcs::context::HostFunctionSystemDeps {
+                plugin_lifecycle: plugin_lifecycle.clone(),
                 // Plugin SQL runs as each plugin's own role, as in production;
                 // the host function pool shares the app pool.
                 plugin_sql: plugin_sql.clone(),
@@ -800,6 +803,7 @@ impl TestApp {
                     functions: server::registry::EvaluatorFunctions::Direct {
                         function: "noop".into(),
                     },
+                    uses_checker: true,
                 },
             );
             {
@@ -896,7 +900,7 @@ impl TestApp {
             prometheus_registry: test_prom_registry.clone(),
             dispatcher_permits: server::dispatcher::permits::DispatcherSemaphore::default(),
             worker_slots: Default::default(),
-            plugin_lifecycle: Default::default(),
+            plugin_lifecycle,
             plugin_sql,
             last_workers: Default::default(),
         };

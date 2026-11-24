@@ -529,31 +529,37 @@ fn register_registry_functions(hr: &mut HostFunctionRegistry, deps: &HostFunctio
     });
 
     let lang_reg = system.language_resolver_registry.clone();
+    let lifecycle = system.plugin_lifecycle.clone();
     let pm = deps.plugin_manager.clone();
     hr.register("language:resolve", move |plugin_id| {
         language::create_resolve_language_function(
             plugin_id.to_string(),
             lang_reg.clone(),
+            lifecycle.clone(),
             pm.clone(),
         )
     });
 
     let checker_stage_reg = system.checker_stage_registry.clone();
+    let lifecycle = system.plugin_lifecycle.clone();
     let pm = deps.plugin_manager.clone();
     hr.register("checker:resolve", move |plugin_id| {
         checker::create_resolve_checker_function(
             plugin_id.to_string(),
             checker_stage_reg.clone(),
+            lifecycle.clone(),
             pm.clone(),
         )
     });
 
     let checker_stage_reg = system.checker_stage_registry.clone();
+    let lifecycle = system.plugin_lifecycle.clone();
     let pm = deps.plugin_manager.clone();
     hr.register("checker:interpret", move |plugin_id| {
         checker::create_interpret_checker_function(
             plugin_id.to_string(),
             checker_stage_reg.clone(),
+            lifecycle.clone(),
             pm.clone(),
         )
     });

@@ -2108,7 +2108,7 @@ export interface paths {
     put?: never;
     /**
      * Apply a finalized submission judgement
-     * @description Makes a finalized judgement the current version and copies its cached result fields onto the submission. A judgement judged against test data the problem has changed since is applied only with `force=true`. Requires `submission:rejudge` permission.
+     * @description Makes a finalized judgement the current version and copies its cached result fields onto the submission. A judgement judged against inputs the problem has changed since (test data, limits, checker or other files) is applied only with `force=true`, which marks it `judged_on_earlier_inputs`. Requires `submission:rejudge` permission.
      */
     post: operations['applySubmissionJudgement'];
     delete?: never;
@@ -4317,7 +4317,7 @@ export interface components {
      *     provide to run.
      * @enum {string}
      */
-    Provided: 'contest_type' | 'problem_type' | 'checker_format';
+    Provided: 'contest_type' | 'problem_type' | 'checker_format' | 'language';
     /** @description What the fleet currently publishes for a plugin id. */
     PublishedPluginResponse: {
       /**
@@ -4619,6 +4619,13 @@ export interface components {
        * @example 1
        */
       judge_epoch: number;
+      /**
+       * @description For viewers who see every submission: whether this judgement was
+       *     applied, forced, after its problem's inputs changed (test data,
+       *     limits, checker or other files), so its verdicts show beside inputs
+       *     it was not judged with. `null` for everyone else.
+       */
+      judged_on_earlier_inputs?: boolean | null;
       /**
        * Format: int32
        * @example 1024
@@ -13649,9 +13656,10 @@ export interface operations {
     parameters: {
       query?: {
         /**
-         * @description Apply it even if it was judged against test data the problem has
-         *     changed since, which is otherwise refused with
-         *     `JUDGED_ON_OTHER_TEST_DATA`.
+         * @description Apply it even if it was judged against inputs the problem has changed
+         *     since (test data, limits, checker or other files), which is otherwise
+         *     refused with `JUDGED_ON_OTHER_INPUTS`; the judgement is then marked
+         *     `judged_on_earlier_inputs`.
          */
         force?: boolean;
       };
@@ -13711,7 +13719,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The judgement was judged against test data the problem has changed since, which `force=true` applies anyway (JUDGED_ON_OTHER_TEST_DATA) */
+      /** @description The judgement was judged against inputs the problem has changed since (its test data, limits, checker or other files), which `force=true` applies anyway, marking it `judged_on_earlier_inputs` (JUDGED_ON_OTHER_INPUTS) */
       409: {
         headers: {
           [name: string]: unknown;

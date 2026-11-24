@@ -13,47 +13,122 @@ use plugin_core::traits::PluginManager;
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
 use tokio::sync::RwLock;
 
-/// One dispatch's hold on a background event's id, fleet-wide: a row of
-/// `hook_event`, inserted before the hooks run, so a duplicate on any replica,
-/// meanwhile or later (after a restart too), is skipped. The row is deleted
-/// again if the dispatch is dropped before it completes, so a cancelled
-/// dispatch does not lose the event; a process that dies mid-dispatch keeps
-/// it, so the event fires at most once.
+/// How long one dispatch holds a background event before the re-scan may
+/// run it again elsewhere: longer than a dispatch's hooks take, so a live
+/// dispatch is not repeated, and short enough that an event whose replica
+/// died runs again soon.
+const EVENT_LEASE_SECS: i64 = 600;
+
+/// How long a completed event's row is kept: a duplicate dispatch of it
+/// within this is skipped.
+const COMPLETED_KEPT_SECS: i64 = 7 * 24 * 3600;
+
+/// How many events one re-scan claims.
+const REDELIVERY_BATCH: i64 = 16;
+
+/// How often a replica re-scans for events to run again.
+pub const REDELIVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How many events whose claim could not be recorded a replica keeps for
+/// its next re-scan; past this the oldest are dropped, loudly.
+const UNRECORDED_MAX: usize = 10_000;
+
+/// A background event this replica could not record (the database refused
+/// the claim), kept for its next re-scan to record and run.
+struct Unrecorded {
+    event_id: String,
+    topic: String,
+    payload: serde_json::Value,
+    enabled_plugins: Option<ResourceEnablements>,
+}
+
+/// One dispatch's lease on a background event, fleet-wide: its row of
+/// `hook_event`, which records the event (topic, payload, enablements)
+/// before its hooks run. Delivery is at least once: a duplicate dispatch of
+/// the event, on any replica and after a restart too, is skipped while the
+/// row exists; a dispatch that completes marks it done; one whose hooks
+/// could not answer, or that is dropped, gives the lease back; and the
+/// re-scan ([`redeliver_once`]) runs every event that is not done once its
+/// lease is free or has lapsed. Plugins take a hook event as idempotent.
 struct EventClaim {
     db: common::db::DatabaseConnection,
     id: String,
-    completed: bool,
+    /// The `attempts` the lease was taken at, so a lapsed lease another
+    /// replica took since is not given back.
+    attempt: i32,
+    settled: bool,
 }
 
 impl EventClaim {
-    /// The claim on `id`, or `None` when the event was dispatched already or
-    /// is being dispatched now, on this replica or another.
+    /// Records the event and takes its lease, or `None` when the event is
+    /// recorded already (dispatched, being dispatched or waiting for the
+    /// re-scan), on this replica or another.
     async fn take(
         db: &common::db::DatabaseConnection,
-        id: String,
+        id: &str,
+        topic: &str,
+        payload: &serde_json::Value,
+        enabled_plugins: Option<&ResourceEnablements>,
     ) -> Result<Option<Self>, sea_orm::DbErr> {
+        let enabled = enabled_plugins
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
         let inserted = db
             .execute_raw(sea_orm::Statement::from_sql_and_values(
                 sea_orm::DbBackend::Postgres,
-                "INSERT INTO hook_event (event_id) VALUES ($1) ON CONFLICT DO NOTHING",
-                [id.clone().into()],
+                "INSERT INTO hook_event (event_id, topic, payload, enabled_plugins, claimed_at) \
+                 VALUES ($1, $2, $3, $4, now()) ON CONFLICT DO NOTHING",
+                [
+                    id.into(),
+                    topic.into(),
+                    payload.clone().into(),
+                    enabled.into(),
+                ],
             ))
             .await?
             .rows_affected();
         Ok((inserted == 1).then(|| Self {
             db: db.clone(),
-            id,
-            completed: false,
+            id: id.to_string(),
+            attempt: 1,
+            settled: false,
         }))
+    }
+
+    /// Ends the lease: the event is done, or, when a hook could not answer
+    /// (`unanswered`), given back for the re-scan to run again.
+    async fn settle(mut self, unanswered: bool) {
+        self.settled = true;
+        let statement = if unanswered {
+            sea_orm::Statement::from_sql_and_values(
+                sea_orm::DbBackend::Postgres,
+                "UPDATE hook_event SET claimed_at = NULL \
+                  WHERE event_id = $1 AND attempts = $2 AND completed_at IS NULL",
+                [self.id.clone().into(), self.attempt.into()],
+            )
+        } else {
+            sea_orm::Statement::from_sql_and_values(
+                sea_orm::DbBackend::Postgres,
+                "UPDATE hook_event SET completed_at = COALESCE(completed_at, now()) \
+                  WHERE event_id = $1",
+                [self.id.clone().into()],
+            )
+        };
+        let settled = self.db.execute_raw(statement).await;
+        if let Err(e) = settled {
+            tracing::warn!(event_id = %self.id, error = %e, "Ending a hook event lease failed; the event runs again once the lease lapses");
+        }
     }
 }
 
 impl Drop for EventClaim {
-    /// Gives the claim back unless the dispatch completed. On the
-    /// multi-threaded runtime the server runs on, the row is deleted before
-    /// the drop returns; elsewhere a task deletes it.
+    /// Gives the lease of a dispatch dropped before it ended back, in a task
+    /// of its own: a drop never waits on the database, so a runtime shutting
+    /// down with a dispatch in flight is not held up. A give-back that never
+    /// runs leaves the lease to lapse.
     fn drop(&mut self) {
-        if self.completed {
+        if self.settled {
             return;
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
@@ -61,24 +136,20 @@ impl Drop for EventClaim {
         };
         let db = self.db.clone();
         let id = std::mem::take(&mut self.id);
-        let give_back = async move {
-            let deleted = db
+        let attempt = self.attempt;
+        drop(runtime.spawn(async move {
+            let released = db
                 .execute_raw(sea_orm::Statement::from_sql_and_values(
                     sea_orm::DbBackend::Postgres,
-                    "DELETE FROM hook_event WHERE event_id = $1",
-                    [id.clone().into()],
+                    "UPDATE hook_event SET claimed_at = NULL \
+                      WHERE event_id = $1 AND attempts = $2 AND completed_at IS NULL",
+                    [id.clone().into(), attempt.into()],
                 ))
                 .await;
-            if let Err(e) = deleted {
-                tracing::warn!(event_id = %id, error = %e, "Giving back a hook event claim failed");
+            if let Err(e) = released {
+                tracing::warn!(event_id = %id, error = %e, "Giving back a hook event lease failed; it lapses instead");
             }
-        };
-        match runtime.runtime_flavor() {
-            tokio::runtime::RuntimeFlavor::MultiThread => {
-                tokio::task::block_in_place(|| runtime.block_on(give_back))
-            }
-            _ => drop(runtime.spawn(give_back)),
-        }
+        }));
     }
 }
 
@@ -121,6 +192,8 @@ struct HookEntry {
 
 pub struct ServerHookRegistry {
     hooks: HashMap<String, Vec<HookEntry>>,
+    /// Background events this replica could not record yet, oldest first.
+    unrecorded: std::sync::Mutex<std::collections::VecDeque<Unrecorded>>,
 }
 
 impl Default for ServerHookRegistry {
@@ -133,7 +206,29 @@ impl ServerHookRegistry {
     pub fn new() -> Self {
         Self {
             hooks: HashMap::new(),
+            unrecorded: Default::default(),
         }
+    }
+
+    /// Keeps `event` for the next re-scan; past [`UNRECORDED_MAX`] the
+    /// oldest kept event is dropped.
+    fn keep_unrecorded(&self, event: Unrecorded) {
+        let Ok(mut kept) = self.unrecorded.lock() else {
+            return;
+        };
+        if kept.len() >= UNRECORDED_MAX
+            && let Some(dropped) = kept.pop_front()
+        {
+            tracing::error!(event_id = %dropped.event_id, "Dropping a hook event that could not be recorded: too many are waiting");
+        }
+        kept.push_back(event);
+    }
+
+    fn take_unrecorded(&self) -> Vec<Unrecorded> {
+        self.unrecorded
+            .lock()
+            .map(|mut kept| kept.drain(..).collect())
+            .unwrap_or_default()
     }
 
     pub fn register<M: PluginManager + Send + Sync + ?Sized + 'static>(
@@ -437,11 +532,14 @@ pub async fn dispatch_hooks(
     dispatch_hooks_inner(
         topic,
         event_payload,
-        enabled_plugins,
-        hook_registry,
+        DispatchScope {
+            enabled_plugins,
+            hook_registry,
+            admission_owner: None,
+            class,
+        },
         0,
-        None,
-        class,
+        &mut false,
     )
     .await
 }
@@ -460,11 +558,14 @@ pub(crate) async fn dispatch_submission_hooks(
     dispatch_hooks_inner(
         "before_submission",
         payload,
-        enabled_plugins,
-        hook_registry,
+        DispatchScope {
+            enabled_plugins,
+            hook_registry,
+            admission_owner,
+            class: CallClass::Interactive,
+        },
         0,
-        admission_owner,
-        CallClass::Interactive,
+        &mut false,
     )
     .await
 }
@@ -490,13 +591,14 @@ pub fn dispatch_hooks_background(
     });
 }
 
-/// Dispatch an event whose response no one waits for, once per `event_id`
-/// fleet-wide (an event dispatched, or being dispatched, under the same id on
-/// any replica is skipped; see `EventClaim`), as [`CallClass::Background`]
-/// calls. Completes when every hook has run, so a caller that awaits it can
-/// count the hooks as part of its own work. Dropped before it completes, it
-/// gives the event back to be dispatched again. When the claim cannot be
-/// taken (the database did not answer), the event is not dispatched.
+/// Dispatch an event whose response no one waits for, as
+/// [`CallClass::Background`] calls, at least once fleet-wide per `event_id`
+/// (see `EventClaim`): an event recorded already, on any replica, is
+/// skipped. Completes when every hook has run, so a caller that awaits it
+/// can count the hooks as part of its own work. An event whose claim cannot
+/// be recorded now is kept for this replica's next re-scan, and one whose
+/// hooks could not answer, or whose dispatch is dropped, is run again by a
+/// re-scan ([`redeliver_once`]).
 pub async fn dispatch_hooks_once(
     db: &common::db::DatabaseConnection,
     topic: &str,
@@ -505,27 +607,57 @@ pub async fn dispatch_hooks_once(
     hook_registry: &SharedHookRegistry,
     event_id: Option<String>,
 ) {
-    let claim = match event_id {
-        Some(id) => match EventClaim::take(db, id.clone()).await {
-            Ok(Some(claim)) => Some(claim),
-            Ok(None) => {
-                tracing::debug!(event_id = %id, topic, "Skipping duplicate background hook event");
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(event_id = %id, topic, error = %e, "Claiming a hook event failed; not dispatching it");
-                return;
-            }
-        },
-        None => None,
+    let Some(id) = event_id else {
+        deliver(None, topic, event_payload, enabled_plugins, hook_registry).await;
+        return;
     };
+    match EventClaim::take(db, &id, topic, &event_payload, enabled_plugins).await {
+        Ok(Some(claim)) => {
+            deliver(
+                Some(claim),
+                topic,
+                event_payload,
+                enabled_plugins,
+                hook_registry,
+            )
+            .await
+        }
+        Ok(None) => {
+            tracing::debug!(event_id = %id, topic, "Skipping a background hook event recorded already");
+        }
+        Err(e) => {
+            tracing::warn!(event_id = %id, topic, error = %e, "Recording a hook event failed; the next re-scan records and runs it");
+            hook_registry.read().await.keep_unrecorded(Unrecorded {
+                event_id: id,
+                topic: topic.to_string(),
+                payload: event_payload,
+                enabled_plugins: enabled_plugins.cloned(),
+            });
+        }
+    }
+}
 
-    match dispatch_hooks(
+/// Runs an event's hooks under `claim`, then ends the claim: done, or given
+/// back when a hook could not answer.
+async fn deliver(
+    claim: Option<EventClaim>,
+    topic: &str,
+    event_payload: serde_json::Value,
+    enabled_plugins: Option<&ResourceEnablements>,
+    hook_registry: &SharedHookRegistry,
+) {
+    let mut unanswered = false;
+    match dispatch_hooks_inner(
         topic,
         event_payload,
-        enabled_plugins,
-        hook_registry,
-        CallClass::Background,
+        DispatchScope {
+            enabled_plugins,
+            hook_registry,
+            admission_owner: None,
+            class: CallClass::Background,
+        },
+        0,
+        &mut unanswered,
     )
     .await
     {
@@ -537,12 +669,118 @@ pub async fn dispatch_hooks_once(
                 "Background hook returned Reject (no effect — response already sent)",
             );
         }
+        Err(AppError::PluginUnavailable) => unanswered = true,
         Err(e) => {
             tracing::warn!(topic, "Background hook dispatch failed: {e:?}");
         }
     }
-    if let Some(mut claim) = claim {
-        claim.completed = true;
+    if let Some(claim) = claim {
+        claim.settle(unanswered).await;
+    }
+}
+
+/// One re-scan of the background events: records and runs the events this
+/// replica could not record, deletes completed events past the horizon, and
+/// runs again each event not done whose lease is free or has lapsed (its
+/// hooks could not answer, its dispatch was dropped, its replica died).
+pub async fn redeliver_once(
+    db: &common::db::DatabaseConnection,
+    hook_registry: &SharedHookRegistry,
+) -> Result<(), sea_orm::DbErr> {
+    let unrecorded = hook_registry.read().await.take_unrecorded();
+    for event in unrecorded {
+        dispatch_hooks_once(
+            db,
+            &event.topic,
+            event.payload,
+            event.enabled_plugins.as_ref(),
+            hook_registry,
+            Some(event.event_id),
+        )
+        .await;
+    }
+
+    db.execute_raw(sea_orm::Statement::from_sql_and_values(
+        sea_orm::DbBackend::Postgres,
+        "DELETE FROM hook_event WHERE completed_at < now() - make_interval(secs => $1)",
+        [(COMPLETED_KEPT_SECS as f64).into()],
+    ))
+    .await?;
+
+    let due = db
+        .query_all_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Postgres,
+            "UPDATE hook_event h SET claimed_at = now(), attempts = h.attempts + 1 \
+               FROM (SELECT event_id FROM hook_event \
+                      WHERE completed_at IS NULL \
+                        AND (claimed_at IS NULL \
+                             OR claimed_at < now() - make_interval(secs => $1)) \
+                      ORDER BY created_at LIMIT $2 \
+                      FOR UPDATE SKIP LOCKED) due \
+              WHERE h.event_id = due.event_id \
+             RETURNING h.event_id, h.topic, h.payload, h.enabled_plugins, h.attempts",
+            [(EVENT_LEASE_SECS as f64).into(), REDELIVERY_BATCH.into()],
+        ))
+        .await?;
+    for row in due {
+        let id: String = row.try_get("", "event_id")?;
+        let topic: String = row.try_get("", "topic")?;
+        let payload: serde_json::Value = row.try_get("", "payload")?;
+        let enabled: Option<serde_json::Value> = row.try_get("", "enabled_plugins")?;
+        let attempt: i32 = row.try_get("", "attempts")?;
+        let enabled_plugins = match enabled.map(serde_json::from_value).transpose() {
+            Ok(enabled) => enabled,
+            Err(e) => {
+                tracing::error!(event_id = %id, error = %e, "A recorded hook event's enablements do not parse; running it for global hooks only");
+                None
+            }
+        };
+        let claim = EventClaim {
+            db: db.clone(),
+            id,
+            attempt,
+            settled: false,
+        };
+        deliver(
+            Some(claim),
+            &topic,
+            payload,
+            enabled_plugins.as_ref(),
+            hook_registry,
+        )
+        .await;
+    }
+    Ok(())
+}
+
+/// Re-scans the background events every [`REDELIVERY_INTERVAL`] until
+/// `cancel`; a re-scan in flight when it fires is dropped, and the leases it
+/// held are given back.
+pub async fn run_redelivery(
+    db: common::db::DatabaseConnection,
+    hook_registry: SharedHookRegistry,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut tick = tokio::time::interval(REDELIVERY_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                tokio::select! {
+                    scanned = redeliver_once(&db, &hook_registry) => {
+                        if let Err(e) = scanned {
+                            tracing::warn!(error = %e, "Hook event re-scan failed");
+                        }
+                    }
+                    _ = cancel.changed() => return,
+                }
+            }
+            changed = cancel.changed() => {
+                if changed.is_err() || *cancel.borrow() {
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -564,15 +802,30 @@ pub fn dispatch_hooks_background_typed<E: HookEvent + Send + 'static>(
     dispatch_hooks_background(db, topic, payload, enabled_plugins, hook_registry, event_id);
 }
 
+/// What every hook of one dispatch, chained events included, runs with.
+#[derive(Clone, Copy)]
+struct DispatchScope<'a> {
+    enabled_plugins: Option<&'a ResourceEnablements>,
+    hook_registry: &'a SharedHookRegistry,
+    admission_owner: Option<&'a str>,
+    class: CallClass,
+}
+
+/// Runs `topic`'s hooks; `unanswered` is set when a hook could not answer
+/// (a notify hook's too, though the dispatch goes on without it).
 async fn dispatch_hooks_inner(
     topic: &str,
     mut event_payload: serde_json::Value,
-    enabled_plugins: Option<&ResourceEnablements>,
-    hook_registry: &SharedHookRegistry,
+    scope: DispatchScope<'_>,
     depth: u8,
-    admission_owner: Option<&str>,
-    class: CallClass,
+    unanswered: &mut bool,
 ) -> Result<HookOutcome, AppError> {
+    let DispatchScope {
+        enabled_plugins,
+        hook_registry,
+        admission_owner,
+        class,
+    } = scope;
     if depth >= MAX_CHAIN_DEPTH {
         tracing::warn!(
             topic,
@@ -739,11 +992,9 @@ async fn dispatch_hooks_inner(
                             let result = Box::pin(dispatch_hooks_inner(
                                 &chained.topic,
                                 chained.payload,
-                                enabled_plugins,
-                                hook_registry,
+                                scope,
                                 depth + 1,
-                                admission_owner,
-                                class,
+                                unanswered,
                             ))
                             .await?;
                             if let HookOutcome::Rejected(_) = result {
@@ -770,6 +1021,7 @@ async fn dispatch_hooks_inner(
                     }
                 },
                 Err(e) => {
+                    *unanswered |= is_unavailable(&e);
                     tracing::warn!(topic, "Notify hook error (ignored): {e}");
                 }
             },
@@ -1018,8 +1270,234 @@ mod tests {
 
         running.abort();
         assert!(running.await.unwrap_err().is_cancelled());
+        wait_until_released(&db, "after_judging:1:1").await;
         dispatch_once(&db, &second).await;
+        assert_eq!(other.calls(), 0, "a duplicate dispatch still skips it");
+        redeliver_once(&db, &second).await.unwrap();
         assert_eq!(other.calls(), 1, "the dropped dispatch gave it back");
+    }
+
+    /// Returns once the claim on `event_id` is released (its lease given
+    /// back, not completed). Polls the row, the state the re-scan reads.
+    async fn wait_until_released(db: &common::db::DatabaseConnection, event_id: &str) {
+        loop {
+            let released = db
+                .query_one_raw(sea_orm::Statement::from_sql_and_values(
+                    sea_orm::DbBackend::Postgres,
+                    "SELECT (claimed_at IS NULL AND completed_at IS NULL) AS released \
+                       FROM hook_event WHERE event_id = $1",
+                    [event_id.into()],
+                ))
+                .await
+                .unwrap()
+                .is_some_and(|row| row.try_get::<bool>("", "released").unwrap());
+            if released {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn execute(db: &common::db::DatabaseConnection, sql: &str) {
+        db.execute_raw(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            sql.to_string(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    async fn rows(db: &common::db::DatabaseConnection) -> i64 {
+        db.query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            "SELECT COUNT(*)::bigint AS n FROM hook_event",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "n")
+        .unwrap()
+    }
+
+    /// An event whose claim could not be recorded (the database refused the
+    /// insert) is kept by the replica and recorded and dispatched by its next
+    /// re-scan; once it ran, no re-scan runs it again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_event_whose_claim_failed_is_redelivered() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let hook = Arc::new(MockHook::new(
+            "observer",
+            "after_judging",
+            GenericHookAction::Pass,
+        ));
+        let registry = replica_with(hook.clone()).await;
+        execute(&db, "ALTER TABLE hook_event RENAME TO hook_event_away").await;
+        dispatch_once(&db, &registry).await;
+        assert_eq!(hook.calls(), 0, "not dispatched without a claim");
+        execute(&db, "ALTER TABLE hook_event_away RENAME TO hook_event").await;
+
+        redeliver_once(&db, &registry).await.unwrap();
+        assert_eq!(hook.calls(), 1, "the re-scan recorded and dispatched it");
+        redeliver_once(&db, &registry).await.unwrap();
+        assert_eq!(hook.calls(), 1, "and never again");
+    }
+
+    /// Answers unavailable on its first call, then passes.
+    struct FlakyHook {
+        topics: Vec<String>,
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl GenericHook for FlakyHook {
+        type Context = CallOptions;
+
+        fn id(&self) -> &str {
+            "flaky"
+        }
+
+        fn topics(&self) -> &[String] {
+            &self.topics
+        }
+
+        async fn on_event(
+            &self,
+            _ctx: CallOptions,
+            _event: &GenericEvent,
+        ) -> anyhow::Result<GenericHookAction> {
+            if self.call_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(PluginError::Unavailable {
+                    plugin_id: "flaky".into(),
+                    func_name: "on_event".into(),
+                }
+                .into());
+            }
+            Ok(HookAction::Pass)
+        }
+    }
+
+    /// An event one of whose hooks could not answer (the plugin was busy,
+    /// its SQL met an outage) is given back and run again by the next
+    /// re-scan, notify hooks included; once every hook answered it is done.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_event_a_hook_could_not_answer_is_redelivered() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let flaky = Arc::new(FlakyHook {
+            topics: vec!["after_judging".into()],
+            call_count: AtomicUsize::new(0),
+        });
+        let registry = replica_with(flaky.clone()).await;
+        dispatch_once(&db, &registry).await;
+        assert_eq!(flaky.call_count.load(Ordering::SeqCst), 1);
+
+        redeliver_once(&db, &registry).await.unwrap();
+        assert_eq!(flaky.call_count.load(Ordering::SeqCst), 2, "run again");
+        redeliver_once(&db, &registry).await.unwrap();
+        assert_eq!(flaky.call_count.load(Ordering::SeqCst), 2, "and then done");
+    }
+
+    /// A completed event never fires again, even once its claim is old; an
+    /// event whose dispatch never finished (its replica died) is run again
+    /// once its lease has lapsed, from what the row recorded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_an_unfinished_event_is_redelivered_after_its_lease() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let hook = Arc::new(MockHook::new(
+            "observer",
+            "after_judging",
+            GenericHookAction::Pass,
+        ));
+        let registry = replica_with(hook.clone()).await;
+        dispatch_once(&db, &registry).await;
+        execute(
+            &db,
+            "INSERT INTO hook_event (event_id, topic, payload) \
+             VALUES ('after_judging:2:1', 'after_judging', '{}')",
+        )
+        .await;
+        execute(
+            &db,
+            "UPDATE hook_event SET claimed_at = claimed_at - interval '1 day'",
+        )
+        .await;
+        assert_eq!(hook.calls(), 1);
+
+        redeliver_once(&db, &registry).await.unwrap();
+        assert_eq!(hook.calls(), 2, "only the unfinished event ran again");
+        redeliver_once(&db, &registry).await.unwrap();
+        assert_eq!(hook.calls(), 2);
+    }
+
+    /// A completed event's row is deleted once it is older than the purge
+    /// horizon; an unfinished one is kept, however old.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completed_events_are_purged_past_the_horizon() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let registry = new_shared_registry();
+        dispatch_once(&db, &registry).await;
+        execute(
+            &db,
+            "INSERT INTO hook_event (event_id, topic, payload, claimed_at) \
+             VALUES ('after_judging:2:1', 'after_judging', '{}', now())",
+        )
+        .await;
+        redeliver_once(&db, &registry).await.unwrap();
+        assert_eq!(rows(&db).await, 2, "a fresh completed row is kept");
+
+        execute(
+            &db,
+            "UPDATE hook_event SET created_at = created_at - interval '30 days', \
+                    claimed_at = claimed_at - interval '30 days', \
+                    completed_at = completed_at - interval '30 days'",
+        )
+        .await;
+        // The unfinished row would be redelivered; keep it claimed so the
+        // re-scan leaves it alone and only the purge acts.
+        execute(
+            &db,
+            "UPDATE hook_event SET claimed_at = now() WHERE completed_at IS NULL",
+        )
+        .await;
+        redeliver_once(&db, &registry).await.unwrap();
+        assert_eq!(rows(&db).await, 1, "the old completed row is purged");
+    }
+
+    /// A runtime shutting down with a dispatch in flight exits: dropping the
+    /// dispatch gives its claim back without blocking on the database.
+    #[test]
+    fn a_dispatch_in_flight_does_not_hold_up_shutdown() {
+        let outer = tokio::runtime::Runtime::new().unwrap();
+        let (pg, _db, url) = outer.block_on(crate::test_support::postgres_with_url());
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let stalling = Arc::new(StallingHook {
+            id: "observer".into(),
+            topics: vec!["after_judging".into()],
+            call_count: AtomicUsize::new(0),
+            started: tokio::sync::Notify::new(),
+        });
+        runtime.block_on(async {
+            let db = crate::database::init_db(&url).await.unwrap();
+            let registry = replica_with(stalling.clone()).await;
+            tokio::spawn(async move { dispatch_once(&db, &registry).await });
+            stalling.started.notified().await;
+        });
+
+        let (done, exited) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(runtime);
+            let _ = done.send(());
+        });
+        // A bound on a hang, not a wait for state: the drop either returns
+        // or never does.
+        exited
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .expect("the runtime shut down with a dispatch in flight");
+        outer.block_on(async move { drop(pg) });
     }
 
     #[tokio::test]

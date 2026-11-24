@@ -11,7 +11,7 @@ use super::dispatch::DispatchedUnit;
 use super::fault::{DispatchFailure, SystemErrorClass};
 use crate::dlq::{DlqService, DlqSubject};
 use crate::entity::{code_run, submission, submission_judgement};
-use crate::providers::{LocalPlaceholders, Provided, Provides};
+use crate::providers::{Loaded, Provided};
 
 /// The kind of row the dispatcher judges.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,60 +52,48 @@ impl Unit {
     }
 
     /// The keys the unit needs a provider of (`providers::Needs`), each as
-    /// SQL over a [`Unit::scan_from`] scan: its contest type, and its
-    /// problem's type and checker format.
-    fn needs(self) -> [(Provided, &'static str); 3] {
-        match self {
-            Unit::Judgement => [
-                (Provided::ContestType, "s.contest_type"),
-                (
-                    Provided::ProblemType,
-                    "(SELECT pt.problem_type FROM problem pt WHERE pt.id = s.problem_id)",
-                ),
-                (
-                    Provided::CheckerFormat,
-                    "(SELECT pt.checker_format FROM problem pt WHERE pt.id = s.problem_id)",
-                ),
-            ],
-            Unit::CodeRun => [
-                (Provided::ContestType, "u.contest_type"),
-                (
-                    Provided::ProblemType,
-                    "(SELECT pt.problem_type FROM problem pt WHERE pt.id = u.problem_id)",
-                ),
-                (
-                    Provided::CheckerFormat,
-                    "(SELECT pt.checker_format FROM problem pt WHERE pt.id = u.problem_id)",
-                ),
-            ],
-        }
+    /// SQL over a [`Unit::scan_from`] scan ([`crate::providers::sql_needs`]):
+    /// its contest type, its problem's type, its problem's checker format
+    /// when the evaluator uses a checker, and its language.
+    fn needs(self) -> Vec<(Provided, String)> {
+        let row = match self {
+            Unit::Judgement => "s",
+            Unit::CodeRun => "u",
+        };
+        crate::providers::sql_needs(
+            &format!("{row}.contest_type"),
+            &format!("(SELECT pt.problem_type FROM problem pt WHERE pt.id = {row}.problem_id)"),
+            &format!("(SELECT pt.checker_format FROM problem pt WHERE pt.id = {row}.problem_id)"),
+            &format!("{row}.language"),
+        )
     }
 
     /// SQL over a [`Unit::scan_from`] scan: the unit may run now, every
     /// key it needs having a provider enabled fleet-wide
     /// ([`crate::providers::runnable`]). A unit that may not is parked.
     pub(crate) fn runnable(self) -> String {
-        crate::providers::runnable(self.needs())
+        crate::providers::runnable(&self.needs())
     }
 
     /// SQL over a [`Unit::scan_from`] scan: this replica may take the unit,
-    /// having every key it needs loaded, or no live replica having one
-    /// ([`crate::providers::runs_here`]); `local` binds what this replica
-    /// has loaded.
-    fn runs_here(self, local: &LocalPlaceholders) -> String {
-        crate::providers::runs_here(self.needs(), local)
+    /// having every key it needs loaded on its fleet-wide provider, or no
+    /// live replica having one
+    /// ([`crate::providers::runs_here`]); `local` is the placeholder of
+    /// what this replica has loaded.
+    fn runs_here(self, local: &str) -> String {
+        crate::providers::runs_here(&self.needs(), local)
     }
 
     /// `SET` items, each led by `, `, that claiming a row of this unit adds to
     /// its lease columns: a judgement records whether its problem's stored
-    /// configs had issues (`problem.config_issues`) and the version of the
-    /// test data it is judged against (`problem.test_data_version`) when it
-    /// was dispatched.
+    /// configs had issues (`problem.config_issues`) when it was dispatched.
+    /// The inputs version is stamped where the dispatch reads the inputs
+    /// (`judging::stamp_inputs_version`).
     fn claim_sets(self) -> &'static str {
         match self {
             Unit::Judgement => {
-                ", (config_issues, test_data_version) = \
-                   (SELECT p.config_issues, p.test_data_version FROM submission s \
+                ", config_issues = \
+                   (SELECT p.config_issues FROM submission s \
                     JOIN problem p ON p.id = s.problem_id WHERE s.id = t.submission_id)"
             }
             Unit::CodeRun => "",
@@ -371,11 +359,17 @@ pub(crate) trait ClaimedUnit {
     fn dispatched(&self) -> DispatchedUnit;
     /// The contest type it is judged under.
     fn contest_type(&self) -> &str;
+    /// The language it is in.
+    fn language(&self) -> &str;
 }
 
 impl ClaimedUnit for ClaimedJudgement {
     fn contest_type(&self) -> &str {
         &self.submission.contest_type
+    }
+
+    fn language(&self) -> &str {
+        &self.submission.language
     }
 
     fn dispatched(&self) -> DispatchedUnit {
@@ -390,6 +384,10 @@ impl ClaimedUnit for ClaimedJudgement {
 impl ClaimedUnit for code_run::Model {
     fn contest_type(&self) -> &str {
         &self.contest_type
+    }
+
+    fn language(&self) -> &str {
+        &self.language
     }
 
     fn dispatched(&self) -> DispatchedUnit {
@@ -413,13 +411,17 @@ pub(crate) struct Claim<T> {
 }
 
 impl<T: ClaimedUnit> Claim<T> {
-    /// What the unit needs a provider of, as the claim read it.
-    pub(crate) fn needs(&self) -> crate::providers::Needs<'_> {
-        crate::providers::Needs {
-            contest_type: self.unit.contest_type(),
-            problem_type: &self.problem_type,
-            checker_format: &self.checker_format,
-        }
+    /// What the unit needs a provider of, its problem as the claim read it.
+    pub(crate) fn needs<'a>(
+        &'a self,
+        lifecycle: &crate::plugin_lifecycle::PluginLifecycle,
+    ) -> crate::providers::Needs<'a> {
+        lifecycle.needs(
+            self.unit.contest_type(),
+            &self.problem_type,
+            &self.checker_format,
+            Some(self.unit.language()),
+        )
     }
 }
 
@@ -467,11 +469,11 @@ fn in_flight_count(owner: &str) -> String {
 /// the cap left (`claim_room`) and the `plugin_config` change counter
 /// (`claim_epoch`); with nothing claimed it is that row alone, its unit
 /// columns NULL.
-fn claim_statement(unit: Unit, server_id: &str, limit: ClaimLimit, local: &Provides) -> Statement {
+fn claim_statement(unit: Unit, server_id: &str, limit: ClaimLimit, local: &Loaded) -> Statement {
     let mut b = Binds::default();
     let rows = b.bind(i64::from(limit.rows));
     let owner = b.bind(server_id);
-    let local = LocalPlaceholders::bind(local, |keys| b.bind(keys));
+    let local = b.bind(serde_json::to_value(local).expect("loaded keys serialize"));
     let (room, take) = match limit.in_flight_cap {
         Some(cap) => (
             format!(
@@ -534,7 +536,7 @@ async fn run_claim<T>(
     unit: Unit,
     server_id: &str,
     limit: ClaimLimit,
-    local: &Provides,
+    local: &Loaded,
     parse: impl Fn(&sea_orm::QueryResult) -> Result<T, DbErr>,
 ) -> Result<Claimed<T>, DbErr> {
     let none = Claimed {
@@ -598,7 +600,7 @@ pub(crate) async fn claim_judgements(
     db: &DatabaseConnection,
     server_id: &str,
     limit: ClaimLimit,
-    local: &Provides,
+    local: &Loaded,
 ) -> Result<Claimed<ClaimedJudgement>, DbErr> {
     use sea_orm::FromQueryResult;
     run_claim(db, Unit::Judgement, server_id, limit, local, |row| {
@@ -616,7 +618,7 @@ pub(crate) async fn claim_code_runs(
     db: &DatabaseConnection,
     server_id: &str,
     limit: ClaimLimit,
-    local: &Provides,
+    local: &Loaded,
 ) -> Result<Claimed<code_run::Model>, DbErr> {
     use sea_orm::FromQueryResult;
     run_claim(db, Unit::CodeRun, server_id, limit, local, |row| {
@@ -988,7 +990,7 @@ pub(crate) async fn reclaim_abandoned(
     abandoned: Abandoned,
     budget: RetryBudget,
     batch: u32,
-    local: &Provides,
+    local: &Loaded,
 ) -> Result<Reclaimed, DbErr> {
     let batch = batch.max(1);
     let mut total = Reclaimed::default();
@@ -1008,12 +1010,12 @@ async fn reclaim_batch(
     abandoned: Abandoned,
     budget: RetryBudget,
     limit: u32,
-    local: &Provides,
+    local: &Loaded,
 ) -> Result<(usize, Reclaimed), DbErr> {
     let txn = db.begin().await?;
     let mut b = Binds::default();
     let predicate = abandoned.predicate(&mut b);
-    let local = LocalPlaceholders::bind(local, |keys| b.bind(keys));
+    let local = b.bind(serde_json::to_value(local).expect("loaded keys serialize"));
     let filter = format!(
         "u.status IN {in_flight} AND {predicate} AND {handled}",
         in_flight = StatusPhase::InFlight.sql_list(),
@@ -1163,12 +1165,12 @@ pub(crate) async fn retry_system_errors(
     db: &DatabaseConnection,
     budget: RetryBudget,
     limit: u32,
-    local: &Provides,
+    local: &Loaded,
 ) -> Result<SystemErrorPass, DbErr> {
     let txn = db.begin().await?;
     let mut b = Binds::default();
     let max = b.bind(budget.max());
-    let local = LocalPlaceholders::bind(local, |keys| b.bind(keys));
+    let local = b.bind(serde_json::to_value(local).expect("loaded keys serialize"));
     let filter = format!(
         "u.is_current AND {undecided} \
          AND ({handled} OR ({open} AND s.system_error_retries >= {max}))",
@@ -1248,10 +1250,11 @@ pub(crate) enum DispatchFailed {
     /// system-error retry, as its class says; a code run's stands.
     SystemError,
     /// Back to `Queued` without spending a retry: the platform lost the
-    /// attempt, or every provider of its contest type is disabled fleet-wide,
-    /// so the failure is the disable's (a judging session its provider's
-    /// unload cut), on whichever replica it ran, and the work waits parked
-    /// for a provider.
+    /// attempt, or a plugin the unit needs (its contest type's, its
+    /// evaluator, its checker when the evaluator uses one, its language's)
+    /// has no provider enabled fleet-wide (`Unit::runnable`), so the failure
+    /// is the disable's (a judging session the unload cut), on whichever
+    /// replica it ran, and the work waits parked for a provider.
     HandedBack,
     /// Nothing: the dispatch was since requeued, superseded or finished.
     Stale,

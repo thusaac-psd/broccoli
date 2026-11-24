@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 use common::StatusPhase;
 use common::db::{DatabaseConnection, PgPoolSpec, PgSession};
-use sea_orm::{ConnectionTrait, DbBackend, Schema, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, Schema, Statement, TransactionTrait};
 use testcontainers::ContainerAsync;
 use testcontainers::ImageExt;
 use testcontainers::runners::AsyncRunner;
@@ -161,6 +161,9 @@ async fn the_migrations_create_the_schema_the_code_expects() {
     crate::services::plugin_config_cache::expected::install(migrated)
         .await
         .expect("config epoch trigger");
+    crate::services::judging::install_inputs_triggers(migrated)
+        .await
+        .expect("inputs version triggers");
     let after = catalog(migrated).await;
     let added: Vec<_> = after.difference(&before).collect();
     let removed: Vec<_> = before.difference(&after).collect();
@@ -493,4 +496,134 @@ fn the_upgrade_guide_names_every_migration_of_this_release_that_is_not_additive(
             }
         );
     }
+}
+
+/// Every change to what judging reads of a problem counts in its
+/// `inputs_version`, whatever path makes it: its limits, type and checker
+/// format, its test cases, its additional files and its problem-scoped and
+/// contest-problem configs. A change to anything else (its title) does not.
+#[tokio::test]
+async fn every_change_to_a_problems_judging_inputs_counts_in_its_version() {
+    use sea_orm::EntityTrait;
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (_, problem_id) = crate::test_support::seed_user_and_problem(&db).await;
+    let exec = |sql: String| {
+        let db = db.clone();
+        async move {
+            db.execute_unprepared(&sql).await.unwrap();
+        }
+    };
+    let version = || {
+        let db = db.clone();
+        async move {
+            crate::entity::problem::Entity::find_by_id(problem_id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .inputs_version
+        }
+    };
+    let mut last = version().await;
+    let changes = [
+        (
+            "title",
+            "UPDATE problem SET title = 'renamed' WHERE id = {p}".to_string(),
+            false,
+        ),
+        (
+            "time limit",
+            "UPDATE problem SET time_limit = time_limit + 1 WHERE id = {p}".into(),
+            true,
+        ),
+        (
+            "memory limit",
+            "UPDATE problem SET memory_limit = memory_limit + 1 WHERE id = {p}".into(),
+            true,
+        ),
+        (
+            "checker format",
+            "UPDATE problem SET checker_format = 'exact' WHERE id = {p}".into(),
+            true,
+        ),
+        (
+            "problem type",
+            "UPDATE problem SET problem_type = 'other' WHERE id = {p}".into(),
+            true,
+        ),
+        (
+            "test case added",
+            "INSERT INTO test_case (input, expected_output, score, label, is_sample, position, \
+                                    problem_id, created_at) \
+             VALUES ('1', '1', 10, 't1', false, 0, {p}, NOW())"
+                .into(),
+            true,
+        ),
+        (
+            "test case changed",
+            "UPDATE test_case SET score = 20 WHERE problem_id = {p}".into(),
+            true,
+        ),
+        (
+            "test case removed",
+            "DELETE FROM test_case WHERE problem_id = {p}".into(),
+            true,
+        ),
+        (
+            "additional file",
+            "INSERT INTO additional_file (id, problem_id, language, path, content_hash, filename, \
+                                          size, created_at) \
+             VALUES (gen_random_uuid(), {p}, 'cpp', 'grader.cpp', 'h', 'grader.cpp', 1, NOW())"
+                .into(),
+            true,
+        ),
+        (
+            "problem config",
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+             VALUES ('problem', '{p}', 'checker', '{{}}', 0, NOW())"
+                .into(),
+            true,
+        ),
+        (
+            "contest-problem config",
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+             VALUES ('contest_problem', '7:{p}', 'ioi', '{{}}', 0, NOW())"
+                .into(),
+            true,
+        ),
+        (
+            "another problem's config",
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+             VALUES ('problem', '999999', 'checker', '{{}}', 0, NOW())"
+                .into(),
+            false,
+        ),
+    ];
+    for (what, sql, counts) in changes {
+        exec(
+            sql.replace("{p}", &problem_id.to_string())
+                .replace("{{}}", "{}"),
+        )
+        .await;
+        let now = version().await;
+        assert_eq!(now > last, counts, "{what}: {last} -> {now}");
+        last = now;
+    }
+
+    // A restore (a bundle import) puts rows back as they were: it counts
+    // nothing.
+    let txn = db.begin().await.unwrap();
+    txn.execute_unprepared(crate::services::judging::RESTORING)
+        .await
+        .unwrap();
+    txn.execute_unprepared(&format!(
+        "INSERT INTO test_case (input, expected_output, score, label, is_sample, position, \
+                                problem_id, created_at) \
+         VALUES ('2', '2', 10, 't2', false, 1, {problem_id}, NOW()); \
+         UPDATE problem SET time_limit = time_limit + 1 WHERE id = {problem_id}"
+    ))
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    assert_eq!(version().await, last, "a restore counts nothing");
 }

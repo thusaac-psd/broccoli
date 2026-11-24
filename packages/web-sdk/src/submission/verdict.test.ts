@@ -38,6 +38,7 @@ test('a parked submission names what parks it and the plugin, as the server reco
     'contest_type',
     'problem_type',
     'checker_format',
+    'language',
   ] as const) {
     assert.deepEqual(
       getVerdictBadge(

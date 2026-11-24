@@ -14,6 +14,9 @@ use crate::services::evaluate_batch::EvaluateCases;
 pub struct EvaluatorHandler {
     pub plugin_id: String,
     pub functions: EvaluatorFunctions,
+    /// It checks output with the problem's checker, so work it evaluates
+    /// needs a checker plugin for the problem's checker format.
+    pub uses_checker: bool,
 }
 
 /// The functions an evaluator declared when it registered.
@@ -129,9 +132,23 @@ impl<H: Provided> Providers<H> {
             .insert(handler.plugin_id().to_string(), handler);
     }
 
-    /// The handler `key` resolves to.
+    /// The handler `key` resolves to among the plugins loaded here. A
+    /// dispatch resolves fleet-wide instead (`providers::resolve`).
     pub fn get(&self, key: &str) -> Option<&H> {
         self.keys.get(key)?.values().next()
+    }
+
+    /// `plugin_id`'s registration of `key`, if it made one here.
+    pub fn registration(&self, key: &str, plugin_id: &str) -> Option<&H> {
+        self.keys.get(key)?.get(plugin_id)
+    }
+
+    /// The plugins that registered `key` here, ids sorted.
+    pub fn plugins_of(&self, key: &str) -> Vec<String> {
+        self.keys
+            .get(key)
+            .map(|providers| providers.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn contains_key(&self, key: &str) -> bool {

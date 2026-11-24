@@ -98,7 +98,7 @@ pub async fn report(
     db: &DatabaseConnection,
     server_id: &str,
     report: &ReplicaReport,
-    provides: &crate::providers::Provides,
+    provides: &crate::providers::Loaded,
 ) -> Result<(), DbErr> {
     let plugins = serde_json::to_value(report).map_err(|e| DbErr::Custom(e.to_string()))?;
     let provides = serde_json::to_value(provides).map_err(|e| DbErr::Custom(e.to_string()))?;

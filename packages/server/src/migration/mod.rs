@@ -49,7 +49,7 @@ mod m0014_device_code_client_addr;
 mod m0015_config_recheck;
 mod m0016_plugin_host_locale;
 mod m0017_plugin_governs_shape;
-mod m0018_test_data_version;
+mod m0018_judging_inputs_version;
 mod m0019_replica_provides;
 mod m0020_hook_event;
 
@@ -200,7 +200,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0015_config_recheck::Migration),
             Box::new(m0016_plugin_host_locale::Migration),
             Box::new(m0017_plugin_governs_shape::Migration),
-            Box::new(m0018_test_data_version::Migration),
+            Box::new(m0018_judging_inputs_version::Migration),
             Box::new(m0019_replica_provides::Migration),
             Box::new(m0020_hook_event::Migration),
         ]

@@ -149,6 +149,7 @@ impl Standing {
                     Provided::ContestType => "its contest plugin",
                     Provided::ProblemType => "its evaluator plugin",
                     Provided::CheckerFormat => "its checker plugin",
+                    Provided::Language => "its language plugin",
                 };
                 Some(format!(
                     "Waiting for {role} {}: disabled until an administrator enables it",
@@ -344,6 +345,16 @@ mod tests {
                 .waiting_for(&names)
                 .unwrap()
                 .starts_with("Waiting for its checker plugin standard-checkers:")
+        );
+        let language = ClosedBy {
+            plugin_id: "standard-languages".into(),
+            provides: Provided::Language,
+        };
+        assert!(
+            Standing::new(Some(SubmissionStatus::Queued), None, Some(&language))
+                .waiting_for()
+                .unwrap()
+                .starts_with("Waiting for its language plugin: 'standard-languages'")
         );
         // A finished submission is finished whatever its plugin does now.
         let judged = Standing::new(

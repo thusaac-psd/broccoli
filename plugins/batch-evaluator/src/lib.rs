@@ -18,6 +18,7 @@ pub fn init() -> FnResult<String> {
         "batch",
         "prepare_evaluate_case",
         "on_operation_results",
+        true,
     )?;
     host.log.info("Batch evaluator registered")?;
     Ok("ok".to_string())

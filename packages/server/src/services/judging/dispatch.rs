@@ -71,7 +71,7 @@ pub struct LiveDispatches(Arc<Mutex<HashMap<DispatchedUnit, usize>>>);
 impl LiveDispatches {
     /// Makes `unit` live until the returned entry is dropped. `needs_loaded`
     /// says whether this replica had every plugin the unit needs loaded when
-    /// it claimed it (see [`Dispatch::not_loaded_here`]).
+    /// it claimed it (see [`Dispatch::missing_plugin`]).
     pub fn enter(&self, unit: DispatchedUnit, needs_loaded: bool) -> LiveUnit {
         *self.units().entry(unit).or_default() += 1;
         LiveUnit {
@@ -192,21 +192,14 @@ impl Dispatch {
         }
     }
 
-    /// Records that a plugin the unit needs (`what`) is not loaded here, if
-    /// that is this replica's fault: every plugin the unit needs was loaded
-    /// here when it was claimed, so the plugin is reloading or was unloaded
-    /// since, and the attempt is handed back
-    /// ([`DispatchFault::NotLoadedHere`]). A unit this replica took while
-    /// missing one (no live replica had it loaded) fails as its plugin being
-    /// missing, visibly. Returns whether it recorded the fault.
-    pub fn not_loaded_here(&self, what: &str) -> bool {
-        if self.0.live.needs_loaded {
-            self.0.faults.record(
-                DispatchFault::NotLoadedHere,
-                format!("{what} is not loaded on this replica"),
-            );
-        }
-        self.0.live.needs_loaded
+    /// Records that a plugin the unit needs did not resolve here
+    /// (`unresolved`), as `judging::fault::missing_plugin` decides: handed
+    /// back when the unit was claimed with every plugin it needs loaded
+    /// here (it is reloading or was unloaded since), standing when this
+    /// replica took it while no live replica had the plugin.
+    pub fn missing_plugin(&self, unresolved: &crate::providers::Unresolved) {
+        let recorded = super::fault::missing_plugin(self.0.live.needs_loaded, unresolved);
+        self.0.faults.record(recorded.fault, recorded.message);
     }
 
     /// Fresh call locals for a plugin call made for this dispatch.
@@ -314,9 +307,13 @@ mod tests {
     }
 
     /// A plugin missing mid-dispatch is recorded as this replica's fault,
-    /// losing the attempt, only for a unit claimed with every plugin loaded.
+    /// losing the attempt, for a unit claimed with every plugin loaded. A
+    /// unit taken while no live replica had the plugin loaded stands on its
+    /// first attempt, naming the plugin and its role.
     #[test]
-    fn a_plugin_lost_since_the_claim_is_this_replicas_fault() {
+    fn a_missing_plugin_hands_back_what_was_claimed_loaded_and_stands_otherwise() {
+        use super::super::fault::SystemErrorClass;
+        use broccoli_api_types::error::HostCode;
         for needs_loaded in [true, false] {
             let faults = DispatchFaults::default();
             let dispatch = Dispatch::new(
@@ -324,11 +321,29 @@ mod tests {
                 LiveDispatches::default().enter(UNIT, needs_loaded),
                 faults.clone(),
             );
-            assert_eq!(dispatch.not_loaded_here("the evaluator"), needs_loaded);
-            assert_eq!(
-                faults.lost().map(|r| r.fault),
-                needs_loaded.then_some(DispatchFault::NotLoadedHere)
-            );
+            let unresolved = crate::providers::Unresolved {
+                kind: crate::providers::Provided::CheckerFormat,
+                key: "lines".into(),
+                provider: Some("standard-checkers".into()),
+            };
+            dispatch.missing_plugin(&unresolved);
+            let recorded = faults.get().expect("recorded");
+            if needs_loaded {
+                assert_eq!(recorded.fault, DispatchFault::NotLoadedHere);
+                assert!(faults.lost().is_some());
+            } else {
+                assert_eq!(recorded.fault, DispatchFault::NotLoaded);
+                assert_eq!(
+                    SystemErrorClass::of_fault(recorded.fault),
+                    SystemErrorClass::Stands
+                );
+                assert_eq!(recorded.fault.code(), HostCode::PluginNotLoaded);
+                assert_eq!(
+                    recorded.message,
+                    "the checker plugin standard-checkers for checker format \"lines\" \
+                     is loaded on no live replica"
+                );
+            }
         }
     }
 

@@ -213,7 +213,9 @@ pub async fn run_code(
     let contest_type = problem.default_contest_type.clone();
     crate::plugin_lifecycle::accepting_handler(
         &state,
-        crate::providers::Needs::of(&contest_type, &problem),
+        state
+            .plugin_lifecycle
+            .needs_on(&contest_type, &problem, Some(payload.language.trim())),
     )
     .await?;
     let custom_tcs_json =
@@ -316,7 +318,9 @@ pub async fn run_contest_code(
     let contest_type = required_contest_type(&contest_model)?;
     crate::plugin_lifecycle::accepting_handler(
         &state,
-        crate::providers::Needs::of(&contest_type, &problem),
+        state
+            .plugin_lifecycle
+            .needs_on(&contest_type, &problem, Some(&language)),
     )
     .await?;
     let new_code_run = code_run::ActiveModel {

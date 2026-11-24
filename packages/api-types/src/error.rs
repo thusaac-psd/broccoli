@@ -89,9 +89,10 @@ host_codes! {
     ValidationError = "VALIDATION_ERROR", generic;
     ConfigNamespaceNotFound = "CONFIG_NAMESPACE_NOT_FOUND";
     ConfigWouldBreak = "CONFIG_WOULD_BREAK";
-    /// A judgement to apply was judged against test data its problem has
-    /// changed since; the request may force it.
-    JudgedOnOtherTestData = "JUDGED_ON_OTHER_TEST_DATA";
+    /// A judgement to apply was judged against inputs its problem has
+    /// changed since (test data, limits, checker or other files); the
+    /// request may force it.
+    JudgedOnOtherInputs = "JUDGED_ON_OTHER_INPUTS";
     PayloadTooLarge = "PAYLOAD_TOO_LARGE";
     TokenMissing = "TOKEN_MISSING";
     TokenInvalid = "TOKEN_INVALID";
@@ -140,7 +141,6 @@ host_codes! {
     /// The submission arrived after the plugin's admission window closed.
     SubmissionTooLate = "SUBMISSION_TOO_LATE";
     // Judgement and code run errors.
-    NoHandlerRegistered = "NO_HANDLER_REGISTERED";
     ProblemNotFound = "PROBLEM_NOT_FOUND";
     DatabaseError = "DATABASE_ERROR";
     InvalidFiles = "INVALID_FILES";
@@ -163,6 +163,10 @@ host_codes! {
     /// A plugin the work needs stopped being loaded on the replica that
     /// took it; the work goes back to the queue.
     PluginNotLoadedHere = "PLUGIN_NOT_LOADED_HERE";
+    /// A plugin the work needs was loaded on no live replica when the work
+    /// was taken (or no plugin provides what it needs): the work stands
+    /// failed, naming the plugin and its role.
+    PluginNotLoaded = "PLUGIN_NOT_LOADED";
     /// The problem's checker program failed.
     CheckerFailed = "CHECKER_FAILED";
     /// A program the problem supplies besides its checker (an interactor or

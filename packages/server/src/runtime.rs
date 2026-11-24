@@ -253,9 +253,11 @@ impl ServerRuntime {
             ),
         );
 
+        let plugin_lifecycle: Arc<crate::plugin_lifecycle::PluginLifecycle> = Default::default();
         let manager = ServerManager::new(
             app_config.plugin.clone(),
             HostFunctionSystemDeps {
+                plugin_lifecycle: plugin_lifecycle.clone(),
                 plugin_sql: plugin_sql.clone(),
                 host_db: host_fn_db,
                 mq: Some(mq.clone()),
@@ -332,7 +334,7 @@ impl ServerRuntime {
             prometheus_registry,
             dispatcher_permits,
             worker_slots,
-            plugin_lifecycle: Default::default(),
+            plugin_lifecycle,
             plugin_sql,
             last_workers: Default::default(),
         };

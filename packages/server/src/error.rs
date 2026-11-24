@@ -132,9 +132,9 @@ pub enum AppError {
     /// [`DISABLED_RETRY_AFTER_SECS`], since it serves once an admin enables
     /// the plugin.
     ContestTypeDisabled(String),
-    /// The judgement to apply was judged against test data its problem has
+    /// The judgement to apply was judged against inputs its problem has
     /// changed since; `force=true` applies it anyway.
-    JudgedOnOtherTestData,
+    JudgedOnOtherInputs,
     /// Server is overloaded; client should retry after the given duration.
     /// Distinct from `RateLimited` (429): 429 means "your client is too fast",
     /// 503 means "the system as a whole is past capacity". Used for
@@ -225,12 +225,13 @@ impl AppError {
                     details: Some(serde_json::json!({ "issues": issues })),
                 },
             ),
-            AppError::JudgedOnOtherTestData => (
+            AppError::JudgedOnOtherInputs => (
                 StatusCode::CONFLICT,
                 simple(
-                    HostCode::JudgedOnOtherTestData,
-                    "The judgement was judged against test data the problem has changed since; \
-                     send it again with force=true to apply it anyway"
+                    HostCode::JudgedOnOtherInputs,
+                    "The judgement was judged against inputs the problem has changed since \
+                     (its test data, limits, checker or other files); send it again with \
+                     force=true to apply it anyway"
                         .to_string(),
                 ),
             ),

@@ -54,7 +54,7 @@ use super::response::{VisibilityContext, build_submission_response};
     tag = "Submissions",
     operation_id = "applySubmissionJudgement",
     summary = "Apply a finalized submission judgement",
-    description = "Makes a finalized judgement the current version and copies its cached result fields onto the submission. A judgement judged against test data the problem has changed since is applied only with `force=true`. Requires `submission:rejudge` permission.",
+    description = "Makes a finalized judgement the current version and copies its cached result fields onto the submission. A judgement judged against inputs the problem has changed since (test data, limits, checker or other files) is applied only with `force=true`, which marks it `judged_on_earlier_inputs`. Requires `submission:rejudge` permission.",
     params(
         ("id" = i32, Path, description = "Submission ID"),
         ("judgement_id" = i32, Path, description = "Judgement ID"),
@@ -66,7 +66,7 @@ use super::response::{VisibilityContext, build_submission_response};
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Submission or judgement not found (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "The judgement was judged against test data the problem has changed since, which `force=true` applies anyway (JUDGED_ON_OTHER_TEST_DATA)", body = ErrorBody),
+        (status = 409, description = "The judgement was judged against inputs the problem has changed since (its test data, limits, checker or other files), which `force=true` applies anyway, marking it `judged_on_earlier_inputs` (JUDGED_ON_OTHER_INPUTS)", body = ErrorBody),
         (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
@@ -102,7 +102,7 @@ pub async fn apply_submission_judgement(
                 "Cannot apply a superseded judgement: it never got a result".into(),
             ));
         }
-        ApplyJudgement::OtherTestData => return Err(AppError::JudgedOnOtherTestData),
+        ApplyJudgement::OtherInputs => return Err(AppError::JudgedOnOtherInputs),
     };
     txn.commit().await?;
 

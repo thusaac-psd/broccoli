@@ -13,7 +13,8 @@ pub struct Model {
     /// `{ plugin_id: ReplicaPluginState }`, as last reported.
     #[sea_orm(column_type = "JsonBinary")]
     pub plugins: Json,
-    /// What this replica has loaded right now (`providers::Provides`), so a
+    /// What this replica has loaded right now, each key with the plugins that
+    /// registered it (`providers::Loaded`), so a
     /// replica that cannot run a unit leaves it to one that can.
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub provides: Option<Json>,

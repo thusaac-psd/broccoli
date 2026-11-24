@@ -1,4 +1,3 @@
-use crate::providers::Needs;
 use common::db::DatabaseConnection;
 use std::collections::HashMap;
 
@@ -61,7 +60,7 @@ pub(super) async fn build_submission_list_items(
 
         data.push(SubmissionListItem {
             id: sub.id,
-            language: sub.language,
+            language: sub.language.clone(),
             status: Some(sub.status),
             verdict: sub.verdict,
             user_id: sub.user_id,
@@ -78,9 +77,14 @@ pub(super) async fn build_submission_list_items(
             time_used: sub.time_used,
             memory_used: sub.memory_used,
             withheld: None,
-            parked_by: state
-                .plugin_lifecycle
-                .parked_by(Needs::of(&sub.contest_type, problem_model), sub.status),
+            parked_by: state.plugin_lifecycle.parked_by(
+                state.plugin_lifecycle.needs_on(
+                    &sub.contest_type,
+                    problem_model,
+                    Some(&sub.language),
+                ),
+                sub.status,
+            ),
         });
     }
 
@@ -542,7 +546,7 @@ pub(super) async fn build_submission_response_with_cases(
     Ok(SubmissionResponse {
         id: sub.id,
         files,
-        language: sub.language,
+        language: sub.language.clone(),
         status: Some(sub.status),
         user_id: sub.user_id,
         username: context.username,
@@ -556,11 +560,12 @@ pub(super) async fn build_submission_response_with_cases(
         result: result_response,
         withheld: None,
         parked_by: state.plugin_lifecycle.parked_by(
-            Needs {
-                contest_type: &sub.contest_type,
-                problem_type: &context.problem_type,
-                checker_format: &context.checker_format,
-            },
+            state.plugin_lifecycle.needs(
+                &sub.contest_type,
+                &context.problem_type,
+                &context.checker_format,
+                Some(&sub.language),
+            ),
             sub.status,
         ),
     })
@@ -620,6 +625,7 @@ pub(super) async fn build_judgement_response(
         test_case_pagination: Some(pagination),
         withheld: None,
         config_issues: None,
+        judged_on_earlier_inputs: None,
         test_case_results,
     })
 }
@@ -788,7 +794,8 @@ mod judgement_history_tests {
             dispatch_retries: 0,
             config_issues: false,
             error_stands,
-            test_data_version: 0,
+            inputs_version: 0,
+            judged_on_earlier_inputs: false,
             created_at: now,
             queued_at: now,
             finalized_at: Some(now),

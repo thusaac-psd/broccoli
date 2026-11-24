@@ -167,6 +167,7 @@ fn register_evaluator_fn(
             EvaluatorHandler {
                 plugin_id: plugin_id.to_string(),
                 functions,
+                uses_checker: input.uses_checker,
             },
         );
     });
@@ -287,12 +288,30 @@ fn register_language_resolver_fn(
 mod tests {
     use super::*;
 
-    fn parse(json: serde_json::Value) -> Result<EvaluatorFunctions, extism::Error> {
+    fn parse(mut json: serde_json::Value) -> Result<EvaluatorFunctions, extism::Error> {
+        json["uses_checker"] = serde_json::json!(true);
         evaluator_functions(
             serde_json::from_value::<RegisterEvaluatorInput>(json)
                 .unwrap()
                 .handlers,
         )
+    }
+
+    /// An evaluator says whether it uses the problem's checker: work needs a
+    /// checker plugin only then, so a registration that does not say is
+    /// refused.
+    #[test]
+    fn evaluator_registration_declares_whether_it_uses_a_checker() {
+        let declared = |uses_checker: Option<bool>| {
+            let mut json = serde_json::json!({"type": "t", "handler": "eval"});
+            if let Some(uses) = uses_checker {
+                json["uses_checker"] = serde_json::json!(uses);
+            }
+            serde_json::from_value::<RegisterEvaluatorInput>(json).map(|i| i.uses_checker)
+        };
+        assert!(!declared(Some(false)).unwrap());
+        assert!(declared(Some(true)).unwrap());
+        assert!(declared(None).is_err());
     }
 
     #[test]

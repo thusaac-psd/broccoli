@@ -206,6 +206,36 @@ test('a judgement whose problem had no config issues shows no notice', async ({
   await expect(page.getByText(JUDGED_WITH_ISSUES)).toHaveCount(0);
 });
 
+test("staff see in the Versions card that a version was applied after its problem's inputs changed", async ({
+  page,
+}) => {
+  await mockApi(page, 'admin');
+  const version = (id: number, earlier: boolean) => ({
+    id,
+    submission_id: 1,
+    version: id,
+    is_current: id === 2,
+    is_finalized: true,
+    status: 'Judged',
+    verdict: 'Accepted',
+    score: 100,
+    judge_epoch: id,
+    created_at: '2025-10-01T14:30:00Z',
+    test_case_results: [],
+    judged_on_earlier_inputs: earlier,
+  });
+  await page.route('**/api/v1/submissions/1/judgements', (route) =>
+    route.fulfill({ json: [version(1, false), version(2, true)] }),
+  );
+  await page.goto('/submissions/1');
+  const badges = page.getByText('Judged on earlier inputs', { exact: true });
+  await expect(badges).toHaveCount(1);
+  await expect(badges).toHaveAttribute(
+    'title',
+    /test data, limits, checker or other files changed/,
+  );
+});
+
 test('staff see a system error once, its cause in their language and the server message as detail', async ({
   page,
 }) => {

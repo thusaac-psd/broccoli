@@ -76,6 +76,6 @@ async fn scan_once(
     state: &AppState,
     budget: RetryBudget,
 ) -> anyhow::Result<judging::SystemErrorPass> {
-    let local = crate::providers::Provides::loaded_here(&state.registries).await;
+    let local = crate::providers::Loaded::here(&state.registries).await;
     Ok(judging::retry_system_errors(&state.db, budget, SCAN_BATCH_SIZE, &local).await?)
 }

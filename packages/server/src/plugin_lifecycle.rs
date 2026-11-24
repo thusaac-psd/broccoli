@@ -80,7 +80,7 @@ pub struct PluginLifecycle {
 
 struct Reported {
     report: ReplicaReport,
-    provides: Provides,
+    provides: crate::providers::Loaded,
     /// Whether a write of an equal report succeeded.
     written: bool,
 }
@@ -164,10 +164,14 @@ fn mismatch(published: Option<&Fingerprint>, local: Option<&Fingerprint>) -> Opt
 pub struct Governs {
     /// It declares a `[[server.queries]] topic = "visibility"`.
     pub visibility: bool,
-    /// The contest types, problem types and checker formats its `init()`
-    /// registered, each sorted.
+    /// The contest types, problem types, checker formats and languages its
+    /// `init()` registered, each sorted.
     #[serde(flatten)]
     pub provides: Provides,
+    /// The problem types it registered an evaluator for that uses no
+    /// checker (`uses_checker` false), sorted: work on them needs no checker
+    /// plugin.
+    pub unchecked_problem_types: Vec<String>,
 }
 
 /// A plugin that is enabled fleet-wide but not loaded on this replica.
@@ -285,8 +289,94 @@ impl PluginLifecycle {
         providers.first().map(|id| (*id).clone())
     }
 
-    // `providers::runnable` states the same rule in SQL over the rows this
-    // reads (`plugin.is_enabled`, `plugin.governs`); change them together.
+    /// Who resolves `key` (a `kind` of key) fleet-wide: the enabled plugin
+    /// providing it whose id sorts first; `Closed` when every plugin that
+    /// recorded it is disabled; `Unknown` when none ever recorded it. The
+    /// one rule every replica resolves a key by (see `providers::resolve`);
+    /// `providers::provider` states it in SQL.
+    pub fn provider(&self, kind: Provided, key: &str) -> crate::providers::FleetProvider {
+        use crate::providers::FleetProvider;
+        let Ok(governs) = self.governs.read() else {
+            return FleetProvider::Unknown;
+        };
+        let mut recorded = false;
+        let mut first: Option<&String> = None;
+        for (id, g) in governs.iter() {
+            if !g.provides.provides(kind, key) {
+                continue;
+            }
+            recorded = true;
+            if self.is_desired_enabled(id) && first.is_none_or(|f| id < f) {
+                first = Some(id);
+            }
+        }
+        match (first, recorded) {
+            (Some(id), _) => FleetProvider::Plugin(id.clone()),
+            (None, true) => FleetProvider::Closed,
+            (None, false) => FleetProvider::Unknown,
+        }
+    }
+
+    /// What work of `contest_type` on `problem`, in `language` (none for the
+    /// problem alone), needs: exactly the plugins it uses. Its problem's
+    /// checker format is a need unless the problem type's fleet-wide
+    /// evaluator declared it uses no checker. `providers::sql_needs` states
+    /// the same in SQL.
+    pub fn needs<'a>(
+        &self,
+        contest_type: &'a str,
+        problem_type: &'a str,
+        checker_format: &'a str,
+        language: Option<&'a str>,
+    ) -> Needs<'a> {
+        use crate::providers::FleetProvider;
+        let unchecked = match self.provider(Provided::ProblemType, problem_type) {
+            FleetProvider::Plugin(evaluator) => self
+                .governs(&evaluator)
+                .is_some_and(|g| g.unchecked_problem_types.iter().any(|t| t == problem_type)),
+            FleetProvider::Closed | FleetProvider::Unknown => false,
+        };
+        Needs {
+            contest_type,
+            problem_type,
+            checker_format: (!unchecked).then_some(checker_format),
+            language,
+        }
+    }
+
+    /// [`Self::needs`] of work of `contest_type` on `problem`.
+    pub fn needs_on<'a>(
+        &self,
+        contest_type: &'a str,
+        problem: &'a crate::entity::problem::Model,
+        language: Option<&'a str>,
+    ) -> Needs<'a> {
+        self.needs(
+            contest_type,
+            &problem.problem_type,
+            &problem.checker_format,
+            language,
+        )
+    }
+
+    /// Whether `local` has every key of `needs` loaded on its fleet-wide
+    /// provider ([`Self::provider`]), or, for a key none ever recorded, on
+    /// any plugin. `providers::runs_here` reads the same in SQL.
+    pub fn all_loaded(&self, local: &crate::providers::Loaded, needs: Needs<'_>) -> bool {
+        use crate::providers::FleetProvider;
+        needs
+            .each()
+            .into_iter()
+            .all(|(kind, key)| match self.provider(kind, key) {
+                FleetProvider::Plugin(id) => local.has(kind, key, &id),
+                FleetProvider::Unknown => local.has_key(kind, key),
+                FleetProvider::Closed => false,
+            })
+    }
+
+    // `providers::runnable` and `providers::provider` state these rules in
+    // SQL over the rows they read (`plugin.is_enabled`, `plugin.governs`);
+    // change them together.
 
     /// Why plugin `plugin_id`, known not to be loaded here, cannot serve:
     /// the fleet disabled it, or it is enabled and missing on this replica
@@ -534,7 +624,7 @@ fn build_report(
 /// pass. The row's heartbeat is [`heartbeat`]'s.
 async fn write_report(state: &AppState, applied: &HashMap<String, Applied>) {
     let report = build_report(state, applied, Instant::now());
-    let provides = Provides::loaded_here(&state.registries).await;
+    let provides = crate::providers::Loaded::here(&state.registries).await;
     if !record_report(state, &report, &provides) {
         return;
     }
@@ -554,7 +644,11 @@ async fn write_report(state: &AppState, applied: &HashMap<String, Applied>) {
 /// Keep `report` as this replica's latest, and say whether it is due to be
 /// written: it changed, or no write of it has succeeded yet. Never due once
 /// [`stop`] ran.
-fn record_report(state: &AppState, report: &ReplicaReport, provides: &Provides) -> bool {
+fn record_report(
+    state: &AppState,
+    report: &ReplicaReport,
+    provides: &crate::providers::Loaded,
+) -> bool {
     let Ok(mut reported) = state.plugin_lifecycle.reported.lock() else {
         return false;
     };
@@ -1028,9 +1122,21 @@ async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
         .ok()
         .and_then(|r| r.get(plugin_id).map(|e| declares_visibility(&e.manifest)))
         .unwrap_or(false);
+    let mut unchecked_problem_types: Vec<String> = state
+        .registries
+        .evaluator_registry
+        .read()
+        .await
+        .registered_by(plugin_id)
+        .into_iter()
+        .filter(|(_, evaluator)| !evaluator.uses_checker)
+        .map(|(problem_type, _)| problem_type)
+        .collect();
+    unchecked_problem_types.sort();
     Governs {
         visibility,
         provides: Provides::registered_by(&state.registries, plugin_id).await,
+        unchecked_problem_types,
     }
 }
 
@@ -1918,10 +2024,11 @@ mod tests {
             serde_json::json!({"visibility": false, "contest_types": ["x"]}),
             serde_json::json!({
                 "visibility": false, "contest_types": [], "problem_types": [], "checker_formats": [],
-                "host_locale": null,
+                "languages": [], "unchecked_problem_types": [], "host_locale": null,
             }),
             serde_json::json!({
                 "visibility": "no", "contest_types": [], "problem_types": [], "checker_formats": [],
+                "languages": [], "unchecked_problem_types": [],
             }),
             serde_json::json!([]),
         ] {
@@ -1934,9 +2041,11 @@ mod tests {
             visibility: true,
             provides: Provides {
                 contest_types: vec!["x".into()],
-                problem_types: vec![],
+                problem_types: vec!["batch".into(), "communication".into()],
                 checker_formats: vec!["lines".into()],
+                languages: vec!["cpp".into()],
             },
+            unchecked_problem_types: vec!["communication".into()],
         };
         write(serde_json::to_value(&whole).unwrap())
             .await
@@ -2014,13 +2123,131 @@ mod tests {
         lifecycle
     }
 
+    /// A key resolves to the enabled plugin providing it whose id sorts
+    /// first, whatever is loaded here: a replica with only a later provider
+    /// loaded does not run the key on it. With every provider disabled the
+    /// key is closed, and a key no plugin recorded resolves locally.
+    #[test]
+    fn a_key_resolves_to_its_fleet_wide_provider_only() {
+        use crate::providers::{FleetProvider, Unresolved, resolve};
+        use crate::registry::{ContestTypeHandlers, Providers};
+        let lifecycle = PluginLifecycle::default();
+        for id in ["a-contest", "b-contest"] {
+            lifecycle.set_governs(
+                id,
+                Governs {
+                    provides: Provides {
+                        contest_types: vec!["t".into()],
+                        ..Provides::default()
+                    },
+                    ..Governs::default()
+                },
+            );
+            lifecycle.set_desired(id, true);
+        }
+        let mut here: Providers<ContestTypeHandlers> = Providers::default();
+        for key in ["t", "unrecorded"] {
+            here.insert(
+                key.into(),
+                ContestTypeHandlers {
+                    plugin_id: "b-contest".into(),
+                    submission_fn: "s".into(),
+                    code_run_fn: "r".into(),
+                    submission_admission: false,
+                },
+            );
+        }
+        let kind = Provided::ContestType;
+        let resolved = |key: &str| {
+            resolve(&here, lifecycle.provider(kind, key), kind, key).map(|h| h.plugin_id)
+        };
+
+        assert_eq!(
+            lifecycle.provider(kind, "t"),
+            FleetProvider::Plugin("a-contest".into())
+        );
+        assert_eq!(
+            resolved("t"),
+            Err(Unresolved {
+                kind,
+                key: "t".into(),
+                provider: Some("a-contest".into()),
+            }),
+            "b-contest is loaded here, but a-contest provides the key"
+        );
+        lifecycle.set_desired("a-contest", false);
+        assert_eq!(resolved("t"), Ok("b-contest".into()));
+        lifecycle.set_desired("b-contest", false);
+        assert_eq!(lifecycle.provider(kind, "t"), FleetProvider::Closed);
+        assert_eq!(
+            lifecycle.provider(kind, "unrecorded"),
+            FleetProvider::Unknown
+        );
+        assert_eq!(resolved("unrecorded"), Ok("b-contest".into()));
+    }
+
+    /// Work needs exactly the plugins it uses: its problem's checker only
+    /// when the problem type's fleet-wide evaluator declared it uses one,
+    /// and its language's resolver. A disabled checker closes only work
+    /// whose evaluator checks with it; a disabled language plugin closes
+    /// work in that language.
+    #[test]
+    fn work_needs_a_checker_only_when_its_evaluator_uses_one() {
+        let lifecycle = providers(true, true, false);
+        let checked = lifecycle.needs("t", "p", "c", Some("cpp"));
+        assert_eq!(checked.checker_format, Some("c"));
+        assert_eq!(
+            lifecycle.closed_by(checked).map(|c| c.provides),
+            Some(Provided::CheckerFormat)
+        );
+
+        lifecycle.set_governs(
+            "eval",
+            Governs {
+                provides: Provides {
+                    problem_types: vec!["p".into()],
+                    ..Provides::default()
+                },
+                unchecked_problem_types: vec!["p".into()],
+                ..Governs::default()
+            },
+        );
+        let unchecked = lifecycle.needs("t", "p", "c", Some("cpp"));
+        assert_eq!(unchecked.checker_format, None);
+        assert_eq!(lifecycle.closed_by(unchecked), None);
+
+        lifecycle.set_governs(
+            "langs",
+            Governs {
+                provides: Provides {
+                    languages: vec!["cpp".into()],
+                    ..Provides::default()
+                },
+                ..Governs::default()
+            },
+        );
+        lifecycle.set_desired("langs", false);
+        assert_eq!(
+            lifecycle.closed_by(unchecked),
+            Some(ClosedBy {
+                plugin_id: "langs".into(),
+                provides: Provided::Language,
+            })
+        );
+        assert_eq!(
+            lifecycle.closed_by(lifecycle.needs("t", "p", "c", None)),
+            None
+        );
+    }
+
     #[test]
     fn closed_work_names_the_plugin_and_what_it_provides_for_the_work() {
         let queued = common::SubmissionStatus::Queued;
         let needs = Needs {
             contest_type: "t",
             problem_type: "p",
-            checker_format: "c",
+            checker_format: Some("c"),
+            language: None,
         };
         let closed = |provides, plugin_id: &str| {
             Some(ClosedBy {

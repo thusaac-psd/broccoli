@@ -598,6 +598,10 @@ pub async fn import(
     // one transaction everything runs in.
     let mut conn = db.acquire().await?;
     let mut tx = sqlx::Connection::begin(conn.raw()).await?;
+    // The rows are restored as they were: no inputs version counts them.
+    sqlx::query(crate::services::judging::RESTORING)
+        .execute(&mut *tx)
+        .await?;
     let target = schema_version(&mut tx).await?;
     ensure!(
         known.last() == Some(&target),

@@ -1334,7 +1334,7 @@ mod tests {
             submission_format: None,
             config_issues: false,
             config_recheck: None,
-            test_data_version: 0,
+            inputs_version: 0,
             created_at: now,
             updated_at: now,
             deleted_at: None,

@@ -87,15 +87,32 @@ work. A one-second fallback tick covers notifications lost while the
 listening connection was down; every reconnect also wakes the
 fiber.
 
-A replica claims only work it can run here. A unit needs one key of each
-kind plugins provide (`providers::Needs`): its contest type, its problem's
-type (the evaluator) and its problem's checker format. The claim, the
-system-error retry, the steal and the stuck detector take a unit only when
-this replica has every one of them loaded (`Provides::loaded_here`, read
-from its registries, so the check costs no round trip), or when no live
-replica has one loaded: then the replica that takes the unit fails it
-visibly instead of it waiting unseen (`providers::runs_here`). Each replica
-publishes what it has loaded in its `plugin_replica.provides` row. A unit
+A replica claims only work it can run here. A unit needs exactly the
+plugins it uses (`providers::Needs`, built by `PluginLifecycle::needs`):
+its contest type's plugin, its problem type's evaluator, its language's
+resolver, and its problem's checker format's checker only when the
+evaluator declared at registration that it uses a checker (`uses_checker`,
+recorded as the plugin's `unchecked_problem_types` in `plugin.governs`). A
+problem whose evaluator checks no output (communication) is therefore not
+parked by a disabled checker plugin, and work in a language whose plugin is
+disabled is parked instead of failing. Every key resolves
+by one rule, on every replica alike: to its fleet-wide provider, the plugin
+with the first id among the enabled ones that provide it
+(`PluginLifecycle::provider`, `providers::provider` in SQL, both over
+`plugin.is_enabled` and `plugin.governs`). The dispatch runs each key on
+that plugin only (`providers::resolve`), never on another provider that
+happens to be loaded here, so one contest is never judged by two plugins
+under two configs. The claim, the system-error retry, the steal and the
+stuck detector take a unit only when this replica has every key's
+fleet-wide provider loaded (`Loaded::here`, read from its registries, so the
+check costs no round trip), or when no live replica has one loaded: then the
+replica that takes the unit fails it visibly instead of it waiting unseen
+(`providers::runs_here`). Every attempt would meet the same, so its system
+error stands on the first attempt, never retried, as `PLUGIN_NOT_LOADED`
+with a message naming the plugin, its role and the key
+(`judging::fault::missing_plugin`). Each replica publishes what it has loaded, each key
+with the plugins that registered it there, in its `plugin_replica.provides`
+row. A unit
 this replica cannot run yet stays `Queued` for a replica that can, or for
 this one once it loads the plugin. A plugin that stops being loaded here
 after a unit was claimed with everything loaded (a reload, an unload) is
@@ -199,10 +216,17 @@ hooks as part of itself (a contest plugin's submission call, a detached
 session); the reaper and an applied judgement start them in a task of their
 own that counts as judging work until they have run
 (`spawn_after_judging_hooks`), so neither waits for a hook. A hook event
-fires at most once fleet-wide: the replica that dispatches it first inserts
-its id into `hook_event`, so no other replica and no restart dispatches it
-again, and a dispatch dropped before it completes deletes the row, so the
-event is dispatched again. A client therefore never sees a terminal status
+is delivered at least once fleet-wide. The replica that dispatches it first
+records it in `hook_event` (its id, topic, payload and enablements) with a
+lease, before its hooks run, so a duplicate dispatch on any replica, or after
+a restart, is skipped. A dispatch that completes marks the event done. One
+whose hooks could not answer (a busy plugin, a database outage), or that is
+dropped, gives the lease back, without waiting on the database, so shutdown
+is never held up. Every replica re-scans the table every 10 s: it runs again
+each event that is not done and whose lease is free or has lapsed (10 min, so
+the event of a replica that died runs again), records and runs the events it
+could not record itself, and deletes completed events after 7 days. Plugins
+take a hook event as idempotent. A client therefore never sees a terminal status
 that a retry takes back: within an attempt the statuses only move forward,
 and a terminal status is final.
 
@@ -231,12 +255,19 @@ are keyed on it.
   from `max_judge_epoch`, which locks the submission and names the apply's
   after-judging event (`after_judging:{id}:applied:{n}`), so re-applying a
   judgement fires its hooks again.
-- A judgement records the problem's `test_data_version` when it is claimed;
-  every change to the problem's test data commits through `TestDataEdit`,
-  which counts it. Applying a judgement judged against other test data than
-  the problem has now is refused with `409 JUDGED_ON_OTHER_TEST_DATA` unless
-  the request says `force=true`, since its verdicts would show beside data
-  they were not judged with.
+- Everything judging reads of a problem is versioned as one:
+  `problem.inputs_version` counts every change to its test cases, its time
+  and memory limits, its type, its checker format, its additional files
+  (graders) and its problem-scoped and contest-problem configs (its checker
+  source among them). Database triggers count them (`judging::inputs`), so
+  every write path counts a change without knowing to. The dispatch reads the
+  problem and its test cases in one snapshot and stamps the judgement with
+  that snapshot's version (`judging::stamp_inputs_version`). Applying a
+  judgement judged against other inputs than the problem has now is refused
+  with `409 JUDGED_ON_OTHER_INPUTS` unless the request says `force=true`,
+  since its verdicts would show beside inputs they were not judged with; a
+  forced apply marks the judgement `judged_on_earlier_inputs`, which staff see
+  in its Versions card.
 - A judgement that stops being current while still in flight is finalized as
   `Superseded`, a status of its own: it never got a verdict, so it is
   history, not a system error. No retry takes it, and applying it is refused

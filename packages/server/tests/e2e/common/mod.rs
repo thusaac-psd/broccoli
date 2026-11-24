@@ -343,14 +343,22 @@ impl E2eTestApp {
     /// periodic reconcile does: what a change another replica published does
     /// here.
     pub async fn reconcile_plugins(&self) {
+        let failed = self.reconcile_plugins_failing().await;
+        assert!(failed.is_empty(), "reconcile failed to apply {failed:?}");
+    }
+
+    /// [`Self::reconcile_plugins`], returning the plugins it could not load.
+    pub async fn reconcile_plugins_failing(&self) -> Vec<String> {
         let state = self
             .state
             .as_ref()
             .expect("reconcile_plugins needs the in-process server");
-        let failures = server::plugin_lifecycle::reconcile(state)
+        server::plugin_lifecycle::reconcile(state)
             .await
-            .expect("reconcile the plugin table");
-        assert!(failures.is_empty(), "reconcile failed to apply a plugin");
+            .expect("reconcile the plugin table")
+            .into_iter()
+            .map(|failure| failure.plugin_id)
+            .collect()
     }
 
     /// Takes a sample burst on the in-process server's platform clock, as
@@ -661,9 +669,12 @@ impl E2eTestApp {
             std::time::Duration::from_secs(30),
             &server::database::app_session(&app_config.database),
         );
+        let plugin_lifecycle: std::sync::Arc<server::plugin_lifecycle::PluginLifecycle> =
+            Default::default();
         let plugins = ServerManager::new(
             app_config.plugin.clone(),
             server::host_funcs::context::HostFunctionSystemDeps {
+                plugin_lifecycle: plugin_lifecycle.clone(),
                 // Plugin SQL runs as each plugin's own role, as in production;
                 // the host function pool shares the app pool.
                 plugin_sql: plugin_sql.clone(),
@@ -722,7 +733,7 @@ impl E2eTestApp {
             prometheus_registry: e2e_prom_registry,
             dispatcher_permits: server::dispatcher::permits::DispatcherSemaphore::default(),
             worker_slots: worker_slots.clone(),
-            plugin_lifecycle: Default::default(),
+            plugin_lifecycle,
             plugin_sql,
             last_workers: Default::default(),
         };
@@ -819,6 +830,7 @@ impl E2eTestApp {
                     functions: server::registry::EvaluatorFunctions::Direct {
                         function: "noop".into(),
                     },
+                    uses_checker: true,
                 },
             );
             {

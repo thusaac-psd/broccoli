@@ -141,9 +141,10 @@ pub struct UploadTestCasesRequest {
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ApplyJudgementQuery {
-    /// Apply it even if it was judged against test data the problem has
-    /// changed since, which is otherwise refused with
-    /// `JUDGED_ON_OTHER_TEST_DATA`.
+    /// Apply it even if it was judged against inputs the problem has changed
+    /// since (test data, limits, checker or other files), which is otherwise
+    /// refused with `JUDGED_ON_OTHER_INPUTS`; the judgement is then marked
+    /// `judged_on_earlier_inputs`.
     #[serde(default)]
     pub force: bool,
 }
@@ -193,7 +194,11 @@ pub async fn problem_response(
         crate::plugin_lifecycle::contest_type_outage(state, &m.default_contest_type).await;
     let closed_by = state
         .plugin_lifecycle
-        .closed_by(crate::providers::Needs::of(&m.default_contest_type, &m));
+        .closed_by(
+            state
+                .plugin_lifecycle
+                .needs_on(&m.default_contest_type, &m, None),
+        );
     let submission_format: Option<std::collections::HashMap<String, Vec<String>>> = m
         .submission_format
         .and_then(|v| serde_json::from_value(v).ok());

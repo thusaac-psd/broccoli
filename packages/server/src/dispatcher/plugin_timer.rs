@@ -18,7 +18,10 @@
 //! forever, and the loop keeps delivering every other plugin's timers in the
 //! meantime.
 //!
-//! `attempts` counts deliveries that started. The claim statement is the
+//! `attempts` counts deliveries the plugin answered or that ran to the end
+//! of their lease. A delivery the plugin could not answer (its SQL met a
+//! database outage, the server is draining, the plugin is between loads)
+//! is handed back with its attempt refunded. The claim statement is the
 //! single owner of the retry budget: it never claims a row whose budget is
 //! spent and, in the same statement, deletes every such row whose last
 //! claim's lease has expired, however that last delivery ended (a trap, a
@@ -175,24 +178,38 @@ pub async fn tick_once(state: &AppState, config: &TimerConfig) -> Result<TickSta
     // re-claim the rows, so a guest still running here would run twice. A
     // delivery starts only with a whole call budget of lease left, and one
     // still running when the lease ends is cancelled and keeps its attempt;
-    // the rows not reached are handed back with theirs refunded.
+    // one the plugin could not answer ends the tick, and it and the rows not
+    // reached are handed back with theirs refunded.
     let lease_ends = claim_started + config.lease();
     let mut rows = due.into_iter().peekable();
+    let mut unanswered = Vec::new();
     while rows.peek().is_some_and(|_| {
         lease_ends.saturating_duration_since(tokio::time::Instant::now()) >= config.call_budget
     }) {
         let Some(row) = rows.next() else { break };
-        if deliver(state, &row, lease_ends.into_std()).await == Delivery::LeaseEnded {
-            warn!(
-                plugin_id = %row.plugin_id,
-                key = %row.key,
-                attempts = row.attempts,
-                "Plugin timer delivery was cancelled at the end of its claim lease; it will be retried"
-            );
-            break;
+        match deliver(state, &row, lease_ends.into_std()).await {
+            Delivery::Done => {}
+            Delivery::LeaseEnded => {
+                warn!(
+                    plugin_id = %row.plugin_id,
+                    key = %row.key,
+                    attempts = row.attempts,
+                    "Plugin timer delivery was cancelled at the end of its claim lease; it will be retried"
+                );
+                break;
+            }
+            Delivery::Unanswered => {
+                warn!(
+                    plugin_id = %row.plugin_id,
+                    key = %row.key,
+                    "Plugin could not answer a timer delivery; it is handed back with its attempt refunded"
+                );
+                unanswered.push(row);
+                break;
+            }
         }
     }
-    let unreached: Vec<plugin_timer::Model> = rows.collect();
+    let unreached: Vec<plugin_timer::Model> = unanswered.into_iter().chain(rows).collect();
     if !unreached.is_empty() {
         release_unreached(&state.db, &unreached).await;
     }
@@ -427,6 +444,23 @@ enum Delivery {
     /// The guest was still running when the claim's lease ended and was
     /// cancelled.
     LeaseEnded,
+    /// The plugin could not answer before the lease ended (its SQL met a
+    /// database outage, the server is draining, the plugin is between
+    /// loads): nothing about the timer, so the row goes back with its
+    /// attempt refunded, as an unreached one does.
+    Unanswered,
+}
+
+impl Delivery {
+    /// How a delivery whose call answered `called` ended, `lease_ended`
+    /// saying whether the claim's lease had ended by then.
+    fn of<T>(called: &Result<T, PluginError>, lease_ended: bool) -> Self {
+        match called {
+            Err(e) if e.is_unavailable() && lease_ended => Self::LeaseEnded,
+            Err(e) if e.is_unavailable() => Self::Unanswered,
+            _ => Self::Done,
+        }
+    }
 }
 
 /// Delivers one claimed row: invokes the plugin's declared timer function,
@@ -482,7 +516,7 @@ async fn deliver(
         }
     };
 
-    match state
+    let called = state
         .plugins
         .call_raw(
             &row.plugin_id,
@@ -490,24 +524,20 @@ async fn deliver(
             input_bytes,
             CallOptions::background(lease_ends),
         )
-        .await
-    {
-        Ok(_) => {
-            delete_timer(&state.db, row).await;
-            Delivery::Done
-        }
-        Err(PluginError::Unavailable { .. }) => Delivery::LeaseEnded,
-        Err(e) => {
-            warn!(
-                plugin_id = %row.plugin_id,
-                key = %row.key,
-                attempts = row.attempts,
-                error = %e,
-                "Plugin timer delivery failed; will retry after lease expiry"
-            );
-            Delivery::Done
-        }
+        .await;
+    let delivery = Delivery::of(&called, std::time::Instant::now() >= lease_ends);
+    match called {
+        Ok(_) => delete_timer(&state.db, row).await,
+        Err(e) if delivery == Delivery::Done => warn!(
+            plugin_id = %row.plugin_id,
+            key = %row.key,
+            attempts = row.attempts,
+            error = %e,
+            "Plugin timer delivery failed; will retry after lease expiry"
+        ),
+        Err(_) => {}
     }
+    delivery
 }
 
 #[cfg(test)]
@@ -828,6 +858,40 @@ mod tests {
         let claimed = claim(&db, 2).await;
 
         assert_eq!(claimed.len(), 2, "batch limit must bound one claim tick");
+    }
+
+    /// A delivery the plugin could not answer (its SQL met a database outage,
+    /// the server is draining, the plugin is between loads) says nothing
+    /// about the timer: before the lease ends it is handed back with its
+    /// attempt refunded. Only a call cut at the lease's end keeps its
+    /// attempt, and an answer of the plugin's own, success or failure, ends
+    /// the delivery.
+    #[test]
+    fn an_unanswered_delivery_refunds_its_attempt_unless_the_lease_ended() {
+        let unavailable = || PluginError::Unavailable {
+            plugin_id: "p".into(),
+            func_name: "on_timer".into(),
+        };
+        let failed = || PluginError::ExecutionFailed {
+            plugin_id: "p".into(),
+            func_name: "on_timer".into(),
+            depth: 1,
+            message: "boom".into(),
+        };
+        assert_eq!(Delivery::of(&Ok::<(), _>(()), false), Delivery::Done);
+        assert_eq!(Delivery::of(&Err::<(), _>(failed()), false), Delivery::Done);
+        assert_eq!(
+            Delivery::of(&Err::<(), _>(unavailable()), false),
+            Delivery::Unanswered
+        );
+        assert_eq!(
+            Delivery::of(&Err::<(), _>(PluginError::ShuttingDown), false),
+            Delivery::Unanswered
+        );
+        assert_eq!(
+            Delivery::of(&Err::<(), _>(unavailable()), true),
+            Delivery::LeaseEnded
+        );
     }
 
     #[tokio::test]

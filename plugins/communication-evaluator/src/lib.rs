@@ -21,7 +21,7 @@ fn load_comm_config(host: &Host, problem_id: i32) -> Result<config::CommConfig, 
 pub fn init() -> FnResult<String> {
     let host = Host::new();
     host.registry
-        .register_evaluator("communication", "evaluate_communication")?;
+        .register_evaluator("communication", "evaluate_communication", false)?;
     host.log.info("Communication evaluator registered")?;
     Ok("ok".to_string())
 }

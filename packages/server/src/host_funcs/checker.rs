@@ -16,6 +16,7 @@ use std::sync::Arc;
 struct CheckerStageContext {
     caller_plugin_id: String,
     checker_stage_registry: CheckerStageRegistry,
+    plugin_lifecycle: std::sync::Arc<crate::plugin_lifecycle::PluginLifecycle>,
     plugin_manager: super::context::ManagerRef,
 }
 
@@ -28,11 +29,13 @@ impl super::HostFnContext for CheckerStageContext {
 fn checker_stage_data(
     caller_plugin_id: String,
     checker_stage_registry: CheckerStageRegistry,
+    plugin_lifecycle: std::sync::Arc<crate::plugin_lifecycle::PluginLifecycle>,
     plugin_manager: super::context::ManagerRef,
 ) -> UserData<Arc<CheckerStageContext>> {
     super::host_data(CheckerStageContext {
         caller_plugin_id,
         checker_stage_registry,
+        plugin_lifecycle,
         plugin_manager,
     })
 }
@@ -40,13 +43,19 @@ fn checker_stage_data(
 pub fn create_resolve_checker_function(
     plugin_id: String,
     checker_stage_registry: CheckerStageRegistry,
+    plugin_lifecycle: std::sync::Arc<crate::plugin_lifecycle::PluginLifecycle>,
     plugin_manager: super::context::ManagerRef,
 ) -> Function {
     super::host_function(
         "resolve_checker",
         [ValType::I64],
         [ValType::I64],
-        checker_stage_data(plugin_id, checker_stage_registry, plugin_manager),
+        checker_stage_data(
+            plugin_id,
+            checker_stage_registry,
+            plugin_lifecycle,
+            plugin_manager,
+        ),
         super::Waits::Blocks,
         resolve_checker_fn,
     )
@@ -55,13 +64,19 @@ pub fn create_resolve_checker_function(
 pub fn create_interpret_checker_function(
     plugin_id: String,
     checker_stage_registry: CheckerStageRegistry,
+    plugin_lifecycle: std::sync::Arc<crate::plugin_lifecycle::PluginLifecycle>,
     plugin_manager: super::context::ManagerRef,
 ) -> Function {
     super::host_function(
         "interpret_checker_result",
         [ValType::I64],
         [ValType::I64],
-        checker_stage_data(plugin_id, checker_stage_registry, plugin_manager),
+        checker_stage_data(
+            plugin_id,
+            checker_stage_registry,
+            plugin_lifecycle,
+            plugin_manager,
+        ),
         super::Waits::Blocks,
         interpret_checker_fn,
     )
@@ -79,17 +94,25 @@ fn checker_stage_call(
 ) -> Result<Vec<u8>, extism::Error> {
     let ctx = super::HostCall::enter(user_data, host_fn_name)?;
 
-    let handler = tokio::runtime::Handle::current()
-        .block_on(async { ctx.checker_stage_registry.read().await.get(format).cloned() });
-    let Some(handler) = handler else {
-        // Lost since the claim, a fault of this replica's (see
-        // `Dispatch::not_loaded_here`).
-        if let Some(dispatch) = crate::services::judging::Dispatch::of_current_call() {
-            dispatch.not_loaded_here(&format!("the checker of format {format}"));
+    let kind = crate::providers::Provided::CheckerFormat;
+    let handler = tokio::runtime::Handle::current().block_on(async {
+        crate::providers::resolve(
+            &*ctx.checker_stage_registry.read().await,
+            ctx.plugin_lifecycle.provider(kind, format),
+            kind,
+            format,
+        )
+    });
+    let handler = match handler {
+        Ok(handler) => handler,
+        Err(unresolved) => {
+            // Handed back or standing, by how the unit was claimed (see
+            // `Dispatch::missing_plugin`).
+            if let Some(dispatch) = crate::services::judging::Dispatch::of_current_call() {
+                dispatch.missing_plugin(&unresolved);
+            }
+            return Err(extism::Error::msg(unresolved.to_string()));
         }
-        return Err(extism::Error::msg(format!(
-            "No checker resolver registered for '{format}'"
-        )));
     };
 
     let function_name = select_handler_fn(&handler);

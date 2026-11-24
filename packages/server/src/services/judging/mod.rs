@@ -97,6 +97,7 @@
 mod budget;
 mod dispatch;
 mod fault;
+mod inputs;
 mod notify;
 mod open;
 mod plugin_writes;
@@ -110,6 +111,10 @@ pub(crate) use budget::RetryBudget;
 pub use dispatch::{Dispatch, DispatchedUnit, LiveDispatches, LiveUnit, NotOwned};
 pub(crate) use fault::{CallEnd, DispatchFailure};
 pub use fault::{DispatchFault, DispatchFaults};
+pub use inputs::RESTORING;
+#[cfg(test)]
+pub(crate) use inputs::expected::install as install_inputs_triggers;
+pub(crate) use inputs::stamp_inputs_version;
 pub use notify::CLAIM_CHANNEL;
 pub(crate) use notify::ClaimWake;
 #[cfg(test)]

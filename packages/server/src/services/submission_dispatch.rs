@@ -1,4 +1,5 @@
 use crate::error::HostCode;
+use crate::providers::Provided;
 use crate::registry::ContestTypeRegistry;
 use broccoli_server_sdk::types::{
     AfterJudgingEvent, DetachedSubmissionCompletion, HookEvent, OnSubmissionInput,
@@ -303,38 +304,60 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
         ),
     );
 
-    let contest_type = Some(submission.contest_type.clone());
-
-    let handler = {
-        let registry = state.registries.contest_type_registry.read().await;
-        contest_type.as_ref().and_then(|t| registry.get(t)).cloned()
-    };
-
+    let handler = crate::providers::resolve(
+        &*state.registries.contest_type_registry.read().await,
+        state
+            .plugin_lifecycle
+            .provider(Provided::ContestType, &submission.contest_type),
+        Provided::ContestType,
+        &submission.contest_type,
+    );
     let handler = match handler {
-        Some(h) => h,
-        None => {
-            warn!(
-                submission_id = submission.id,
-                contest_type = ?contest_type,
-                "No plugin registered for contest type"
-            );
+        Ok(h) => h,
+        Err(unresolved) => {
+            warn!(submission_id = submission.id, "{unresolved}");
             record_dispatch_failure(
                 &state.db,
                 &state.metrics,
                 judgement_ref,
                 &faults,
-                DispatchFailure::no_handler(
-                    live.needs_loaded(),
-                    format!("contest type {:?}", contest_type),
-                ),
+                DispatchFailure::no_handler(live.needs_loaded(), &unresolved),
             )
             .await;
             return;
         }
     };
 
+    // Every judging input read here (the problem's limits and type, its test
+    // cases) comes from one snapshot, which also gives the inputs version
+    // the judgement is stamped with (`judging::stamp_inputs_version`).
+    let inputs = match state
+        .db
+        .begin_with_config(
+            Some(IsolationLevel::RepeatableRead),
+            Some(AccessMode::ReadOnly),
+        )
+        .await
+    {
+        Ok(txn) => txn,
+        Err(e) => {
+            error!(error = %e, "DB error opening the judging inputs snapshot");
+            record_dispatch_failure(
+                &state.db,
+                &state.metrics,
+                judgement_ref,
+                &faults,
+                DispatchFailure::judging(
+                    HostCode::DatabaseError,
+                    format!("Failed to read the judging inputs: {e}"),
+                ),
+            )
+            .await;
+            return;
+        }
+    };
     let problem = match problem::Entity::find_by_id(submission.problem_id)
-        .one(&state.db)
+        .one(&inputs)
         .await
     {
         Ok(Some(p)) => p,
@@ -413,7 +436,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             )
             .order_by_asc(test_case::Column::Position)
             .into_model::<SubmissionDispatchTestCaseRow>()
-            .all(&state.db)
+            .all(&inputs)
             .await
         {
             Ok(tcs) => tcs,
@@ -538,6 +561,29 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
         }
         resolved_test_cases
     };
+    drop(inputs);
+    if let Err(e) = judging::stamp_inputs_version(
+        &state.db,
+        judgement_ref.id,
+        judgement_ref.judge_epoch,
+        problem.inputs_version,
+    )
+    .await
+    {
+        error!(error = %e, "DB error stamping the judging inputs version");
+        record_dispatch_failure(
+            &state.db,
+            &state.metrics,
+            judgement_ref,
+            &faults,
+            DispatchFailure::judging(
+                HostCode::DatabaseError,
+                format!("Failed to record the judging inputs version: {e}"),
+            ),
+        )
+        .await;
+        return;
+    }
 
     let input = OnSubmissionInput {
         submission_id: submission.id,

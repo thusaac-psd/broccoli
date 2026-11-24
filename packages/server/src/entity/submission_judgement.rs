@@ -85,11 +85,15 @@ pub struct Model {
     /// clears it.
     #[sea_orm(default_value = false)]
     pub error_stands: bool,
-    /// The problem's test data version (`problem::Model::test_data_version`)
-    /// when this dispatch was claimed: the data its verdicts were judged
-    /// against. Applying it after the data changed needs `force`.
+    /// The problem's inputs version (`problem::Model::inputs_version`) its
+    /// dispatch read the inputs at: what its verdicts were judged against.
+    /// Applying it after the inputs changed needs `force`.
     #[sea_orm(default_value = 0)]
-    pub test_data_version: i32,
+    pub inputs_version: i32,
+    /// It was applied, forced, after the problem's inputs changed: its
+    /// verdicts show beside inputs it was not judged with.
+    #[sea_orm(default_value = false)]
+    pub judged_on_earlier_inputs: bool,
 
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeUtc,

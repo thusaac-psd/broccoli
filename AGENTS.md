@@ -291,17 +291,19 @@ binaries warn about every key they do not read.
   keep an old shape for, so no expand/contract.
 - When changing plugin execution behavior, check both manifest-level permissions
   and host-side registration/resolution.
-- A unit of work runs only while every plugin it needs has an enabled provider:
-  its contest type's plugin, its problem type's evaluator and its checker
-  format's checker (`providers::Needs`). Work that cannot run because one is
-  disabled fleet-wide is parked, not failed: the claim, the system-error retry,
-  the stuck detector and the overview's parked count read one predicate
+- A unit of work runs only while every plugin it needs has an enabled provider.
+  It needs exactly the plugins it uses (`providers::Needs`, built by
+  `PluginLifecycle::needs`): its contest type's plugin, its problem type's
+  evaluator, its language's resolver, and its checker format's checker only when
+  the evaluator registered with `uses_checker`. Work that cannot run because one
+  is disabled fleet-wide is parked, not failed: the claim, the system-error
+  retry, the stuck detector and the overview's parked count read one predicate
   (`judging::Unit::runnable`, built on `providers::runnable`;
   `PluginLifecycle::closed_by` in Rust), the submit paths refuse it
   (`accepting_handler`), and it resumes when a provider is enabled. A replica
-  takes a unit only when it has every one of those plugins loaded, or no live
-  replica has one (`providers::runs_here`, local keys from
-  `Provides::loaded_here`); a plugin lost after the claim hands the attempt back
+  takes a unit only when it has every key's fleet-wide provider loaded, or no
+  live replica has (`providers::runs_here`, local registrations from
+  `Loaded::here`); a plugin lost after the claim hands the attempt back
   (`Dispatch::not_loaded_here`). A new scan that hands out or retries judging
   work uses these predicates too. A judgement whose session the disable cut goes
   straight back to `Queued` (`judging::fail_dispatch`), never through
@@ -331,8 +333,9 @@ binaries warn about every key they do not read.
   stolen.
 - A failure every attempt would repeat stands: its `DispatchFault` classes as
   standing (a problem's checker or its own program failing, `CHECKER_FAILED`,
-  `PROBLEM_FAILED`), and the system-error retry never re-judges it. An evaluator
-  reports a problem's failure generically, in
+  `PROBLEM_FAILED`; a plugin the unit needs loaded on no live replica when it
+  was taken, `PLUGIN_NOT_LOADED`), and the system-error retry never re-judges
+  it. An evaluator reports a problem's failure generically, in
   `TestCaseVerdict::problem_failure`; the host never reads a plugin's verdict
   for it. A system error the retry may still take back is not shown: the
   submission and its judgement history show the attempt in flight until the
@@ -349,24 +352,31 @@ binaries warn about every key they do not read.
   JSON body, so the host writes every header (no cookie, redirect or page from a
   plugin). A plugin never speaks as the host or as another plugin.
 - Several plugins may provide one key (a contest type, a problem type, a checker
-  format, a language). `registry::Providers` keeps every registration and
-  resolves a key to the provider whose plugin id sorts first, so replicas that
-  load the same plugins agree and an unload hands the key to the next provider.
-  Register and resolve through it, never through a map of your own.
+  format, a language). `registry::Providers` keeps every registration. Judging
+  work resolves a key to its fleet-wide provider, the enabled plugin providing
+  it whose id sorts first (`PluginLifecycle::provider`, `providers::provider` in
+  SQL), through `providers::resolve`, so every replica runs a key on the same
+  plugin and a replica that lacks that plugin never falls back to another.
+  Register and resolve through these, never through a map of your own.
 - Every submit path (practice and contest submissions, code runs) accepts work
   through one rule, `plugin_lifecycle::accepting_handler`, which refuses a
   contest type no provider can judge now; a new submit path calls it too.
+- Everything judging reads of a problem (test cases, limits, type, checker
+  format, additional files, problem-scoped and contest-problem configs) is
+  versioned as one in `problem.inputs_version`, counted by database triggers
+  (`services::judging::inputs`), never by a write path: a new input table gets
+  the trigger. The dispatch stamps the version it read the inputs at on the
+  judgement; applying a judgement of another version needs `force` and marks it
+  `judged_on_earlier_inputs`.
 - A change to a problem's test data goes through
-  `services::test_data::TestDataEdit`, which counts it in
-  `problem.test_data_version` (judging copies the version onto every judgement
-  it claims, and applying a judgement of another version needs `force`), and
-  whose commit checks the problem's stored configs against the data as the
-  change leaves it and refuses a change that breaks one with 409
-  `CONFIG_WOULD_BREAK` unless the request says `force=true`. The problem's
-  `config_issues` flag, which judging copies onto every judgement it claims, is
-  kept by `services::config_issues`: a new path that changes what a stored
-  config is checked against (test data, a plugin, a contest- or plugin-scope
-  config) rechecks it there, after it commits and off the judging path.
+  `services::test_data::TestDataEdit`, whose commit checks the problem's stored
+  configs against the data as the change leaves it and refuses a change that
+  breaks one with 409 `CONFIG_WOULD_BREAK` unless the request says `force=true`.
+  The problem's `config_issues` flag, which judging copies onto every judgement
+  it claims, is kept by `services::config_issues`: a new path that changes what
+  a stored config is checked against (test data, a plugin, a contest- or
+  plugin-scope config) rechecks it there, after it commits and off the judging
+  path.
 - Every write or delete of a stored plugin config, an admin's, a plugin's
   (`config_set`) or the host's own as a problem or contest goes, goes through
   `services::plugin_config` (`write_config`, `delete_config*`): a write passes
