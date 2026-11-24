@@ -3,19 +3,29 @@
 //! A plugin provides keys of three kinds ([`Provided`]): contest types it
 //! judges, problem types it evaluates, checker formats it resolves. A
 //! judgement or code run needs one key of each: its contest type, its
-//! problem's type and its problem's checker format ([`Needs`]). The same
-//! record of keys ([`Provides`]) says what one plugin registered (its
-//! `plugin.governs`, see `plugin_lifecycle::Governs`), what this replica has
-//! loaded ([`Provides::loaded_here`], read from its registries), and what each
-//! live replica has loaded (its `plugin_replica.provides`).
+//! problem's type and its problem's checker format ([`Needs`]). What one
+//! plugin registered is a [`Provides`] (its `plugin.governs`, see
+//! `plugin_lifecycle::Governs`); what a replica has loaded is a [`Loaded`],
+//! each key with the plugins that registered it there ([`Loaded::here`],
+//! read from its registries, and each live replica's
+//! `plugin_replica.provides`).
 //!
-//! Two rules read them, alike for every kind:
+//! One rule resolves a key: to its fleet-wide provider, the plugin with the
+//! first id among the enabled ones that provide it
+//! (`PluginLifecycle::provider`, and [`provider`] in SQL, over the rows
+//! `plugin.is_enabled` and `plugin.governs`). A key no plugin ever recorded
+//! resolves among the plugins loaded here. The claim, the dispatch
+//! ([`resolve`]) and the parking rule all read it:
 //!
 //! - a unit is runnable while every key it needs has a provider enabled
 //!   fleet-wide (`runnable`); work that is not is parked;
-//! - a replica takes a unit only when it has every key the unit needs loaded,
-//!   or no live replica has that key loaded (then the replica that takes it
-//!   fails it visibly instead of it waiting unseen) (`runs_here`).
+//! - a replica takes a unit only when it has every key's fleet-wide provider
+//!   loaded, or no live replica has (then the replica that takes it fails it
+//!   visibly instead of it waiting unseen) (`runs_here`);
+//! - the dispatch runs each key on its fleet-wide provider only, so one
+//!   contest is never judged by two plugins under two configs.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -60,32 +70,42 @@ impl Provides {
         self.keys(kind).iter().any(|k| k == key)
     }
 
-    /// What this replica has loaded: every key its registries hold.
-    pub async fn loaded_here(registries: &RegistryState) -> Self {
-        Self::registered(registries, None).await
-    }
-
     /// What `plugin_id` registered in this replica's registries.
     pub async fn registered_by(registries: &RegistryState, plugin_id: &str) -> Self {
-        Self::registered(registries, Some(plugin_id)).await
-    }
-
-    async fn registered(registries: &RegistryState, plugin_id: Option<&str>) -> Self {
-        fn sorted(mut keys: Vec<String>) -> Vec<String> {
-            keys.sort();
-            keys
+        let loaded = Loaded::here(registries).await;
+        let keys = |map: &BTreeMap<String, Vec<String>>| -> Vec<String> {
+            map.iter()
+                .filter(|(_, plugins)| plugins.iter().any(|p| p == plugin_id))
+                .map(|(key, _)| key.clone())
+                .collect()
+        };
+        Self {
+            contest_types: keys(&loaded.contest_types),
+            problem_types: keys(&loaded.problem_types),
+            checker_formats: keys(&loaded.checker_formats),
         }
+    }
+}
+
+/// What one replica has loaded: for each kind, every key with the plugins
+/// that registered it there, ids sorted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Loaded {
+    pub contest_types: BTreeMap<String, Vec<String>>,
+    pub problem_types: BTreeMap<String, Vec<String>>,
+    pub checker_formats: BTreeMap<String, Vec<String>>,
+}
+
+impl Loaded {
+    /// What this replica has loaded: every registration its registries hold.
+    pub async fn here(registries: &RegistryState) -> Self {
         macro_rules! keys {
             ($registry:ident) => {{
                 let registry = registries.$registry.read().await;
-                sorted(match plugin_id {
-                    Some(id) => registry
-                        .registered_by(id)
-                        .into_iter()
-                        .map(|(k, _)| k)
-                        .collect(),
-                    None => registry.keys().cloned().collect(),
-                })
+                registry
+                    .keys()
+                    .map(|key| (key.clone(), registry.plugins_of(key)))
+                    .collect()
             }};
         }
         Self {
@@ -93,6 +113,108 @@ impl Provides {
             problem_types: keys!(evaluator_registry),
             checker_formats: keys!(checker_stage_registry),
         }
+    }
+
+    fn of(&self, kind: Provided) -> &BTreeMap<String, Vec<String>> {
+        match kind {
+            Provided::ContestType => &self.contest_types,
+            Provided::ProblemType => &self.problem_types,
+            Provided::CheckerFormat => &self.checker_formats,
+        }
+    }
+
+    /// Whether `plugin_id` registered `key` of `kind` here.
+    pub fn has(&self, kind: Provided, key: &str, plugin_id: &str) -> bool {
+        self.of(kind)
+            .get(key)
+            .is_some_and(|plugins| plugins.iter().any(|p| p == plugin_id))
+    }
+
+    /// Whether any plugin registered `key` of `kind` here.
+    pub fn has_key(&self, kind: Provided, key: &str) -> bool {
+        self.of(kind).contains_key(key)
+    }
+}
+
+/// Who resolves a key fleet-wide (`PluginLifecycle::provider`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FleetProvider {
+    /// The enabled provider whose id sorts first.
+    Plugin(String),
+    /// Plugins recorded the key, and every one is disabled.
+    Closed,
+    /// No plugin ever recorded the key: it resolves among the plugins loaded
+    /// here.
+    Unknown,
+}
+
+/// Why a key did not resolve to a handler here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unresolved {
+    pub kind: Provided,
+    pub key: String,
+    /// The key's fleet-wide provider, when it has one: not loaded here.
+    pub provider: Option<String>,
+}
+
+impl std::fmt::Display for Unresolved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let role = role(self.kind);
+        match &self.provider {
+            Some(plugin_id) => write!(
+                f,
+                "{role} plugin {plugin_id} for {} {:?} is not loaded on this replica",
+                noun(self.kind),
+                self.key
+            ),
+            None => write!(
+                f,
+                "no {role} plugin provides {} {:?}",
+                noun(self.kind),
+                self.key
+            ),
+        }
+    }
+}
+
+/// What a plugin providing a key of `kind` is to the unit.
+pub fn role(kind: Provided) -> &'static str {
+    match kind {
+        Provided::ContestType => "the contest",
+        Provided::ProblemType => "the evaluator",
+        Provided::CheckerFormat => "the checker",
+    }
+}
+
+fn noun(kind: Provided) -> &'static str {
+    match kind {
+        Provided::ContestType => "contest type",
+        Provided::ProblemType => "problem type",
+        Provided::CheckerFormat => "checker format",
+    }
+}
+
+/// The handler `key` (a `kind` of key) resolves to here: its fleet-wide
+/// provider's registration (`fleet`), or, for a key no plugin ever recorded,
+/// the first loaded here. The one place a dispatch picks a handler.
+pub fn resolve<H: crate::registry::Provided>(
+    registry: &crate::registry::Providers<H>,
+    fleet: FleetProvider,
+    kind: Provided,
+    key: &str,
+) -> Result<H, Unresolved> {
+    let unresolved = |provider| Unresolved {
+        kind,
+        key: key.to_string(),
+        provider,
+    };
+    match fleet {
+        FleetProvider::Plugin(plugin_id) => registry
+            .registration(key, &plugin_id)
+            .cloned()
+            .ok_or_else(|| unresolved(Some(plugin_id))),
+        FleetProvider::Closed => Err(unresolved(None)),
+        FleetProvider::Unknown => registry.get(key).cloned().ok_or_else(|| unresolved(None)),
     }
 }
 
@@ -143,22 +265,35 @@ pub(crate) fn runnable(needs: [(Provided, &str); 3]) -> String {
     format!("({})", each.join(" AND "))
 }
 
+/// SQL: the fleet-wide provider of `key` (an SQL expression) of `kind`: the
+/// enabled plugin providing it whose id sorts first, bytewise as Rust sorts
+/// it; NULL when none is enabled. The SQL form of
+/// `PluginLifecycle::provider`.
+pub(crate) fn provider(kind: Provided, key: &str) -> String {
+    format!(
+        "(SELECT min(p.id COLLATE \"C\") FROM plugin p \
+           WHERE p.is_enabled AND p.governs->'{field}' @> jsonb_build_array({key}))",
+        field = field(kind),
+    )
+}
+
 /// SQL: this replica may take work with `needs` (each an SQL expression,
-/// with its kind): for every key, this replica has it loaded (`local`, the
-/// placeholder each kind's list of [`Provides::loaded_here`] is bound to), or
-/// no live replica has it loaded (`plugin_replica.provides`, live by its
-/// heartbeat on the database clock).
-pub(crate) fn runs_here(needs: [(Provided, &str); 3], local: &LocalPlaceholders) -> String {
+/// with its kind): for every key, this replica has its fleet-wide
+/// [`provider`] loaded (`local`, the placeholder [`Loaded::here`] is bound
+/// to), or no live replica has (`plugin_replica.provides`, live by its
+/// heartbeat on the database clock). A key no plugin provides fleet-wide
+/// goes by whether any plugin loaded it.
+pub(crate) fn runs_here(needs: [(Provided, &str); 3], local: &str) -> String {
     let each: Vec<String> = needs
         .iter()
         .map(|(kind, key)| {
             format!(
-                "({key} = ANY({local}) OR NOT EXISTS (\
+                "({here} OR NOT EXISTS (\
                    SELECT 1 FROM plugin_replica r \
                     WHERE r.heartbeat_at > NOW() - make_interval(secs => {live}) \
-                      AND r.provides->'{field}' @> jsonb_build_array({key})))",
-                local = local.of(*kind),
-                field = field(*kind),
+                      AND {there}))",
+                here = loads(*kind, key, local),
+                there = loads(*kind, key, "r.provides"),
                 live = crate::plugin_fleet::LIVE_WINDOW_SECS,
             )
         })
@@ -166,22 +301,14 @@ pub(crate) fn runs_here(needs: [(Provided, &str); 3], local: &LocalPlaceholders)
     format!("({})", each.join(" AND "))
 }
 
-/// The placeholders a statement bound each kind of this replica's loaded keys
-/// to (see [`runs_here`]).
-pub(crate) struct LocalPlaceholders([String; 3]);
-
-impl LocalPlaceholders {
-    /// Binds each kind of `local` with `bind`, which returns the placeholder
-    /// of the value it bound.
-    pub(crate) fn bind(local: &Provides, mut bind: impl FnMut(Vec<String>) -> String) -> Self {
-        Self(KINDS.map(|kind| bind(local.keys(kind).to_vec())))
-    }
-
-    fn of(&self, kind: Provided) -> &str {
-        let index = KINDS
-            .iter()
-            .position(|k| *k == kind)
-            .expect("every kind is in KINDS");
-        &self.0[index]
-    }
+/// SQL: `loaded` has `key` of `kind` loaded on its fleet-wide provider, or,
+/// for a key none provides fleet-wide, on any plugin.
+fn loads(kind: Provided, key: &str, loaded: &str) -> String {
+    format!(
+        "COALESCE(CASE WHEN {provider} IS NULL \
+                       THEN ({loaded})->'{field}' ? ({key}) \
+                       ELSE ({loaded})->'{field}'->({key}) ? {provider} END, FALSE)",
+        provider = provider(kind, key),
+        field = field(kind),
+    )
 }

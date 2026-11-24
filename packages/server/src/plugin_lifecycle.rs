@@ -80,7 +80,7 @@ pub struct PluginLifecycle {
 
 struct Reported {
     report: ReplicaReport,
-    provides: Provides,
+    provides: crate::providers::Loaded,
     /// Whether a write of an equal report succeeded.
     written: bool,
 }
@@ -285,8 +285,52 @@ impl PluginLifecycle {
         providers.first().map(|id| (*id).clone())
     }
 
-    // `providers::runnable` states the same rule in SQL over the rows this
-    // reads (`plugin.is_enabled`, `plugin.governs`); change them together.
+    /// Who resolves `key` (a `kind` of key) fleet-wide: the enabled plugin
+    /// providing it whose id sorts first; `Closed` when every plugin that
+    /// recorded it is disabled; `Unknown` when none ever recorded it. The
+    /// one rule every replica resolves a key by (see `providers::resolve`);
+    /// `providers::provider` states it in SQL.
+    pub fn provider(&self, kind: Provided, key: &str) -> crate::providers::FleetProvider {
+        use crate::providers::FleetProvider;
+        let Ok(governs) = self.governs.read() else {
+            return FleetProvider::Unknown;
+        };
+        let mut recorded = false;
+        let mut first: Option<&String> = None;
+        for (id, g) in governs.iter() {
+            if !g.provides.provides(kind, key) {
+                continue;
+            }
+            recorded = true;
+            if self.is_desired_enabled(id) && first.is_none_or(|f| id < f) {
+                first = Some(id);
+            }
+        }
+        match (first, recorded) {
+            (Some(id), _) => FleetProvider::Plugin(id.clone()),
+            (None, true) => FleetProvider::Closed,
+            (None, false) => FleetProvider::Unknown,
+        }
+    }
+
+    /// Whether `local` has every key of `needs` loaded on its fleet-wide
+    /// provider ([`Self::provider`]), or, for a key none ever recorded, on
+    /// any plugin. `providers::runs_here` reads the same in SQL.
+    pub fn all_loaded(&self, local: &crate::providers::Loaded, needs: Needs<'_>) -> bool {
+        use crate::providers::FleetProvider;
+        needs
+            .each()
+            .into_iter()
+            .all(|(kind, key)| match self.provider(kind, key) {
+                FleetProvider::Plugin(id) => local.has(kind, key, &id),
+                FleetProvider::Unknown => local.has_key(kind, key),
+                FleetProvider::Closed => false,
+            })
+    }
+
+    // `providers::runnable` and `providers::provider` state these rules in
+    // SQL over the rows they read (`plugin.is_enabled`, `plugin.governs`);
+    // change them together.
 
     /// Why plugin `plugin_id`, known not to be loaded here, cannot serve:
     /// the fleet disabled it, or it is enabled and missing on this replica
@@ -534,7 +578,7 @@ fn build_report(
 /// pass. The row's heartbeat is [`heartbeat`]'s.
 async fn write_report(state: &AppState, applied: &HashMap<String, Applied>) {
     let report = build_report(state, applied, Instant::now());
-    let provides = Provides::loaded_here(&state.registries).await;
+    let provides = crate::providers::Loaded::here(&state.registries).await;
     if !record_report(state, &report, &provides) {
         return;
     }
@@ -554,7 +598,11 @@ async fn write_report(state: &AppState, applied: &HashMap<String, Applied>) {
 /// Keep `report` as this replica's latest, and say whether it is due to be
 /// written: it changed, or no write of it has succeeded yet. Never due once
 /// [`stop`] ran.
-fn record_report(state: &AppState, report: &ReplicaReport, provides: &Provides) -> bool {
+fn record_report(
+    state: &AppState,
+    report: &ReplicaReport,
+    provides: &crate::providers::Loaded,
+) -> bool {
     let Ok(mut reported) = state.plugin_lifecycle.reported.lock() else {
         return false;
     };
@@ -2012,6 +2060,69 @@ mod tests {
         lifecycle.set_desired("eval", eval_enabled);
         lifecycle.set_desired("check", check_enabled);
         lifecycle
+    }
+
+    /// A key resolves to the enabled plugin providing it whose id sorts
+    /// first, whatever is loaded here: a replica with only a later provider
+    /// loaded does not run the key on it. With every provider disabled the
+    /// key is closed, and a key no plugin recorded resolves locally.
+    #[test]
+    fn a_key_resolves_to_its_fleet_wide_provider_only() {
+        use crate::providers::{FleetProvider, Unresolved, resolve};
+        use crate::registry::{ContestTypeHandlers, Providers};
+        let lifecycle = PluginLifecycle::default();
+        for id in ["a-contest", "b-contest"] {
+            lifecycle.set_governs(
+                id,
+                Governs {
+                    provides: Provides {
+                        contest_types: vec!["t".into()],
+                        ..Provides::default()
+                    },
+                    ..Governs::default()
+                },
+            );
+            lifecycle.set_desired(id, true);
+        }
+        let mut here: Providers<ContestTypeHandlers> = Providers::default();
+        for key in ["t", "unrecorded"] {
+            here.insert(
+                key.into(),
+                ContestTypeHandlers {
+                    plugin_id: "b-contest".into(),
+                    submission_fn: "s".into(),
+                    code_run_fn: "r".into(),
+                    submission_admission: false,
+                },
+            );
+        }
+        let kind = Provided::ContestType;
+        let resolved = |key: &str| {
+            resolve(&here, lifecycle.provider(kind, key), kind, key).map(|h| h.plugin_id)
+        };
+
+        assert_eq!(
+            lifecycle.provider(kind, "t"),
+            FleetProvider::Plugin("a-contest".into())
+        );
+        assert_eq!(
+            resolved("t"),
+            Err(Unresolved {
+                kind,
+                key: "t".into(),
+                provider: Some("a-contest".into()),
+            }),
+            "b-contest is loaded here, but a-contest provides the key"
+        );
+        lifecycle.set_desired("a-contest", false);
+        assert_eq!(resolved("t"), Ok("b-contest".into()));
+        lifecycle.set_desired("b-contest", false);
+        assert_eq!(lifecycle.provider(kind, "t"), FleetProvider::Closed);
+        assert_eq!(
+            lifecycle.provider(kind, "unrecorded"),
+            FleetProvider::Unknown
+        );
+        assert_eq!(resolved("unrecorded"), Ok("b-contest".into()));
     }
 
     #[test]

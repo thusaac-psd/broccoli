@@ -1,9 +1,10 @@
 use sea_orm_migration::prelude::*;
 
 /// What each replica has loaded, of every kind of key plugins provide
-/// (`entity::plugin_replica::Model::provides`, a `providers::Provides`):
-/// contest types, problem types and checker formats, which the claim reads
-/// to take only work this replica can run. It takes the place of the
+/// (`entity::plugin_replica::Model::provides`, a `providers::Loaded`):
+/// contest types, problem types and checker formats, each with the plugins
+/// that registered it there, which the claim reads to take only work this
+/// replica runs on each key's fleet-wide provider. It takes the place of the
 /// contest types alone. Every live replica rewrites its row on its next
 /// report, so the rows are reset.
 ///

@@ -49,7 +49,7 @@ async fn scan_once(
     budget: RetryBudget,
     batch_size: u32,
 ) -> anyhow::Result<()> {
-    let local = crate::providers::Provides::loaded_here(&state.registries).await;
+    let local = crate::providers::Loaded::here(&state.registries).await;
     for unit in [Unit::Judgement, Unit::CodeRun] {
         let reclaimed =
             judging::reclaim_abandoned(&state.db, unit, abandoned, budget, batch_size, &local)

@@ -89,13 +89,21 @@ fiber.
 
 A replica claims only work it can run here. A unit needs one key of each
 kind plugins provide (`providers::Needs`): its contest type, its problem's
-type (the evaluator) and its problem's checker format. The claim, the
-system-error retry, the steal and the stuck detector take a unit only when
-this replica has every one of them loaded (`Provides::loaded_here`, read
-from its registries, so the check costs no round trip), or when no live
-replica has one loaded: then the replica that takes the unit fails it
-visibly instead of it waiting unseen (`providers::runs_here`). Each replica
-publishes what it has loaded in its `plugin_replica.provides` row. A unit
+type (the evaluator) and its problem's checker format. Every key resolves
+by one rule, on every replica alike: to its fleet-wide provider, the plugin
+with the first id among the enabled ones that provide it
+(`PluginLifecycle::provider`, `providers::provider` in SQL, both over
+`plugin.is_enabled` and `plugin.governs`). The dispatch runs each key on
+that plugin only (`providers::resolve`), never on another provider that
+happens to be loaded here, so one contest is never judged by two plugins
+under two configs. The claim, the system-error retry, the steal and the
+stuck detector take a unit only when this replica has every key's
+fleet-wide provider loaded (`Loaded::here`, read from its registries, so the
+check costs no round trip), or when no live replica has one loaded: then the
+replica that takes the unit fails it visibly instead of it waiting unseen
+(`providers::runs_here`). Each replica publishes what it has loaded, each key
+with the plugins that registered it there, in its `plugin_replica.provides`
+row. A unit
 this replica cannot run yet stays `Queued` for a replica that can, or for
 this one once it loads the plugin. A plugin that stops being loaded here
 after a unit was claimed with everything loaded (a reload, an unload) is

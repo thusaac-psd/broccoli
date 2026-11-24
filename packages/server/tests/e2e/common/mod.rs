@@ -661,9 +661,12 @@ impl E2eTestApp {
             std::time::Duration::from_secs(30),
             &server::database::app_session(&app_config.database),
         );
+        let plugin_lifecycle: std::sync::Arc<server::plugin_lifecycle::PluginLifecycle> =
+            Default::default();
         let plugins = ServerManager::new(
             app_config.plugin.clone(),
             server::host_funcs::context::HostFunctionSystemDeps {
+                plugin_lifecycle: plugin_lifecycle.clone(),
                 // Plugin SQL runs as each plugin's own role, as in production;
                 // the host function pool shares the app pool.
                 plugin_sql: plugin_sql.clone(),
@@ -722,7 +725,7 @@ impl E2eTestApp {
             prometheus_registry: e2e_prom_registry,
             dispatcher_permits: server::dispatcher::permits::DispatcherSemaphore::default(),
             worker_slots: worker_slots.clone(),
-            plugin_lifecycle: Default::default(),
+            plugin_lifecycle,
             plugin_sql,
             last_workers: Default::default(),
         };

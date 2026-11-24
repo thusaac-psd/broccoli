@@ -893,7 +893,7 @@ mod tests {
                 &db,
                 RetryBudget::new(10),
                 10,
-                &crate::providers::Provides::default(),
+                &crate::providers::Loaded::default(),
             )
             .await
             .expect("retry");
@@ -953,7 +953,7 @@ mod tests {
             &db,
             RetryBudget::new(1),
             10,
-            &crate::providers::Provides::default(),
+            &crate::providers::Loaded::default(),
         )
         .await
         .expect("retry");

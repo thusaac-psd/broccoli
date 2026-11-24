@@ -129,9 +129,23 @@ impl<H: Provided> Providers<H> {
             .insert(handler.plugin_id().to_string(), handler);
     }
 
-    /// The handler `key` resolves to.
+    /// The handler `key` resolves to among the plugins loaded here. A
+    /// dispatch resolves fleet-wide instead (`providers::resolve`).
     pub fn get(&self, key: &str) -> Option<&H> {
         self.keys.get(key)?.values().next()
+    }
+
+    /// `plugin_id`'s registration of `key`, if it made one here.
+    pub fn registration(&self, key: &str, plugin_id: &str) -> Option<&H> {
+        self.keys.get(key)?.get(plugin_id)
+    }
+
+    /// The plugins that registered `key` here, ids sorted.
+    pub fn plugins_of(&self, key: &str) -> Vec<String> {
+        self.keys
+            .get(key)
+            .map(|providers| providers.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn contains_key(&self, key: &str) -> bool {

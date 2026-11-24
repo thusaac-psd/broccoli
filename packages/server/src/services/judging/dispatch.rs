@@ -199,12 +199,11 @@ impl Dispatch {
     /// ([`DispatchFault::NotLoadedHere`]). A unit this replica took while
     /// missing one (no live replica had it loaded) fails as its plugin being
     /// missing, visibly. Returns whether it recorded the fault.
-    pub fn not_loaded_here(&self, what: &str) -> bool {
+    pub fn not_loaded_here(&self, unresolved: &crate::providers::Unresolved) -> bool {
         if self.0.live.needs_loaded {
-            self.0.faults.record(
-                DispatchFault::NotLoadedHere,
-                format!("{what} is not loaded on this replica"),
-            );
+            self.0
+                .faults
+                .record(DispatchFault::NotLoadedHere, unresolved.to_string());
         }
         self.0.live.needs_loaded
     }
@@ -324,7 +323,12 @@ mod tests {
                 LiveDispatches::default().enter(UNIT, needs_loaded),
                 faults.clone(),
             );
-            assert_eq!(dispatch.not_loaded_here("the evaluator"), needs_loaded);
+            let unresolved = crate::providers::Unresolved {
+                kind: crate::providers::Provided::ProblemType,
+                key: "batch".into(),
+                provider: Some("evaluator".into()),
+            };
+            assert_eq!(dispatch.not_loaded_here(&unresolved), needs_loaded);
             assert_eq!(
                 faults.lost().map(|r| r.fault),
                 needs_loaded.then_some(DispatchFault::NotLoadedHere)

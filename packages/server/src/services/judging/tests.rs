@@ -21,10 +21,10 @@ use crate::entity::{
 };
 
 /// Nothing loaded here.
-const NO_TYPES: &crate::providers::Provides = &crate::providers::Provides {
-    contest_types: Vec::new(),
-    problem_types: Vec::new(),
-    checker_formats: Vec::new(),
+const NO_TYPES: &crate::providers::Loaded = &crate::providers::Loaded {
+    contest_types: std::collections::BTreeMap::new(),
+    problem_types: std::collections::BTreeMap::new(),
+    checker_formats: std::collections::BTreeMap::new(),
 };
 
 /// Ten rows, no in-flight cap.
@@ -1550,6 +1550,35 @@ async fn work_of_a_disabled_contest_plugin_is_parked_until_it_is_enabled() {
     assert_eq!(claimable(&db).await, 2, "both resume");
 }
 
+/// What one replica has loaded: `plugin` registered every key it names.
+fn loaded(plugin: &str, keys: [(crate::providers::Provided, &str); 3]) -> crate::providers::Loaded {
+    use crate::providers::Provided;
+    let mut loaded = crate::providers::Loaded::default();
+    for (kind, key) in keys {
+        let map = match kind {
+            Provided::ContestType => &mut loaded.contest_types,
+            Provided::ProblemType => &mut loaded.problem_types,
+            Provided::CheckerFormat => &mut loaded.checker_formats,
+        };
+        map.insert(key.to_string(), vec![plugin.to_string()]);
+    }
+    loaded
+}
+
+/// Records `peer` as a live replica that has `loaded` loaded.
+async fn peer(db: &DatabaseConnection, loaded: &crate::providers::Loaded) {
+    exec(
+        db,
+        &format!(
+            "INSERT INTO plugin_replica (server_id, plugins, provides, state_at, heartbeat_at) \
+             VALUES ('peer', '{{}}', '{}', NOW(), NOW()) \
+             ON CONFLICT (server_id) DO UPDATE SET provides = EXCLUDED.provides",
+            serde_json::to_string(loaded).unwrap()
+        ),
+    )
+    .await;
+}
+
 /// A replica takes a unit only when it has every plugin the unit needs
 /// loaded: its contest type's, its problem type's evaluator and its checker
 /// format's. While a live peer has one of them loaded and this replica does
@@ -1557,7 +1586,7 @@ async fn work_of_a_disabled_contest_plugin_is_parked_until_it_is_enabled() {
 /// it loads it; a key no live replica has loaded is taken, to fail visibly.
 #[tokio::test]
 async fn a_replica_claims_only_work_whose_every_plugin_it_has_loaded() {
-    use crate::providers::Provides;
+    use crate::providers::{Loaded, Provided};
     let (_pg, db) = crate::test_support::postgres().await;
     new_submission(&db).await;
     let problem = crate::entity::problem::Entity::find()
@@ -1565,21 +1594,20 @@ async fn a_replica_claims_only_work_whose_every_plugin_it_has_loaded() {
         .await
         .unwrap()
         .unwrap();
-    let everything = Provides {
-        contest_types: vec!["standard".into()],
-        problem_types: vec![problem.problem_type.clone()],
-        checker_formats: vec![problem.checker_format.clone()],
-    };
-    let peer = |provides: &Provides| {
-        format!(
-            "INSERT INTO plugin_replica (server_id, plugins, provides, state_at, heartbeat_at) \
-             VALUES ('peer', '{{}}', '{}', NOW(), NOW()) \
-             ON CONFLICT (server_id) DO UPDATE SET provides = EXCLUDED.provides",
-            serde_json::to_string(provides).unwrap()
+    let keys = [
+        (Provided::ContestType, "standard"),
+        (Provided::ProblemType, problem.problem_type.as_str()),
+        (Provided::CheckerFormat, problem.checker_format.as_str()),
+    ];
+    let everything = loaded("plugin", keys);
+    let without = |kind: Provided| {
+        loaded(
+            "plugin",
+            keys.map(|(k, key)| (k, if k == kind { "other" } else { key })),
         )
     };
-    exec(&db, &peer(&everything)).await;
-    let claim = |local: Provides| {
+    peer(&db, &everything).await;
+    let claim = |local: Loaded| {
         let db = db.clone();
         async move {
             claim_judgements(&db, "here", TEN, &local)
@@ -1589,40 +1617,62 @@ async fn a_replica_claims_only_work_whose_every_plugin_it_has_loaded() {
                 .len()
         }
     };
-    for missing in [
-        Provides {
-            problem_types: Vec::new(),
-            ..everything.clone()
-        },
-        Provides {
-            checker_formats: Vec::new(),
-            ..everything.clone()
-        },
-        Provides {
-            contest_types: Vec::new(),
-            ..everything.clone()
-        },
-    ] {
-        assert_eq!(claim(missing.clone()).await, 0, "{missing:?}");
+    for kind in crate::providers::KINDS {
+        assert_eq!(claim(without(kind)).await, 0, "{kind:?}");
     }
     // The peer has the evaluator no more: no live replica does, so the
     // replica missing it takes the unit, to fail it visibly.
-    exec(
-        &db,
-        &peer(&Provides {
-            problem_types: Vec::new(),
-            ..everything.clone()
-        }),
-    )
-    .await;
-    assert_eq!(
-        claim(Provides {
-            problem_types: Vec::new(),
-            ..everything.clone()
-        })
-        .await,
-        1
-    );
+    peer(&db, &without(Provided::ProblemType)).await;
+    assert_eq!(claim(without(Provided::ProblemType)).await, 1);
+}
+
+/// A key resolves to its fleet-wide provider, the enabled plugin providing
+/// it whose id sorts first, on every replica alike: a replica that has only
+/// another provider of the contest type loaded leaves the unit to the live
+/// peer that has the first, instead of judging it with its own plugin under
+/// that plugin's config. Once the first is disabled, the next one is the
+/// provider, and this replica takes the unit.
+#[tokio::test]
+async fn a_replica_runs_a_key_only_on_its_fleet_wide_provider() {
+    use crate::providers::Provided;
+    let (_pg, db) = crate::test_support::postgres().await;
+    new_submission(&db).await;
+    let problem = crate::entity::problem::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let contest = |id: &str, enabled: bool| {
+        format!(
+            "INSERT INTO plugin (id, is_enabled, governs) \
+             VALUES ('{id}', {enabled}, \
+                     '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": [], \"checker_formats\": []}}') \
+             ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
+        )
+    };
+    exec(&db, &contest("a-contest", true)).await;
+    exec(&db, &contest("b-contest", true)).await;
+    let with_contest = |plugin: &str| {
+        let mut l = loaded(
+            "plugin",
+            [
+                (Provided::ContestType, "standard"),
+                (Provided::ProblemType, problem.problem_type.as_str()),
+                (Provided::CheckerFormat, problem.checker_format.as_str()),
+            ],
+        );
+        l.contest_types
+            .insert("standard".into(), vec![plugin.to_string()]);
+        l
+    };
+    peer(&db, &with_contest("a-contest")).await;
+    let here = with_contest("b-contest");
+    let claimed = claim_judgements(&db, "here", TEN, &here).await.unwrap();
+    assert_eq!(claimed.units.len(), 0, "the peer has the provider loaded");
+
+    exec(&db, &contest("a-contest", false)).await;
+    let claimed = claim_judgements(&db, "here", TEN, &here).await.unwrap();
+    assert_eq!(claimed.units.len(), 1, "b-contest is the provider now");
 }
 
 /// Records `standard` (the problem type [`new_submission`] uses) as

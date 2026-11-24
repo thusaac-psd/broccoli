@@ -307,7 +307,7 @@ pub async fn claim_once(
     }
     // What this replica has loaded: it takes only work it can run here (see
     // `providers::runs_here`), read from its registries, with no round trip.
-    let local = crate::providers::Provides::loaded_here(&state.registries).await;
+    let local = crate::providers::Loaded::here(&state.registries).await;
     let in_flight_cap = (max_in_flight > 0).then_some(max_in_flight);
 
     // Judgements and code runs share the in-flight cap; judgements go first.
@@ -398,7 +398,7 @@ fn start_claimed<T, F, Fut>(
     server_id: &str,
     label: &'static str,
     claimed: judging::Claimed<T>,
-    local: &crate::providers::Provides,
+    local: &crate::providers::Loaded,
     slots: Vec<DispatcherReservation>,
     dispatch: F,
 ) where
@@ -429,11 +429,7 @@ fn start_claimed<T, F, Fut>(
             &claim.problem_type,
             claim.queued_secs,
         );
-        let needs_loaded = claim
-            .needs()
-            .each()
-            .into_iter()
-            .all(|(kind, key)| local.provides(kind, key));
+        let needs_loaded = state.plugin_lifecycle.all_loaded(local, claim.needs());
         let live = state
             .registries
             .live_dispatches

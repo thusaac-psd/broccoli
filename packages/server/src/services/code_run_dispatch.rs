@@ -1,4 +1,5 @@
 use crate::error::HostCode;
+use crate::providers::Provided;
 use broccoli_server_sdk::types::{
     OnCodeRunInput, OnCodeRunOutput, SourceFile, TestCaseBodyRef, TestCaseRow,
 };
@@ -64,28 +65,24 @@ pub(crate) async fn dispatch_code_run_to_plugin(
                 .unwrap_or_default(),
         ),
     );
-    let handler = {
-        let registry = state.registries.contest_type_registry.read().await;
-        registry.get(&code_run.contest_type).cloned()
-    };
-
+    let handler = crate::providers::resolve(
+        &*state.registries.contest_type_registry.read().await,
+        state
+            .plugin_lifecycle
+            .provider(Provided::ContestType, &code_run.contest_type),
+        Provided::ContestType,
+        &code_run.contest_type,
+    );
     let handler = match handler {
-        Some(h) => h,
-        None => {
-            warn!(
-                code_run_id = code_run.id,
-                contest_type = %code_run.contest_type,
-                "No plugin registered for contest type"
-            );
+        Ok(h) => h,
+        Err(unresolved) => {
+            warn!(code_run_id = code_run.id, "{unresolved}");
             record_dispatch_failure(
                 &state.db,
                 code_run.id,
                 code_run.judge_epoch,
                 &faults,
-                DispatchFailure::no_handler(
-                    live.needs_loaded(),
-                    format!("contest type {:?}", code_run.contest_type),
-                ),
+                DispatchFailure::no_handler(live.needs_loaded(), &unresolved),
             )
             .await;
             return;

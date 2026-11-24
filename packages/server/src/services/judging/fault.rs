@@ -294,17 +294,17 @@ impl DispatchFailure {
     /// here. A unit claimed with every plugin it needs loaded here lost it
     /// since ([`DispatchFault::NotLoadedHere`], handed back); one claimed
     /// while no live replica had it loaded fails as having no handler.
-    pub(crate) fn no_handler(needs_loaded: bool, what: String) -> Self {
+    pub(crate) fn no_handler(
+        needs_loaded: bool,
+        unresolved: &crate::providers::Unresolved,
+    ) -> Self {
         if needs_loaded {
             Self::from(Recorded {
                 fault: DispatchFault::NotLoadedHere,
-                message: format!("{what} is not loaded on this replica"),
+                message: unresolved.to_string(),
             })
         } else {
-            Self::judging(
-                HostCode::NoHandlerRegistered,
-                format!("No plugin registered for {what}"),
-            )
+            Self::judging(HostCode::NoHandlerRegistered, unresolved.to_string())
         }
     }
 }
@@ -409,12 +409,17 @@ mod tests {
     /// while no live replica had the plugin fails visibly.
     #[test]
     fn a_missing_handler_hands_back_only_what_was_claimed_loaded() {
-        let lost = DispatchFailure::no_handler(true, "contest type x".into());
+        let unresolved = crate::providers::Unresolved {
+            kind: crate::providers::Provided::ContestType,
+            key: "x".into(),
+            provider: Some("contest".into()),
+        };
+        let lost = DispatchFailure::no_handler(true, &unresolved);
         assert_eq!(
             (lost.code, lost.class),
             (HostCode::PluginNotLoadedHere, SystemErrorClass::HandBack)
         );
-        let missing = DispatchFailure::no_handler(false, "contest type x".into());
+        let missing = DispatchFailure::no_handler(false, &unresolved);
         assert_eq!(
             (missing.code, missing.class),
             (HostCode::NoHandlerRegistered, SystemErrorClass::Judging)

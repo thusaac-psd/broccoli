@@ -1,4 +1,5 @@
 use crate::error::HostCode;
+use crate::providers::Provided;
 use crate::registry::ContestTypeRegistry;
 use broccoli_server_sdk::types::{
     AfterJudgingEvent, DetachedSubmissionCompletion, HookEvent, OnSubmissionInput,
@@ -303,30 +304,24 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
         ),
     );
 
-    let contest_type = Some(submission.contest_type.clone());
-
-    let handler = {
-        let registry = state.registries.contest_type_registry.read().await;
-        contest_type.as_ref().and_then(|t| registry.get(t)).cloned()
-    };
-
+    let handler = crate::providers::resolve(
+        &*state.registries.contest_type_registry.read().await,
+        state
+            .plugin_lifecycle
+            .provider(Provided::ContestType, &submission.contest_type),
+        Provided::ContestType,
+        &submission.contest_type,
+    );
     let handler = match handler {
-        Some(h) => h,
-        None => {
-            warn!(
-                submission_id = submission.id,
-                contest_type = ?contest_type,
-                "No plugin registered for contest type"
-            );
+        Ok(h) => h,
+        Err(unresolved) => {
+            warn!(submission_id = submission.id, "{unresolved}");
             record_dispatch_failure(
                 &state.db,
                 &state.metrics,
                 judgement_ref,
                 &faults,
-                DispatchFailure::no_handler(
-                    live.needs_loaded(),
-                    format!("contest type {:?}", contest_type),
-                ),
+                DispatchFailure::no_handler(live.needs_loaded(), &unresolved),
             )
             .await;
             return;

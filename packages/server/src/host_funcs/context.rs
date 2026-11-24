@@ -39,6 +39,9 @@ pub struct HostFunctionSystemDeps {
     pub plugin_config_cache: crate::services::plugin_config_cache::PluginConfigCache,
     /// The detached judging sessions running on this server.
     pub judging_sessions: crate::services::judging_sessions::JudgingSessions,
+    /// The fleet's plugins, which resolve each key a dispatch needs to its
+    /// fleet-wide provider (`providers::resolve`).
+    pub plugin_lifecycle: Arc<crate::plugin_lifecycle::PluginLifecycle>,
 }
 
 /// The plugin manager as the host functions it owns hold it: weakly, so the
@@ -123,6 +126,8 @@ impl OperationHostDeps {
 pub struct EvaluateHostDeps {
     pub db: DatabaseConnection,
     pub evaluator_registry: EvaluatorRegistry,
+    /// Resolves the evaluator to the problem type's fleet-wide provider.
+    pub plugin_lifecycle: Arc<crate::plugin_lifecycle::PluginLifecycle>,
     pub evaluate_batches: EvaluateBatches,
     pub operation_deps: OperationHostDeps,
     pub fanout: crate::dispatcher::fanout::Fanout,
@@ -184,6 +189,7 @@ impl HostFunctionDeps {
         EvaluateHostDeps {
             db: self.system.host_db.clone(),
             evaluator_registry: self.system.evaluator_registry.clone(),
+            plugin_lifecycle: self.system.plugin_lifecycle.clone(),
             evaluate_batches: self.system.evaluate_batches.clone(),
             operation_deps: {
                 let mut deps = self.system.operation_deps();

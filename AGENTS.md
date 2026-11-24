@@ -291,9 +291,9 @@ binaries warn about every key they do not read.
   (`judging::Unit::runnable`, built on `providers::runnable`;
   `PluginLifecycle::closed_by` in Rust), the submit paths refuse it
   (`accepting_handler`), and it resumes when a provider is enabled. A replica
-  takes a unit only when it has every one of those plugins loaded, or no live
-  replica has one (`providers::runs_here`, local keys from
-  `Provides::loaded_here`); a plugin lost after the claim hands the attempt back
+  takes a unit only when it has every key's fleet-wide provider loaded, or no
+  live replica has (`providers::runs_here`, local registrations from
+  `Loaded::here`); a plugin lost after the claim hands the attempt back
   (`Dispatch::not_loaded_here`). A new scan that hands out or retries judging
   work uses these predicates too. A judgement whose session the disable cut goes
   straight back to `Queued` (`judging::fail_dispatch`), never through
@@ -341,10 +341,12 @@ binaries warn about every key they do not read.
   JSON body, so the host writes every header (no cookie, redirect or page from a
   plugin). A plugin never speaks as the host or as another plugin.
 - Several plugins may provide one key (a contest type, a problem type, a checker
-  format, a language). `registry::Providers` keeps every registration and
-  resolves a key to the provider whose plugin id sorts first, so replicas that
-  load the same plugins agree and an unload hands the key to the next provider.
-  Register and resolve through it, never through a map of your own.
+  format, a language). `registry::Providers` keeps every registration. Judging
+  work resolves a key to its fleet-wide provider, the enabled plugin providing
+  it whose id sorts first (`PluginLifecycle::provider`, `providers::provider` in
+  SQL), through `providers::resolve`, so every replica runs a key on the same
+  plugin and a replica that lacks that plugin never falls back to another.
+  Register and resolve through these, never through a map of your own.
 - Every submit path (practice and contest submissions, code runs) accepts work
   through one rule, `plugin_lifecycle::accepting_handler`, which refuses a
   contest type no provider can judge now; a new submit path calls it too.

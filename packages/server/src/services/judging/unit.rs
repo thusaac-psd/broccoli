@@ -11,7 +11,7 @@ use super::dispatch::DispatchedUnit;
 use super::fault::{DispatchFailure, SystemErrorClass};
 use crate::dlq::{DlqService, DlqSubject};
 use crate::entity::{code_run, submission, submission_judgement};
-use crate::providers::{LocalPlaceholders, Provided, Provides};
+use crate::providers::{Loaded, Provided};
 
 /// The kind of row the dispatcher judges.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,10 +89,11 @@ impl Unit {
     }
 
     /// SQL over a [`Unit::scan_from`] scan: this replica may take the unit,
-    /// having every key it needs loaded, or no live replica having one
-    /// ([`crate::providers::runs_here`]); `local` binds what this replica
-    /// has loaded.
-    fn runs_here(self, local: &LocalPlaceholders) -> String {
+    /// having every key it needs loaded on its fleet-wide provider, or no
+    /// live replica having one
+    /// ([`crate::providers::runs_here`]); `local` is the placeholder of
+    /// what this replica has loaded.
+    fn runs_here(self, local: &str) -> String {
         crate::providers::runs_here(self.needs(), local)
     }
 
@@ -467,11 +468,11 @@ fn in_flight_count(owner: &str) -> String {
 /// the cap left (`claim_room`) and the `plugin_config` change counter
 /// (`claim_epoch`); with nothing claimed it is that row alone, its unit
 /// columns NULL.
-fn claim_statement(unit: Unit, server_id: &str, limit: ClaimLimit, local: &Provides) -> Statement {
+fn claim_statement(unit: Unit, server_id: &str, limit: ClaimLimit, local: &Loaded) -> Statement {
     let mut b = Binds::default();
     let rows = b.bind(i64::from(limit.rows));
     let owner = b.bind(server_id);
-    let local = LocalPlaceholders::bind(local, |keys| b.bind(keys));
+    let local = b.bind(serde_json::to_value(local).expect("loaded keys serialize"));
     let (room, take) = match limit.in_flight_cap {
         Some(cap) => (
             format!(
@@ -534,7 +535,7 @@ async fn run_claim<T>(
     unit: Unit,
     server_id: &str,
     limit: ClaimLimit,
-    local: &Provides,
+    local: &Loaded,
     parse: impl Fn(&sea_orm::QueryResult) -> Result<T, DbErr>,
 ) -> Result<Claimed<T>, DbErr> {
     let none = Claimed {
@@ -598,7 +599,7 @@ pub(crate) async fn claim_judgements(
     db: &DatabaseConnection,
     server_id: &str,
     limit: ClaimLimit,
-    local: &Provides,
+    local: &Loaded,
 ) -> Result<Claimed<ClaimedJudgement>, DbErr> {
     use sea_orm::FromQueryResult;
     run_claim(db, Unit::Judgement, server_id, limit, local, |row| {
@@ -616,7 +617,7 @@ pub(crate) async fn claim_code_runs(
     db: &DatabaseConnection,
     server_id: &str,
     limit: ClaimLimit,
-    local: &Provides,
+    local: &Loaded,
 ) -> Result<Claimed<code_run::Model>, DbErr> {
     use sea_orm::FromQueryResult;
     run_claim(db, Unit::CodeRun, server_id, limit, local, |row| {
@@ -988,7 +989,7 @@ pub(crate) async fn reclaim_abandoned(
     abandoned: Abandoned,
     budget: RetryBudget,
     batch: u32,
-    local: &Provides,
+    local: &Loaded,
 ) -> Result<Reclaimed, DbErr> {
     let batch = batch.max(1);
     let mut total = Reclaimed::default();
@@ -1008,12 +1009,12 @@ async fn reclaim_batch(
     abandoned: Abandoned,
     budget: RetryBudget,
     limit: u32,
-    local: &Provides,
+    local: &Loaded,
 ) -> Result<(usize, Reclaimed), DbErr> {
     let txn = db.begin().await?;
     let mut b = Binds::default();
     let predicate = abandoned.predicate(&mut b);
-    let local = LocalPlaceholders::bind(local, |keys| b.bind(keys));
+    let local = b.bind(serde_json::to_value(local).expect("loaded keys serialize"));
     let filter = format!(
         "u.status IN {in_flight} AND {predicate} AND {handled}",
         in_flight = StatusPhase::InFlight.sql_list(),
@@ -1163,12 +1164,12 @@ pub(crate) async fn retry_system_errors(
     db: &DatabaseConnection,
     budget: RetryBudget,
     limit: u32,
-    local: &Provides,
+    local: &Loaded,
 ) -> Result<SystemErrorPass, DbErr> {
     let txn = db.begin().await?;
     let mut b = Binds::default();
     let max = b.bind(budget.max());
-    let local = LocalPlaceholders::bind(local, |keys| b.bind(keys));
+    let local = b.bind(serde_json::to_value(local).expect("loaded keys serialize"));
     let filter = format!(
         "u.is_current AND {undecided} \
          AND ({handled} OR ({open} AND s.system_error_retries >= {max}))",
