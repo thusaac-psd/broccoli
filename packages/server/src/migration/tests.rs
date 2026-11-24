@@ -418,6 +418,10 @@ async fn a_database_the_released_build_ran_upgrades_to_this_build() {
         ["ioi"],
         "a disabled plugin still closes the contest types it governed"
     );
+    assert!(
+        governs.provides.languages.is_empty() && governs.unchecked_problem_types.is_empty(),
+        "a key the released build did not record reads as none"
+    );
 
     let odd = plugins.iter().find(|p| p.id == "odd").expect("odd");
     assert_eq!(
@@ -447,6 +451,24 @@ async fn a_database_the_released_build_ran_upgrades_to_this_build() {
         submission,
         submission_judgement,
         code_run,
+    );
+
+    // The judging-inputs triggers run on an upgraded row.
+    let version = || async {
+        entity::problem::Entity::find_by_id(1)
+            .one(db)
+            .await
+            .expect("problem")
+            .expect("kept")
+            .inputs_version
+    };
+    let before = version().await;
+    db.execute_unprepared("UPDATE problem SET time_limit = time_limit + 1 WHERE id = 1")
+        .await
+        .expect("change an upgraded problem's limits");
+    assert!(
+        version().await > before,
+        "a change to an upgraded problem counts"
     );
     boot.release().await.expect("release");
 }
