@@ -35,13 +35,14 @@ A DTO reaches a response body only through `Visible::into_masked_json`, which
 applies the decision. Every shape that goes through it implements `Governed`
 (`visibility/shapes.rs`), naming the top-level fields the host decides alone.
 
-A mask blanks a path only where the shape's API type admits a blank: the host
-leaves alone, and logs, a path whose blank the type would not parse (an id, a
-page number, a name the host decides). So the paths a plugin can blank are
-exactly the nullable ones in `broccoli-api-types`, and every answer a client
-receives parses as the type it reads. The test
+A plugin's mask always holds. A mask that blanks a value the shape's API type
+requires (an id, a contest problem's label) cannot be served as asked, since no
+client could read the answer, so the kernel withholds the whole resource from
+that viewer instead (`visible::admits`) and logs it: the viewer sees less than
+the plugin asked, never more. Every answer a client receives parses as the type
+it reads. The test
 `every_answer_a_mask_or_withholding_leaves_parses_as_its_api_type` masks each
-path of each shape and withholds it for each reason, and parses the result.
+path of each shape and withholds it for each reason, and parses what is served.
 
 Decisions are memoized per kernel. `know_submission` and `know_contest` hand
 the kernel rows the request already read, so it does not read them again.

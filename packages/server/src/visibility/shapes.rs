@@ -81,7 +81,7 @@ impl Governed for SubmissionListItem {
 mod tests {
     use super::*;
     use crate::services::submission_feedback::Feedback;
-    use crate::visibility::{Decision, FieldMask, Visible};
+    use crate::visibility::{Decision, FieldMask};
     use broccoli_api_types::visibility::PluginOutage;
     use serde::Serialize;
     use serde::de::DeserializeOwned;
@@ -142,33 +142,41 @@ mod tests {
         }
     }
 
-    /// What a client receives for `sample` under `decision` and `feedback`
-    /// parses as `T`, the API type every client reads it with.
-    fn served_parses<T>(
+    /// What a client receives for `sample` under `decision` and `feedback`,
+    /// if the kernel serves it at all, parses as `T`, the API type every
+    /// client reads it with.
+    fn served<T>(
         sample: &T,
         decision: Decision,
         feedback: Option<Feedback>,
-    ) -> serde_json::Value
+    ) -> Option<serde_json::Value>
     where
         T: Governed + Serialize + DeserializeOwned + Clone,
     {
-        let value = Visible::new(sample.clone(), decision.clone())
-            .with_feedback(feedback.clone())
-            .into_masked_json()
-            .unwrap();
+        let resource = crate::visibility::Resource::Submission(1);
+        let feedback_by_id: std::collections::HashMap<i32, Feedback> =
+            feedback.clone().map(|f| (1, f)).into_iter().collect();
+        let visible = super::super::wrap_visible(
+            &resource,
+            sample.clone(),
+            decision.clone(),
+            &feedback_by_id,
+        )?;
+        let value = visible.into_masked_json().unwrap();
         if let Err(e) = serde_json::from_value::<T>(value.clone()) {
             panic!(
                 "{} under {decision:?} / {feedback:?} does not parse: {e}\n{value:#}",
                 std::any::type_name::<T>()
             );
         }
-        value
+        Some(value)
     }
 
     /// Whatever a plugin masks and whatever the host withholds, a client
-    /// parses the answer: each path of a full sample masked alone, each
-    /// top-level field a plugin governs blanked (`null`) by its mask, and the
-    /// sample withheld for each reason.
+    /// parses the answer it gets: each path of a full sample masked alone
+    /// is served parseable or not served at all, each top-level field a
+    /// plugin governs is served blank (`null`) under its mask, and the sample
+    /// withheld for each reason is served parseable.
     fn assert_every_answer_parses<T>(sample: serde_json::Value)
     where
         T: Governed + Serialize + DeserializeOwned + Clone,
@@ -179,22 +187,24 @@ mod tests {
         paths(&full, "", &mut all);
         for path in &all {
             let mask = FieldMask::new([path.clone()]);
-            let value = served_parses(&sample, Decision::Redact(mask), None);
+            let value = served(&sample, Decision::Redact(mask), None);
             let top = !path.contains('.');
             if top && !T::host_decides(path) && !full[path.as_str()].is_array() {
-                assert!(
-                    value[path.as_str()].is_null(),
-                    "{} cannot leave out `{path}`, which a plugin governs",
-                    std::any::type_name::<T>()
-                );
+                let value = value.unwrap_or_else(|| {
+                    panic!(
+                        "{} cannot leave out `{path}`, which a plugin governs",
+                        std::any::type_name::<T>()
+                    )
+                });
+                assert!(value[path.as_str()].is_null(), "{path}: {value}");
             }
         }
         let outage = Decision::Withheld {
             outage: PluginOutage::Unavailable,
             mask: FieldMask::default(),
         };
-        served_parses(&sample, outage, None);
-        served_parses(&sample, Decision::Allow, Some(Feedback::Withheld));
+        served(&sample, outage, None).expect("an outage withholds, never denies");
+        served(&sample, Decision::Allow, Some(Feedback::Withheld)).expect("hidden is served");
     }
 
     #[test]

@@ -772,17 +772,13 @@ mod clarification_write_results {
             &format!("clarification:{clar_id}"),
         )
         .await;
-        seed_kv(&app, "redact_resource_fields", "content").await;
+        seed_kv(&app, "redact_resource_fields", "replies").await;
 
         let listed = app
             .get_with_token(&routes::contest_clarifications(cid), &user)
             .await;
         assert_eq!(listed.status, 200, "{}", listed.text);
-        assert!(
-            listed.body["data"][0]["content"].is_null(),
-            "{}",
-            listed.text
-        );
+        assert_eq!(listed.body["data"][0]["content"], "Is N <= 1000?");
 
         let replied = app
             .post_with_token(
@@ -793,8 +789,12 @@ mod clarification_write_results {
             .await;
         assert_eq!(replied.status, 200, "{}", replied.text);
         assert_eq!(replied.body["id"], clar_id);
-        assert!(replied.body["content"].is_null(), "{}", replied.text);
-        assert_eq!(replied.body["replies"][0]["content"], "More detail");
+        assert_eq!(
+            replied.body["replies"],
+            serde_json::json!([]),
+            "{}",
+            replied.text
+        );
 
         let resolved = app
             .post_with_token(
@@ -805,6 +805,11 @@ mod clarification_write_results {
             .await;
         assert_eq!(resolved.status, 200, "{}", resolved.text);
         assert_eq!(resolved.body["resolved"], true);
-        assert!(resolved.body["content"].is_null(), "{}", resolved.text);
+        assert_eq!(
+            resolved.body["replies"],
+            serde_json::json!([]),
+            "{}",
+            resolved.text
+        );
     }
 }

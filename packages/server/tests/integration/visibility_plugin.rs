@@ -576,11 +576,7 @@ async fn decide_visibility_list_masking() {
         .iter()
         .find(|item| item["problem_id"] == p2)
         .unwrap_or_else(|| panic!("redacted problem {p2} missing from {}", res.text));
-    assert!(
-        redacted["label"].is_null(),
-        "masked field `label` should be blanked: {}",
-        res.text
-    );
+    assert_eq!(redacted["label"], "B", "an unmasked field is left alone");
     assert!(
         redacted["problem_title"].is_null(),
         "masked field `problem_title` should be blanked: {}",
@@ -603,6 +599,34 @@ async fn decide_visibility_list_masking() {
         assert_eq!(survivor["label"], label);
         assert_eq!(survivor["problem_title"], title);
     }
+}
+
+/// A mask that blanks a value the response type requires (a contest
+/// problem's `label`) cannot be served as asked: no client could read the
+/// row. The kernel withholds the row instead of skipping the blank, so the
+/// viewer sees less than the plugin asked, never more, and the answer parses.
+#[tokio::test]
+async fn a_mask_on_a_required_field_withholds_the_resource() {
+    let app = TestApp::spawn_with_plugins().await;
+    let admin_token = app
+        .create_user_with_role("required_mask_admin", "pass1234", "admin")
+        .await;
+    let viewer_token = app
+        .create_authenticated_user("required_mask_viewer", "pass1234")
+        .await;
+    let (contest_id, p1, p2, p3) = setup_three_problem_contest(&app, &admin_token).await;
+
+    seed_kv(&app, "redact_resource_keys", &format!("problem:{p2}")).await;
+    seed_kv(&app, "redact_resource_fields", "label").await;
+
+    let res = app
+        .get_with_token(&routes::contest_problems(contest_id), &viewer_token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let rows: Vec<broccoli_api_types::contest::ContestProblemResponse> =
+        serde_json::from_value(res.body.clone()).expect("every row parses as its API type");
+    let ids: Vec<i32> = rows.iter().map(|row| row.problem_id).collect();
+    assert_eq!(ids, [p1, p3], "the row whose label is masked is withheld");
 }
 
 #[tokio::test]
@@ -690,11 +714,6 @@ async fn decide_visibility_mixed_batch_lands_on_correct_resources() {
     assert_eq!(data[0]["problem_title"], "Working Path Problem A");
 
     // The redacted problem is present but masked, not denied.
-    assert!(
-        data[1]["label"].is_null(),
-        "the redacted problem's label must be blanked: {}",
-        res.text
-    );
     assert!(
         data[1]["problem_title"].is_null(),
         "the redacted problem's problem_title must be blanked: {}",

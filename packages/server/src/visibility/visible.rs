@@ -59,7 +59,7 @@ pub struct Visible<T> {
     feedback: Option<Feedback>,
 }
 
-impl<T: serde::Serialize + serde::de::DeserializeOwned + Governed> Visible<T> {
+impl<T: serde::Serialize + Governed> Visible<T> {
     /// Only reachable from within `visibility` (this module and `mod.rs`) —
     /// see the module docs for why that is the entire point of this type.
     pub(super) fn new(inner: T, decision: Decision) -> Self {
@@ -109,7 +109,7 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned + Governed> Visible<T> {
         }
         match &self.decision {
             Decision::Redact(mask) | Decision::Withheld { mask, .. } => {
-                apply_admitted::<T>(&mut value, mask)
+                super::apply_mask(&mut value, mask)
             }
             Decision::Allow | Decision::Deny => {}
         }
@@ -118,29 +118,23 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned + Governed> Visible<T> {
     }
 }
 
-/// Blank each path of a plugin's `mask` in `value` that the response type
-/// admits blank: a path whose blank `T` would not parse (a field every client
-/// reads as present, such as an id or a page number) is left alone and
-/// logged, since a client cannot read the answer otherwise. The paths a mask
-/// can blank are therefore exactly the ones the API types make nullable, and
-/// the two cannot disagree.
-fn apply_admitted<T: serde::de::DeserializeOwned>(value: &mut serde_json::Value, mask: &FieldMask) {
-    for path in mask.paths() {
-        let mut blanked = value.clone();
-        super::apply_mask(&mut blanked, &FieldMask::new([path.to_owned()]));
-        if blanked == *value {
-            continue;
-        }
-        match serde_json::from_value::<T>(blanked.clone()) {
-            Ok(_) => *value = blanked,
-            Err(error) => tracing::warn!(
-                path,
-                shape = std::any::type_name::<T>(),
-                %error,
-                "A visibility mask names a value its response cannot leave out; it stays"
-            ),
-        }
+/// Whether every path of `mask` blanked in `entity` leaves a value `T`
+/// parses: whether a client can read the answer the mask makes. A path that
+/// blanks a value the API type requires (an id, a label every client reads)
+/// does not; the kernel then withholds the whole resource instead of serving
+/// an answer no client can read or skipping a blank the plugin asked for.
+pub(super) fn admits<T>(entity: &T, mask: &FieldMask) -> bool
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    if mask.is_empty() {
+        return true;
     }
+    let Ok(mut value) = serde_json::to_value(entity) else {
+        return false;
+    };
+    super::apply_mask(&mut value, mask);
+    serde_json::from_value::<T>(value).is_ok()
 }
 
 /// Blank every field of `value` but the ones `T` declares host-decided, and
