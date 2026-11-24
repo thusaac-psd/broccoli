@@ -211,8 +211,11 @@ pub async fn run_code(
     validate_run_language(&payload.language, &known_languages)?;
 
     let contest_type = problem.default_contest_type.clone();
-    crate::plugin_lifecycle::accepting_handler(&state, &contest_type, &problem.problem_type)
-        .await?;
+    crate::plugin_lifecycle::accepting_handler(
+        &state,
+        crate::providers::Needs::of(&contest_type, &problem),
+    )
+    .await?;
     let custom_tcs_json =
         serde_json::to_value(&payload.custom_test_cases).unwrap_or(serde_json::Value::Null);
 
@@ -311,8 +314,11 @@ pub async fn run_contest_code(
 
     let language = payload.language.trim().to_string();
     let contest_type = required_contest_type(&contest_model)?;
-    crate::plugin_lifecycle::accepting_handler(&state, &contest_type, &problem.problem_type)
-        .await?;
+    crate::plugin_lifecycle::accepting_handler(
+        &state,
+        crate::providers::Needs::of(&contest_type, &problem),
+    )
+    .await?;
     let new_code_run = code_run::ActiveModel {
         files: Set(files_to_json(&payload.files)),
         language: Set(language),

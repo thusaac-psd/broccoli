@@ -1,58 +1,83 @@
 use crate::error::HostCode;
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use broccoli_server_sdk::types::HookEvent;
 use common::event::GenericEvent;
 use common::hook::{GenericHook, HookAction};
-use lru::LruCache;
 use plugin_core::admission::CallClass;
 use plugin_core::error::PluginError;
 use plugin_core::executor::CallOptions;
 use plugin_core::hook::{HookMode, HookScope, PLUGIN_RUNTIME_ERROR_CODE, PluginHook};
 use plugin_core::traits::PluginManager;
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
-use std::sync::LazyLock;
 use tokio::sync::RwLock;
 
-/// The ids of the background events dispatched, or being dispatched, on
-/// this server (see [`dispatch_hooks_once`]).
-static DISPATCHED_EVENTS: LazyLock<Mutex<LruCache<String, ()>>> =
-    LazyLock::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(10_000).unwrap())));
-
-fn dispatched_events() -> std::sync::MutexGuard<'static, LruCache<String, ()>> {
-    DISPATCHED_EVENTS.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// One dispatch's hold on an event id in [`DISPATCHED_EVENTS`]: taken before
-/// the hooks run, so a duplicate meanwhile is skipped, and given back if the
-/// dispatch is dropped before it completes, so the event is not lost.
+/// One dispatch's hold on a background event's id, fleet-wide: a row of
+/// `hook_event`, inserted before the hooks run, so a duplicate on any replica,
+/// meanwhile or later (after a restart too), is skipped. The row is deleted
+/// again if the dispatch is dropped before it completes, so a cancelled
+/// dispatch does not lose the event; a process that dies mid-dispatch keeps
+/// it, so the event fires at most once.
 struct EventClaim {
+    db: common::db::DatabaseConnection,
     id: String,
     completed: bool,
 }
 
 impl EventClaim {
     /// The claim on `id`, or `None` when the event was dispatched already or
-    /// is being dispatched now.
-    fn take(id: String) -> Option<Self> {
-        let mut events = dispatched_events();
-        if events.get(&id).is_some() {
-            return None;
-        }
-        events.put(id.clone(), ());
-        Some(Self {
+    /// is being dispatched now, on this replica or another.
+    async fn take(
+        db: &common::db::DatabaseConnection,
+        id: String,
+    ) -> Result<Option<Self>, sea_orm::DbErr> {
+        let inserted = db
+            .execute_raw(sea_orm::Statement::from_sql_and_values(
+                sea_orm::DbBackend::Postgres,
+                "INSERT INTO hook_event (event_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                [id.clone().into()],
+            ))
+            .await?
+            .rows_affected();
+        Ok((inserted == 1).then(|| Self {
+            db: db.clone(),
             id,
             completed: false,
-        })
+        }))
     }
 }
 
 impl Drop for EventClaim {
+    /// Gives the claim back unless the dispatch completed. On the
+    /// multi-threaded runtime the server runs on, the row is deleted before
+    /// the drop returns; elsewhere a task deletes it.
     fn drop(&mut self) {
-        if !self.completed {
-            dispatched_events().pop(&self.id);
+        if self.completed {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let db = self.db.clone();
+        let id = std::mem::take(&mut self.id);
+        let give_back = async move {
+            let deleted = db
+                .execute_raw(sea_orm::Statement::from_sql_and_values(
+                    sea_orm::DbBackend::Postgres,
+                    "DELETE FROM hook_event WHERE event_id = $1",
+                    [id.clone().into()],
+                ))
+                .await;
+            if let Err(e) = deleted {
+                tracing::warn!(event_id = %id, error = %e, "Giving back a hook event claim failed");
+            }
+        };
+        match runtime.runtime_flavor() {
+            tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| runtime.block_on(give_back))
+            }
+            _ => drop(runtime.spawn(give_back)),
         }
     }
 }
@@ -445,6 +470,7 @@ pub(crate) async fn dispatch_submission_hooks(
 }
 
 pub fn dispatch_hooks_background(
+    db: common::db::DatabaseConnection,
     topic: String,
     event_payload: serde_json::Value,
     enabled_plugins: Option<ResourceEnablements>,
@@ -453,6 +479,7 @@ pub fn dispatch_hooks_background(
 ) {
     tokio::spawn(async move {
         dispatch_hooks_once(
+            &db,
             &topic,
             event_payload,
             enabled_plugins.as_ref(),
@@ -464,12 +491,14 @@ pub fn dispatch_hooks_background(
 }
 
 /// Dispatch an event whose response no one waits for, once per `event_id`
-/// (an event dispatched, or being dispatched, under the same id is skipped),
-/// as [`CallClass::Background`] calls. Completes when every hook has run, so
-/// a caller that awaits it can count the hooks as part of its own work. The
-/// event counts as dispatched once this completes: dropped before then, it
-/// may be dispatched again.
+/// fleet-wide (an event dispatched, or being dispatched, under the same id on
+/// any replica is skipped; see `EventClaim`), as [`CallClass::Background`]
+/// calls. Completes when every hook has run, so a caller that awaits it can
+/// count the hooks as part of its own work. Dropped before it completes, it
+/// gives the event back to be dispatched again. When the claim cannot be
+/// taken (the database did not answer), the event is not dispatched.
 pub async fn dispatch_hooks_once(
+    db: &common::db::DatabaseConnection,
     topic: &str,
     event_payload: serde_json::Value,
     enabled_plugins: Option<&ResourceEnablements>,
@@ -477,10 +506,14 @@ pub async fn dispatch_hooks_once(
     event_id: Option<String>,
 ) {
     let claim = match event_id {
-        Some(id) => match EventClaim::take(id.clone()) {
-            Some(claim) => Some(claim),
-            None => {
+        Some(id) => match EventClaim::take(db, id.clone()).await {
+            Ok(Some(claim)) => Some(claim),
+            Ok(None) => {
                 tracing::debug!(event_id = %id, topic, "Skipping duplicate background hook event");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(event_id = %id, topic, error = %e, "Claiming a hook event failed; not dispatching it");
                 return;
             }
         },
@@ -514,6 +547,7 @@ pub async fn dispatch_hooks_once(
 }
 
 pub fn dispatch_hooks_background_typed<E: HookEvent + Send + 'static>(
+    db: common::db::DatabaseConnection,
     event: E,
     enabled_plugins: Option<ResourceEnablements>,
     hook_registry: SharedHookRegistry,
@@ -527,7 +561,7 @@ pub fn dispatch_hooks_background_typed<E: HookEvent + Send + 'static>(
             return;
         }
     };
-    dispatch_hooks_background(topic, payload, enabled_plugins, hook_registry, event_id);
+    dispatch_hooks_background(db, topic, payload, enabled_plugins, hook_registry, event_id);
 }
 
 async fn dispatch_hooks_inner(
@@ -859,46 +893,74 @@ mod tests {
         dispatch_hooks(topic, payload, None, registry, CallClass::Background).await
     }
 
-    #[tokio::test]
-    async fn an_event_dispatched_once_has_run_its_hooks_when_it_returns() {
-        let hook = Arc::new(MockHook::new(
-            "observer",
-            "after_judging",
-            GenericHookAction::Pass,
-        ));
+    /// A registry, as one replica holds it, with `hook` on `after_judging`.
+    async fn replica_with(hook: Arc<dyn GenericHook<Context = CallOptions>>) -> SharedHookRegistry {
         let registry = new_shared_registry();
         register_direct(
             &mut *registry.write().await,
-            hook.clone(),
+            hook,
             HookScope::Global,
             HookMode::Notify,
         );
-        let id = || Some("once-test:1".to_string());
-        dispatch_hooks_once(
-            "after_judging",
-            serde_json::json!({}),
-            None,
-            &registry,
-            id(),
-        )
-        .await;
-        assert_eq!(hook.calls(), 1, "the hook ran before the dispatch returned");
-        dispatch_hooks_once(
-            "after_judging",
-            serde_json::json!({}),
-            None,
-            &registry,
-            id(),
-        )
-        .await;
-        assert_eq!(hook.calls(), 1, "the same event is dispatched once");
+        registry
     }
 
-    /// Counts its calls; the first never completes.
+    async fn dispatch_once(db: &common::db::DatabaseConnection, registry: &SharedHookRegistry) {
+        dispatch_hooks_once(
+            db,
+            "after_judging",
+            serde_json::json!({}),
+            None,
+            registry,
+            Some("after_judging:1:1".to_string()),
+        )
+        .await;
+    }
+
+    /// An event's hooks run once fleet-wide: the replica that dispatched it
+    /// has run them when the dispatch returns, and neither another replica
+    /// nor the same one after a restart (a fresh registry) runs them again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_event_fires_once_across_replicas_and_restarts() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let hooks: Vec<Arc<MockHook>> = (0..3)
+            .map(|_| {
+                Arc::new(MockHook::new(
+                    "observer",
+                    "after_judging",
+                    GenericHookAction::Pass,
+                ))
+            })
+            .collect();
+        for hook in &hooks {
+            let registry = replica_with(hook.clone()).await;
+            dispatch_once(&db, &registry).await;
+        }
+        assert_eq!(
+            hooks.iter().map(|h| h.calls()).collect::<Vec<_>>(),
+            [1, 0, 0],
+            "the first replica ran it before returning; no other replica or restart did"
+        );
+        // The claim the others read is the database's, not a process's.
+        let claims = db
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Postgres,
+                "SELECT COUNT(*)::bigint AS n FROM hook_event WHERE event_id = 'after_judging:1:1'",
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<i64>("", "n")
+            .unwrap();
+        assert_eq!(claims, 1);
+    }
+
+    /// Counts its calls; the first signals `started` and never completes.
     struct StallingHook {
         id: String,
         topics: Vec<String>,
         call_count: AtomicUsize,
+        started: tokio::sync::Notify,
     }
 
     #[async_trait]
@@ -919,54 +981,45 @@ mod tests {
             _event: &GenericEvent,
         ) -> anyhow::Result<GenericHookAction> {
             if self.call_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.started.notify_one();
                 std::future::pending::<()>().await;
             }
             Ok(HookAction::Pass)
         }
     }
 
-    /// An event counts as dispatched only once its dispatch completes: a
-    /// duplicate while it runs is skipped, but a dispatch dropped before its
-    /// hooks ran leaves the event to be dispatched again.
-    #[tokio::test]
-    async fn an_event_whose_dispatch_was_dropped_is_dispatched_again() {
-        use futures::FutureExt;
-        let hook = Arc::new(StallingHook {
+    /// Two replicas racing on one event run its hooks once: while one
+    /// replica's dispatch runs, the other's is skipped. A dispatch dropped
+    /// before it completes gives the event back, so it is dispatched again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_racing_replica_is_skipped_and_a_dropped_dispatch_gives_the_event_back() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let stalling = Arc::new(StallingHook {
             id: "observer".into(),
             topics: vec!["after_judging".into()],
             call_count: AtomicUsize::new(0),
+            started: tokio::sync::Notify::new(),
         });
-        let registry = new_shared_registry();
-        register_direct(
-            &mut *registry.write().await,
-            hook.clone(),
-            HookScope::Global,
-            HookMode::Notify,
-        );
-        let dispatch = || {
-            dispatch_hooks_once(
-                "after_judging",
-                serde_json::json!({}),
-                None,
-                &registry,
-                Some("dropped-test:1".to_string()),
-            )
-        };
-        let mut stalled = Box::pin(dispatch());
-        assert!((&mut stalled).now_or_never().is_none(), "the hook stalls");
-        dispatch().await;
-        assert_eq!(
-            hook.call_count.load(Ordering::SeqCst),
-            1,
-            "a duplicate of a running dispatch is skipped"
-        );
-        drop(stalled);
-        dispatch().await;
-        assert_eq!(
-            hook.call_count.load(Ordering::SeqCst),
-            2,
-            "the dropped dispatch did not use up the event"
-        );
+        let first = replica_with(stalling.clone()).await;
+        let other = Arc::new(MockHook::new(
+            "observer",
+            "after_judging",
+            GenericHookAction::Pass,
+        ));
+        let second = replica_with(other.clone()).await;
+
+        let running = tokio::spawn({
+            let db = db.clone();
+            async move { dispatch_once(&db, &first).await }
+        });
+        stalling.started.notified().await;
+        dispatch_once(&db, &second).await;
+        assert_eq!(other.calls(), 0, "skipped while the first replica runs it");
+
+        running.abort();
+        assert!(running.await.unwrap_err().is_cancelled());
+        dispatch_once(&db, &second).await;
+        assert_eq!(other.calls(), 1, "the dropped dispatch gave it back");
     }
 
     #[tokio::test]

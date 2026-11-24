@@ -889,9 +889,14 @@ mod tests {
             let update = judging::as_recorded("judge", update, None).expect("recorded");
             assert_eq!(submission_update(&db, update).await, 1);
 
-            let pass = retry_system_errors(&db, RetryBudget::new(10), 10, &[])
-                .await
-                .expect("retry");
+            let pass = retry_system_errors(
+                &db,
+                RetryBudget::new(10),
+                10,
+                &crate::providers::Provides::default(),
+            )
+            .await
+            .expect("retry");
             let shown = submission::Entity::find_by_id(sub.id)
                 .one(&db)
                 .await
@@ -944,9 +949,14 @@ mod tests {
             common::SubmissionStatus::Queued,
             "the submission keeps showing the attempt"
         );
-        let pass = retry_system_errors(&db, RetryBudget::new(1), 10, &[])
-            .await
-            .expect("retry");
+        let pass = retry_system_errors(
+            &db,
+            RetryBudget::new(1),
+            10,
+            &crate::providers::Provides::default(),
+        )
+        .await
+        .expect("retry");
         assert_eq!(pass.requeued, 1);
     }
 

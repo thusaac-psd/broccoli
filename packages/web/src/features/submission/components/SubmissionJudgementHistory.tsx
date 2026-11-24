@@ -17,6 +17,7 @@ import {
   Button,
   QueryErrorState,
   TextPreview,
+  useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -50,6 +51,7 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
   const { user } = useAuth();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
+  const [confirm, confirmDialog] = useConfirmDialog();
   const canRejudge = !!user?.permissions.includes(SUBMISSION_REJUDGE);
   // Judgement version history (including pending regrade candidates) is a
   // judging-operations view. Contestants must only ever see the current
@@ -138,22 +140,40 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
     },
   });
 
-  const applyMutation = useMutation({
-    mutationFn: async (judgementId: number) => {
-      const { data, error } = await apiClient.POST(
-        '/submissions/{id}/judgements/{judgement_id}/apply',
-        {
-          params: { path: { id: submissionId, judgement_id: judgementId } },
+  const apply = async (judgementId: number, force: boolean) => {
+    const { data, error } = await apiClient.POST(
+      '/submissions/{id}/judgements/{judgement_id}/apply',
+      {
+        params: {
+          path: { id: submissionId, judgement_id: judgementId },
+          query: { force },
         },
-      );
-      if (error) throw error;
-      return data;
-    },
-    onSuccess: async () => {
-      toast.success(t('submissionDetail.judgementApplied'));
-      await invalidate();
-    },
-    onError: (error) => {
+      },
+    );
+    if (error) throw error;
+    toast.success(t('submissionDetail.judgementApplied'));
+    await invalidate();
+    return data;
+  };
+
+  const applyMutation = useMutation({
+    mutationFn: (judgementId: number) => apply(judgementId, false),
+    onError: (error, judgementId) => {
+      // Judged against test data the problem has changed since: applied
+      // only once the user confirms it.
+      if (
+        (error as { code?: string } | null)?.code ===
+        'JUDGED_ON_OTHER_TEST_DATA'
+      ) {
+        confirm({
+          title: t('submissionDetail.applyOtherTestData'),
+          description: errorMessage(error, t('submissionDetail.applyError')),
+          confirmLabel: t('submissionDetail.applyVersion'),
+          failureMessage: t('submissionDetail.applyError'),
+          onConfirm: () => apply(judgementId, true),
+        });
+        return;
+      }
       toast.error(errorMessage(error, t('submissionDetail.applyError')));
     },
   });
@@ -181,6 +201,7 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
 
   return (
     <div className="rounded-lg border bg-card px-6 py-5">
+      {confirmDialog}
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="text-sm font-semibold">
           {t('submissionDetail.versions')}

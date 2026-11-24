@@ -53,6 +53,12 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub config_recheck: Option<Json>,
 
+    /// How many times the problem's test data changed: every change commits
+    /// through `services::test_data::TestDataEdit`, which counts it. Judging
+    /// copies it onto the judgement it claims.
+    #[sea_orm(default_value = 0)]
+    pub test_data_version: i32,
+
     #[sea_orm(has_many)]
     pub submissions: HasMany<super::submission::Entity>,
 

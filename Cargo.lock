@@ -5602,7 +5602,6 @@ dependencies = [
  "hyper-util",
  "ipnet",
  "jsonwebtoken",
- "lru 0.16.4",
  "matchit 0.9.2",
  "mime_guess",
  "mq",

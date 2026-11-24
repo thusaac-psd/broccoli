@@ -59,8 +59,15 @@ pub async fn start_evaluate_batch_with(
     let evaluator = {
         let registry = deps.evaluator_registry.read().await;
         registry.get(&problem_type).cloned()
-    }
-    .ok_or_else(|| anyhow!("No evaluator registered for problem type: {}", problem_type))?;
+    };
+    let Some(evaluator) = evaluator else {
+        // Lost since the claim, a fault of this replica's (see
+        // `Dispatch::not_loaded_here`).
+        if let Some(dispatch) = &deps.operation_deps.dispatch {
+            dispatch.not_loaded_here(&format!("the evaluator of problem type {problem_type}"));
+        }
+        anyhow::bail!("No evaluator registered for problem type: {problem_type}");
+    };
 
     let batch_id = Uuid::new_v4().to_string();
     let resolved_inputs = resolve_inputs(&deps, input, &batch_id, problem).await?;

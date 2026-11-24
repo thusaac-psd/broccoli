@@ -728,10 +728,9 @@ async fn a_type_another_enabled_plugin_provides_is_not_withheld_by_a_disabled_on
     plugin_lifecycle::reconcile(&a.state).await.unwrap();
 
     assert_eq!(
-        a.state.plugin_lifecycle.disabled_provider(
-            server::plugin_lifecycle::Provided::ContestType,
-            "fleet-only"
-        ),
+        a.state
+            .plugin_lifecycle
+            .disabled_provider(server::providers::Provided::ContestType, "fleet-only"),
         None
     );
     let res = a

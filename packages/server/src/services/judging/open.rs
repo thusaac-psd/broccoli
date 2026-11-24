@@ -10,7 +10,7 @@ use sea_orm::{
 
 use super::unit::mirror_current;
 use crate::dlq::{DlqService, DlqSubject};
-use crate::entity::{submission, submission_judgement, test_case_result};
+use crate::entity::{problem, submission, submission_judgement, test_case_result};
 
 /// Chainable on `submission::Entity::update_many()`: allocates one fresh
 /// judge epoch per matched submission. The new epoch is the returned row's
@@ -215,27 +215,44 @@ async fn supersede_current_judgement<C: ConnectionTrait>(
 
 /// Outcome of `apply_judgement`.
 pub(crate) enum ApplyJudgement {
-    Applied(Box<submission::Model>),
+    /// The submission as it is now, showing the applied judgement, and the
+    /// `max_judge_epoch` the apply allocated: unique to this apply, it names
+    /// the result's after-judging event.
+    Applied {
+        submission: Box<submission::Model>,
+        generation: i32,
+    },
     SubmissionNotFound,
     JudgementNotFound,
     NotFinalized,
     /// It was superseded before it got a verdict: there is no result to show.
     Superseded,
+    /// It was judged against test data the problem has changed since (its
+    /// `test_data_version` is not the problem's), and the apply was not
+    /// forced: its verdicts would show beside data they were not judged with.
+    OtherTestData,
 }
 
 /// Makes a finalized judgement the submission's current one, in the
 /// caller's transaction. A superseded judgement never had a result and is
-/// refused.
+/// refused, and so, unless `force`, is one judged against test data the
+/// problem has changed since.
 ///
-/// The judgement becomes current under a FRESH epoch, never its own older
-/// one: copying it back would move `judge_epoch` backwards and reuse an
-/// `after_judging:{id}:{epoch}` dedupe key that already fired. Its kept
-/// `test_case_result` rows move to the new epoch with it, so plugins that
-/// join results to their judgement on the epoch still find them.
+/// The judgement keeps its own epoch: the epoch names the attempt its
+/// results belong to, so every result row keyed by (judgement, epoch), the
+/// host's `test_case_result` and every plugin's own, stays the applied
+/// judgement's without being re-keyed. The submission shows that epoch again
+/// (`judge_epoch` follows the current judgement); nothing can write the
+/// finalized judgement under it, and epochs stay unique per submission
+/// because they are only ever allocated from `max_judge_epoch`. The apply
+/// still allocates from it: the bump locks the submission row against a
+/// rejudge or discard, and the value it takes names this apply's
+/// after-judging event (a re-applied judgement's hooks fire again).
 pub(crate) async fn apply_judgement(
     txn: &DatabaseTransaction,
     submission_id: i32,
     judgement_id: i32,
+    force: bool,
 ) -> Result<ApplyJudgement, DbErr> {
     // Allocating first also locks the submission row for the rest of the
     // transaction, serializing this against rejudge and discard.
@@ -262,27 +279,30 @@ pub(crate) async fn apply_judgement(
     if judgement.status == SubmissionStatus::Superseded {
         return Ok(ApplyJudgement::Superseded);
     }
+    if !force {
+        let test_data_version: Option<i32> = problem::Entity::find_by_id(sub.problem_id)
+            .select_only()
+            .column(problem::Column::TestDataVersion)
+            .into_tuple()
+            .one(txn)
+            .await?;
+        if test_data_version != Some(judgement.test_data_version) {
+            return Ok(ApplyJudgement::OtherTestData);
+        }
+    }
 
     supersede_current_judgement(txn, submission_id).await?;
     submission_judgement::Entity::update_many()
         .col_expr(submission_judgement::Column::IsCurrent, Expr::value(true))
-        .col_expr(
-            submission_judgement::Column::JudgeEpoch,
-            Expr::value(sub.max_judge_epoch),
-        )
         .filter(submission_judgement::Column::Id.eq(judgement_id))
         .exec(txn)
         .await?;
-    test_case_result::Entity::update_many()
-        .col_expr(
-            test_case_result::Column::JudgeEpoch,
-            Expr::value(sub.max_judge_epoch),
-        )
-        .filter(test_case_result::Column::JudgementId.eq(judgement_id))
-        .exec(txn)
-        .await?;
+    let generation = sub.max_judge_epoch;
     let sub = mirror_current(txn, submission_id).await?;
-    Ok(ApplyJudgement::Applied(Box::new(sub)))
+    Ok(ApplyJudgement::Applied {
+        submission: Box::new(sub),
+        generation,
+    })
 }
 
 /// Outcome of `discard_judgement`.

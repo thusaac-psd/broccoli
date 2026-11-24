@@ -34,6 +34,7 @@ pub(super) struct PendingAttempt {
     abandoned: Option<SubmissionAttemptAbandonedEvent>,
     enabled_plugins: Option<hooks::ResourceEnablements>,
     hook_registry: hooks::SharedHookRegistry,
+    db: common::db::DatabaseConnection,
 }
 
 impl PendingAttempt {
@@ -51,6 +52,7 @@ impl PendingAttempt {
             }),
             enabled_plugins: Some(enabled_plugins.clone()),
             hook_registry: state.registries.hook_registry.clone(),
+            db: state.db.clone(),
         }
     }
 
@@ -74,6 +76,7 @@ impl Drop for PendingAttempt {
                 event.attempt_id
             );
             hooks::dispatch_hooks_background_typed(
+                self.db.clone(),
                 event,
                 self.enabled_plugins.take(),
                 self.hook_registry.clone(),
@@ -118,6 +121,7 @@ pub(super) fn fire_after_submission_hooks(
     enabled_plugins: Option<hooks::ResourceEnablements>,
 ) {
     hooks::dispatch_hooks_background_typed(
+        state.db.clone(),
         AfterSubmissionEvent {
             submission_id,
             user_id,

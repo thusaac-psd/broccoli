@@ -375,6 +375,7 @@ mod grants {
         "blob_data",
         "dead_letter_message",
         "device_authorization",
+        "hook_event",
         "idempotency_key",
         "plugin",
         "plugin_config",

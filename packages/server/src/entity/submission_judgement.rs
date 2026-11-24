@@ -85,6 +85,11 @@ pub struct Model {
     /// clears it.
     #[sea_orm(default_value = false)]
     pub error_stands: bool,
+    /// The problem's test data version (`problem::Model::test_data_version`)
+    /// when this dispatch was claimed: the data its verdicts were judged
+    /// against. Applying it after the data changed needs `force`.
+    #[sea_orm(default_value = 0)]
+    pub test_data_version: i32,
 
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeUtc,

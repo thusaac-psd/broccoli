@@ -282,16 +282,21 @@ binaries warn about every key they do not read.
 - When changing plugin execution behavior, check both manifest-level permissions
   and host-side registration/resolution.
 - A unit of work runs only while every plugin it needs has an enabled provider:
-  its contest type's plugin and its problem type's evaluator. Work that cannot
-  run because one is disabled fleet-wide is parked, not failed: the claim, the
-  system-error retry, the stuck detector and the overview's parked count read
-  one predicate (`judging::Unit::runnable`, built on
-  `plugin_lifecycle::work_runnable`; `PluginLifecycle::closed_by` in Rust), the
-  submit paths refuse it (`accepting_handler`), and it resumes when a provider
-  is enabled. A new scan that hands out or retries judging work uses that
-  predicate too. A judgement whose session the disable cut goes straight back to
-  `Queued` (`judging::fail_dispatch`), never through `SystemError`, on every
-  replica alike, since the decision reads the fleet-wide `plugin` table.
+  its contest type's plugin, its problem type's evaluator and its checker
+  format's checker (`providers::Needs`). Work that cannot run because one is
+  disabled fleet-wide is parked, not failed: the claim, the system-error retry,
+  the stuck detector and the overview's parked count read one predicate
+  (`judging::Unit::runnable`, built on `providers::runnable`;
+  `PluginLifecycle::closed_by` in Rust), the submit paths refuse it
+  (`accepting_handler`), and it resumes when a provider is enabled. A replica
+  takes a unit only when it has every one of those plugins loaded, or no live
+  replica has one (`providers::runs_here`, local keys from
+  `Provides::loaded_here`); a plugin lost after the claim hands the attempt back
+  (`Dispatch::not_loaded_here`). A new scan that hands out or retries judging
+  work uses these predicates too. A judgement whose session the disable cut goes
+  straight back to `Queued` (`judging::fail_dispatch`), never through
+  `SystemError`, on every replica alike, since the decision reads the fleet-wide
+  `plugin` table.
 - A worker that lacks a platform tool takes no work
   (`HeartbeatPayload::accepts_work`): it stays live, its heartbeat lists what is
   missing, and while no live worker takes work the claim claims nothing
@@ -342,14 +347,16 @@ binaries warn about every key they do not read.
   through one rule, `plugin_lifecycle::accepting_handler`, which refuses a
   contest type no provider can judge now; a new submit path calls it too.
 - A change to a problem's test data goes through
-  `services::test_data::TestDataEdit`, whose commit checks the problem's stored
-  configs against the data as the change leaves it and refuses a change that
-  breaks one with 409 `CONFIG_WOULD_BREAK` unless the request says `force=true`.
-  The problem's `config_issues` flag, which judging copies onto every judgement
-  it claims, is kept by `services::config_issues`: a new path that changes what
-  a stored config is checked against (test data, a plugin, a contest- or
-  plugin-scope config) rechecks it there, after it commits and off the judging
-  path.
+  `services::test_data::TestDataEdit`, which counts it in
+  `problem.test_data_version` (judging copies the version onto every judgement
+  it claims, and applying a judgement of another version needs `force`), and
+  whose commit checks the problem's stored configs against the data as the
+  change leaves it and refuses a change that breaks one with 409
+  `CONFIG_WOULD_BREAK` unless the request says `force=true`. The problem's
+  `config_issues` flag, which judging copies onto every judgement it claims, is
+  kept by `services::config_issues`: a new path that changes what a stored
+  config is checked against (test data, a plugin, a contest- or plugin-scope
+  config) rechecks it there, after it commits and off the judging path.
 - Every write or delete of a stored plugin config, an admin's, a plugin's
   (`config_set`) or the host's own as a problem or contest goes, goes through
   `services::plugin_config` (`write_config`, `delete_config*`): a write passes

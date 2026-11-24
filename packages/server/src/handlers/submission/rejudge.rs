@@ -32,13 +32,13 @@ use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
-use crate::models::problem::validate_contest_type;
+use crate::models::problem::{ApplyJudgementQuery, validate_contest_type};
 use crate::models::submission::*;
 use crate::services::judging::{
     self, ApplyJudgement, DiscardJudgement, OpenJudgement, apply_judgement, discard_judgement,
     open_judgement,
 };
-use crate::services::submission_dispatch::spawn_after_judging_hooks;
+use crate::services::submission_dispatch::{ResultShown, spawn_after_judging_hooks};
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, is_problem_in_contest, required_contest_type};
 use crate::utils::judging::{files_to_json, validate_code_payload, validate_submission_contract};
@@ -54,10 +54,11 @@ use super::response::{VisibilityContext, build_submission_response};
     tag = "Submissions",
     operation_id = "applySubmissionJudgement",
     summary = "Apply a finalized submission judgement",
-    description = "Makes a finalized judgement the current version and copies its cached result fields onto the submission. Requires `submission:rejudge` permission.",
+    description = "Makes a finalized judgement the current version and copies its cached result fields onto the submission. A judgement judged against test data the problem has changed since is applied only with `force=true`. Requires `submission:rejudge` permission.",
     params(
         ("id" = i32, Path, description = "Submission ID"),
-        ("judgement_id" = i32, Path, description = "Judgement ID")
+        ("judgement_id" = i32, Path, description = "Judgement ID"),
+        ApplyJudgementQuery
     ),
     responses(
         (status = 200, description = "Applied judgement", body = SubmissionResponseAfterMutation),
@@ -65,6 +66,7 @@ use super::response::{VisibilityContext, build_submission_response};
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Submission or judgement not found (NOT_FOUND)", body = ErrorBody),
+        (status = 409, description = "The judgement was judged against test data the problem has changed since, which `force=true` applies anyway (JUDGED_ON_OTHER_TEST_DATA)", body = ErrorBody),
         (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
@@ -74,12 +76,16 @@ pub async fn apply_submission_judgement(
     auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath((id, judgement_id)): AppPath<(i32, i32)>,
+    AppQuery(query): AppQuery<ApplyJudgementQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission(perm::SUBMISSION_REJUDGE)?;
 
     let txn = state.db.begin().await?;
-    let updated = match apply_judgement(&txn, id, judgement_id).await? {
-        ApplyJudgement::Applied(updated) => *updated,
+    let (updated, generation) = match apply_judgement(&txn, id, judgement_id, query.force).await? {
+        ApplyJudgement::Applied {
+            submission,
+            generation,
+        } => (*submission, generation),
         ApplyJudgement::SubmissionNotFound => {
             return Err(AppError::NotFound("Submission not found".into()));
         }
@@ -96,16 +102,11 @@ pub async fn apply_submission_judgement(
                 "Cannot apply a superseded judgement: it never got a result".into(),
             ));
         }
+        ApplyJudgement::OtherTestData => return Err(AppError::JudgedOnOtherTestData),
     };
     txn.commit().await?;
 
-    spawn_after_judging_hooks(
-        &state,
-        updated.id,
-        updated.user_id,
-        updated.problem_id,
-        updated.contest_id,
-    );
+    spawn_after_judging_hooks(&state, updated.id, ResultShown::Applied { generation });
 
     let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
     let response = build_submission_response(&state, updated, visibility).await?;

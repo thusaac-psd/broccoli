@@ -305,9 +305,9 @@ pub async fn claim_once(
     if !state.worker_slots.takes_work() || !state.mq.check_reachable().await {
         return Ok(ClaimPass::CANNOT_RUN);
     }
-    // The contest types this replica can judge right now; see
-    // `dispatcher::prefer_local_handler`.
-    let contest_types = super::local_contest_types(state).await;
+    // What this replica has loaded: it takes only work it can run here (see
+    // `providers::runs_here`), read from its registries, with no round trip.
+    let local = crate::providers::Provides::loaded_here(&state.registries).await;
     let in_flight_cap = (max_in_flight > 0).then_some(max_in_flight);
 
     // Judgements and code runs share the in-flight cap; judgements go first.
@@ -329,7 +329,7 @@ pub async fn claim_once(
             rows: slots.len() as u32,
             in_flight_cap,
         },
-        &contest_types,
+        &local,
     )
     .await?;
     // The room the cap left for this whole pass.
@@ -344,6 +344,7 @@ pub async fn claim_once(
         server_id,
         "dispatch_judgement",
         claimed,
+        &local,
         slots,
         crate::services::submission_dispatch::dispatch_judgement,
     );
@@ -364,7 +365,7 @@ pub async fn claim_once(
             // Counted by the judgement claim: `code_run_budget` is in it.
             in_flight_cap: None,
         },
-        &contest_types,
+        &local,
     )
     .await?;
     let claimed_code_runs = claimed.units.len() as u32;
@@ -373,6 +374,7 @@ pub async fn claim_once(
         server_id,
         "dispatch_code_run",
         claimed,
+        &local,
         slots,
         crate::services::code_run_dispatch::dispatch_code_run_to_plugin,
     );
@@ -396,6 +398,7 @@ fn start_claimed<T, F, Fut>(
     server_id: &str,
     label: &'static str,
     claimed: judging::Claimed<T>,
+    local: &crate::providers::Provides,
     slots: Vec<DispatcherReservation>,
     dispatch: F,
 ) where
@@ -426,10 +429,15 @@ fn start_claimed<T, F, Fut>(
             &claim.problem_type,
             claim.queued_secs,
         );
+        let needs_loaded = claim
+            .needs()
+            .each()
+            .into_iter()
+            .all(|(kind, key)| local.provides(kind, key));
         let live = state
             .registries
             .live_dispatches
-            .enter(claim.unit.dispatched());
+            .enter(claim.unit.dispatched(), needs_loaded);
         slot.spawn(label, dispatch(state.clone(), claim.unit, live));
     }
 }

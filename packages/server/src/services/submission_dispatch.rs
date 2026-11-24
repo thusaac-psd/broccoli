@@ -34,34 +34,43 @@ struct SubmissionDispatchTestCaseRow {
     expected_output_blob_hash: Option<String>,
 }
 
+/// How a submission came to show the result its after-judging hooks see,
+/// which names the hook event: once per result shown, whichever paths fire it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResultShown {
+    /// Its current judgement's attempt at its epoch finished, or its system
+    /// error was confirmed.
+    Judged,
+    /// An admin applied a judgement; `generation` is the submission's
+    /// `max_judge_epoch` that apply allocated, unique to that apply.
+    Applied { generation: i32 },
+}
+
+impl ResultShown {
+    /// The hook event id of `sub` showing its result this way.
+    fn event_id(self, sub: &submission::Model) -> String {
+        match self {
+            Self::Judged => format!("after_judging:{}:{}", sub.id, sub.judge_epoch),
+            Self::Applied { generation } => {
+                format!("after_judging:{}:applied:{generation}", sub.id)
+            }
+        }
+    }
+}
+
 /// Runs the after-judging hooks of a submission whose result a request or a
 /// background scan just decided, in a task of its own that counts as judging
 /// work (`judging_sessions`) until they have run: the caller neither waits
 /// for the hooks' background calls nor loses them if it is dropped.
 /// Judging that is tracked already awaits [`fire_after_judging_hooks`].
-pub(crate) fn spawn_after_judging_hooks(
-    state: &AppState,
-    submission_id: i32,
-    user_id: i32,
-    problem_id: i32,
-    contest_id: Option<i32>,
-) {
+pub(crate) fn spawn_after_judging_hooks(state: &AppState, submission_id: i32, shown: ResultShown) {
     let judging = state.registries.judging_sessions.track();
     let db = state.db.clone();
     let hook_registry = state.registries.hook_registry.clone();
     let contest_types = state.registries.contest_type_registry.clone();
     tokio::spawn(async move {
         let _judging = judging;
-        fire_after_judging_hooks(
-            &db,
-            hook_registry,
-            &contest_types,
-            submission_id,
-            user_id,
-            problem_id,
-            contest_id,
-        )
-        .await;
+        fire_after_judging_hooks(&db, hook_registry, &contest_types, submission_id, shown).await;
     });
 }
 
@@ -72,9 +81,7 @@ pub(crate) async fn fire_after_judging_hooks(
     hook_registry: hooks::SharedHookRegistry,
     contest_types: &ContestTypeRegistry,
     submission_id: i32,
-    user_id: i32,
-    problem_id: i32,
-    contest_id: Option<i32>,
+    shown: ResultShown,
 ) {
     let sub = match submission::Entity::find_by_id(submission_id).one(db).await {
         Ok(Some(s)) => s,
@@ -92,16 +99,7 @@ pub(crate) async fn fire_after_judging_hooks(
         return;
     }
 
-    dispatch_after_judging_hooks(
-        db,
-        hook_registry,
-        contest_types,
-        &sub,
-        user_id,
-        problem_id,
-        contest_id,
-    )
-    .await;
+    dispatch_after_judging_hooks(db, hook_registry, contest_types, &sub, shown).await;
 }
 
 pub(crate) async fn fire_after_judging_hooks_for_detached_completion(
@@ -158,16 +156,7 @@ pub(crate) async fn fire_after_judging_hooks_for_detached_completion(
         }
     }
 
-    dispatch_after_judging_hooks(
-        db,
-        hook_registry,
-        contest_types,
-        &sub,
-        sub.user_id,
-        sub.problem_id,
-        sub.contest_id,
-    )
-    .await;
+    dispatch_after_judging_hooks(db, hook_registry, contest_types, &sub, ResultShown::Judged).await;
 }
 
 async fn dispatch_after_judging_hooks(
@@ -175,9 +164,7 @@ async fn dispatch_after_judging_hooks(
     hook_registry: hooks::SharedHookRegistry,
     contest_types: &ContestTypeRegistry,
     sub: &submission::Model,
-    user_id: i32,
-    problem_id: i32,
-    contest_id: Option<i32>,
+    shown: ResultShown,
 ) {
     let verdict = sub
         .verdict
@@ -185,20 +172,26 @@ async fn dispatch_after_judging_hooks(
         .map(|v| v.to_string())
         .unwrap_or_else(|| sub.status.to_string());
 
-    let enabled_plugins =
-        match hooks::resource_enablements(db, contest_types, problem_id, contest_id).await {
-            Ok(e) => Some(e),
-            Err(e) => {
-                warn!(error = ?e, "Failed to fetch enablements for after_judging hook");
-                None
-            }
-        };
+    let enabled_plugins = match hooks::resource_enablements(
+        db,
+        contest_types,
+        sub.problem_id,
+        sub.contest_id,
+    )
+    .await
+    {
+        Ok(e) => Some(e),
+        Err(e) => {
+            warn!(error = ?e, "Failed to fetch enablements for after_judging hook");
+            None
+        }
+    };
 
     let event = AfterJudgingEvent {
         submission_id: sub.id,
-        user_id,
-        problem_id,
-        contest_id,
+        user_id: sub.user_id,
+        problem_id: sub.problem_id,
+        contest_id: sub.contest_id,
         verdict,
         score: sub.score,
     };
@@ -212,11 +205,12 @@ async fn dispatch_after_judging_hooks(
     // Awaited, not spawned: the hooks are part of the judging work that
     // calls this (see `judging_sessions`).
     hooks::dispatch_hooks_once(
+        db,
         AfterJudgingEvent::TOPIC,
         payload,
         enabled_plugins.as_ref(),
         &hook_registry,
-        Some(format!("after_judging:{}:{}", sub.id, sub.judge_epoch)),
+        Some(shown.event_id(sub)),
     )
     .await;
 }
@@ -329,9 +323,9 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &state.metrics,
                 judgement_ref,
                 &faults,
-                DispatchFailure::judging(
-                    HostCode::NoHandlerRegistered,
-                    format!("No plugin registered for contest type {:?}", contest_type),
+                DispatchFailure::no_handler(
+                    live.needs_loaded(),
+                    format!("contest type {:?}", contest_type),
                 ),
             )
             .await;
@@ -592,7 +586,6 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
     let db = state.db.clone();
     let metrics = state.metrics.clone();
     let submission_id = submission.id;
-    let user_id = submission.user_id;
     let problem_id = submission.problem_id;
     let contest_id = submission.contest_id;
 
@@ -677,9 +670,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                     hook_registry,
                     &contest_types,
                     submission_id,
-                    user_id,
-                    problem_id,
-                    contest_id,
+                    ResultShown::Judged,
                 )
                 .await;
             }

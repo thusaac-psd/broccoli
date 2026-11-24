@@ -80,10 +80,17 @@ fn checker_stage_call(
     let ctx = super::HostCall::enter(user_data, host_fn_name)?;
 
     let handler = tokio::runtime::Handle::current()
-        .block_on(async { ctx.checker_stage_registry.read().await.get(format).cloned() })
-        .ok_or_else(|| {
-            extism::Error::msg(format!("No checker resolver registered for '{format}'"))
-        })?;
+        .block_on(async { ctx.checker_stage_registry.read().await.get(format).cloned() });
+    let Some(handler) = handler else {
+        // Lost since the claim, a fault of this replica's (see
+        // `Dispatch::not_loaded_here`).
+        if let Some(dispatch) = crate::services::judging::Dispatch::of_current_call() {
+            dispatch.not_loaded_here(&format!("the checker of format {format}"));
+        }
+        return Err(extism::Error::msg(format!(
+            "No checker resolver registered for '{format}'"
+        )));
+    };
 
     let function_name = select_handler_fn(&handler);
     tracing::debug!(

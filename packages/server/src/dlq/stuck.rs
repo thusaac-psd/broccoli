@@ -61,7 +61,7 @@ pub async fn detect_once(state: &AppState, config: &DlqConfig) -> anyhow::Result
     // Recovery requeues for the claim fiber, which leaves work to a replica
     // that can judge it; selecting the same way keeps a replica from burning
     // retries on work it cannot judge.
-    let local = crate::dispatcher::local_contest_types(state).await;
+    let local = crate::providers::Provides::loaded_here(&state.registries).await;
     for unit in [Unit::Judgement, Unit::CodeRun] {
         let reclaimed = judging::reclaim_abandoned(
             &state.db,

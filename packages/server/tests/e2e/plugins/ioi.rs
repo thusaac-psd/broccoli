@@ -547,6 +547,71 @@ async fn a_judged_ioi_submission_reads_back_the_subtask_scores_it_was_judged_wit
     );
 }
 
+/// Applying an earlier judgement makes its result the submission's again,
+/// with everything it was scored with: its results stay keyed by the epoch
+/// they were judged at, so the subtask-scores route and the scoreboard read
+/// the applied judgement's 100 points, not nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_applied_earlier_judgement_scores_what_it_was_judged_with() {
+    let app = E2eTestApp::spawn().await;
+    let (admin, contest_id, _, sub_id) =
+        judged_sum_best_subtask_submission(&app, "ioi_applied").await;
+    let first = current_judgement(&app, sub_id).await;
+
+    let res = app
+        .post_with_token(
+            &format!("/api/v1/submissions/{sub_id}/rejudge"),
+            &json!({ "apply_immediately": true }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let judged = app.wait_for_submission_terminal(sub_id, &admin, 60).await;
+    assert_eq!(judged.body["status"], "Judged", "{}", judged.text);
+    app.judging_idle().await;
+    assert_ne!(current_judgement(&app, sub_id).await.id, first.id);
+
+    let res = app
+        .post_with_token(
+            &format!("/api/v1/submissions/{sub_id}/judgements/{}/apply", first.id),
+            &json!({}),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    app.judging_idle().await;
+    assert_eq!(current_judgement(&app, sub_id).await.id, first.id);
+
+    let scores = app
+        .get_with_token(
+            &format!(
+                "/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}/submissions/{sub_id}/subtask-scores"
+            ),
+            &admin,
+        )
+        .await;
+    assert_eq!(scores.status, 200, "{}", scores.text);
+    assert_eq!(
+        scores.body["subtasks"][0]["score"].as_f64(),
+        Some(100.0),
+        "{}",
+        scores.text
+    );
+    let board = app
+        .get_with_token(
+            &format!("/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}/scoreboard"),
+            &admin,
+        )
+        .await;
+    assert_eq!(board.status, 200, "{}", board.text);
+    assert_eq!(
+        board.body["rankings"][0]["total_score"].as_f64(),
+        Some(100.0),
+        "{}",
+        board.text
+    );
+}
+
 /// A judgement's subtask scores read back as it was scored, after the
 /// problem's subtasks changed: the result panel shows what the judgement's
 /// total was made of, never the stored total beside a rescoring.

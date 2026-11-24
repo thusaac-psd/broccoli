@@ -89,6 +89,9 @@ host_codes! {
     ValidationError = "VALIDATION_ERROR", generic;
     ConfigNamespaceNotFound = "CONFIG_NAMESPACE_NOT_FOUND";
     ConfigWouldBreak = "CONFIG_WOULD_BREAK";
+    /// A judgement to apply was judged against test data its problem has
+    /// changed since; the request may force it.
+    JudgedOnOtherTestData = "JUDGED_ON_OTHER_TEST_DATA";
     PayloadTooLarge = "PAYLOAD_TOO_LARGE";
     TokenMissing = "TOKEN_MISSING";
     TokenInvalid = "TOKEN_INVALID";
@@ -154,6 +157,9 @@ host_codes! {
     PlatformToolMissing = "PLATFORM_TOOL_MISSING";
     /// No live worker takes work.
     NoCapableWorker = "NO_CAPABLE_WORKER";
+    /// A plugin the work needs stopped being loaded on the replica that
+    /// took it; the work goes back to the queue.
+    PluginNotLoadedHere = "PLUGIN_NOT_LOADED_HERE";
     /// The problem's checker program failed.
     CheckerFailed = "CHECKER_FAILED";
     /// A program the problem supplies besides its checker (an interactor or

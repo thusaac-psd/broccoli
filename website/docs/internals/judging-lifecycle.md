@@ -87,6 +87,21 @@ work. A one-second fallback tick covers notifications lost while the
 listening connection was down; every reconnect also wakes the
 fiber.
 
+A replica claims only work it can run here. A unit needs one key of each
+kind plugins provide (`providers::Needs`): its contest type, its problem's
+type (the evaluator) and its problem's checker format. The claim, the
+system-error retry, the steal and the stuck detector take a unit only when
+this replica has every one of them loaded (`Provides::loaded_here`, read
+from its registries, so the check costs no round trip), or when no live
+replica has one loaded: then the replica that takes the unit fails it
+visibly instead of it waiting unseen (`providers::runs_here`). Each replica
+publishes what it has loaded in its `plugin_replica.provides` row. A unit
+this replica cannot run yet stays `Queued` for a replica that can, or for
+this one once it loads the plugin. A plugin that stops being loaded here
+after a unit was claimed with everything loaded (a reload, an unload) is
+this replica's fault, `PLUGIN_NOT_LOADED_HERE`: the attempt is handed back
+without spending any budget (`Dispatch::not_loaded_here`).
+
 ## Judging sessions end in a verdict
 
 A contest plugin judges a submission in a detached session: the host runs its
@@ -118,15 +133,16 @@ plugin yet.
 
 ## A disabled plugin parks the work that needs it
 
-A unit of work needs two plugins: the one that provides its contest type and
-the evaluator of its problem's type. It is parked while every plugin that
-recorded either key (`plugin.governs`, `contest_types` and `problem_types`)
-is disabled fleet-wide; `work_runnable` states that in SQL
+A unit of work needs three plugins: the one that provides its contest type,
+the evaluator of its problem's type and the checker of its problem's checker
+format. It is parked while every plugin that recorded one of those keys
+(`plugin.governs`: `contest_types`, `problem_types`, `checker_formats`) is
+disabled fleet-wide; `providers::runnable` states that in SQL
 (`judging::Unit::runnable` over a unit's scan) and
 `PluginLifecycle::closed_by` in Rust. Parked work waits `Queued` and resumes
 once a provider is enabled again. A new submission or code run that would be
 parked is refused: `503 CONTEST_TYPE_DISABLED` for its contest type,
-`503 PLUGIN_DISABLED` naming the evaluator for its problem type, both with a
+`503 PLUGIN_DISABLED` naming the evaluator or checker plugin, both with a
 `Retry-After` of 30 seconds. A system error a plugin writes without a code is recorded as
 `PLUGIN_ERROR`, so none is shown without one:
 
@@ -182,20 +198,24 @@ projects it and fires the after-judging hooks. Judging work runs those
 hooks as part of itself (a contest plugin's submission call, a detached
 session); the reaper and an applied judgement start them in a task of their
 own that counts as judging work until they have run
-(`spawn_after_judging_hooks`), so neither waits for a hook. The hook event
-counts as dispatched once its dispatch completes, so one dropped midway is
-dispatched again. A client therefore never sees a terminal status
+(`spawn_after_judging_hooks`), so neither waits for a hook. A hook event
+fires at most once fleet-wide: the replica that dispatches it first inserts
+its id into `hook_event`, so no other replica and no restart dispatches it
+again, and a dispatch dropped before it completes deletes the row, so the
+event is dispatched again. A client therefore never sees a terminal status
 that a retry takes back: within an attempt the statuses only move forward,
 and a terminal status is final.
 
 ## Judge epochs
 
-A judge epoch is the fencing token of one dispatch of one unit. Plugin
-writes, dispatch failures and the `after_judging:{id}:{epoch}` hook dedupe key
+A judge epoch is the fencing token of one dispatch of one unit, and the
+identity of the attempt its results belong to. Plugin writes, dispatch
+failures, result rows and the `after_judging:{id}:{epoch}` hook dedupe key
 are keyed on it.
 
-- Two judgements of one submission never share an epoch, and a submission's
-  `judge_epoch` never moves backwards.
+- Two judgements of one submission never share an epoch, and a judgement's
+  epoch never moves backwards. The submission shows its current judgement's
+  epoch, so applying an earlier judgement shows that judgement's epoch again.
 - `submission.max_judge_epoch` is the allocator. Every judgement epoch is
   allocated by bumping it inside an UPDATE of the submission row, so the row
   lock serializes concurrent allocators. A code run has one row per run and
@@ -204,8 +224,19 @@ are keyed on it.
   dispatch it replaced is rejected.
 - A judgement's `test_case_result` rows carry the judgement's own epoch.
   Plugins join results to their judgement on it (IOI's
-  `sj.judge_epoch = tcr.judge_epoch`). `apply_judgement` gives the applied
-  judgement a fresh epoch and moves its kept results to it.
+  `sj.judge_epoch = tcr.judge_epoch`), and a plugin keys the rows it stores
+  for a judgement by (judgement, epoch) the same way. `apply_judgement` keeps
+  the applied judgement's epoch, so every result row, the host's and every
+  plugin's, stays attached without being re-keyed. The apply still allocates
+  from `max_judge_epoch`, which locks the submission and names the apply's
+  after-judging event (`after_judging:{id}:applied:{n}`), so re-applying a
+  judgement fires its hooks again.
+- A judgement records the problem's `test_data_version` when it is claimed;
+  every change to the problem's test data commits through `TestDataEdit`,
+  which counts it. Applying a judgement judged against other test data than
+  the problem has now is refused with `409 JUDGED_ON_OTHER_TEST_DATA` unless
+  the request says `force=true`, since its verdicts would show beside data
+  they were not judged with.
 - A judgement that stops being current while still in flight is finalized as
   `Superseded`, a status of its own: it never got a verdict, so it is
   history, not a system error. No retry takes it, and applying it is refused
@@ -243,7 +274,11 @@ whatever meets a platform fault records it there: a publish the queue
 refused (`QUEUE_UNREACHABLE`), an operation the queue lost
 (`OPERATION_LOST`), a worker without a platform tool
 (`PLATFORM_TOOL_MISSING`), a fleet with no live worker that takes work
-(`NO_CAPABLE_WORKER`). Each of these faults is a hand-back
+(`NO_CAPABLE_WORKER`), a plugin the unit needs that stopped being loaded on
+the replica that claimed it (`PLUGIN_NOT_LOADED_HERE`), a statement its
+plugins ran that the database did not answer (`DATABASE_UNAVAILABLE`, as
+`common::db::is_outage` decides it, recorded by the plugin SQL host functions
+through `Dispatch::note_database_error`). Each of these faults is a hand-back
 (`SystemErrorClass::HandBack`): the platform lost the attempt, and it never
 becomes a verdict. The judging session ends as `Lost` before another result
 reaches the plugin, a plugin write that would finalize the judgement is fenced
