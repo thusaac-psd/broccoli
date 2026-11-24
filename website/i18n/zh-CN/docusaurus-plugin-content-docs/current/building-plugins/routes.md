@@ -144,3 +144,4 @@ PluginHttpResponse::refuse(413, Refusal::TooManyPages, "too long")
 - `contest::standing_result("s")` 是提交行 `s` 持有已确定结果的 SQL 条件。宿主把仍可能改变的结果（评测中的结果，或重试仍可能收回的系统错误）保持在非终态，因此只读取已确定结果的排行榜，不会在提交重新评测期间把某格降为 0。
 - `contest::results_may_change(host, contest_id, phase)` 说明排行榜是否仍可能改变：比赛进行中，或仍有提交在评测。请把它作为排行榜的 `live` 返回，Web SDK 的 `liveBoardPace` 会据此安排排行榜的刷新节奏。
 - `visibility::hide_outcome()` 是向查看者隐藏提交全部结果的可见性决定，与封榜或不显示任何信息的反馈级别一样。此后每个客户端都把该提交读作已隐藏，而不会读作已评测却没有结果。
+- 改变查看者能看到提交哪些内容的插件操作（例如解锁隐藏结果的令牌），在完成后调用 Web SDK 的 `announceSubmissionVisibilityChange(submissionId)`。宿主随后重新读取该提交的每个视图，包括因结果被隐藏而停止刷新的视图。请根据你的路由给出的信息决定为哪些提交提供此类操作，而不要根据提交的状态：查看者读到的可能是已隐藏的状态。

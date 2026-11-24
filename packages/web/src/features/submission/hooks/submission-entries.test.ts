@@ -322,6 +322,31 @@ test('an entry whose outcome the contest hides is done, and polling stops', asyn
   assert.equal(p.fetches(), 1);
 });
 
+test('a done entry whose submission became visible is read again, by its submission only', () => {
+  const hidden = result(null, { withheld: { reason: 'hidden' } });
+  const done = entriesReducer([entry(1, 'polling'), entry(2, 'polling')], {
+    type: 'polled',
+    id: 1,
+    result: hidden,
+  });
+  const entries = entriesReducer(done, {
+    type: 'reread',
+    submissionId: 41,
+    result: result('Judged'),
+  });
+  assert.equal(entries[0].status, 'done');
+  assert.equal(entries[0].submission?.status, 'Judged');
+  // An entry still being polled is left to its poller.
+  assert.equal(entries[1].status, 'polling');
+  assert.equal(entries[1].submission, null);
+  const other = entriesReducer(entries, {
+    type: 'reread',
+    submissionId: 99,
+    result: result('Judged'),
+  });
+  assert.equal(other, entries, 'another submission changes nothing');
+});
+
 test('failing polls back off with jitter', async () => {
   const p = poller(
     [

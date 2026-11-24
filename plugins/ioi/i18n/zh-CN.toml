@@ -188,7 +188,7 @@
 'ioi.tokenPanel.loadFailed' = '无法加载你的令牌。'
 'ioi.tokenPanel.title' = '令牌'
 'ioi.tokenPanel.available' = '可用：{available} / {total}'
-'ioi.tokenPanel.useToken' = '在此提交上使用令牌'
+'ioi.tokenPanel.useToken' = '在提交 #{id} 上使用令牌'
 'ioi.tokenPanel.usingToken' = '正在使用令牌…'
 'ioi.tokenPanel.useFailed' = '使用令牌失败。'
 'ioi.tokenPanel.alreadyUsed' = '此提交已使用令牌'

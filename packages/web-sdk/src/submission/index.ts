@@ -7,3 +7,4 @@ export * from '@/submission/utils';
 export * from '@/submission/verdict';
 export * from '@/submission/verdict-key';
 export * from '@/submission/verdict-style';
+export * from '@/submission/visibility';

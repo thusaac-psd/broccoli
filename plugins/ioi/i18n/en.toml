@@ -188,7 +188,7 @@
 'ioi.tokenPanel.loadFailed' = 'Could not load your tokens.'
 'ioi.tokenPanel.title' = 'Tokens'
 'ioi.tokenPanel.available' = '{available} / {total} available'
-'ioi.tokenPanel.useToken' = 'Use Token on This Submission'
+'ioi.tokenPanel.useToken' = 'Use a token on submission #{id}'
 'ioi.tokenPanel.usingToken' = 'Using token...'
 'ioi.tokenPanel.useFailed' = 'Failed to use the token.'
 'ioi.tokenPanel.alreadyUsed' = 'Token used on this submission'

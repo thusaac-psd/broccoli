@@ -289,3 +289,87 @@ test('an IOI submission that failed to judge shows the server message once, as t
     page.getByText('sandbox: cgroup memory controller unavailable'),
   ).toHaveCount(1);
 });
+
+test('a token unlocks a hidden IOI result where the problem page shows it, without a reload', async ({
+  page,
+}) => {
+  await mockApi(page, 'contestant', { plugins: ['ioi'] });
+  let tokened = false;
+  const judged = {
+    ...submission(9, 2, 'Accepted'),
+    contest_id: 4,
+    contest_type: 'ioi',
+    problem_id: 1,
+    problem_title: 'Sum of Two Integers',
+  };
+  // At feedback "none" the owner reads the outcome as withheld, status and
+  // all, until a token unlocks it.
+  const hidden = {
+    ...judged,
+    status: null,
+    verdict: null,
+    score: null,
+    time_used: null,
+    memory_used: null,
+    withheld: { reason: 'hidden' },
+  };
+  const IOI = '**/api/v1/p/ioi/api/plugins/ioi/contests/4';
+  await page.route(/\/api\/v1\/contests\/4\/problems$/, (route) =>
+    route.fulfill({
+      json: [
+        {
+          contest_id: 4,
+          problem_id: 1,
+          problem_title: 'Sum of Two Integers',
+          label: 'A',
+          position: 0,
+        },
+      ],
+    }),
+  );
+  await page.route(/\/api\/v1\/contests\/4\/problems\/1$/, (route) =>
+    route.fulfill({ json: { ...problem(1), default_contest_type: 'ioi' } }),
+  );
+  await page.route(/\/api\/v1\/contests\/4\/submissions(\?|$)/, (route) =>
+    route.fulfill({ json: cursorPage([tokened ? judged : hidden]) }),
+  );
+  await page.route(`${IOI}/info`, (route) =>
+    route.fulfill({
+      json: {
+        scoring_mode: 'sum_best_subtask',
+        feedback_level: 'none',
+        scoreboard_visibility: 'all_contest_viewers',
+        scoreboard_tiebreaker: 'equal_rank',
+        token_mode: 'fixed_budget',
+      },
+    }),
+  );
+  await page.route(`${IOI}/token-status`, (route) =>
+    route.fulfill({
+      json: {
+        mode: 'fixed_budget',
+        available: tokened ? 0 : 1,
+        used: tokened ? 1 : 0,
+        total: 1,
+        next_regen_at: null,
+        tokened_submission_ids: tokened ? [9] : [],
+        usable_submissions: tokened
+          ? []
+          : [{ submission_id: 9, problem_id: 1 }],
+      },
+    }),
+  );
+  await page.route(`${IOI}/submissions/9/token`, (route) => {
+    tokened = true;
+    return route.fulfill({ json: { remaining_tokens: 0 } });
+  });
+
+  await page.goto('/contests/4/problems/1?tab=coding');
+  await expect(page.getByText('Result hidden').first()).toBeVisible();
+  await page
+    .getByRole('button', { name: 'Use a token on submission #9' })
+    .click();
+  await page.getByRole('button', { name: 'Confirm' }).click();
+  await expect(page.getByText('Result hidden')).toHaveCount(0);
+  await expect(page.getByText('Accepted').first()).toBeVisible();
+});

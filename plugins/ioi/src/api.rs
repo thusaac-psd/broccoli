@@ -352,11 +352,18 @@ pub(crate) fn handle_token_status(
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
     let user_id = req.require_user_id()?;
-    let contest_id = req.contest()?.id;
+    let info = req.contest()?;
+    let contest_id = info.id;
 
     let contest_config: ContestConfig = contest::load_config(host, contest_id)?;
 
     let token_state = load_token_state(host, contest_id, user_id)?;
+    let usable_submissions =
+        if info.phase == ContestPhase::Running && tokens_enabled(&contest_config) {
+            load_usable_submissions(host, contest_id, user_id, &token_state)?
+        } else {
+            Vec::new()
+        };
 
     // Query elapsed minutes for regenerating mode
     let mut p = Params::new();
@@ -404,8 +411,50 @@ pub(crate) fn handle_token_status(
             "total": total,
             "next_regen_at": next_regen_at,
             "tokened_submission_ids": token_state.tokened_submission_ids,
+            "usable_submissions": usable_submissions,
         })),
     })
+}
+
+/// A submission a token can be spent on now, with its problem.
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize, Serialize)]
+struct UsableSubmission {
+    submission_id: i32,
+    problem_id: i32,
+}
+
+/// The viewer's submissions in the contest a token can be spent on, newest
+/// first: judged (the rule `handle_use_token` applies) and not yet tokened.
+/// The panel offers a token from this list, never from the submission's
+/// status, which feedback may withhold from its owner.
+#[cfg(target_arch = "wasm32")]
+fn load_usable_submissions(
+    host: &Host,
+    contest_id: i32,
+    user_id: i32,
+    token_state: &TokenState,
+) -> Result<Vec<UsableSubmission>, ApiError> {
+    let mut p = Params::new();
+    let sql = format!(
+        "SELECT id AS submission_id, problem_id FROM submission \
+         WHERE contest_id = {} AND user_id = {} AND status = {} \
+         ORDER BY id DESC",
+        p.bind(contest_id),
+        p.bind(user_id),
+        p.bind(SubmissionStatus::Judged.as_str()),
+    );
+    let rows = host
+        .db
+        .query_with_args::<UsableSubmission>(&sql, &p.into_args())?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| {
+            !token_state
+                .tokened_submission_ids
+                .contains(&row.submission_id)
+        })
+        .collect())
 }
 
 #[cfg(target_arch = "wasm32")]

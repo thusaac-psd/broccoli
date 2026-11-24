@@ -125,7 +125,12 @@ in both places at any level.
 
 A token unlocks full feedback on one submission regardless of
 `feedback_level`. A contestant spends a token on their own submission while
-the contest is running, and a submission can only be tokened once.
+the contest is running, on a submission that has been judged, and a
+submission can only be tokened once. The problem page's token panel offers a
+token for the submission it shows, or else for the newest judged submission
+of that problem not yet tokened, even when `feedback_level = "none"` hides
+whether it was judged. Once spent, the submission's result shows wherever the
+page shows the submission, with no reload.
 
 `tokens.mode` picks the token model, and it defaults to `none`.
 

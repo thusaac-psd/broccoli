@@ -222,3 +222,10 @@ helpers, so every plugin reads them by the same rules:
   submission's whole outcome from a viewer, as a scoreboard freeze or a
   feedback level that shows nothing does. Every client then reads the
   submission as withheld, never as judged without a result.
+- A plugin action that changes what a viewer may see of a submission (a
+  token that unlocks a hidden outcome, say) calls the web SDK's
+  `announceSubmissionVisibilityChange(submissionId)` once it is done. The
+  host then reads every view of that submission again, including views that
+  stopped refreshing because the outcome was hidden. Decide what such an
+  action is offered for from what your route says, never from the
+  submission's status: the viewer may be reading it withheld.

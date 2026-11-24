@@ -14,11 +14,14 @@ import { SlotPermissionsBridge } from '@/components/SlotPermissionsBridge';
 import { appConfig } from '@/config';
 import { ContestProvider } from '@/features/contest/contexts/contest-context';
 import { SubmissionNavigationProvider } from '@/features/submission/contexts/submission-navigation-context';
+import { useFollowSubmissionVisibility } from '@/features/submission/hooks/use-follow-submission-visibility';
+import { queryClient } from '@/lib/query-client';
 
 export default function AppShell() {
   const navigate = useNavigate();
   // Dialogs and sheets close when the page changes.
   const { pathname } = useLocation();
+  useFollowSubmissionVisibility(queryClient);
   return (
     <PageContext value={pathname}>
       <NavigateContext value={navigate}>

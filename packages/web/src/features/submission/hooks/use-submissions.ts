@@ -6,7 +6,11 @@ import {
 import { useSessionView } from '@broccoli/web-sdk/auth';
 import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { type CodeRun, type Submission } from '@broccoli/web-sdk/submission';
+import {
+  type CodeRun,
+  type Submission,
+  useSubmissionVisibilityChange,
+} from '@broccoli/web-sdk/submission';
 import { sleep } from '@broccoli/web-sdk/utils';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
@@ -146,6 +150,31 @@ export function useSubmissions({
       pollers.clear();
     };
   }, []);
+
+  // A settled entry stops polling, a hidden one too: when a plugin says what
+  // the viewer may see of its submission changed (a token unlocked it), read
+  // it once more.
+  useSubmissionVisibilityChange((submissionId) => {
+    const settled = entries.some(
+      (e) =>
+        e.status === 'done' && !e.isRun && e.submission?.id === submissionId,
+    );
+    if (!settled) return;
+    void apiClient
+      .GET('/submissions/{id}', { params: { path: { id: submissionId } } })
+      .then((res) => {
+        if (res.data) {
+          dispatch({
+            type: 'reread',
+            submissionId,
+            result: submissionResult(res.data),
+          });
+        }
+      })
+      // A read that fails leaves the entry as it was; the submission's own
+      // page and lists read it again too.
+      .catch(() => {});
+  });
 
   // A submit or run refused because the contest type's plugin is out means
   // the page's view of that outage is stale (opened before a disable, say):

@@ -432,6 +432,25 @@ async fn ioi_feedback_none_shows_a_submissions_scores_only_by_token_or_after_the
         );
         assert_eq!(own.body["status"], json!(null), "{}", own.text);
     }
+    // The token panel offers a token from what the route says is usable,
+    // never from the withheld status: the owner's judged, untokened
+    // submissions, each with its problem.
+    let usable = |who: &str| {
+        let app = &app;
+        let base = &base;
+        let who = who.to_string();
+        async move {
+            let res = app
+                .get_with_token(&format!("{base}/token-status"), &who)
+                .await;
+            assert_eq!(res.status, 200, "{}", res.text);
+            res.body["usable_submissions"].clone()
+        }
+    };
+    assert_eq!(
+        usable(&tokened).await,
+        json!([{ "submission_id": subs[0], "problem_id": problem_id }])
+    );
     let spent = app
         .post_with_token(
             &format!("{base}/submissions/{}/token", subs[0]),
@@ -447,6 +466,7 @@ async fn ioi_feedback_none_shows_a_submissions_scores_only_by_token_or_after_the
     assert_eq!(own.body["withheld"], json!(null), "{}", own.text);
     assert_eq!(own.body["status"], "Judged", "{}", own.text);
     assert_eq!(shown(&plain, subs[1]).await, (false, false), "no token");
+    assert_eq!(usable(&tokened).await, json!([]), "the token is spent");
 
     let now = Utc::now();
     let mut ended: server::entity::contest::ActiveModel =
