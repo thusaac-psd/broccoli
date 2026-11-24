@@ -13,6 +13,10 @@ pub const NAMESPACE: &str = "print";
 #[derive(Debug, Clone, Deserialize)]
 pub struct StationCredential {
     pub name: String,
+    /// Empty while unset: the token is a secret, which a bundle never
+    /// carries, so a restored station has none until someone sets it. Such
+    /// a station authenticates nothing.
+    #[serde(default)]
     pub token: String,
 }
 
@@ -60,7 +64,7 @@ pub fn violations(config: &PrintConfig) -> Vec<ConfigViolation> {
                 .param("name", station.name.as_str()),
             );
         }
-        if !tokens.insert(station.token.as_str()) {
+        if !station.token.is_empty() && !tokens.insert(station.token.as_str()) {
             violations.push(
                 ConfigViolation::new(
                     format!("stations[{i}].token"),
@@ -145,6 +149,13 @@ mod tests {
             { "name": "a", "token": "t1" },
             { "name": "b", "token": "t2" },
         ]));
+        assert_eq!(violations(&config), []);
+    }
+
+    #[test]
+    fn stations_whose_tokens_are_unset_load_and_share_no_token() {
+        let config = with_stations(json!([{ "name": "a" }, { "name": "b" }]));
+        assert_eq!(config.stations[0].token, "");
         assert_eq!(violations(&config), []);
     }
 

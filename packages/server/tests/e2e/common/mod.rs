@@ -339,6 +339,41 @@ impl E2eTestApp {
             .collect()
     }
 
+    /// A bundle of this server's `selection`, as `broccoli-server bundle
+    /// export` writes it.
+    pub async fn export_bundle(&self, selection: server::bundle::Selection) -> Vec<u8> {
+        let state = self
+            .state
+            .as_ref()
+            .expect("export_bundle needs the in-process server");
+        let mut archive = Vec::new();
+        server::bundle::export(
+            &self.db,
+            &*state.blob_store,
+            &state.config.plugin.plugins_dir,
+            &server::bundle::ExportOptions {
+                selection,
+                with_secrets: false,
+            },
+            &mut archive,
+        )
+        .await
+        .expect("export the bundle");
+        archive
+    }
+
+    /// Restores `archive` onto this server, as `broccoli-server bundle
+    /// import` does.
+    pub async fn import_bundle(&self, archive: &[u8], options: server::bundle::ImportOptions) {
+        let state = self
+            .state
+            .as_ref()
+            .expect("import_bundle needs the in-process server");
+        server::bundle::import(&self.db, state.blob_store.clone(), options, archive)
+            .await
+            .expect("import the bundle");
+    }
+
     /// Converges this server onto the fleet's plugin table now, as its
     /// periodic reconcile does: what a change another replica published does
     /// here.

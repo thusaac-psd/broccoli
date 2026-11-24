@@ -573,3 +573,90 @@ async fn a_config_write_that_leaves_the_toggle_out_keeps_it() {
     assert_eq!(cleared["enabled"], json!(null), "{cleared}");
     assert_eq!(cleared["position"], json!(3), "{cleared}");
 }
+
+/// A bundle never carries a secret config field. Restored over the server
+/// it came from, the stored secret stays; restored onto another server, the
+/// field is unset, and a print station that signs in with it is refused
+/// until someone sets its token again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bundle_withholds_a_secret_config_field() {
+    use server::bundle::{ImportOptions, Selection};
+    use std::io::Read;
+
+    const TOKEN: &str = "contest-station-token";
+    // A contest's station names its contest on every request.
+    async fn station(app: &E2eTestApp, contest_id: i32) -> u16 {
+        app.client
+            .get(format!(
+                "{}/api/v1/p/print/api/plugins/print/stations/jobs?contest_id={contest_id}",
+                app.base_url
+            ))
+            .header("Authorization", format!("PrintStation {TOKEN}"))
+            .send()
+            .await
+            .expect("station request")
+            .status()
+            .as_u16()
+    }
+    let stations = json!({ "config": { "stations": [{ "name": "desk", "token": TOKEN }] } });
+
+    let source = E2eTestApp::spawn().await;
+    let admin = source
+        .create_user_with_role("bundle_secret_admin", "password", "admin")
+        .await;
+    let contest_id = source
+        .create_contest(&admin, "Bundle Cup", true, true)
+        .await;
+    let config = format!("/api/v1/contests/{contest_id}/config/print/print");
+    let res = source.put_with_token(&config, &stations, &admin).await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(station(&source, contest_id).await, 200);
+
+    let archive = source.export_bundle(Selection::Contest(contest_id)).await;
+    let mut unpacked = Vec::new();
+    flate2::read::GzDecoder::new(&archive[..])
+        .read_to_end(&mut unpacked)
+        .expect("a gzip archive");
+    assert!(
+        !String::from_utf8_lossy(&unpacked).contains(TOKEN),
+        "the bundle carries the station token"
+    );
+
+    source
+        .import_bundle(
+            &archive,
+            ImportOptions {
+                replace_contest: true,
+                ..ImportOptions::default()
+            },
+        )
+        .await;
+    assert_eq!(
+        station(&source, contest_id).await,
+        200,
+        "restored over its source, the stored token stays"
+    );
+
+    let target = E2eTestApp::spawn().await;
+    target
+        .import_bundle(&archive, ImportOptions::default())
+        .await;
+    assert_eq!(
+        station(&target, contest_id).await,
+        403,
+        "no token is set on the target"
+    );
+    let target_admin = target
+        .create_user_with_role("bundle_secret_target_admin", "password", "admin")
+        .await;
+    let res = target.get_with_token(&config, &target_admin).await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(res.body["config"]["stations"], json!([{ "name": "desk" }]));
+    assert_eq!(res.body["secrets"], json!([]), "{}", res.text);
+
+    let res = target
+        .put_with_token(&config, &stations, &target_admin)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(station(&target, contest_id).await, 200);
+}

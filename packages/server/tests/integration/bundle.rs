@@ -39,7 +39,14 @@ async fn rows(app: &TestApp, table: &str, order: &str) -> String {
 
 async fn export(app: &TestApp, options: ExportOptions) -> anyhow::Result<Vec<u8>> {
     let mut archive = Vec::new();
-    server::bundle::export(&app.db, &*app.state.blob_store, &options, &mut archive).await?;
+    server::bundle::export(
+        &app.db,
+        &*app.state.blob_store,
+        &app.state.config.plugin.plugins_dir,
+        &options,
+        &mut archive,
+    )
+    .await?;
     Ok(archive)
 }
 
@@ -98,8 +105,8 @@ async fn seed_contest(app: &TestApp) -> (i32, String) {
         app,
         &format!(
             "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) VALUES \
-             ('problem', '{problem}', 'checker', '{{\"tolerance\": 1}}', 0, now()), \
-             ('contest', '{contest}', 'scoring', '{{\"freeze\": 60}}', 0, now())"
+             ('problem', '{problem}', 'server-plugin:checker', '{{\"tolerance\": 1}}', 0, now()), \
+             ('contest', '{contest}', 'server-plugin:scoring', '{{\"freeze\": 60}}', 0, now())"
         ),
     )
     .await;
@@ -335,7 +342,7 @@ async fn a_contest_import_replaces_the_contest_with_its_id() {
         &target,
         &format!(
             "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
-             VALUES ('contest', '{contest}', 'someplugin:extra', '{{}}', 0, now()); \
+             VALUES ('contest', '{contest}', 'server-plugin:extra', '{{}}', 0, now()); \
              INSERT INTO clarification (contest_id, author_id, content, clarification_type, created_at, updated_at) \
              SELECT {contest}, id, 'Is it open?', 'question', now(), now() FROM \"user\" WHERE username = 'erin'"
         ),
@@ -403,6 +410,7 @@ async fn an_export_with_a_missing_blob_writes_nothing() {
     let err = server::bundle::export(
         &app.db,
         &*app.state.blob_store,
+        &app.state.config.plugin.plugins_dir,
         &ExportOptions {
             selection: Selection::Problems(vec![problem]),
             with_secrets: false,
@@ -506,8 +514,8 @@ async fn seed_problem_with_configs(app: &TestApp, who: &str) -> i32 {
         app,
         &format!(
             "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) VALUES \
-             ('problem', '{problem}', 'someplugin:task', '{{\"from\": \"{who}\"}}', 0, now()), \
-             ('plugin', 'someplugin', 'settings', '{{\"who\": \"{who}\"}}', 0, now())"
+             ('problem', '{problem}', 'server-plugin:task', '{{\"from\": \"{who}\"}}', 0, now()), \
+             ('plugin', 'server-plugin', 'settings', '{{\"who\": \"{who}\"}}', 0, now())"
         ),
     )
     .await;
@@ -518,7 +526,7 @@ async fn plugin_settings(app: &TestApp) -> String {
     text(
         app,
         "SELECT coalesce((SELECT config::text FROM plugin_config \
-         WHERE scope = 'plugin' AND ref_id = 'someplugin'), 'none') AS v",
+         WHERE scope = 'plugin' AND ref_id = 'server-plugin'), 'none') AS v",
     )
     .await
 }
@@ -544,7 +552,7 @@ async fn a_bundle_carries_no_plugin_wide_config() {
     exec(
         &target,
         "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
-         VALUES ('plugin', 'someplugin', 'settings', '{\"who\": \"target\"}', 0, now())",
+         VALUES ('plugin', 'server-plugin', 'settings', '{\"who\": \"target\"}', 0, now())",
     )
     .await;
     import(&target, &archive, ImportOptions::default())
@@ -558,7 +566,7 @@ async fn a_bundle_carries_no_plugin_wide_config() {
              FROM plugin_config WHERE scope <> 'plugin'"
         )
         .await,
-        format!("problem/{problem}/someplugin:task"),
+        format!("problem/{problem}/server-plugin:task"),
         "the problem's own config comes along"
     );
 
@@ -601,9 +609,9 @@ async fn replacing_problems_removes_the_configs_of_the_replaced_ones() {
         &target,
         &format!(
             "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) VALUES \
-             ('problem', '{old}', 'someplugin:old_ns', '{{}}', 0, now()), \
-             ('contest_problem', '{contest}:{old}', 'someplugin:limits', '{{}}', 0, now()), \
-             ('contest', '{contest}', 'someplugin:scoring', '{{}}', 0, now())"
+             ('problem', '{old}', 'server-plugin:old_ns', '{{}}', 0, now()), \
+             ('contest_problem', '{contest}:{old}', 'server-plugin:limits', '{{}}', 0, now()), \
+             ('contest', '{contest}', 'server-plugin:scoring', '{{}}', 0, now())"
         ),
     )
     .await;
@@ -626,7 +634,7 @@ async fn replacing_problems_removes_the_configs_of_the_replaced_ones() {
              FROM plugin_config"
         )
         .await,
-        "contest/someplugin:scoring",
+        "contest/server-plugin:scoring",
         "only the contest's own config, which no replaced problem owns, stays"
     );
 }
@@ -804,4 +812,49 @@ fn with_problem_columns(archive: &[u8], columns: &[(&str, &str)]) -> Vec<u8> {
     let mut gz = out.into_inner().expect("finish tar");
     gz.flush().expect("flush");
     gz.finish().expect("finish gzip")
+}
+
+/// A config whose plugin has no manifest on the source (removed, or never
+/// installed there) is one no one could say the secret fields of: the
+/// export leaves it out and names the plugin.
+#[tokio::test]
+async fn a_bundle_leaves_out_the_configs_of_a_plugin_without_a_manifest() {
+    let source = TestApp::spawn().await;
+    let problem = seed_problem_with_configs(&source, "source").await;
+    exec(
+        &source,
+        &format!(
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+             VALUES ('problem', '{problem}', 'removed-plugin:task', '{{}}', 0, now())"
+        ),
+    )
+    .await;
+    let mut archive = Vec::new();
+    let summary = server::bundle::export(
+        &source.db,
+        &*source.state.blob_store,
+        &source.state.config.plugin.plugins_dir,
+        &ExportOptions {
+            selection: Selection::Problems(vec![problem]),
+            with_secrets: false,
+        },
+        &mut archive,
+    )
+    .await
+    .expect("export");
+    assert_eq!(summary.configs_left_out, ["removed-plugin"]);
+
+    let target = TestApp::spawn().await;
+    import(&target, &archive, ImportOptions::default())
+        .await
+        .expect("import");
+    assert_eq!(
+        text(
+            &target,
+            "SELECT string_agg(namespace, ',') AS v FROM plugin_config WHERE scope = 'problem'"
+        )
+        .await,
+        "server-plugin:task",
+        "only the configs of a plugin the source knows travel"
+    );
 }

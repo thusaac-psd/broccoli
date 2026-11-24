@@ -156,6 +156,10 @@ to another server.
 - **Secrets travel only with `--with-secrets`.** Without it every password in
   the archive is blank, so the archive carries no credentials and a new account
   cannot log in until an admin sets its password.
+- **Secret plugin settings never travel.** A print station's token, or any
+  setting a plugin marks secret, stays out of the archive even with
+  `--with-secrets`. The target keeps the token it already has for that contest;
+  otherwise set the stations' tokens again before they can sign in.
 - **Schema versions.** The archive records the source database's schema version
   and each table's columns. It restores onto a server of the same or a newer
   build, which has started once (so its database is migrated); a column the

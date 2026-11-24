@@ -208,13 +208,13 @@ docker compose --env-file .env.server -f docker-compose.server.yaml \
 
 Export takes one selection:
 
-| Flag                                | The bundle carries                                                                       |
-| ----------------------------------- | ---------------------------------------------------------------------------------------- |
-| none                                | Every problem that is not deleted                                                        |
-| `--problems 1,2,5`                  | Those problems                                                                           |
-| `--contest <id>`                    | The contest, its problems, its roster, and the roster's active accounts with their roles |
-| `--with-secrets` (with `--contest`) | The accounts' password hashes too. Without it the archive holds no credentials           |
-| `--out <file>`                      | Writes the archive to the file instead of stdout                                         |
+| Flag                                | The bundle carries                                                                                                              |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| none                                | Every problem that is not deleted                                                                                               |
+| `--problems 1,2,5`                  | Those problems                                                                                                                  |
+| `--contest <id>`                    | The contest, its problems, its roster, and the roster's active accounts with their roles                                        |
+| `--with-secrets` (with `--contest`) | The accounts' password hashes too. Without it the archive holds no credentials. Secret plugin config fields stay out either way |
+| `--out <file>`                      | Writes the archive to the file instead of stdout                                                                                |
 
 Import restores every row in one transaction, committed after every blob is
 stored, so a failed import changes nothing. It refuses:
@@ -248,8 +248,15 @@ Plugin configs travel by the rules in the plugin configuration guide's _Move it
 with a bundle_ section (`website/docs/building-plugins/configuration.md`,
 "Configuration" under "Building plugins" on the documentation site): a bundle
 carries its problems' and contest's configs, never a plugin-wide one, and an
-import replaces the configs of every problem it replaces. An import runs without
-the plugin runtime, so it checks none of the configs it restores. Until a server
+import replaces the configs of every problem it replaces. A config field its
+plugin marks secret, such as a print station's token, never travels, with or
+without `--with-secrets`: an import keeps the value the target already stores
+for that config, else leaves it unset, and a contest's print stations need their
+tokens set again before they can sign in. The export reads each plugin's schema
+from its published upload or the server's plugin directory. The configs of a
+plugin with neither (removed, or never installed on the source) stay out of the
+bundle, and the export's summary names that plugin. An import runs without the
+plugin runtime, so it checks none of the configs it restores. Until a server
 checks them, the imported problems count as having config issues: they land
 flagged and marked, and a submission judged meanwhile is marked as judged with
 config issues. A running server checks the marked problems within a few seconds

@@ -49,7 +49,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 fn station_for<'a>(token: &str, stations: &'a [StationCredential]) -> Option<&'a str> {
     let mut found = None;
     for s in stations {
-        if constant_time_eq(s.token.as_bytes(), token.as_bytes()) && found.is_none() {
+        if !s.token.is_empty()
+            && constant_time_eq(s.token.as_bytes(), token.as_bytes())
+            && found.is_none()
+        {
             found = Some(s.name.as_str());
         }
     }
@@ -131,6 +134,16 @@ mod tests {
             contest: None,
             problem_id: None,
         }
+    }
+
+    #[test]
+    fn a_station_whose_token_is_unset_authenticates_nothing() {
+        let stations = [StationCredential {
+            name: "desk".into(),
+            token: String::new(),
+        }];
+        assert_eq!(station_for("", &stations), None);
+        assert_eq!(station_for("anything", &stations), None);
     }
 
     #[test]
