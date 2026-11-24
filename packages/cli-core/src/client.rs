@@ -55,6 +55,18 @@ pub enum ClientError {
          Check the address: it is the URL you open the judge at in a browser."
     )]
     NotBroccoli { server: ServerUrl, detail: String },
+    /// The API answered a route it has with JSON this client cannot read:
+    /// a field it needs is missing or of another type. The server is a
+    /// Broccoli server, of a version that answers differently.
+    #[error(
+        "{server} gave an unexpected answer to {route} ({detail}). \
+         The server may run a different version of Broccoli than this client."
+    )]
+    UnexpectedAnswer {
+        server: ServerUrl,
+        route: String,
+        detail: String,
+    },
     /// The server answered with an error.
     #[error(transparent)]
     Api(#[from] ApiError),
@@ -307,13 +319,29 @@ impl Client {
     }
 
     fn parse_response<T: DeserializeOwned>(&self, resp: Response) -> ClientResult<T> {
-        self.check_status(resp)?
+        let resp = self.check_status(resp)?;
+        self.read_answer(resp)
+    }
+
+    /// Read a success's body as `T`. A body that is not JSON comes from
+    /// something other than the API; JSON that is not a `T` is the API's
+    /// answer in a shape this client does not know.
+    fn read_answer<T: DeserializeOwned>(&self, resp: Response) -> ClientResult<T> {
+        use ureq::ResponseExt;
+        let route = resp.get_uri().path().to_owned();
+        let not_api = |detail: String| ClientError::NotBroccoli {
+            server: self.server().clone(),
+            detail,
+        };
+        let value: serde_json::Value = resp
             .into_body()
-            .read_json::<T>()
-            .map_err(|e| ClientError::NotBroccoli {
-                server: self.server().clone(),
-                detail: format!("its answer is not the API's: {e}"),
-            })
+            .read_json()
+            .map_err(|e| not_api(format!("its answer is not the API's: {e}")))?;
+        serde_json::from_value(value).map_err(|e| ClientError::UnexpectedAnswer {
+            server: self.server().clone(),
+            route,
+            detail: e.to_string(),
+        })
     }
 
     fn parse_empty(&self, resp: Response) -> ClientResult<()> {
@@ -442,13 +470,7 @@ impl Client {
         };
         let resp = self.post_anonymous("/api/v1/auth/device-token", &body)?;
         match resp.status().as_u16() {
-            200 | 400 => resp
-                .into_body()
-                .read_json()
-                .map_err(|e| ClientError::NotBroccoli {
-                    server: self.server().clone(),
-                    detail: format!("its answer is not the API's: {e}"),
-                }),
+            200 | 400 => self.read_answer(resp),
             _ => Err(self.failure(resp)),
         }
     }
@@ -852,11 +874,20 @@ mod tests {
     /// A server that answers one request with `status` and returns the
     /// request line and headers it received.
     fn answer_once(status: &str) -> (ServerUrl, std::thread::JoinHandle<Vec<String>>) {
+        answer_once_with(status, "")
+    }
+
+    /// A server that answers one request with `status` and the JSON `body`.
+    fn answer_once_with(
+        status: &str,
+        body: &str,
+    ) -> (ServerUrl, std::thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url: ServerUrl = format!("http://{}", listener.local_addr().unwrap())
             .parse()
             .unwrap();
         let status = status.to_string();
+        let body = body.to_string();
         let handle = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -873,13 +904,35 @@ mod tests {
             let mut stream = stream;
             write!(
                 stream,
-                "HTTP/1.1 {status}\r\nDate: {SERVER_DATE}\r\nContent-Length: 0\r\n\
-                 Connection: close\r\n\r\n"
+                "HTTP/1.1 {status}\r\nDate: {SERVER_DATE}\r\nContent-Length: {}\r\n\
+                 Content-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                body.len()
             )
             .unwrap();
             head
         });
         (url, handle)
+    }
+
+    #[test]
+    fn json_a_route_does_not_answer_is_unexpected_not_a_foreign_server() {
+        let (url, server) = answer_once_with("200 OK", r#"{"data": [{"id": 1}]}"#);
+        let err = Client::new(Session::explicit(url, "token".into()))
+            .me()
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(
+            matches!(&err, ClientError::UnexpectedAnswer { route, .. } if route == "/api/v1/auth/me"),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("unexpected answer"), "{err}");
+
+        let (url, server) = answer_once_with("200 OK", "<html>hello</html>");
+        let err = Client::new(Session::explicit(url, "token".into()))
+            .me()
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(matches!(err, ClientError::NotBroccoli { .. }), "{err:?}");
     }
 
     #[test]
