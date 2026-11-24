@@ -1250,10 +1250,11 @@ pub(crate) enum DispatchFailed {
     /// system-error retry, as its class says; a code run's stands.
     SystemError,
     /// Back to `Queued` without spending a retry: the platform lost the
-    /// attempt, or every provider of its contest type is disabled fleet-wide,
-    /// so the failure is the disable's (a judging session its provider's
-    /// unload cut), on whichever replica it ran, and the work waits parked
-    /// for a provider.
+    /// attempt, or a plugin the unit needs (its contest type's, its
+    /// evaluator, its checker when the evaluator uses one, its language's)
+    /// has no provider enabled fleet-wide (`Unit::runnable`), so the failure
+    /// is the disable's (a judging session the unload cut), on whichever
+    /// replica it ran, and the work waits parked for a provider.
     HandedBack,
     /// Nothing: the dispatch was since requeued, superseded or finished.
     Stale,
