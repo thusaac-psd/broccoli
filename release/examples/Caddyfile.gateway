@@ -7,7 +7,13 @@
 	respond @internal 404
 
 	reverse_proxy {$BROCCOLI_UPSTREAMS} {
-		lb_policy round_robin
+		# Each browser sticks to one server (the broccoli_upstream cookie), so
+		# during a rolling upgrade it loads the page and its chunks from one
+		# build. A client without the cookie, or whose server is down, is sent
+		# round robin and pinned to the server it reaches.
+		lb_policy cookie broccoli_upstream {
+			fallback round_robin
+		}
 		# /livez checks only that the server process answers; /healthz also
 		# pings Postgres and Redis, so probing it would eject every server at
 		# once whenever the shared infra blips. Two misses eject an upstream.

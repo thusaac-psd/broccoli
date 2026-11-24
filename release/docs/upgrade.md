@@ -89,6 +89,30 @@ curl -fsS http://127.0.0.1:${BROCCOLI_HTTP_BIND##*:}/healthz
 3. If a gateway is present, keep it running while server nodes roll. Restart it
    only after all upstream server health checks pass.
 
+### One frontend version per browser
+
+Each server serves the web app it was built with: an `index.html` that is never
+cached and content-hashed chunks under `/assets/` that are cached for good.
+While servers of two releases run behind one gateway, a browser must not load
+the page from one and its chunks from the other. The shipped gateways
+(`examples/Caddyfile.gateway`, and `airgap/caddy/Caddyfile.airgap`) see to it:
+they pin each browser to one server with the `broccoli_upstream` cookie, so it
+keeps loading the page and every chunk from the same build. A browser without
+the cookie, or whose server is down, is sent to the next server round robin and
+pinned to it.
+
+A browser switches builds only when its own server stops for the upgrade. Its
+open page is still the old build; the next chunk it loads comes from a new
+server, which does not have the old chunk, and the page reloads itself once and
+continues on the new build. That one automatic reload is all a contestant sees.
+A release upgraded with every server stopped (see "Which Upgrades Can Roll")
+never mixes builds: the first page after the restart is the new one.
+
+A gateway of your own that sends each request to any server can mix builds
+during a roll. Give it the same stickiness by cookie (not by client address: a
+venue shows one address for all its contestants), or upgrade every server
+together: stop them all, then start them.
+
 Servers share the `idempotency_key` table, and a server only recognises the key
 states its own version writes, so a client retry that lands on a server of
 another version can run a request the first one already recorded (for example,

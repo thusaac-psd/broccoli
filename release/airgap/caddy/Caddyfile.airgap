@@ -30,7 +30,13 @@
 	# or Redis blips), eject an upstream after two misses, and retry requests
 	# that cannot reach an upstream on another one instead of returning 502.
 	reverse_proxy {$BROCCOLI_UPSTREAMS} {
-		lb_policy round_robin
+		# Each browser sticks to one server (the broccoli_upstream cookie), so
+		# during a rolling upgrade it loads the page and its chunks from one
+		# build. A client without the cookie, or whose server is down, is sent
+		# round robin and pinned to the server it reaches.
+		lb_policy cookie broccoli_upstream {
+			fallback round_robin
+		}
 		health_uri /livez
 		health_interval 5s
 		health_timeout 2s
