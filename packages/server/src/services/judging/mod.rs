@@ -111,6 +111,7 @@ pub(crate) use budget::RetryBudget;
 pub use dispatch::{Dispatch, DispatchedUnit, LiveDispatches, LiveUnit, NotOwned};
 pub(crate) use fault::{CallEnd, DispatchFailure};
 pub use fault::{DispatchFault, DispatchFaults};
+pub use inputs::RESTORING;
 #[cfg(test)]
 pub(crate) use inputs::expected::install as install_inputs_triggers;
 pub(crate) use inputs::stamp_inputs_version;

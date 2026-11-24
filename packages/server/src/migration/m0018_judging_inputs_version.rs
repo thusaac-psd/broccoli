@@ -6,7 +6,9 @@ use sea_orm_migration::prelude::*;
 /// and its problem-scoped plugin configs (its checker source among them). The
 /// triggers below count every change to any of them, whatever path makes it,
 /// so no write path can forget to (`services::judging::inputs::expected`
-/// states them as the code expects them).
+/// states them as the code expects them). A transaction that restores rows
+/// as they were (a bundle import) sets `broccoli.restoring`, and the triggers
+/// count nothing in it: a restore is no change.
 /// A judgement records the version it was judged against
 /// (`entity::submission_judgement::Model::inputs_version`) and whether it was
 /// applied anyway after the problem's inputs changed
@@ -51,6 +53,9 @@ END $$;
 CREATE OR REPLACE FUNCTION public.broccoli_problem_inputs_changed() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
+  IF current_setting('broccoli.restoring', true) = 'on' THEN
+    RETURN NEW;
+  END IF;
   IF NEW.time_limit IS DISTINCT FROM OLD.time_limit
      OR NEW.memory_limit IS DISTINCT FROM OLD.memory_limit
      OR NEW.problem_type IS DISTINCT FROM OLD.problem_type
@@ -67,6 +72,9 @@ DECLARE
   changed jsonb;
   target integer;
 BEGIN
+  IF current_setting('broccoli.restoring', true) = 'on' THEN
+    RETURN NULL;
+  END IF;
   FOR changed IN
     SELECT r FROM unnest(ARRAY[
       CASE WHEN TG_OP <> 'INSERT' THEN to_jsonb(OLD) END,

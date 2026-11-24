@@ -5,8 +5,11 @@
 //! additional files (graders) and its problem-scoped plugin configs (its
 //! checker source among them, and a contest's per-problem configs).
 //! `problem.inputs_version` counts every change to any of them, counted by
-//! database triggers (see [`expected`]), so every write path, a bundle
-//! import included, counts it without knowing to. The dispatch reads the
+//! database triggers (see [`expected`]), so every write path counts it
+//! without knowing to. A transaction that restores rows as they were (a
+//! bundle import) sets [`RESTORING`] and the triggers count nothing in it:
+//! the restored problems and judgements keep the versions they were saved
+//! with. The dispatch reads the
 //! problem and its test cases in one snapshot and stamps the judgement with
 //! that snapshot's version ([`stamp_inputs_version`]), so the version names
 //! the inputs the judgement was judged with. Applying a judgement of another
@@ -14,6 +17,10 @@
 
 use common::db::DatabaseConnection;
 use sea_orm::{ConnectionTrait, DbBackend, DbErr, Statement};
+
+/// The statement that marks the running transaction as restoring rows as
+/// they were, so the inputs triggers count nothing in it.
+pub const RESTORING: &str = "SET LOCAL broccoli.restoring = 'on'";
 
 /// Records that judgement `judgement_id`, at epoch `judge_epoch`, is judged
 /// against inputs version `version`, read in the same snapshot as the
@@ -55,6 +62,9 @@ pub(crate) mod expected {
         "CREATE OR REPLACE FUNCTION public.broccoli_problem_inputs_changed() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
+  IF current_setting('broccoli.restoring', true) = 'on' THEN
+    RETURN NEW;
+  END IF;
   IF NEW.time_limit IS DISTINCT FROM OLD.time_limit
      OR NEW.memory_limit IS DISTINCT FROM OLD.memory_limit
      OR NEW.problem_type IS DISTINCT FROM OLD.problem_type
@@ -74,6 +84,9 @@ DECLARE
   changed jsonb;
   target integer;
 BEGIN
+  IF current_setting('broccoli.restoring', true) = 'on' THEN
+    RETURN NULL;
+  END IF;
   FOR changed IN
     SELECT r FROM unnest(ARRAY[
       CASE WHEN TG_OP <> 'INSERT' THEN to_jsonb(OLD) END,

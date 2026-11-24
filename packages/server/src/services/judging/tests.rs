@@ -2205,4 +2205,19 @@ async fn every_change_to_a_problems_judging_inputs_counts_in_its_version() {
         assert_eq!(now > last, counts, "{what}: {last} -> {now}");
         last = now;
     }
+
+    // A restore (a bundle import) puts rows back as they were: it counts
+    // nothing.
+    let txn = db.begin().await.unwrap();
+    txn.execute_unprepared(super::RESTORING).await.unwrap();
+    txn.execute_unprepared(&format!(
+        "INSERT INTO test_case (input, expected_output, score, label, is_sample, position, \
+                                problem_id, created_at) \
+         VALUES ('2', '2', 10, 't2', false, 1, {problem_id}, NOW()); \
+         UPDATE problem SET time_limit = time_limit + 1 WHERE id = {problem_id}"
+    ))
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    assert_eq!(version().await, last, "a restore counts nothing");
 }
