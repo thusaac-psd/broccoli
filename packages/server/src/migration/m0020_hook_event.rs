@@ -5,7 +5,9 @@ use sea_orm_migration::prelude::*;
 /// the event's hooks, so no other replica, and no later restart, runs them
 /// again.
 ///
-/// Forward-only like every migration here.
+/// Additive (release/docs/upgrade.md): servers of the previous release keep
+/// working against it, so a release that adds only migrations like it rolls
+/// server by server.
 pub struct Migration;
 
 impl MigrationName for Migration {

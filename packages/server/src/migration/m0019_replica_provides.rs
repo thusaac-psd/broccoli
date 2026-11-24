@@ -7,8 +7,8 @@ use sea_orm_migration::prelude::*;
 /// contest types alone. Every live replica rewrites its row on its next
 /// report, so the rows are reset.
 ///
-/// Forward-only like every migration here. Not rolling-safe: replicas of the
-/// previous build write the column this renames.
+/// Not additive (release/docs/upgrade.md): it renames a column servers of the
+/// previous release write, so they stop before it runs.
 pub struct Migration;
 
 impl MigrationName for Migration {

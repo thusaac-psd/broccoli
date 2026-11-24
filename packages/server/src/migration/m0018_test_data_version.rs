@@ -9,7 +9,9 @@ use sea_orm_migration::prelude::*;
 /// `plugin_group_role`, see m0001) may read the new columns as it reads every
 /// other column that is not content.
 ///
-/// Forward-only like every migration here.
+/// Additive (release/docs/upgrade.md): servers of the previous release keep
+/// working against it, so a release that adds only migrations like it rolls
+/// server by server.
 pub struct Migration;
 
 impl MigrationName for Migration {

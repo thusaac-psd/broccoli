@@ -5,7 +5,9 @@ use sea_orm_migration::prelude::*;
 /// plugin at a time provides a locale: a unique index over the enabled rows'
 /// locales, so no write of any path can enable a second pack for one.
 ///
-/// Forward-only like every migration here.
+/// Additive (release/docs/upgrade.md): servers of the previous release keep
+/// working against it, so a release that adds only migrations like it rolls
+/// server by server.
 pub struct Migration;
 
 impl MigrationName for Migration {
