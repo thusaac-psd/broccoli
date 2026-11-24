@@ -254,7 +254,7 @@ impl PluginLifecycle {
 
     /// What keeps work with `needs` from running: the disabled provider
     /// ([`Self::disabled_provider`]) of the first of its keys, in
-    /// [`providers::KINDS`] order, that has one, with what it provides for
+    /// [`crate::providers::KINDS`] order, that has one, with what it provides for
     /// the work. `None` when every key has an enabled provider (or none was
     /// ever recorded). `providers::runnable` states the same rule in SQL.
     pub fn closed_by(&self, needs: Needs<'_>) -> Option<ClosedBy> {

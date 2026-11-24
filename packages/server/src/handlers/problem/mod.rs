@@ -281,7 +281,7 @@ pub(crate) async fn require_problem_part_reachable(
     scope: ProblemScope,
     action: Action,
     not_found: &str,
-) -> Result<Option<crate::entity::contest::Model>, AppError> {
+) -> Result<Option<contest::Model>, AppError> {
     let mut reached = None;
     if let Some(contest_id) = scope.contest_id {
         if kernel
