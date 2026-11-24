@@ -145,6 +145,7 @@ pub async fn get_checker_source(
     };
     let files = match get_config(
         &state.db,
+        state.plugins.get_registry(),
         &ConfigTarget::problem(id),
         &owner.plugin_id,
         &owner.namespace,

@@ -3973,6 +3973,10 @@ export interface components {
       version: string;
     };
     PluginConfigResponse: {
+      /**
+       * @description The stored config, each secret field (`writeOnly` in `json_schema`)
+       *     `null`: a secret never leaves the server.
+       */
       config: unknown;
       description?: string | null;
       enabled?: boolean | null;
@@ -3983,6 +3987,11 @@ export interface components {
       plugin_id: string;
       /** Format: int32 */
       position: number;
+      /**
+       * @description The paths of the secret fields that hold a value (`stations[0].token`).
+       *     Writing `null` at one keeps the stored secret.
+       */
+      secrets: string[];
       /** Format: date-time */
       updated_at?: string | null;
     };

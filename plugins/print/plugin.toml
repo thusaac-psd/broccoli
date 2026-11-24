@@ -171,6 +171,7 @@ type = "string"
 title = "Token"
 description = "Opaque secret, unique per station."
 min_length = 1
+secret = true
 
 # -- Web UI --
 [web]

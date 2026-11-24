@@ -8,7 +8,12 @@ pub struct PluginConfigResponse {
     pub plugin_id: String,
     #[schema(example = "checker")]
     pub namespace: String,
+    /// The stored config, each secret field (`writeOnly` in `json_schema`)
+    /// `null`: a secret never leaves the server.
     pub config: serde_json::Value,
+    /// The paths of the secret fields that hold a value (`stations[0].token`).
+    /// Writing `null` at one keeps the stored secret.
+    pub secrets: Vec<String>,
     pub enabled: Option<bool>,
     pub position: i32,
     pub updated_at: Option<DateTime<Utc>>,

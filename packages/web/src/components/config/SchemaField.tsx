@@ -431,10 +431,13 @@ export function SchemaField({
       );
     }
 
-    // Default: string input
+    // Default: string input. A secret is never read back: an empty input
+    // writes `null`, which keeps whatever secret is stored.
     {
-      const stringPlaceholder =
-        showAsPlaceholder && inheritedResult
+      const secret = prop.writeOnly === true;
+      const stringPlaceholder = secret
+        ? t('config.secretKept')
+        : showAsPlaceholder && inheritedResult
           ? inheritedResult.display
           : undefined;
 
@@ -460,7 +463,14 @@ export function SchemaField({
               value={
                 showAsPlaceholder ? '' : typeof value === 'string' ? value : ''
               }
-              onChange={(e) => updateValue(path, e.target.value)}
+              onChange={(e) =>
+                updateValue(
+                  path,
+                  secret && e.target.value === '' ? null : e.target.value,
+                )
+              }
+              type={secret ? 'password' : undefined}
+              autoComplete={secret ? 'off' : undefined}
               placeholder={stringPlaceholder}
               minLength={prop.minLength}
               maxLength={prop.maxLength}

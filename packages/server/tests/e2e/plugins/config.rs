@@ -478,3 +478,71 @@ async fn a_cascade_shows_only_the_scopes_its_caller_may_read() {
     assert_eq!(res.status, 200, "{}", res.text);
     assert!(res.text.contains("Global banner"), "{}", res.text);
 }
+/// A field a schema marks secret (`secret = true`, `writeOnly` in the JSON
+/// schema) never leaves the server: every read answers it as null and lists
+/// it as set. A write that sends null keeps the stored secret, so saving the
+/// form unchanged leaves a print station able to sign in.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_secret_config_field_is_never_read_back_and_survives_an_unchanged_save() {
+    let app = E2eTestApp::spawn().await;
+    let (admin, problem_id, contest_id) = configured_everywhere(&app, "secret_admin").await;
+    let station_works = || async {
+        app.client
+            .get(format!(
+                "{}/api/v1/p/print/api/plugins/print/stations/jobs",
+                app.base_url
+            ))
+            .header("Authorization", "PrintStation station-secret-token")
+            .send()
+            .await
+            .expect("station request")
+            .status()
+            .as_u16()
+    };
+    assert_eq!(station_works().await, 200);
+
+    let config = "/api/v1/admin/plugins/print/config/print";
+    for path in [
+        config.to_string(),
+        "/api/v1/admin/plugins/print/config".to_string(),
+        format!("/api/v1/contests/{contest_id}/config/cascade"),
+        format!("/api/v1/contests/{contest_id}/problems/{problem_id}/config/cascade"),
+        format!("/api/v1/contests/{contest_id}/config"),
+    ] {
+        let res = app.get_with_token(&path, &admin).await;
+        assert_eq!(res.status, 200, "{path}: {}", res.text);
+        assert!(
+            !res.text.contains("station-secret-token"),
+            "{path}: {}",
+            res.text
+        );
+    }
+    let res = app.get_with_token(config, &admin).await;
+    assert_eq!(
+        res.body["config"]["stations"][0]["token"],
+        json!(null),
+        "{}",
+        res.text
+    );
+    assert_eq!(
+        res.body["config"]["stations"][0]["name"], "desk",
+        "{}",
+        res.text
+    );
+    assert_eq!(
+        res.body["secrets"],
+        json!(["stations[0].token"]),
+        "{}",
+        res.text
+    );
+
+    // The form saves what it read: the secret comes back as null.
+    let mut unchanged = res.body["config"].clone();
+    unchanged["banner"] = json!("Renamed banner");
+    let res = app
+        .put_with_token(config, &json!({ "config": unchanged }), &admin)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(!res.text.contains("station-secret-token"), "{}", res.text);
+    assert_eq!(station_works().await, 200, "the stored token is kept");
+}

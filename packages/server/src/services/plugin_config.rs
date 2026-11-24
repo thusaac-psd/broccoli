@@ -145,8 +145,42 @@ impl ConfigTargetPattern {
     }
 }
 
+/// The namespace `plugin_id` declares as `namespace`, as this replica knows
+/// its manifest.
+pub(crate) fn declared(
+    registry: &PluginRegistry,
+    plugin_id: &str,
+    namespace: &str,
+) -> Option<ConfigNamespace> {
+    registry
+        .read()
+        .ok()?
+        .get(plugin_id)?
+        .manifest
+        .config
+        .get(namespace)
+        .cloned()
+}
+
+/// A stored config as a read shows it: each secret field its namespace
+/// declares `null`, with the paths of those that hold a value. Every route
+/// that answers a stored config builds its answer here, so a secret never
+/// leaves the server.
+pub(crate) fn shown(
+    registry: &PluginRegistry,
+    plugin_id: &str,
+    namespace: &str,
+    mut config: serde_json::Value,
+) -> (serde_json::Value, Vec<String>) {
+    let secrets = declared(registry, plugin_id, namespace)
+        .map(|ns| ns.withhold_secrets(&mut config))
+        .unwrap_or_default();
+    (config, secrets)
+}
+
 pub(crate) async fn get_config<C: ConnectionTrait>(
     db: &C,
+    registry: &PluginRegistry,
     target: &ConfigTarget,
     plugin_id: &str,
     namespace: &str,
@@ -163,10 +197,12 @@ pub(crate) async fn get_config<C: ConnectionTrait>(
     match row {
         Some(r) => {
             let namespace = strip_namespace_prefix(&r.namespace).to_string();
+            let (config, secrets) = shown(registry, plugin_id, &namespace, r.config);
             Ok(Json(PluginConfigResponse {
                 plugin_id: plugin_id.to_string(),
                 namespace,
-                config: r.config,
+                config,
+                secrets,
                 enabled: r.enabled,
                 position: r.position,
                 updated_at: Some(r.updated_at),
@@ -511,6 +547,19 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
             .one(&txn)
             .await?;
     }
+    // A secret the client sends back as `null` (it reads them so) keeps the
+    // stored value.
+    let mut config = config;
+    if let Some(ns) = declared(plugins.get_registry(), plugin_id, namespace) {
+        let stored = plugin_config::Entity::find_by_id((
+            target.scope().as_str().to_string(),
+            target.ref_id().to_string(),
+            target.stored_namespace(plugin_id, namespace),
+        ))
+        .one(&txn)
+        .await?;
+        ns.keep_secrets(&mut config, stored.as_ref().map(|row| &row.config));
+    }
     let findings = check_config(plugins, target, plugin_id, namespace, &config, reads).await?;
     if !findings.refusals.is_empty() {
         return Err(AppError::InvalidConfig(findings.refusals));
@@ -551,11 +600,13 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     .await?;
     let change = ConfigChange::of(&txn, target).await?;
     txn.commit().await?;
+    let (config, secrets) = shown(plugins.get_registry(), plugin_id, namespace, row.config);
     Ok((
         PluginConfigResponse {
             plugin_id: plugin_id.to_string(),
             namespace: strip_namespace_prefix(&row.namespace).to_string(),
-            config: row.config,
+            config,
+            secrets,
             enabled: row.enabled,
             position: row.position,
             updated_at: Some(row.updated_at),
@@ -737,7 +788,11 @@ impl Readable {
 /// scope they may not read is left out, and so is every top-level field such
 /// a row sets, which is named in `withheld` instead. Only the fields a row
 /// actually contributes count: a switched-off row contributes nothing.
-pub(crate) fn cascade_view(effective: EffectiveConfig, readable: Readable) -> ConfigCascadeView {
+pub(crate) fn cascade_view(
+    effective: EffectiveConfig,
+    readable: Readable,
+    ns: Option<&ConfigNamespace>,
+) -> ConfigCascadeView {
     use broccoli_server_sdk::types::CascadeLevel;
     let EffectiveConfig {
         mut config,
@@ -773,7 +828,22 @@ pub(crate) fn cascade_view(effective: EffectiveConfig, readable: Readable) -> Co
             map.remove(key);
         }
     }
-    let [cp, c, p, plugin] = rows.map(|(level, at)| level.filter(|_| readable.reads(at)));
+    // No scope's secret is shown, whoever reads: each value is `null`.
+    let withhold = |value: &mut serde_json::Value| {
+        if let Some(ns) = ns {
+            ns.withhold_secrets(value);
+        }
+    };
+    withhold(&mut config);
+    let [cp, c, p, plugin] = rows.map(|(level, at)| {
+        level.filter(|_| readable.reads(at)).map(|mut level| {
+            withhold(&mut level.config);
+            if let Some(stored) = &mut level.stored {
+                withhold(stored);
+            }
+            level
+        })
+    });
     ConfigCascadeView {
         config,
         source,
