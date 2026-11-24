@@ -99,7 +99,12 @@ the page from one and its chunks from the other. The shipped gateways
 they pin each browser to one server with the `broccoli_upstream` cookie, so it
 keeps loading the page and every chunk from the same build. A browser without
 the cookie, or whose server is down, is sent to the next server round robin and
-pinned to it.
+pinned to it. The cookie names its server by a hash of the server's address and
+nothing else, so a gateway that restarts, or a second gateway in front of the
+same servers, keeps every browser on the server it had.
+
+The command-line clients are not pinned, and need not be: they read only the
+API, which both releases of a roll answer, and never load the web app's chunks.
 
 A browser switches builds only when its own server stops for the upgrade. Its
 open page is still the old build; the next chunk it loads comes from a new

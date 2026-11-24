@@ -33,7 +33,10 @@
 		# Each browser sticks to one server (the broccoli_upstream cookie), so
 		# during a rolling upgrade it loads the page and its chunks from one
 		# build. A client without the cookie, or whose server is down, is sent
-		# round robin and pinned to the server it reaches.
+		# round robin and pinned to the server it reaches. The cookie has no
+		# secret: its value is a hash of the server's address alone, so a
+		# restarted gateway, or another gateway in front of the same servers,
+		# keeps every browser on its server.
 		lb_policy cookie broccoli_upstream {
 			fallback round_robin
 		}
