@@ -227,6 +227,7 @@ mod tests {
             "problem_id": 3, "problem_title": "A", "contest_id": 4, "contest_type": "icpc",
             "judge_epoch": 1, "target_worker_id": "w", "created_at": "2026-01-01T00:00:00Z",
             "result": result, "withheld": null, "parked_by": parked_by,
+            "judged_on_earlier_inputs": true,
         }));
         assert_every_answer_parses::<SubmissionListItem>(serde_json::json!({
             "id": 1, "language": "cpp", "status": "Judged", "verdict": "Accepted",
