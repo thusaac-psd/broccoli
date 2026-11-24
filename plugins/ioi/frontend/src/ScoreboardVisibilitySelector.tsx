@@ -35,7 +35,7 @@ function isScoreboardVisibility(value: unknown): value is ScoreboardVisibility {
 
 export function ScoreboardVisibilitySelector({
   value,
-  schema,
+  label,
   onChange,
   showAsPlaceholder,
   inheritedValue,
@@ -56,7 +56,7 @@ export function ScoreboardVisibilitySelector({
     <div className="flex flex-col gap-2">
       <div className="flex items-center gap-2">
         <Label className="text-[11px] font-semibold uppercase tracking-wider opacity-55">
-          {t('ioi.scoreboardVisibility.label')}
+          {label}
         </Label>
         {showAsPlaceholder && inheritedSource && (
           <InheritedBadge source={inheritedSource} />
@@ -67,14 +67,8 @@ export function ScoreboardVisibilitySelector({
       </p>
 
       <Select value={selectedValue} onValueChange={(v) => onChange(v)}>
-        <SelectTrigger aria-label={t('ioi.scoreboardVisibility.label')}>
-          <SelectValue
-            placeholder={
-              inheritedDisplay ??
-              schema.title ??
-              t('ioi.scoreboardVisibility.label')
-            }
-          />
+        <SelectTrigger aria-label={label}>
+          <SelectValue placeholder={inheritedDisplay ?? label} />
         </SelectTrigger>
         <SelectContent>
           {VISIBILITY_OPTIONS.map((option) => (

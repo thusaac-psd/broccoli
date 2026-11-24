@@ -206,6 +206,12 @@ The field path joins nested property names with dots, so the field
 `[config.sandbox.properties.compile_time_limit_s]` in `batch-evaluator` has
 the title key `config.batch-evaluator.sandbox.compile_time_limit_s.title`.
 
+A component that renders a field in your plugin's place (a
+`config.field.<plugin id>.<namespace>.<field path>` slot) receives the
+field's `label` and `description` already chosen this way. Show those, never
+`schema.title` or `schema.description`, which hold only the text from
+`plugin.toml`.
+
 ```toml
 'plugin.batch-evaluator.description' = 'Judges batch problems: compile, run against each test, check the output.'
 'config.batch-evaluator.sandbox.description' = 'Sandbox resource limits for compilation and execution steps'

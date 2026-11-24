@@ -42,7 +42,8 @@ const INACTIVE_ACCENT = 'var(--muted-foreground, #9ca3af)';
 
 export function ScoringModeSelector({
   value,
-  schema,
+  label,
+  description,
   onChange,
   formValues,
   setFieldValue,
@@ -74,16 +75,14 @@ export function ScoringModeSelector({
     <div className="flex flex-col gap-2.5 col-span-2">
       <div className="flex items-center gap-2">
         <Label className="text-[11px] font-semibold uppercase tracking-wider opacity-55">
-          {schema.title ?? t('ioi.scoringMode.label')}
+          {label}
         </Label>
         {showAsPlaceholder && inheritedSource && (
           <InheritedBadge source={inheritedSource} />
         )}
       </div>
-      {schema.description && (
-        <p className="text-xs opacity-50 m-0 leading-normal">
-          {schema.description}
-        </p>
+      {description && (
+        <p className="text-xs opacity-50 m-0 leading-normal">{description}</p>
       )}
 
       {/* Timeline connector */}

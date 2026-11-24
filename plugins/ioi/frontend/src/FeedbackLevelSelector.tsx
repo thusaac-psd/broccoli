@@ -28,7 +28,8 @@ const FEEDBACK_OPTIONS: ReadonlyArray<{
 
 export function FeedbackLevelSelector({
   value,
-  schema,
+  label,
+  description,
   onChange,
   formValues,
   showAsPlaceholder,
@@ -53,25 +54,19 @@ export function FeedbackLevelSelector({
     <div className="flex flex-col gap-2">
       <div className="flex items-center gap-2">
         <Label className="text-[11px] font-semibold uppercase tracking-wider opacity-55">
-          {schema.title ?? t('ioi.feedbackLevel.label')}
+          {label}
         </Label>
         {showAsPlaceholder && inheritedSource && (
           <InheritedBadge source={inheritedSource} />
         )}
       </div>
-      {schema.description && (
-        <p className="text-xs opacity-50 m-0 leading-normal">
-          {schema.description}
-        </p>
+      {description && (
+        <p className="text-xs opacity-50 m-0 leading-normal">{description}</p>
       )}
 
       <Select value={selectedValue} onValueChange={(v) => onChange(v)}>
-        <SelectTrigger
-          aria-label={schema.title ?? t('ioi.feedbackLevel.label')}
-        >
-          <SelectValue
-            placeholder={inheritedDisplay ?? t('ioi.feedbackLevel.label')}
-          />
+        <SelectTrigger aria-label={label}>
+          <SelectValue placeholder={inheritedDisplay ?? label} />
         </SelectTrigger>
         <SelectContent>
           {FEEDBACK_OPTIONS.map((option) => (

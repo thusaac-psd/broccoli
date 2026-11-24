@@ -131,6 +131,8 @@ export function SchemaField({
         className="grid"
         slotProps={{
           value,
+          label,
+          description,
           schema: prop,
           onChange: (v: unknown) => updateValue(path, v),
           formValues: rootValues,

@@ -868,7 +868,8 @@ function UnifiedSearch({
 
 export function SubtaskEditor({
   value,
-  schema,
+  label,
+  description,
   onChange,
   scope,
   showAsPlaceholder,
@@ -1317,7 +1318,7 @@ export function SubtaskEditor({
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-2">
           <span className="text-[11px] font-bold uppercase tracking-widest opacity-45">
-            {schema.title ?? t('ioi.subtask.title')}
+            {label}
           </span>
           {showAsPlaceholder && inheritedSource && (
             <InheritedBadge source={inheritedSource} />
@@ -1423,10 +1424,8 @@ export function SubtaskEditor({
         </div>
       )}
 
-      {schema.description && (
-        <p className="text-xs opacity-45 m-0 leading-normal">
-          {schema.description}
-        </p>
+      {description && (
+        <p className="text-xs opacity-45 m-0 leading-normal">{description}</p>
       )}
 
       {problemId && tcLoading && (
