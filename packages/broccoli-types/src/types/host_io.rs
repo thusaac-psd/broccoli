@@ -117,6 +117,10 @@ pub struct RegisterEvaluatorInput {
     pub problem_type: String,
     #[serde(flatten)]
     pub handlers: EvaluatorHandlers,
+    /// Whether the evaluator checks output with the problem's checker
+    /// (`resolve_checker`). A unit needs a checker plugin for its problem's
+    /// checker format only when its evaluator does.
+    pub uses_checker: bool,
 }
 
 /// The functions an evaluator registers: one direct `handler`, or a staged

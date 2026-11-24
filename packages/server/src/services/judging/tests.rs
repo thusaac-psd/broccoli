@@ -25,6 +25,7 @@ const NO_TYPES: &crate::providers::Loaded = &crate::providers::Loaded {
     contest_types: std::collections::BTreeMap::new(),
     problem_types: std::collections::BTreeMap::new(),
     checker_formats: std::collections::BTreeMap::new(),
+    languages: std::collections::BTreeMap::new(),
 };
 
 /// Ten rows, no in-flight cap.
@@ -1485,7 +1486,7 @@ async fn provider(db: &DatabaseConnection, enabled: bool) {
         db,
         &format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
-             VALUES ('std', {enabled}, '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": [], \"checker_formats\": []}}') \
+             VALUES ('std', {enabled}, '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         ),
     )
@@ -1551,18 +1552,25 @@ async fn work_of_a_disabled_contest_plugin_is_parked_until_it_is_enabled() {
 }
 
 /// What one replica has loaded: `plugin` registered every key it names.
-fn loaded(plugin: &str, keys: [(crate::providers::Provided, &str); 3]) -> crate::providers::Loaded {
-    use crate::providers::Provided;
+fn loaded(plugin: &str, keys: [(crate::providers::Provided, &str); 4]) -> crate::providers::Loaded {
     let mut loaded = crate::providers::Loaded::default();
     for (kind, key) in keys {
-        let map = match kind {
-            Provided::ContestType => &mut loaded.contest_types,
-            Provided::ProblemType => &mut loaded.problem_types,
-            Provided::CheckerFormat => &mut loaded.checker_formats,
-        };
-        map.insert(key.to_string(), vec![plugin.to_string()]);
+        loaded
+            .of_mut(kind)
+            .insert(key.to_string(), vec![plugin.to_string()]);
     }
     loaded
+}
+
+/// Every key the submission [`new_submission`] makes needs, of `problem`.
+fn unit_keys(problem: &crate::entity::problem::Model) -> [(crate::providers::Provided, &str); 4] {
+    use crate::providers::Provided;
+    [
+        (Provided::ContestType, "standard"),
+        (Provided::ProblemType, problem.problem_type.as_str()),
+        (Provided::CheckerFormat, problem.checker_format.as_str()),
+        (Provided::Language, "cpp"),
+    ]
 }
 
 /// Records `peer` as a live replica that has `loaded` loaded.
@@ -1594,11 +1602,7 @@ async fn a_replica_claims_only_work_whose_every_plugin_it_has_loaded() {
         .await
         .unwrap()
         .unwrap();
-    let keys = [
-        (Provided::ContestType, "standard"),
-        (Provided::ProblemType, problem.problem_type.as_str()),
-        (Provided::CheckerFormat, problem.checker_format.as_str()),
-    ];
+    let keys = unit_keys(&problem);
     let everything = loaded("plugin", keys);
     let without = |kind: Provided| {
         loaded(
@@ -1634,7 +1638,6 @@ async fn a_replica_claims_only_work_whose_every_plugin_it_has_loaded() {
 /// provider, and this replica takes the unit.
 #[tokio::test]
 async fn a_replica_runs_a_key_only_on_its_fleet_wide_provider() {
-    use crate::providers::Provided;
     let (_pg, db) = crate::test_support::postgres().await;
     new_submission(&db).await;
     let problem = crate::entity::problem::Entity::find()
@@ -1646,21 +1649,14 @@ async fn a_replica_runs_a_key_only_on_its_fleet_wide_provider() {
         format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
              VALUES ('{id}', {enabled}, \
-                     '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": [], \"checker_formats\": []}}') \
+                     '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         )
     };
     exec(&db, &contest("a-contest", true)).await;
     exec(&db, &contest("b-contest", true)).await;
     let with_contest = |plugin: &str| {
-        let mut l = loaded(
-            "plugin",
-            [
-                (Provided::ContestType, "standard"),
-                (Provided::ProblemType, problem.problem_type.as_str()),
-                (Provided::CheckerFormat, problem.checker_format.as_str()),
-            ],
-        );
+        let mut l = loaded("plugin", unit_keys(&problem));
         l.contest_types
             .insert("standard".into(), vec![plugin.to_string()]);
         l
@@ -1675,6 +1671,99 @@ async fn a_replica_runs_a_key_only_on_its_fleet_wide_provider() {
     assert_eq!(claimed.units.len(), 1, "b-contest is the provider now");
 }
 
+/// Work needs exactly the plugins it uses. Its problem's checker is a need
+/// only when the problem type's fleet-wide evaluator uses a checker: with
+/// the checker plugin disabled, work of an evaluator that declared no
+/// checker is still claimed, by a replica that has no checker loaded. Its
+/// language is a need like any other: with the language plugin disabled the
+/// work is parked, and a replica without it loaded leaves it to a live peer
+/// that has it.
+#[tokio::test]
+async fn work_needs_its_language_and_a_checker_only_when_its_evaluator_uses_one() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    new_submission(&db).await;
+    let problem = crate::entity::problem::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let governs = |id: &str, enabled: bool, field: &str, key: &str, unchecked: &str| {
+        format!(
+            "INSERT INTO plugin (id, is_enabled, governs) VALUES ('{id}', {enabled}, \
+               jsonb_build_object('visibility', false, 'contest_types', '[]'::jsonb, \
+                 'problem_types', '[]'::jsonb, 'checker_formats', '[]'::jsonb, \
+                 'languages', '[]'::jsonb, 'unchecked_problem_types', '{unchecked}'::jsonb) \
+               || jsonb_build_object('{field}', jsonb_build_array('{key}'))) \
+             ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled, \
+                                            governs = EXCLUDED.governs"
+        )
+    };
+    exec(
+        &db,
+        &governs(
+            "checkers",
+            false,
+            "checker_formats",
+            &problem.checker_format,
+            "[]",
+        ),
+    )
+    .await;
+    exec(
+        &db,
+        &governs("eval", true, "problem_types", &problem.problem_type, "[]"),
+    )
+    .await;
+    assert_eq!(
+        claimable(&db).await,
+        0,
+        "parked: its evaluator uses the disabled checker"
+    );
+
+    let unchecked = format!("[\"{}\"]", problem.problem_type);
+    exec(
+        &db,
+        &governs(
+            "eval",
+            true,
+            "problem_types",
+            &problem.problem_type,
+            &unchecked,
+        ),
+    )
+    .await;
+    let mut no_checker = loaded("plugin", unit_keys(&problem));
+    no_checker.checker_formats.clear();
+    let claimed = claim_judgements(&db, "here", TEN, &no_checker)
+        .await
+        .unwrap();
+    assert_eq!(claimed.units.len(), 1, "its evaluator uses no checker");
+    let ids: Vec<i32> = claimed.units.iter().map(|c| c.unit.judgement.id).collect();
+    super::unit::release_claimed(&db, Unit::Judgement, "here", &ids)
+        .await
+        .unwrap();
+
+    exec(&db, &governs("langs", false, "languages", "cpp", "[]")).await;
+    assert_eq!(
+        claimable(&db).await,
+        0,
+        "parked: its language plugin is disabled"
+    );
+    exec(&db, &governs("langs", true, "languages", "cpp", "[]")).await;
+    peer(&db, &loaded("langs", unit_keys(&problem))).await;
+    let mut no_language = loaded("plugin", unit_keys(&problem));
+    no_language.languages.clear();
+    no_language.checker_formats.clear();
+    let claimed = claim_judgements(&db, "here", TEN, &no_language)
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed.units.len(),
+        0,
+        "the peer has its language plugin loaded"
+    );
+}
+
 /// Records `standard` (the problem type [`new_submission`] uses) as
 /// evaluated by one plugin, enabled or not.
 async fn evaluator(db: &DatabaseConnection, enabled: bool) {
@@ -1683,7 +1772,7 @@ async fn evaluator(db: &DatabaseConnection, enabled: bool) {
         &format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
              VALUES ('eval', {enabled}, \
-                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"standard\"], \"checker_formats\": []}}') \
+                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"standard\"], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         ),
     )
@@ -1707,7 +1796,7 @@ async fn work_whose_checker_plugin_is_disabled_is_parked_until_it_is_enabled() {
         format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
              VALUES ('checkers', {enabled}, \
-                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [\"{format}\"]}}') \
+                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [\"{format}\"], \"languages\": [], \"unchecked_problem_types\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         )
     };

@@ -529,11 +529,13 @@ fn register_registry_functions(hr: &mut HostFunctionRegistry, deps: &HostFunctio
     });
 
     let lang_reg = system.language_resolver_registry.clone();
+    let lifecycle = system.plugin_lifecycle.clone();
     let pm = deps.plugin_manager.clone();
     hr.register("language:resolve", move |plugin_id| {
         language::create_resolve_language_function(
             plugin_id.to_string(),
             lang_reg.clone(),
+            lifecycle.clone(),
             pm.clone(),
         )
     });

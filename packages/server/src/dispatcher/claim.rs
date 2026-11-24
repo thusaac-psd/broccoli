@@ -429,7 +429,9 @@ fn start_claimed<T, F, Fut>(
             &claim.problem_type,
             claim.queued_secs,
         );
-        let needs_loaded = state.plugin_lifecycle.all_loaded(local, claim.needs());
+        let needs_loaded = state
+            .plugin_lifecycle
+            .all_loaded(local, claim.needs(&state.plugin_lifecycle));
         let live = state
             .registries
             .live_dispatches

@@ -52,40 +52,27 @@ impl Unit {
     }
 
     /// The keys the unit needs a provider of (`providers::Needs`), each as
-    /// SQL over a [`Unit::scan_from`] scan: its contest type, and its
-    /// problem's type and checker format.
-    fn needs(self) -> [(Provided, &'static str); 3] {
-        match self {
-            Unit::Judgement => [
-                (Provided::ContestType, "s.contest_type"),
-                (
-                    Provided::ProblemType,
-                    "(SELECT pt.problem_type FROM problem pt WHERE pt.id = s.problem_id)",
-                ),
-                (
-                    Provided::CheckerFormat,
-                    "(SELECT pt.checker_format FROM problem pt WHERE pt.id = s.problem_id)",
-                ),
-            ],
-            Unit::CodeRun => [
-                (Provided::ContestType, "u.contest_type"),
-                (
-                    Provided::ProblemType,
-                    "(SELECT pt.problem_type FROM problem pt WHERE pt.id = u.problem_id)",
-                ),
-                (
-                    Provided::CheckerFormat,
-                    "(SELECT pt.checker_format FROM problem pt WHERE pt.id = u.problem_id)",
-                ),
-            ],
-        }
+    /// SQL over a [`Unit::scan_from`] scan ([`crate::providers::sql_needs`]):
+    /// its contest type, its problem's type, its problem's checker format
+    /// when the evaluator uses a checker, and its language.
+    fn needs(self) -> Vec<(Provided, String)> {
+        let row = match self {
+            Unit::Judgement => "s",
+            Unit::CodeRun => "u",
+        };
+        crate::providers::sql_needs(
+            &format!("{row}.contest_type"),
+            &format!("(SELECT pt.problem_type FROM problem pt WHERE pt.id = {row}.problem_id)"),
+            &format!("(SELECT pt.checker_format FROM problem pt WHERE pt.id = {row}.problem_id)"),
+            &format!("{row}.language"),
+        )
     }
 
     /// SQL over a [`Unit::scan_from`] scan: the unit may run now, every
     /// key it needs having a provider enabled fleet-wide
     /// ([`crate::providers::runnable`]). A unit that may not is parked.
     pub(crate) fn runnable(self) -> String {
-        crate::providers::runnable(self.needs())
+        crate::providers::runnable(&self.needs())
     }
 
     /// SQL over a [`Unit::scan_from`] scan: this replica may take the unit,
@@ -94,7 +81,7 @@ impl Unit {
     /// ([`crate::providers::runs_here`]); `local` is the placeholder of
     /// what this replica has loaded.
     fn runs_here(self, local: &str) -> String {
-        crate::providers::runs_here(self.needs(), local)
+        crate::providers::runs_here(&self.needs(), local)
     }
 
     /// `SET` items, each led by `, `, that claiming a row of this unit adds to
@@ -372,11 +359,17 @@ pub(crate) trait ClaimedUnit {
     fn dispatched(&self) -> DispatchedUnit;
     /// The contest type it is judged under.
     fn contest_type(&self) -> &str;
+    /// The language it is in.
+    fn language(&self) -> &str;
 }
 
 impl ClaimedUnit for ClaimedJudgement {
     fn contest_type(&self) -> &str {
         &self.submission.contest_type
+    }
+
+    fn language(&self) -> &str {
+        &self.submission.language
     }
 
     fn dispatched(&self) -> DispatchedUnit {
@@ -391,6 +384,10 @@ impl ClaimedUnit for ClaimedJudgement {
 impl ClaimedUnit for code_run::Model {
     fn contest_type(&self) -> &str {
         &self.contest_type
+    }
+
+    fn language(&self) -> &str {
+        &self.language
     }
 
     fn dispatched(&self) -> DispatchedUnit {
@@ -414,13 +411,17 @@ pub(crate) struct Claim<T> {
 }
 
 impl<T: ClaimedUnit> Claim<T> {
-    /// What the unit needs a provider of, as the claim read it.
-    pub(crate) fn needs(&self) -> crate::providers::Needs<'_> {
-        crate::providers::Needs {
-            contest_type: self.unit.contest_type(),
-            problem_type: &self.problem_type,
-            checker_format: &self.checker_format,
-        }
+    /// What the unit needs a provider of, its problem as the claim read it.
+    pub(crate) fn needs<'a>(
+        &'a self,
+        lifecycle: &crate::plugin_lifecycle::PluginLifecycle,
+    ) -> crate::providers::Needs<'a> {
+        lifecycle.needs(
+            self.unit.contest_type(),
+            &self.problem_type,
+            &self.checker_format,
+            Some(self.unit.language()),
+        )
     }
 }
 

@@ -164,10 +164,14 @@ fn mismatch(published: Option<&Fingerprint>, local: Option<&Fingerprint>) -> Opt
 pub struct Governs {
     /// It declares a `[[server.queries]] topic = "visibility"`.
     pub visibility: bool,
-    /// The contest types, problem types and checker formats its `init()`
-    /// registered, each sorted.
+    /// The contest types, problem types, checker formats and languages its
+    /// `init()` registered, each sorted.
     #[serde(flatten)]
     pub provides: Provides,
+    /// The problem types it registered an evaluator for that uses no
+    /// checker (`uses_checker` false), sorted: work on them needs no checker
+    /// plugin.
+    pub unchecked_problem_types: Vec<String>,
 }
 
 /// A plugin that is enabled fleet-wide but not loaded on this replica.
@@ -311,6 +315,48 @@ impl PluginLifecycle {
             (None, true) => FleetProvider::Closed,
             (None, false) => FleetProvider::Unknown,
         }
+    }
+
+    /// What work of `contest_type` on `problem`, in `language` (none for the
+    /// problem alone), needs: exactly the plugins it uses. Its problem's
+    /// checker format is a need unless the problem type's fleet-wide
+    /// evaluator declared it uses no checker. `providers::sql_needs` states
+    /// the same in SQL.
+    pub fn needs<'a>(
+        &self,
+        contest_type: &'a str,
+        problem_type: &'a str,
+        checker_format: &'a str,
+        language: Option<&'a str>,
+    ) -> Needs<'a> {
+        use crate::providers::FleetProvider;
+        let unchecked = match self.provider(Provided::ProblemType, problem_type) {
+            FleetProvider::Plugin(evaluator) => self
+                .governs(&evaluator)
+                .is_some_and(|g| g.unchecked_problem_types.iter().any(|t| t == problem_type)),
+            FleetProvider::Closed | FleetProvider::Unknown => false,
+        };
+        Needs {
+            contest_type,
+            problem_type,
+            checker_format: (!unchecked).then_some(checker_format),
+            language,
+        }
+    }
+
+    /// [`Self::needs`] of work of `contest_type` on `problem`.
+    pub fn needs_on<'a>(
+        &self,
+        contest_type: &'a str,
+        problem: &'a crate::entity::problem::Model,
+        language: Option<&'a str>,
+    ) -> Needs<'a> {
+        self.needs(
+            contest_type,
+            &problem.problem_type,
+            &problem.checker_format,
+            language,
+        )
     }
 
     /// Whether `local` has every key of `needs` loaded on its fleet-wide
@@ -1076,9 +1122,21 @@ async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
         .ok()
         .and_then(|r| r.get(plugin_id).map(|e| declares_visibility(&e.manifest)))
         .unwrap_or(false);
+    let mut unchecked_problem_types: Vec<String> = state
+        .registries
+        .evaluator_registry
+        .read()
+        .await
+        .registered_by(plugin_id)
+        .into_iter()
+        .filter(|(_, evaluator)| !evaluator.uses_checker)
+        .map(|(problem_type, _)| problem_type)
+        .collect();
+    unchecked_problem_types.sort();
     Governs {
         visibility,
         provides: Provides::registered_by(&state.registries, plugin_id).await,
+        unchecked_problem_types,
     }
 }
 
@@ -1966,10 +2024,11 @@ mod tests {
             serde_json::json!({"visibility": false, "contest_types": ["x"]}),
             serde_json::json!({
                 "visibility": false, "contest_types": [], "problem_types": [], "checker_formats": [],
-                "host_locale": null,
+                "languages": [], "unchecked_problem_types": [], "host_locale": null,
             }),
             serde_json::json!({
                 "visibility": "no", "contest_types": [], "problem_types": [], "checker_formats": [],
+                "languages": [], "unchecked_problem_types": [],
             }),
             serde_json::json!([]),
         ] {
@@ -1982,9 +2041,11 @@ mod tests {
             visibility: true,
             provides: Provides {
                 contest_types: vec!["x".into()],
-                problem_types: vec![],
+                problem_types: vec!["batch".into(), "communication".into()],
                 checker_formats: vec!["lines".into()],
+                languages: vec!["cpp".into()],
             },
+            unchecked_problem_types: vec!["communication".into()],
         };
         write(serde_json::to_value(&whole).unwrap())
             .await
@@ -2125,13 +2186,68 @@ mod tests {
         assert_eq!(resolved("unrecorded"), Ok("b-contest".into()));
     }
 
+    /// Work needs exactly the plugins it uses: its problem's checker only
+    /// when the problem type's fleet-wide evaluator declared it uses one,
+    /// and its language's resolver. A disabled checker closes only work
+    /// whose evaluator checks with it; a disabled language plugin closes
+    /// work in that language.
+    #[test]
+    fn work_needs_a_checker_only_when_its_evaluator_uses_one() {
+        let lifecycle = providers(true, true, false);
+        let checked = lifecycle.needs("t", "p", "c", Some("cpp"));
+        assert_eq!(checked.checker_format, Some("c"));
+        assert_eq!(
+            lifecycle.closed_by(checked).map(|c| c.provides),
+            Some(Provided::CheckerFormat)
+        );
+
+        lifecycle.set_governs(
+            "eval",
+            Governs {
+                provides: Provides {
+                    problem_types: vec!["p".into()],
+                    ..Provides::default()
+                },
+                unchecked_problem_types: vec!["p".into()],
+                ..Governs::default()
+            },
+        );
+        let unchecked = lifecycle.needs("t", "p", "c", Some("cpp"));
+        assert_eq!(unchecked.checker_format, None);
+        assert_eq!(lifecycle.closed_by(unchecked), None);
+
+        lifecycle.set_governs(
+            "langs",
+            Governs {
+                provides: Provides {
+                    languages: vec!["cpp".into()],
+                    ..Provides::default()
+                },
+                ..Governs::default()
+            },
+        );
+        lifecycle.set_desired("langs", false);
+        assert_eq!(
+            lifecycle.closed_by(unchecked),
+            Some(ClosedBy {
+                plugin_id: "langs".into(),
+                provides: Provided::Language,
+            })
+        );
+        assert_eq!(
+            lifecycle.closed_by(lifecycle.needs("t", "p", "c", None)),
+            None
+        );
+    }
+
     #[test]
     fn closed_work_names_the_plugin_and_what_it_provides_for_the_work() {
         let queued = common::SubmissionStatus::Queued;
         let needs = Needs {
             contest_type: "t",
             problem_type: "p",
-            checker_format: "c",
+            checker_format: Some("c"),
+            language: None,
         };
         let closed = |provides, plugin_id: &str| {
             Some(ClosedBy {

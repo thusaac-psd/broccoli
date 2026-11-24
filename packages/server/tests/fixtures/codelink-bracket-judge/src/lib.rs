@@ -28,7 +28,7 @@ use extism_pdk::{FnResult, plugin_fn};
 pub fn init() -> FnResult<String> {
     let host = Host::new();
     host.registry
-        .register_evaluator("codelink-bracket-judge-fixture", "evaluate")?;
+        .register_evaluator("codelink-bracket-judge-fixture", "evaluate", false)?;
     host.registry.register_language_resolver(
         "cpp",
         "resolve_language",

@@ -283,11 +283,13 @@ binaries warn about every key they do not read.
   keep an old shape for, so no expand/contract.
 - When changing plugin execution behavior, check both manifest-level permissions
   and host-side registration/resolution.
-- A unit of work runs only while every plugin it needs has an enabled provider:
-  its contest type's plugin, its problem type's evaluator and its checker
-  format's checker (`providers::Needs`). Work that cannot run because one is
-  disabled fleet-wide is parked, not failed: the claim, the system-error retry,
-  the stuck detector and the overview's parked count read one predicate
+- A unit of work runs only while every plugin it needs has an enabled provider.
+  It needs exactly the plugins it uses (`providers::Needs`, built by
+  `PluginLifecycle::needs`): its contest type's plugin, its problem type's
+  evaluator, its language's resolver, and its checker format's checker only when
+  the evaluator registered with `uses_checker`. Work that cannot run because one
+  is disabled fleet-wide is parked, not failed: the claim, the system-error
+  retry, the stuck detector and the overview's parked count read one predicate
   (`judging::Unit::runnable`, built on `providers::runnable`;
   `PluginLifecycle::closed_by` in Rust), the submit paths refuse it
   (`accepting_handler`), and it resumes when a provider is enabled. A replica

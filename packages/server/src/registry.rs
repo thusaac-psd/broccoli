@@ -14,6 +14,9 @@ use crate::services::evaluate_batch::EvaluateCases;
 pub struct EvaluatorHandler {
     pub plugin_id: String,
     pub functions: EvaluatorFunctions,
+    /// It checks output with the problem's checker, so work it evaluates
+    /// needs a checker plugin for the problem's checker format.
+    pub uses_checker: bool,
 }
 
 /// The functions an evaluator declared when it registered.

@@ -9,6 +9,7 @@ use broccoli_server_sdk::types::{ResolveLanguageInput, ResolveLanguageOutput};
 struct ResolveLanguageContext {
     caller_plugin_id: String,
     resolver_registry: LanguageResolverRegistry,
+    plugin_lifecycle: Arc<crate::plugin_lifecycle::PluginLifecycle>,
     plugin_manager: super::context::ManagerRef,
 }
 
@@ -21,6 +22,7 @@ impl super::HostFnContext for ResolveLanguageContext {
 pub fn create_resolve_language_function(
     plugin_id: String,
     resolver_registry: LanguageResolverRegistry,
+    plugin_lifecycle: Arc<crate::plugin_lifecycle::PluginLifecycle>,
     plugin_manager: super::context::ManagerRef,
 ) -> Function {
     super::host_function(
@@ -30,6 +32,7 @@ pub fn create_resolve_language_function(
         super::host_data(ResolveLanguageContext {
             caller_plugin_id: plugin_id,
             resolver_registry,
+            plugin_lifecycle,
             plugin_manager,
         }),
         super::Waits::Blocks,
@@ -46,17 +49,26 @@ fn resolve_language_fn(
     let input: ResolveLanguageInput = super::read_json(plugin, inputs, "input")?;
     let ctx = super::HostCall::enter(&user_data, "resolve_language")?;
 
+    let kind = crate::providers::Provided::Language;
     let resolver = tokio::runtime::Handle::current().block_on(async {
-        let registry = ctx.resolver_registry.read().await;
-        registry.get(&input.language_id).cloned()
+        crate::providers::resolve(
+            &*ctx.resolver_registry.read().await,
+            ctx.plugin_lifecycle.provider(kind, &input.language_id),
+            kind,
+            &input.language_id,
+        )
     });
-
-    let handler = resolver.ok_or_else(|| {
-        extism::Error::msg(format!(
-            "No language resolver registered for '{}'",
-            input.language_id
-        ))
-    })?;
+    let handler = match resolver {
+        Ok(handler) => handler,
+        Err(unresolved) => {
+            // Lost since the claim, a fault of this replica's (see
+            // `Dispatch::not_loaded_here`).
+            if let Some(dispatch) = crate::services::judging::Dispatch::of_current_call() {
+                dispatch.not_loaded_here(&unresolved);
+            }
+            return Err(extism::Error::msg(unresolved.to_string()));
+        }
+    };
 
     if handler.plugin_id == ctx.caller_plugin_id {
         return Err(extism::Error::msg(

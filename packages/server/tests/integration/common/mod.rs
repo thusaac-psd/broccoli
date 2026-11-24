@@ -803,6 +803,7 @@ impl TestApp {
                     functions: server::registry::EvaluatorFunctions::Direct {
                         function: "noop".into(),
                     },
+                    uses_checker: true,
                 },
             );
             {

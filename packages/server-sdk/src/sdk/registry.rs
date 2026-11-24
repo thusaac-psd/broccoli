@@ -49,12 +49,21 @@ impl Registry {
 
     /// Register `handler` to evaluate test cases of `evaluator_type`, one
     /// call per case. The handler starts and awaits its own operations.
-    pub fn register_evaluator(&self, evaluator_type: &str, handler: &str) -> Result<(), SdkError> {
+    /// `uses_checker` says whether it checks output with the problem's
+    /// checker (`resolve_checker`): work on its problems needs a checker
+    /// plugin only when it does.
+    pub fn register_evaluator(
+        &self,
+        evaluator_type: &str,
+        handler: &str,
+        uses_checker: bool,
+    ) -> Result<(), SdkError> {
         let input = RegisterEvaluatorInput {
             problem_type: evaluator_type.to_string(),
             handlers: EvaluatorHandlers::Direct {
                 handler: handler.to_string(),
             },
+            uses_checker,
         };
         unsafe { crate::host::raw::register_evaluator(serde_json::to_string(&input)?)? };
         Ok(())
@@ -65,12 +74,14 @@ impl Registry {
     /// `PreparedEvaluateCase`, runs its operations itself (holding no plugin
     /// instance while they run), then calls `interpret_handler` with an
     /// `EvaluateOperationResultsInput` covering several finished cases and
-    /// expects one `TestCaseVerdict` per case.
+    /// expects one `TestCaseVerdict` per case. `uses_checker` is as for
+    /// [`Self::register_evaluator`].
     pub fn register_staged_evaluator(
         &self,
         evaluator_type: &str,
         prepare_handler: &str,
         interpret_handler: &str,
+        uses_checker: bool,
     ) -> Result<(), SdkError> {
         let input = RegisterEvaluatorInput {
             problem_type: evaluator_type.to_string(),
@@ -78,6 +89,7 @@ impl Registry {
                 prepare_handler: prepare_handler.to_string(),
                 interpret_handler: interpret_handler.to_string(),
             },
+            uses_checker,
         };
         unsafe { crate::host::raw::register_evaluator(serde_json::to_string(&input)?)? };
         Ok(())
@@ -147,6 +159,7 @@ impl Registry {
         &self,
         _evaluator_type: &str,
         _handler: &str,
+        _uses_checker: bool,
     ) -> Result<(), SdkError> {
         Ok(())
     }
@@ -156,6 +169,7 @@ impl Registry {
         _evaluator_type: &str,
         _prepare_handler: &str,
         _interpret_handler: &str,
+        _uses_checker: bool,
     ) -> Result<(), SdkError> {
         Ok(())
     }

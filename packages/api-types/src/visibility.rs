@@ -43,8 +43,10 @@ pub enum Provided {
     /// Its problem type: the plugin's evaluator runs the unit's test cases.
     ProblemType,
     /// Its problem's checker format: the plugin's checker checks the unit's
-    /// output.
+    /// output. Needed only when the unit's evaluator uses a checker.
     CheckerFormat,
+    /// Its language: the plugin's resolver says how to compile and run it.
+    Language,
 }
 
 /// The plugin that keeps new work of a resource from running: every plugin

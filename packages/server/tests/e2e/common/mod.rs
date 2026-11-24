@@ -822,6 +822,7 @@ impl E2eTestApp {
                     functions: server::registry::EvaluatorFunctions::Direct {
                         function: "noop".into(),
                     },
+                    uses_checker: true,
                 },
             );
             {

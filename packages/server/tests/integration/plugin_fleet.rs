@@ -602,7 +602,7 @@ async fn a_missing_visibility_plugin_fails_closed_only_for_its_contest_types() {
     // The plugin, when it last loaded, registered the `fleet-only` type.
     for sql in [
         format!(
-            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": []}}' \
+            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": []}}' \
              WHERE id = '{PLUGIN}'"
         ),
         format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {governed}"),
@@ -641,7 +641,7 @@ async fn a_disabled_visibility_plugin_fails_closed_for_its_contest_types() {
     assert_eq!(res.status, 200, "{}", res.text);
     for sql in [
         format!(
-            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": []}}' \
+            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": []}}' \
              WHERE id = '{PLUGIN}'"
         ),
         format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {governed}"),
@@ -697,12 +697,12 @@ async fn a_type_another_enabled_plugin_provides_is_not_withheld_by_a_disabled_on
     assert_eq!(res.status, 200, "{}", res.text);
     for sql in [
         format!(
-            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": []}}' \
+            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": []}}' \
              WHERE id = '{PLUGIN}'"
         ),
         // Another plugin provides the same type and is enabled.
         "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
-         ('second-provider', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": []}')"
+         ('second-provider', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": []}')"
             .to_string(),
         format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {governed}"),
     ] {
@@ -775,7 +775,7 @@ async fn a_plugin_lists_its_running_contests_while_disabled() {
     let running = a.create_contest(&token, "Running", true, true).await;
     for sql in [
         format!(
-            "UPDATE plugin SET governs = '{{\"visibility\": false, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": []}}' \
+            "UPDATE plugin SET governs = '{{\"visibility\": false, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": []}}' \
              WHERE id = '{PLUGIN}'"
         ),
         format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {running}"),
@@ -880,7 +880,7 @@ async fn a_missing_visibility_plugin_also_hides_its_contests_problems_outside_th
         format!(
             "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
              ('{PLUGIN}', TRUE, 1, NOW(), \
-              '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": []}}')"
+              '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": []}}')"
         ),
         format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {governed}"),
     ] {
@@ -1215,7 +1215,7 @@ async fn work_on_a_problem_type_whose_evaluator_is_disabled_is_refused_and_parke
     for sql in [
         "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
          ('evaluator-off', FALSE, 1, NOW(), \
-          '{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"evaluated-x\"], \"checker_formats\": []}')"
+          '{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"evaluated-x\"], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": []}')"
             .to_string(),
         format!(
             "UPDATE problem SET problem_type = 'evaluated-x', is_public = TRUE WHERE id = {problem_id}"
@@ -1291,7 +1291,7 @@ async fn a_problem_whose_evaluator_is_disabled_names_what_closes_its_submissions
         .await;
     for sql in [
         "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
-         ('off-evaluator', FALSE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"closed-type\"], \"checker_formats\": []}')"
+         ('off-evaluator', FALSE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"closed-type\"], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": []}')"
             .to_string(),
         format!("UPDATE problem SET problem_type = 'closed-type' WHERE id = {problem_id}"),
     ] {

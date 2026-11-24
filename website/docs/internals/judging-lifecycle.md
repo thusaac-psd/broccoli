@@ -87,9 +87,15 @@ work. A one-second fallback tick covers notifications lost while the
 listening connection was down; every reconnect also wakes the
 fiber.
 
-A replica claims only work it can run here. A unit needs one key of each
-kind plugins provide (`providers::Needs`): its contest type, its problem's
-type (the evaluator) and its problem's checker format. Every key resolves
+A replica claims only work it can run here. A unit needs exactly the
+plugins it uses (`providers::Needs`, built by `PluginLifecycle::needs`):
+its contest type's plugin, its problem type's evaluator, its language's
+resolver, and its problem's checker format's checker only when the
+evaluator declared at registration that it uses a checker (`uses_checker`,
+recorded as the plugin's `unchecked_problem_types` in `plugin.governs`). A
+problem whose evaluator checks no output (communication) is therefore not
+parked by a disabled checker plugin, and work in a language whose plugin is
+disabled is parked instead of failing. Every key resolves
 by one rule, on every replica alike: to its fleet-wide provider, the plugin
 with the first id among the enabled ones that provide it
 (`PluginLifecycle::provider`, `providers::provider` in SQL, both over

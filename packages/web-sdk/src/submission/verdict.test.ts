@@ -31,6 +31,7 @@ test('a parked submission names what parks it, as the server records it', () => 
     'contest_type',
     'problem_type',
     'checker_format',
+    'language',
   ] as const) {
     assert.deepEqual(
       getVerdictBadge(
