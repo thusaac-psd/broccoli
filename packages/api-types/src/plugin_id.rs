@@ -104,24 +104,32 @@ mod tests {
     /// id the rule accepts.
     #[test]
     fn every_plugin_in_the_repository_has_a_valid_id() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut checked = 0;
-        for dir in [
-            "plugins",
-            "packages/server/tests/fixtures",
-            "packages/server/tests/fixtures_timer_negative",
-        ] {
-            for entry in std::fs::read_dir(root.join(dir)).expect(dir) {
+        // Every directory with a manifest, wherever it lives (plugins, test
+        // fixtures, examples), since each is loaded under its directory name.
+        fn walk(dir: &Path, found: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("readable") {
                 let path = entry.unwrap().path();
-                if !path.join("plugin.toml").is_file() {
+                let name = path.file_name().unwrap().to_string_lossy();
+                if !path.is_dir()
+                    || name.starts_with('.')
+                    || ["target", "node_modules"].contains(&name.as_ref())
+                {
                     continue;
                 }
-                let id = path.file_name().unwrap().to_str().unwrap();
-                assert_eq!(check_plugin_id(id), Ok(()), "{}", path.display());
-                checked += 1;
+                if path.join("plugin.toml").is_file() {
+                    found.push(path.clone());
+                }
+                walk(&path, found);
             }
         }
-        assert!(checked > 10, "found only {checked} plugins");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut found = Vec::new();
+        walk(&root, &mut found);
+        for path in &found {
+            let id = path.file_name().unwrap().to_str().unwrap();
+            assert_eq!(check_plugin_id(id), Ok(()), "{}", path.display());
+        }
+        assert!(found.len() > 10, "found only {} plugins", found.len());
     }
 
     #[test]

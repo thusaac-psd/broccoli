@@ -66,7 +66,7 @@ impl PluginInvoker for TestPluginManager {
         input: Vec<u8>,
         options: plugin_core::executor::CallOptions,
     ) -> Result<Vec<u8>, PluginError> {
-        if plugin_id == "__test__" && func_name == "noop" {
+        if plugin_id == "stand-in" && func_name == "noop" {
             return Ok(br#"{"success":true,"error_message":null}"#.to_vec());
         }
 
@@ -796,7 +796,7 @@ impl TestApp {
             evaluator_registry.write().await.insert(
                 "standard".into(),
                 server::registry::EvaluatorHandler {
-                    plugin_id: "__test__".into(),
+                    plugin_id: "stand-in".into(),
                     functions: server::registry::EvaluatorFunctions::Direct {
                         function: "noop".into(),
                     },
@@ -808,7 +808,7 @@ impl TestApp {
                     stage.insert(
                         fmt.into(),
                         server::registry::CheckerStageHandlers {
-                            plugin_id: "__test__".into(),
+                            plugin_id: "stand-in".into(),
                             resolve_fn: "noop".into(),
                             interpret_fn: "noop".into(),
                         },
@@ -819,19 +819,19 @@ impl TestApp {
             // checker plugin's manifest (its default checker format).
             {
                 let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("tests/fixtures_config/__test__");
+                    .join("tests/fixtures_config/stand-in");
                 let entry = plugin_core::registry::PluginEntry::from_dir(&dir)
                     .expect("the stand-in plugin's manifest loads");
                 plugins
                     .get_registry()
                     .write()
                     .unwrap()
-                    .insert("__test__".into(), entry);
+                    .insert("stand-in".into(), entry);
             }
             contest_type_registry.write().await.insert(
                 "standard".into(),
                 server::registry::ContestTypeHandlers {
-                    plugin_id: "__test__".into(),
+                    plugin_id: "stand-in".into(),
                     submission_fn: "noop".into(),
                     code_run_fn: "noop".into(),
                     submission_admission: false,
@@ -852,7 +852,7 @@ impl TestApp {
                 languages.insert(
                     id.to_string(),
                     LanguageResolverEntry {
-                        plugin_id: "__test__".into(),
+                        plugin_id: "stand-in".into(),
                         function_name: "noop".into(),
                         display_name: display_name.into(),
                         default_filename: default_filename.into(),
@@ -934,7 +934,7 @@ impl TestApp {
                 contest_types.insert(
                     "standard".into(),
                     server::registry::ContestTypeHandlers {
-                        plugin_id: "__test__".into(),
+                        plugin_id: "stand-in".into(),
                         submission_fn: "noop".into(),
                         code_run_fn: "noop".into(),
                         submission_admission: false,
@@ -1227,7 +1227,7 @@ impl TestApp {
     ///
     /// [`Self::create_problem`] goes through the real HTTP handler, which
     /// validates `problem_type`/`checker_format` against the in-memory
-    /// evaluator registry. That registry is only seeded with the `"__test__"`
+    /// evaluator registry. That registry is only seeded with the `"stand-in"`
     /// noop handlers under plain `TestApp::spawn()`; `spawn_with_plugins()`
     /// leaves it empty, so `create_problem` would 400 there. Tests that need
     /// only the problem's existence and `is_public` flag use this instead.

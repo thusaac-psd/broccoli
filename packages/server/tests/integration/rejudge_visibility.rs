@@ -552,7 +552,7 @@ async fn admin_fan_out_to_a_contest_cannot_name_another_contest_type() {
         .insert(
             "other".into(),
             server::registry::ContestTypeHandlers {
-                plugin_id: "__test__".into(),
+                plugin_id: "stand-in".into(),
                 submission_fn: "noop".into(),
                 code_run_fn: "noop".into(),
                 submission_admission: false,

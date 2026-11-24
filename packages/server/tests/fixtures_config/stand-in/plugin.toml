@@ -1,4 +1,4 @@
-name = "__test__"
+name = "stand-in"
 version = "0.1.0"
 description = "Manifest of the stand-in plugin a plugin-less test app registers its checker formats for: it declares their default"
 
