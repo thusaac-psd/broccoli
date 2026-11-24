@@ -51,7 +51,9 @@ pub struct DatabaseConnection(sea_orm::DatabaseConnection, Arc<Reachability>, Me
 /// statements it runs on a [`PooledConnection`], which bypass sea-orm's
 /// executor, so every statement reaches it once.
 #[derive(Clone, Default)]
-struct Metric(Option<Arc<dyn Fn(&sea_orm::metric::Info<'_>) + Send + Sync>>);
+struct Metric(Option<Arc<MetricCallback>>);
+
+type MetricCallback = dyn Fn(&sea_orm::metric::Info<'_>) + Send + Sync;
 
 impl std::fmt::Debug for Metric {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
