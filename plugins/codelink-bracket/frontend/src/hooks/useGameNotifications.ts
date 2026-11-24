@@ -1,4 +1,4 @@
-import { RequestError, usePluginApi } from '@broccoli/web-sdk/api';
+import { errorKind, RequestError, usePluginApi } from '@broccoli/web-sdk/api';
 import { useAuth, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { nextPollDelay } from '@broccoli/web-sdk/hooks';
 import { useQueryClient } from '@tanstack/react-query';
@@ -118,6 +118,9 @@ export function useGameNotifications(
         } finally {
           if (!signal.aborted) connect(false);
         }
+        // Coming back online ends the wait only after a failure that was the
+        // network's: a wait the server asked for (`Retry-After`) stands.
+        const wakesOnline = errorKind(lastError) === 'network';
         await new Promise<void>((resolve) => {
           const finish = () => {
             clearTimeout(timer);
@@ -131,7 +134,9 @@ export function useGameNotifications(
             nextPollDelay(RECONNECT_MS, failures, { error: lastError }),
           );
           signal.addEventListener('abort', finish, { once: true });
-          window.addEventListener('online', finish, { once: true });
+          if (wakesOnline) {
+            window.addEventListener('online', finish, { once: true });
+          }
           if (signal.aborted) finish();
         });
       }
