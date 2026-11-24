@@ -1750,8 +1750,11 @@ async fn ioi_task_config_naming_a_missing_test_case_is_stored_with_its_issue() {
         .await;
     assert_eq!(
         task_issue_keys(&issues.body, contest_id, problem_id),
-        vec!["ioi.config.task.unknownTestCase".to_string()],
-        "{}",
+        vec![
+            "ioi.config.task.unknownTestCase".to_string(),
+            "ioi.config.task.nothingToScore".to_string(),
+        ],
+        "the only subtask names no test case, so none can score: {}",
         issues.text
     );
     assert!(app.config_issues_flag(problem_id).await);
@@ -2375,7 +2378,10 @@ async fn a_config_write_is_checked_against_test_data_a_concurrent_change_commits
         .await;
     assert_eq!(
         task_issue_keys(&issues.body, contest_id, problem_id),
-        vec!["ioi.config.task.unknownTestCase".to_string()],
+        vec![
+            "ioi.config.task.unknownTestCase".to_string(),
+            "ioi.config.task.nothingToScore".to_string(),
+        ],
         "the write was checked against the renamed test case: {}",
         issues.text
     );
