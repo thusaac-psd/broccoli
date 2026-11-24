@@ -129,7 +129,9 @@ export function ConfigInheritanceInfo({
           ? labels.overrideInfo
           : activeInherited
             ? labels.inheritInfo(
-                formatValue(activeInherited.value),
+                inheritedValue?.withheld
+                  ? t('config.withheldValue')
+                  : formatValue(activeInherited.value),
                 activeInherited.source,
               )
             : defaultLabel

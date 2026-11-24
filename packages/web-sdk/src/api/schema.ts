@@ -2609,11 +2609,12 @@ export interface components {
       /** @description The row as stored, without defaults; `None` when nothing is stored. */
       stored?: unknown;
     };
-    CascadeLevels: {
+    /** @description [`ConfigCascadeView::levels`]. */
+    CascadeLevelsView: {
       contest?: components['schemas']['CascadeLevel'] | null;
       contest_problem?: components['schemas']['CascadeLevel'] | null;
-      plugin: components['schemas']['CascadeLevel'];
-      problem: components['schemas']['CascadeLevel'];
+      plugin?: components['schemas']['CascadeLevel'] | null;
+      problem?: components['schemas']['CascadeLevel'] | null;
     };
     CheckerSourceFile: {
       /**
@@ -2838,23 +2839,52 @@ export interface components {
      * @description A namespace's config at a problem, contest or contest problem as its
      *     plugin reads it, and what the scopes above give it: what the admin form
      *     shows as inherited. Both come from the cascade rule the plugin SDK reads
-     *     configs by.
+     *     configs by, shown as far as the caller may read the scopes involved.
      */
     ConfigCascadeResponse: {
       /**
        * @description The config a problem reads that stores nothing narrower than this
        *     target, this target's own row included.
        */
-      effective: components['schemas']['EffectiveConfig'];
+      effective: components['schemas']['ConfigCascadeView'];
       /**
        * @description The same without this target's own row: what it inherits, and from
        *     which scope each field comes (`fields`).
        */
-      inherited: components['schemas']['EffectiveConfig'];
+      inherited: components['schemas']['ConfigCascadeView'];
       /** @example compilation */
       namespace: string;
       /** @example standard-languages */
       plugin_id: string;
+    };
+    /**
+     * @description An effective config as a caller may see it. A scope's row is shown only to
+     *     a caller who may read it directly: the plugin-wide row needs
+     *     `plugin:manage`, a problem's `problem:edit`, a contest's or contest
+     *     problem's `contest:manage`. A top-level field a hidden row sets is named in
+     *     `withheld` and left out of `config`.
+     */
+    ConfigCascadeView: {
+      config: unknown;
+      /**
+       * @description Where each top-level field comes from: the scope whose row sets it,
+       *     else the plugin-wide row, else the schema's defaults.
+       */
+      fields: {
+        [key: string]: components['schemas']['ConfigSource'];
+      };
+      is_enabled: boolean;
+      /**
+       * @description Each scope's row the caller may read; `null` for a scope that does not
+       *     apply here or that the caller may not read.
+       */
+      levels: components['schemas']['CascadeLevelsView'];
+      source: components['schemas']['ConfigSource'];
+      /**
+       * @description The top-level fields left out of `config` because a scope the caller
+       *     may not read sets them.
+       */
+      withheld: string[];
     };
     ConfigSchemaResponse: {
       /** @example Testlib checker compiler settings */
@@ -3433,23 +3463,6 @@ export interface components {
         [key: string]: number;
       };
       unresolved_by_message_type: components['schemas']['MessageTypeCounts'];
-    };
-    /**
-     * @description The config a plugin reads for a namespace at one problem, as
-     *     [`resolve_cascade`] decides it.
-     */
-    EffectiveConfig: {
-      config: unknown;
-      /**
-       * @description Where each top-level field of `config` comes from: the scope whose
-       *     row sets it, else the plugin-wide row, else the schema's defaults.
-       */
-      fields?: {
-        [key: string]: components['schemas']['ConfigSource'];
-      };
-      is_enabled: boolean;
-      levels: components['schemas']['CascadeLevels'];
-      source: components['schemas']['ConfigSource'];
     };
     /**
      * @description What went wrong. `code` and `details` are the contract a client reads;

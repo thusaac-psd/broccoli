@@ -6,8 +6,8 @@ use sea_orm::{
 };
 
 use broccoli_server_sdk::types::{
-    ConfigResult, ConfigValidateInput, ConfigValidateOutput, ConfigViolation, EffectiveConfig,
-    resolve_cascade,
+    ConfigResult, ConfigSource, ConfigValidateInput, ConfigValidateOutput, ConfigViolation,
+    EffectiveConfig, resolve_cascade,
 };
 use plugin_core::config_schema::{self, FieldError, FieldErrorKind};
 pub(crate) use plugin_core::manifest::ConfigScope;
@@ -24,7 +24,9 @@ use crate::entity::{contest_problem, plugin_config, problem};
 use crate::error::AppError;
 use crate::host_funcs::config::{resolve_namespace, strip_namespace_prefix};
 use crate::host_funcs::sql::ReadThrough;
-use crate::models::plugin_config::{PluginConfigResponse, config_key};
+use crate::models::plugin_config::{
+    CascadeLevelsView, ConfigCascadeView, PluginConfigResponse, config_key,
+};
 use crate::services::config_issues::{
     ConfigChecker, Recheck, problems_checked_by, recheck_problems,
 };
@@ -700,6 +702,91 @@ pub(crate) struct Cascade {
     pub(crate) effective: EffectiveConfig,
     /// The same without the target's own row: what it inherits.
     pub(crate) inherited: EffectiveConfig,
+}
+
+/// The scopes whose rows a caller may read directly, by the permissions the
+/// config routes of each scope require.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Readable {
+    pub(crate) plugin: bool,
+    pub(crate) problem: bool,
+    pub(crate) contest: bool,
+}
+
+impl Readable {
+    pub(crate) fn of(user: &crate::extractors::auth::AuthUser) -> Self {
+        use broccoli_server_sdk::permissions as perm;
+        Self {
+            plugin: user.has_permission(perm::PLUGIN_MANAGE),
+            problem: user.has_permission(perm::PROBLEM_EDIT),
+            contest: user.has_permission(perm::CONTEST_MANAGE),
+        }
+    }
+
+    fn reads(self, source: ConfigSource) -> bool {
+        match source {
+            ConfigSource::ContestProblem | ConfigSource::Contest => self.contest,
+            ConfigSource::Problem => self.problem,
+            ConfigSource::Plugin => self.plugin,
+            ConfigSource::Default | ConfigSource::Disabled => true,
+        }
+    }
+}
+
+/// `effective` as a caller who may read `readable` may see it: each row of a
+/// scope they may not read is left out, and so is every top-level field such
+/// a row sets, which is named in `withheld` instead. Only the fields a row
+/// actually contributes count: a switched-off row contributes nothing.
+pub(crate) fn cascade_view(effective: EffectiveConfig, readable: Readable) -> ConfigCascadeView {
+    use broccoli_server_sdk::types::CascadeLevel;
+    let EffectiveConfig {
+        mut config,
+        source,
+        is_enabled,
+        fields,
+        levels,
+    } = effective;
+    let rows: [(Option<CascadeLevel>, ConfigSource); 4] = [
+        (levels.contest_problem, ConfigSource::ContestProblem),
+        (levels.contest, ConfigSource::Contest),
+        (Some(levels.problem), ConfigSource::Problem),
+        (Some(levels.plugin), ConfigSource::Plugin),
+    ];
+    let contributes = |level: &CascadeLevel, at: ConfigSource, key: &str| {
+        let switched_off = at != ConfigSource::Plugin
+            && (source == ConfigSource::Disabled || level.enabled == Some(false));
+        !switched_off && level.stored.as_ref().and_then(|s| s.get(key)).is_some()
+    };
+    let withheld: Vec<String> = fields
+        .keys()
+        .filter(|key| {
+            rows.iter().any(|(level, at)| {
+                level
+                    .as_ref()
+                    .is_some_and(|level| !readable.reads(*at) && contributes(level, *at, key))
+            })
+        })
+        .cloned()
+        .collect();
+    if let serde_json::Value::Object(map) = &mut config {
+        for key in &withheld {
+            map.remove(key);
+        }
+    }
+    let [cp, c, p, plugin] = rows.map(|(level, at)| level.filter(|_| readable.reads(at)));
+    ConfigCascadeView {
+        config,
+        source,
+        is_enabled,
+        fields,
+        withheld,
+        levels: CascadeLevelsView {
+            contest_problem: cp,
+            contest: c,
+            problem: p,
+            plugin,
+        },
+    }
 }
 
 /// The cascade ([`resolve_cascade`], the rule the guest SDK reads configs

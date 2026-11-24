@@ -21,7 +21,7 @@ pub struct PluginConfigResponse {
 /// A namespace's config at a problem, contest or contest problem as its
 /// plugin reads it, and what the scopes above give it: what the admin form
 /// shows as inherited. Both come from the cascade rule the plugin SDK reads
-/// configs by.
+/// configs by, shown as far as the caller may read the scopes involved.
 #[derive(Serialize, ToSchema)]
 pub struct ConfigCascadeResponse {
     #[schema(example = "standard-languages")]
@@ -30,10 +30,40 @@ pub struct ConfigCascadeResponse {
     pub namespace: String,
     /// The config a problem reads that stores nothing narrower than this
     /// target, this target's own row included.
-    pub effective: broccoli_server_sdk::types::EffectiveConfig,
+    pub effective: ConfigCascadeView,
     /// The same without this target's own row: what it inherits, and from
     /// which scope each field comes (`fields`).
-    pub inherited: broccoli_server_sdk::types::EffectiveConfig,
+    pub inherited: ConfigCascadeView,
+}
+
+/// An effective config as a caller may see it. A scope's row is shown only to
+/// a caller who may read it directly: the plugin-wide row needs
+/// `plugin:manage`, a problem's `problem:edit`, a contest's or contest
+/// problem's `contest:manage`. A top-level field a hidden row sets is named in
+/// `withheld` and left out of `config`.
+#[derive(Serialize, ToSchema)]
+pub struct ConfigCascadeView {
+    pub config: serde_json::Value,
+    pub source: broccoli_server_sdk::types::ConfigSource,
+    pub is_enabled: bool,
+    /// Where each top-level field comes from: the scope whose row sets it,
+    /// else the plugin-wide row, else the schema's defaults.
+    pub fields: std::collections::BTreeMap<String, broccoli_server_sdk::types::ConfigSource>,
+    /// The top-level fields left out of `config` because a scope the caller
+    /// may not read sets them.
+    pub withheld: Vec<String>,
+    /// Each scope's row the caller may read; `null` for a scope that does not
+    /// apply here or that the caller may not read.
+    pub levels: CascadeLevelsView,
+}
+
+/// [`ConfigCascadeView::levels`].
+#[derive(Serialize, ToSchema)]
+pub struct CascadeLevelsView {
+    pub contest_problem: Option<broccoli_server_sdk::types::CascadeLevel>,
+    pub contest: Option<broccoli_server_sdk::types::CascadeLevel>,
+    pub problem: Option<broccoli_server_sdk::types::CascadeLevel>,
+    pub plugin: Option<broccoli_server_sdk::types::CascadeLevel>,
 }
 
 #[derive(Deserialize, ToSchema)]

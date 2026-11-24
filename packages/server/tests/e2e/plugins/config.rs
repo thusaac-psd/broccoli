@@ -355,3 +355,126 @@ async fn a_contest_problem_form_inherits_what_the_plugin_reads() {
     assert_eq!(inherited["levels"]["problem"]["enabled"], false);
     assert_eq!(compilation["effective"]["config"], inherited["config"]);
 }
+
+/// A deployment whose plugin-wide print config holds a station token, whose
+/// problem stores its own compile flags, and a contest using the problem.
+/// Returns the admin token, the problem and the contest.
+async fn configured_everywhere(app: &E2eTestApp, admin_name: &str) -> (String, i32, i32) {
+    let admin = app
+        .create_user_with_role(admin_name, "password", "admin")
+        .await;
+    let problem_id = app.create_problem(&admin, "Access").await;
+    let contest_id = app.create_contest(&admin, "Access Cup", true, true).await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    let res = app
+        .put_with_token(
+            "/api/v1/admin/plugins/print/config/print",
+            &json!({ "config": {
+                "banner": "Global banner",
+                "stations": [{ "name": "desk", "token": "station-secret-token" }],
+            }}),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let res = app
+        .put_with_token(
+            &format!("/api/v1/problems/{problem_id}/config/standard-languages/compilation"),
+            &json!({ "config": { "cpp": { "flags": ["-O3", "-problem-only"] } } }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    (admin, problem_id, contest_id)
+}
+
+fn cascade_of<'a>(
+    body: &'a serde_json::Value,
+    plugin_id: &str,
+    namespace: &str,
+) -> &'a serde_json::Value {
+    body.as_array()
+        .expect("an array")
+        .iter()
+        .find(|c| c["plugin_id"] == plugin_id && c["namespace"] == namespace)
+        .unwrap_or_else(|| panic!("no {plugin_id}/{namespace} in {body}"))
+}
+
+/// A cascade answer shows a caller only the scopes they may read directly:
+/// the plugin-wide row needs `plugin:manage`, a problem's row
+/// `problem:edit`, a contest's `contest:manage`. A field whose value comes
+/// from a scope the caller may not read is named as withheld, its value left
+/// out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cascade_shows_only_the_scopes_its_caller_may_read() {
+    let app = E2eTestApp::spawn().await;
+    let (admin, problem_id, contest_id) = configured_everywhere(&app, "cascade_access_admin").await;
+    let organizer = app
+        .create_user_with_permissions("cascade_organizer", "password", &["contest:manage"])
+        .await;
+    let setter = app
+        .create_user_with_permissions("cascade_setter", "password", &["problem:edit"])
+        .await;
+
+    let contest = format!("/api/v1/contests/{contest_id}/config/cascade");
+    let contest_problem =
+        format!("/api/v1/contests/{contest_id}/problems/{problem_id}/config/cascade");
+    let problem = format!("/api/v1/problems/{problem_id}/config/cascade");
+
+    // A contest manager reads neither the plugin-wide row nor the problem's.
+    for path in [&contest, &contest_problem] {
+        let res = app.get_with_token(path, &organizer).await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        assert!(!res.text.contains("Global banner"), "{path}: {}", res.text);
+        assert!(
+            !res.text.contains("station-secret-token"),
+            "{path}: {}",
+            res.text
+        );
+        assert!(!res.text.contains("-problem-only"), "{path}: {}", res.text);
+    }
+    let res = app.get_with_token(&contest, &organizer).await;
+    let print = cascade_of(&res.body, "print", "print");
+    for view in ["effective", "inherited"] {
+        assert!(print[view]["levels"]["plugin"].is_null(), "{print}");
+        let withheld = print[view]["withheld"].as_array().expect("withheld");
+        assert!(withheld.contains(&json!("banner")), "{print}");
+        assert!(withheld.contains(&json!("stations")), "{print}");
+    }
+    let res = app.get_with_token(&contest_problem, &organizer).await;
+    let compilation = cascade_of(&res.body, "standard-languages", "compilation");
+    assert!(
+        compilation["inherited"]["levels"]["problem"].is_null(),
+        "{compilation}"
+    );
+    assert!(
+        compilation["inherited"]["withheld"]
+            .as_array()
+            .expect("withheld")
+            .contains(&json!("cpp")),
+        "{compilation}"
+    );
+
+    // A problem setter reads the problem's own row, never the plugin-wide one.
+    let res = app.get_with_token(&problem, &setter).await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(res.text.contains("-problem-only"), "{}", res.text);
+    let compilation = cascade_of(&res.body, "standard-languages", "compilation");
+    assert!(
+        compilation["effective"]["levels"]["plugin"].is_null(),
+        "{compilation}"
+    );
+    assert!(
+        !compilation["effective"]["levels"]["problem"].is_null(),
+        "{compilation}"
+    );
+
+    // An admin reads every scope.
+    let res = app.get_with_token(&contest_problem, &admin).await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(res.text.contains("-problem-only"), "{}", res.text);
+    let res = app.get_with_token(&contest, &admin).await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(res.text.contains("Global banner"), "{}", res.text);
+}

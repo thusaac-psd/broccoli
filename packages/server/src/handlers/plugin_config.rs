@@ -28,8 +28,8 @@ use crate::models::plugin_config::{
 use crate::services::config_issues::ConfigChecker;
 use crate::services::config_issues::{Subject, config_issues};
 use crate::services::plugin_config::{
-    ConfigScope, ConfigTarget, IncompatibleConfig, Reads, RowSettings, config_cascade,
-    delete_config, get_config, write_config,
+    ConfigScope, ConfigTarget, IncompatibleConfig, Readable, Reads, RowSettings, cascade_view,
+    config_cascade, delete_config, get_config, write_config,
 };
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, find_contest_problem};
@@ -159,6 +159,7 @@ async fn cascade_inner<C: ConnectionTrait>(
     db: &C,
     plugins: &dyn PluginManager,
     target: &ConfigTarget,
+    readable: Readable,
 ) -> Result<Json<Vec<ConfigCascadeResponse>>, AppError> {
     let namespaces: Vec<(String, String)> = collect_schemas_for_scope(plugins, target.scope())
         .into_iter()
@@ -171,8 +172,8 @@ async fn cascade_inner<C: ConnectionTrait>(
             .map(|c| ConfigCascadeResponse {
                 plugin_id: c.plugin_id,
                 namespace: c.namespace,
-                effective: c.effective,
-                inherited: c.inherited,
+                effective: cascade_view(c.effective, readable),
+                inherited: cascade_view(c.inherited, readable),
             })
             .collect(),
     ))
@@ -429,6 +430,7 @@ pub async fn list_problem_config_cascade(
         &state.db,
         state.plugins.as_ref(),
         &ConfigTarget::problem(problem_id),
+        Readable::of(&auth_user),
     )
     .await
 }
@@ -626,6 +628,7 @@ pub async fn list_contest_problem_config_cascade(
         &state.db,
         state.plugins.as_ref(),
         &ConfigTarget::contest_problem(contest_id, problem_id),
+        Readable::of(&auth_user),
     )
     .await
 }
@@ -863,6 +866,7 @@ pub async fn list_contest_config_cascade(
         &state.db,
         state.plugins.as_ref(),
         &ConfigTarget::contest(contest_id),
+        Readable::of(&auth_user),
     )
     .await
 }

@@ -95,6 +95,10 @@ export function SchemaField({
     path.length === 1 ? inheritedValueOf(path[0], inherited) : null;
   const inheritedResult = inheritedValue && {
     value: inheritedValue.value,
+    // A value from a scope the viewer may not read is shown as withheld.
+    display: inheritedValue.withheld
+      ? t('config.withheldValue')
+      : String(inheritedValue.value),
     source: configSourceName(inheritedValue.source, t),
   };
   const showAsPlaceholder = !isFieldExplicit && !isFieldDirty;
@@ -111,7 +115,7 @@ export function SchemaField({
     return (
       <InheritedAnnotation
         source={inheritedResult.source}
-        value={String(inheritedResult.value)}
+        value={inheritedResult.display}
         isOverride={isFieldExplicit || isFieldDirty}
       />
     );
@@ -213,7 +217,7 @@ export function SchemaField({
     if (prop.type === 'boolean') {
       const inheritedBoolLabel =
         showAsPlaceholder && inheritedResult
-          ? `(${String(inheritedResult.value)})`
+          ? `(${inheritedResult.display})`
           : undefined;
 
       return (
@@ -253,7 +257,7 @@ export function SchemaField({
     if (prop.type === 'string' && prop.enum) {
       const selectPlaceholder =
         showAsPlaceholder && inheritedResult
-          ? String(inheritedResult.value)
+          ? inheritedResult.display
           : undefined;
 
       return (
@@ -306,7 +310,7 @@ export function SchemaField({
     if (prop.type === 'number' || prop.type === 'integer') {
       const inheritedPlaceholder =
         showAsPlaceholder && inheritedResult
-          ? String(inheritedResult.value)
+          ? inheritedResult.display
           : undefined;
 
       return (
@@ -431,7 +435,7 @@ export function SchemaField({
     {
       const stringPlaceholder =
         showAsPlaceholder && inheritedResult
-          ? String(inheritedResult.value)
+          ? inheritedResult.display
           : undefined;
 
       return (

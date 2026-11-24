@@ -980,6 +980,7 @@
 'config.level.contest' = "Contest"
 'config.level.problem' = "Problem"
 'config.level.plugin' = "Server-wide"
+'config.withheldValue' = "hidden"
 
 # Language switcher
 'locale.switch' = "Language"

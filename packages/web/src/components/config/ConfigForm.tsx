@@ -97,8 +97,10 @@ function ConfigFormFields({
   const defaults = useMemo(
     () =>
       inherited
-        ? ((inherited.config as Record<string, unknown> | null) ??
-          schemaDefaults)
+        ? {
+            ...schemaDefaults,
+            ...((inherited.config as Record<string, unknown> | null) ?? {}),
+          }
         : schemaDefaults,
     [schemaDefaults, inherited],
   );
