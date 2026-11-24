@@ -309,10 +309,19 @@ fn run_guest(
     drop(watch);
     let output_len = outcome.as_ref().map_or(0, |out| out.len() as u64);
     plugin.note_call(input_len + output_len);
-    let marked = locals.with(|m: &mut crate::executor::MarkedUnavailable| m.0);
+    let marked = locals.with(|m: &mut crate::executor::MarkedUnavailable| *m);
     outcome.map_err(|e| {
-        if cancelled || marked {
-            return unavailable();
+        use crate::executor::MarkedUnavailable;
+        match marked {
+            MarkedUnavailable::Database => {
+                return PluginError::DatabaseUnavailable {
+                    plugin_id: plugin_id.clone(),
+                    func_name: func_name.clone(),
+                };
+            }
+            MarkedUnavailable::Busy => return unavailable(),
+            MarkedUnavailable::No if cancelled => return unavailable(),
+            MarkedUnavailable::No => {}
         }
         let message = failure_reason(&e);
         warn!(

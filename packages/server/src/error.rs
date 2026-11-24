@@ -573,6 +573,12 @@ impl From<PluginError> for AppError {
                 tracing::warn!("{err}");
                 AppError::PluginUnavailable
             }
+            // The database's outage, met inside the plugin's call: answered
+            // as the database's, with its Retry-After.
+            PluginError::DatabaseUnavailable { .. } => {
+                tracing::warn!("{err}");
+                AppError::DatabaseUnavailable
+            }
             _ => AppError::Internal(err.to_string()),
         }
     }
@@ -744,6 +750,26 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(body["code"], "PLUGIN_UNAVAILABLE");
         }
+    }
+
+    /// A plugin call failed by its database's outage names the database: a
+    /// 503 DATABASE_UNAVAILABLE with the database's Retry-After, not the
+    /// plugin's "busy".
+    #[tokio::test]
+    async fn a_plugin_call_failed_by_a_database_outage_is_the_databases_503() {
+        let response = AppError::from(PluginError::DatabaseUnavailable {
+            plugin_id: "p".into(),
+            func_name: "f".into(),
+        })
+        .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get("Retry-After").unwrap(),
+            &DATABASE_RETRY_AFTER_SECS.to_string()
+        );
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "DATABASE_UNAVAILABLE");
     }
 
     /// Every 503 is retryable and says when to ask again. A disabled plugin

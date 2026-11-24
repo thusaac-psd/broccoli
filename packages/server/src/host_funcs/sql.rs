@@ -263,7 +263,13 @@ fn db_error(e: &sea_orm::DbErr) -> Result<String, extism::Error> {
 /// about the request, so callers answer it with "try again".
 fn unavailable(e: crate::plugin_db::Unavailable) -> extism::Error {
     tracing::warn!(error = %e, "Plugin SQL unavailable");
-    plugin_core::executor::fail_unavailable();
+    match e {
+        // The database's outage: the call reports it as the database's.
+        crate::plugin_db::Unavailable::Outage(_) => {
+            plugin_core::executor::fail_database_unavailable()
+        }
+        _ => plugin_core::executor::fail_unavailable(),
+    }
     extism::Error::msg(e.to_string())
 }
 

@@ -26,9 +26,11 @@ fn guest(version: i64) -> String {
         (import "extism:host/user" "mark" (func $mark (param i64) (result i64)))
         (import "extism:host/user" "await_child" (func $await_child (param i64) (result i64)))
         (import "extism:host/user" "busy" (func $busy (param i64) (result i64)))
+        (import "extism:host/user" "db_down" (func $db_down (param i64) (result i64)))
         (import "extism:host/user" "nest_spin" (func $nest_spin (param i64) (result i64)))
         (func (export "nest_spin") (result i32) (drop (call $nest_spin (i64.const 0))) (i32.const 0))
         (func (export "busy") (result i32) (drop (call $busy (i64.const 0))) (i32.const 0))
+        (func (export "db_down") (result i32) (drop (call $db_down (i64.const 0))) (i32.const 0))
         (func (export "parent") (result i32) (drop (call $await_child (i64.const 0))) (i32.const 0))
         (func (export "hold") (result i32) (drop (call $hold (i64.const 0))) (i32.const 0))
         (func (export "park") (result i32) (drop (call $park (i64.const 0))) (i32.const 0))
@@ -230,6 +232,15 @@ fn busy(_: &Ctx, _: i64) -> Result<(), extism::Error> {
     ))
 }
 
+/// A host function whose database is unreachable. It marks the call busy
+/// first, as a host function deeper in the same call might: the database
+/// outage is the cause the call reports.
+fn db_down(_: &Ctx, _: i64) -> Result<(), extism::Error> {
+    crate::executor::fail_database_unavailable();
+    crate::executor::fail_unavailable();
+    Err(extism::Error::msg("the database is unreachable"))
+}
+
 fn mark(ctx: &Ctx, version: i64) -> Result<(), extism::Error> {
     ctx.0.update(|c| c.marks.push(version));
     Ok(())
@@ -278,6 +289,7 @@ impl Harness {
                     host_fn("mark", ctx.clone(), mark),
                     host_fn("await_child", ctx.clone(), await_child),
                     host_fn("busy", ctx.clone(), busy),
+                    host_fn("db_down", ctx.clone(), db_down),
                     host_fn("nest_spin", ctx.clone(), nest_spin),
                 ]
             });
@@ -817,6 +829,17 @@ async fn a_host_function_can_fail_its_call_as_unavailable() {
         .await
         .unwrap_err();
     assert!(matches!(err, PluginError::Unavailable { .. }), "{err:?}");
+    // A call that could not run for its database's outage says so.
+    let err = h
+        .manager
+        .call_raw(PLUGIN, "db_down", vec![], CallOptions::interactive(later()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, PluginError::DatabaseUnavailable { .. }),
+        "{err:?}"
+    );
+    assert!(err.is_unavailable());
     // The mark belongs to that call alone.
     h.manager
         .call_raw(PLUGIN, "mark", vec![], CallOptions::interactive(later()))

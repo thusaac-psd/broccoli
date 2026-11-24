@@ -190,8 +190,11 @@ A plugin's SQL runs within the deadline of the call that runs it
   the cancel never lands on one;
 - an outage of the database on a plugin's statement, its transaction's
   begin, commit or rollback (`common::db::is_outage`) says nothing about the
-  statement: the call fails as unavailable, like a busy pool, and under a
-  judging dispatch the attempt is handed back
+  statement: the call fails as the database's outage
+  (`executor::fail_database_unavailable`, `PluginError::DatabaseUnavailable`),
+  which a request answers with `503 DATABASE_UNAVAILABLE` and the database's
+  `Retry-After`, not the plugin's "busy" (a statement cut at its deadline
+  stays `PLUGIN_UNAVAILABLE`), and under a judging dispatch the attempt is handed back
   (`DispatchFault::DatabaseUnavailable`) instead of spending its budget. One
   rule decides both (`host_funcs::sql::settle`), for raw plugin SQL and the
   host-pool writes of `host.submission.*` and `host.code_run.*` alike; any
