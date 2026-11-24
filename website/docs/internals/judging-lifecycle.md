@@ -302,10 +302,11 @@ a finite number); the host records it as the dispatch's fault, so the
 system error carries the code and how the checker failed (staff only, like
 every system-error diagnostic). An evaluator plugin reports a program of the
 problem failing (a manager whose source the compiler rejects, or that
-exits non-zero, dies of a signal of its own or prints no valid score while a
-contestant still runs; a manager that fails once every contestant has exited,
-SIGPIPE included, was left without the interaction it needed, which is the
-contestants' failure, a wrong answer) on the case's verdict (`TestCaseVerdict::problem_failure`, set by the
+exits non-zero, dies of a signal of its own or prints no valid score, however
+early the contestants exited, since contestants normally exit before the
+manager scores; only a manager killed by SIGPIPE wrote to contestants that had
+left, which is theirs, a wrong answer, and a manager that judges a short
+interaction says so with its score) on the case's verdict (`TestCaseVerdict::problem_failure`, set by the
 communication evaluator); the host records it the same way, as
 `PROBLEM_FAILED`, where it receives the evaluator's verdict
 (`evaluate_batch::dispatch`), so the system error the contest plugin ends the
