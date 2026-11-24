@@ -1,4 +1,3 @@
-import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { isStaff } from '@broccoli/web-sdk/permissions';
 import { useSlotPermissions } from '@broccoli/web-sdk/slot';
@@ -629,9 +628,12 @@ export function IoiSubmissionResult({
         canViewPrivilegedSubmissionFeedback: hasPrivilegedSubmissionAccess,
       })
     : null;
-  const feedbackNeedsSubtasks =
-    visibility?.effectiveFeedback === 'subtask_scores' ||
-    visibility?.effectiveFeedback === 'full';
+  // The judged result (its subtasks, and the maximum it was scored against)
+  // backs every level that shows a total.
+  const feedbackShowsTotal =
+    !!visibility && visibility.effectiveFeedback !== 'none';
+  // The server answers once the judgement stands; the key carries the
+  // submission's status, so the query asks again when it changes.
   const subtaskScoresQuery = useQuery<SubtaskScoresResponse>({
     queryKey: [
       'ioi-subtask-scores',
@@ -640,10 +642,7 @@ export function IoiSubmissionResult({
       submission?.judge_epoch,
       submission?.status,
     ],
-    refetchInterval: pollInterval(() =>
-      submission?.status === 'Running' ? 1000 : false,
-    ),
-    enabled: !!contestId && !!submission?.id && feedbackNeedsSubtasks,
+    enabled: !!contestId && !!submission?.id && feedbackShowsTotal,
     queryFn: () => api.getSubmissionSubtaskScores(contestId!, submission!.id),
     retry: 2,
   });
@@ -707,7 +706,9 @@ export function IoiSubmissionResult({
     );
   }
 
-  const configMaxScore = taskConfig.max_score;
+  // A judged total reads against the maximum its judgement was scored with;
+  // the problem's current maximum stands in only until that arrives.
+  const configMaxScore = subtaskScoresData?.max_score ?? taskConfig.max_score;
 
   // Feedback: total_only
   if (effectiveFeedback === 'total_only') {

@@ -87,7 +87,7 @@ result a contestant sees before spending a token, and it defaults to `full`.
 | `full`             | the verdict, the total score, and every test case's own verdict, score, time, and memory |
 | `subtask_scores`   | the verdict, the total score, and the score of each subtask, with individual test case results held back |
 | `total_only`       | the verdict and the total score only                                 |
-| `none`             | nothing about the result                                             |
+| `none`             | nothing about the result: the submission reads as withheld, as a frozen one does |
 
 :::note[Where the subtask breakdown shows up]
 
@@ -99,10 +99,18 @@ The submission view itself hides per test case results at every level below
 :::
 
 A submission shows the subtasks it was judged with and the score each one
-got, so a change to a problem's subtasks after judging changes no result a
-submission already shows; judge it again to score it under the new subtasks.
-The `sum_best_subtask` scoreboard combines every submission under the
+got, and its total against the maximum it was judged with, so a change to a
+problem's subtasks after judging changes no result a submission already
+shows; judge it again to score it under the new subtasks. The
+`sum_best_subtask` scoreboard combines every submission under the
 problem's current subtasks.
+
+A subtask that cannot score is worth nothing: it adds nothing to the
+problem's maximum and shows a maximum of 0, so a problem none of whose
+subtasks can score has a maximum of 0 on the scoreboard. The scoreboard names
+its columns by the contest's problem labels and counts only a submission's
+standing result: a submission still being judged, or one whose system error
+may still be judged again, leaves its cell at the last standing score.
 
 The scoreboard follows the same level. At `none` it shows a contestant no
 score at all, their own row included, so it lists names only, without ranks.

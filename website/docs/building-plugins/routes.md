@@ -173,6 +173,20 @@ The test reads your `plugin.toml` and the packs it declares, and also asks for
 the codes the SDK itself answers your routes with (`INVALID_PATH_PARAMETER`,
 `SIGN_IN_REQUIRED`).
 
+A refusal names the numbers it is about with `.detail(name, value)`, which
+takes only numbers and words. The client passes each to the code's text as a
+parameter, so the pack text says what the limit is:
+
+```rust
+PluginHttpResponse::refuse(413, Refusal::TooManyPages, "too long")
+    .detail("pages", pages)
+    .detail("limit", max_pages)
+```
+
+```toml
+'print.apiError.TOO_MANY_PAGES' = 'This document has {pages} pages; this contest prints at most {limit} pages.'
+```
+
 The server answers every `5xx` from a plugin route itself, so database or host
 text can never reach a response body, even from a handler that builds a `500`
 response by hand. A status that is neither a success nor a client error, such
@@ -186,3 +200,25 @@ server's origin.
 
 Answer `404` for a resource the caller may not see, the same as for one that
 does not exist, so a route never tells a caller which ids are taken.
+
+## Read a contest's results
+
+A board or a view of a contest's results reads them through the SDK's contest
+helpers, so every plugin reads them by the same rules:
+
+- `contest::problems(host, contest_id)` gives the contest's problems in its
+  order, each with the label the contest gives it. Name a board's columns by
+  these labels, as the host's own contest pages do.
+- `contest::standing_result("s")` is the SQL condition that submission row
+  `s` holds its standing result. The host keeps a result that may still
+  change (one in flight, or a system error the retry may still take back) at a
+  status that is not terminal, so a board that reads only standing results
+  never drops a cell to 0 while a submission is judged again.
+- `contest::results_may_change(host, contest_id, phase)` says whether a board
+  may still change: the contest runs, or a submission is still being judged.
+  Answer it as the board's `live`, and the web SDK's `liveBoardPace` paces the
+  board's refreshes by it.
+- `visibility::hide_outcome()` is the visibility decision that withholds a
+  submission's whole outcome from a viewer, as a scoreboard freeze or a
+  feedback level that shows nothing does. Every client then reads the
+  submission as withheld, never as judged without a result.

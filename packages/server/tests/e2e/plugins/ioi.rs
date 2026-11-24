@@ -14,6 +14,29 @@ async fn seed_accepted_ioi_submission(
     contest_id: i32,
     score: f64,
 ) -> i32 {
+    seed_ioi_submission(
+        app,
+        username,
+        problem_id,
+        contest_id,
+        SubmissionStatus::Judged,
+        Verdict::Accepted,
+        score,
+    )
+    .await
+}
+
+/// A submission whose current judgement is finalized as `verdict` and
+/// `score`, while the submission itself shows `status`.
+async fn seed_ioi_submission(
+    app: &E2eTestApp,
+    username: &str,
+    problem_id: i32,
+    contest_id: i32,
+    status: SubmissionStatus,
+    verdict: Verdict,
+    score: f64,
+) -> i32 {
     let user_model = user::Entity::find()
         .filter(user::Column::Username.eq(username))
         .one(&app.db)
@@ -28,8 +51,8 @@ async fn seed_accepted_ioi_submission(
         problem_id: Set(problem_id),
         contest_id: Set(Some(contest_id)),
         contest_type: Set("ioi".into()),
-        status: Set(SubmissionStatus::Judged),
-        verdict: Set(Some(Verdict::Accepted)),
+        status: Set(status),
+        verdict: Set(Some(verdict.clone())),
         score: Set(Some(score)),
         time_used: Set(Some(10)),
         memory_used: Set(Some(256)),
@@ -50,7 +73,7 @@ async fn seed_accepted_ioi_submission(
         is_finalized: Set(true),
         triggered_by_user_id: Set(None),
         status: Set(SubmissionStatus::Judged),
-        verdict: Set(Some(Verdict::Accepted)),
+        verdict: Set(Some(verdict)),
         score: Set(Some(score)),
         time_used: Set(Some(10)),
         memory_used: Set(Some(256)),
@@ -113,6 +136,129 @@ async fn ioi_scoreboard_reflects_judged_submission() {
     assert!(
         rankings_arr[0]["username"].is_string(),
         "Row should have a username"
+    );
+}
+
+/// A board reads only what a submission stands at: a newer submission whose
+/// current judgement is a system error the retry may still take back (the
+/// submission shows it in flight) leaves the cell at the last standing score.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retryable_system_error_leaves_the_last_standing_score_on_the_board() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_standing_admin", "password", "admin")
+        .await;
+    let contestant = app
+        .create_authenticated_user("ioi_standing_user", "password")
+        .await;
+    let problem_id = app.create_problem(&admin, "IOI Standing").await;
+    let contest_id = app
+        .create_typed_contest(&admin, "IOI Standing", "ioi", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &contestant).await;
+    let res = app
+        .put_with_token(
+            &format!("/api/v1/contests/{contest_id}/config/ioi/contest"),
+            &json!({ "config": { "scoring_mode": "best_tokened_or_last" }, "enabled": true }),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    seed_accepted_ioi_submission(&app, "ioi_standing_user", problem_id, contest_id, 70.0).await;
+    seed_ioi_submission(
+        &app,
+        "ioi_standing_user",
+        problem_id,
+        contest_id,
+        SubmissionStatus::Running,
+        Verdict::SystemError,
+        0.0,
+    )
+    .await;
+
+    let board = app
+        .get_with_token(
+            &format!("/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}/scoreboard"),
+            &admin,
+        )
+        .await;
+    assert_eq!(board.status, 200, "{}", board.text);
+    assert_eq!(
+        board.body["rankings"][0]["total_score"].as_f64(),
+        Some(70.0),
+        "{}",
+        board.text
+    );
+}
+
+/// A board stays live after its contest ends while any submission is still
+/// being judged, so a last-minute submission reaches it, and stops once
+/// every submission stands.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_board_stays_live_after_the_end_until_every_submission_stands() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_live_admin", "password", "admin")
+        .await;
+    let contestant = app
+        .create_authenticated_user("ioi_live_user", "password")
+        .await;
+    let problem_id = app.create_problem(&admin, "IOI Live").await;
+    let contest_id = app
+        .create_typed_contest(&admin, "IOI Live", "ioi", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &contestant).await;
+    let sub_id = seed_ioi_submission(
+        &app,
+        "ioi_live_user",
+        problem_id,
+        contest_id,
+        SubmissionStatus::Running,
+        Verdict::Accepted,
+        100.0,
+    )
+    .await;
+    let now = Utc::now();
+    let mut ended: server::entity::contest::ActiveModel =
+        server::entity::contest::Entity::find_by_id(contest_id)
+            .one(&app.db)
+            .await
+            .expect("query contest")
+            .expect("contest exists")
+            .into();
+    ended.start_time = Set(now - Duration::hours(2));
+    ended.end_time = Set(now - Duration::minutes(1));
+    ended.update(&app.db).await.expect("end the contest");
+
+    let path = format!("/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}/scoreboard");
+    let board = app.get_with_token(&path, &admin).await;
+    assert_eq!(board.status, 200, "{}", board.text);
+    assert_eq!(board.body["phase"], "after", "{}", board.text);
+    assert_eq!(
+        board.body["live"],
+        json!(true),
+        "judging is pending: {}",
+        board.text
+    );
+
+    let mut judged: submission::ActiveModel = submission::Entity::find_by_id(sub_id)
+        .one(&app.db)
+        .await
+        .expect("query submission")
+        .expect("the submission exists")
+        .into();
+    judged.status = Set(SubmissionStatus::Judged);
+    judged.update(&app.db).await.expect("judge the submission");
+    let board = app.get_with_token(&path, &admin).await;
+    assert_eq!(
+        board.body["live"],
+        json!(false),
+        "every submission stands: {}",
+        board.text
     );
 }
 
@@ -272,6 +418,19 @@ async fn ioi_feedback_none_shows_a_submissions_scores_only_by_token_or_after_the
 
     for (who, sub_id) in [(&tokened, subs[0]), (&plain, subs[1])] {
         assert_eq!(shown(who, sub_id).await, (false, false), "withheld");
+        // The owner's own submission says it is withheld, never "judged"
+        // without a verdict.
+        let own = app
+            .get_with_token(&format!("/api/v1/submissions/{sub_id}"), who)
+            .await;
+        assert_eq!(own.status, 200, "{}", own.text);
+        assert_eq!(
+            own.body["withheld"],
+            json!({ "reason": "hidden" }),
+            "{}",
+            own.text
+        );
+        assert_eq!(own.body["status"], json!(null), "{}", own.text);
     }
     let spent = app
         .post_with_token(
@@ -282,6 +441,11 @@ async fn ioi_feedback_none_shows_a_submissions_scores_only_by_token_or_after_the
         .await;
     assert_eq!(spent.status, 200, "{}", spent.text);
     assert_eq!(shown(&tokened, subs[0]).await, (true, true), "the token");
+    let own = app
+        .get_with_token(&format!("/api/v1/submissions/{}", subs[0]), &tokened)
+        .await;
+    assert_eq!(own.body["withheld"], json!(null), "{}", own.text);
+    assert_eq!(own.body["status"], "Judged", "{}", own.text);
     assert_eq!(shown(&plain, subs[1]).await, (false, false), "no token");
 
     let now = Utc::now();
@@ -426,6 +590,12 @@ async fn a_judgements_subtask_scores_are_the_ones_it_was_scored_with_after_the_c
         scores.body["subtasks"],
         json!([{ "name": "All Tests", "scoring_method": "sum", "score": 100.0, "max_score": 100.0 }]),
         "{}",
+        scores.text
+    );
+    assert_eq!(
+        scores.body["max_score"].as_f64(),
+        Some(100.0),
+        "the judged total reads against the maximum it was scored with: {}",
         scores.text
     );
 }

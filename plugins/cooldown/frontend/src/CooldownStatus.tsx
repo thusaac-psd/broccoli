@@ -1,7 +1,7 @@
 /**
  * Shows cooldown timer status on the problem detail sidebar.
  */
-import { usePluginApi } from '@broccoli/web-sdk/api';
+import { nothingForThisViewer, usePluginApi } from '@broccoli/web-sdk/api';
 import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { pollInterval, useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -47,15 +47,19 @@ export function CooldownStatus({ submission, contestId, problemId }: Props) {
   const query = useQuery({
     queryKey: ['cooldown-status', contestId ?? null, problemId, viewerKey],
     enabled: authReady && !!user && problemId !== undefined,
-    queryFn: async (): Promise<CooldownStatusRead> => {
+    // A viewer the route refuses (one who does not take part in the
+    // contest) has no cooldown: nothing to show.
+    queryFn: async (): Promise<CooldownStatusRead | null> => {
       const path = contestId
         ? `${ROUTES}/contests/${contestId}/problems/${problemId}/status`
         : `${ROUTES}/problems/${problemId}/status`;
-      const status = await api.get<CooldownStatusData>(path);
-      return { ...status, receivedAt: performance.now() };
+      const status = await api
+        .get<CooldownStatusData>(path)
+        .catch(nothingForThisViewer);
+      return status && { ...status, receivedAt: performance.now() };
     },
     // Ask again once the wait is over, so the server confirms it.
-    refetchInterval: pollInterval<CooldownStatusRead>((status) =>
+    refetchInterval: pollInterval<CooldownStatusRead | null>((status) =>
       status && status.wait_seconds > 0 ? status.wait_seconds * 1000 : false,
     ),
   });

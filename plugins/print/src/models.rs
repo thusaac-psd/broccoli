@@ -31,20 +31,6 @@ pub fn estimate_pages_with(source: &str, cols: usize, lines_per_page: usize) -> 
     visual_lines.div_ceil(lines_per_page).max(1) as i32
 }
 
-/// Fallback label (A, B, ... Z, AA) for a problem with no explicit label.
-pub fn problem_letter(position: i32) -> String {
-    let mut n = position.max(0) as u64;
-    let mut out = Vec::new();
-    loop {
-        out.push((b'A' + (n % 26) as u8) as char);
-        if n < 26 {
-            break;
-        }
-        n = n / 26 - 1;
-    }
-    out.iter().rev().collect()
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct ArbitraryJobRequest {
     /// Problem the code was written against, when printed from a contest
@@ -162,13 +148,5 @@ mod tests {
     fn pagination_rounds_up() {
         let src = vec!["line"; 55].join("\n");
         assert_eq!(estimate_pages_with(&src, 90, 54), 2);
-    }
-
-    #[test]
-    fn problem_letters() {
-        assert_eq!(problem_letter(0), "A");
-        assert_eq!(problem_letter(25), "Z");
-        assert_eq!(problem_letter(26), "AA");
-        assert_eq!(problem_letter(27), "AB");
     }
 }

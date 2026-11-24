@@ -42,6 +42,13 @@ const MAX_TIMER_MS = 2 ** 31 - 1;
  */
 export const RUNNING_CONTEST_POLL_MS = 60_000;
 
+/**
+ * How often a board that may still change (a scoreboard while its contest
+ * runs or its judging is pending) is asked for again. Its budget: one request
+ * per open seat every half minute, spread across it by each seat's pace.
+ */
+export const LIVE_BOARD_POLL_MS = 30_000;
+
 /** When this seat asks about a contest, drawn once per page load. */
 export interface SeatPace {
   /** Its place in the spread of asks after a phase change. */
@@ -52,6 +59,11 @@ export interface SeatPace {
    * together drift apart instead of asking in lockstep.
    */
   runningPollMs: number;
+  /**
+   * Its pace for a live board: within a quarter of `LIVE_BOARD_POLL_MS`
+   * either way, for the same reason.
+   */
+  liveBoardPollMs: number;
 }
 
 /** A seat's pace, drawn with `random`. */
@@ -59,6 +71,7 @@ export function seatPace(random: () => number): SeatPace {
   return {
     phaseOffsetMs: Math.round(random() * PHASE_DUE_SPREAD_MS),
     runningPollMs: Math.round(RUNNING_CONTEST_POLL_MS * (0.75 + random() / 2)),
+    liveBoardPollMs: Math.round(LIVE_BOARD_POLL_MS * (0.75 + random() / 2)),
   };
 }
 
@@ -98,4 +111,21 @@ export function contestPollPace(
     contest.plugin_outage ? PLUGIN_OUTAGE_POLL_MS : Infinity,
   );
   return pace === Infinity ? false : Math.min(pace, MAX_TIMER_MS);
+}
+
+/**
+ * The pace of a contest plugin's board: while the board may still change
+ * (`live`, as the plugin answers it), at most the seat's `liveBoardPollMs`;
+ * and always when the contest's phase or outage turns over
+ * (`contestPollPace`). `contest` is absent until the contest loads.
+ */
+export function liveBoardPace(
+  contest: Parameters<typeof contestPollPace>[0] | null | undefined,
+  live: boolean,
+  nowMs: number,
+  seat: SeatPace = SEAT_PACE,
+): number | false {
+  const pace = contest ? contestPollPace(contest, nowMs, seat) : false;
+  if (!live) return pace;
+  return Math.min(seat.liveBoardPollMs, pace === false ? Infinity : pace);
 }

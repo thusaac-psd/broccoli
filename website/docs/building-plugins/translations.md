@@ -150,7 +150,9 @@ of them lacks a text in one of your packs (see
 [Routes](./routes.md#errors)). A code with no translation falls back to a
 generic message for its HTTP status class, never the host's text for a code of
 the same name. The same lookup
-applies to errors from your plugin's own HTTP routes. A rejection goes out as
+applies to errors from your plugin's own HTTP routes, whose parameters are the
+details a refusal names with `.detail(name, value)` (see
+[Routes](./routes.md#errors)). A rejection goes out as
 `400`, `403`, `404`, `409`, `413` or `429`; any other status is sent as `400`.
 
 ## Translate your judging errors

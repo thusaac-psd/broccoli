@@ -20,6 +20,19 @@ async function open(page: Page, plugin: 'icpc' | 'ioi' | 'codelink-bracket') {
   await mockApi(page, 'contestant', { plugins: [plugin] });
 }
 
+test('an IOI scoreboard names its columns as the contest labels its problems', async ({
+  page,
+}) => {
+  await open(page, 'ioi');
+  await page.goto('/contests/4/rankings');
+  await expect(
+    page.getByRole('columnheader', { name: 'C', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('columnheader', { name: 'A', exact: true }),
+  ).toHaveCount(0);
+});
+
 test('an ICPC scoreboard whose contest info fails still shows the board', async ({
   page,
 }) => {

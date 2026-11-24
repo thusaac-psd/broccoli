@@ -72,17 +72,6 @@ pub(crate) fn standings_restriction(
     }
 }
 
-/// Field mask for a submission whose outcome is hidden from the viewer. It
-/// hides the submission's status, which makes the host withhold the whole
-/// outcome on every submission shape: the submission reads as still running
-/// with no verdict, score, resources or test results, and no list filtered
-/// or sorted by status places it. A frozen submission therefore discloses
-/// only that it was submitted, and when, never whether it compiled.
-#[cfg(any(target_arch = "wasm32", test))]
-fn hidden_result_mask_fields() -> Vec<String> {
-    vec![broccoli_server_sdk::visibility::SUBMISSION_STATUS_PATH.to_string()]
-}
-
 /// Every contest submission whose result is final, read off the submission
 /// row: the host's projection of its current judgement, which keeps a
 /// result that may still change at a status that is not terminal (see
@@ -98,8 +87,8 @@ fn current_submissions_sql(contest_id_placeholder: &str, user_filter: &str) -> S
          JOIN contest_problem cp ON cp.contest_id = s.contest_id \
           AND cp.problem_id = s.problem_id \
          WHERE s.contest_id = {contest_id_placeholder} \
-           AND s.status IN {final_statuses}{user_filter}",
-        final_statuses = broccoli_server_sdk::types::StatusPhase::Terminal.sql_list(),
+           AND {standing}{user_filter}",
+        standing = broccoli_server_sdk::contest::standing_result("s"),
     )
 }
 
@@ -239,13 +228,6 @@ mod filter_tests {
             standings_restriction("after", false, false, Some(42)),
             StandingsRestriction::Unrestricted
         );
-    }
-
-    #[test]
-    fn hidden_result_mask_withholds_the_status_itself() {
-        // Hiding the verdict alone would leave the status column, a status
-        // filter and a status sort disclosing a compilation error.
-        assert_eq!(hidden_result_mask_fields(), vec!["status".to_string()]);
     }
 
     fn subject(user_id: Option<i32>) -> QuerySubject {
@@ -830,9 +812,9 @@ fn decide_visibility_decisions(
     // The host never asks this about staff (`contest:manage` or
     // `submission:view_all`): organizers see the real data by the host's
     // rule, so nothing here decides for them.
-    let hidden = WireDecision::Redact {
-        fields: hidden_result_mask_fields(),
-    };
+    // A frozen submission discloses only that it was submitted, and when,
+    // never whether it compiled.
+    let hidden = broccoli_server_sdk::visibility::hide_outcome();
     let viewer_id = req.subject.user_id;
     decide_contest_submissions(
         host,
@@ -1173,39 +1155,8 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     let contest_id = info.id;
     let config: ContestConfig = contest::load_config(host, contest_id)?;
 
-    // Fetch contest problems in order
-    #[derive(Deserialize)]
-    struct ContestProblem {
-        problem_id: i32,
-        label: Option<String>,
-    }
-    let mut p = Params::new();
-    let sql = format!(
-        "SELECT problem_id, label FROM contest_problem WHERE contest_id = {} ORDER BY position",
-        p.bind(contest_id)
-    );
-    let problems: Vec<ContestProblem> = host.db.query_with_args(&sql, &p.into_args())?;
-
-    // Build problem labels: use explicit label if set, otherwise A, B, C...
-    let problem_labels: Vec<String> = problems
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            p.label
-                .as_deref()
-                .filter(|l| !l.is_empty())
-                .map(|l| l.to_string())
-                .unwrap_or_else(|| {
-                    // A, B, C, ... Z, AA, AB, ...
-                    let c = (b'A' + (i as u8) % 26) as char;
-                    if i < 26 {
-                        c.to_string()
-                    } else {
-                        format!("{}{}", (b'A' + (i as u8) / 26 - 1) as char, c)
-                    }
-                })
-        })
-        .collect();
+    let problems = contest::problems(host, contest_id)?;
+    let problem_labels: Vec<String> = problems.iter().map(|p| p.label.clone()).collect();
     let problem_ids: Vec<i32> = problems.iter().map(|p| p.problem_id).collect();
 
     // Fetch participants (during before/during phase, only fetch the requesting user

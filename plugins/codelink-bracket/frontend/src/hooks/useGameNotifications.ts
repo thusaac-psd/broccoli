@@ -1,5 +1,6 @@
-import { usePluginApi } from '@broccoli/web-sdk/api';
+import { RequestError, usePluginApi } from '@broccoli/web-sdk/api';
 import { useAuth, viewerCacheKey } from '@broccoli/web-sdk/auth';
+import { nextPollDelay } from '@broccoli/web-sdk/hooks';
 import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 
@@ -13,6 +14,12 @@ import {
 } from '../lib/notifications';
 import type { BracketResponse } from '../types';
 import { PLUGIN_ID, ROUTES } from './useBracketApi';
+
+/**
+ * How soon a stream that ended or failed is opened again, and how long a
+ * stream must have lived to count as healthy rather than as a failure.
+ */
+const RECONNECT_MS = 1_000;
 
 export function useGameNotifications(
   contestId: number | undefined,
@@ -47,7 +54,11 @@ export function useGameNotifications(
     } catch {
       /* A missing/invalid baseline starts with the current games. */
     }
-    let retryMs = 1_000;
+    // Reconnects that failed in a row, and why the last one did: the wait
+    // before the next is the shared poll backoff from `RECONNECT_MS`
+    // (`nextPollDelay`), jittered and at least a `Retry-After`.
+    let failures = 0;
+    let lastError: unknown;
     const streamKey = liveStreamKey(contestId, viewerKey);
     const connect = (on: boolean) => {
       setConnected(on);
@@ -70,7 +81,7 @@ export function useGameNotifications(
               .get('content-type')
               ?.startsWith('text/event-stream')
           ) {
-            throw new Error('Notification stream unavailable');
+            throw RequestError.fromResponse(response, null);
           }
           connect(true);
           await readEventStream(response.body, async (event) => {
@@ -96,12 +107,14 @@ export function useGameNotifications(
           });
           // The server regularly closes healthy streams for reauthorization.
           // Reconnect directly: a background setTimeout can be throttled for a minute.
-          if (performance.now() - started >= 1_000) {
-            retryMs = 1_000;
+          if (performance.now() - started >= RECONNECT_MS) {
+            failures = 0;
             continue;
           }
-        } catch {
+          lastError = undefined;
+        } catch (error) {
           if (signal.aborted) return;
+          lastError = error;
         } finally {
           if (!signal.aborted) connect(false);
         }
@@ -112,12 +125,15 @@ export function useGameNotifications(
             window.removeEventListener('online', finish);
             resolve();
           };
-          const timer = setTimeout(finish, retryMs);
+          failures += 1;
+          const timer = setTimeout(
+            finish,
+            nextPollDelay(RECONNECT_MS, failures, { error: lastError }),
+          );
           signal.addEventListener('abort', finish, { once: true });
           window.addEventListener('online', finish, { once: true });
           if (signal.aborted) finish();
         });
-        retryMs = Math.min(retryMs * 2, 15_000);
       }
     };
     void run();

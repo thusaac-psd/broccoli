@@ -9,7 +9,9 @@ use std::collections::HashMap;
 #[cfg(any(target_arch = "wasm32", test))]
 use broccoli_server_sdk::prelude::*;
 #[cfg(any(target_arch = "wasm32", test))]
-use broccoli_server_sdk::visibility::{ContestSubmission, decide_contest_submissions};
+use broccoli_server_sdk::visibility::{
+    ContestSubmission, decide_contest_submissions, hide_outcome,
+};
 #[cfg(any(target_arch = "wasm32", test))]
 use serde::de::IgnoredAny;
 
@@ -81,39 +83,6 @@ fn per_test_case_mask_fields() -> Vec<String> {
     ]
 }
 
-/// Field mask covering every field withheld at `FeedbackLevel::None`, unioned
-/// across every host DTO shape it
-/// can apply to: list items carry verdict/score/time_used/memory_used at the
-/// top level and have no `result` key at all; detail responses nest the same
-/// four fields, plus compile_output/error_message/test_case_results, under
-/// `result`; the judgement-history endpoint applies the mask to a synthetic
-/// `SubmissionResponse { result: ... }` wrapper built around the flat
-/// `SubmissionJudgementResponse`, so the `result.*` paths reach it too.
-/// `apply_mask` (`packages/server/src/visibility/mask.rs`) is a documented
-/// no-op on a path that does not exist in the shape actually being masked --
-/// a missing key, a type mismatch, or `*` on a non-array never inserts
-/// anything -- so one union list is safe for all three shapes: whichever
-/// shape the host happens to be rendering, only the paths that actually
-/// exist in THAT shape are blanked. Blanking the whole
-/// `result.test_case_results` array produces `[]`.
-#[cfg(any(target_arch = "wasm32", test))]
-fn none_level_mask_fields() -> Vec<String> {
-    vec![
-        "verdict".to_string(),
-        "score".to_string(),
-        "time_used".to_string(),
-        "memory_used".to_string(),
-        "result.verdict".to_string(),
-        "result.score".to_string(),
-        "result.time_used".to_string(),
-        "result.memory_used".to_string(),
-        "result.compile_output".to_string(),
-        "result.error_message".to_string(),
-        "result.test_case_results".to_string(),
-        "result.test_case_pagination".to_string(),
-    ]
-}
-
 /// The mask for a given `FeedbackLevel`. `Full` blanks nothing, so it is
 /// `Allow` -- the identity decision, not a `Redact` with an empty field list.
 /// `SubtaskScores` and `TotalOnly` are byte-identical: the distinction between the two levels is
@@ -127,9 +96,9 @@ fn mask_for_level(level: FeedbackLevel) -> WireDecision {
         FeedbackLevel::SubtaskScores | FeedbackLevel::TotalOnly => WireDecision::Redact {
             fields: per_test_case_mask_fields(),
         },
-        FeedbackLevel::None => WireDecision::Redact {
-            fields: none_level_mask_fields(),
-        },
+        // Nothing of the result shows: the host presents the submission as
+        // withheld, so no client reads it as judged without a verdict.
+        FeedbackLevel::None => hide_outcome(),
     }
 }
 
@@ -228,6 +197,7 @@ pub(crate) fn decide_visibility_decisions(
 #[cfg(test)]
 mod visibility_tests {
     use super::*;
+    use broccoli_server_sdk::visibility::SUBMISSION_STATUS_PATH;
 
     #[test]
     fn per_test_case_mask_covers_every_withheld_per_test_case_field() {
@@ -246,32 +216,6 @@ mod visibility_tests {
             assert!(fields.contains(&f.to_string()), "missing field {f}");
         }
         assert_eq!(fields.len(), 9, "no fields beyond the withheld set");
-    }
-
-    #[test]
-    fn none_level_mask_covers_every_field_the_old_code_blanked_on_either_shape() {
-        let fields = none_level_mask_fields();
-        for f in [
-            "verdict",
-            "score",
-            "time_used",
-            "memory_used",
-            "result.verdict",
-            "result.score",
-            "result.time_used",
-            "result.memory_used",
-            "result.compile_output",
-            "result.error_message",
-            "result.test_case_results",
-            "result.test_case_pagination",
-        ] {
-            assert!(fields.contains(&f.to_string()), "missing field {f}");
-        }
-        assert_eq!(
-            fields.len(),
-            12,
-            "includes pagination for hidden testcase feedback"
-        );
     }
 
     #[test]
@@ -301,18 +245,11 @@ mod visibility_tests {
         }
     }
 
+    /// At `none` the submission's whole outcome is withheld, so its owner
+    /// reads it as withheld (and the CLI says hidden), never as judged.
     #[test]
-    fn mask_for_none_is_redact_with_the_none_level_fields() {
-        match mask_for_level(FeedbackLevel::None) {
-            WireDecision::Redact { fields } => {
-                let mut got = fields;
-                got.sort();
-                let mut want = none_level_mask_fields();
-                want.sort();
-                assert_eq!(got, want);
-            }
-            other => panic!("expected Redact, got {other:?}"),
-        }
+    fn the_none_level_withholds_the_whole_outcome() {
+        assert_eq!(mask_for_level(FeedbackLevel::None), hide_outcome());
     }
 
     fn subject(user_id: Option<i32>) -> QuerySubject {
@@ -420,7 +357,7 @@ mod visibility_tests {
             WireDecision::Redact { fields } => {
                 let mut got = fields.clone();
                 got.sort();
-                let mut want = none_level_mask_fields();
+                let mut want = vec![SUBMISSION_STATUS_PATH.to_string()];
                 want.sort();
                 assert_eq!(got, want);
             }
@@ -558,7 +495,7 @@ mod visibility_tests {
             WireDecision::Redact { fields } => {
                 let mut got = fields.clone();
                 got.sort();
-                let mut want = none_level_mask_fields();
+                let mut want = vec![SUBMISSION_STATUS_PATH.to_string()];
                 want.sort();
                 assert_eq!(got, want);
             }
@@ -644,7 +581,7 @@ mod visibility_tests {
             WireDecision::Redact { fields } => {
                 let mut got = fields.clone();
                 got.sort();
-                let mut want = none_level_mask_fields();
+                let mut want = vec![SUBMISSION_STATUS_PATH.to_string()];
                 want.sort();
                 assert_eq!(
                     got, want,
@@ -764,7 +701,7 @@ mod visibility_tests {
                 WireDecision::Redact { fields } => {
                     let mut got = fields.clone();
                     got.sort();
-                    let mut want = none_level_mask_fields();
+                    let mut want = vec![SUBMISSION_STATUS_PATH.to_string()];
                     want.sort();
                     assert_eq!(got, want, "decision {i} mask mismatch");
                 }

@@ -50,6 +50,8 @@ export interface SubtaskScoreEntry {
 
 export interface SubtaskScoresResponse {
   subtasks: SubtaskScoreEntry[] | null;
+  /** The maximum the judgement was scored against; `null` until it stands, or when the viewer reads no total. */
+  max_score: number | null;
 }
 
 export interface ScoreboardProblemScore {
@@ -76,6 +78,8 @@ export interface ScoreboardResponse {
   scoreboard_visibility: ScoreboardVisibility;
   scoreboard_tiebreaker: ScoreboardTiebreaker;
   max_scores: Record<string, number>;
+  /** The contest's problems in its order, with the labels the contest gives them. */
+  problems: { problem_id: number; label: string }[];
   /** False when `rankings` holds only the viewer's own row, or nothing. */
   full_board: boolean;
   rankings: ScoreboardEntry[];

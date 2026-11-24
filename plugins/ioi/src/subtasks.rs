@@ -185,7 +185,7 @@ fn score_subtask_with_index(
     SubtaskResult {
         name: def.name.clone(),
         score: round_score(score),
-        max_score: def.max_score,
+        max_score: subtask_max_score(def, members),
     }
 }
 
@@ -303,9 +303,22 @@ pub fn effective_subtasks(
     }
 }
 
-/// A problem's maximum score: the sum of its subtasks' maximum scores.
-pub fn problem_max_score(subtasks: &[SubtaskDef]) -> f64 {
-    total_score(subtasks.iter().map(|s| s.max_score))
+/// A problem's maximum score: the sum of what its subtasks are worth
+/// ([`subtask_max_score`]), 0 for a problem none of whose subtasks can score.
+pub fn problem_max_score(subtasks: &[SubtaskDef], test_cases: &[TestCaseRow]) -> f64 {
+    let members = MemberIndex::new(test_cases);
+    total_score(subtasks.iter().map(|def| subtask_max_score(def, &members)))
+}
+
+/// What subtask `def` is worth: its configured maximum when it can score
+/// ([`can_score`]), else nothing. Judging, the scoreboard and a result all
+/// read a subtask's maximum through this.
+pub fn subtask_max_score(def: &SubtaskDef, members: &MemberIndex<'_>) -> f64 {
+    if can_score(def, members) {
+        def.max_score
+    } else {
+        0.0
+    }
 }
 
 /// Build a default "All Tests" subtask (Sum scoring) over the non-sample,
@@ -319,13 +332,22 @@ fn build_default_subtasks(test_cases: &[TestCaseRow]) -> Vec<SubtaskDef> {
         return vec![];
     }
     let max_score = total_score(scoring_test_cases.iter().map(|tc| tc.score));
+    // A label can be another case's id, so each case goes by a key that
+    // names it alone: its label, else its id.
+    let members = MemberIndex::new(test_cases);
     vec![SubtaskDef {
         name: "All Tests".into(),
         scoring_method: SubtaskScoringMethod::Sum,
         max_score,
         test_cases: scoring_test_cases
             .iter()
-            .map(|tc| resolve_tc_label(tc))
+            .filter_map(|tc| {
+                test_case_reference_keys(tc).into_iter().find(|key| {
+                    members
+                        .test_case(key)
+                        .is_some_and(|named| named.id == tc.id)
+                })
+            })
             .collect(),
     }]
 }
@@ -605,7 +627,7 @@ mod tests {
             test_case(2, 90.0, false, None),
         ];
         assert_eq!(
-            problem_max_score(&effective_subtasks(&[], &test_cases)),
+            problem_max_score(&effective_subtasks(&[], &test_cases), &test_cases),
             90.0
         );
     }
@@ -613,7 +635,7 @@ mod tests {
     /// A problem with nothing to score has a maximum of 0, never `-0`.
     #[test]
     fn a_problem_with_no_subtasks_has_a_maximum_of_zero() {
-        let max = problem_max_score(&effective_subtasks(&[], &[]));
+        let max = problem_max_score(&effective_subtasks(&[], &[]), &[]);
         assert!(max == 0.0 && max.is_sign_positive(), "{max}");
         assert_eq!(serde_json::json!(max).to_string(), "0.0");
     }
@@ -624,11 +646,47 @@ mod tests {
             make_def(SubtaskScoringMethod::Sum, 30.0, vec!["a"]),
             make_def(SubtaskScoringMethod::GroupMin, 70.0, vec!["b"]),
         ];
-        let test_cases = vec![test_case(1, 10.0, true, None)];
+        let test_cases = vec![
+            test_case(1, 10.0, false, Some("a")),
+            test_case(2, 0.0, false, Some("b")),
+        ];
         assert_eq!(
-            problem_max_score(&effective_subtasks(&configured, &test_cases)),
+            problem_max_score(&effective_subtasks(&configured, &test_cases), &test_cases),
             100.0
         );
+    }
+
+    /// A subtask that can never score is worth nothing, in the problem's
+    /// maximum and in its own result, so a result never reads as short of a
+    /// maximum nobody can reach; a problem none of whose subtasks can score
+    /// has a maximum of 0.
+    #[test]
+    fn a_subtask_that_cannot_score_is_worth_nothing() {
+        let test_cases = vec![test_case(1, 10.0, false, Some("a"))];
+        let scorable = make_def(SubtaskScoringMethod::Sum, 60.0, vec!["a"]);
+        let missing = make_def(SubtaskScoringMethod::GroupMin, 100.0, vec!["gone"]);
+        let defs = vec![scorable, missing.clone()];
+        assert_eq!(problem_max_score(&defs, &test_cases), 60.0);
+        let results = score_all_subtasks(&defs, &test_cases, &HashMap::new());
+        assert_eq!(results[1].max_score, 0.0);
+        assert_eq!(problem_max_score(&[missing], &test_cases), 0.0);
+    }
+
+    /// The default subtask names every case it scores by a key that names
+    /// exactly that case, so a label that is another case's id (labels start
+    /// from a position, ids from 1) never drops a case from the subtask, its
+    /// score or the problem's maximum.
+    #[test]
+    fn the_default_subtask_names_each_case_by_a_key_only_it_has() {
+        let test_cases = vec![
+            test_case(1, 10.0, true, Some("0")),
+            test_case(2, 90.0, false, Some("1")),
+        ];
+        let subtasks = effective_subtasks(&[], &test_cases);
+        assert_eq!(problem_max_score(&subtasks, &test_cases), 90.0);
+        let ratios: HashMap<i32, f64> = [(2, 1.0)].into_iter().collect();
+        let results = score_all_subtasks(&subtasks, &test_cases, &ratios);
+        assert_eq!(results[0].score, 90.0);
     }
 
     #[test]

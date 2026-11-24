@@ -1,5 +1,5 @@
 import { serverNow } from '@broccoli/web-sdk/api';
-import { contestPollPace } from '@broccoli/web-sdk/contest';
+import { liveBoardPace } from '@broccoli/web-sdk/contest';
 import { pollInterval, unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { formatRelativeSeconds, useTranslation } from '@broccoli/web-sdk/i18n';
 import { useContestSlotContext } from '@broccoli/web-sdk/slot';
@@ -18,7 +18,6 @@ import { useIcpcApi } from './hooks/useIcpcApi';
 import type { ProblemCell, StandingsEntry, StandingsResponse } from './types';
 
 /** How often a live board asks for new results. */
-const LIVE_BOARD_POLL_MS = 30_000;
 
 interface IcpcScoreboardProps {
   contestId?: number;
@@ -197,9 +196,7 @@ export function IcpcScoreboard({ contestId }: IcpcScoreboardProps) {
       // leave the tab open); every board also turns over when the contest's
       // phase does (`contestPollPace`).
       if (!autoRefresh || d === undefined) return false;
-      const pace = contest ? contestPollPace(contest, serverNow()) : false;
-      if (!d.live) return pace;
-      return Math.min(LIVE_BOARD_POLL_MS, pace === false ? Infinity : pace);
+      return liveBoardPace(contest, d.live, serverNow());
     }),
   });
   const { dataUpdatedAt, refetch } = query;
