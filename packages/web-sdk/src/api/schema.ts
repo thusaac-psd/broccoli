@@ -8403,7 +8403,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The plugin that decides who may read the problem is disabled (PLUGIN_DISABLED, no Retry-After) or cannot answer right now (PLUGIN_UNAVAILABLE, carries Retry-After) */
+      /** @description The plugin that decides who may read the problem is disabled (PLUGIN_DISABLED, carries Retry-After) or cannot answer right now (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -8588,7 +8588,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The plugin that decides who may read the problem is disabled (PLUGIN_DISABLED, no Retry-After) or cannot answer right now (PLUGIN_UNAVAILABLE, carries Retry-After) */
+      /** @description The plugin that decides who may read the problem is disabled (PLUGIN_DISABLED, carries Retry-After) or cannot answer right now (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -8656,7 +8656,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The plugin that decides who may read the problem is disabled (PLUGIN_DISABLED, no Retry-After) or cannot answer right now (PLUGIN_UNAVAILABLE, carries Retry-After) */
+      /** @description The plugin that decides who may read the problem is disabled (PLUGIN_DISABLED, carries Retry-After) or cannot answer right now (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -8748,7 +8748,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, no Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE) */
+      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, carries Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, carries Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -9049,7 +9049,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The plugin that decides who may read the problem is disabled (PLUGIN_DISABLED, no Retry-After) or cannot answer right now (PLUGIN_UNAVAILABLE, carries Retry-After) */
+      /** @description The plugin that decides who may read the problem is disabled (PLUGIN_DISABLED, carries Retry-After) or cannot answer right now (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -9112,7 +9112,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The plugin that decides who may read the problem is disabled (PLUGIN_DISABLED, no Retry-After) or cannot answer right now (PLUGIN_UNAVAILABLE, carries Retry-After) */
+      /** @description The plugin that decides who may read the problem is disabled (PLUGIN_DISABLED, carries Retry-After) or cannot answer right now (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -9213,7 +9213,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest's type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest's type is disabled (CONTEST_TYPE_DISABLED, no Retry-After); or a plugin it needs could not answer in time (PLUGIN_UNAVAILABLE) */
+      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest's type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest's type is disabled (CONTEST_TYPE_DISABLED, carries Retry-After); or a plugin it needs could not answer in time (PLUGIN_UNAVAILABLE) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -9971,7 +9971,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
+      /** @description The plugin is disabled (PLUGIN_DISABLED, carries Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -10090,7 +10090,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
+      /** @description The plugin is disabled (PLUGIN_DISABLED, carries Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -10209,7 +10209,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
+      /** @description The plugin is disabled (PLUGIN_DISABLED, carries Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -10328,7 +10328,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
+      /** @description The plugin is disabled (PLUGIN_DISABLED, carries Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -10443,7 +10443,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
+      /** @description The plugin is disabled (PLUGIN_DISABLED, carries Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -10558,7 +10558,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
+      /** @description The plugin is disabled (PLUGIN_DISABLED, carries Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -10677,7 +10677,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
+      /** @description The plugin is disabled (PLUGIN_DISABLED, carries Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -10792,7 +10792,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
+      /** @description The plugin is disabled (PLUGIN_DISABLED, carries Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -11822,7 +11822,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, no Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE) */
+      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, carries Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, carries Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -12203,7 +12203,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, no Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE) */
+      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, carries Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, carries Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE) */
       503: {
         headers: {
           [name: string]: unknown;
