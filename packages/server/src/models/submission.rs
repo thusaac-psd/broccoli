@@ -175,6 +175,12 @@ pub struct SubmissionJudgementResponse {
     /// plugin refuses. `null` for everyone else.
     #[serde(default)]
     pub config_issues: Option<bool>,
+    /// For viewers who see every submission: whether this judgement was
+    /// applied, forced, after its problem's inputs changed (test data,
+    /// limits, checker or other files), so its verdicts show beside inputs
+    /// it was not judged with. `null` for everyone else.
+    #[serde(default)]
+    pub judged_on_earlier_inputs: Option<bool>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]

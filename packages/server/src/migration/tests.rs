@@ -161,6 +161,9 @@ async fn the_migrations_create_the_schema_the_code_expects() {
     crate::services::plugin_config_cache::expected::install(migrated)
         .await
         .expect("config epoch trigger");
+    crate::services::judging::install_inputs_triggers(migrated)
+        .await
+        .expect("inputs version triggers");
     let after = catalog(migrated).await;
     let added: Vec<_> = after.difference(&before).collect();
     let removed: Vec<_> = before.difference(&after).collect();

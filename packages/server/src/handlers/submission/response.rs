@@ -625,6 +625,7 @@ pub(super) async fn build_judgement_response(
         test_case_pagination: Some(pagination),
         withheld: None,
         config_issues: None,
+        judged_on_earlier_inputs: None,
         test_case_results,
     })
 }
@@ -793,7 +794,8 @@ mod judgement_history_tests {
             dispatch_retries: 0,
             config_issues: false,
             error_stands,
-            test_data_version: 0,
+            inputs_version: 0,
+            judged_on_earlier_inputs: false,
             created_at: now,
             queued_at: now,
             finalized_at: Some(now),

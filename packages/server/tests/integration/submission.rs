@@ -1109,6 +1109,7 @@ mod judgement_history {
 
     async fn seed_history(app: &TestApp, username: &str, problem_id: i32) -> (i32, i32, i32) {
         let now = Utc::now();
+
         let user_model = user::Entity::find()
             .filter(user::Column::Username.eq(username))
             .one(&app.db)
@@ -1214,6 +1215,21 @@ mod judgement_history {
             .expect("insert test case result");
         }
 
+        // Judged against the problem's inputs as the fixture leaves them, as a
+        // dispatch stamps it.
+        {
+            use sea_orm::ConnectionTrait;
+            app.db
+                .execute_raw(sea_orm::Statement::from_sql_and_values(
+                    sea_orm::DbBackend::Postgres,
+                    "UPDATE submission_judgement SET inputs_version = \
+                       (SELECT inputs_version FROM problem WHERE id = $1) \
+                     WHERE submission_id = $2",
+                    [problem_id.into(), submission.id.into()],
+                ))
+                .await
+                .expect("stamp the inputs version");
+        }
         (submission_id, old.id, current.id)
     }
 
@@ -1589,40 +1605,110 @@ mod judgement_history {
         );
     }
 
-    /// A judgement judged against test data the problem has since changed
-    /// would show its verdicts beside data it was not judged with: applying
-    /// it is refused with `JUDGED_ON_OTHER_TEST_DATA` unless the request says
-    /// `force=true`.
+    /// A judgement judged against inputs the problem has since changed (its
+    /// test data, limits, checker format, additional files or a problem
+    /// config such as its checker source) would show its verdicts beside
+    /// inputs it was not judged with: applying it is refused with
+    /// `JUDGED_ON_OTHER_INPUTS` unless the request says `force=true`, and a
+    /// forced apply marks the judgement for staff as judged on earlier
+    /// inputs.
     #[tokio::test]
-    async fn applying_a_judgement_made_before_a_test_data_change_needs_force() {
+    async fn applying_a_judgement_made_before_an_inputs_change_needs_force_and_is_marked() {
         let app = TestApp::spawn().await;
         let admin_token = app
             .create_user_with_role("admin_jhist_data", "pass1234", "admin")
             .await;
-        let problem_id = app.create_problem(&admin_token, "Changed Data").await;
-        let (submission_id, old_judgement_id, _current) =
-            seed_history(&app, "admin_jhist_data", problem_id).await;
-        app.create_test_case(problem_id, &admin_token).await;
+        let changes: [&str; 5] = [
+            "test data",
+            "time limit",
+            "checker format",
+            "additional file",
+            "problem config",
+        ];
+        for change in changes {
+            let problem_id = app.create_problem(&admin_token, change).await;
+            let (submission_id, old_judgement_id, _current) =
+                seed_history(&app, "admin_jhist_data", problem_id).await;
+            match change {
+                "test data" => {
+                    app.create_test_case(problem_id, &admin_token).await;
+                }
+                "time limit" | "checker format" => {
+                    let patch = if change == "time limit" {
+                        json!({"time_limit": 4321})
+                    } else {
+                        json!({"checker_format": "lines"})
+                    };
+                    let res = app
+                        .patch_with_token(&routes::problem(problem_id), &patch, &admin_token)
+                        .await;
+                    assert!(res.status < 300, "{change}: {}", res.text);
+                }
+                "additional file" => {
+                    let res = app
+                        .upload_additional_file(
+                            problem_id,
+                            "grader.cpp",
+                            b"int grade();".to_vec(),
+                            "cpp",
+                            &admin_token,
+                        )
+                        .await;
+                    assert!(res.status < 300, "{change}: {}", res.text);
+                }
+                _ => {
+                    use sea_orm::ConnectionTrait;
+                    app.db
+                        .execute_raw(sea_orm::Statement::from_string(
+                            sea_orm::DbBackend::Postgres,
+                            format!(
+                                "INSERT INTO plugin_config (scope, ref_id, namespace, config, \
+                                                            position, updated_at) \
+                                 VALUES ('problem', '{problem_id}', 'checker', '{{}}', 0, NOW())"
+                            ),
+                        ))
+                        .await
+                        .unwrap();
+                }
+            }
 
-        let apply = routes::submission_judgement_apply(submission_id, old_judgement_id);
-        let res = app.post_with_token(&apply, &json!({}), &admin_token).await;
-        assert_eq!(res.status, 409, "{}", res.text);
-        assert_eq!(
-            res.body["code"], "JUDGED_ON_OTHER_TEST_DATA",
-            "{}",
-            res.text
-        );
-        let kept = submission_judgement::Entity::find_by_id(old_judgement_id)
-            .one(&app.db)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!kept.is_current, "refused, nothing changed");
+            let apply = routes::submission_judgement_apply(submission_id, old_judgement_id);
+            let res = app.post_with_token(&apply, &json!({}), &admin_token).await;
+            assert_eq!(res.status, 409, "{change}: {}", res.text);
+            assert_eq!(
+                res.body["code"], "JUDGED_ON_OTHER_INPUTS",
+                "{change}: {}",
+                res.text
+            );
+            let kept = submission_judgement::Entity::find_by_id(old_judgement_id)
+                .one(&app.db)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!kept.is_current, "{change}: refused, nothing changed");
+            assert!(!kept.judged_on_earlier_inputs);
 
-        let res = app
-            .post_with_token(&format!("{apply}?force=true"), &json!({}), &admin_token)
-            .await;
-        assert_eq!(res.status, 200, "{}", res.text);
+            let res = app
+                .post_with_token(&format!("{apply}?force=true"), &json!({}), &admin_token)
+                .await;
+            assert_eq!(res.status, 200, "{change}: {}", res.text);
+            let history = app
+                .get_with_token(&routes::submission_judgements(submission_id), &admin_token)
+                .await;
+            assert_eq!(history.status, 200, "{}", history.text);
+            let applied = history
+                .body
+                .as_array()
+                .expect("the judgements")
+                .iter()
+                .find(|j| j["id"] == old_judgement_id)
+                .unwrap_or_else(|| panic!("{change}: {}", history.text));
+            assert_eq!(
+                applied["judged_on_earlier_inputs"], true,
+                "{change}: staff see the forced apply: {}",
+                history.text
+            );
+        }
     }
 
     #[tokio::test]

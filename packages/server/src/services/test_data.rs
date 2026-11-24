@@ -11,17 +11,16 @@
 //! it; what the namespace's defaults find where nothing is stored, such as
 //! no test cases yet, never refuses one. Either way the problem's
 //! `config_issues` flag records whether any config has issues, which judging
-//! copies onto the judgements it claims, and the problem's
-//! `test_data_version` counts the change, which judging copies too: applying
-//! a judgement judged against other test data needs `force`
+//! copies onto the judgements it claims. The problem's `inputs_version`
+//! counts the change (`judging::inputs`), which judging stamps on each
+//! judgement: applying a judgement judged against other inputs needs `force`
 //! (`judging::apply_judgement`).
 
 use std::sync::Arc;
 
 use common::db::{DatabaseConnection, DatabaseTransaction};
-use sea_orm::sea_query::Expr;
 use sea_orm::sea_query::LockType;
-use sea_orm::{ColumnTrait, EntityTrait, ExprTrait, QueryFilter, QuerySelect, TransactionTrait};
+use sea_orm::{QuerySelect, TransactionTrait};
 
 use crate::entity::problem;
 use crate::error::AppError;
@@ -115,14 +114,6 @@ impl TestDataEdit {
             }
         }
         record_outcome(self.db(), problem_id, &after).await?;
-        problem::Entity::update_many()
-            .col_expr(
-                problem::Column::TestDataVersion,
-                Expr::col(problem::Column::TestDataVersion).add(1),
-            )
-            .filter(problem::Column::Id.eq(problem_id))
-            .exec(self.db())
-            .await?;
         let txn = Arc::try_unwrap(self.txn).map_err(|_| {
             AppError::Internal("a config check still holds the test data change".into())
         })?;

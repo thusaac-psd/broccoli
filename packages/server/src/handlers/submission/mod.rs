@@ -555,6 +555,9 @@ async fn build_visible_judgement(
     let show_test_details = visibility.has_view_all || problem_model.show_test_details;
 
     let config_issues = visibility.has_view_all.then_some(judgement.config_issues);
+    let judged_on_earlier_inputs = visibility
+        .has_view_all
+        .then_some(judgement.judged_on_earlier_inputs);
     let judgement = response::as_its_submission_shows(judgement, sub);
     let mut response = build_judgement_response(
         &state.db,
@@ -567,6 +570,7 @@ async fn build_visible_judgement(
     )
     .await?;
     response.config_issues = config_issues;
+    response.judged_on_earlier_inputs = judged_on_earlier_inputs;
     if visibility.has_view_all && !response.is_current {
         let row = state
             .db

@@ -353,17 +353,22 @@ binaries warn about every key they do not read.
 - Every submit path (practice and contest submissions, code runs) accepts work
   through one rule, `plugin_lifecycle::accepting_handler`, which refuses a
   contest type no provider can judge now; a new submit path calls it too.
+- Everything judging reads of a problem (test cases, limits, type, checker
+  format, additional files, problem-scoped and contest-problem configs) is
+  versioned as one in `problem.inputs_version`, counted by database triggers
+  (`services::judging::inputs`), never by a write path: a new input table gets
+  the trigger. The dispatch stamps the version it read the inputs at on the
+  judgement; applying a judgement of another version needs `force` and marks it
+  `judged_on_earlier_inputs`.
 - A change to a problem's test data goes through
-  `services::test_data::TestDataEdit`, which counts it in
-  `problem.test_data_version` (judging copies the version onto every judgement
-  it claims, and applying a judgement of another version needs `force`), and
-  whose commit checks the problem's stored configs against the data as the
-  change leaves it and refuses a change that breaks one with 409
-  `CONFIG_WOULD_BREAK` unless the request says `force=true`. The problem's
-  `config_issues` flag, which judging copies onto every judgement it claims, is
-  kept by `services::config_issues`: a new path that changes what a stored
-  config is checked against (test data, a plugin, a contest- or plugin-scope
-  config) rechecks it there, after it commits and off the judging path.
+  `services::test_data::TestDataEdit`, whose commit checks the problem's stored
+  configs against the data as the change leaves it and refuses a change that
+  breaks one with 409 `CONFIG_WOULD_BREAK` unless the request says `force=true`.
+  The problem's `config_issues` flag, which judging copies onto every judgement
+  it claims, is kept by `services::config_issues`: a new path that changes what
+  a stored config is checked against (test data, a plugin, a contest- or
+  plugin-scope config) rechecks it there, after it commits and off the judging
+  path.
 - Every write or delete of a stored plugin config, an admin's, a plugin's
   (`config_set`) or the host's own as a problem or contest goes, goes through
   `services::plugin_config` (`write_config`, `delete_config*`): a write passes

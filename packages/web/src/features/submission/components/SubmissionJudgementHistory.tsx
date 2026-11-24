@@ -159,14 +159,13 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
   const applyMutation = useMutation({
     mutationFn: (judgementId: number) => apply(judgementId, false),
     onError: (error, judgementId) => {
-      // Judged against test data the problem has changed since: applied
-      // only once the user confirms it.
+      // Judged against inputs the problem has changed since: applied only
+      // once the user confirms it.
       if (
-        (error as { code?: string } | null)?.code ===
-        'JUDGED_ON_OTHER_TEST_DATA'
+        (error as { code?: string } | null)?.code === 'JUDGED_ON_OTHER_INPUTS'
       ) {
         confirm({
-          title: t('submissionDetail.applyOtherTestData'),
+          title: t('submissionDetail.applyOtherInputs'),
           description: errorMessage(error, t('submissionDetail.applyError')),
           confirmLabel: t('submissionDetail.applyVersion'),
           failureMessage: t('submissionDetail.applyError'),
@@ -371,6 +370,16 @@ function JudgementRow({
           >
             <AlertTriangle className="h-3 w-3" />
             {t('submissionDetail.configIssues.badge')}
+          </Badge>
+        )}
+        {judgement.judged_on_earlier_inputs && (
+          <Badge
+            variant="outline"
+            className="gap-1 border-amber-500/60 text-amber-700 dark:text-amber-300"
+            title={t('submissionDetail.earlierInputs.judged')}
+          >
+            <AlertTriangle className="h-3 w-3" />
+            {t('submissionDetail.earlierInputs.badge')}
           </Badge>
         )}
         {judgement.target_worker_id && (

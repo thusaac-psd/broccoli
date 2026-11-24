@@ -328,8 +328,36 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
         }
     };
 
+    // Every judging input read here (the problem's limits and type, its test
+    // cases) comes from one snapshot, which also gives the inputs version
+    // the judgement is stamped with (`judging::stamp_inputs_version`).
+    let inputs = match state
+        .db
+        .begin_with_config(
+            Some(IsolationLevel::RepeatableRead),
+            Some(AccessMode::ReadOnly),
+        )
+        .await
+    {
+        Ok(txn) => txn,
+        Err(e) => {
+            error!(error = %e, "DB error opening the judging inputs snapshot");
+            record_dispatch_failure(
+                &state.db,
+                &state.metrics,
+                judgement_ref,
+                &faults,
+                DispatchFailure::judging(
+                    HostCode::DatabaseError,
+                    format!("Failed to read the judging inputs: {e}"),
+                ),
+            )
+            .await;
+            return;
+        }
+    };
     let problem = match problem::Entity::find_by_id(submission.problem_id)
-        .one(&state.db)
+        .one(&inputs)
         .await
     {
         Ok(Some(p)) => p,
@@ -408,7 +436,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             )
             .order_by_asc(test_case::Column::Position)
             .into_model::<SubmissionDispatchTestCaseRow>()
-            .all(&state.db)
+            .all(&inputs)
             .await
         {
             Ok(tcs) => tcs,
@@ -533,6 +561,29 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
         }
         resolved_test_cases
     };
+    drop(inputs);
+    if let Err(e) = judging::stamp_inputs_version(
+        &state.db,
+        judgement_ref.id,
+        judgement_ref.judge_epoch,
+        problem.inputs_version,
+    )
+    .await
+    {
+        error!(error = %e, "DB error stamping the judging inputs version");
+        record_dispatch_failure(
+            &state.db,
+            &state.metrics,
+            judgement_ref,
+            &faults,
+            DispatchFailure::judging(
+                HostCode::DatabaseError,
+                format!("Failed to record the judging inputs version: {e}"),
+            ),
+        )
+        .await;
+        return;
+    }
 
     let input = OnSubmissionInput {
         submission_id: submission.id,

@@ -141,9 +141,10 @@ pub struct UploadTestCasesRequest {
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ApplyJudgementQuery {
-    /// Apply it even if it was judged against test data the problem has
-    /// changed since, which is otherwise refused with
-    /// `JUDGED_ON_OTHER_TEST_DATA`.
+    /// Apply it even if it was judged against inputs the problem has changed
+    /// since (test data, limits, checker or other files), which is otherwise
+    /// refused with `JUDGED_ON_OTHER_INPUTS`; the judgement is then marked
+    /// `judged_on_earlier_inputs`.
     #[serde(default)]
     pub force: bool,
 }

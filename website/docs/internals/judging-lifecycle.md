@@ -255,12 +255,19 @@ are keyed on it.
   from `max_judge_epoch`, which locks the submission and names the apply's
   after-judging event (`after_judging:{id}:applied:{n}`), so re-applying a
   judgement fires its hooks again.
-- A judgement records the problem's `test_data_version` when it is claimed;
-  every change to the problem's test data commits through `TestDataEdit`,
-  which counts it. Applying a judgement judged against other test data than
-  the problem has now is refused with `409 JUDGED_ON_OTHER_TEST_DATA` unless
-  the request says `force=true`, since its verdicts would show beside data
-  they were not judged with.
+- Everything judging reads of a problem is versioned as one:
+  `problem.inputs_version` counts every change to its test cases, its time
+  and memory limits, its type, its checker format, its additional files
+  (graders) and its problem-scoped and contest-problem configs (its checker
+  source among them). Database triggers count them (`judging::inputs`), so
+  every write path counts a change without knowing to. The dispatch reads the
+  problem and its test cases in one snapshot and stamps the judgement with
+  that snapshot's version (`judging::stamp_inputs_version`). Applying a
+  judgement judged against other inputs than the problem has now is refused
+  with `409 JUDGED_ON_OTHER_INPUTS` unless the request says `force=true`,
+  since its verdicts would show beside inputs they were not judged with; a
+  forced apply marks the judgement `judged_on_earlier_inputs`, which staff see
+  in its Versions card.
 - A judgement that stops being current while still in flight is finalized as
   `Superseded`, a status of its own: it never got a verdict, so it is
   history, not a system error. No retry takes it, and applying it is refused

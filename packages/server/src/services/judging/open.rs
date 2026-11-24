@@ -227,16 +227,17 @@ pub(crate) enum ApplyJudgement {
     NotFinalized,
     /// It was superseded before it got a verdict: there is no result to show.
     Superseded,
-    /// It was judged against test data the problem has changed since (its
-    /// `test_data_version` is not the problem's), and the apply was not
-    /// forced: its verdicts would show beside data they were not judged with.
-    OtherTestData,
+    /// It was judged against inputs the problem has changed since (its
+    /// `inputs_version` is not the problem's), and the apply was not forced:
+    /// its verdicts would show beside inputs they were not judged with.
+    OtherInputs,
 }
 
 /// Makes a finalized judgement the submission's current one, in the
 /// caller's transaction. A superseded judgement never had a result and is
-/// refused, and so, unless `force`, is one judged against test data the
-/// problem has changed since.
+/// refused, and so, unless `force`, is one judged against inputs the problem
+/// has changed since (`judging::inputs`); a forced one is marked
+/// `judged_on_earlier_inputs`.
 ///
 /// The judgement keeps its own epoch: the epoch names the attempt its
 /// results belong to, so every result row keyed by (judgement, epoch), the
@@ -279,21 +280,24 @@ pub(crate) async fn apply_judgement(
     if judgement.status == SubmissionStatus::Superseded {
         return Ok(ApplyJudgement::Superseded);
     }
-    if !force {
-        let test_data_version: Option<i32> = problem::Entity::find_by_id(sub.problem_id)
-            .select_only()
-            .column(problem::Column::TestDataVersion)
-            .into_tuple()
-            .one(txn)
-            .await?;
-        if test_data_version != Some(judgement.test_data_version) {
-            return Ok(ApplyJudgement::OtherTestData);
-        }
+    let inputs_version: Option<i32> = problem::Entity::find_by_id(sub.problem_id)
+        .select_only()
+        .column(problem::Column::InputsVersion)
+        .into_tuple()
+        .one(txn)
+        .await?;
+    let earlier_inputs = inputs_version != Some(judgement.inputs_version);
+    if earlier_inputs && !force {
+        return Ok(ApplyJudgement::OtherInputs);
     }
 
     supersede_current_judgement(txn, submission_id).await?;
     submission_judgement::Entity::update_many()
         .col_expr(submission_judgement::Column::IsCurrent, Expr::value(true))
+        .col_expr(
+            submission_judgement::Column::JudgedOnEarlierInputs,
+            Expr::value(earlier_inputs),
+        )
         .filter(submission_judgement::Column::Id.eq(judgement_id))
         .exec(txn)
         .await?;
