@@ -1605,9 +1605,14 @@ async fn cut_by_a_disable(change: Change) {
         .await;
     assert_eq!(res.status, 503, "{}", res.text);
     assert_eq!(res.body["code"], "CONTEST_TYPE_DISABLED", "{}", res.text);
-    assert!(
-        !res.headers.contains_key("retry-after"),
-        "a disabled contest type is not a retry-later answer"
+    assert_eq!(
+        res.headers.get("retry-after").map(|v| v.to_str().unwrap()),
+        Some(
+            server::error::DISABLED_RETRY_AFTER_SECS
+                .to_string()
+                .as_str()
+        ),
+        "a disabled contest type's 503 says when to ask again"
     );
     let practice = json!({
         "files": [{"filename": "main.cpp", "content": CPP_SUM}],

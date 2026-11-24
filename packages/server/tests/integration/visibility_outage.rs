@@ -163,7 +163,14 @@ async fn a_disabled_contest_plugin_withholds_only_what_it_governs() {
         .await;
     assert_eq!(res.status, 503, "{}", res.text);
     assert_eq!(res.body["code"], "PLUGIN_DISABLED");
-    assert!(!res.headers.contains_key("retry-after"));
+    assert_eq!(
+        res.headers.get("retry-after").map(|v| v.to_str().unwrap()),
+        Some(
+            server::error::DISABLED_RETRY_AFTER_SECS
+                .to_string()
+                .as_str()
+        )
+    );
 
     // The same problem read on its own is not governed by the contest plugin.
     let res = app

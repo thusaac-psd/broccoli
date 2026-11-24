@@ -648,9 +648,14 @@ mod sql {
             "{}",
             res.text
         );
-        assert!(
-            !res.headers.contains_key("retry-after"),
-            "a disabled plugin is not a retry-later answer"
+        assert_eq!(
+            res.headers.get("retry-after").map(|v| v.to_str().unwrap()),
+            Some(
+                server::error::DISABLED_RETRY_AFTER_SECS
+                    .to_string()
+                    .as_str()
+            ),
+            "a disabled plugin's 503 says when to ask again"
         );
 
         let res = app
