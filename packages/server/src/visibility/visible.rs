@@ -25,7 +25,7 @@
 use broccoli_api_types::visibility::Withheld;
 use broccoli_server_sdk::visibility::cap_submission_detail_texts;
 
-use super::Decision;
+use super::{Decision, FieldMask};
 use crate::error::AppError;
 use crate::services::submission_feedback::Feedback;
 
@@ -59,7 +59,7 @@ pub struct Visible<T> {
     feedback: Option<Feedback>,
 }
 
-impl<T: serde::Serialize + Governed> Visible<T> {
+impl<T: serde::Serialize + serde::de::DeserializeOwned + Governed> Visible<T> {
     /// Only reachable from within `visibility` (this module and `mod.rs`) —
     /// see the module docs for why that is the entire point of this type.
     pub(super) fn new(inner: T, decision: Decision) -> Self {
@@ -109,12 +109,37 @@ impl<T: serde::Serialize + Governed> Visible<T> {
         }
         match &self.decision {
             Decision::Redact(mask) | Decision::Withheld { mask, .. } => {
-                super::apply_mask(&mut value, mask)
+                apply_admitted::<T>(&mut value, mask)
             }
             Decision::Allow | Decision::Deny => {}
         }
         cap_submission_detail_texts(&mut value);
         Ok(value)
+    }
+}
+
+/// Blank each path of a plugin's `mask` in `value` that the response type
+/// admits blank: a path whose blank `T` would not parse (a field every client
+/// reads as present, such as an id or a page number) is left alone and
+/// logged, since a client cannot read the answer otherwise. The paths a mask
+/// can blank are therefore exactly the ones the API types make nullable, and
+/// the two cannot disagree.
+fn apply_admitted<T: serde::de::DeserializeOwned>(value: &mut serde_json::Value, mask: &FieldMask) {
+    for path in mask.paths() {
+        let mut blanked = value.clone();
+        super::apply_mask(&mut blanked, &FieldMask::new([path.to_owned()]));
+        if blanked == *value {
+            continue;
+        }
+        match serde_json::from_value::<T>(blanked.clone()) {
+            Ok(_) => *value = blanked,
+            Err(error) => tracing::warn!(
+                path,
+                shape = std::any::type_name::<T>(),
+                %error,
+                "A visibility mask names a value its response cannot leave out; it stays"
+            ),
+        }
     }
 }
 
@@ -149,24 +174,24 @@ fn withhold<T: Governed>(value: &mut serde_json::Value, reason: Withheld) -> Res
 
 #[cfg(test)]
 mod tests {
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
 
     use super::*;
     use crate::visibility::FieldMask;
 
-    #[derive(Debug, Clone, Serialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     struct SampleDto {
         verdict: Option<String>,
         score: Option<i32>,
     }
 
-    #[derive(Debug, Clone, Serialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     struct FakeJudgeResult {
         compile_output: Option<String>,
     }
 
-    #[derive(Debug, Clone, Serialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     struct FakeSubmissionDto {
         result: FakeJudgeResult,
     }

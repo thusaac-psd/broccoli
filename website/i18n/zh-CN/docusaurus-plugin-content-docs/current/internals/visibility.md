@@ -20,6 +20,8 @@ sidebar_position: 7
 
 DTO 只能经由 `Visible::into_masked_json` 进入响应体，该函数应用决定。经过它的每种响应形状都实现 `Governed`（`visibility/shapes.rs`），列出仅由主机决定的顶层字段。
 
+掩码只在该形状的 API 类型允许置空的位置置空：如果置空某个路径后类型无法解析（如 id、页码、由主机决定的名称），主机保留该值并记录日志。因此插件能置空的路径正是 `broccoli-api-types` 中可为空的字段，客户端收到的每个响应都能按其读取的类型解析。测试 `every_answer_a_mask_or_withholding_leaves_parses_as_its_api_type` 对每种形状逐一掩码每个路径、按每种原因隐藏，并解析结果。
+
 决策按内核实例缓存。`know_submission` 和 `know_contest` 把请求已经读取的行交给内核，避免重复读取。
 
 ## 比赛阶段

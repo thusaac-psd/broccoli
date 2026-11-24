@@ -446,7 +446,7 @@ impl<'a> VisibilityKernel<'a> {
     /// list by dropping `None` and render a detail 404 on `None` - a denied
     /// resource is never rendered as a placeholder, because a placeholder
     /// confirms it exists.
-    pub async fn fetch_visible<T: serde::Serialize + Governed>(
+    pub async fn fetch_visible<T: serde::Serialize + serde::de::DeserializeOwned + Governed>(
         &self,
         action: Action,
         resource: Resource,
@@ -464,7 +464,9 @@ impl<'a> VisibilityKernel<'a> {
 
     /// Batched form. Input and output are positionally aligned; denied
     /// entries come back as `None`.
-    pub async fn fetch_visible_batch<T: serde::Serialize + Governed>(
+    pub async fn fetch_visible_batch<
+        T: serde::Serialize + serde::de::DeserializeOwned + Governed,
+    >(
         &self,
         action: Action,
         items: Vec<(Resource, T)>,
@@ -513,7 +515,7 @@ impl<'a> VisibilityKernel<'a> {
 /// `null` status with no reason.
 ///
 /// [`SUBMISSION_STATUS_PATH`]: broccoli_server_sdk::visibility::SUBMISSION_STATUS_PATH
-fn wrap_visible<T: serde::Serialize + Governed>(
+fn wrap_visible<T: serde::Serialize + serde::de::DeserializeOwned + Governed>(
     resource: &Resource,
     entity: T,
     decision: Decision,
@@ -1273,7 +1275,7 @@ mod tests {
     // `fetch_visible` / `fetch_visible_batch`
     // -----------------------------------------------------------------
 
-    #[derive(Debug, Clone, serde::Serialize)]
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     struct ScoredEntity {
         id: i32,
         score: Option<i32>,
