@@ -26,9 +26,15 @@ fn guest(version: i64) -> String {
         (import "extism:host/user" "mark" (func $mark (param i64) (result i64)))
         (import "extism:host/user" "await_child" (func $await_child (param i64) (result i64)))
         (import "extism:host/user" "busy" (func $busy (param i64) (result i64)))
+        (import "extism:host/user" "db_down" (func $db_down (param i64) (result i64)))
+        (import "extism:host/user" "nest_hold" (func $nest_hold (param i64) (result i64)))
         (import "extism:host/user" "nest_spin" (func $nest_spin (param i64) (result i64)))
+        (import "extism:host/user" "broken" (func $broken (param i64) (result i64)))
+        (func (export "broken") (result i32) (drop (call $broken (i64.const 0))) (i32.const 0))
         (func (export "nest_spin") (result i32) (drop (call $nest_spin (i64.const 0))) (i32.const 0))
         (func (export "busy") (result i32) (drop (call $busy (i64.const 0))) (i32.const 0))
+        (func (export "db_down") (result i32) (drop (call $db_down (i64.const 0))) (i32.const 0))
+        (func (export "nest_hold") (result i32) (drop (call $nest_hold (i64.const 0))) (i32.const 0))
         (func (export "parent") (result i32) (drop (call $await_child (i64.const 0))) (i32.const 0))
         (func (export "hold") (result i32) (drop (call $hold (i64.const 0))) (i32.const 0))
         (func (export "park") (result i32) (drop (call $park (i64.const 0))) (i32.const 0))
@@ -52,6 +58,8 @@ struct Counts {
     marks: Vec<i64>,
     /// Whether each `hold` found its instance retired once released.
     retired: Vec<bool>,
+    /// Opened by the test to let `nest_hold` make its nested call.
+    nest_open: bool,
 }
 
 /// What the host functions report to the test, and the gate they wait on.
@@ -76,6 +84,13 @@ impl Fixture {
 
     fn release(&self) {
         self.update(|c| c.released = true);
+    }
+
+    fn wait_nest_open(&self) {
+        let mut counts = self.counts.lock();
+        while !counts.nest_open {
+            self.changed.wait(&mut counts);
+        }
     }
 
     fn read<R>(&self, f: impl FnOnce(&Counts) -> R) -> R {
@@ -188,6 +203,26 @@ fn nest(ctx: &Ctx, _: i64) -> Result<(), extism::Error> {
     })
 }
 
+/// Parks, waits until the test opens it, then calls `hold` as a nested
+/// call.
+fn nest_hold(ctx: &Ctx, _: i64) -> Result<(), extism::Error> {
+    let (fixture, manager) = ctx;
+    let manager = manager.upgrade().expect("manager alive");
+    crate::executor::parked(|| {
+        fixture.update(|c| c.parked += 1);
+        fixture.wait_nest_open();
+        fixture.update(|c| c.parked -= 1);
+        tokio::runtime::Handle::current().block_on(manager.call_raw(
+            PLUGIN,
+            "hold",
+            vec![],
+            CallOptions::nested(),
+        ))
+    })
+    .map(|_| ())
+    .map_err(|e| extism::Error::msg(e.to_string()))
+}
+
 /// A contest call waiting for its verdicts: parks and waits for a separate
 /// top-level background call, as `on_submission` waits for the evaluator
 /// calls it started.
@@ -228,6 +263,20 @@ fn busy(_: &Ctx, _: i64) -> Result<(), extism::Error> {
     Err(extism::Error::msg(
         "the host cannot serve this call right now",
     ))
+}
+
+/// A host function whose database is unreachable. It marks the call busy
+/// first, as a host function deeper in the same call might: the database
+/// outage is the cause the call reports.
+fn db_down(_: &Ctx, _: i64) -> Result<(), extism::Error> {
+    crate::executor::fail_database_unavailable();
+    crate::executor::fail_unavailable();
+    Err(extism::Error::msg("the database is unreachable"))
+}
+
+/// A host function that fails for a reason no retry changes.
+fn broken(_: &Ctx, _: i64) -> Result<(), extism::Error> {
+    Err(extism::Error::msg("the host function is broken"))
 }
 
 fn mark(ctx: &Ctx, version: i64) -> Result<(), extism::Error> {
@@ -278,7 +327,10 @@ impl Harness {
                     host_fn("mark", ctx.clone(), mark),
                     host_fn("await_child", ctx.clone(), await_child),
                     host_fn("busy", ctx.clone(), busy),
+                    host_fn("db_down", ctx.clone(), db_down),
+                    host_fn("nest_hold", ctx.clone(), nest_hold),
                     host_fn("nest_spin", ctx.clone(), nest_spin),
+                    host_fn("broken", ctx.clone(), broken),
                 ]
             });
             TestManager {
@@ -728,6 +780,44 @@ async fn a_reload_keeps_only_the_replaced_pools_a_call_still_runs_on() {
     assert_eq!(h.superseded(), 0, "its call ended");
 }
 
+/// A call holds its version from the moment it looks the pool up, before
+/// its guest thread enters the call: a reload in between keeps that version
+/// with the plugin, and the unload that follows retires it. The nested call
+/// here has looked up v2 and waits for a token when v2 is replaced and the
+/// plugin unloaded; it never runs on v2 un-retired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_between_its_lookup_and_its_guest_is_retired_by_a_later_unload() {
+    let h = Harness::new(crate::admission::MIN_TOKENS);
+    // v1: a parent call parks in a host function, giving its token up.
+    let parent = h.spawn("nest_hold", CallOptions::background(later()));
+    until(|| h.fixture.read(|c| c.parked) == 1).await;
+    // Other calls take every token and hold them.
+    let holding = [
+        h.spawn("hold", CallOptions::background(later())),
+        h.spawn("hold", CallOptions::interactive(later())),
+    ];
+    until(|| h.fixture.read(|c| c.running) == 2).await;
+    // v2, then the parent's nested call looks v2 up and waits for the token.
+    h.write_guest(2);
+    h.reload();
+    h.fixture.update(|c| c.nest_open = true);
+    until(|| h.admission().resuming(CallClass::Background) == 1).await;
+    // v3 replaces v2 while the nested call waits, then the plugin unloads.
+    h.write_guest(3);
+    h.reload();
+    h.manager.unload_plugin(PLUGIN).unwrap();
+    h.fixture.release();
+    for call in holding {
+        call.await.unwrap().unwrap();
+    }
+    let _ = parent.await.unwrap();
+    assert!(
+        !h.fixture.read(|c| c.retired.clone()).contains(&false),
+        "a call ran on a replaced version the unload did not retire: {:?}",
+        h.fixture.read(|c| c.retired.clone())
+    );
+}
+
 /// A reload that does not take is dropped alone: a call running on it is
 /// retired, and the version put back keeps serving.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -817,9 +907,89 @@ async fn a_host_function_can_fail_its_call_as_unavailable() {
         .await
         .unwrap_err();
     assert!(matches!(err, PluginError::Unavailable { .. }), "{err:?}");
+    // A call that could not run for its database's outage says so.
+    let err = h
+        .manager
+        .call_raw(PLUGIN, "db_down", vec![], CallOptions::interactive(later()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, PluginError::DatabaseUnavailable { .. }),
+        "{err:?}"
+    );
+    assert!(err.is_unavailable());
     // The mark belongs to that call alone.
     h.manager
         .call_raw(PLUGIN, "mark", vec![], CallOptions::interactive(later()))
         .await
         .expect("the next call runs");
+}
+
+/// Every event logged while the tests run, rendered as its message and
+/// fields, with its level.
+fn captured_logs() -> &'static Mutex<Vec<(tracing::Level, String)>> {
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+
+    static LOGS: std::sync::OnceLock<Mutex<Vec<(tracing::Level, String)>>> =
+        std::sync::OnceLock::new();
+
+    struct Render(String);
+    impl tracing::field::Visit for Render {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, " {}={:?}", field.name(), value);
+        }
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, " {}={}", field.name(), value);
+        }
+    }
+    struct Capture;
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            let mut render = Render(String::new());
+            event.record(&mut render);
+            captured_logs()
+                .lock()
+                .push((*event.metadata().level(), render.0));
+        }
+    }
+
+    LOGS.get_or_init(|| {
+        tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Capture))
+            .expect("no other test sets a global subscriber");
+        Mutex::new(Vec::new())
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_call_logs_one_line_and_an_unavailable_one_logs_nothing() {
+    let logs = captured_logs();
+    let h = Harness::new(2);
+    for func in ["busy", "db_down", "broken"] {
+        h.manager
+            .call_raw(PLUGIN, func, vec![], CallOptions::interactive(later()))
+            .await
+            .unwrap_err();
+    }
+    // Other tests log too, so only the events naming these calls count, at
+    // the levels a deployment logs.
+    let logs = logs.lock();
+    let naming = |func: &str| -> Vec<(tracing::Level, String)> {
+        logs.iter()
+            .filter(|(level, text)| *level <= tracing::Level::INFO && text.contains(func))
+            .cloned()
+            .collect()
+    };
+    // A call the host could not serve now is the caller's answer, not a fault.
+    for func in ["busy", "db_down"] {
+        assert_eq!(naming(func), vec![], "{func}");
+    }
+    // A failure is one line, without the wasm backtrace.
+    let broken = naming("broken");
+    assert_eq!(broken.len(), 1, "{broken:#?}");
+    let (level, text) = &broken[0];
+    assert_eq!(*level, tracing::Level::WARN);
+    assert!(!text.contains('\n'), "{text}");
+    assert!(text.contains("the host function is broken"), "{text}");
 }

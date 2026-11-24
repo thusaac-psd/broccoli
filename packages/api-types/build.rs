@@ -3,7 +3,7 @@
 //! `[language_pack] locale = "en"`, the catalog every other language
 //! translates. Every first segment of one of its keys is a namespace the host
 //! speaks in, so no plugin may take it as its id (see
-//! `i18n::is_host_namespace`). Writes `$OUT_DIR/host_namespaces.rs` and
+//! `plugin_id::is_host_namespace`). Writes `$OUT_DIR/host_namespaces.rs` and
 //! names the catalog in `HOST_CATALOG`.
 
 use std::collections::BTreeSet;

@@ -273,7 +273,7 @@ async fn a_replica_without_the_contest_type_leaves_queued_work_for_one_that_has_
         .insert(
             "fleet-only".into(),
             server::registry::ContestTypeHandlers {
-                plugin_id: "__test__".into(),
+                plugin_id: "stand-in".into(),
                 submission_fn: "noop".into(),
                 code_run_fn: "noop".into(),
                 submission_admission: false,
@@ -1016,7 +1016,7 @@ async fn the_stuck_detector_leaves_work_to_a_replica_that_can_judge_it() {
         .insert(
             "fleet-only".into(),
             server::registry::ContestTypeHandlers {
-                plugin_id: "__test__".into(),
+                plugin_id: "stand-in".into(),
                 submission_fn: "noop".into(),
                 code_run_fn: "noop".into(),
                 submission_admission: false,
@@ -1093,7 +1093,7 @@ async fn a_retired_replica_row_stays_retired() {
         .insert(
             "late".into(),
             server::registry::ContestTypeHandlers {
-                plugin_id: "__test__".into(),
+                plugin_id: "stand-in".into(),
                 submission_fn: "noop".into(),
                 code_run_fn: "noop".into(),
                 submission_admission: false,

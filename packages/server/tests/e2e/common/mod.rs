@@ -815,7 +815,7 @@ impl E2eTestApp {
             state.registries.evaluator_registry.write().await.insert(
                 "batch".into(),
                 server::registry::EvaluatorHandler {
-                    plugin_id: "__test__".into(),
+                    plugin_id: "stand-in".into(),
                     functions: server::registry::EvaluatorFunctions::Direct {
                         function: "noop".into(),
                     },
@@ -827,7 +827,7 @@ impl E2eTestApp {
                     stage.insert(
                         fmt.into(),
                         server::registry::CheckerStageHandlers {
-                            plugin_id: "__test__".into(),
+                            plugin_id: "stand-in".into(),
                             resolve_fn: "noop".into(),
                             interpret_fn: "noop".into(),
                         },
@@ -837,7 +837,7 @@ impl E2eTestApp {
             state.registries.contest_type_registry.write().await.insert(
                 "standard".into(),
                 server::registry::ContestTypeHandlers {
-                    plugin_id: "__test__".into(),
+                    plugin_id: "stand-in".into(),
                     submission_fn: "noop".into(),
                     code_run_fn: "noop".into(),
                     submission_admission: false,

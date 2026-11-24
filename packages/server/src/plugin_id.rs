@@ -7,41 +7,20 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// A plugin id that is safe as a single path segment and speaks only for
-/// its plugin: 1 to 128 characters, starting with an ASCII letter or digit,
-/// otherwise only ASCII letters, digits, `_` and `-`, and not a namespace
-/// of the host's messages ([`plugin_core::i18n::is_host_namespace`]), whose
-/// keys a plugin with that id would own.
+pub use broccoli_api_types::plugin_id::InvalidPluginId;
+
+/// A plugin id that passes the one plugin id rule
+/// ([`broccoli_api_types::plugin_id::check_plugin_id`]): safe as a single path
+/// segment, and speaking only for its plugin, never in a namespace of the
+/// host's messages.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct PluginId(String);
 
-/// A string that is not a valid [`PluginId`].
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum InvalidPluginId {
-    #[error(
-        "Invalid plugin ID '{0}': it must be 1-128 characters, start with a letter or digit, and \
-         contain only letters, digits, '-' or '_'"
-    )]
-    Shape(String),
-    #[error("Invalid plugin ID '{0}': it names a namespace of the host's own messages")]
-    HostNamespace(String),
-}
-
 impl PluginId {
     pub fn parse(id: impl Into<String>) -> Result<Self, InvalidPluginId> {
         let id = id.into();
-        let valid = id.len() <= 128
-            && id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
-            && id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-        if !valid {
-            return Err(InvalidPluginId::Shape(id));
-        }
-        if plugin_core::i18n::is_host_namespace(&id) {
-            return Err(InvalidPluginId::HostNamespace(id));
-        }
+        broccoli_api_types::plugin_id::check_plugin_id(&id)?;
         Ok(Self(id))
     }
 
@@ -75,41 +54,19 @@ impl<'de> Deserialize<'de> for PluginId {
 mod tests {
     use super::*;
 
+    /// `PluginId` is the one rule: a path-unsafe id and a host namespace
+    /// are refused as `check_plugin_id` refuses them.
     #[test]
-    fn accepts_path_safe_ids_only() {
-        for ok in ["a", "Plugin_1-x", &"a".repeat(128)] {
-            assert!(PluginId::parse(ok).is_ok(), "{ok}");
-        }
-        for bad in [
-            "",
-            "_a",
-            "-a",
-            "a.b",
-            "..",
-            "a/b",
-            "../var/cache",
-            "a b",
-            &"a".repeat(129),
-        ] {
-            assert!(PluginId::parse(bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn a_host_namespace_is_not_a_plugin_id() {
-        for host in [
-            "apiError",
-            "apierror",
-            "plugin",
-            "config",
-            "identifier",
-            "toast",
-        ] {
-            assert_eq!(
-                PluginId::parse(host),
-                Err(InvalidPluginId::HostNamespace(host.to_string())),
-            );
-        }
+    fn a_plugin_id_passes_the_one_rule() {
+        assert_eq!(
+            PluginId::parse("../var/cache"),
+            Err(InvalidPluginId::Shape("../var/cache".into()))
+        );
+        assert_eq!(
+            PluginId::parse("apiError"),
+            Err(InvalidPluginId::HostNamespace("apiError".into()))
+        );
+        assert_eq!(PluginId::parse("ioi").unwrap().as_str(), "ioi");
     }
 
     #[test]

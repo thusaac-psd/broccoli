@@ -263,7 +263,13 @@ fn db_error(e: &sea_orm::DbErr) -> Result<String, extism::Error> {
 /// about the request, so callers answer it with "try again".
 fn unavailable(e: crate::plugin_db::Unavailable) -> extism::Error {
     tracing::warn!(error = %e, "Plugin SQL unavailable");
-    plugin_core::executor::fail_unavailable();
+    match e {
+        // The database's outage: the call reports it as the database's.
+        crate::plugin_db::Unavailable::Outage(_) => {
+            plugin_core::executor::fail_database_unavailable()
+        }
+        _ => plugin_core::executor::fail_unavailable(),
+    }
     extism::Error::msg(e.to_string())
 }
 
@@ -1385,6 +1391,28 @@ mod tests {
             .migrate()
             .await
             .expect("migrate");
+    }
+
+    /// Reading a connection's backend pid is the host's bookkeeping for the
+    /// cancel, not a statement of the caller's: the metric callback sees the
+    /// statements run on the connection and not the pid read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_backend_pid_read_is_not_a_measured_statement() {
+        let (_container, _url, mut db) = one_connection().await;
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        db.set_metric_callback({
+            let seen = seen.clone();
+            move |_| {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let mut conn = db.acquire().await.expect("checked out");
+        assert!(conn.backend_pid().await.expect("pid") > 0);
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 0);
+        conn.execute(Statement::from_string(DbBackend::Postgres, "SELECT 1"))
+            .await
+            .expect("ran");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// A database outage on a plugin's own statement is no answer about the

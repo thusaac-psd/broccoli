@@ -532,6 +532,12 @@ impl Admission {
         self.queued_where(|kind| kind.class() == Some(class))
     }
 
+    /// Nested calls waiting to take a token back, per class.
+    #[cfg(test)]
+    pub(crate) fn resuming(&self, class: CallClass) -> usize {
+        self.0.lock().resuming[class.index()].len()
+    }
+
     /// Top-level calls of `kind` queued now.
     #[cfg(test)]
     pub(crate) fn queued_kind(&self, kind: CallKind) -> usize {

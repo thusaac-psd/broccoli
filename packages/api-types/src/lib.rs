@@ -13,6 +13,7 @@ pub mod contest;
 pub mod dlq;
 pub mod error;
 pub mod plugin;
+pub mod plugin_id;
 pub mod problem;
 pub mod shared;
 pub mod status;

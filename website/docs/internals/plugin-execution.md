@@ -219,6 +219,12 @@ a connection permit no longer and has each statement cut there (see
 A call still queued at its deadline, or cancelled at it, fails with
 `PluginError::Unavailable`.
 
+A call that fails as unavailable logs nothing of its own: the caller answers
+it, and the host function that marked it logs one line for its cause. Any
+other failed call logs one `Plugin call failed` warning with its reason
+(`failure_reason`), every cause of its error without the wasm backtrace.
+extism logs a failed call only at `debug`.
+
 ## Unloaded instances
 
 Each loaded plugin's instance pool carries a `pool::Liveness`, live until the
@@ -228,7 +234,9 @@ version it started on, and the new version takes the old pools over
 (`PluginEntry::succeed`): the unload retires every pool a call of the plugin
 still runs on, whichever version it started on. A version takes over only the
 replaced pools a call still runs on; a pool whose calls have all ended is
-dropped at the next reload. A reload that does not take
+dropped at the next reload. A call holds its pool's liveness from the moment it
+looks the pool up under the registry lock, before its guest thread starts, so
+no reload can drop a pool a call is about to run on. A reload that does not take
 (its load fails, or the fleet refuses it) puts the old version back and
 retires the refused version's pool alone (`PluginEntry::discard`). Every unload, a disable or the fleet forgetting the
 plugin, goes through `plugin_lifecycle::deactivate`, which also cuts the

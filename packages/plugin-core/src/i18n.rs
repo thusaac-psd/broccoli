@@ -46,34 +46,13 @@ impl IdentifierKind {
     }
 }
 
-include!(concat!(env!("OUT_DIR"), "/host_namespaces.rs"));
-
-/// The namespace of identifier names (`identifier.<kind>.<id>`).
-const IDENTIFIER: &str = "identifier";
-/// The namespaces of a plugin's manifest text (`plugin.<id>.…`,
-/// `config.<id>.…`).
-const MANIFEST_TEXT: [&str; 2] = ["plugin", "config"];
-/// The namespace of the host's error texts (`apiError.<CODE>`).
-const API_ERROR: &str = "apiError";
-
-/// Whether `id` is a namespace the host speaks in: the first segment of a key
-/// of the host's catalog, or a key family the platform reads for every plugin
-/// (identifier names, manifest text, error texts). A plugin's own keys are the
-/// ones under its id, so a plugin with such an id would speak as the host; no
-/// plugin may take one (compared ignoring ASCII case).
-pub fn is_host_namespace(id: &str) -> bool {
-    HOST_CATALOG_NAMESPACES
-        .iter()
-        .chain(&MANIFEST_TEXT)
-        .chain(&[IDENTIFIER, API_ERROR])
-        .any(|ns| ns.eq_ignore_ascii_case(id))
-}
+use broccoli_api_types::plugin_id::{IDENTIFIER_NAMESPACE, MANIFEST_TEXT_NAMESPACES};
 
 /// The identifier `key` names, when it is the name of an identifier a
 /// plugin registers.
 fn plugin_identifier(key: &str) -> Option<(IdentifierKind, &str)> {
     let (kind, id) = key
-        .strip_prefix(IDENTIFIER)?
+        .strip_prefix(IDENTIFIER_NAMESPACE)?
         .strip_prefix('.')?
         .split_once('.')?;
     IdentifierKind::ALL
@@ -87,7 +66,7 @@ fn plugin_identifier(key: &str) -> Option<(IdentifierKind, &str)> {
 /// description and config text, which the admin pages show for a plugin
 /// whether it runs or not.
 fn is_manifest_text(plugin_id: &str, key: &str) -> bool {
-    MANIFEST_TEXT.iter().any(|ns| {
+    MANIFEST_TEXT_NAMESPACES.iter().any(|ns| {
         key.strip_prefix(ns)
             .and_then(|rest| rest.strip_prefix('.'))
             .is_some_and(|rest| under(Some(rest), plugin_id))
@@ -441,28 +420,6 @@ mod tests {
             &owners,
         );
         assert!(two["en"].0.is_empty(), "{:?}", two["en"].0);
-    }
-
-    /// Every namespace the host's catalog speaks in, and every key family
-    /// the platform reads for all plugins, is refused as a plugin id.
-    #[test]
-    fn no_plugin_id_names_a_host_namespace() {
-        let catalog: toml::Table = include_str!(env!("HOST_CATALOG")).parse().unwrap();
-        assert!(!catalog.is_empty());
-        for key in catalog.keys() {
-            let namespace = key.split('.').next().unwrap();
-            assert!(super::is_host_namespace(namespace), "{key}");
-            assert!(
-                super::is_host_namespace(&namespace.to_ascii_uppercase()),
-                "{key}"
-            );
-        }
-        for family in ["plugin", "config", "identifier", "apiError"] {
-            assert!(super::is_host_namespace(family), "{family}");
-        }
-        for plugin in ["ioi", "icpc", "batch-evaluator", "apiErrors"] {
-            assert!(!super::is_host_namespace(plugin), "{plugin}");
-        }
     }
 
     #[test]

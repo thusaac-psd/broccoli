@@ -66,6 +66,17 @@ pub enum PluginError {
         func_name: String,
     },
 
+    /// The call could not run to completion because the host's database was
+    /// unreachable (a host function failed it with
+    /// [`crate::executor::fail_database_unavailable`]). Like
+    /// [`Self::Unavailable`] it says nothing about the work; callers answer
+    /// it as the database's outage.
+    #[error("Plugin '{plugin_id}' could not finish '{func_name}': the database is unreachable")]
+    DatabaseUnavailable {
+        plugin_id: String,
+        func_name: String,
+    },
+
     /// No instance of the plugin could be built for this call (out of memory,
     /// the module file gone). Not an answer from the plugin.
     #[error("Plugin '{plugin_id}' could not start an instance: {message}")]
@@ -85,13 +96,15 @@ pub enum PluginError {
 
 impl PluginError {
     /// Whether this says the plugin cannot answer right now rather than
-    /// anything about the request: the call reached its deadline, the server
-    /// is draining, the plugin is between loads, or no instance could be
-    /// built. Callers answer these as "try again", never as a decision.
+    /// anything about the request: the call reached its deadline, the
+    /// host's database is unreachable, the server is draining, the plugin is
+    /// between loads, or no instance could be built. Callers answer these as
+    /// "try again", never as a decision.
     pub fn is_unavailable(&self) -> bool {
         matches!(
             self,
             PluginError::Unavailable { .. }
+                | PluginError::DatabaseUnavailable { .. }
                 | PluginError::ShuttingDown
                 | PluginError::NotLoaded(_)
                 | PluginError::InstanceBuild { .. }

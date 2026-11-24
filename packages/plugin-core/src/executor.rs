@@ -213,18 +213,41 @@ impl CallLocals {
     }
 }
 
-/// Set on a call tree by [`fail_unavailable`].
-#[derive(Default)]
-pub(crate) struct MarkedUnavailable(pub bool);
+/// Why a call tree could not be served, as its host functions marked it
+/// ([`fail_unavailable`], [`fail_database_unavailable`]).
+#[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) enum MarkedUnavailable {
+    #[default]
+    No,
+    /// The host could not serve it right now (busy, cut at its deadline).
+    Busy,
+    /// The host's database was unreachable. It outranks `Busy`: it is the
+    /// cause, whatever else the call then met.
+    Database,
+}
+
+impl MarkedUnavailable {
+    fn mark(cause: MarkedUnavailable) {
+        if let Some(locals) = call_locals() {
+            locals.with(|marked: &mut MarkedUnavailable| *marked = (*marked).max(cause));
+        }
+    }
+}
 
 /// Mark the call running on this thread as one the host could not serve right
 /// now. A host function calls this before it traps the guest; the call then
 /// fails with [`PluginError::Unavailable`] instead of an execution error, so
 /// callers answer it as "try again".
 pub fn fail_unavailable() {
-    if let Some(locals) = call_locals() {
-        locals.with(|marked: &mut MarkedUnavailable| marked.0 = true);
-    }
+    MarkedUnavailable::mark(MarkedUnavailable::Busy);
+}
+
+/// Mark the call running on this thread as one the host could not serve
+/// because its database is unreachable. The call then fails with
+/// [`PluginError::DatabaseUnavailable`], whatever else marked it, so callers
+/// answer it as the database's outage rather than the plugin's.
+pub fn fail_database_unavailable() {
+    MarkedUnavailable::mark(MarkedUnavailable::Database);
 }
 
 /// The state shared by the call running on this thread and the calls nested
