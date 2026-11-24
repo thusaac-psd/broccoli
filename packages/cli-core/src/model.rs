@@ -6,6 +6,8 @@ use broccoli_api_types::submission::{SubmissionListItem, SubmissionResponse};
 use broccoli_api_types::visibility::{ClosedBy, PluginOutage, Provided, Withheld};
 pub use broccoli_api_types::{SubmissionStatus, Verdict};
 use ratatui::style::Color;
+use std::cell::OnceCell;
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
@@ -120,8 +122,9 @@ impl Standing {
     }
 
     /// What the submission waits for, as a sentence for a wait line; `None`
-    /// once nothing more is coming.
-    pub fn waiting_for(&self) -> Option<String> {
+    /// once nothing more is coming. A plugin it waits for is named through
+    /// `names`, so whoever can enable it knows which one.
+    pub fn waiting_for(&self, names: &PluginNames<'_>) -> Option<String> {
         match self {
             Self::Status(SubmissionStatus::Queued) => {
                 Some("Queued: waiting for a judge to take it".into())
@@ -131,8 +134,9 @@ impl Standing {
             }
             Self::Status(_) | Self::Hidden => None,
             Self::WaitingForPlugin(PluginOutage::Disabled { plugin_id }) => Some(format!(
-                "Waiting for the contest's plugin: '{plugin_id}' is disabled until an \
-                 administrator enables it"
+                "Waiting for the contest's plugin {}: disabled until an administrator \
+                 enables it",
+                names.name(plugin_id)
             )),
             Self::WaitingForPlugin(PluginOutage::Unavailable) => {
                 Some("Waiting for the contest's plugin, which cannot answer right now".into())
@@ -147,11 +151,44 @@ impl Standing {
                     Provided::CheckerFormat => "its checker plugin",
                 };
                 Some(format!(
-                    "Waiting for {role}: '{plugin_id}' is disabled until an administrator \
-                     enables it"
+                    "Waiting for {role} {}: disabled until an administrator enables it",
+                    names.name(plugin_id)
                 ))
             }
         }
+    }
+}
+
+/// Plugins by the names the server's catalog gives them
+/// (`plugin.<id>.name`), or by their ids where it gives none. The catalog is
+/// read the first time a plugin is named, so a line that names none costs
+/// no request.
+pub struct PluginNames<'a> {
+    catalog: OnceCell<HashMap<String, String>>,
+    read: Box<dyn Fn() -> HashMap<String, String> + 'a>,
+}
+
+impl<'a> PluginNames<'a> {
+    /// Names from the catalog `read` returns, read once, when first needed.
+    pub fn new(read: impl Fn() -> HashMap<String, String> + 'a) -> Self {
+        Self {
+            catalog: OnceCell::new(),
+            read: Box::new(read),
+        }
+    }
+
+    /// No catalog: every plugin by its id.
+    pub fn ids() -> Self {
+        Self::new(HashMap::new)
+    }
+
+    /// What `plugin_id` is called: its catalog name, else its id.
+    pub fn name(&self, plugin_id: &str) -> String {
+        self.catalog
+            .get_or_init(|| (self.read)())
+            .get(&format!("plugin.{plugin_id}.name"))
+            .cloned()
+            .unwrap_or_else(|| plugin_id.to_string())
     }
 }
 
@@ -255,7 +292,7 @@ mod tests {
         let hidden = Standing::new(None, Some(&Withheld::Hidden), None);
         assert_eq!(hidden, Standing::Hidden);
         assert!(!hidden.is_in_progress());
-        assert_eq!(hidden.waiting_for(), None);
+        assert_eq!(hidden.waiting_for(&PluginNames::ids()), None);
 
         let outage = Withheld::PluginOutage {
             outage: PluginOutage::Unavailable,
@@ -266,48 +303,70 @@ mod tests {
             Standing::WaitingForPlugin(PluginOutage::Unavailable)
         );
         assert!(waiting.is_in_progress());
-        assert!(waiting.waiting_for().is_some());
+        assert!(waiting.waiting_for(&PluginNames::ids()).is_some());
     }
 
     #[test]
-    fn a_queued_submission_whose_plugin_is_disabled_waits_for_that_plugin() {
-        let disabled = ClosedBy {
-            plugin_id: "ioi".into(),
-            provides: Provided::ContestType,
+    fn a_parked_submission_names_its_plugin_by_the_catalog_and_its_role() {
+        let names = PluginNames::new(|| {
+            [("plugin.ioi.name".to_string(), "IOI".to_string())]
+                .into_iter()
+                .collect()
+        });
+        let parked = |plugin_id: &str, provides| {
+            Standing::new(
+                Some(SubmissionStatus::Queued),
+                None,
+                Some(&ClosedBy {
+                    plugin_id: plugin_id.into(),
+                    provides,
+                }),
+            )
         };
-        let standing = Standing::new(Some(SubmissionStatus::Queued), None, Some(&disabled));
-        assert_eq!(standing, Standing::Parked(disabled.clone()));
         assert_eq!(
-            standing.waiting_for().as_deref(),
+            parked("ioi", Provided::ContestType)
+                .waiting_for(&names)
+                .as_deref(),
+            Some("Waiting for its contest plugin IOI: disabled until an administrator enables it")
+        );
+        // A plugin the catalog does not name is named by its id.
+        assert_eq!(
+            parked("batch", Provided::ProblemType)
+                .waiting_for(&names)
+                .as_deref(),
             Some(
-                "Waiting for its contest plugin: 'ioi' is disabled until an administrator \
+                "Waiting for its evaluator plugin batch: disabled until an administrator \
                  enables it"
             )
         );
-        let evaluator = ClosedBy {
-            plugin_id: "batch".into(),
-            provides: Provided::ProblemType,
-        };
         assert!(
-            Standing::new(Some(SubmissionStatus::Queued), None, Some(&evaluator))
-                .waiting_for()
+            parked("standard-checkers", Provided::CheckerFormat)
+                .waiting_for(&names)
                 .unwrap()
-                .starts_with("Waiting for its evaluator plugin: 'batch'")
-        );
-        let checker = ClosedBy {
-            plugin_id: "standard-checkers".into(),
-            provides: Provided::CheckerFormat,
-        };
-        assert!(
-            Standing::new(Some(SubmissionStatus::Queued), None, Some(&checker))
-                .waiting_for()
-                .unwrap()
-                .starts_with("Waiting for its checker plugin: 'standard-checkers'")
+                .starts_with("Waiting for its checker plugin standard-checkers:")
         );
         // A finished submission is finished whatever its plugin does now.
-        let judged = Standing::new(Some(SubmissionStatus::Judged), None, Some(&disabled));
+        let judged = Standing::new(
+            Some(SubmissionStatus::Judged),
+            None,
+            Some(&ClosedBy {
+                plugin_id: "ioi".into(),
+                provides: Provided::ContestType,
+            }),
+        );
         assert_eq!(judged, Standing::Status(SubmissionStatus::Judged));
         assert!(!judged.is_in_progress());
+    }
+
+    #[test]
+    fn a_line_that_names_no_plugin_reads_no_catalog() {
+        let names = PluginNames::new(|| panic!("the catalog is read only to name a plugin"));
+        assert!(
+            Standing::Status(SubmissionStatus::Queued)
+                .waiting_for(&names)
+                .is_some()
+        );
+        assert_eq!(Standing::Hidden.waiting_for(&names), None);
     }
 
     #[test]
@@ -315,12 +374,15 @@ mod tests {
         let queued = Standing::Status(SubmissionStatus::Queued);
         assert!(
             queued
-                .waiting_for()
+                .waiting_for(&PluginNames::ids())
                 .unwrap()
                 .contains("waiting for a judge")
         );
         let running = Standing::Status(SubmissionStatus::Running);
-        assert_eq!(running.waiting_for().as_deref(), Some("Judging: Running"));
+        assert_eq!(
+            running.waiting_for(&PluginNames::ids()).as_deref(),
+            Some("Judging: Running")
+        );
     }
 
     #[test]

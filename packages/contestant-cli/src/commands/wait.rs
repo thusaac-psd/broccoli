@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use broccoli_cli_core::model::{Standing, SubmissionStatus};
+use broccoli_cli_core::model::{PluginNames, Standing, SubmissionStatus};
 use broccoli_cli_core::tui::progress::Progress;
 
 /// The wait gave up while the work was still queued or judging. Nothing was
@@ -53,6 +53,7 @@ fn interval(standing: &Standing) -> Duration {
 pub fn until_final<T>(
     limit: Duration,
     check_later: &str,
+    names: &PluginNames<'_>,
     poll: impl FnMut() -> anyhow::Result<(Standing, T)>,
 ) -> anyhow::Result<(T, Duration)> {
     let mut progress = Progress::stderr();
@@ -61,6 +62,7 @@ pub fn until_final<T>(
     run(
         limit,
         check_later,
+        names,
         poll,
         || start.elapsed(),
         std::thread::sleep,
@@ -82,6 +84,7 @@ pub fn until_final<T>(
 fn run<T>(
     limit: Duration,
     check_later: &str,
+    names: &PluginNames<'_>,
     mut poll: impl FnMut() -> anyhow::Result<(Standing, T)>,
     elapsed: impl Fn() -> Duration,
     mut sleep: impl FnMut(Duration),
@@ -90,7 +93,7 @@ fn run<T>(
     loop {
         let (standing, answer) = poll()?;
         let waited = elapsed();
-        let Some(waiting_for) = standing.waiting_for() else {
+        let Some(waiting_for) = standing.waiting_for(names) else {
             return Ok((answer, waited));
         };
         if waited >= limit {
@@ -125,6 +128,7 @@ mod tests {
         let result = run(
             MINUTE,
             "check later",
+            &PluginNames::ids(),
             || {
                 let i = polls.min(answers.len() - 1);
                 polls += 1;

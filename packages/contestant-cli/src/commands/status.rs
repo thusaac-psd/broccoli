@@ -39,7 +39,7 @@ pub fn run(args: StatusArgs) -> anyhow::Result<()> {
 
     if let Some(id) = args.id {
         let sub = client.get_submission(&id)?;
-        print_submission(&sub);
+        print_submission(&sub, &client);
         return Ok(());
     }
 
@@ -66,7 +66,7 @@ pub fn run(args: StatusArgs) -> anyhow::Result<()> {
             .interact_opt()?;
         if let Some(i) = choice {
             let sub = client.get_submission(&subs.data[i].id.to_string())?;
-            print_submission(&sub);
+            print_submission(&sub, &client);
         }
     } else {
         print_recent_table(&subs.data);
@@ -179,7 +179,7 @@ fn print_recent_table(subs: &[SubmissionListItem]) {
     println!();
 }
 
-fn print_submission(sub: &SubmissionResponse) {
+fn print_submission(sub: &SubmissionResponse, client: &Client) {
     println!();
     println!(
         "  {} {} — {}",
@@ -189,7 +189,7 @@ fn print_submission(sub: &SubmissionResponse) {
     );
     let standing = Standing::of_submission(sub);
     println!("  Status: {}", status_style(&standing));
-    if let Some(waiting_for) = standing.waiting_for() {
+    if let Some(waiting_for) = standing.waiting_for(&client.plugin_names()) {
         println!("  {}", style(waiting_for).dim());
     }
     if let Some(ref result) = sub.result {
