@@ -9,8 +9,8 @@ from the patches. The upstream SDK documentation is the crate's page on
 crates.io and docs.rs.
 
 The patches make a call's cancel (`CancelHandle::cancel`) and its manifest
-timeout bound every piece of guest code the call runs. All of them are in
-`src/plugin.rs`.
+timeout bound every piece of guest code the call runs, and keep a failed call to
+one log line. All of them are in `src/plugin.rs`.
 
 ## The deadline is armed before the call registers
 
@@ -59,6 +59,16 @@ memory. An error the guest reports through its output returns normally and keeps
 the store. The decision sits in `raw_call` because only there is the outcome
 still typed: the error a caller receives has turned an interrupt into the
 message `timeout` and a memory limit into `oom`.
+
+## A failed call logs one line, at debug
+
+`raw_call` logs an export call that failed in wasmtime (a trap, a failed host
+function) at `debug`, with the error's root cause. The published crate logs it
+at `error` with the error's `Debug` form, which carries the whole wasm backtrace
+wasmtime attaches as context: tens of lines for every expected failure (a
+plugin's missing dependency, a statement cut at its deadline). The caller gets
+the error, and Broccoli's host logs each failed call once, with its reason
+(`plugin_core` "Plugin call failed").
 
 ## The test hook
 

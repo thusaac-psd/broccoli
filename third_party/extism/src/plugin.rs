@@ -1146,9 +1146,10 @@ impl Plugin {
                     return Err((Error::msg(cause), rc));
                 }
 
-                error!(
+                debug!(
                     plugin = self.id.to_string(),
-                    "call to {name} encountered an error: {e:?}"
+                    "call to {name} encountered an error: {}",
+                    e.root_cause()
                 );
                 Err((e.into(), rc))
             }
