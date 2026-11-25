@@ -1388,7 +1388,7 @@ export interface paths {
     };
     /**
      * Server readiness and dependency health
-     * @description Public, unauthenticated. Pings the database, message queue and blob storage concurrently, within a 1.5s total budget. Returns 200 with `status: "ok"` when all probed components are healthy; 503 with `status: "degraded"` otherwise. This is the deep readiness check; load balancers should probe the shallow `GET /livez`, which makes no dependency calls.
+     * @description Public, unauthenticated. Pings the database, message queue and blob storage concurrently, within a 1.5s total budget. Returns 200 with `status: "ok"` when no probed component is down (a database whose pool is saturated reads `db: "busy"` and is not down); 503 with `status: "degraded"` otherwise. This is the deep readiness check; load balancers should probe the shallow `GET /livez`, which makes no dependency calls.
      */
     get: operations['getHealth'];
     put?: never;
@@ -3616,7 +3616,8 @@ export interface components {
     FleetPluginState: 'loaded' | 'failed' | 'pending' | 'disabled';
     HealthResponse: {
       /**
-       * @description Database probe result: `"ok"` or `"down"`.
+       * @description Database probe result: `"ok"`, `"busy"` when every pooled connection
+       *     is in use (the API answers `DATABASE_BUSY` meanwhile), or `"down"`.
        * @example ok
        */
       db: string;
@@ -3644,8 +3645,8 @@ export interface components {
        */
       plugins: string;
       /**
-       * @description Aggregate status: `"ok"` when every probed component is healthy,
-       *     `"degraded"` otherwise.
+       * @description Aggregate status: `"ok"` when no probed component is down,
+       *     `"degraded"` otherwise. A busy database is not down.
        * @example ok
        */
       status: string;

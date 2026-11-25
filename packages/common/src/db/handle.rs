@@ -33,6 +33,7 @@ use std::backtrace::Backtrace;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use broccoli_types::types::sanitize_text_field;
 use sea_orm::sea_query::Value;
@@ -296,6 +297,18 @@ impl DatabaseConnection {
                 held,
                 metric: self.2.clone(),
             })
+    }
+
+    /// [`acquire`](Self::acquire) within `budget`. A wait that outlasts it
+    /// answers as the pool's own acquire timeout would: busy
+    /// ([`Outage::Busy`](super::Outage::Busy)) while any connection is
+    /// checked out, lost otherwise. Unlike that timeout it does not mark the
+    /// database unreachable.
+    pub async fn acquire_within(&self, budget: Duration) -> Result<PooledConnection, DbErr> {
+        match tokio::time::timeout(budget, self.acquire()).await {
+            Ok(outcome) => outcome,
+            Err(_) => Err(self.1.wait_expired()),
+        }
     }
 
     /// How many connections the pool has open, and how many are idle.

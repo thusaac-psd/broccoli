@@ -113,3 +113,54 @@ mod livez {
         assert!(elapsed < Duration::from_millis(1900), "took {elapsed:?}");
     }
 }
+
+mod busy {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// A pool whose every connection is checked out is busy, not down: the
+    /// deep check reports `db: "busy"` by the same rule the API answers
+    /// `DATABASE_BUSY` by, and a busy database does not fail readiness. The
+    /// probe stays within its budget even though the pool's own acquire
+    /// timeout is longer. Once a connection comes free the probe reads `ok`.
+    #[tokio::test]
+    async fn a_saturated_pool_reads_busy_not_down() {
+        use common::db::{PgPoolSpec, PgSession};
+        use sea_orm::TransactionTrait;
+
+        let app = TestApp::spawn().await;
+        let database =
+            test_support::create_test_database(&format!("health_busy_{}", std::process::id()))
+                .await;
+        let spec = PgPoolSpec {
+            acquire_timeout: Duration::from_secs(30),
+            ..PgPoolSpec::new(1, 0)
+        };
+        let db = common::db::connect(database.url(), &spec, &PgSession::unbounded("test"))
+            .await
+            .unwrap();
+
+        let held = db.begin().await.unwrap();
+        let started = Instant::now();
+        let deps = server::handlers::health::probe_dependencies(
+            &db,
+            &app.state.mq,
+            app.state.blob_store.as_ref(),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert_eq!(deps.db(), "busy");
+        assert!(deps.healthy(), "a busy database does not fail readiness");
+        assert!(elapsed < Duration::from_millis(1900), "took {elapsed:?}");
+
+        held.rollback().await.unwrap();
+        let deps = server::handlers::health::probe_dependencies(
+            &db,
+            &app.state.mq,
+            app.state.blob_store.as_ref(),
+        )
+        .await;
+        assert_eq!(deps.db(), "ok");
+        db.close().await.unwrap();
+    }
+}
