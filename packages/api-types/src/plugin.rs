@@ -282,6 +282,9 @@ pub enum FieldErrorKind {
     /// names holds: a new item, or one whose key field changed. Its secret
     /// is entered again.
     SecretNotStored,
+    /// Another item of the array already has this value in the array's key
+    /// field, which names one item.
+    DuplicateKey { value: serde_json::Value },
     /// The plugin's own `validate` function refuses the value. `key`, when
     /// present, is a key of that plugin's language pack and `params` the
     /// values its message names; without it, `message` is all there is.
@@ -308,6 +311,9 @@ impl std::fmt::Display for FieldErrorKind {
             Self::MinLength { limit } => write!(f, "must be at least {limit} characters"),
             Self::MaxLength { limit } => write!(f, "must be at most {limit} characters"),
             Self::Pattern { pattern } => write!(f, "must match the pattern {pattern}"),
+            Self::DuplicateKey { value } => {
+                write!(f, "another item already has the key {value}")
+            }
             Self::SecretNotStored => {
                 f.write_str("no secret is stored for this item: enter it again")
             }

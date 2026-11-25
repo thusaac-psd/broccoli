@@ -256,6 +256,26 @@ fn validate_value(prop: &SchemaProperty, value: &Value, path: &str, errors: &mut
                     validate_value(item, v, &format!("{path}[{i}]"), errors);
                 }
             }
+            // A key field names one item: two items with the same key would
+            // share whatever belongs to it, a secret included.
+            if let Some(key) = &prop.key {
+                let mut seen = Vec::new();
+                for (i, value) in items.iter().enumerate() {
+                    let Some(named) = value.get(key) else {
+                        continue;
+                    };
+                    if seen.contains(&named) {
+                        errors.push(FieldError::new(
+                            format!("{path}[{i}].{key}"),
+                            FieldErrorKind::DuplicateKey {
+                                value: named.clone(),
+                            },
+                        ));
+                    } else {
+                        seen.push(named);
+                    }
+                }
+            }
         }
         Value::Object(fields) if !prop.properties.is_empty() => validate_fields(
             &prop.properties,
@@ -566,5 +586,31 @@ mod tests {
             r#"required = ["name"]"#,
         ))
         .expect("a required string key field");
+    }
+
+    #[test]
+    fn a_keyed_array_refuses_two_items_with_one_key() {
+        let manifest = stations_manifest(r#"key = "name""#, r#"required = ["name"]"#);
+        let ns = &manifest.config["print"];
+        let errors = validate(
+            ns,
+            &serde_json::json!({"stations": [
+                {"name": "a"}, {"name": "b"}, {"name": "a"},
+            ]}),
+        )
+        .expect_err("a duplicate key");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].path, "stations[2].name");
+        assert_eq!(
+            errors[0].kind,
+            FieldErrorKind::DuplicateKey {
+                value: serde_json::json!("a")
+            }
+        );
+        validate(
+            ns,
+            &serde_json::json!({"stations": [{"name": "a"}, {"name": "b"}]}),
+        )
+        .expect("distinct keys");
     }
 }

@@ -1113,6 +1113,7 @@
 'config.validation.unknownField' = "This setting does not exist"
 'config.validation.required' = "Required"
 'config.validation.secretNotStored' = "No secret is stored for this item. Enter it again."
+'config.validation.duplicateKey' = "Another item is already named {value}."
 'config.blob.default' = "Default"
 'config.blob.replaceLabel' = "Replace {name}"
 'config.blob.replace' = "Replace"

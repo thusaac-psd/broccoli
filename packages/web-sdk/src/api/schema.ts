@@ -3618,6 +3618,11 @@ export interface components {
           kind: 'secret_not_stored';
         }
       | {
+          /** @enum {string} */
+          kind: 'duplicate_key';
+          value: unknown;
+        }
+      | {
           key?: string | null;
           /** @enum {string} */
           kind: 'plugin';
