@@ -24,7 +24,13 @@ import type {
   InheritedConfig,
   JsonSchemaProperty,
 } from './types';
-import { CLEAR_SECRET, defaultForType, defaultText, isNewItem } from './utils';
+import {
+  CLEAR_SECRET,
+  defaultForType,
+  defaultText,
+  isNewItem,
+  valueText,
+} from './utils';
 
 function DefaultBadge() {
   const { t } = useTranslation();
@@ -84,6 +90,7 @@ export function SchemaField({
   const { t } = useTranslation();
   const pluginText = usePluginText();
   const itemName = useItemName();
+  const words = { yes: t('config.yes'), no: t('config.no') };
   const fieldId = `cfg-${path.join('-')}`;
   // A plugin can name its fields in its own translation pack.
   const label =
@@ -124,14 +131,14 @@ export function SchemaField({
     // A value from a scope the viewer may not read is shown as withheld.
     display: inheritedValue.withheld
       ? t('config.withheldValue')
-      : String(inheritedValue.value),
+      : (valueText(inheritedValue.value, words) ?? ''),
     source: configSourceName(inheritedValue.source, t),
   };
   const showAsPlaceholder = !isFieldExplicit && !isFieldDirty;
   // What an unset field shows, for every kind of field: the value it
   // inherits, else its default.
   const unsetText = showAsPlaceholder
-    ? (inheritedResult?.display ?? defaultText(prop, path, inherited))
+    ? (inheritedResult?.display ?? defaultText(prop, path, words, inherited))
     : undefined;
 
   const badge = (() => {
@@ -328,7 +335,7 @@ export function SchemaField({
               )}
               {prop.enum.map((opt) => (
                 <option key={String(opt)} value={String(opt)}>
-                  {String(opt)}
+                  {valueText(opt, words) ?? String(opt)}
                 </option>
               ))}
             </select>

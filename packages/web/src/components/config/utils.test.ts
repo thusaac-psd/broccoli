@@ -14,6 +14,7 @@ import {
   setAtPath,
   validateAll,
   validateField,
+  valueText,
 } from './utils.ts';
 
 const schema: JsonSchema = {
@@ -168,17 +169,29 @@ test("a plugin's refusal keeps its pack key, its parameters and its words", () =
   });
 });
 
+const words = { yes: 'Yes', no: 'No' };
+
+test('a boolean reads in words, other values as text', () => {
+  assert.equal(
+    defaultText({ type: 'boolean', default: false }, ['on'], words),
+    'No',
+  );
+  assert.equal(valueText(true, { yes: '是', no: '否' }), '是');
+  assert.equal(valueText('fast', words), 'fast');
+  assert.equal(valueText(['x'], words), undefined);
+});
+
 test('a field left at its default reads its default, the resolved one first', () => {
   const limit = schema.properties!.limit;
-  assert.equal(defaultText(limit, ['limit']), '3');
+  assert.equal(defaultText(limit, ['limit'], words), '3');
   assert.equal(
-    defaultText({ type: 'integer', default: 0 }, ['retries']),
+    defaultText({ type: 'integer', default: 0 }, ['retries'], words),
     '0',
     'a default of zero is a default',
   );
-  assert.equal(defaultText({ type: 'integer' }, ['free']), undefined);
+  assert.equal(defaultText({ type: 'integer' }, ['free'], words), undefined);
   assert.equal(
-    defaultText(limit, ['limit'], {
+    defaultText(limit, ['limit'], words, {
       config: { limit: 7 },
       source: 'default',
       is_enabled: true,
@@ -195,13 +208,17 @@ test('a field left at its default reads its default, the resolved one first', ()
     'the default the server resolved',
   );
   assert.equal(
-    defaultText(schema.properties!.nested.properties!.ratio, [
-      'nested',
-      'ratio',
-    ]),
+    defaultText(
+      schema.properties!.nested.properties!.ratio,
+      ['nested', 'ratio'],
+      words,
+    ),
     '0.5',
   );
-  assert.equal(defaultText(schema.properties!.weights, ['weights']), undefined);
+  assert.equal(
+    defaultText(schema.properties!.weights, ['weights'], words),
+    undefined,
+  );
 });
 
 const stations: JsonSchema = {

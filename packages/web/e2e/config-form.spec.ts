@@ -130,3 +130,46 @@ test('config tabs and array items read as names, not ids', async ({ page }) => {
   await expect(dialog.getByRole('heading', { name: '第 2 项' })).toBeVisible();
   await expect(dialog.getByText('打印站', { exact: true })).toHaveCount(1);
 });
+
+// A boolean left at its default reads in the user's language, never as a
+// raw true or false.
+test('an unset boolean reads its default in words', async ({ page }) => {
+  await mockApi(page, 'admin', { plugins: ['print'] });
+  await page.addInitScript(() =>
+    localStorage.setItem('broccoli-locale', 'zh-CN'),
+  );
+  await page.route('**/api/v1/admin/plugins', (route) =>
+    route.fulfill({
+      json: [
+        {
+          ...plugin,
+          config_schemas: [
+            {
+              namespace: 'print',
+              description: 'Code printing settings',
+              scopes: ['plugin'],
+              json_schema: {
+                type: 'object',
+                properties: {
+                  require_approval: {
+                    type: 'boolean',
+                    title: 'Require approval',
+                    default: false,
+                  },
+                },
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  await page.route('**/api/v1/admin/plugins/print/config', (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await page.goto('/admin/plugins');
+  await page.getByRole('button', { name: '配置' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByText('(否)')).toBeVisible();
+  await expect(dialog.getByText('(false)')).toHaveCount(0);
+});

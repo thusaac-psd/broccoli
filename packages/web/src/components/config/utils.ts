@@ -348,15 +348,37 @@ export function defaultForType(prop: JsonSchemaProperty): unknown {
   }
 }
 
+/** The words a boolean value reads as. */
+export interface BooleanWords {
+  yes: string;
+  no: string;
+}
+
+/**
+ * A config value as the form shows it wherever it names one (an option, an
+ * inherited value, a default): a boolean in words, anything else as text.
+ * `undefined` for a value with no such text (none, an object, a list).
+ */
+export function valueText(
+  value: unknown,
+  words: BooleanWords,
+): string | undefined {
+  if (value === undefined || value === null || typeof value === 'object') {
+    return undefined;
+  }
+  if (typeof value === 'boolean') return value ? words.yes : words.no;
+  return String(value);
+}
+
 /**
  * What a field left at its default reads, as placeholder text: the default
  * the server resolved for a top-level field (`inherited`), else the
- * schema's. `undefined` for a field with no default, or one that is an
- * object or a list.
+ * schema's, as [`valueText`] shows it.
  */
 export function defaultText(
   prop: JsonSchemaProperty,
   path: readonly string[],
+  words: BooleanWords,
   inherited?: InheritedConfig,
 ): string | undefined {
   const [field] = path;
@@ -364,10 +386,7 @@ export function defaultText(
     path.length === 1 && inherited?.fields?.[field] === 'default'
       ? (inherited.config as Record<string, unknown> | null)?.[field]
       : undefined;
-  const value = resolved ?? prop.default;
-  return value === undefined || value === null || typeof value === 'object'
-    ? undefined
-    : String(value);
+  return valueText(resolved ?? prop.default, words);
 }
 
 /**

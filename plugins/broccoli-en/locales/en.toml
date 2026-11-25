@@ -997,6 +997,8 @@
 'config.moveUp' = "Move up"
 'config.moveDown' = "Move down"
 'config.itemNumber' = "Item {n}"
+'config.yes' = "Yes"
+'config.no' = "No"
 
 # Language switcher
 'locale.switch' = "Language"
