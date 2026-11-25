@@ -77,5 +77,7 @@ export function SubmitClosureNotice({
           className={className}
         />
       );
+    case 'noLanguage':
+      return <Notice text={t('problem.noLanguage')} className={className} />;
   }
 }

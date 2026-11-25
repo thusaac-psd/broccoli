@@ -1311,3 +1311,48 @@ async fn a_problem_whose_evaluator_is_disabled_names_what_closes_its_submissions
         assert_eq!(res.body["closed_by"], closed, "{route}: {}", res.text);
     }
 }
+
+/// A problem whose every language is provided only by a disabled plugin is
+/// closed by that plugin, on its own and under a contest, and lists each
+/// closed language, so the page says so before any code is written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_problem_whose_languages_are_all_disabled_names_the_language_plugin() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    let a = TestApp::spawn().await;
+    let token = admin(&a).await;
+    let contest_id = a.create_contest(&token, "Languages", true, true).await;
+    let problem_id = a.create_problem(&token, "No language").await;
+    a.add_problem_to_contest(contest_id, problem_id, &token)
+        .await;
+    for sql in [
+        "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
+         ('off-languages', FALSE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [], \"languages\": [\"closed-lang\"], \"unchecked_problem_types\": []}')"
+            .to_string(),
+        format!(
+            "UPDATE problem SET submission_format = '{{\"closed-lang\": [\"main.x\"]}}' \
+             WHERE id = {problem_id}"
+        ),
+    ] {
+        a.db.execute_raw(Statement::from_string(DbBackend::Postgres, sql))
+            .await
+            .unwrap();
+    }
+    plugin_lifecycle::reconcile(&a.state).await.unwrap();
+
+    let closed = json!({"plugin_id": "off-languages", "provides": "language"});
+    for route in [
+        routes::problem(problem_id),
+        routes::contest_problem(contest_id, problem_id),
+    ] {
+        let res = a.get_with_token(&route, &token).await;
+        assert_eq!(res.status, 200, "{route}: {}", res.text);
+        assert_eq!(res.body["closed_by"], closed, "{route}: {}", res.text);
+        assert_eq!(
+            res.body["closed_languages"],
+            json!([{"language": "closed-lang", "closed_by": closed}]),
+            "{route}: {}",
+            res.text
+        );
+    }
+}

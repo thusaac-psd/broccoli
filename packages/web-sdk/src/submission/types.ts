@@ -47,6 +47,9 @@ export type PluginOutage = components['schemas']['PluginOutage'];
  */
 export type ClosedBy = components['schemas']['ClosedBy'];
 
+/** A language whose work is refused while its plugin is disabled. */
+export type ClosedLanguage = components['schemas']['ClosedLanguage'];
+
 /** What a unit of work needs a plugin to provide (`ClosedBy.provides`). */
 export type Provided = components['schemas']['Provided'];
 

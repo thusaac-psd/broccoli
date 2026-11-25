@@ -50,6 +50,23 @@ function parsePersistedFiles(raw: string | null): EditorFile[] {
   }
 }
 
+/**
+ * The languages a problem takes work in, of those the server can take now:
+ * the ones its `submissionFormat` names, or every one when it names none of
+ * them. Empty when the server can take none, which the problem view shows
+ * as a closed submit, never as an editor in some other language.
+ */
+export function acceptedLanguages(
+  supported: readonly SupportedLanguage[],
+  submissionFormat: SubmissionFormat,
+): SupportedLanguage[] {
+  if (!submissionFormat) return [...supported];
+  const configured = supported.filter(
+    (lang) => getConfiguredFilenames(lang.id, submissionFormat).length > 0,
+  );
+  return configured.length > 0 ? configured : [...supported];
+}
+
 export function getConfiguredFilenames(
   languageId: string,
   submissionFormat: SubmissionFormat,

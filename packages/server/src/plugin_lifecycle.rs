@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
-use broccoli_api_types::visibility::{ClosedBy, PluginOutage};
+use broccoli_api_types::visibility::{ClosedBy, ClosedLanguage, PluginOutage};
 use plugin_core::error::PluginError;
 use plugin_core::registry::PluginStatus;
 use sea_orm::{ConnectionTrait, DbBackend, DbErr, EntityTrait, Statement};
@@ -174,6 +174,14 @@ pub struct Governs {
     pub unchecked_problem_types: Vec<String>,
 }
 
+/// What closes new work on a problem ([`PluginLifecycle::problem_closure`]):
+/// the `closed_by` and `closed_languages` of its response.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProblemClosure {
+    pub closed_by: Option<ClosedBy>,
+    pub closed_languages: Vec<ClosedLanguage>,
+}
+
 /// A plugin that is enabled fleet-wide but not loaded on this replica.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginNotReady {
@@ -269,6 +277,56 @@ impl PluginLifecycle {
                     provides,
                 })
         })
+    }
+
+    /// What closes new work on a problem whose `needs` name no language yet
+    /// (a problem view, before the contestant picks one): each language it
+    /// accepts (recorded fleet-wide, and among `accepted` when the problem
+    /// names its languages) whose providers are all disabled, and the work
+    /// outright when what it needs besides a language is closed
+    /// ([`Self::closed_by`]) or none of its languages is left open (the
+    /// first closed one's plugin). A fleet that recorded none of them closes
+    /// nothing here.
+    pub fn problem_closure(
+        &self,
+        needs: Needs<'_>,
+        accepted: Option<&HashSet<&str>>,
+    ) -> ProblemClosure {
+        let languages: std::collections::BTreeSet<String> = self
+            .governs
+            .read()
+            .map(|governs| {
+                governs
+                    .values()
+                    .flat_map(|g| g.provides.languages.iter())
+                    .filter(|language| accepted.is_none_or(|a| a.contains(language.as_str())))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let closed_languages: Vec<ClosedLanguage> = languages
+            .iter()
+            .filter_map(|language| {
+                let plugin_id = self.disabled_provider(Provided::Language, language)?;
+                Some(ClosedLanguage {
+                    language: language.clone(),
+                    closed_by: ClosedBy {
+                        plugin_id,
+                        provides: Provided::Language,
+                    },
+                })
+            })
+            .collect();
+        let none_open = !languages.is_empty() && closed_languages.len() == languages.len();
+        let closed_by = self.closed_by(needs).or_else(|| {
+            none_open
+                .then(|| closed_languages.first().map(|l| l.closed_by.clone()))
+                .flatten()
+        });
+        ProblemClosure {
+            closed_by,
+            closed_languages,
+        }
     }
 
     /// The plugin that keeps `key` (a `kind` of key) closed: every plugin
@@ -2121,6 +2179,77 @@ mod tests {
         lifecycle.set_desired("eval", eval_enabled);
         lifecycle.set_desired("check", check_enabled);
         lifecycle
+    }
+
+    /// A problem's submit is closed for each language whose providers are
+    /// all disabled, and closed outright, by the first of them, once no
+    /// recorded language is left open; what it needs besides a language
+    /// closes it first.
+    #[test]
+    fn a_problem_is_closed_per_language_and_outright_once_no_language_is_open() {
+        use broccoli_api_types::visibility::ClosedLanguage;
+        let lifecycle = providers(true, true, true);
+        let languages = |languages: &[&str]| Governs {
+            provides: Provides {
+                languages: languages.iter().map(|l| l.to_string()).collect(),
+                ..Provides::default()
+            },
+            ..Governs::default()
+        };
+        lifecycle.set_governs("langs-a", languages(&["cpp", "python3"]));
+        lifecycle.set_governs("langs-b", languages(&["java"]));
+        lifecycle.set_desired("langs-a", false);
+        lifecycle.set_desired("langs-b", true);
+        let needs = lifecycle.needs("t", "p", "c", None);
+        let closed = |language: &str, plugin_id: &str| ClosedLanguage {
+            language: language.into(),
+            closed_by: ClosedBy {
+                plugin_id: plugin_id.into(),
+                provides: Provided::Language,
+            },
+        };
+
+        let some = lifecycle.problem_closure(needs, None);
+        assert_eq!(some.closed_by, None);
+        assert_eq!(
+            some.closed_languages,
+            vec![closed("cpp", "langs-a"), closed("python3", "langs-a")]
+        );
+
+        lifecycle.set_desired("langs-b", false);
+        let all = lifecycle.problem_closure(needs, None);
+        assert_eq!(
+            all.closed_by,
+            Some(ClosedBy {
+                plugin_id: "langs-a".into(),
+                provides: Provided::Language,
+            })
+        );
+        assert_eq!(all.closed_languages.len(), 3);
+
+        // A problem that names its languages is closed by those alone.
+        lifecycle.set_desired("langs-b", true);
+        let java_only = HashSet::from(["java"]);
+        let named = lifecycle.problem_closure(needs, Some(&java_only));
+        assert_eq!((named.closed_by, named.closed_languages), (None, vec![]));
+        let cpp_only = HashSet::from(["cpp"]);
+        assert_eq!(
+            lifecycle.problem_closure(needs, Some(&cpp_only)).closed_by,
+            Some(ClosedBy {
+                plugin_id: "langs-a".into(),
+                provides: Provided::Language,
+            })
+        );
+
+        // The contest type closes it before any language does.
+        lifecycle.set_desired("judge", false);
+        assert_eq!(
+            lifecycle.problem_closure(needs, None).closed_by,
+            Some(ClosedBy {
+                plugin_id: "judge".into(),
+                provides: Provided::ContestType,
+            })
+        );
     }
 
     /// A key resolves to the enabled plugin providing it whose id sorts

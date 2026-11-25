@@ -1,6 +1,7 @@
 import type { QueryFailure } from '@broccoli/web-sdk/hooks';
 import { Slot } from '@broccoli/web-sdk/slot';
 import type {
+  ClosedLanguage,
   Submission,
   SubmissionSummary,
 } from '@broccoli/web-sdk/submission';
@@ -25,6 +26,7 @@ interface ProblemCodingTabProps {
   onContestTypeChange?: (value: string) => void;
   contestTypes?: string[];
   submissionFormat?: Record<string, string[]> | null;
+  closedLanguages?: ClosedLanguage[];
   latestSubmission: Submission | null;
   submissionHistory: SubmissionSummary[];
   submissionHistoryError: QueryFailure | null;
@@ -53,6 +55,7 @@ export function ProblemCodingTab({
   onContestTypeChange,
   contestTypes,
   submissionFormat,
+  closedLanguages,
   latestSubmission,
   submissionHistory,
   submissionHistoryError,
@@ -94,6 +97,7 @@ export function ProblemCodingTab({
           onContestTypeChange={onContestTypeChange}
           contestTypes={contestTypes}
           submissionFormat={submissionFormat}
+          closedLanguages={closedLanguages}
         />
       </div>
 

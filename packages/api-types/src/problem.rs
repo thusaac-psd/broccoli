@@ -70,10 +70,14 @@ pub struct ProblemResponse {
     /// refused until it is.
     pub plugin_outage: Option<crate::visibility::PluginOutage>,
     /// The plugin that keeps a new submission or code run of this problem
-    /// from running, in the contest type the response is read under (the
-    /// contest's, or `default_contest_type` on its own), if anything: such
-    /// work is refused until a provider is enabled.
+    /// from running in any language, in the contest type the response is
+    /// read under (the contest's, or `default_contest_type` on its own), if
+    /// anything: such work is refused until a provider is enabled. Once no
+    /// language is left open, it is the first closed language's plugin.
     pub closed_by: Option<crate::visibility::ClosedBy>,
+    /// The languages whose work is refused while the rest stay open, each
+    /// with the plugin that closes it, sorted by language.
+    pub closed_languages: Vec<crate::visibility::ClosedLanguage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
