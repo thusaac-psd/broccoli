@@ -105,8 +105,8 @@ async fn seed_contest(app: &TestApp) -> (i32, String) {
         app,
         &format!(
             "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) VALUES \
-             ('problem', '{problem}', 'server-plugin:checker', '{{\"tolerance\": 1}}', 0, now()), \
-             ('contest', '{contest}', 'server-plugin:scoring', '{{\"freeze\": 60}}', 0, now())"
+             ('problem', '{problem}', 'server-plugin:bundled', '{{\"tolerance\": 1}}', 0, now()), \
+             ('contest', '{contest}', 'server-plugin:bundled', '{{\"freeze\": 60}}', 0, now())"
         ),
     )
     .await;
@@ -514,7 +514,7 @@ async fn seed_problem_with_configs(app: &TestApp, who: &str) -> i32 {
         app,
         &format!(
             "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) VALUES \
-             ('problem', '{problem}', 'server-plugin:task', '{{\"from\": \"{who}\"}}', 0, now()), \
+             ('problem', '{problem}', 'server-plugin:bundled', '{{\"from\": \"{who}\"}}', 0, now()), \
              ('plugin', 'server-plugin', 'settings', '{{\"who\": \"{who}\"}}', 0, now())"
         ),
     )
@@ -566,7 +566,7 @@ async fn a_bundle_carries_no_plugin_wide_config() {
              FROM plugin_config WHERE scope <> 'plugin'"
         )
         .await,
-        format!("problem/{problem}/server-plugin:task"),
+        format!("problem/{problem}/server-plugin:bundled"),
         "the problem's own config comes along"
     );
 
@@ -815,8 +815,9 @@ fn with_problem_columns(archive: &[u8], columns: &[(&str, &str)]) -> Vec<u8> {
 }
 
 /// A config whose plugin has no manifest on the source (removed, or never
-/// installed there) is one no one could say the secret fields of: the
-/// export leaves it out and names the plugin.
+/// installed there), or whose namespace its manifest no longer declares, is
+/// one no one could say the secret fields of: the export leaves it out and
+/// names it.
 #[tokio::test]
 async fn a_bundle_leaves_out_the_configs_of_a_plugin_without_a_manifest() {
     let source = TestApp::spawn().await;
@@ -825,7 +826,8 @@ async fn a_bundle_leaves_out_the_configs_of_a_plugin_without_a_manifest() {
         &source,
         &format!(
             "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
-             VALUES ('problem', '{problem}', 'removed-plugin:task', '{{}}', 0, now())"
+             VALUES ('problem', '{problem}', 'removed-plugin:task', '{{}}', 0, now()), \
+             ('problem', '{problem}', 'server-plugin:renamed', '{{}}', 0, now())"
         ),
     )
     .await;
@@ -842,7 +844,11 @@ async fn a_bundle_leaves_out_the_configs_of_a_plugin_without_a_manifest() {
     )
     .await
     .expect("export");
-    assert_eq!(summary.configs_left_out, ["removed-plugin"]);
+    assert_eq!(
+        summary.configs_left_out,
+        ["removed-plugin", "server-plugin:renamed"],
+        "a plugin with no manifest here, and a namespace its manifest does not declare"
+    );
 
     let target = TestApp::spawn().await;
     import(&target, &archive, ImportOptions::default())
@@ -854,7 +860,70 @@ async fn a_bundle_leaves_out_the_configs_of_a_plugin_without_a_manifest() {
             "SELECT string_agg(namespace, ',') AS v FROM plugin_config WHERE scope = 'problem'"
         )
         .await,
-        "server-plugin:task",
+        "server-plugin:bundled",
         "only the configs of a plugin the source knows travel"
     );
+}
+
+/// A bundle never carries a secret, and an import keeps what the target
+/// stores for the same config: re-importing a server's own export over its
+/// problems leaves their secrets as they were, though replacing the
+/// problems deletes their configs first.
+#[tokio::test]
+async fn reimporting_an_export_over_its_own_problems_keeps_their_secrets() {
+    let app = TestApp::spawn().await;
+    let problem = seed_problem_with_configs(&app, "source").await;
+    exec(
+        &app,
+        &format!(
+            "UPDATE plugin_config SET config = config || '{{\"token\": \"problem-secret\"}}' \
+             WHERE scope = 'problem' AND ref_id = '{problem}'"
+        ),
+    )
+    .await;
+    let archive = export(
+        &app,
+        ExportOptions {
+            selection: Selection::Problems(vec![problem]),
+            with_secrets: false,
+        },
+    )
+    .await
+    .expect("export");
+    assert!(
+        !String::from_utf8_lossy(&unpacked(&archive)).contains("problem-secret"),
+        "the bundle carries the secret"
+    );
+
+    import(
+        &app,
+        &archive,
+        ImportOptions {
+            replace_problems: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("re-import");
+    assert_eq!(
+        text(
+            &app,
+            &format!(
+                "SELECT config->>'token' AS v FROM plugin_config \
+                 WHERE scope = 'problem' AND ref_id = '{problem}'"
+            )
+        )
+        .await,
+        "problem-secret"
+    );
+}
+
+/// The archive's entries, uncompressed.
+fn unpacked(archive: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(archive)
+        .read_to_end(&mut out)
+        .expect("a gzip archive");
+    out
 }

@@ -162,20 +162,43 @@ pub(crate) fn declared(
         .cloned()
 }
 
+/// A stored config as a read shows it.
+pub(crate) struct Shown {
+    /// Each secret field `null`; `null` whole when `withheld`.
+    pub(crate) config: serde_json::Value,
+    /// The paths of the secret fields that hold a value.
+    pub(crate) secrets: Vec<String>,
+    /// No schema for the namespace is known here, so nothing of it shows.
+    pub(crate) withheld: bool,
+}
+
 /// A stored config as a read shows it: each secret field its namespace
-/// declares `null`, with the paths of those that hold a value. Every route
-/// that answers a stored config builds its answer here, so a secret never
-/// leaves the server.
+/// declares `null`, with the paths of those that hold a value, and nothing
+/// at all when this server knows no schema for the namespace, since no one
+/// here can say which of its fields are secret. Every route that answers a
+/// stored config builds its answer here, so a secret never leaves the
+/// server.
 pub(crate) fn shown(
     registry: &PluginRegistry,
     plugin_id: &str,
     namespace: &str,
     mut config: serde_json::Value,
-) -> (serde_json::Value, Vec<String>) {
-    let secrets = declared(registry, plugin_id, namespace)
-        .map(|ns| ns.withhold_secrets(&mut config))
-        .unwrap_or_default();
-    (config, secrets)
+) -> Shown {
+    match declared(registry, plugin_id, namespace) {
+        Some(ns) => {
+            let secrets = ns.withhold_secrets(&mut config);
+            Shown {
+                config,
+                secrets: secrets.into_iter().map(|set| set.path).collect(),
+                withheld: false,
+            }
+        }
+        None => Shown {
+            config: serde_json::Value::Null,
+            secrets: Vec::new(),
+            withheld: true,
+        },
+    }
 }
 
 pub(crate) async fn get_config<C: ConnectionTrait>(
@@ -197,12 +220,13 @@ pub(crate) async fn get_config<C: ConnectionTrait>(
     match row {
         Some(r) => {
             let namespace = strip_namespace_prefix(&r.namespace).to_string();
-            let (config, secrets) = shown(registry, plugin_id, &namespace, r.config);
+            let shown = shown(registry, plugin_id, &namespace, r.config);
             Ok(Json(PluginConfigResponse {
                 plugin_id: plugin_id.to_string(),
                 namespace,
-                config,
-                secrets,
+                config: shown.config,
+                secrets: shown.secrets,
+                config_withheld: shown.withheld,
                 enabled: r.enabled,
                 position: r.position,
                 updated_at: Some(r.updated_at),
@@ -552,8 +576,8 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
             .one(&txn)
             .await?;
     }
-    // A secret the client sends back as `null` (it reads them so) keeps the
-    // stored value.
+    // A secret the client sends back as `null` (it reads them so) keeps what
+    // the stored config holds for the same item.
     let mut config = config;
     if let Some(ns) = declared(plugins.get_registry(), plugin_id, namespace) {
         let stored = plugin_config::Entity::find_by_id((
@@ -563,7 +587,15 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
         ))
         .one(&txn)
         .await?;
-        ns.keep_secrets(&mut config, stored.as_ref().map(|row| &row.config));
+        ns.keep_secrets(&mut config, stored.as_ref().map(|row| &row.config))
+            .map_err(|unstored| {
+                AppError::InvalidConfig(
+                    unstored
+                        .into_iter()
+                        .map(|path| FieldError::new(path, FieldErrorKind::SecretNotStored))
+                        .collect(),
+                )
+            })?;
     }
     let findings = check_config(plugins, target, plugin_id, namespace, &config, reads).await?;
     if !findings.refusals.is_empty() {
@@ -602,13 +634,14 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     .await?;
     let change = ConfigChange::of(&txn, target).await?;
     txn.commit().await?;
-    let (config, secrets) = shown(plugins.get_registry(), plugin_id, namespace, row.config);
+    let shown = shown(plugins.get_registry(), plugin_id, namespace, row.config);
     Ok((
         PluginConfigResponse {
             plugin_id: plugin_id.to_string(),
             namespace: strip_namespace_prefix(&row.namespace).to_string(),
-            config,
-            secrets,
+            config: shown.config,
+            secrets: shown.secrets,
+            config_withheld: shown.withheld,
             enabled: row.enabled,
             position: row.position,
             updated_at: Some(row.updated_at),
@@ -1059,6 +1092,168 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A caller with exactly `permissions`.
+    fn caller(permissions: &[&str]) -> crate::extractors::auth::AuthUser {
+        crate::extractors::auth::AuthUser {
+            user_id: 1,
+            session_id: 1,
+            username: "u".into(),
+            roles: Vec::new(),
+            permissions: permissions.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn each_scope_is_read_by_the_permission_its_config_routes_require() {
+        use broccoli_server_sdk::permissions as perm;
+        let all = Readable::of(&caller(&[
+            perm::PLUGIN_MANAGE,
+            perm::PROBLEM_EDIT,
+            perm::CONTEST_MANAGE,
+        ]));
+        assert_eq!(
+            all,
+            Readable {
+                plugin: true,
+                problem: true,
+                contest: true
+            }
+        );
+        let organizer = Readable::of(&caller(&[perm::CONTEST_MANAGE]));
+        assert!(organizer.reads(ConfigSource::Contest));
+        assert!(organizer.reads(ConfigSource::ContestProblem));
+        assert!(!organizer.reads(ConfigSource::Problem));
+        assert!(!organizer.reads(ConfigSource::Plugin));
+        let setter = Readable::of(&caller(&[perm::PROBLEM_EDIT]));
+        assert!(setter.reads(ConfigSource::Problem));
+        assert!(!setter.reads(ConfigSource::Contest));
+        assert!(!setter.reads(ConfigSource::ContestProblem));
+        assert!(!setter.reads(ConfigSource::Plugin));
+        let anyone = Readable::of(&caller(&[]));
+        for source in [
+            ConfigSource::ContestProblem,
+            ConfigSource::Contest,
+            ConfigSource::Problem,
+            ConfigSource::Plugin,
+        ] {
+            assert!(!anyone.reads(source), "{source:?}");
+        }
+        assert!(
+            anyone.reads(ConfigSource::Default),
+            "a schema's defaults are no one's"
+        );
+    }
+
+    /// A row of one scope that stores `key`.
+    fn level(key: &str) -> broccoli_server_sdk::types::CascadeLevel {
+        let row = serde_json::json!({ key: key });
+        broccoli_server_sdk::types::CascadeLevel {
+            config: row.clone(),
+            stored: Some(row),
+            is_default: false,
+            enabled: None,
+        }
+    }
+
+    /// The cascade of a contest problem where each scope sets its own
+    /// field: `cp`, `c`, `p` and `g` (plugin-wide).
+    fn every_scope() -> EffectiveConfig {
+        use broccoli_server_sdk::types::CascadeLevels;
+        EffectiveConfig {
+            config: serde_json::json!({ "cp": "cp", "c": "c", "p": "p", "g": "g" }),
+            source: ConfigSource::ContestProblem,
+            is_enabled: true,
+            fields: [
+                ("cp", ConfigSource::ContestProblem),
+                ("c", ConfigSource::Contest),
+                ("p", ConfigSource::Problem),
+                ("g", ConfigSource::Plugin),
+            ]
+            .into_iter()
+            .map(|(k, s)| (k.to_string(), s))
+            .collect(),
+            levels: CascadeLevels {
+                contest_problem: Some(level("cp")),
+                contest: Some(level("c")),
+                problem: level("p"),
+                plugin: level("g"),
+            },
+        }
+    }
+
+    #[test]
+    fn a_cascade_shows_each_role_only_the_scopes_it_reads() {
+        // (role, what it reads, the scopes whose rows it sees, its fields)
+        let cases = [
+            (
+                "admin",
+                (true, true, true),
+                ["cp", "c", "p", "g"].as_slice(),
+            ),
+            ("contest manager", (false, false, true), &["cp", "c"]),
+            ("problem editor", (false, true, false), &["p"]),
+            ("plugin manager", (true, false, false), &["g"]),
+            ("none", (false, false, false), &[]),
+        ];
+        for (role, (plugin, problem, contest), shown) in cases {
+            let view = cascade_view(
+                every_scope(),
+                Readable {
+                    plugin,
+                    problem,
+                    contest,
+                },
+                None,
+            );
+            let levels = [
+                ("cp", view.levels.contest_problem.is_some()),
+                ("c", view.levels.contest.is_some()),
+                ("p", view.levels.problem.is_some()),
+                ("g", view.levels.plugin.is_some()),
+            ];
+            for (key, visible) in levels {
+                assert_eq!(visible, shown.contains(&key), "{role}: the {key} row");
+                assert_eq!(
+                    view.config.get(key).is_some(),
+                    shown.contains(&key),
+                    "{role}: the {key} field"
+                );
+                assert_eq!(
+                    view.withheld.contains(&key.to_string()),
+                    !shown.contains(&key),
+                    "{role}: {key} named as withheld"
+                );
+            }
+            assert_eq!(
+                view.fields.len(),
+                4,
+                "{role}: every field's source is named"
+            );
+        }
+    }
+
+    #[test]
+    fn a_switched_off_row_the_caller_cannot_read_withholds_nothing() {
+        let mut cascade = every_scope();
+        cascade.levels.contest.as_mut().unwrap().enabled = Some(false);
+        cascade.fields.insert("c".into(), ConfigSource::Plugin);
+        let view = cascade_view(
+            cascade,
+            Readable {
+                plugin: true,
+                problem: true,
+                contest: false,
+            },
+            None,
+        );
+        assert!(view.levels.contest.is_none());
+        assert!(
+            !view.withheld.contains(&"c".to_string()),
+            "a switched-off row contributes nothing: {:?}",
+            view.withheld
+        );
+    }
 
     #[test]
     fn a_refusal_keeps_only_a_key_of_the_plugins_own_pack() {

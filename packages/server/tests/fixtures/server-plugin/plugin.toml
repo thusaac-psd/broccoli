@@ -140,3 +140,21 @@ validate = "validate_checked"
 [config.checked.properties.refuse]
 type = "boolean"
 default = false
+
+# A config the bundle tests store and move between servers.
+[config.bundled]
+description = "Fixture config a bundle carries"
+scopes = ["problem", "contest"]
+
+[config.bundled.properties.tolerance]
+type = "number"
+
+[config.bundled.properties.freeze]
+type = "integer"
+
+[config.bundled.properties.from]
+type = "string"
+
+[config.bundled.properties.token]
+type = "string"
+secret = true

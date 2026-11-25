@@ -226,6 +226,100 @@ mod problem_config {
     }
 }
 
+/// A config whose namespace this server knows no schema for (its plugin's
+/// upload removed, or the namespace renamed) is one no one here can say the
+/// secret fields of: every read withholds it whole.
+mod unknown_schema {
+    use super::*;
+    use sea_orm::ConnectionTrait;
+
+    #[tokio::test]
+    async fn a_config_whose_schema_is_unknown_is_never_read_back() {
+        let app = TestApp::spawn_with_config_schemas().await;
+        let admin = app
+            .create_user_with_role("unknown_schema_admin", "password123", "admin")
+            .await;
+        let problem_id = app.create_problem(&admin, "P").await;
+        let res = app
+            .put_with_token(
+                &routes::problem_config_ns(problem_id, "test-plugin", "checker"),
+                &json!({ "config": { "k": "kept-value" } }),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        app.db
+            .execute_unprepared(&format!(
+                "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+                 VALUES ('problem', '{problem_id}', 'test-plugin:renamed', \
+                 '{{\"token\": \"unknown-schema-secret\"}}', 0, now()), \
+                 ('problem', '{problem_id}', 'gone-plugin:task', \
+                 '{{\"token\": \"gone-plugin-secret\"}}', 0, now())"
+            ))
+            .await
+            .unwrap();
+
+        let res = app
+            .get_with_token(&routes::problem_config(problem_id), &admin)
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        assert!(!res.text.contains("unknown-schema-secret"), "{}", res.text);
+        assert!(!res.text.contains("gone-plugin-secret"), "{}", res.text);
+        let entry = |plugin: &str, namespace: &str| {
+            res.body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["plugin_id"] == plugin && e["namespace"] == namespace)
+                .unwrap_or_else(|| panic!("no {plugin}/{namespace} in {}", res.text))
+                .clone()
+        };
+        let renamed = entry("test-plugin", "renamed");
+        assert_eq!(renamed["config"], json!(null), "{renamed}");
+        assert_eq!(renamed["config_withheld"], json!(true), "{renamed}");
+        let known = entry("test-plugin", "checker");
+        assert_eq!(known["config_withheld"], json!(false), "{known}");
+        assert!(
+            res.text.contains("kept-value"),
+            "a known schema's config is shown"
+        );
+    }
+}
+
+/// A stored secret is cleared only by the explicit marker
+/// `{"$clear": true}`: `null` keeps it, and a string replaces it.
+mod clear_secret {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_clear_marker_clears_a_stored_secret() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("clear_secret_admin", "password123", "admin")
+            .await;
+        let problem_id = app.insert_public_problem("P").await;
+        let path = routes::problem_config_ns(problem_id, "server-plugin", "bundled");
+        let save = |config: serde_json::Value| {
+            let (app, admin, path) = (&app, &admin, &path);
+            async move {
+                let res = app
+                    .put_with_token(path, &json!({ "config": config }), admin)
+                    .await;
+                assert_eq!(res.status, 200, "{}", res.text);
+                res.body
+            }
+        };
+
+        let saved = save(json!({ "token": "to-clear" })).await;
+        assert_eq!(saved["secrets"], json!(["token"]), "{saved}");
+        let kept = save(json!({ "token": null })).await;
+        assert_eq!(kept["secrets"], json!(["token"]), "null keeps it: {kept}");
+        let cleared = save(json!({ "token": { "$clear": true } })).await;
+        assert_eq!(cleared["secrets"], json!([]), "{cleared}");
+        assert_eq!(cleared["config"], json!({}), "{cleared}");
+    }
+}
+
 mod namespace_validation {
     use super::*;
 

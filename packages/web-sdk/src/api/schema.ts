@@ -3597,6 +3597,10 @@ export interface components {
           scope: string;
         }
       | {
+          /** @enum {string} */
+          kind: 'secret_not_stored';
+        }
+      | {
           key?: string | null;
           /** @enum {string} */
           kind: 'plugin';
@@ -3997,6 +4001,12 @@ export interface components {
        *     `null`: a secret never leaves the server.
        */
       config: unknown;
+      /**
+       * @description Whether `config` is withheld whole (`null`): this server knows no
+       *     schema for the namespace (its plugin is not installed here, or no
+       *     longer declares it), so it cannot tell which fields are secret.
+       */
+      config_withheld: boolean;
       description?: string | null;
       enabled?: boolean | null;
       json_schema?: unknown;

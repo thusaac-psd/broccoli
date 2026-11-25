@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import type { JsonSchema } from './types.ts';
 import {
+  defaultText,
   extractDefaults,
   hasOwnDescendantValue,
   serverFieldErrors,
@@ -161,4 +162,40 @@ test("a plugin's refusal keeps its pack key, its parameters and its words", () =
     params: {},
     message: 'taken',
   });
+});
+
+test('a field left at its default reads its default, the resolved one first', () => {
+  const limit = schema.properties!.limit;
+  assert.equal(defaultText(limit, ['limit']), '3');
+  assert.equal(
+    defaultText({ type: 'integer', default: 0 }, ['retries']),
+    '0',
+    'a default of zero is a default',
+  );
+  assert.equal(defaultText({ type: 'integer' }, ['free']), undefined);
+  assert.equal(
+    defaultText(limit, ['limit'], {
+      config: { limit: 7 },
+      source: 'default',
+      is_enabled: true,
+      fields: { limit: 'default' },
+      withheld: [],
+      levels: {
+        contest_problem: null,
+        contest: null,
+        problem: null,
+        plugin: null,
+      },
+    }),
+    '7',
+    'the default the server resolved',
+  );
+  assert.equal(
+    defaultText(schema.properties!.nested.properties!.ratio, [
+      'nested',
+      'ratio',
+    ]),
+    '0.5',
+  );
+  assert.equal(defaultText(schema.properties!.weights, ['weights']), undefined);
 });

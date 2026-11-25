@@ -14,6 +14,10 @@ pub struct PluginConfigResponse {
     /// The paths of the secret fields that hold a value (`stations[0].token`).
     /// Writing `null` at one keeps the stored secret.
     pub secrets: Vec<String>,
+    /// Whether `config` is withheld whole (`null`): this server knows no
+    /// schema for the namespace (its plugin is not installed here, or no
+    /// longer declares it), so it cannot tell which fields are secret.
+    pub config_withheld: bool,
     pub enabled: Option<bool>,
     pub position: i32,
     pub updated_at: Option<DateTime<Utc>>,

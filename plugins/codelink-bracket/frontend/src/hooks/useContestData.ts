@@ -34,6 +34,7 @@ export function useContestProblems(contestId: number | undefined) {
       );
     },
   });
+  // eslint-disable-next-line query/no-defaulted-query-data -- an absent problem shows a neutral placeholder, which is what this hook promises
   const list = (data ?? []).filter(
     (problem) =>
       allowedProblemIds === null ||

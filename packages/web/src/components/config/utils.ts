@@ -2,7 +2,12 @@ import type { ApiSchemas } from '@broccoli/web-sdk/api';
 
 import type { MessageKey } from '@/lib/i18n/catalog';
 
-import type { FieldProblem, JsonSchema, JsonSchemaProperty } from './types';
+import type {
+  FieldProblem,
+  InheritedConfig,
+  JsonSchema,
+  JsonSchemaProperty,
+} from './types';
 
 export { inheritedValueOf } from '@broccoli/web-sdk/slot';
 
@@ -265,6 +270,8 @@ export function serverProblem(field: ServerFieldError): FieldProblem {
       return { key: 'config.validation.unknownField' };
     case 'missing':
       return { key: 'config.validation.required' };
+    case 'secret_not_stored':
+      return { key: 'config.validation.secretNotStored' };
     case 'plugin':
       return {
         pluginKey: field.key ?? null,
@@ -319,4 +326,26 @@ export function defaultForType(prop: JsonSchemaProperty): unknown {
     default:
       return '';
   }
+}
+
+/**
+ * What a field left at its default reads, as placeholder text: the default
+ * the server resolved for a top-level field (`inherited`), else the
+ * schema's. `undefined` for a field with no default, or one that is an
+ * object or a list.
+ */
+export function defaultText(
+  prop: JsonSchemaProperty,
+  path: readonly string[],
+  inherited?: InheritedConfig,
+): string | undefined {
+  const [field] = path;
+  const resolved =
+    path.length === 1 && inherited?.fields?.[field] === 'default'
+      ? (inherited.config as Record<string, unknown> | null)?.[field]
+      : undefined;
+  const value = resolved ?? prop.default;
+  return value === undefined || value === null || typeof value === 'object'
+    ? undefined
+    : String(value);
 }

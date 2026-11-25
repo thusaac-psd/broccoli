@@ -20,6 +20,7 @@ import {
 import { fetchSubmissions } from '@/features/submission/api/fetch-submissions';
 import { useBulkRejudge } from '@/features/submission/hooks/use-bulk-rejudge';
 import { useCursorPages } from '@/features/submission/hooks/use-cursor-pages';
+import { languageFilterOptions } from '@/features/submission/utils/language-filter';
 
 import { BulkRejudgeBar, BulkRejudgeToggle } from './BulkRejudge';
 import { SubmissionListPager } from './SubmissionListPager';
@@ -100,7 +101,7 @@ export function AllSubmissions() {
     return () => clearTimeout(handle);
   }, [appliedQ, searchInput, updateSearchParams]);
 
-  const { data: supportedLanguages } = useQuery({
+  const languages = useQuery({
     queryKey: ['supported-languages'],
     queryFn: () => fetchSupportedLanguages(apiClient),
     staleTime: 5 * 60 * 1000,
@@ -147,14 +148,17 @@ export function AllSubmissions() {
   const pagination = submissionsQuery.data?.pagination;
 
   const languageOptions = useMemo(
-    () => [
-      { value: 'all', label: t('submissions.filters.allLanguages') },
-      ...(supportedLanguages ?? []).map((l) => ({
-        value: l.id,
-        label: l.name,
-      })),
-    ],
-    [supportedLanguages, t],
+    () =>
+      languageFilterOptions(
+        {
+          all: t('submissions.filters.allLanguages'),
+          allUnavailable: t('submissions.filters.allLanguagesUnavailable'),
+        },
+        languages.data,
+        languages.isError,
+        appliedLanguage ?? null,
+      ),
+    [languages.data, languages.isError, appliedLanguage, t],
   );
 
   const statusOptions = useMemo(

@@ -1,6 +1,10 @@
 import { parseApiError, useApiClient } from '@broccoli/web-sdk/api';
 import { useQueryState } from '@broccoli/web-sdk/hooks';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import {
+  pluginKeys,
+  usePluginText,
+  useTranslation,
+} from '@broccoli/web-sdk/i18n';
 import type { PluginDetail } from '@broccoli/web-sdk/plugin';
 import {
   Label,
@@ -418,6 +422,7 @@ export function ResourceConfigDialog({
   onOpenChange,
 }: ResourceConfigDialogProps) {
   const { t } = useTranslation();
+  const pluginText = usePluginText();
   const apiClient = useApiClient();
 
   // For plugin scope, use admin endpoint
@@ -512,7 +517,10 @@ export function ResourceConfigDialog({
               <TabsList>
                 {pluginsWithSchemas.map((entry) => (
                   <TabsTrigger key={entry.pluginId} value={entry.pluginId}>
-                    {entry.pluginId}
+                    {pluginText(
+                      pluginKeys.name(entry.pluginId),
+                      entry.pluginId,
+                    )}
                   </TabsTrigger>
                 ))}
               </TabsList>
@@ -558,6 +566,7 @@ function SinglePluginContent({
   onNamespaceChange?: (ns: string) => void;
 }) {
   const { t } = useTranslation();
+  const pluginText = usePluginText();
   const [localNamespace, setLocalNamespace] = useState(
     schemas[0]?.namespace ?? '',
   );
@@ -853,7 +862,10 @@ function SinglePluginContent({
         <TabsList>
           {schemas.map((s) => (
             <TabsTrigger key={s.namespace} value={s.namespace}>
-              {s.namespace}
+              {pluginText(
+                pluginKeys.configDescription(pluginId, s.namespace),
+                s.description ?? s.namespace,
+              )}
             </TabsTrigger>
           ))}
         </TabsList>

@@ -101,6 +101,7 @@
 # Submissions filters
 'submissions.filters.allProblems' = "All Problems"
 'submissions.filters.allLanguages' = "All Languages"
+'submissions.filters.allLanguagesUnavailable' = "All languages (the list could not load)"
 'submissions.filters.allStatuses' = "All Statuses"
 'submissions.filters.search' = "Search"
 'submissions.filters.searchPlaceholder' = "Search by user, problem, or contest…"
@@ -986,6 +987,12 @@
 'config.level.plugin' = "Server-wide"
 'config.withheldValue' = "hidden"
 'config.secretKept' = "Leave empty to keep the stored secret"
+'config.clearSecret' = "Clear"
+'config.secretCleared' = "Cleared when you save"
+'config.keepSecret' = "Keep it"
+'config.moveUp' = "Move up"
+'config.moveDown' = "Move down"
+'config.itemNumber' = "Item {n}"
 
 # Language switcher
 'locale.switch' = "Language"
@@ -1101,6 +1108,7 @@
 'config.validation.pattern' = "Does not have the required format"
 'config.validation.unknownField' = "This setting does not exist"
 'config.validation.required' = "Required"
+'config.validation.secretNotStored' = "No secret is stored for this item. Enter it again."
 'config.blob.default' = "Default"
 'config.blob.replaceLabel' = "Replace {name}"
 'config.blob.replace' = "Replace"

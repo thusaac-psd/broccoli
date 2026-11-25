@@ -153,6 +153,7 @@ default = ""
 
 [config.print.properties.stations]
 type = "array"
+key = "name"
 title = "Print stations"
 description = "Each entry authorizes one print station. The station sends 'Authorization: PrintStation <token>' and is known by its name in the queue."
 default = []

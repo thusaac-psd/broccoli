@@ -12,7 +12,7 @@ import {
 } from '@broccoli/web-sdk/slot';
 import { Button, Input, Label, Switch } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
-import { Minus, Plus } from 'lucide-react';
+import { ArrowDown, ArrowUp, Minus, Plus } from 'lucide-react';
 
 import { BlobRefField } from './BlobRefField';
 import { FieldError } from './FieldError';
@@ -24,7 +24,7 @@ import type {
   InheritedConfig,
   JsonSchemaProperty,
 } from './types';
-import { defaultForType } from './utils';
+import { defaultForType, defaultText } from './utils';
 
 function DefaultBadge() {
   const { t } = useTranslation();
@@ -50,6 +50,7 @@ export function SchemaField({
   hasExplicitDescendant,
   isDirty,
   inherited,
+  itemLabel,
 }: Readonly<{
   name: string;
   prop: JsonSchemaProperty;
@@ -65,25 +66,34 @@ export function SchemaField({
   hasExplicitDescendant: (path: string[]) => boolean;
   isDirty?: (path: string[]) => boolean;
   inherited?: InheritedConfig;
+  /**
+   * The name of an array item, which an item shows in place of the array's
+   * title and description: its key field's value, or its number.
+   */
+  itemLabel?: string;
 }>) {
   const { t } = useTranslation();
   const pluginText = usePluginText();
+  const itemName = useItemName();
   const fieldId = `cfg-${path.join('-')}`;
   // A plugin can name its fields in its own translation pack.
   const label =
-    pluginId && namespace
+    itemLabel ??
+    (pluginId && namespace
       ? pluginText(
           pluginKeys.configField(pluginId, namespace, path, 'title'),
           prop.title ?? name,
         )
-      : (prop.title ?? name);
+      : (prop.title ?? name));
   const description =
-    pluginId && namespace
-      ? pluginText(
-          pluginKeys.configField(pluginId, namespace, path, 'description'),
-          prop.description,
-        )
-      : prop.description;
+    itemLabel !== undefined
+      ? undefined
+      : pluginId && namespace
+        ? pluginText(
+            pluginKeys.configField(pluginId, namespace, path, 'description'),
+            prop.description,
+          )
+        : prop.description;
   const unit =
     pluginId && namespace && prop['x-unit']
       ? pluginText(
@@ -109,6 +119,11 @@ export function SchemaField({
     source: configSourceName(inheritedValue.source, t),
   };
   const showAsPlaceholder = !isFieldExplicit && !isFieldDirty;
+  // What an unset field shows, for every kind of field: the value it
+  // inherits, else its default.
+  const unsetText = showAsPlaceholder
+    ? (inheritedResult?.display ?? defaultText(prop, path, inherited))
+    : undefined;
 
   const badge = (() => {
     if (isFieldExplicit || isFieldDirty) return null;
@@ -225,9 +240,7 @@ export function SchemaField({
     // Boolean -> horizontal settings-style card with switch on the right
     if (prop.type === 'boolean') {
       const inheritedBoolLabel =
-        showAsPlaceholder && inheritedResult
-          ? `(${inheritedResult.display})`
-          : undefined;
+        unsetText === undefined ? undefined : `(${unsetText})`;
 
       return (
         <div className="flex items-center justify-between gap-4 rounded-lg border px-4 py-3">
@@ -264,10 +277,7 @@ export function SchemaField({
 
     // String enum -> styled select
     if (prop.type === 'string' && prop.enum) {
-      const selectPlaceholder =
-        showAsPlaceholder && inheritedResult
-          ? inheritedResult.display
-          : undefined;
+      const selectPlaceholder = unsetText;
 
       return (
         <div className="flex flex-col gap-1.5">
@@ -317,10 +327,7 @@ export function SchemaField({
 
     // Number / integer -> custom NumericInput
     if (prop.type === 'number' || prop.type === 'integer') {
-      const inheritedPlaceholder =
-        showAsPlaceholder && inheritedResult
-          ? inheritedResult.display
-          : undefined;
+      const inheritedPlaceholder = unsetText;
 
       return (
         <div className="flex flex-col gap-1.5">
@@ -403,8 +410,33 @@ export function SchemaField({
                     hasExplicitDescendant={hasExplicitDescendant}
                     isDirty={isDirty}
                     inherited={inherited}
+                    itemLabel={itemName(item, prop['x-key'], i)}
                   />
                 </div>
+                {/* An item moves with everything it holds, its secrets too:
+                    the server matches a kept secret to its item by key. */}
+                <Button
+                  aria-label={t('config.moveUp')}
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="shrink-0 h-9 w-9 text-muted-foreground"
+                  disabled={i === 0}
+                  onClick={() => updateValue(path, swapped(items, i - 1, i))}
+                >
+                  <ArrowUp className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  aria-label={t('config.moveDown')}
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="shrink-0 h-9 w-9 text-muted-foreground"
+                  disabled={i === items.length - 1}
+                  onClick={() => updateValue(path, swapped(items, i, i + 1))}
+                >
+                  <ArrowDown className="h-3.5 w-3.5" />
+                </Button>
                 <Button
                   aria-label={t('common.remove')}
                   type="button"
@@ -440,15 +472,18 @@ export function SchemaField({
       );
     }
 
-    // Default: string input. A secret is never read back: an empty input
-    // writes `null`, which keeps whatever secret is stored.
+    // Default: string input. A secret is never read back: a stored one
+    // reads `null`, and an empty input writes `null` again, which keeps it.
+    // Clearing it sends the explicit marker.
     {
       const secret = prop.writeOnly === true;
-      const stringPlaceholder = secret
-        ? t('config.secretKept')
-        : showAsPlaceholder && inheritedResult
-          ? inheritedResult.display
-          : undefined;
+      const stored = secret && value === null;
+      const clearing = secret && isClearMarker(value);
+      const stringPlaceholder = clearing
+        ? t('config.secretCleared')
+        : stored
+          ? t('config.secretKept')
+          : unsetText;
 
       return (
         <div className="flex flex-col gap-1.5">
@@ -467,23 +502,52 @@ export function SchemaField({
             )}
           </div>
           <div>
-            <Input
-              id={fieldId}
-              value={
-                showAsPlaceholder ? '' : typeof value === 'string' ? value : ''
-              }
-              onChange={(e) =>
-                updateValue(
-                  path,
-                  secret && e.target.value === '' ? null : e.target.value,
-                )
-              }
-              type={secret ? 'password' : undefined}
-              autoComplete={secret ? 'off' : undefined}
-              placeholder={stringPlaceholder}
-              minLength={prop.minLength}
-              maxLength={prop.maxLength}
-            />
+            <div className="flex gap-1.5">
+              <Input
+                id={fieldId}
+                value={
+                  showAsPlaceholder
+                    ? ''
+                    : typeof value === 'string'
+                      ? value
+                      : ''
+                }
+                onChange={(e) =>
+                  updateValue(
+                    path,
+                    secret && e.target.value === '' ? null : e.target.value,
+                  )
+                }
+                disabled={clearing}
+                type={secret ? 'password' : undefined}
+                autoComplete={secret ? 'off' : undefined}
+                placeholder={stringPlaceholder}
+                minLength={prop.minLength}
+                maxLength={prop.maxLength}
+              />
+              {stored && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-9 shrink-0"
+                  onClick={() => updateValue(path, { [CLEAR_SECRET]: true })}
+                >
+                  {t('config.clearSecret')}
+                </Button>
+              )}
+              {clearing && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-9 shrink-0"
+                  onClick={() => updateValue(path, null)}
+                >
+                  {t('config.keepSecret')}
+                </Button>
+              )}
+            </div>
             <FieldError problem={error} />
             {annotation}
           </div>
@@ -491,4 +555,40 @@ export function SchemaField({
       );
     }
   }
+}
+
+/** What a write sends for a secret to clear it: `{"$clear": true}`. */
+const CLEAR_SECRET = '$clear';
+
+function isClearMarker(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    Object.keys(value).length === 1 &&
+    (value as Record<string, unknown>)[CLEAR_SECRET] === true
+  );
+}
+
+/**
+ * What an array item is called: the value of its array's key field, or
+ * "Item N" when it has none yet.
+ */
+function useItemName() {
+  const { t } = useTranslation();
+  return (item: unknown, key: string | undefined, index: number) => {
+    const named =
+      key && item && typeof item === 'object'
+        ? (item as Record<string, unknown>)[key]
+        : undefined;
+    return typeof named === 'string' && named !== ''
+      ? named
+      : t('config.itemNumber', { n: index + 1 });
+  };
+}
+
+/** `items` with the items at `a` and `b` swapped. */
+function swapped<T>(items: readonly T[], a: number, b: number): T[] {
+  const next = [...items];
+  [next[a], next[b]] = [next[b], next[a]];
+  return next;
 }
