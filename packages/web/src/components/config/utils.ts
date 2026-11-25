@@ -258,9 +258,10 @@ function messageParams(
 /** What a server field error says, in the UI language when its kind is known. */
 export function serverProblem(field: ServerFieldError): FieldProblem {
   switch (field.kind) {
-    case 'type':
-      if (TYPE_KEYS[field.expected]) return { key: TYPE_KEYS[field.expected] };
-      break;
+    case 'type': {
+      const key = TYPE_KEYS[field.expected];
+      return key ? { key } : serverWords(field);
+    }
     case 'min':
       return { key: 'config.validation.min', params: { min: field.limit } };
     case 'max':
@@ -287,6 +288,8 @@ export function serverProblem(field: ServerFieldError): FieldProblem {
       return { key: 'config.validation.secretNotStored' };
     case 'secret_required':
       return { key: 'config.validation.secretRequired' };
+    case 'namespace_undeclared':
+      return { key: 'config.validation.namespaceUndeclared' };
     case 'duplicate_key':
       return {
         key: 'config.validation.duplicateKey',
@@ -298,8 +301,16 @@ export function serverProblem(field: ServerFieldError): FieldProblem {
         params: messageParams(field.params),
         message: field.message,
       };
+    default:
+      // Every kind the API names is said above, so a kind added to it fails
+      // the build here; one from a newer server reads in its own words.
+      field satisfies never;
+      return serverWords(field as ServerFieldError);
   }
-  // A kind this build does not know yet: the server's own words.
+}
+
+/** A field error said in the server's own words. */
+function serverWords(field: ServerFieldError): FieldProblem {
   return {
     key: 'plugins.config.serverFieldError',
     params: { message: field.message },
@@ -343,7 +354,7 @@ export function defaultForType(prop: JsonSchemaProperty): unknown {
       return prop.properties ? extractDefaults(prop as JsonSchema) : {};
     case 'array':
       return [];
-    default:
+    case undefined:
       return '';
   }
 }

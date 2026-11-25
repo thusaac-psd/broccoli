@@ -50,7 +50,9 @@ function getEntryStatus(entry: SubmissionEntry): ShownStatus {
       return 'Pending';
     case 'polling':
       return 'Running';
-    default:
+    case 'done':
+    case 'error':
+    case 'rejected':
       return 'Pending';
   }
 }

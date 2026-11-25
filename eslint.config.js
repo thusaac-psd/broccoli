@@ -58,6 +58,18 @@ export default defineConfig([
       'import/newline-after-import': 'warn',
       'import/no-duplicates': 'warn',
       'tsdoc/syntax': 'warn',
+      // A switch over a union names every member, a default included: a
+      // member the API or a plugin adds to a generated union fails the lint
+      // where it would otherwise fall to a default silently. A default that
+      // stays (for a value from a newer server) asserts `satisfies never`.
+      '@typescript-eslint/switch-exhaustiveness-check': [
+        'error',
+        {
+          considerDefaultExhaustiveForUnions: false,
+          allowDefaultCaseForExhaustiveSwitch: true,
+          requireDefaultForNonUnion: false,
+        },
+      ],
     },
   },
 

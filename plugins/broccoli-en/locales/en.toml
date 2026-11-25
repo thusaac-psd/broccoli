@@ -1122,6 +1122,7 @@
 'config.validation.required' = "Required"
 'config.validation.secretNotStored' = "The secret stored for this item was not read before this save, or was changed since. Enter it again, or clear it."
 'config.validation.secretRequired' = "This secret is required. Enter one."
+'config.validation.namespaceUndeclared' = "The plugin does not offer these settings at this level"
 'config.validation.duplicateKey' = "Another item is already named {value}."
 'config.blob.default' = "Default"
 'config.blob.replaceLabel' = "Replace {name}"

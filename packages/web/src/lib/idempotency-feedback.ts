@@ -47,7 +47,8 @@ export function unsettledMessage(
       return t(outcomeUnknownKey ?? unsettledMessageKey('outcome-unknown'));
     case 'in-progress':
       return t(unsettledMessageKey('in-progress'));
-    default:
+    case 'already-done':
+    case null:
       return null;
   }
 }

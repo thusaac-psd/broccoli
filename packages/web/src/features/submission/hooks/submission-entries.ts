@@ -134,7 +134,10 @@ export function entriesReducer(
         ? entries.map((e) => (rereads(e) ? withResult(e, action.result) : e))
         : entries;
     }
-    default: {
+    case 'accepted':
+    case 'polled':
+    case 'rejected':
+    case 'failed': {
       const index = entries.findIndex((e) => e.id === action.id);
       const entry = entries[index];
       if (!entry || !FROM[action.type].has(entry.status)) return entries;

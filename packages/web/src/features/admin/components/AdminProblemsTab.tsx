@@ -216,7 +216,7 @@ function ProblemDialogForm({
       case 'outcome-unknown':
       case 'in-progress':
         return 'unsettled';
-      default:
+      case null:
         return 'failed';
     }
   }

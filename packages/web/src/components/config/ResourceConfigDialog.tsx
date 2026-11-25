@@ -285,7 +285,9 @@ function useResourceConfigList(
             },
           );
           break;
-        default:
+        case 'plugin':
+          // Never fetched (`enabled` below): the plugin scope lists its
+          // configs through the plugin's own route.
           return [];
       }
 
