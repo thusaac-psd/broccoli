@@ -89,6 +89,19 @@ pub enum PluginError {
         func_name: String,
     },
 
+    /// The call could not run to completion because its own SQL found no
+    /// plugin SQL connection or permit free in time (a host function failed
+    /// it with [`crate::executor::fail_sql_busy`]): contention among the
+    /// plugin's calls, which a moment later serve again. The host database
+    /// answers, so it is not a host outage ([`PluginError::is_host_outage`]).
+    #[error(
+        "Plugin '{plugin_id}' could not finish '{func_name}': no plugin SQL connection was free"
+    )]
+    SqlBusy {
+        plugin_id: String,
+        func_name: String,
+    },
+
     /// No instance of the plugin could be built for this call (out of memory,
     /// the module file gone). Not an answer from the plugin.
     #[error("Plugin '{plugin_id}' could not start an instance: {message}")]
@@ -130,6 +143,7 @@ impl PluginError {
             PluginError::Unavailable { .. }
                 | PluginError::DatabaseUnavailable { .. }
                 | PluginError::DatabaseBusy { .. }
+                | PluginError::SqlBusy { .. }
                 | PluginError::ShuttingDown
                 | PluginError::NotLoaded(_)
                 | PluginError::InstanceBuild { .. }

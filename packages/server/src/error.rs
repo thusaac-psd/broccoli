@@ -663,6 +663,12 @@ impl From<PluginError> for AppError {
                 tracing::warn!("{err}");
                 AppError::DatabaseBusy
             }
+            // The plugin's own SQL contention answers the client alike: the
+            // server is busy, and serves again a moment later.
+            PluginError::SqlBusy { .. } => {
+                tracing::warn!("{err}");
+                AppError::DatabaseBusy
+            }
             // The failure's reason is the plugin's text.
             PluginError::ExecutionFailed {
                 ref plugin_id,

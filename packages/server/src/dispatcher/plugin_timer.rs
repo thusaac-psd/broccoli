@@ -22,9 +22,12 @@
 //! of their lease. A delivery the plugin could not answer (its SQL met a
 //! database outage, the server is draining, the plugin is between loads)
 //! is handed back with its attempt refunded and its next delivery backed off
-//! (`retry_at`, [`unanswered_backoff`]). A host outage (the database lost or
-//! saturated, the server draining) is the platform's, so it refunds for as
-//! long as it lasts and never spends the row; after [`MAX_UNANSWERED`]
+//! (`retry_at`, [`unanswered_backoff`]). A host outage (the host database
+//! lost or saturated, the server draining) is the platform's, so it refunds
+//! for as long as it lasts, never spends the row, and is tried again every
+//! [`OUTAGE_RETRY`], so the timer fires promptly once the database answers;
+//! the plugin's own SQL finding no connection free is the plugin's
+//! (`PluginError::SqlBusy`). After [`MAX_UNANSWERED`]
 //! deliveries in a row the plugin left unanswered for its own reason the
 //! refund stops, so a plugin that never answers spends the timer's budget
 //! and the timer is dropped loudly. The claim statement is the
@@ -64,6 +67,12 @@ pub const LEASE_MARGIN: StdDuration = StdDuration::from_secs(30);
 /// reason with their attempt refunded; past this each one spends one. A host
 /// outage never counts here.
 pub const MAX_UNANSWERED: i32 = 12;
+
+/// How soon a timer a host outage kept from answering is tried again: short
+/// and fixed, never backed off, so the timer fires within it of the database
+/// answering again, however long the outage lasted. One claim per timer per
+/// interval is all an outage costs.
+pub const OUTAGE_RETRY: StdDuration = StdDuration::from_secs(5);
 
 /// The wait before delivering a timer again after its `unanswered`th
 /// unanswered delivery in a row: 5 s, doubling, up to 5 min.
@@ -396,9 +405,10 @@ async fn release_unreached(db: &DatabaseConnection, rows: &[plugin_timer::Model]
     }
 }
 
-/// Hands a claimed row whose delivery went unanswered for `cause` back, its
-/// next delivery backed off by [`unanswered_backoff`] of how many in a row
-/// went unanswered for that cause. A host outage always refunds the attempt.
+/// Hands a claimed row whose delivery went unanswered for `cause` back. A
+/// host outage always refunds the attempt and is tried again after
+/// [`OUTAGE_RETRY`]; the plugin's own unanswered delivery is backed off by
+/// [`unanswered_backoff`] of how many in a row it left unanswered.
 /// The plugin's own unanswered delivery refunds it while the plugin has left
 /// no more than [`MAX_UNANSWERED`] in a row unanswered, and spends it after
 /// that. Only a row still holding this claim is touched. Errors are logged:
@@ -412,14 +422,11 @@ async fn back_off_unanswered(
     let Some(claimed_at) = row.claimed_at else {
         return;
     };
-    let (unanswered, outages, in_a_row) = match cause {
-        Unanswered::HostOutage => {
-            let outages = row.outages.saturating_add(1);
-            (row.unanswered, outages, outages)
-        }
+    let (unanswered, outages, wait) = match cause {
+        Unanswered::HostOutage => (row.unanswered, row.outages.saturating_add(1), OUTAGE_RETRY),
         Unanswered::Plugin => {
             let unanswered = row.unanswered.saturating_add(1);
-            (unanswered, 0, unanswered)
+            (unanswered, 0, unanswered_backoff(unanswered))
         }
     };
     let refund = i32::from(cause == Unanswered::HostOutage || unanswered <= MAX_UNANSWERED);
@@ -447,7 +454,7 @@ async fn back_off_unanswered(
                 refund.into(),
                 unanswered.into(),
                 outages.into(),
-                unanswered_backoff(in_a_row).as_secs_f64().into(),
+                wait.as_secs_f64().into(),
             ],
         ))
         .await
@@ -995,9 +1002,11 @@ mod tests {
     }
 
     /// A host outage never spends a timer, however long it lasts: each
-    /// delivery it keeps from answering refunds its attempt and backs off
-    /// (capped), even past [`MAX_UNANSWERED`], and does not count toward the
-    /// plugin's own unanswered deliveries.
+    /// delivery it keeps from answering refunds its attempt, even past
+    /// [`MAX_UNANSWERED`], and does not count toward the plugin's own
+    /// unanswered deliveries. It is tried again after [`OUTAGE_RETRY`] each
+    /// time, never longer, so a timer fires within that of the database
+    /// answering again however long the outage lasted.
     #[tokio::test]
     async fn a_host_outage_refunds_a_timer_for_as_long_as_it_lasts() {
         let db = test_db().await;
@@ -1023,13 +1032,11 @@ mod tests {
                 "outage {outage}: refunded, the plugin's own count untouched"
             );
             let wait = (row.retry_at.expect("backed off") - now()).num_milliseconds();
-            assert!(wait <= unanswered_backoff(outage).as_millis() as i64);
+            assert!(
+                0 < wait && wait <= OUTAGE_RETRY.as_millis() as i64,
+                "outage {outage}: tried again within {OUTAGE_RETRY:?}, waited {wait} ms"
+            );
         }
-        assert_eq!(
-            unanswered_backoff(MAX_UNANSWERED * 2),
-            StdDuration::from_secs(300),
-            "the backoff is capped"
-        );
 
         // The plugin's own miss after the outage resets the outage count.
         exec(
@@ -1131,6 +1138,18 @@ mod tests {
         assert_eq!(
             Delivery::of(&Err::<(), _>(PluginError::ShuttingDown), false),
             Delivery::Unanswered(Unanswered::HostOutage)
+        );
+        // The plugin's own SQL finding no connection free is its own
+        // contention: the host database answers.
+        assert_eq!(
+            Delivery::of(
+                &Err::<(), _>(PluginError::SqlBusy {
+                    plugin_id: "p".into(),
+                    func_name: "on_timer".into(),
+                }),
+                false
+            ),
+            Delivery::Unanswered(Unanswered::Plugin)
         );
         assert_eq!(
             Delivery::of(
