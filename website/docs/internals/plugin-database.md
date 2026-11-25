@@ -186,12 +186,21 @@ A plugin's SQL runs within the deadline of the call that runs it
   leased for it, with nothing read before it: the plugin pools' sessions set
   `client_connection_check_interval` (`plugin_db::CUT_CHECK_INTERVAL`), so a
   cut one's connection is closed and its backend stops the statement within
-  that interval (`plugin_db::CutBy::Closing`). The pools ask the database
-  once, before the first opens, whether it takes the setting (its platform
-  must tell a closed client); on one that does not, a statement's backend pid
-  is read at checkout and a cut one is cancelled there (`pg_cancel_backend`,
-  through the app role, which holds every plugin role) before its connection
-  returns (`CutBy::Cancelling`). A transaction records its backend's pid when
+  that interval (`plugin_db::CutBy::Closing`). That stops the statement only
+  when the backend's client is the server itself, so the pools ask once,
+  before the first opens: the host's sessions must send startup `options`,
+  and a probe connection that asks for the interval at startup must have it
+  (its platform must tell a closed client, and nothing between may drop the
+  option). Behind a pooler such as PgBouncer neither holds: the operator
+  turns the startup options off (`statement_timeout_secs = 0`,
+  `tcp_keepalives = false`), a pooler that ignores them leaves the interval
+  unset, and closing the server's side would leave the backend's own client,
+  the pooler, connected and the statement running. Then, and on a platform
+  that cannot check its clients, a statement's backend pid is read at
+  checkout and a cut one is cancelled there (`pg_cancel_backend`, through the
+  app role, which holds every plugin role) before its connection returns
+  (`CutBy::Cancelling`). A plugin's SQL may not change the interval, like
+  every bound the host enforces (`common::db::ENFORCED_SESSION_SETTINGS`). A transaction records its backend's pid when
   it begins, and a cut statement of it ends the transaction: it leaves the
   map and its lock at once, and the task cancels it and rolls it back,
   returning its connection and permit. No later statement can reach the

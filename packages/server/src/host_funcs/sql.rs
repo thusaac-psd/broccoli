@@ -768,7 +768,7 @@ fn reject_session_escape(plugin_id: &str, sql: &str) -> Result<(), extism::Error
             "Rejected a role/session change on the plugin SQL path",
         );
         return Err(extism::Error::msg(
-            "not permitted on the plugin SQL capability: SET/RESET ROLE, SET SESSION AUTHORIZATION, set_config, ALTER ROLE/USER, DISCARD, anonymous code blocks, pg_settings, and changes to host-enforced settings (statement_timeout, tcp_keepalives_*) in any scope are forbidden",
+            "not permitted on the plugin SQL capability: SET/RESET ROLE, SET SESSION AUTHORIZATION, set_config, ALTER ROLE/USER, DISCARD, anonymous code blocks, pg_settings, and changes to host-enforced settings (statement_timeout, tcp_keepalives_*, client_connection_check_interval) in any scope are forbidden",
         ));
     }
     Ok(())
@@ -1324,6 +1324,8 @@ mod tests {
             "CREATE VIEW v AS SELECT name, setting FROM pg_settings",
             "SELECT setting FROM \"pg_settings\" WHERE name = 'statement_timeout'",
             "SET SESSION statement_timeout TO 0",
+            "SET client_connection_check_interval = 0",
+            "SET LOCAL client_connection_check_interval TO 0",
             "set statement_timeout to default",
             "SELECT 1; SET tcp_keepalives_idle = 0",
             "reset role",
@@ -1813,6 +1815,33 @@ mod tests {
         }
         assert_eq!(rows().await, 0, "the statement stopped and rolled back");
         holding.rollback().await.expect("free the host connection");
+    }
+
+    /// Behind a pooler (PgBouncer), closing the host's connection leaves the
+    /// backend's own client, the pooler, connected: the host sends no startup
+    /// `options` there, and then cuts a statement by cancelling its backend,
+    /// never by closing its connection.
+    #[tokio::test]
+    async fn a_host_that_sends_no_startup_options_cuts_by_cancelling() {
+        let (_container, url, host) = one_connection().await;
+        migrate(&url).await;
+        let sql = PluginSql {
+            pools: PluginSqlPools::new(
+                host,
+                &url,
+                2,
+                Duration::from_secs(20),
+                &common::db::PgSession::new("broccoli-server", 0, false),
+            ),
+            registry: Default::default(),
+        };
+        let lease = sql
+            .lease("p", &crate::plugin_db::SqlCall::default())
+            .await
+            .expect("leased");
+        assert_eq!(lease.cut_by, crate::plugin_db::CutBy::Cancelling);
+        let (_conn, pid) = lease.connection().await.expect("connection");
+        assert!(pid.is_some(), "the backend to cancel is read at checkout");
     }
 
     /// On a database that cannot check its clients, a statement cut at its

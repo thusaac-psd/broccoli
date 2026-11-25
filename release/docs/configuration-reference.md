@@ -109,10 +109,10 @@ Leave these alone unless a measurement says otherwise.
 
 ### Database (`database.*`)
 
-| Setting                  | Default | Effect                                                                                                   |
-| ------------------------ | ------- | -------------------------------------------------------------------------------------------------------- |
-| `statement_timeout_secs` | `60`    | Per-statement timeout; `0` turns it off                                                                  |
-| `tcp_keepalives`         | `true`  | Behind a PgBouncer that rejects startup options, set this to `false` and `statement_timeout_secs` to `0` |
+| Setting                  | Default | Effect                                                                                                                                                                                           |
+| ------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `statement_timeout_secs` | `60`    | Per-statement timeout; `0` turns it off                                                                                                                                                          |
+| `tcp_keepalives`         | `true`  | Behind a PgBouncer, set this to `false` and `statement_timeout_secs` to `0`: the server then sends no startup options and stops a plugin statement cut at its deadline by cancelling its backend |
 
 ### Accounts and submissions
 
