@@ -57,11 +57,17 @@ pub(super) async fn build_submission_list_items(
             .get(&sub.problem_id)
             .ok_or_else(|| AppError::Internal("Problem not found".into()))?;
         let score = submission_score_for_status(&sub.status, sub.score);
+        let parked_by = state.plugin_lifecycle.parked_by(
+            state
+                .plugin_lifecycle
+                .needs_on(&sub.contest_type, problem_model, Some(&sub.language)),
+            sub.status,
+        );
 
         data.push(SubmissionListItem {
             id: sub.id,
             language: sub.language.clone(),
-            status: Some(sub.status),
+            status: Some(shown_status(sub.status, parked_by.as_ref())),
             verdict: sub.verdict,
             user_id: sub.user_id,
             username: user_model.username,
@@ -77,14 +83,7 @@ pub(super) async fn build_submission_list_items(
             time_used: sub.time_used,
             memory_used: sub.memory_used,
             withheld: None,
-            parked_by: state.plugin_lifecycle.parked_by(
-                state.plugin_lifecycle.needs_on(
-                    &sub.contest_type,
-                    problem_model,
-                    Some(&sub.language),
-                ),
-                sub.status,
-            ),
+            parked_by,
         });
     }
 
@@ -477,8 +476,18 @@ pub(super) async fn build_submission_response_with_cases(
     let show_compile_output =
         has_view_all || is_owner || compile_output_public(contest_model.as_ref(), now);
 
-    let is_running = sub.status == SubmissionStatus::Running;
-    let show_results = sub.status.is_terminal() || is_running;
+    let parked_by = state.plugin_lifecycle.parked_by(
+        state.plugin_lifecycle.needs(
+            &sub.contest_type,
+            &context.problem_type,
+            &context.checker_format,
+            Some(&sub.language),
+        ),
+        sub.status,
+    );
+    let status = shown_status(sub.status, parked_by.as_ref());
+    let is_running = status == SubmissionStatus::Running;
+    let show_results = status.is_terminal() || is_running;
 
     let result_response = if show_results {
         let current_judgement_id = context.current_judgement_id;
@@ -547,7 +556,7 @@ pub(super) async fn build_submission_response_with_cases(
         id: sub.id,
         files,
         language: sub.language.clone(),
-        status: Some(sub.status),
+        status: Some(status),
         user_id: sub.user_id,
         username: context.username,
         problem_id: sub.problem_id,
@@ -559,16 +568,24 @@ pub(super) async fn build_submission_response_with_cases(
         created_at: sub.created_at,
         result: result_response,
         withheld: None,
-        parked_by: state.plugin_lifecycle.parked_by(
-            state.plugin_lifecycle.needs(
-                &sub.contest_type,
-                &context.problem_type,
-                &context.checker_format,
-                Some(&sub.language),
-            ),
-            sub.status,
-        ),
+        parked_by,
     })
+}
+
+/// The status a submission shows. Parked work (`parked_by`) reads `Queued`
+/// whatever its row says: work in flight when its provider closed fleet-wide
+/// is cut and handed back to `Queued` (`judging::fail_dispatch`), and no
+/// replica takes it until a provider opens, so `Queued` is where it is
+/// going and where it waits.
+fn shown_status(
+    status: SubmissionStatus,
+    parked_by: Option<&broccoli_api_types::visibility::ClosedBy>,
+) -> SubmissionStatus {
+    if parked_by.is_some() {
+        SubmissionStatus::Queued
+    } else {
+        status
+    }
 }
 
 pub(super) async fn build_judgement_response(
@@ -799,6 +816,28 @@ mod judgement_history_tests {
             created_at: now,
             queued_at: now,
             finalized_at: Some(now),
+        }
+    }
+
+    #[test]
+    fn parked_work_reads_queued_whatever_its_row_says() {
+        use broccoli_api_types::visibility::{ClosedBy, ClosedReason, Provided};
+        let parked = ClosedBy {
+            plugin_id: "p".into(),
+            provides: Provided::ContestType,
+            reason: ClosedReason::Disabled,
+        };
+        for status in [
+            SubmissionStatus::Pending,
+            SubmissionStatus::Compiling,
+            SubmissionStatus::Running,
+            SubmissionStatus::Queued,
+        ] {
+            assert_eq!(
+                shown_status(status, Some(&parked)),
+                SubmissionStatus::Queued
+            );
+            assert_eq!(shown_status(status, None), status);
         }
     }
 
