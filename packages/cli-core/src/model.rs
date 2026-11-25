@@ -133,21 +133,29 @@ impl Standing {
                 Some(format!("Judging: {}", status.human()))
             }
             Self::Status(_) | Self::Hidden => None,
-            Self::WaitingForPlugin(PluginOutage::Disabled { plugin_id }) => Some(format!(
-                "Waiting for the contest's plugin {}: disabled until an administrator \
-                 enables it",
-                names.name(plugin_id)
-            )),
-            Self::WaitingForPlugin(PluginOutage::NotLoaded { plugin_id }) => Some(format!(
-                "Waiting for the contest's plugin {}: loaded on no server until one loads it",
-                names.name(plugin_id)
-            )),
+            Self::WaitingForPlugin(PluginOutage::Disabled { plugin_id }) => {
+                Some(contest_plugin(plugin_id, ClosedReason::Disabled, names))
+            }
+            Self::WaitingForPlugin(PluginOutage::NotLoaded { plugin_id }) => {
+                Some(contest_plugin(plugin_id, ClosedReason::NotLoaded, names))
+            }
             Self::WaitingForPlugin(PluginOutage::Unavailable) => {
                 Some("Waiting for the contest's plugin, which cannot answer right now".into())
             }
             Self::Parked(closed) => Some(format!("Waiting for {}", closed_by_text(closed, names))),
         }
     }
+}
+
+/// A wait line for a contest plugin that is out for `reason`, worded as
+/// [`closed_by_text`] words it.
+fn contest_plugin(plugin_id: &str, reason: ClosedReason, names: &PluginNames<'_>) -> String {
+    let closed = ClosedBy {
+        plugin_id: plugin_id.to_string(),
+        provides: Provided::ContestType,
+        reason,
+    };
+    format!("Waiting for {}", closed_by_text(&closed, names))
 }
 
 /// What keeps work from running (`closed`), as a phrase: the plugin by its
@@ -406,7 +414,7 @@ mod tests {
         );
         assert_eq!(
             not_loaded.waiting_for(&names).as_deref(),
-            Some("Waiting for the contest's plugin IOI: loaded on no server until one loads it")
+            Some("Waiting for its contest plugin IOI: loaded on no server until one loads it")
         );
         assert!(not_loaded.is_in_progress());
         // An evaluator loaded nowhere withholds nothing: only parked says it.
