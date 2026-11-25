@@ -19,10 +19,10 @@ test('a visibility change reaches every listener until it unsubscribes', () => {
 });
 
 test('a visibility change announced in one tab reaches the listeners of another', async () => {
-  // A second instance of the module is the same app in another tab.
-  const other = (await import(
-    './visibility.ts?another-tab'
-  )) as typeof import('./visibility.ts');
+  // A second instance of the module is the same app in another tab. The
+  // specifier is a value so the type checker does not resolve its query.
+  const anotherTab = './visibility.ts?another-tab';
+  const other = (await import(anotherTab)) as typeof import('./visibility.ts');
   const heard = new Promise<number>((resolve) => {
     const stop = other.onSubmissionVisibilityChange((id) => {
       stop();
