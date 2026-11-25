@@ -54,9 +54,9 @@ DTO 只能经由 `Visible::into_masked_json` 进入响应体，该函数应用�
 
 - 比赛和澄清是主机记录（`Resource::degrades_in_outage`），故障不会从中拿走任何内容。
 - 无法判断的题目部分或提交为 `Decision::Withheld`。其响应只显示其 `Governed` 形状列出的字段，其余字段为 `null`，`withheld` 为 `{"reason": "plugin_outage", "outage": ...}`。列表保留该行。没有主机决定字段的形状（题面、样例、附件）会以该故障使请求失败，读取以外的所有操作也是如此。
-- 故障对应 `503 PLUGIN_DISABLED` 或 `503 PLUGIN_UNAVAILABLE`，均带 `Retry-After`：每个 503 都可重试。已禁用插件的答复要求 30 秒后再试（`DISABLED_RETRY_AFTER_SECS`），因为需要它的工作被暂存，并在管理员启用后恢复。已禁用插件自己的路由同样返回 `PLUGIN_DISABLED`；向由已禁用插件提供比赛类型的比赛提交，返回 `CONTEST_TYPE_DISABLED`。
+- 故障分三种（由 `PluginLifecycle::outage` 区分，这是唯一区分它们的地方）：插件已禁用（`disabled`）；插件已启用但没有任何存活的副本在提供它（`not_loaded`，依据最近一次协调时各副本的报告判断）；插件已启用，只是本副本此刻缺少它（`unavailable`）。它们分别对应 `503 PLUGIN_DISABLED`、`503 PLUGIN_NOT_LOADED` 和 `503 PLUGIN_UNAVAILABLE`，均带 `Retry-After`：每个 503 都可重试。已禁用插件或未在任何服务器上加载的插件的答复要求 30 秒后再试（`DISABLED_RETRY_AFTER_SECS`），因为需要它的工作被暂存，并在管理员启用它或某个副本加载它后恢复；两者都在 `details.plugin_id` 中写明插件。插件自己的路由返回同样的答复；向由已禁用插件提供比赛类型的比赛提交，返回 `CONTEST_TYPE_DISABLED`，同样写明插件。
 
-`ContestResponse.plugin_outage` 和 `ContestListItem.plugin_outage` 来自 `plugin_lifecycle::contest_type_outage`：提供该比赛类型的插件已禁用，或本地没有加载其处理程序。客户端据此展示提交会被拒绝、结果不可用的比赛。
+`ContestResponse.plugin_outage` 和 `ContestListItem.plugin_outage` 来自 `plugin_lifecycle::contest_type_outage`：该比赛类型已关闭（`PluginLifecycle::key_closure`，对单个键的唯一关闭规则：所有提供者都已禁用，或其全集群提供者未在任何存活副本上加载），或本地没有加载其处理程序。客户端据此展示提交会被拒绝、结果不可用的比赛，除非只是本副本缺少该插件，否则会写明插件。
 
 `SubmissionResponse.parked_by`、`SubmissionListItem.parked_by` 和 `ProblemResponse.closed_by` 来自停放工作的规则 `PluginLifecycle::closed_by`：使工作无法运行的已禁用插件，以及它为该工作提供的内容（`contest_type`，或题目类型评测程序的 `problem_type`）。被停放的提交会指明它；题目按读取时所用的比赛类型（所在比赛的类型，单独读取时为其 `default_contest_type`）指明它，因此无论是哪个插件，客户端都只显示一条提示，并且不提供服务器会拒绝的提交。
 

@@ -124,17 +124,26 @@ Degrading is per resource and per field, never per batch:
   keeps the row. A shape with no host-decided fields (a problem statement, its
   samples, its attachments) fails the request with the outage, and so does
   every action other than reading.
-- An outage is `503 PLUGIN_DISABLED` or `503 PLUGIN_UNAVAILABLE`, each with
-  `Retry-After`: every 503 is retryable. A disabled plugin's answer asks again
-  after 30 seconds (`DISABLED_RETRY_AFTER_SECS`), since what needs it is
-  parked and serves once an administrator enables it. A disabled plugin's own routes
-  answer `PLUGIN_DISABLED` too; a submission to a contest whose type its
-  disabled plugin provides is `CONTEST_TYPE_DISABLED`.
+- An outage is one of three (`PluginLifecycle::outage`, the one place they
+  are told apart): the plugin is disabled (`disabled`), it is enabled and no
+  live replica serves it (`not_loaded`, judged by the replicas' reports as of
+  the last reconcile), or it is enabled and only this replica lacks it now
+  (`unavailable`). They answer `503 PLUGIN_DISABLED`, `503 PLUGIN_NOT_LOADED`
+  and `503 PLUGIN_UNAVAILABLE`, each with `Retry-After`: every 503 is
+  retryable. A disabled plugin's or a loaded-nowhere plugin's answer asks
+  again after 30 seconds (`DISABLED_RETRY_AFTER_SECS`), since what needs it is
+  parked and serves once an administrator enables it or a replica loads it;
+  both name the plugin in `details.plugin_id`. A plugin's own routes answer
+  the same; a submission to a contest whose type its disabled plugin
+  provides is `CONTEST_TYPE_DISABLED`, which names the plugin too.
 
 `ContestResponse.plugin_outage` and `ContestListItem.plugin_outage` come from
-`plugin_lifecycle::contest_type_outage`: the plugin providing the contest's type
-is disabled, or no handler for it is loaded here. Clients use it to show a
-contest whose submissions are refused and whose results are unavailable.
+`plugin_lifecycle::contest_type_outage`: the contest's type is closed
+(`PluginLifecycle::key_closure`, the one closure rule for a key: every
+provider disabled, or its fleet-wide provider loaded on no live replica), or
+no handler for it is loaded here. Clients use it to show a contest whose
+submissions are refused and whose results are unavailable, naming the plugin
+unless only this replica lacks it.
 
 `SubmissionResponse.parked_by`, `SubmissionListItem.parked_by` and
 `ProblemResponse.closed_by` come from `PluginLifecycle::closed_by`, the rule
