@@ -253,3 +253,56 @@ test('an open registration offers signing up', async ({ page }) => {
   await page.goto('/register');
   await expect(page).toHaveTitle(`Create Account · ${APP_NAME}`);
 });
+
+// The DLQ summary has a card per total and per message type, however many
+// there are: at every width each row of cards fills the summary, so no card
+// is left alone at the end, and every label fits its card.
+for (const width of [390, 768, 1024, 1280, 1536, 1920]) {
+  test(`the DLQ summary fills its rows at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await mockApi(page, 'admin');
+    await page.route(/\/api\/v1\/dlq\/stats$/, (route) =>
+      route.fulfill({
+        json: {
+          total_unresolved: 3,
+          total_resolved: 1,
+          unresolved_by_message_type: {
+            operation_task: 1,
+            stuck_submission: 1,
+            stuck_code_run: 0,
+            stuck_submission_judgement: 1,
+            hook_event: 0,
+          },
+          unresolved_by_error_code: {},
+        },
+      }),
+    );
+    await page.goto('/admin/dlq');
+    const summary = page.getByTestId('dlq-stats-summary');
+    await expect(summary.getByText('Undelivered hook events')).toBeVisible();
+    const layout = await summary.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const cards = Array.from(element.children, (card) => {
+        const rect = card.getBoundingClientRect();
+        const label = card.querySelector('p');
+        return {
+          top: Math.round(rect.top),
+          left: rect.left,
+          right: rect.right,
+          fits: !label || label.scrollWidth <= label.clientWidth,
+        };
+      });
+      return { left: box.left, right: box.right, cards };
+    });
+    expect(layout.cards).toHaveLength(7);
+    for (const card of layout.cards) expect(card.fits).toBe(true);
+    const rows = new Map<number, typeof layout.cards>();
+    for (const card of layout.cards) {
+      rows.set(card.top, [...(rows.get(card.top) ?? []), card]);
+    }
+    for (const row of rows.values()) {
+      expect(Math.min(...row.map((c) => c.left))).toBeCloseTo(layout.left, 0);
+      expect(Math.max(...row.map((c) => c.right))).toBeCloseTo(layout.right, 0);
+    }
+  });
+}
