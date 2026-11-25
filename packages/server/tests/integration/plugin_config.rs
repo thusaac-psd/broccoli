@@ -372,6 +372,94 @@ mod required_secret {
     }
 }
 
+/// A save reads the stored secrets it keeps under the row's lock, so a save
+/// that keeps a secret while another rotates it waits for the rotation and
+/// keeps the new secret, never reverting it.
+mod concurrent_secret {
+    use super::*;
+    use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_save_that_keeps_a_secret_waits_for_a_rotation_in_flight() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("concurrent_secret_admin", "password123", "admin")
+            .await;
+        let problem_id = app.insert_public_problem("P").await;
+        let path = routes::problem_config_ns(problem_id, "server-plugin", "bundled");
+        let res = app
+            .put_with_token(&path, &json!({ "config": { "token": "old" } }), &admin)
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+
+        // The test's own connections, beside the server's pool.
+        let own = sea_orm::Database::connect(app.database.url())
+            .await
+            .unwrap();
+        // A rotation in flight: the row is locked and holds the new token.
+        let rotation = own.begin().await.unwrap();
+        rotation
+            .execute_unprepared(&format!(
+                "UPDATE plugin_config SET config = '{{\"token\": \"rotated\"}}' \
+                 WHERE scope = 'problem' AND ref_id = '{problem_id}' \
+                 AND namespace = 'server-plugin:bundled'"
+            ))
+            .await
+            .unwrap();
+
+        let keep = {
+            let (url, admin, client) = (app.url(&path), admin.clone(), app.client.clone());
+            tokio::spawn(async move {
+                client
+                    .put(url)
+                    .bearer_auth(admin)
+                    .json(&json!({ "config": { "token": null, "from": "kept" } }))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+                    .as_u16()
+            })
+        };
+        // The save waits on the rotation's row lock.
+        loop {
+            let waiting = own
+                .query_one_raw(Statement::from_string(
+                    DbBackend::Postgres,
+                    "SELECT count(*) AS n FROM pg_stat_activity \
+                     WHERE wait_event_type = 'Lock' AND datname = current_database()",
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get::<i64>("", "n")
+                .unwrap();
+            if waiting > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        rotation.commit().await.unwrap();
+        assert_eq!(keep.await.unwrap(), 200);
+
+        let stored = own
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                format!(
+                    "SELECT config->>'token' AS v FROM plugin_config \
+                     WHERE scope = 'problem' AND ref_id = '{problem_id}' \
+                     AND namespace = 'server-plugin:bundled'"
+                ),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<String>("", "v")
+            .unwrap();
+        assert_eq!(stored, "rotated", "the save keeps the rotated token");
+    }
+}
+
 mod namespace_validation {
     use super::*;
 

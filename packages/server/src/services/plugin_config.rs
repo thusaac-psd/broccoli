@@ -624,11 +624,15 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     // the stored config holds for the same item.
     let mut config = config;
     if let Some(ns) = declared(plugins.get_registry(), plugin_id, namespace) {
+        // Under the row's lock: a save that rotates a secret meanwhile is
+        // waited for, so this one keeps the new secret instead of reverting
+        // it.
         let stored = plugin_config::Entity::find_by_id((
             target.scope().as_str().to_string(),
             target.ref_id().to_string(),
             target.stored_namespace(plugin_id, namespace),
         ))
+        .lock(LockType::Update)
         .one(&txn)
         .await?;
         ns.keep_secrets(&mut config, stored.as_ref().map(|row| &row.config))
