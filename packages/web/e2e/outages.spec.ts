@@ -222,7 +222,7 @@ for (const [name, locale, plugins, parkedBy, label] of [
     'zh-CN',
     ['icpc'],
     { plugin_id: 'icpc', provides: 'contest_type' },
-    '等待中：其比赛插件 ICPC 赛制 已被禁用',
+    '等待中：其比赛插件「ICPC 赛制」已被禁用',
   ],
   [
     'its evaluator plugin, by its id when no pack names it',

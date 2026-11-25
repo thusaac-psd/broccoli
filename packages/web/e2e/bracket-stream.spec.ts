@@ -141,7 +141,7 @@ test("a match's submission feed names outcomes and times in the UI language", as
   const sheet = page.getByRole('dialog');
   await expect(sheet.getByText('答案错误').first()).toBeVisible();
   await expect(
-    sheet.getByText('等待中：其比赛插件 Codelink 淘汰赛 已被禁用').first(),
+    sheet.getByText('等待中：其比赛插件「Codelink 淘汰赛」已被禁用').first(),
   ).toBeVisible();
   await expect(sheet.getByText('WrongAnswer')).toHaveCount(0);
   await expect(sheet.getByText('Queued', { exact: true })).toHaveCount(0);
