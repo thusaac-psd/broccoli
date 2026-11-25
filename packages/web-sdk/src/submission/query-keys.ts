@@ -20,4 +20,12 @@ export const submissionViewKeys = {
   /** A list of submissions, `name` telling the lists apart. */
   list: (name: string, ...filters: unknown[]) =>
     [SUBMISSION_VIEWS, 'list', name, ...filters] as const,
+  /**
+   * A plugin's own query whose answer depends on what the viewer may see of
+   * its submissions (a token count, a breakdown, a board that scores tokened
+   * submissions), under the plugin's id. It is read again with every other
+   * view, in every tab, so a plugin never follows a visibility change itself.
+   */
+  plugin: (pluginId: string, ...parts: unknown[]) =>
+    [SUBMISSION_VIEWS, 'plugin', pluginId, ...parts] as const,
 };

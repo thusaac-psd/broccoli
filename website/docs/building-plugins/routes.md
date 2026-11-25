@@ -227,6 +227,9 @@ helpers, so every plugin reads them by the same rules:
   `announceSubmissionVisibilityChange(submissionId)` once it is done. The
   host then reads every view of that submission again, in every open tab of
   the app, including views that stopped refreshing because the outcome was
-  hidden. Decide what such an
-  action is offered for from what your route says, never from the
-  submission's status: the viewer may be reading it withheld.
+  hidden. A query of your own whose answer depends on what the viewer may
+  see (a token count, a breakdown, a board that scores tokened submissions)
+  takes its key from `submissionViewKeys.plugin(pluginId, ...)`, and the
+  host reads it again with the rest. Decide what such an action is offered
+  for from what your route says, never from the submission's status: the
+  viewer may be reading it withheld.
