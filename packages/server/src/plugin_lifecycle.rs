@@ -2189,6 +2189,11 @@ pub async fn enable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
                 "Plugin '{plugin_id}' is already enabled"
             )));
         }
+        // Enabling is the fleet's state: a replica without the plugin's
+        // files records it for the replicas that have them, which load it.
+        if !plugin_distribution::loadable_here(state, id, &source) {
+            return enable_elsewhere(state, plugin_id, &source).await;
+        }
         Ok(load_then_publish(state, applied, id, Change::Enable, &source).await?)
     })
     .await;
@@ -2196,6 +2201,44 @@ pub async fn enable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
         recheck_config_issues(state, &[plugin_id]).await;
     }
     result
+}
+
+/// Enable `plugin_id`, whose `source` this replica cannot load, for the
+/// fleet: the version, governs and locale it last recorded stand, and the
+/// replicas that have its files load it.
+async fn enable_elsewhere(
+    state: &AppState,
+    plugin_id: &str,
+    source: &PluginSource,
+) -> Result<(), AppError> {
+    let published = publish(
+        &state.db,
+        plugin_id,
+        Change::Enable,
+        Loaded::default(),
+        source,
+    )
+    .await;
+    match published {
+        Ok(Some(_)) => {
+            state.plugin_lifecycle.set_desired(plugin_id, true);
+            Ok(())
+        }
+        Ok(None) => Err(refused(state, plugin_id, Change::Enable).await.into()),
+        Err(e) if breaks_locale_index(&e) => {
+            let locale = plugin_entity::Entity::find_by_id(plugin_id)
+                .one(&state.db)
+                .await?
+                .and_then(|row| row.host_locale)
+                .unwrap_or_default();
+            Err(match locale_taken(&state.db, plugin_id, &locale).await? {
+                Some(by) => ChangeError::LanguagePackTaken { locale, by },
+                None => ChangeError::Stale(plugin_id.to_string()),
+            }
+            .into())
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Disable a plugin fleet-wide. Its pending timers are deleted: the plugin is
