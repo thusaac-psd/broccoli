@@ -1268,11 +1268,13 @@ struct Answers {
 
 impl Answers {
     /// A hook (the running one, or one of an event it chained) failed, for
-    /// `why`.
+    /// `why`, which may be the plugin's own text: it is kept as a guest line
+    /// is (`plugin_core::guest_log::plugin_text`), escaped and capped.
     fn failed(&mut self, why: impl std::fmt::Display) {
         self.running_unanswered = true;
         if self.failure.is_none() {
-            self.failure = Some(why.to_string());
+            self.failure =
+                Some(plugin_core::guest_log::plugin_text(&why.to_string()).into_owned());
         }
     }
 
@@ -1544,7 +1546,11 @@ async fn dispatch_hooks_inner(
                     // The dispatch goes on without it; a background event
                     // keeps the plugin owed and runs it again.
                     answers.failed(&e);
-                    tracing::warn!(topic, "Notify hook error (ignored): {e}");
+                    plugin_core::guest_log::about(
+                        &entry.plugin_id,
+                        "A notify hook failed",
+                        &format!("{topic}: {e:#}"),
+                    );
                 }
             },
         }
