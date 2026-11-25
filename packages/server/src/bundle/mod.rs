@@ -123,8 +123,9 @@ pub struct TableRows {
 pub struct Summary {
     pub tables: Vec<(String, u64)>,
     pub blobs: usize,
-    /// The plugins whose configs an export left out: no manifest of theirs
-    /// is at hand, so no one could say which of their fields are secret.
+    /// The plugins, and the `plugin:namespace` configs, an export left out:
+    /// no manifest of the plugin is at hand, or it does not declare the
+    /// namespace, so no one could say which of their fields are secret.
     pub configs_left_out: Vec<String>,
 }
 
@@ -664,7 +665,7 @@ struct Withholding {
     rows: std::fs::File,
     count: u64,
     withheld: Vec<Withheld>,
-    /// The plugins whose rows were left out.
+    /// The plugins, and `plugin:namespace` rows, left out.
     left_out: BTreeSet<String>,
     /// The blob hashes the configs hold.
     hashes: BTreeSet<String>,
@@ -673,7 +674,8 @@ struct Withholding {
 /// `rows` (`plugin_config` in `COPY` text format, with `columns`) with each
 /// secret field its namespace declares withheld
 /// ([`ConfigNamespace::withhold_secrets`]), and where, leaving out the rows
-/// of a plugin whose schemas are unknown.
+/// of a plugin whose schemas are unknown and of a namespace its manifest
+/// does not declare.
 fn withhold_secrets(
     mut rows: std::fs::File,
     columns: &[String],
@@ -709,20 +711,25 @@ fn withhold_secrets(
             left_out.insert(plugin.to_string());
             continue;
         };
-        if let Some(ns) = namespaces.get(strip_namespace_prefix(&stored)) {
-            let secrets: Vec<_> = ns
-                .withhold_secrets(&mut value)
-                .into_iter()
-                .map(|set| set.identity)
-                .collect();
-            if !secrets.is_empty() {
-                withheld.push(Withheld {
-                    scope: copy_text::decode(&fields[scope])?,
-                    ref_id: copy_text::decode(&fields[ref_id])?,
-                    namespace: stored,
-                    secrets,
-                });
-            }
+        // A namespace the manifest no longer declares has no schema to say
+        // which of its fields are secret: the row stays out like the
+        // configs of an unknown plugin.
+        let Some(ns) = namespaces.get(strip_namespace_prefix(&stored)) else {
+            left_out.insert(stored);
+            continue;
+        };
+        let secrets: Vec<_> = ns
+            .withhold_secrets(&mut value)
+            .into_iter()
+            .map(|set| set.identity)
+            .collect();
+        if !secrets.is_empty() {
+            withheld.push(Withheld {
+                scope: copy_text::decode(&fields[scope])?,
+                ref_id: copy_text::decode(&fields[ref_id])?,
+                namespace: stored,
+                secrets,
+            });
         }
         let text = value.to_string();
         hashes.extend(content_hashes(&text));

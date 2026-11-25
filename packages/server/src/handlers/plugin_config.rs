@@ -123,12 +123,13 @@ async fn list_config_inner<C: ConnectionTrait>(
 
             seen_keys.insert((plugin_id.clone(), namespace.clone()));
 
-            let (config, secrets) = shown(registry, &plugin_id, &namespace, r.config);
+            let shown = shown(registry, &plugin_id, &namespace, r.config);
             PluginConfigResponse {
                 plugin_id,
                 namespace,
-                config,
-                secrets,
+                config: shown.config,
+                secrets: shown.secrets,
+                config_withheld: shown.withheld,
                 enabled: r.enabled,
                 position: r.position,
                 updated_at: Some(r.updated_at),
@@ -146,6 +147,7 @@ async fn list_config_inner<C: ConnectionTrait>(
                 namespace: schema.namespace.clone(),
                 config: serde_json::Value::Null,
                 secrets: Vec::new(),
+                config_withheld: false,
                 enabled: None,
                 position: 0,
                 updated_at: None,

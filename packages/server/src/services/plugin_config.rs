@@ -162,20 +162,43 @@ pub(crate) fn declared(
         .cloned()
 }
 
+/// A stored config as a read shows it.
+pub(crate) struct Shown {
+    /// Each secret field `null`; `null` whole when `withheld`.
+    pub(crate) config: serde_json::Value,
+    /// The paths of the secret fields that hold a value.
+    pub(crate) secrets: Vec<String>,
+    /// No schema for the namespace is known here, so nothing of it shows.
+    pub(crate) withheld: bool,
+}
+
 /// A stored config as a read shows it: each secret field its namespace
-/// declares `null`, with the paths of those that hold a value. Every route
-/// that answers a stored config builds its answer here, so a secret never
-/// leaves the server.
+/// declares `null`, with the paths of those that hold a value, and nothing
+/// at all when this server knows no schema for the namespace, since no one
+/// here can say which of its fields are secret. Every route that answers a
+/// stored config builds its answer here, so a secret never leaves the
+/// server.
 pub(crate) fn shown(
     registry: &PluginRegistry,
     plugin_id: &str,
     namespace: &str,
     mut config: serde_json::Value,
-) -> (serde_json::Value, Vec<String>) {
-    let secrets = declared(registry, plugin_id, namespace)
-        .map(|ns| ns.withhold_secrets(&mut config))
-        .unwrap_or_default();
-    (config, secrets.into_iter().map(|set| set.path).collect())
+) -> Shown {
+    match declared(registry, plugin_id, namespace) {
+        Some(ns) => {
+            let secrets = ns.withhold_secrets(&mut config);
+            Shown {
+                config,
+                secrets: secrets.into_iter().map(|set| set.path).collect(),
+                withheld: false,
+            }
+        }
+        None => Shown {
+            config: serde_json::Value::Null,
+            secrets: Vec::new(),
+            withheld: true,
+        },
+    }
 }
 
 pub(crate) async fn get_config<C: ConnectionTrait>(
@@ -197,12 +220,13 @@ pub(crate) async fn get_config<C: ConnectionTrait>(
     match row {
         Some(r) => {
             let namespace = strip_namespace_prefix(&r.namespace).to_string();
-            let (config, secrets) = shown(registry, plugin_id, &namespace, r.config);
+            let shown = shown(registry, plugin_id, &namespace, r.config);
             Ok(Json(PluginConfigResponse {
                 plugin_id: plugin_id.to_string(),
                 namespace,
-                config,
-                secrets,
+                config: shown.config,
+                secrets: shown.secrets,
+                config_withheld: shown.withheld,
                 enabled: r.enabled,
                 position: r.position,
                 updated_at: Some(r.updated_at),
@@ -610,13 +634,14 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     .await?;
     let change = ConfigChange::of(&txn, target).await?;
     txn.commit().await?;
-    let (config, secrets) = shown(plugins.get_registry(), plugin_id, namespace, row.config);
+    let shown = shown(plugins.get_registry(), plugin_id, namespace, row.config);
     Ok((
         PluginConfigResponse {
             plugin_id: plugin_id.to_string(),
             namespace: strip_namespace_prefix(&row.namespace).to_string(),
-            config,
-            secrets,
+            config: shown.config,
+            secrets: shown.secrets,
+            config_withheld: shown.withheld,
             enabled: row.enabled,
             position: row.position,
             updated_at: Some(row.updated_at),
