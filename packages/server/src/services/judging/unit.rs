@@ -65,6 +65,7 @@ impl Unit {
             &format!("(SELECT pt.problem_type FROM problem pt WHERE pt.id = {row}.problem_id)"),
             &format!("(SELECT pt.checker_format FROM problem pt WHERE pt.id = {row}.problem_id)"),
             &format!("{row}.language"),
+            &format!("(SELECT pt.checker_language FROM problem pt WHERE pt.id = {row}.problem_id)"),
         )
     }
 
@@ -406,6 +407,8 @@ pub(crate) struct Claim<T> {
     pub problem_type: String,
     /// Its problem's checker format (`problem.checker_format`).
     pub checker_format: String,
+    /// Its problem's checker language (`problem.checker_language`).
+    pub checker_language: Option<String>,
     /// Seconds from its creation to the claim, on the database clock.
     pub queued_secs: f64,
 }
@@ -421,6 +424,7 @@ impl<T: ClaimedUnit> Claim<T> {
             &self.problem_type,
             &self.checker_format,
             Some(self.unit.language()),
+            self.checker_language.as_deref(),
         )
     }
 }
@@ -510,6 +514,7 @@ fn claim_statement(unit: Unit, server_id: &str, limit: ClaimLimit, local: &Loade
                         FROM picked WHERE t.id = picked.id RETURNING t.*){mirror} \
          SELECT room.n AS claim_room, (SELECT last_value FROM {epoch}) AS claim_epoch, \
                 p.problem_type AS claim_problem_type, p.checker_format AS claim_checker_format, \
+                p.checker_language AS claim_checker_language, \
                 GREATEST(EXTRACT(EPOCH FROM NOW() - moved.created_at), 0)::float8 \
                     AS claim_queued_secs, \
                 moved.*{columns} \
@@ -575,6 +580,7 @@ async fn run_claim<T>(
                     checker_format: row
                         .try_get::<Option<String>>("", "claim_checker_format")?
                         .unwrap_or_default(),
+                    checker_language: row.try_get("", "claim_checker_language")?,
                     queued_secs: row.try_get("", "claim_queued_secs")?,
                 })
             })

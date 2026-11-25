@@ -1335,6 +1335,7 @@ mod tests {
             config_issues: false,
             config_recheck: None,
             inputs_version: 0,
+            checker_language: None,
             created_at: now,
             updated_at: now,
             deleted_at: None,

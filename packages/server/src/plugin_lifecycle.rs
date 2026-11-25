@@ -186,6 +186,49 @@ pub struct Governs {
     /// their stored configs counts in the inputs version of the problems it
     /// reaches (the `broccoli_inputs_changed` trigger, migration m0018).
     pub judging_inputs: Vec<String>,
+    /// The languages its `checker_source` namespace compiles in, by file
+    /// extension (`ConfigNamespace::checker_languages`), sorted: the
+    /// `broccoli_checker_language` trigger (migration m0018) reads a
+    /// problem's checker language from them.
+    pub checker_languages: Vec<CheckerLanguage>,
+}
+
+/// One extension a plugin's checker source compiles in a language.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct CheckerLanguage {
+    /// The `checker_source` namespace.
+    pub namespace: String,
+    /// A primary file's extension, without the dot, in lower case.
+    pub extension: String,
+    /// The language a primary file with it compiles in.
+    pub language: String,
+}
+
+/// The checker languages `manifest` declares, as [`Governs::checker_languages`]
+/// records them.
+pub fn declared_checker_languages(
+    manifest: &plugin_core::manifest::PluginManifest,
+) -> Vec<CheckerLanguage> {
+    let mut languages: Vec<CheckerLanguage> = manifest
+        .config
+        .iter()
+        .filter(|(_, namespace)| namespace.checker_source)
+        .flat_map(|(name, namespace)| {
+            namespace
+                .checker_languages
+                .iter()
+                .flat_map(move |(language, extensions)| {
+                    extensions.iter().map(move |extension| CheckerLanguage {
+                        namespace: name.clone(),
+                        extension: extension.trim_start_matches('.').to_ascii_lowercase(),
+                        language: language.clone(),
+                    })
+                })
+        })
+        .collect();
+    languages.sort();
+    languages.dedup();
+    languages
 }
 
 /// One topic a plugin hooks, and where its hook runs.
@@ -476,6 +519,7 @@ impl PluginLifecycle {
         problem_type: &'a str,
         checker_format: &'a str,
         language: Option<&'a str>,
+        checker_language: Option<&'a str>,
     ) -> Needs<'a> {
         use crate::providers::FleetProvider;
         let unchecked = match self.provider(Provided::ProblemType, problem_type) {
@@ -484,11 +528,23 @@ impl PluginLifecycle {
                 .is_some_and(|g| g.unchecked_problem_types.iter().any(|t| t == problem_type)),
             FleetProvider::Closed | FleetProvider::Unknown => false,
         };
+        let checker_format = (!unchecked).then_some(checker_format);
+        // The checker's compile language is a need only where its checker
+        // compiles in a language it declares.
+        let compiles = checker_format.is_some_and(|format| {
+            match self.provider(Provided::CheckerFormat, format) {
+                FleetProvider::Plugin(checker) => self
+                    .governs(&checker)
+                    .is_some_and(|g| !g.checker_languages.is_empty()),
+                FleetProvider::Closed | FleetProvider::Unknown => false,
+            }
+        });
         Needs {
             contest_type,
             problem_type,
-            checker_format: (!unchecked).then_some(checker_format),
+            checker_format,
             language,
+            checker_language: checker_language.filter(|_| compiles),
         }
     }
 
@@ -504,6 +560,7 @@ impl PluginLifecycle {
             &problem.problem_type,
             &problem.checker_format,
             language,
+            problem.checker_language.as_deref(),
         )
     }
 
@@ -1333,7 +1390,7 @@ async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
         .map(|(problem_type, _)| problem_type)
         .collect();
     unchecked_problem_types.sort();
-    let (hooks, judging_inputs) = state
+    let (hooks, judging_inputs, checker_languages) = state
         .plugins
         .get_registry()
         .read()
@@ -1343,6 +1400,7 @@ async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
                 (
                     declared_hooks(&e.manifest),
                     declared_judging_inputs(&e.manifest),
+                    declared_checker_languages(&e.manifest),
                 )
             })
         })
@@ -1353,6 +1411,7 @@ async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
         unchecked_problem_types,
         hooks,
         judging_inputs,
+        checker_languages,
     }
 }
 
@@ -2240,11 +2299,11 @@ mod tests {
             serde_json::json!({"visibility": false, "contest_types": ["x"]}),
             serde_json::json!({
                 "visibility": false, "contest_types": [], "problem_types": [], "checker_formats": [],
-                "languages": [], "unchecked_problem_types": [], "hooks": [], "judging_inputs": [], "host_locale": null,
+                "languages": [], "unchecked_problem_types": [], "hooks": [], "judging_inputs": [], "checker_languages": [], "host_locale": null,
             }),
             serde_json::json!({
                 "visibility": "no", "contest_types": [], "problem_types": [], "checker_formats": [],
-                "languages": [], "unchecked_problem_types": [], "hooks": [], "judging_inputs": [],
+                "languages": [], "unchecked_problem_types": [], "hooks": [], "judging_inputs": [], "checker_languages": [],
             }),
             serde_json::json!([]),
         ] {
@@ -2267,6 +2326,7 @@ mod tests {
                 scope: plugin_core::hook::HookScope::Global,
             }],
             judging_inputs: vec!["checker".into()],
+            checker_languages: vec![],
         };
         write(serde_json::to_value(&whole).unwrap())
             .await
@@ -2363,7 +2423,7 @@ mod tests {
         lifecycle.set_governs("langs-b", languages(&["java"]));
         lifecycle.set_desired("langs-a", false);
         lifecycle.set_desired("langs-b", true);
-        let needs = lifecycle.needs("t", "p", "c", None);
+        let needs = lifecycle.needs("t", "p", "c", None, None);
         let closed = |language: &str, plugin_id: &str| ClosedLanguage {
             language: language.into(),
             closed_by: ClosedBy {
@@ -2490,7 +2550,7 @@ mod tests {
     #[test]
     fn work_needs_a_checker_only_when_its_evaluator_uses_one() {
         let lifecycle = providers(true, true, false);
-        let checked = lifecycle.needs("t", "p", "c", Some("cpp"));
+        let checked = lifecycle.needs("t", "p", "c", Some("cpp"), None);
         assert_eq!(checked.checker_format, Some("c"));
         assert_eq!(
             lifecycle.closed_by(checked).map(|c| c.provides),
@@ -2508,7 +2568,7 @@ mod tests {
                 ..Governs::default()
             },
         );
-        let unchecked = lifecycle.needs("t", "p", "c", Some("cpp"));
+        let unchecked = lifecycle.needs("t", "p", "c", Some("cpp"), None);
         assert_eq!(unchecked.checker_format, None);
         assert_eq!(lifecycle.closed_by(unchecked), None);
 
@@ -2532,7 +2592,7 @@ mod tests {
             })
         );
         assert_eq!(
-            lifecycle.closed_by(lifecycle.needs("t", "p", "c", None)),
+            lifecycle.closed_by(lifecycle.needs("t", "p", "c", None, None)),
             None
         );
     }
@@ -2545,7 +2605,7 @@ mod tests {
     fn work_whose_provider_is_loaded_nowhere_is_closed_by_it_until_one_loads_it() {
         use broccoli_api_types::visibility::ClosedReason;
         let lifecycle = providers(true, true, true);
-        let needs = lifecycle.needs("t", "p", "c", None);
+        let needs = lifecycle.needs("t", "p", "c", None, None);
         let mut fleet = crate::providers::Loaded::default();
         for (kind, key, plugin) in [
             (Provided::ContestType, "t", "judge"),
@@ -2640,6 +2700,7 @@ mod tests {
             problem_type: "p",
             checker_format: Some("c"),
             language: None,
+            checker_language: None,
         };
         let closed = |provides, plugin_id: &str| {
             Some(ClosedBy {

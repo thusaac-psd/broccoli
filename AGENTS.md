@@ -299,14 +299,17 @@ binaries warn about every key they do not read.
 - A unit of work runs only while every plugin it needs has an enabled provider.
   It needs exactly the plugins it uses (`providers::Needs`, built by
   `PluginLifecycle::needs`): its contest type's plugin, its problem type's
-  evaluator, its language's resolver, and its checker format's checker only when
-  the evaluator registered with `uses_checker`. Work that cannot run because one
-  is disabled fleet-wide is parked, not failed: the claim, the system-error
-  retry, the stuck detector and the overview's parked count read one predicate
-  (`judging::Unit::runnable`, built on `providers::runnable`;
-  `PluginLifecycle::closed_by` in Rust), the submit paths refuse it
-  (`accepting_handler`), and it resumes when a provider is enabled. A replica
-  takes a unit only when it has every key's fleet-wide provider loaded
+  evaluator, its language's resolver, its checker format's checker only when the
+  evaluator registered with `uses_checker`, and the language that checker
+  compiles the problem's checker source in (`problem.checker_language`, by the
+  `checker_languages` its `checker_source` namespace declares). A plugin a
+  dispatch reaches for outside its needs stands, never hands back. Work that
+  cannot run because one is disabled fleet-wide is parked, not failed: the
+  claim, the system-error retry, the stuck detector and the overview's parked
+  count read one predicate (`judging::Unit::runnable`, built on
+  `providers::runnable`; `PluginLifecycle::closed_by` in Rust), the submit paths
+  refuse it (`accepting_handler`), and it resumes when a provider is enabled. A
+  replica takes a unit only when it has every key's fleet-wide provider loaded
   (`providers::runs_here`, local registrations from `Loaded::here`). A provider
   enabled but loaded on no live replica parks the work the same way
   (`ClosedReason::NotLoaded`; the submit paths answer `PLUGIN_NOT_LOADED`),

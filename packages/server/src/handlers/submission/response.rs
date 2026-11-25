@@ -398,6 +398,7 @@ struct SubmissionContext {
     problem_title: String,
     problem_type: String,
     checker_format: String,
+    checker_language: Option<String>,
     show_test_details: bool,
     contest: Option<contest::Model>,
     current_judgement_id: Option<i32>,
@@ -408,7 +409,8 @@ impl SubmissionContext {
         let row = db
             .query_one_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                r#"SELECT u.username, p.title, p.problem_type, p.checker_format, p.show_test_details,
+                r#"SELECT u.username, p.title, p.problem_type, p.checker_format, p.checker_language,
+                          p.show_test_details,
                           CASE WHEN c.id IS NULL THEN NULL ELSE to_jsonb(c) END AS contest,
                           (SELECT j.id FROM submission_judgement j
                            WHERE j.submission_id = $3 AND j.is_current) AS current_judgement_id
@@ -438,6 +440,7 @@ impl SubmissionContext {
             problem_title: row.try_get("", "title")?,
             problem_type: row.try_get("", "problem_type")?,
             checker_format: row.try_get("", "checker_format")?,
+            checker_language: row.try_get("", "checker_language")?,
             show_test_details: row.try_get("", "show_test_details")?,
             contest,
             current_judgement_id: row.try_get("", "current_judgement_id")?,
@@ -482,6 +485,7 @@ pub(super) async fn build_submission_response_with_cases(
             &context.problem_type,
             &context.checker_format,
             Some(&sub.language),
+            context.checker_language.as_deref(),
         ),
         sub.status,
     );

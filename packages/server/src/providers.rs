@@ -284,6 +284,12 @@ pub struct Needs<'a> {
     /// The unit's language, when there is a unit (a problem alone has
     /// none).
     pub language: Option<&'a str>,
+    /// The language the problem's checker source compiles in
+    /// (`problem.checker_language`), when the checker format is a need and
+    /// its fleet-wide provider declares checker languages: the checker
+    /// resolves it to compile its source, so a closed one parks the work
+    /// as the unit's own language would.
+    pub checker_language: Option<&'a str>,
 }
 
 impl<'a> Needs<'a> {
@@ -294,6 +300,7 @@ impl<'a> Needs<'a> {
             (Provided::ProblemType, Some(self.problem_type)),
             (Provided::CheckerFormat, self.checker_format),
             (Provided::Language, self.language),
+            (Provided::Language, self.checker_language),
         ]
         .into_iter()
         .filter_map(|(kind, key)| Some((kind, key?)))
@@ -310,22 +317,29 @@ pub(crate) fn sql_needs(
     problem_type: &str,
     checker_format: &str,
     language: &str,
+    checker_language: &str,
 ) -> Vec<(Provided, String)> {
+    let checker_format = format!(
+        "(CASE WHEN EXISTS (SELECT 1 FROM plugin e \
+                             WHERE e.id = {evaluator} \
+                               AND e.governs->'unchecked_problem_types' \
+                                   @> jsonb_build_array({problem_type})) \
+               THEN NULL ELSE {checker_format} END)",
+        evaluator = provider(Provided::ProblemType, problem_type),
+    );
+    let checker_language = format!(
+        "(CASE WHEN EXISTS (SELECT 1 FROM plugin c \
+                             WHERE c.id = {checker} \
+                               AND jsonb_array_length(c.governs->'checker_languages') > 0) \
+               THEN {checker_language} END)",
+        checker = provider(Provided::CheckerFormat, &checker_format),
+    );
     vec![
         (Provided::ContestType, contest_type.to_string()),
         (Provided::ProblemType, problem_type.to_string()),
-        (
-            Provided::CheckerFormat,
-            format!(
-                "(CASE WHEN EXISTS (SELECT 1 FROM plugin e \
-                                     WHERE e.id = {evaluator} \
-                                       AND e.governs->'unchecked_problem_types' \
-                                           @> jsonb_build_array({problem_type})) \
-                       THEN NULL ELSE {checker_format} END)",
-                evaluator = provider(Provided::ProblemType, problem_type),
-            ),
-        ),
+        (Provided::CheckerFormat, checker_format),
         (Provided::Language, language.to_string()),
+        (Provided::Language, checker_language),
     ]
 }
 

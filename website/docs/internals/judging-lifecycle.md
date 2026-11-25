@@ -166,7 +166,13 @@ A unit of work needs exactly the plugins it uses (`providers::Needs`, built by
 evaluator of its problem's type, the resolver of its language, and the checker
 of its problem's checker format only when the evaluator registered with
 `uses_checker` (an evaluator that does not is recorded in
-`unchecked_problem_types`). It is parked while every plugin that recorded one
+`unchecked_problem_types`), and, when that checker compiles the problem's
+checker source, the language the source is in (`problem.checker_language`,
+kept by the `broccoli_checker_language` trigger from the extensions the
+checker's `checker_source` namespace declares in `checker_languages`). A
+plugin the dispatch reaches for outside those needs stands at once
+(`NO_PROVIDER`) instead of being handed back, since no parking waits for it.
+It is parked while every plugin that recorded one
 of those keys (`plugin.governs`: `contest_types`, `problem_types`,
 `checker_formats`, `languages`) is disabled fleet-wide; `providers::runnable` states that in SQL
 (`judging::Unit::runnable` over a unit's scan) and

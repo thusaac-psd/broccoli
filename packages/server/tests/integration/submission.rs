@@ -1669,7 +1669,7 @@ mod judgement_history {
                                          '{{\"visibility\": false, \"contest_types\": [], \
                                            \"problem_types\": [], \"checker_formats\": [], \
                                            \"languages\": [], \"unchecked_problem_types\": [], \
-                                           \"hooks\": [], \"judging_inputs\": [\"checker\"]}}'); \
+                                           \"hooks\": [], \"judging_inputs\": [\"checker\"], \"checker_languages\": []}}'); \
                                  INSERT INTO plugin_config (scope, ref_id, namespace, config, \
                                                             position, updated_at) \
                                  VALUES ('problem', '{problem_id}', 'inputs-plugin:checker', \

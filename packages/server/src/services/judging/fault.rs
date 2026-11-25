@@ -117,11 +117,26 @@ impl DispatchFaults {
 /// and the unit waits, parked while its provider is loaded nowhere, for a
 /// replica that runs it. Only a key no enabled plugin provides, taken by a
 /// replica that did not have it loaded either, stands on its first attempt
-/// ([`DispatchFault::NotLoaded`]): no replica will ever run it.
+/// ([`DispatchFault::NotLoaded`]): no replica will ever run it. A key outside
+/// the unit's needs (`needed`, when the claim knows them) stands too:
+/// parking waits only for the keys a unit needs, so handing it back would
+/// hand it back forever.
 pub(crate) fn missing_plugin(
     needs_loaded: bool,
+    needed: Option<&[(crate::providers::Provided, String)]>,
     unresolved: &crate::providers::Unresolved,
 ) -> Recorded {
+    let outside = needed.is_some_and(|needed| {
+        !needed
+            .iter()
+            .any(|(kind, key)| *kind == unresolved.kind && *key == unresolved.key)
+    });
+    if outside {
+        return Recorded {
+            fault: DispatchFault::NotLoaded,
+            message: format!("{unresolved}, and the work does not declare it as a need"),
+        };
+    }
     if needs_loaded || unresolved.provider.is_some() {
         Recorded {
             fault: DispatchFault::NotLoadedHere,
@@ -335,7 +350,8 @@ impl DispatchFailure {
         needs_loaded: bool,
         unresolved: &crate::providers::Unresolved,
     ) -> Self {
-        Self::from(missing_plugin(needs_loaded, unresolved))
+        // The contest plugin is always a need of the unit.
+        Self::from(missing_plugin(needs_loaded, None, unresolved))
     }
 }
 

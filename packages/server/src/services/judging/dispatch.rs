@@ -78,6 +78,7 @@ impl LiveDispatches {
             live: self.clone(),
             unit,
             needs_loaded,
+            needed: None,
         }
     }
 
@@ -103,9 +104,25 @@ pub struct LiveUnit {
     live: LiveDispatches,
     unit: DispatchedUnit,
     needs_loaded: bool,
+    /// The keys the unit needs (`providers::Needs`), when the claim knows
+    /// them: a plugin the dispatch reaches for outside them is not one the
+    /// unit waits for (see [`Dispatch::missing_plugin`]).
+    needed: Option<Vec<(crate::providers::Provided, String)>>,
 }
 
 impl LiveUnit {
+    /// The unit needs exactly `needs`.
+    pub fn needing(mut self, needs: crate::providers::Needs<'_>) -> Self {
+        self.needed = Some(
+            needs
+                .each()
+                .into_iter()
+                .map(|(kind, key)| (kind, key.to_string()))
+                .collect(),
+        );
+        self
+    }
+
     pub fn unit(&self) -> DispatchedUnit {
         self.unit
     }
@@ -181,13 +198,18 @@ impl Dispatch {
         &self.0.faults
     }
 
-    /// Records that a plugin the unit needs did not resolve here
+    /// Records that a plugin the dispatch reached for did not resolve here
     /// (`unresolved`), as `judging::fault::missing_plugin` decides: handed
-    /// back when the unit was claimed with every plugin it needs loaded
-    /// here (it is reloading or was unloaded since), standing when this
-    /// replica took it while no live replica had the plugin.
+    /// back when the unit needs it and an enabled plugin provides it (it is
+    /// reloading, was unloaded since, or another replica has it); standing
+    /// when no enabled plugin provides it, or when the unit does not need it
+    /// at all, since parking never waits for a key outside its needs.
     pub fn missing_plugin(&self, unresolved: &crate::providers::Unresolved) {
-        let recorded = super::fault::missing_plugin(self.0.live.needs_loaded, unresolved);
+        let recorded = super::fault::missing_plugin(
+            self.0.live.needs_loaded,
+            self.0.live.needed.as_deref(),
+            unresolved,
+        );
         self.0.faults.record(recorded.fault, recorded.message);
     }
 
@@ -294,6 +316,46 @@ mod tests {
             );
         }
         assert!(Dispatch::of(&CallLocals::default()).is_none());
+    }
+
+    /// A key the dispatch reaches for outside the unit's needs stands at
+    /// once, whatever provides it: no parking waits for it, so a hand-back
+    /// would come back forever. A key among the needs keeps the rule below.
+    #[test]
+    fn a_missing_plugin_outside_the_units_needs_stands() {
+        use crate::providers::{Needs, Provided};
+        let needs = Needs {
+            contest_type: "t",
+            problem_type: "p",
+            checker_format: Some("testlib"),
+            language: Some("python"),
+            checker_language: Some("cpp"),
+        };
+        let recorded = |language: &str| {
+            let faults = DispatchFaults::default();
+            let dispatch = Dispatch::new(
+                "p",
+                LiveDispatches::default().enter(UNIT, true).needing(needs),
+                faults.clone(),
+            );
+            dispatch.missing_plugin(&crate::providers::Unresolved {
+                kind: Provided::Language,
+                key: language.into(),
+                provider: Some("languages".into()),
+            });
+            faults.get().expect("recorded")
+        };
+        assert_eq!(recorded("cpp").fault, DispatchFault::NotLoadedHere);
+        assert_eq!(recorded("python").fault, DispatchFault::NotLoadedHere);
+        let outside = recorded("rust");
+        assert_eq!(outside.fault, DispatchFault::NotLoaded);
+        assert!(
+            outside
+                .message
+                .ends_with("and the work does not declare it as a need"),
+            "{}",
+            outside.message
+        );
     }
 
     /// A plugin missing mid-dispatch hands the attempt back whenever an

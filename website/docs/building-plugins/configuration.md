@@ -369,6 +369,21 @@ The plugin reads it like any other problem config:
 `host.config.get_problem(problem_id, "checker_source")`. A manifest may mark at
 most one namespace, and only with `scopes = ["problem"]`.
 
+If the checker compiles the source, declare which language each primary
+file's extension compiles in, with `checker_languages` on the same namespace:
+
+```toml
+[config.checker_source]
+scopes = ["problem"]
+checker_source = true
+checker_languages = { cpp = ["cpp", "cc", "cxx"], c = ["c"] }
+```
+
+The host reads a problem's checker language from the first stored file whose
+extension is listed, and work on the problem then needs that language's
+plugin as it needs its own language's: while it is disabled, the work waits
+queued instead of failing.
+
 ## Test it
 
 `Host::mock()` reads the `plugin.toml` of the crate under test, so a native

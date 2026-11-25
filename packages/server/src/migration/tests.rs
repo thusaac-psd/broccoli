@@ -422,7 +422,8 @@ async fn a_database_the_released_build_ran_upgrades_to_this_build() {
         governs.provides.languages.is_empty()
             && governs.unchecked_problem_types.is_empty()
             && governs.hooks.is_empty()
-            && governs.judging_inputs.is_empty(),
+            && governs.judging_inputs.is_empty()
+            && governs.checker_languages.is_empty(),
         "a key the released build did not record reads as none"
     );
 
@@ -523,6 +524,96 @@ fn the_upgrade_guide_names_every_migration_of_this_release_that_is_not_additive(
     }
 }
 
+/// A problem's checker language follows its stored checker source, whatever
+/// path writes it: the language of the first file whose extension the
+/// checker's `checker_source` namespace maps, none when no file maps or the
+/// source is gone. A config of any other namespace leaves it.
+#[tokio::test]
+async fn a_problems_checker_language_follows_its_stored_checker_source() {
+    use sea_orm::EntityTrait;
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (_, problem_id) = crate::test_support::seed_user_and_problem(&db).await;
+    let governs = serde_json::json!({
+        "visibility": false, "contest_types": [], "problem_types": [],
+        "checker_formats": ["testlib"], "languages": [], "unchecked_problem_types": [],
+        "hooks": [], "judging_inputs": [],
+        "checker_languages": [
+            {"namespace": "checker_source", "extension": "c", "language": "c"},
+            {"namespace": "checker_source", "extension": "cpp", "language": "cpp"},
+        ],
+    });
+    db.execute_unprepared(&format!(
+        "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) \
+         VALUES ('checkers', TRUE, 0, NOW(), '{governs}')"
+    ))
+    .await
+    .unwrap();
+    let language = || {
+        let db = db.clone();
+        async move {
+            crate::entity::problem::Entity::find_by_id(problem_id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .checker_language
+        }
+    };
+    let files = |names: &[&str]| {
+        serde_json::json!({
+            "files": names.iter().map(|n| serde_json::json!({"filename": n, "content": ""}))
+                .collect::<Vec<_>>(),
+        })
+    };
+    let cases = [
+        (
+            format!(
+                "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+                 VALUES ('problem', '{problem_id}', 'checkers:checker_source', '{}', 0, NOW())",
+                files(&["testlib.h", "check.cpp"])
+            ),
+            Some("cpp"),
+        ),
+        (
+            format!(
+                "UPDATE plugin_config SET config = '{}' WHERE namespace = 'checkers:checker_source'",
+                files(&["check.c", "other.cpp"])
+            ),
+            Some("c"),
+        ),
+        (
+            format!(
+                "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+                 VALUES ('problem', '{problem_id}', 'checkers:options', '{}', 0, NOW())",
+                files(&["check.cpp"])
+            ),
+            Some("c"),
+        ),
+        (
+            format!(
+                "UPDATE plugin_config SET config = '{}' WHERE namespace = 'checkers:checker_source'",
+                files(&["testlib.h"])
+            ),
+            None,
+        ),
+        (
+            format!(
+                "UPDATE plugin_config SET config = '{}' WHERE namespace = 'checkers:checker_source'",
+                files(&["check.cpp"])
+            ),
+            Some("cpp"),
+        ),
+        (
+            "DELETE FROM plugin_config WHERE namespace = 'checkers:checker_source'".to_string(),
+            None,
+        ),
+    ];
+    for (sql, expected) in cases {
+        db.execute_unprepared(&sql).await.unwrap();
+        assert_eq!(language().await.as_deref(), expected, "{sql}");
+    }
+}
+
 /// Every change to what judging reads of a problem counts in its
 /// `inputs_version`, whatever path makes it: its limits, type and checker
 /// format, its test cases, its additional files, the type of a contest it is
@@ -564,12 +655,12 @@ async fn every_change_to_a_problems_judging_inputs_counts_in_its_version() {
         governs = serde_json::json!({
             "visibility": false, "contest_types": ["judge"], "problem_types": [],
             "checker_formats": [], "languages": [], "unchecked_problem_types": [],
-            "hooks": [], "judging_inputs": ["checker"],
+            "hooks": [], "judging_inputs": ["checker"], "checker_languages": [],
         }),
         display = serde_json::json!({
             "visibility": false, "contest_types": [], "problem_types": [],
             "checker_formats": [], "languages": [], "unchecked_problem_types": [],
-            "hooks": [], "judging_inputs": [],
+            "hooks": [], "judging_inputs": [], "checker_languages": [],
         }),
     ))
     .await;

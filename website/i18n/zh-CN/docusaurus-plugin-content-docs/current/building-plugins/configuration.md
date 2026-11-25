@@ -271,6 +271,17 @@ default = []
 插件像读取其他题目配置一样读取它：`host.config.get_problem(problem_id, "checker_source")`。一个
 清单最多只能标记一个命名空间，且其 `scopes` 只能是 `["problem"]`。
 
+若检查器要编译这些源代码，请在同一命名空间上用 `checker_languages` 声明每种主文件扩展名所用的语言：
+
+```toml
+[config.checker_source]
+scopes = ["problem"]
+checker_source = true
+checker_languages = { cpp = ["cpp", "cc", "cxx"], c = ["c"] }
+```
+
+宿主根据第一个扩展名被列出的已存文件读取题目的检查器语言，此后该题目的工作像需要其自身语言的插件一样需要该语言的插件：该插件被禁用时，工作排队等待而不是失败。
+
 ## 测试
 
 `Host::mock()` 会读取被测 crate 的 `plugin.toml`，因此原生测试看到的配置与服务器填入默认值后的

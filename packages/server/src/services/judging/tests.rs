@@ -1542,7 +1542,7 @@ async fn provider(db: &DatabaseConnection, enabled: bool) {
         db,
         &format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
-             VALUES ('std', {enabled}, '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}') \
+             VALUES ('std', {enabled}, '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         ),
     )
@@ -1692,7 +1692,7 @@ async fn a_replica_runs_a_key_only_on_its_fleet_wide_provider() {
         format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
              VALUES ('{id}', {enabled}, \
-                     '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}') \
+                     '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         )
     };
@@ -1736,7 +1736,7 @@ async fn work_needs_its_language_and_a_checker_only_when_its_evaluator_uses_one(
             "INSERT INTO plugin (id, is_enabled, governs) VALUES ('{id}', {enabled}, \
                jsonb_build_object('visibility', false, 'contest_types', '[]'::jsonb, \
                  'problem_types', '[]'::jsonb, 'checker_formats', '[]'::jsonb, \
-                 'languages', '[]'::jsonb, 'unchecked_problem_types', '{unchecked}'::jsonb, 'hooks', '[]'::jsonb, 'judging_inputs', '[]'::jsonb) \
+                 'languages', '[]'::jsonb, 'unchecked_problem_types', '{unchecked}'::jsonb, 'hooks', '[]'::jsonb, 'judging_inputs', '[]'::jsonb, 'checker_languages', '[]'::jsonb) \
                || jsonb_build_object('{field}', jsonb_build_array('{key}'))) \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled, \
                                             governs = EXCLUDED.governs"
@@ -1818,7 +1818,7 @@ async fn evaluator(db: &DatabaseConnection, enabled: bool) {
         &format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
              VALUES ('eval', {enabled}, \
-                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"standard\"], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}') \
+                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"standard\"], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         ),
     )
@@ -1842,13 +1842,76 @@ async fn work_whose_checker_plugin_is_disabled_is_parked_until_it_is_enabled() {
         format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
              VALUES ('checkers', {enabled}, \
-                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [\"{format}\"], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}') \
+                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [\"{format}\"], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         )
     };
     exec(&db, &checker(false)).await;
     assert_eq!(claimable(&db).await, 0, "parked work is not claimed");
     exec(&db, &checker(true)).await;
+    assert_eq!(claimable(&db).await, 1, "it resumes");
+}
+
+/// A unit whose checker compiles the problem's checker source needs that
+/// source's language as much as its own: the checker plugin's stored source
+/// names it (`problem.checker_language`, kept by the database), and while
+/// every provider of that language is disabled the work is parked, unclaimed,
+/// until one is enabled. A checker that declares no languages needs none.
+#[tokio::test]
+async fn work_whose_checker_language_plugin_is_disabled_is_parked_until_it_is_enabled() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (sub, _) = new_submission(&db).await;
+    let problem_id = sub.problem_id;
+    let format = crate::entity::problem::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap()
+        .checker_format;
+    let languages = serde_json::json!([
+        {"namespace": "checker_source", "extension": "cpp", "language": "checker-cpp"},
+    ]);
+    exec(
+        &db,
+        &format!(
+            "INSERT INTO plugin (id, is_enabled, governs) VALUES \
+               ('checkers', TRUE, '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [\"{format}\"], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": {languages}}}'), \
+               ('compilers', FALSE, '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [], \"languages\": [\"checker-cpp\"], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}')"
+        ),
+    )
+    .await;
+    exec(
+        &db,
+        &format!(
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+             VALUES ('problem', '{problem_id}', 'checkers:checker_source', \
+                     '{{\"files\": [{{\"filename\": \"testlib.h\", \"content\": \"\"}}, \
+                                    {{\"filename\": \"Checker.CPP\", \"content\": \"\"}}]}}', \
+                     0, NOW())"
+        ),
+    )
+    .await;
+    let checker_language = crate::entity::problem::Entity::find_by_id(problem_id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap()
+        .checker_language;
+    assert_eq!(
+        checker_language.as_deref(),
+        Some("checker-cpp"),
+        "the first file the checker compiles names the language"
+    );
+    assert_eq!(
+        claimable(&db).await,
+        0,
+        "parked while its compiler is disabled"
+    );
+    exec(
+        &db,
+        "UPDATE plugin SET is_enabled = TRUE WHERE id = 'compilers'",
+    )
+    .await;
     assert_eq!(claimable(&db).await, 1, "it resumes");
 }
 
