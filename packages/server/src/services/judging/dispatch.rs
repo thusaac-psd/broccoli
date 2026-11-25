@@ -314,45 +314,51 @@ mod tests {
         assert!(Dispatch::of(&CallLocals::default()).is_none());
     }
 
-    /// A plugin missing mid-dispatch is recorded as this replica's fault,
-    /// losing the attempt, for a unit claimed with every plugin loaded. A
-    /// unit taken while no live replica had the plugin loaded stands on its
-    /// first attempt, naming the plugin and its role.
+    /// A plugin missing mid-dispatch hands the attempt back whenever an
+    /// enabled plugin provides the key, however the unit was claimed: the
+    /// unit waits, parked while its provider is loaded nowhere, for a
+    /// replica that runs it. Only a key no enabled plugin provides, taken
+    /// without one loaded, stands on its first attempt, naming the role and
+    /// the key.
     #[test]
-    fn a_missing_plugin_hands_back_what_was_claimed_loaded_and_stands_otherwise() {
+    fn a_missing_plugin_stands_only_when_no_enabled_plugin_provides_its_key() {
         use super::super::fault::SystemErrorClass;
         use broccoli_api_types::error::HostCode;
-        for needs_loaded in [true, false] {
+        let recorded = |needs_loaded: bool, provider: Option<&str>| {
             let faults = DispatchFaults::default();
             let dispatch = Dispatch::new(
                 "p",
                 LiveDispatches::default().enter(UNIT, needs_loaded),
                 faults.clone(),
             );
-            let unresolved = crate::providers::Unresolved {
+            dispatch.missing_plugin(&crate::providers::Unresolved {
                 kind: crate::providers::Provided::CheckerFormat,
                 key: "lines".into(),
-                provider: Some("standard-checkers".into()),
-            };
-            dispatch.missing_plugin(&unresolved);
-            let recorded = faults.get().expect("recorded");
-            if needs_loaded {
-                assert_eq!(recorded.fault, DispatchFault::NotLoadedHere);
-                assert!(faults.lost().is_some());
-            } else {
-                assert_eq!(recorded.fault, DispatchFault::NotLoaded);
-                assert_eq!(
-                    SystemErrorClass::of_fault(recorded.fault),
-                    SystemErrorClass::Stands
-                );
-                assert_eq!(recorded.fault.code(), HostCode::PluginNotLoaded);
-                assert_eq!(
-                    recorded.message,
-                    "the checker plugin standard-checkers for checker format \"lines\" \
-                     is loaded on no live replica"
-                );
-            }
+                provider: provider.map(str::to_string),
+            });
+            faults.get().expect("recorded")
+        };
+        for needs_loaded in [true, false] {
+            let handed_back = recorded(needs_loaded, Some("standard-checkers"));
+            assert_eq!(handed_back.fault, DispatchFault::NotLoadedHere);
+            assert_eq!(
+                handed_back.message,
+                "the checker plugin standard-checkers for checker format \"lines\" \
+                 is not loaded on this replica"
+            );
         }
+        assert_eq!(recorded(true, None).fault, DispatchFault::NotLoadedHere);
+        let stands = recorded(false, None);
+        assert_eq!(stands.fault, DispatchFault::NotLoaded);
+        assert_eq!(
+            SystemErrorClass::of_fault(stands.fault),
+            SystemErrorClass::Stands
+        );
+        assert_eq!(stands.fault.code(), HostCode::NoProvider);
+        assert_eq!(
+            stands.message,
+            "no checker plugin provides checker format \"lines\""
+        );
     }
 
     /// A database outage a dispatch's plugin meets loses the attempt; any

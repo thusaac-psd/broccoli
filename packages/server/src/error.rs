@@ -150,6 +150,11 @@ pub enum AppError {
     /// administrator disabled. A client asks again after
     /// [`DISABLED_RETRY_AFTER_SECS`]: it serves once the plugin is enabled.
     PluginDisabled(String),
+    /// What the request needs is provided by plugin `id`, enabled and loaded
+    /// on no live replica (it failed to load everywhere, or the fleet is
+    /// reloading it). A client asks again after [`DISABLED_RETRY_AFTER_SECS`]:
+    /// it serves once a replica loads the plugin.
+    PluginNotLoaded(String),
     /// Blob storage did not answer through its retries: an outage, retried
     /// by the client after [`STORAGE_RETRY_AFTER_SECS`].
     StorageUnavailable,
@@ -407,6 +412,16 @@ impl AppError {
                     ),
                 ),
             ),
+            AppError::PluginNotLoaded(plugin_id) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                simple(
+                    HostCode::PluginNotLoaded,
+                    format!(
+                        "The plugin '{plugin_id}' is loaded on no server, so what it provides \
+                         is unavailable until one loads it"
+                    ),
+                ),
+            ),
             AppError::StorageUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 simple(
@@ -514,9 +529,9 @@ impl IntoResponse for AppError {
             }
             AppError::ContestTypeUnavailable(_) => Some(CONTEST_TYPE_RETRY_AFTER_SECS),
             AppError::PluginUnavailable => Some(PLUGIN_RETRY_AFTER_SECS),
-            AppError::PluginDisabled(_) | AppError::ContestTypeDisabled(_) => {
-                Some(DISABLED_RETRY_AFTER_SECS)
-            }
+            AppError::PluginDisabled(_)
+            | AppError::PluginNotLoaded(_)
+            | AppError::ContestTypeDisabled(_) => Some(DISABLED_RETRY_AFTER_SECS),
             AppError::StorageUnavailable => Some(STORAGE_RETRY_AFTER_SECS),
             AppError::DatabaseUnavailable => Some(DATABASE_RETRY_AFTER_SECS),
             AppError::DatabaseBusy => Some(DATABASE_BUSY_RETRY_AFTER_SECS),

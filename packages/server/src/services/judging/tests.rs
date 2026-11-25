@@ -126,11 +126,67 @@ async fn exec(db: &DatabaseConnection, sql: &str) {
         .unwrap();
 }
 
-async fn claim_one(db: &DatabaseConnection, server: &str) -> ClaimedJudgement {
-    let mut claimed = claim_judgements(db, server, TEN, NO_TYPES)
+/// What a replica that runs every enabled plugin has loaded: each key an
+/// enabled plugin's recorded governs lists, with that plugin.
+async fn every_enabled(db: &DatabaseConnection) -> crate::providers::Loaded {
+    let mut loaded = crate::providers::Loaded::default();
+    for plugin in crate::entity::plugin::Entity::find()
+        .filter(crate::entity::plugin::Column::IsEnabled.eq(true))
+        .all(db)
         .await
         .unwrap()
-        .units;
+    {
+        let Some(governs) = plugin.governs else {
+            continue;
+        };
+        let governs: crate::plugin_lifecycle::Governs = serde_json::from_value(governs).unwrap();
+        for kind in crate::providers::KINDS {
+            for key in governs.provides.keys(kind) {
+                loaded
+                    .of_mut(kind)
+                    .entry(key.clone())
+                    .or_default()
+                    .push(plugin.id.clone());
+            }
+        }
+    }
+    loaded
+}
+
+/// Records `server` as a live replica that has `loaded` loaded.
+async fn live(db: &DatabaseConnection, server: &str, loaded: &crate::providers::Loaded) {
+    exec(
+        db,
+        &format!(
+            "INSERT INTO plugin_replica (server_id, plugins, provides, state_at, heartbeat_at) \
+             VALUES ('{server}', '{{}}', '{}', NOW(), NOW()) \
+             ON CONFLICT (server_id) DO UPDATE SET provides = EXCLUDED.provides, \
+                                                   heartbeat_at = NOW()",
+            serde_json::to_string(loaded).unwrap()
+        ),
+    )
+    .await;
+}
+
+/// Records `server` as a live replica running every enabled plugin, and
+/// returns what it has loaded.
+async fn running_everything(db: &DatabaseConnection, server: &str) -> crate::providers::Loaded {
+    let loaded = every_enabled(db).await;
+    live(db, server, &loaded).await;
+    loaded
+}
+
+/// What `server`, live and running every enabled plugin, claims.
+async fn claim_running_everything(
+    db: &DatabaseConnection,
+    server: &str,
+) -> Claimed<ClaimedJudgement> {
+    let loaded = running_everything(db, server).await;
+    claim_judgements(db, server, TEN, &loaded).await.unwrap()
+}
+
+async fn claim_one(db: &DatabaseConnection, server: &str) -> ClaimedJudgement {
+    let mut claimed = claim_running_everything(db, server).await.units;
     assert_eq!(claimed.len(), 1, "exactly one judgement is claimable");
     claimed.remove(0).unit
 }
@@ -1494,11 +1550,7 @@ async fn provider(db: &DatabaseConnection, enabled: bool) {
 }
 
 async fn claimable(db: &DatabaseConnection) -> usize {
-    claim_judgements(db, "srv", TEN, NO_TYPES)
-        .await
-        .unwrap()
-        .units
-        .len()
+    claim_running_everything(db, "srv").await.units.len()
 }
 
 /// A judgement cut by its contest plugin's disable goes straight back to
@@ -1575,16 +1627,7 @@ fn unit_keys(problem: &crate::entity::problem::Model) -> [(crate::providers::Pro
 
 /// Records `peer` as a live replica that has `loaded` loaded.
 async fn peer(db: &DatabaseConnection, loaded: &crate::providers::Loaded) {
-    exec(
-        db,
-        &format!(
-            "INSERT INTO plugin_replica (server_id, plugins, provides, state_at, heartbeat_at) \
-             VALUES ('peer', '{{}}', '{}', NOW(), NOW()) \
-             ON CONFLICT (server_id) DO UPDATE SET provides = EXCLUDED.provides",
-            serde_json::to_string(loaded).unwrap()
-        ),
-    )
-    .await;
+    live(db, "peer", loaded).await;
 }
 
 /// A replica takes a unit only when it has every plugin the unit needs
@@ -1663,6 +1706,7 @@ async fn a_replica_runs_a_key_only_on_its_fleet_wide_provider() {
     };
     peer(&db, &with_contest("a-contest")).await;
     let here = with_contest("b-contest");
+    live(&db, "here", &here).await;
     let claimed = claim_judgements(&db, "here", TEN, &here).await.unwrap();
     assert_eq!(claimed.units.len(), 0, "the peer has the provider loaded");
 
@@ -1732,8 +1776,9 @@ async fn work_needs_its_language_and_a_checker_only_when_its_evaluator_uses_one(
         ),
     )
     .await;
-    let mut no_checker = loaded("plugin", unit_keys(&problem));
+    let mut no_checker = every_enabled(&db).await;
     no_checker.checker_formats.clear();
+    live(&db, "here", &no_checker).await;
     let claimed = claim_judgements(&db, "here", TEN, &no_checker)
         .await
         .unwrap();
@@ -1751,9 +1796,10 @@ async fn work_needs_its_language_and_a_checker_only_when_its_evaluator_uses_one(
     );
     exec(&db, &governs("langs", true, "languages", "cpp", "[]")).await;
     peer(&db, &loaded("langs", unit_keys(&problem))).await;
-    let mut no_language = loaded("plugin", unit_keys(&problem));
+    let mut no_language = every_enabled(&db).await;
     no_language.languages.clear();
     no_language.checker_formats.clear();
+    live(&db, "here", &no_language).await;
     let claimed = claim_judgements(&db, "here", TEN, &no_language)
         .await
         .unwrap();
@@ -1835,9 +1881,14 @@ async fn work_whose_evaluator_plugin_is_disabled_is_parked_until_it_is_enabled()
         .unwrap(),
         DispatchFailed::HandedBack
     );
-    let pass = retry_system_errors(&db, RetryBudget::new(1), 10, NO_TYPES)
-        .await
-        .unwrap();
+    let pass = retry_system_errors(
+        &db,
+        RetryBudget::new(1),
+        10,
+        &running_everything(&db, "srv").await,
+    )
+    .await
+    .unwrap();
     assert_eq!(pass.handed_back, 1, "{pass:?}");
     assert_eq!(pass.requeued, 0, "{pass:?}");
     for id in [cut.id, erred.id] {
@@ -1883,7 +1934,7 @@ async fn a_system_error_awaiting_its_retry_is_handed_back_when_its_type_is_parke
         .unwrap();
 
         provider(&db, false).await;
-        let pass = retry_system_errors(&db, budget, 10, NO_TYPES)
+        let pass = retry_system_errors(&db, budget, 10, &running_everything(&db, "srv").await)
             .await
             .unwrap();
         assert_eq!((pass.handed_back, pass.requeued), (1, 0), "spent {spent}");
@@ -1980,13 +2031,23 @@ async fn no_system_error_retry_is_spent_while_its_type_is_parked() {
         failed.push(s.id);
     }
     provider(&db, false).await;
-    let pass = retry_system_errors(&db, RetryBudget::new(5), 2, NO_TYPES)
-        .await
-        .unwrap();
+    let pass = retry_system_errors(
+        &db,
+        RetryBudget::new(5),
+        2,
+        &running_everything(&db, "srv").await,
+    )
+    .await
+    .unwrap();
     assert_eq!((pass.handed_back, pass.requeued), (2, 0));
-    let pass = retry_system_errors(&db, RetryBudget::new(5), 2, NO_TYPES)
-        .await
-        .unwrap();
+    let pass = retry_system_errors(
+        &db,
+        RetryBudget::new(5),
+        2,
+        &running_everything(&db, "srv").await,
+    )
+    .await
+    .unwrap();
     assert_eq!((pass.handed_back, pass.requeued), (1, 0));
     for id in failed {
         let s = sub(&db, id).await;
@@ -2003,7 +2064,7 @@ async fn a_failed_code_run_is_handed_back_or_finalized_by_the_judgements_rule() 
     let (_pg, db) = crate::test_support::postgres().await;
     provider(&db, true).await;
     let claim = |db: DatabaseConnection| async move {
-        let mut runs = claim_code_runs(&db, "srv", TEN, NO_TYPES)
+        let mut runs = claim_code_runs(&db, "srv", TEN, &running_everything(&db, "srv").await)
             .await
             .unwrap()
             .units;
@@ -2098,4 +2159,32 @@ async fn lapsed_work_of_a_parked_type_is_handed_back() {
     assert_eq!(after.status, SubmissionStatus::Queued);
     assert_eq!(after.dispatch_retries, 0);
     assert_eq!(sub(&db, s.id).await.status, SubmissionStatus::Queued);
+}
+
+/// Work whose provider is enabled but loaded on no live replica (it failed
+/// to load everywhere, or the fleet is reloading it) is parked, not taken
+/// to fail: no replica claims it, and it stays `Queued`. Once a live
+/// replica has the provider loaded, that replica takes it, and a replica
+/// without it still does not.
+#[tokio::test]
+async fn work_whose_provider_is_loaded_nowhere_is_parked_until_a_replica_loads_it() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (submission, _) = new_submission(&db).await;
+    evaluator(&db, true).await;
+    live(&db, "srv", NO_TYPES).await;
+    let nothing = claim_judgements(&db, "srv", TEN, NO_TYPES).await.unwrap();
+    assert_eq!(nothing.units.len(), 0, "parked, not taken to fail");
+    assert_eq!(
+        sub(&db, submission.id).await.status,
+        SubmissionStatus::Queued
+    );
+
+    let with_evaluator = every_enabled(&db).await;
+    peer(&db, &with_evaluator).await;
+    let nothing = claim_judgements(&db, "srv", TEN, NO_TYPES).await.unwrap();
+    assert_eq!(nothing.units.len(), 0, "left to the replica that loads it");
+    let claimed = claim_judgements(&db, "peer", TEN, &with_evaluator)
+        .await
+        .unwrap();
+    assert_eq!(claimed.units.len(), 1);
 }

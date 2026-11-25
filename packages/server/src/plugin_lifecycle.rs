@@ -74,6 +74,10 @@ pub struct PluginLifecycle {
     reported: std::sync::Mutex<Option<Reported>>,
     /// The recorded [`Governs`] per plugin, as of the last reconcile.
     governs: RwLock<HashMap<String, Governs>>,
+    /// What the live replicas have loaded, each key with the plugins that
+    /// registered it on one of them, as of the last reconcile
+    /// (`plugin_replica.provides`); `None` before the first read.
+    fleet_loaded: RwLock<Option<crate::providers::Loaded>>,
     /// Set by [`stop`] at shutdown: no further report writes.
     stopped: std::sync::atomic::AtomicBool,
 }
@@ -256,19 +260,59 @@ impl PluginLifecycle {
         self.closed_by(needs)
     }
 
-    /// What keeps work with `needs` from running: the disabled provider
-    /// ([`Self::disabled_provider`]) of the first of its keys, in
-    /// [`crate::providers::KINDS`] order, that has one, with what it provides for
-    /// the work. `None` when every key has an enabled provider (or none was
-    /// ever recorded). `providers::runnable` states the same rule in SQL.
+    /// What keeps work with `needs` from running: for the first of its
+    /// keys, in [`crate::providers::KINDS`] order, that cannot run, the
+    /// plugin and why, with what it provides for the work. A key whose
+    /// providers are all disabled is closed by the first of them
+    /// ([`Self::disabled_provider`], `Disabled`); a key whose fleet-wide
+    /// provider ([`Self::provider`]) is loaded on no live replica is closed
+    /// by that provider (`NotLoaded`), so the work waits for a replica that
+    /// loads it. `None` when every key can run, or was never recorded by any
+    /// plugin. `providers::runnable` states the same rule in SQL.
     pub fn closed_by(&self, needs: Needs<'_>) -> Option<ClosedBy> {
-        needs.each().into_iter().find_map(|(provides, key)| {
-            self.disabled_provider(provides, key)
-                .map(|plugin_id| ClosedBy {
-                    plugin_id,
-                    provides,
-                })
-        })
+        use crate::providers::FleetProvider;
+        use broccoli_api_types::visibility::ClosedReason;
+        needs
+            .each()
+            .into_iter()
+            .find_map(|(provides, key)| match self.provider(provides, key) {
+                FleetProvider::Plugin(plugin_id) => {
+                    (!self.loaded_somewhere(provides, key, &plugin_id)).then_some(ClosedBy {
+                        plugin_id,
+                        provides,
+                        reason: ClosedReason::NotLoaded,
+                    })
+                }
+                FleetProvider::Closed => {
+                    self.disabled_provider(provides, key)
+                        .map(|plugin_id| ClosedBy {
+                            plugin_id,
+                            provides,
+                            reason: ClosedReason::Disabled,
+                        })
+                }
+                FleetProvider::Unknown => None,
+            })
+    }
+
+    /// Whether `plugin_id` has `key` (of `kind`) loaded on a live replica,
+    /// as of the last reconcile's read of the fleet. Before the first read
+    /// every provider counts as loaded somewhere, so a replica that just
+    /// started refuses nothing it cannot judge yet.
+    pub fn loaded_somewhere(&self, kind: Provided, key: &str, plugin_id: &str) -> bool {
+        self.fleet_loaded
+            .read()
+            .ok()
+            .and_then(|loaded| loaded.as_ref().map(|l| l.has(kind, key, plugin_id)))
+            .unwrap_or(true)
+    }
+
+    /// Records what the live replicas have loaded (see
+    /// [`Self::loaded_somewhere`]).
+    pub(crate) fn set_fleet_loaded(&self, loaded: crate::providers::Loaded) {
+        if let Ok(mut slot) = self.fleet_loaded.write() {
+            *slot = Some(loaded);
+        }
     }
 
     /// The plugin that keeps `key` (a `kind` of key) closed: every plugin
@@ -426,8 +470,8 @@ impl PluginLifecycle {
 }
 
 /// Why contests of `contest_type` cannot be served on this replica, if they
-/// cannot: the plugin providing the type is disabled fleet-wide, or no
-/// handler for it is loaded here. Submissions to such a contest are refused
+/// cannot: the plugin providing the type is disabled fleet-wide, or the
+/// type's fleet-wide provider is not loaded here (`providers::resolve`). Submissions to such a contest are refused
 /// and its results are unavailable.
 pub async fn contest_type_outage(state: &AppState, contest_type: &str) -> Option<PluginOutage> {
     if let Some(plugin_id) = state
@@ -436,47 +480,62 @@ pub async fn contest_type_outage(state: &AppState, contest_type: &str) -> Option
     {
         return Some(PluginOutage::Disabled { plugin_id });
     }
-    let registered = state
-        .registries
-        .contest_type_registry
-        .read()
-        .await
-        .contains_key(contest_type);
-    (!registered).then_some(PluginOutage::Unavailable)
+    let resolved = crate::providers::resolve(
+        &*state.registries.contest_type_registry.read().await,
+        state
+            .plugin_lifecycle
+            .provider(Provided::ContestType, contest_type),
+        Provided::ContestType,
+        contest_type,
+    );
+    resolved.is_err().then_some(PluginOutage::Unavailable)
 }
 
 /// The handler a new submission or code run with `needs` is accepted
 /// through, or why none can take it now: the one acceptance rule of every
-/// submit path, contest or practice. A contest type whose provider is
-/// disabled fleet-wide is closed (`CONTEST_TYPE_DISABLED`), and so is work
-/// whose problem type's evaluator or checker format's plugin is
-/// (`PLUGIN_DISABLED`, naming it); a contest type with no handler loaded here
-/// is briefly unavailable (`CONTEST_TYPE_UNAVAILABLE`, retry later).
-/// Accepting any of them would park the work unseen.
+/// submit path, contest or practice. Work that would be parked is refused,
+/// by the same rule (`PluginLifecycle::closed_by`): a contest type whose
+/// providers are all disabled (`CONTEST_TYPE_DISABLED`), any other key whose
+/// providers are (`PLUGIN_DISABLED`), or a key whose fleet-wide provider is
+/// loaded on no live replica (`PLUGIN_NOT_LOADED`), each naming the plugin
+/// and retried by the client. Otherwise the handler is the contest type's
+/// fleet-wide provider (`providers::resolve`), the plugin that admits the
+/// work through its `before_submission` hook; a replica that does not have
+/// it loaded is briefly unavailable (`CONTEST_TYPE_UNAVAILABLE`, retry
+/// later), and never admits the work through another provider.
 pub async fn accepting_handler(
     state: &AppState,
     needs: Needs<'_>,
 ) -> Result<crate::registry::ContestTypeHandlers, AppError> {
+    use broccoli_api_types::visibility::ClosedReason;
     let contest_type = needs.contest_type;
-    let handler = match contest_type_outage(state, contest_type).await {
-        Some(PluginOutage::Disabled { .. }) => {
-            return Err(AppError::ContestTypeDisabled(contest_type.to_string()));
-        }
-        Some(PluginOutage::Unavailable) => None,
-        None => state
-            .registries
-            .contest_type_registry
-            .read()
-            .await
-            .get(contest_type)
-            .cloned(),
-    };
-    let handler =
-        handler.ok_or_else(|| AppError::ContestTypeUnavailable(contest_type.to_string()))?;
     match state.plugin_lifecycle.closed_by(needs) {
-        Some(closed) => Err(AppError::PluginDisabled(closed.plugin_id)),
-        None => Ok(handler),
+        Some(ClosedBy {
+            provides: Provided::ContestType,
+            reason: ClosedReason::Disabled,
+            ..
+        }) => return Err(AppError::ContestTypeDisabled(contest_type.to_string())),
+        Some(ClosedBy {
+            plugin_id,
+            reason: ClosedReason::Disabled,
+            ..
+        }) => return Err(AppError::PluginDisabled(plugin_id)),
+        Some(ClosedBy {
+            plugin_id,
+            reason: ClosedReason::NotLoaded,
+            ..
+        }) => return Err(AppError::PluginNotLoaded(plugin_id)),
+        None => {}
     }
+    crate::providers::resolve(
+        &*state.registries.contest_type_registry.read().await,
+        state
+            .plugin_lifecycle
+            .provider(Provided::ContestType, contest_type),
+        Provided::ContestType,
+        contest_type,
+    )
+    .map_err(|_| AppError::ContestTypeUnavailable(contest_type.to_string()))
 }
 
 /// Plugins that are enabled in the desired state but not `Loaded` here,
@@ -798,6 +857,11 @@ async fn reconcile_locked(
     if fleet_changed || !gone.is_empty() {
         retain_cache(state, published_archives).await;
     }
+    // What the live replicas have loaded, this one's own registrations
+    // included before its next report lands.
+    let mut loaded = plugin_fleet::live_loaded(&state.db).await?;
+    loaded.merge(&crate::providers::Loaded::here(&state.registries).await);
+    state.plugin_lifecycle.set_fleet_loaded(loaded);
     Ok(failures)
 }
 
@@ -2232,12 +2296,51 @@ mod tests {
             Some(ClosedBy {
                 plugin_id: "langs".into(),
                 provides: Provided::Language,
+                reason: broccoli_api_types::visibility::ClosedReason::Disabled,
             })
         );
         assert_eq!(
             lifecycle.closed_by(lifecycle.needs("t", "p", "c", None)),
             None
         );
+    }
+
+    /// Work whose key's fleet-wide provider is enabled but loaded on no live
+    /// replica waits for it, closed by that provider as not loaded, the way
+    /// work of a disabled provider waits: it never takes another provider of
+    /// the key, and it is open again once a replica has the provider loaded.
+    #[test]
+    fn work_whose_provider_is_loaded_nowhere_is_closed_by_it_until_one_loads_it() {
+        use broccoli_api_types::visibility::ClosedReason;
+        let lifecycle = providers(true, true, true);
+        let needs = lifecycle.needs("t", "p", "c", None);
+        let mut fleet = crate::providers::Loaded::default();
+        for (kind, key, plugin) in [
+            (Provided::ContestType, "t", "judge"),
+            (Provided::CheckerFormat, "c", "check"),
+        ] {
+            fleet
+                .of_mut(kind)
+                .insert(key.to_string(), vec![plugin.to_string()]);
+        }
+        lifecycle.set_fleet_loaded(fleet.clone());
+        assert_eq!(
+            lifecycle.closed_by(needs),
+            Some(ClosedBy {
+                plugin_id: "eval".into(),
+                provides: Provided::ProblemType,
+                reason: ClosedReason::NotLoaded,
+            })
+        );
+        assert_eq!(
+            lifecycle.parked_by(needs, common::SubmissionStatus::Queued),
+            lifecycle.closed_by(needs)
+        );
+        fleet
+            .of_mut(Provided::ProblemType)
+            .insert("p".into(), vec!["eval".into()]);
+        lifecycle.set_fleet_loaded(fleet);
+        assert_eq!(lifecycle.closed_by(needs), None);
     }
 
     #[test]
@@ -2253,6 +2356,7 @@ mod tests {
             Some(ClosedBy {
                 plugin_id: plugin_id.into(),
                 provides,
+                reason: broccoli_api_types::visibility::ClosedReason::Disabled,
             })
         };
         assert_eq!(providers(true, true, true).closed_by(needs), None);

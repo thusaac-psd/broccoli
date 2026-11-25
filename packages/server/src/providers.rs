@@ -155,6 +155,20 @@ impl Loaded {
     pub fn has_key(&self, kind: Provided, key: &str) -> bool {
         self.of(kind).contains_key(key)
     }
+
+    /// Adds every registration `other` has, each key's plugin ids kept
+    /// sorted and once.
+    pub fn merge(&mut self, other: &Loaded) {
+        for kind in KINDS {
+            let mine = self.of_mut(kind);
+            for (key, plugins) in other.of(kind) {
+                let ids = mine.entry(key.clone()).or_default();
+                ids.extend(plugins.iter().cloned());
+                ids.sort();
+                ids.dedup();
+            }
+        }
+    }
 }
 
 /// Who resolves a key fleet-wide (`PluginLifecycle::provider`).
@@ -184,7 +198,7 @@ impl std::fmt::Display for Unresolved {
         match &self.provider {
             Some(plugin_id) => write!(
                 f,
-                "{role} plugin {plugin_id} for {} {:?} is not loaded on this replica",
+                "the {role} plugin {plugin_id} for {} {:?} is not loaded on this replica",
                 noun(self.kind),
                 self.key
             ),
@@ -198,29 +212,13 @@ impl std::fmt::Display for Unresolved {
     }
 }
 
-impl Unresolved {
-    /// The message of a unit taken while no live replica had the key's
-    /// provider loaded: the plugin, its role and the key.
-    pub fn nowhere(&self) -> String {
-        match &self.provider {
-            Some(plugin_id) => format!(
-                "{} plugin {plugin_id} for {} {:?} is loaded on no live replica",
-                role(self.kind),
-                noun(self.kind),
-                self.key
-            ),
-            None => self.to_string(),
-        }
-    }
-}
-
 /// What a plugin providing a key of `kind` is to the unit.
 pub fn role(kind: Provided) -> &'static str {
     match kind {
-        Provided::ContestType => "the contest",
-        Provided::ProblemType => "the evaluator",
-        Provided::CheckerFormat => "the checker",
-        Provided::Language => "the language",
+        Provided::ContestType => "contest",
+        Provided::ProblemType => "evaluator",
+        Provided::CheckerFormat => "checker",
+        Provided::Language => "language",
     }
 }
 
@@ -314,23 +312,43 @@ pub(crate) fn sql_needs(
     ]
 }
 
-/// SQL: every key of `needs` (each an SQL expression, with its kind; a NULL
-/// key is no need) has a provider enabled fleet-wide, or no plugin ever
-/// recorded it (an unknown key is not disabled, so whoever takes the work
-/// fails it visibly). The SQL form of `PluginLifecycle::closed_by`, over the
-/// rows it reads (`plugin.is_enabled`, `plugin.governs`).
+/// SQL: the unit may run now. For every key of `needs` (each an SQL
+/// expression, with its kind; a NULL key is no need): its fleet-wide
+/// [`provider`] is loaded on a live replica; or, with no provider enabled,
+/// no plugin ever recorded the key (an unknown key is not closed, so
+/// whoever takes the work fails it visibly). A key every recorded provider
+/// of which is disabled, or whose provider is loaded on no live replica,
+/// parks the work. The SQL form of `PluginLifecycle::closed_by`, over the
+/// rows it reads (`plugin.is_enabled`, `plugin.governs`,
+/// `plugin_replica.provides`).
 pub(crate) fn runnable(needs: &[(Provided, String)]) -> String {
     let each: Vec<String> = needs
         .iter()
         .map(|(kind, key)| {
             format!(
-                "COALESCE((SELECT bool_or(p.is_enabled) FROM plugin p \
-                            WHERE p.governs->'{field}' @> jsonb_build_array({key})), TRUE)",
+                "({key} IS NULL OR CASE \
+                   WHEN {provider} IS NOT NULL THEN EXISTS ({live} AND {there}) \
+                   ELSE NOT EXISTS (SELECT 1 FROM plugin p \
+                                     WHERE p.governs->'{field}' @> jsonb_build_array({key})) \
+                 END)",
+                provider = provider(*kind, key),
+                live = live_replicas(),
+                there = loads(*kind, key, "r.provides"),
                 field = field(*kind),
             )
         })
         .collect();
     format!("({})", each.join(" AND "))
+}
+
+/// SQL: the live replicas, as `r`, a `SELECT 1 FROM plugin_replica r WHERE`
+/// to extend with `AND`. Live by heartbeat on the database clock.
+fn live_replicas() -> String {
+    format!(
+        "SELECT 1 FROM plugin_replica r \
+          WHERE r.heartbeat_at > NOW() - make_interval(secs => {live})",
+        live = crate::plugin_fleet::LIVE_WINDOW_SECS,
+    )
 }
 
 /// SQL: the fleet-wide provider of `key` (an SQL expression) of `kind`: the
@@ -346,23 +364,25 @@ pub(crate) fn provider(kind: Provided, key: &str) -> String {
 }
 
 /// SQL: this replica may take work with `needs` (each an SQL expression,
-/// with its kind; a NULL key is no need): for every key, this replica has its fleet-wide
-/// [`provider`] loaded (`local`, the placeholder [`Loaded::here`] is bound
-/// to), or no live replica has (`plugin_replica.provides`, live by its
-/// heartbeat on the database clock). A key no plugin provides fleet-wide
-/// goes by whether any plugin loaded it.
+/// with its kind; a NULL key is no need): for every key, this replica has
+/// its fleet-wide [`provider`] loaded (`local`, the placeholder
+/// [`Loaded::here`] is bound to). A key no plugin provides fleet-wide goes
+/// by whether any plugin loaded it here, or no live replica has: whoever
+/// takes it fails it visibly. A runnable unit ([`runnable`]) has every
+/// provider loaded on some live replica, so it waits for one of them.
 pub(crate) fn runs_here(needs: &[(Provided, String)], local: &str) -> String {
     let each: Vec<String> = needs
         .iter()
         .map(|(kind, key)| {
             format!(
-                "({key} IS NULL OR {here} OR NOT EXISTS (\
-                   SELECT 1 FROM plugin_replica r \
-                    WHERE r.heartbeat_at > NOW() - make_interval(secs => {live}) \
-                      AND {there}))",
+                "({key} IS NULL OR CASE \
+                   WHEN {provider} IS NOT NULL THEN {here} \
+                   ELSE {here} OR NOT EXISTS ({live} AND {there}) \
+                 END)",
+                provider = provider(*kind, key),
                 here = loads(*kind, key, local),
+                live = live_replicas(),
                 there = loads(*kind, key, "r.provides"),
-                live = crate::plugin_fleet::LIVE_WINDOW_SECS,
             )
         })
         .collect();

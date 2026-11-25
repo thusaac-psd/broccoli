@@ -26,9 +26,9 @@ pub enum DispatchFault {
     /// unit, is not loaded here any more (it is reloading or was unloaded):
     /// the replica's fault, not the submission's.
     NotLoadedHere,
-    /// A plugin the unit needs was loaded on no live replica when this
-    /// replica took the unit, or no plugin provides what it needs: every
-    /// attempt would meet the same, so the failure stands.
+    /// No enabled plugin provides a key the unit needs, and this replica
+    /// took it without one loaded: no replica will run it, so the failure
+    /// stands.
     NotLoaded,
     /// The database did not answer a statement the dispatch's plugins ran
     /// (`common::db::is_outage`): the platform's fault, not the submission's.
@@ -51,7 +51,7 @@ impl DispatchFault {
         match self {
             Self::Operation(fault) => fault.code(),
             Self::NotLoadedHere => HostCode::PluginNotLoadedHere,
-            Self::NotLoaded => HostCode::PluginNotLoaded,
+            Self::NotLoaded => HostCode::NoProvider,
             Self::DatabaseUnavailable => HostCode::DatabaseUnavailable,
             Self::CheckerFailed => HostCode::CheckerFailed,
             Self::ProblemFailed => HostCode::ProblemFailed,
@@ -111,17 +111,18 @@ impl DispatchFaults {
 }
 
 /// The fault of a plugin a unit needs that did not resolve here
-/// (`unresolved`). A unit claimed with every plugin it needs loaded here
-/// lost it since: this replica's fault, handed back
-/// ([`DispatchFault::NotLoadedHere`]). A unit taken while no live replica
-/// had it loaded, or that needs what no plugin provides, stands on its first
-/// attempt ([`DispatchFault::NotLoaded`]), its message naming the plugin and
-/// its role.
+/// (`unresolved`). A key an enabled plugin provides is this replica's to
+/// lose: it is reloading or was unloaded since the claim, or another replica
+/// has it, so the attempt is handed back ([`DispatchFault::NotLoadedHere`])
+/// and the unit waits, parked while its provider is loaded nowhere, for a
+/// replica that runs it. Only a key no enabled plugin provides, taken by a
+/// replica that did not have it loaded either, stands on its first attempt
+/// ([`DispatchFault::NotLoaded`]): no replica will ever run it.
 pub(crate) fn missing_plugin(
     needs_loaded: bool,
     unresolved: &crate::providers::Unresolved,
 ) -> Recorded {
-    if needs_loaded {
+    if needs_loaded || unresolved.provider.is_some() {
         Recorded {
             fault: DispatchFault::NotLoadedHere,
             message: unresolved.to_string(),
@@ -129,7 +130,7 @@ pub(crate) fn missing_plugin(
     } else {
         Recorded {
             fault: DispatchFault::NotLoaded,
-            message: unresolved.nowhere(),
+            message: unresolved.to_string(),
         }
     }
 }
@@ -444,25 +445,31 @@ mod tests {
         );
     }
 
-    /// A contest handler missing here is this replica's fault only for a
-    /// unit it claimed with every plugin loaded: handed back. One it took
-    /// while no live replica had the plugin stands, naming it.
+    /// A contest handler missing here hands the attempt back while an
+    /// enabled plugin provides the contest type; with none, a unit taken
+    /// without one loaded stands, naming the key.
     #[test]
-    fn a_missing_handler_hands_back_only_what_was_claimed_loaded() {
-        let unresolved = crate::providers::Unresolved {
+    fn a_missing_handler_stands_only_when_no_enabled_plugin_provides_it() {
+        let provided = crate::providers::Unresolved {
             kind: crate::providers::Provided::ContestType,
             key: "x".into(),
             provider: Some("contest".into()),
         };
-        let lost = DispatchFailure::no_handler(true, &unresolved);
-        assert_eq!(
-            (lost.code, lost.class),
-            (HostCode::PluginNotLoadedHere, SystemErrorClass::HandBack)
-        );
-        let missing = DispatchFailure::no_handler(false, &unresolved);
+        for needs_loaded in [true, false] {
+            let lost = DispatchFailure::no_handler(needs_loaded, &provided);
+            assert_eq!(
+                (lost.code, lost.class),
+                (HostCode::PluginNotLoadedHere, SystemErrorClass::HandBack)
+            );
+        }
+        let unprovided = crate::providers::Unresolved {
+            provider: None,
+            ..provided
+        };
+        let missing = DispatchFailure::no_handler(false, &unprovided);
         assert_eq!(
             (missing.code, missing.class),
-            (HostCode::PluginNotLoaded, SystemErrorClass::Stands)
+            (HostCode::NoProvider, SystemErrorClass::Stands)
         );
     }
 

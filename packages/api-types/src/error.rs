@@ -163,9 +163,12 @@ host_codes! {
     /// A plugin the work needs stopped being loaded on the replica that
     /// took it; the work goes back to the queue.
     PluginNotLoadedHere = "PLUGIN_NOT_LOADED_HERE";
-    /// A plugin the work needs was loaded on no live replica when the work
-    /// was taken (or no plugin provides what it needs): the work stands
-    /// failed, naming the plugin and its role.
+    /// No enabled plugin provides a key the work needs (its contest type,
+    /// problem type, checker format or language), and the replica that took
+    /// it had none loaded: no replica will ever run it, so it stands.
+    NoProvider = "NO_PROVIDER";
+    /// A plugin the request needs is enabled and loaded on no live replica:
+    /// what it provides waits for a replica to load it; retried.
     PluginNotLoaded = "PLUGIN_NOT_LOADED";
     /// The problem's checker program failed.
     CheckerFailed = "CHECKER_FAILED";

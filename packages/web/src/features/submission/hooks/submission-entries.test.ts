@@ -29,7 +29,11 @@ function result(
 }
 
 const DISABLED = { state: 'disabled', plugin_id: 'icpc' } as const;
-const PARKED = { plugin_id: 'icpc', provides: 'contest_type' } as const;
+const PARKED = {
+  plugin_id: 'icpc',
+  provides: 'contest_type',
+  reason: 'disabled',
+} as const;
 
 const error = { code: 'NOT_FOUND', message: 'gone' };
 

@@ -1301,7 +1301,8 @@ async fn a_problem_whose_evaluator_is_disabled_names_what_closes_its_submissions
     }
     plugin_lifecycle::reconcile(&a.state).await.unwrap();
 
-    let closed = json!({"plugin_id": "off-evaluator", "provides": "problem_type"});
+    let closed =
+        json!({"plugin_id": "off-evaluator", "provides": "problem_type", "reason": "disabled"});
     for route in [
         routes::problem(problem_id),
         routes::contest_problem(contest_id, problem_id),

@@ -42,7 +42,10 @@ test('a parked submission names what parks it and the plugin, as the server reco
   ] as const) {
     assert.deepEqual(
       getVerdictBadge(
-        { status: 'Queued', parked_by: { plugin_id: 'named', provides } },
+        {
+          status: 'Queued',
+          parked_by: { plugin_id: 'named', provides, reason: 'disabled' },
+        },
         i18n,
       ),
       {
@@ -56,10 +59,29 @@ test('a parked submission names what parks it and the plugin, as the server reco
     getVerdictBadge(
       {
         status: 'Queued',
-        parked_by: { plugin_id: 'unnamed', provides: 'contest_type' },
+        parked_by: {
+          plugin_id: 'unnamed',
+          provides: 'contest_type',
+          reason: 'disabled',
+        },
       },
       i18n,
     ).label,
     'submissions.parkedBy.contest_type(unnamed)',
+  );
+  // A provider loaded on no server says so, whatever its role.
+  assert.equal(
+    getVerdictBadge(
+      {
+        status: 'Queued',
+        parked_by: {
+          plugin_id: 'named',
+          provides: 'checker_format',
+          reason: 'not_loaded',
+        },
+      },
+      i18n,
+    ).label,
+    'submissions.parkedBy.notLoaded(Named Plugin)',
   );
 });

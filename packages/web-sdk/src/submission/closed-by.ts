@@ -34,17 +34,31 @@ const ROLE_TEXT: Record<Provided, Record<ClosedByPlace, TranslationKey>> = {
 };
 
 /**
+ * The text of a provider the work waits for that is enabled but loaded on no
+ * server (`reason: 'not_loaded'`), in each place, whatever role it plays.
+ */
+const NOT_LOADED_TEXT: Record<ClosedByPlace, TranslationKey> = {
+  parked: 'submissions.parkedBy.notLoaded',
+  closed: 'problem.closedBy.notLoaded',
+};
+
+/**
  * What holds work back (`ClosedBy`), in the user's language: the role the
- * plugin plays for the work, and the plugin by its translated name
+ * plugin plays for the work, or that it is loaded on no server, and the
+ * plugin by its translated name
  * (`plugin.<id>.name`), or by its id where no catalog names it, so whoever
  * can enable it knows which plugin to act on. Every view of a parked
  * submission or a closed submit says it through this.
  */
 export function closedByText(
-  { plugin_id, provides }: ClosedBy,
+  { plugin_id, provides, reason }: ClosedBy,
   place: ClosedByPlace,
   { t, lookup }: Pick<I18nContextValue, 't' | 'lookup'>,
 ): string {
   const plugin = lookup(pluginKeys.name(plugin_id)) ?? plugin_id;
-  return t(ROLE_TEXT[provides][place], { plugin });
+  const key =
+    reason === 'not_loaded'
+      ? NOT_LOADED_TEXT[place]
+      : ROLE_TEXT[provides][place];
+  return t(key, { plugin });
 }

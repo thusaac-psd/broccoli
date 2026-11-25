@@ -2710,17 +2710,24 @@ export interface components {
       url?: string | null;
     };
     /**
-     * @description The plugin that keeps new work of a resource from running: every plugin
-     *     that provides what the work needs (`provides`) is disabled fleet-wide,
-     *     and this is the first of them by id. A submission it closes is accepted
-     *     by no submit path and, if already queued, waits (parked) until an
-     *     administrator enables a provider.
+     * @description The plugin that keeps new work of a resource from running, and why
+     *     (`reason`): every plugin that provides what the work needs (`provides`)
+     *     is disabled fleet-wide, and this is the first of them by id; or this is
+     *     the key's provider, enabled but loaded on no live replica. A submission it
+     *     closes is accepted by no submit path and, if already queued, waits
+     *     (parked) until a provider can run it.
      */
     ClosedBy: {
       /** @example my-plugin */
       plugin_id: string;
       provides: components['schemas']['Provided'];
+      reason: components['schemas']['ClosedReason'];
     };
+    /**
+     * @description Why a plugin keeps work from running ([`ClosedBy`]).
+     * @enum {string}
+     */
+    ClosedReason: 'disabled' | 'not_loaded';
     CodeRunJudgeResult: {
       compile_output?: string | null;
       error_message?: string | null;

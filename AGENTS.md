@@ -304,10 +304,14 @@ binaries warn about every key they do not read.
   (`judging::Unit::runnable`, built on `providers::runnable`;
   `PluginLifecycle::closed_by` in Rust), the submit paths refuse it
   (`accepting_handler`), and it resumes when a provider is enabled. A replica
-  takes a unit only when it has every key's fleet-wide provider loaded, or no
-  live replica has (`providers::runs_here`, local registrations from
-  `Loaded::here`); a plugin lost after the claim hands the attempt back
-  (`Dispatch::not_loaded_here`). A new scan that hands out or retries judging
+  takes a unit only when it has every key's fleet-wide provider loaded
+  (`providers::runs_here`, local registrations from `Loaded::here`). A provider
+  enabled but loaded on no live replica parks the work the same way
+  (`ClosedReason::NotLoaded`; the submit paths answer `PLUGIN_NOT_LOADED`),
+  never another provider; only a key no enabled plugin provides is taken without
+  its plugin, to stand as `NO_PROVIDER`. A plugin missing at dispatch while an
+  enabled plugin provides the key hands the attempt back
+  (`Dispatch::missing_plugin`). A new scan that hands out or retries judging
   work uses these predicates too. A judgement whose session the disable cut goes
   straight back to `Queued` (`judging::fail_dispatch`), never through
   `SystemError`, on every replica alike, since the decision reads the fleet-wide
@@ -336,13 +340,12 @@ binaries warn about every key they do not read.
   stolen.
 - A failure every attempt would repeat stands: its `DispatchFault` classes as
   standing (a problem's checker or its own program failing, `CHECKER_FAILED`,
-  `PROBLEM_FAILED`; a plugin the unit needs loaded on no live replica when it
-  was taken, `PLUGIN_NOT_LOADED`), and the system-error retry never re-judges
-  it. An evaluator reports a problem's failure generically, in
-  `TestCaseVerdict::problem_failure`; the host never reads a plugin's verdict
-  for it. A system error the retry may still take back is not shown: the
-  submission and its judgement history show the attempt in flight until the
-  retry decides.
+  `PROBLEM_FAILED`; a key no enabled plugin provides, `NO_PROVIDER`), and the
+  system-error retry never re-judges it. An evaluator reports a problem's
+  failure generically, in `TestCaseVerdict::problem_failure`; the host never
+  reads a plugin's verdict for it. A system error the retry may still take back
+  is not shown: the submission and its judgement history show the attempt in
+  flight until the retry decides.
 - Unloading a plugin retires its instance pool (`plugin_core::pool::Liveness`)
   and every pool a reload replaced that a call still runs on
   (`PluginEntry::succeed`): a call already running on a retired instance is

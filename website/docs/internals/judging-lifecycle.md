@@ -102,22 +102,32 @@ with the first id among the enabled ones that provide it
 `plugin.is_enabled` and `plugin.governs`). The dispatch runs each key on
 that plugin only (`providers::resolve`), never on another provider that
 happens to be loaded here, so one contest is never judged by two plugins
-under two configs. The claim, the system-error retry, the steal and the
-stuck detector take a unit only when this replica has every key's
+under two configs. The provider is the first enabled one, not the first
+one some replica happens to have loaded: a transient load failure must not
+move a contest to another plugin and its config. While a key's provider is
+enabled but loaded on no live replica (its first load failed everywhere, the
+fleet is reloading it, the replica that enabled it restarted), work that
+needs it is parked, exactly as when every provider is disabled: it stays
+`Queued` with `parked_by` naming the plugin (`reason: not_loaded`), a submit
+path refuses new work retryably (`503 PLUGIN_NOT_LOADED` with `Retry-After`,
+where a disabled provider answers `PLUGIN_DISABLED`), and it runs once a
+replica that loads the provider is live (`providers::runnable`,
+`PluginLifecycle::closed_by`, which reads the live replicas' loads as of the
+last reconcile). An administrator who wants the next provider to take the
+key disables the first. The claim, the system-error retry, the steal and
+the stuck detector take a unit only when this replica has every key's
 fleet-wide provider loaded (`Loaded::here`, read from its registries, so the
-check costs no round trip), or when no live replica has one loaded: then the
-replica that takes the unit fails it visibly instead of it waiting unseen
-(`providers::runs_here`). Every attempt would meet the same, so its system
-error stands on the first attempt, never retried, as `PLUGIN_NOT_LOADED`
-with a message naming the plugin, its role and the key
-(`judging::fault::missing_plugin`). Each replica publishes what it has loaded, each key
-with the plugins that registered it there, in its `plugin_replica.provides`
-row. A unit
-this replica cannot run yet stays `Queued` for a replica that can, or for
-this one once it loads the plugin. A plugin that stops being loaded here
-after a unit was claimed with everything loaded (a reload, an unload) is
-this replica's fault, `PLUGIN_NOT_LOADED_HERE`: the attempt is handed back
-without spending any budget (`Dispatch::not_loaded_here`).
+check costs no round trip; `providers::runs_here`). Only a key no enabled
+plugin provides at all is taken by a replica without it, to fail visibly
+instead of waiting unseen: no replica will ever run it, so its system error
+stands on the first attempt, never retried, as `NO_PROVIDER`, with a message
+naming the role and the key (`judging::fault::missing_plugin`). Each replica
+publishes what it has loaded, each key with the plugins that registered it
+there, in its `plugin_replica.provides` row. A plugin the unit needs that is
+not loaded here at dispatch, while an enabled plugin provides the key (a
+reload, an unload, a claim that raced a load), is this replica's fault,
+`PLUGIN_NOT_LOADED_HERE`: the attempt is handed back without spending any
+budget (`Dispatch::missing_plugin`).
 
 ## Judging sessions end in a verdict
 

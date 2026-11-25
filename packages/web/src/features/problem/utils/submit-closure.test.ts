@@ -4,12 +4,20 @@ import { test } from 'node:test';
 import { submitClosure } from './submit-closure.ts';
 
 const CONTEST_OUT = { state: 'disabled', plugin_id: 'icpc' } as const;
-const EVALUATOR = { plugin_id: 'batch', provides: 'problem_type' } as const;
+const EVALUATOR = {
+  plugin_id: 'batch',
+  provides: 'problem_type',
+  reason: 'disabled',
+} as const;
 
 test("a contest's plugin outage is the one notice under the contest", () => {
   assert.deepEqual(
     submitClosure('contest', CONTEST_OUT, {
-      closed_by: { plugin_id: 'icpc', provides: 'contest_type' },
+      closed_by: {
+        plugin_id: 'icpc',
+        provides: 'contest_type',
+        reason: 'disabled',
+      },
     }),
     { kind: 'contest', outage: CONTEST_OUT },
   );
