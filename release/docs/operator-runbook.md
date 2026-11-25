@@ -50,9 +50,14 @@ Each server answers three probes and `/metrics` on its main HTTP port:
   and more: a plugin is loaded there but not here (its load keeps failing, or
   its files are missing), so a browser pinned here would miss it, whatever it
   provides (a contest type, a language, an evaluator, a checker, a page or
-  route), until the load succeeds. Servers that each lack a different plugin, or
-  a plugin no server could load, are all ready, so the gateway always keeps a
-  server. It makes no database or Redis call, and its body never names a plugin.
+  route), until the load succeeds. A request here that needs it answers
+  `503 PLUGIN_NOT_LOADED_HERE`, naming the plugin in `details.plugin_id`, and a
+  result it governs reads as withheld (`not_loaded_here`). The answer carries
+  `Retry-After: 10`: two failed probes five seconds apart, after which the
+  gateway sends the retry to a server that serves it. Servers that each lack a
+  different plugin, or a plugin no server could load, are all ready, so the
+  gateway always keeps a server. It makes no database or Redis call, and its
+  body never names a plugin.
 - `/healthz`, the deep check for monitoring: it also reaches Postgres, Redis and
   blob storage (below). It is never a gateway probe: the servers share those, so
   one blip would fail it on every server at once.
@@ -433,6 +438,20 @@ size:
 
 Raise `POSTGRES_MAX_CONNECTIONS` in `.env.infra` for a larger fleet. The native
 installer sets 500 too, and the development `docker-compose.yaml` 200.
+
+**Behind PgBouncer**
+
+A plugin statement that runs past its call's deadline is cut. Talking to
+Postgres directly, the server cuts it by closing its connection, which Postgres
+notices within 100 ms (`client_connection_check_interval`, which plugin SQL may
+not change). That needs startup options, and PgBouncer rejects them, so behind
+PgBouncer set `database.statement_timeout_secs = 0` and
+`database.tcp_keepalives = false` (see the configuration reference). The server
+then sends no startup options and cuts a statement by cancelling its backend
+instead (`pg_cancel_backend`, by the pid it read when it checked the connection
+out). It closes only when it sends startup options and a probe connection reads
+the check interval back as set, so a pooler that ignores the options is cut by
+cancelling too.
 
 **Sizing Redis memory**
 
