@@ -347,10 +347,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &state.metrics,
                 judgement_ref,
                 &faults,
-                DispatchFailure::judging(
-                    HostCode::DatabaseError,
-                    format!("Failed to read the judging inputs: {e}"),
-                ),
+                DispatchFailure::database("read the judging inputs", &e),
             )
             .await;
             return;
@@ -383,10 +380,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &state.metrics,
                 judgement_ref,
                 &faults,
-                DispatchFailure::judging(
-                    HostCode::DatabaseError,
-                    format!("Failed to fetch problem: {}", e),
-                ),
+                DispatchFailure::database("fetch the problem", &e),
             )
             .await;
             return;
@@ -439,7 +433,12 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             .all(&inputs)
             .await
         {
-            Ok(tcs) => tcs,
+            // Everything judging reads in the snapshot is read: it closes
+            // before any body is spilled to blob storage.
+            Ok(tcs) => {
+                drop(inputs);
+                tcs
+            }
             Err(e) => {
                 error!(error = %e, "Failed to query test cases");
                 record_dispatch_failure(
@@ -447,7 +446,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                     &state.metrics,
                     judgement_ref,
                     &faults,
-                    DispatchFailure::judging(HostCode::DatabaseError, format!("Failed to query test cases: {}", e)),
+                    DispatchFailure::database("read the test cases", &e),
                 )
                 .await;
                 return;
@@ -561,7 +560,6 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
         }
         resolved_test_cases
     };
-    drop(inputs);
     if let Err(e) = judging::stamp_inputs_version(
         &state.db,
         judgement_ref.id,
@@ -576,10 +574,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             &state.metrics,
             judgement_ref,
             &faults,
-            DispatchFailure::judging(
-                HostCode::DatabaseError,
-                format!("Failed to record the judging inputs version: {e}"),
-            ),
+            DispatchFailure::database("record the judging inputs version", &e),
         )
         .await;
         return;

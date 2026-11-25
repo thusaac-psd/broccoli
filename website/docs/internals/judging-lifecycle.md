@@ -309,10 +309,14 @@ refused (`QUEUE_UNREACHABLE`), an operation the queue lost
 (`OPERATION_LOST`), a worker without a platform tool
 (`PLATFORM_TOOL_MISSING`), a fleet with no live worker that takes work
 (`NO_CAPABLE_WORKER`), a plugin the unit needs that stopped being loaded on
-the replica that claimed it (`PLUGIN_NOT_LOADED_HERE`), a statement its
-plugins ran that the database did not answer (`DATABASE_UNAVAILABLE`, as
-`common::db::is_outage` decides it, recorded by the plugin SQL host functions
-through `Dispatch::note_database_error`). Each of these faults is a hand-back
+the replica that claimed it (`PLUGIN_NOT_LOADED_HERE`), a statement the
+dispatch or its plugins ran that the database could not serve
+(`DATABASE_UNAVAILABLE`): the database lost, its pool or the plugin's own SQL
+permits with nothing free in time. Plugin SQL records it where every
+unavailable statement ends (`host_funcs::sql::unavailable`, through
+`Dispatch::note_outage`), and the dispatch's own statements (reading the
+inputs, stamping their version) by the same rule
+(`DispatchFailure::database`, as `common::db::is_outage` decides it). Each of these faults is a hand-back
 (`SystemErrorClass::HandBack`): the platform lost the attempt, and it never
 becomes a verdict. The judging session ends as `Lost` before another result
 reaches the plugin, a plugin write that would finalize the judgement is fenced
