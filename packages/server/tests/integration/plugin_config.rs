@@ -1463,7 +1463,7 @@ mod unknown_checks {
                  ('zzz-governor', TRUE, 1, NOW(), '{{\"visibility\": false, \
                    \"contest_types\": [\"{contest_type}\"], \"problem_types\": [\"{problem_type}\"], \
                    \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \
-                   \"hooks\": [], \"judging_inputs\": []}}')"
+                   \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}')"
             ))
             .await
             .unwrap();

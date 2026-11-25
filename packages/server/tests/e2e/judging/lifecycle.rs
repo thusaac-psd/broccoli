@@ -436,7 +436,7 @@ async fn a_contest_whose_plugin_is_loaded_nowhere_names_it_wherever_it_is_out() 
             "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
              ('aaa-judge', TRUE, 1, NOW(), '{\"visibility\": true, \"contest_types\": [\"icpc\"], \
                \"problem_types\": [], \"checker_formats\": [], \
-               \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}')"
+               \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}')"
                 .to_string(),
         ))
         .await
@@ -497,7 +497,7 @@ async fn a_practice_type_whose_only_plugin_is_loaded_nowhere_names_it() {
             "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
              ('elsewhere-judge', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [\"elsewhere\"], \
                \"problem_types\": [], \"checker_formats\": [], \
-               \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}')"
+               \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}')"
                 .to_string(),
         ))
         .await

@@ -1474,7 +1474,7 @@ async fn a_replica_lacking_a_contest_types_provider_a_peer_has_is_not_ready() {
     a.db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
-         ('typed-judge', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [\"ready-type\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}')",
+         ('typed-judge', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [\"ready-type\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}')",
     ))
     .await
     .unwrap();
