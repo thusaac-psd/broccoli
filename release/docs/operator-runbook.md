@@ -262,9 +262,10 @@ stored, so a failed import changes nothing. It refuses:
 - a database this build has not migrated yet: start this build's server once
   first;
 - a database that already has problems, unless `--replace-problems`, which
-  removes every problem the database has, those the bundle does not carry
-  included; and, with `--replace-problems`, problems that submissions, code runs
-  or contests still reference, unless `--wipe-dependents` deletes those too;
+  removes every problem the database has (the import summary names, by id and
+  title, those the bundle does not carry); and, with `--replace-problems`,
+  problems that submissions, code runs or contests still reference, unless
+  `--wipe-dependents` deletes those too;
 - a contest bundle onto a database that has a contest with the bundle's contest
   id, unless `--replace-contest`. The bundle's contest replaces that one: its
   roster, problem links and contest configs go, and so do its clarifications,
@@ -289,25 +290,35 @@ with a bundle_ section (`website/docs/building-plugins/configuration.md`,
 carries its problems' and contest's configs, never a plugin-wide one, and an
 import replaces the configs of every problem it replaces. A config field its
 plugin marks secret, such as a print station's token, never travels, with or
-without `--with-secrets`. A bundle names the installation it was exported from,
-and the secrets an import keeps follow these rules:
+without `--with-secrets`: the bundle carries an opaque ref in its place.
 
-- Importing into the installation that exported the bundle keeps the secrets
-  that installation stores, `--replace-problems` included.
-- Importing it anywhere else leaves every secret unset, and the import summary
-  counts them (`secrets_unset`): enter them again on the target, such as a
-  contest's print station tokens, before the stations can sign in.
+- An import keeps the target's stored secret only where the target holds the
+  bundle's ref for the same item, which means the same stored secret,
+  `--replace-problems` included.
+- Every other secret is left unset, and the import summary counts them
+  (`secrets_unset`): enter them again on the target, such as a contest's print
+  station tokens, before the stations can sign in.
+- A copy restored from a database dump shares refs with its source only for
+  secrets neither side has set again since.
+- A problem that replaces another at its id keeps none of that problem's
+  secrets.
 
-A secret belongs to its item by key (a print station by its name). Once a save
-drops an item, its secret is gone: re-adding a station with the same name, or
-renaming one, makes a new station whose token is entered again. Two stations
-with the same name are refused.
+A secret belongs to its item by key (a print station by its name). A renamed
+station, or one deleted and added again under the same name, is a new station:
+enter its token again. Two stations cannot share a name.
 
-When an admin saves a config, a secret the save leaves out or sends as null
-keeps the stored value, so a form never has to show it; only Clear
-(`{"$clear": true}`) removes it. A secret its item requires, such as a station's
-token, cannot be cleared: Clear is hidden and the server refuses with
-`secret_required`. Replace it by typing a new one.
+No read ever shows a secret's value: a set secret reads as an opaque ref,
+`{"$secret": "<ref>"}`. When an admin saves a config, the stored secret is kept
+only when the save sends that ref back on the same item; the settings form does
+this when the field is left empty. A save that leaves a stored secret out, null
+or empty, or sends a ref the item does not hold (or one read before the secret
+was set again), is refused with `secret_not_stored`: re-enter the secret, or
+clear it on purpose. A station's token is required, so it can never be cleared
+or left empty (`secret_required`): enter one.
+
+A server not yet running a plugin's published version refuses saves of that
+plugin's settings with `PLUGIN_OUTDATED_HERE` (503 with `Retry-After`); it
+serves them once it reconciles, within seconds, so a retry lands.
 
 The export reads each plugin's schema from its published upload or the server's
 plugin directory. The configs of a plugin with neither (removed, or never

@@ -100,8 +100,9 @@ the problems on the server box:
 ```bash
 cd contest
 ./import-problems.sh ../broccoli-problems-*.tar.gz
-#   --replace-problems  remove every problem the database has, those the
-#                       bundle does not carry included, and load its own
+#   --replace-problems  remove every problem the database has and load the
+#                       bundle's; the summary names, by id and title, those
+#                       the bundle does not carry
 #   --wipe-dependents   with --replace-problems, also delete the submissions,
 #                       code runs and contest links that reference them
 ```
@@ -159,20 +160,29 @@ to another server.
   cannot log in until an admin sets its password.
 - **Secret plugin settings never travel.** A print station's token, or any
   setting a plugin marks secret, stays out of the archive even with
-  `--with-secrets`. The archive names the installation it came from. An import
-  into that same installation keeps the secrets it already stores. An import
-  anywhere else leaves every secret unset, and the import summary counts them
-  (`secrets_unset`): enter them again on the target before the stations can sign
-  in.
-- **A secret belongs to its item by key** (a print station by its name). Once a
-  save drops an item, its secret is gone: re-adding a station with the same
-  name, or renaming one, makes a new station whose token is entered again. Two
-  stations with the same name are refused.
-- **Saving keeps a secret unless it is cleared.** A save that leaves a secret
-  out or sends it as null keeps the stored one; only Clear (`{"$clear": true}`)
-  removes it. A secret its item requires (a station's token) cannot be cleared:
-  Clear is hidden and the server refuses with `secret_required`. Replace it by
-  typing a new one.
+  `--with-secrets`: the archive carries an opaque ref in its place. An import
+  keeps the target's stored secret only where the target holds the bundle's ref
+  for the same item, which means the same stored secret. Every other secret is
+  left unset, and the import summary counts them (`secrets_unset`): enter them
+  again on the target before the stations can sign in. A copy restored from a
+  database dump shares refs only for secrets neither side has set again since,
+  and a problem that replaces another at its id keeps none of that problem's
+  secrets.
+- **A secret is never shown.** A set secret reads as an opaque ref
+  (`{"$secret": "<ref>"}`), and a save keeps the stored secret only when it
+  sends that ref back on the same item; the settings form does this when the
+  field is left empty. A save that leaves a stored secret out, null or empty, or
+  sends a ref the item does not hold (or one read before the secret was set
+  again), is refused with `secret_not_stored`: re-enter the secret, or clear it
+  on purpose. A station's token is required, so it can never be cleared or left
+  empty (`secret_required`): enter one.
+- **A secret belongs to its item by key** (a print station by its name). A
+  renamed station, or one deleted and added again under the same name, is a new
+  station: enter its token again. Two stations cannot share a name.
+- **Settings save on an up-to-date server.** A server not yet running a plugin's
+  published version refuses saves of that plugin's settings with
+  `PLUGIN_OUTDATED_HERE` (503, retried); it serves them once it reconciles,
+  within seconds.
 - **Schema versions.** The archive records the source database's schema version
   and each table's columns. It restores onto a server of the same or a newer
   build, which has started once (so its database is migrated); a column the
