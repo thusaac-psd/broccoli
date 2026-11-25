@@ -8,7 +8,9 @@
 //! the creation idempotently.
 //!
 //! An unavailable predecessor at a scheduled instant requires a new staff
-//! schedule; timer delivery time never shifts the clock.
+//! schedule; timer delivery time never shifts the stage clock. A game a late
+//! delivery opens runs its full length from when it opens (see
+//! `machine::open_game`).
 use broccoli_server_sdk::prelude::*;
 
 use crate::model::{MatchState, Phase, Setup, StageClock};
@@ -326,7 +328,8 @@ mod tests {
             .collect()
     }
     #[test]
-    fn delayed_and_duplicate_stage_callbacks_create_each_match_once_with_the_original_clock() {
+    fn delayed_and_duplicate_stage_callbacks_create_each_match_once_and_open_its_game_when_they_run()
+     {
         let host = Host::mock();
         let mut config = setup();
         config.opened_rounds = 0;
@@ -354,7 +357,7 @@ mod tests {
             assert_eq!(matches.len(), 2);
             for (_, m) in matches {
                 assert_eq!(m.xiaoju.len(), 1);
-                assert_eq!(m.xiaoju[0].opened_at_ms, 211_000);
+                assert_eq!(m.xiaoju[0].opened_at_ms, 212_000);
             }
         }
     }

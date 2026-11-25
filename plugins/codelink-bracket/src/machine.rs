@@ -187,7 +187,7 @@ pub fn transition(
                 return Err(Rejection::NotAwaitingStart);
             }
             bracket::fill_missing_orders(&mut next);
-            open_game(&mut next, inputs, inputs.clock.now, &mut wakeups)?;
+            open_game(&mut next, inputs, &mut wakeups)?;
         }
         Event::Award { winner } => {
             if winner != next.player_a && winner != next.player_b {
@@ -322,7 +322,7 @@ fn tick(
                 wake(wakeups, MatchTimer::GameStart, stage.starts_at_ms);
                 return Ok(());
             }
-            open_game(m, inputs, stage.starts_at_ms, wakeups)
+            open_game(m, inputs, wakeups)
         }
         Phase::Ordering => {
             // A match that would start at or after the contest end could never
@@ -337,7 +337,7 @@ fn tick(
                 wake(wakeups, MatchTimer::Start, at);
                 return Ok(());
             }
-            open_game(m, inputs, now, wakeups)
+            open_game(m, inputs, wakeups)
         }
         // Only scheduled stages prepare.
         Phase::Preparing => Ok(()),
@@ -355,7 +355,7 @@ fn tick(
                 );
                 return Ok(());
             }
-            open_game(m, inputs, next_game_at_ms, wakeups)
+            open_game(m, inputs, wakeups)
         }
         Phase::Playing | Phase::AwaitingJudge { .. } => play(m, inputs, wakeups),
         Phase::Decided { .. } | Phase::NeedsAdjudication { .. } => Ok(()),
@@ -455,7 +455,7 @@ fn play(
             Some(MatchOutcome::NextGame) | None => {
                 let seconds = round_def.game_break();
                 if seconds == 0 {
-                    open_game(m, inputs, now, wakeups)?;
+                    open_game(m, inputs, wakeups)?;
                 } else {
                     let at = seconds
                         .checked_mul(1_000)
@@ -505,8 +505,13 @@ fn effective_wakeups(m: &MatchState, inputs: &Inputs<'_>, game: u8, cutoff: i64)
         .collect()
 }
 
-/// Open the next game (regular or 附加赛 -- both live in `m.xiaoju`) at
-/// `opened_at_ms` and wake at its deadline.
+/// Open the next game (regular or 附加赛 -- both live in `m.xiaoju`) now and
+/// wake at its deadline.
+///
+/// A game opens when the tick that opens it runs, never at the time it was
+/// due: a wakeup that arrives late (an outage, the host's timer backoff)
+/// opens it late, and its deadline runs from that moment, so the players
+/// always get the game's full length.
 ///
 /// The first game pins this stage's regular and tiebreak durations and the
 /// shared extra-time allowance. Later setup corrections affect only matches
@@ -514,10 +519,10 @@ fn effective_wakeups(m: &MatchState, inputs: &Inputs<'_>, game: u8, cutoff: i64)
 fn open_game(
     m: &mut MatchState,
     inputs: &Inputs<'_>,
-    opened_at_ms: i64,
     wakeups: &mut Vec<Wakeup>,
 ) -> Result<(), Rejection> {
     let setup = inputs.setup;
+    let opened_at_ms = inputs.clock.now;
     let Some(round) = setup.round_for_match(m.round, m.pos) else {
         adjudicate(m, Adjudication::SetupMissing);
         return Ok(());
@@ -732,7 +737,8 @@ mod tests {
     }
 
     #[test]
-    fn a_scheduled_stage_keeps_its_full_ordering_window_and_shared_first_game_clock() {
+    fn a_scheduled_stage_keeps_its_full_ordering_window_and_opens_its_first_game_no_earlier_than_its_start()
+     {
         let setup = scheduled_setup();
         let mut m = ordering();
         m.order_b = None;
@@ -753,10 +759,15 @@ mod tests {
             [Effect::Cancel(MatchTimer::OrderingClose)]
         );
 
-        // A late wakeup still opens the game on the shared clock.
+        // A late wakeup opens the game when it arrives, so the players get
+        // the game's full length.
         let playing = tick_at(&preparing.next, &setup, 215_000, &[]);
         assert_eq!(playing.next.phase, Phase::Playing);
-        assert_eq!(playing.next.xiaoju[0].opened_at_ms, 210_000);
+        assert_eq!(playing.next.xiaoju[0].opened_at_ms, 215_000);
+        assert_eq!(
+            wakeup(&playing, MatchTimer::Deadline { game: 0 }),
+            Some(215_000 + 1_800_000)
+        );
         assert!(
             playing
                 .effects
@@ -962,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    fn a_game_break_runs_from_settlement_and_the_next_game_opens_at_its_end() {
+    fn a_game_break_runs_from_settlement_and_the_next_game_opens_no_earlier_than_its_end() {
         let mut setup = setup_two_rounds();
         setup.rounds[0].game_break_seconds = Some(60);
         let m = started(&setup, 0);
@@ -986,9 +997,14 @@ mod tests {
         );
         let early = tick_at(&t.next, &setup, 99_999, &[]);
         assert_eq!(early.next, t.next);
+        // A late wakeup opens the game when it arrives, with its full length.
         let late = tick_at(&t.next, &setup, 130_000, &[]);
         assert_eq!(late.next.phase, Phase::Playing);
-        assert_eq!(late.next.xiaoju[1].opened_at_ms, 100_000);
+        assert_eq!(late.next.xiaoju[1].opened_at_ms, 130_000);
+        assert_eq!(
+            late.next.xiaoju[1].base_deadline_ms - 130_000,
+            late.next.xiaoju[0].base_deadline_ms - late.next.xiaoju[0].opened_at_ms
+        );
         assert_eq!(
             late.effects,
             [
