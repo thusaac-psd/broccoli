@@ -171,22 +171,50 @@ fn host_functions_keep_the_errors_they_meet_as_sources() {
     );
 }
 
+/// The call that opens at the start of `code` (`name(...)`), through its
+/// own closing parenthesis: parentheses inside string literals do not
+/// count, so a call ends where it ends and not at a later statement's.
+fn call_at(code: &str) -> &str {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (at, c) in code.char_indices() {
+        if in_string {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &code[..=at];
+                }
+            }
+            _ => {}
+        }
+    }
+    code
+}
+
 /// The ERROR-level log calls in `code` that name a plugin, or put a
 /// plugin's answer into an internal error, each by its first line.
 fn plugin_text_at_error(code: &str) -> Vec<String> {
     let mut found = Vec::new();
     for (start, _) in code.match_indices("error!(") {
-        let call = &code[start..];
-        let end = call.find(");").map_or(call.len(), |end| end + 2);
-        let call = &call[..end];
+        let call = call_at(&code[start..]);
         if call.contains("plugin_id") {
             found.push(call.lines().next().unwrap_or_default().trim().to_string());
         }
     }
     for (start, _) in code.match_indices("AppError::Internal(") {
-        let call = &code[start..];
-        let end = call.find(");").map_or(call.len(), |end| end + 2);
-        let call = &call[..end];
+        let call = call_at(&code[start..]);
         if ["response.body", "reject.message", "Hook execution failed"]
             .iter()
             .any(|plugin_text| call.contains(plugin_text))
@@ -242,6 +270,13 @@ fn a_plugins_text_reaches_the_hosts_log_only_through_guest_log() {
         assert_eq!(plugin_text_at_error(shape).len(), 1, "{shape}");
     }
     assert!(plugin_text_at_error("tracing::error!(\"Failed to roll back: {e}\");").is_empty());
+    // A call ends at its own closing parenthesis, not at a later statement.
+    assert!(
+        plugin_text_at_error(
+            "error!(reason = %why, \"(dead)\"),\nErr(e) => {}\nquery(\"d.plugin_id\");"
+        )
+        .is_empty()
+    );
 }
 
 #[derive(Debug)]
