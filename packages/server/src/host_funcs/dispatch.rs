@@ -60,13 +60,12 @@ fn start_operation_batch_fn(
     let operations: Vec<OperationTask> = super::read_json(plugin, inputs, "operations")?;
     let call = super::HostCall::enter(&user_data, "start_operation_batch")?;
 
-    let batch_id = tokio::runtime::Handle::current()
-        .block_on(operation_batch::start_operation_batch(
+    let batch_id =
+        tokio::runtime::Handle::current().block_on(operation_batch::start_operation_batch(
             call.plugin_id.clone(),
             call.deps.for_current_call(),
             operations,
-        ))
-        .map_err(|e| extism::Error::msg(e.to_string()))?;
+        ))?;
 
     super::write_json(plugin, outputs, &BatchId { batch_id }, "batch_id")
 }
@@ -85,8 +84,7 @@ fn get_next_operation_result_fn(
         &call.deps.operation_batches,
         &input.batch_id,
         super::within_call_deadline(Duration::from_millis(input.timeout_ms)),
-    )
-    .map_err(|e| extism::Error::msg(e.to_string()))?;
+    )?;
 
     // The guest reads what the worker reported for the operation.
     let result = NextResultOutput {

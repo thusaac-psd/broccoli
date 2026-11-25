@@ -18,6 +18,13 @@
 //! call) carries a `visibility-bypass-audited:` comment directly above it or
 //! above the `use` line that opens its group.
 //!
+//! No host function turns an error it met into a message: it keeps the error
+//! as the source of the one it returns, so the outage rule
+//! (`server::host_funcs::host_db`) sees a database outage wherever it is.
+//! No code under `packages/server/src/host_funcs/` outside its tests passes a
+//! caught error (`e`, `err`, `error`, `other`) to `extism::Error::msg` or
+//! `HostDbResponse::err` as text, or answers with the bare `"Database error"`.
+//!
 //! Outside the entity module, every `pub use` or `pub(crate) use` that
 //! re-exports from `crate::entity` carries the same audit marker, so no
 //! module becomes an unreviewed facade over the entity tables.
@@ -84,6 +91,84 @@ fn match_is_inside_identifier(line: &str, match_start: usize) -> bool {
 /// exempt from the scan, so documentation may mention the token.
 fn line_is_comment(line: &str) -> bool {
     line.trim_start().starts_with("//")
+}
+
+/// The lines of `code` that turn a caught error into text for the guest
+/// (see the module docs). `host_db.rs` is the one place a statement's own
+/// error becomes the plugin's answer.
+fn stringified_errors(code: &str) -> Vec<String> {
+    const ERRORS: [&str; 4] = ["e", "err", "error", "other"];
+    let mut found = Vec::new();
+    for line in code.lines() {
+        if line_is_comment(line) {
+            continue;
+        }
+        let stringifies = |callee: &str| {
+            let mut from = 0;
+            while let Some(rel) = line[from..].find(callee) {
+                let start = from + rel + callee.len();
+                // The rest of the statement on this line.
+                let call = &line[start..];
+                let call = call.split(';').next().unwrap_or(call);
+                for name in ERRORS {
+                    if call.starts_with(&format!("{name}.to_string()"))
+                        || call.contains(&format!("{{{name}}}"))
+                        || call.contains(&format!("{{{name}:?}}"))
+                        || call.contains(&format!(", {name})"))
+                    {
+                        return true;
+                    }
+                }
+                from = start;
+            }
+            false
+        };
+        if stringifies("Error::msg(")
+            || stringifies("HostDbResponse::err(")
+            || line.contains("\"Database error\"")
+        {
+            found.push(line.trim().to_string());
+        }
+    }
+    found
+}
+
+#[test]
+fn host_functions_keep_the_errors_they_meet_as_sources() {
+    let mut files = Vec::new();
+    collect_rs_files(&host_funcs_root(), &mut files);
+    let mut offenders = Vec::new();
+    for path in &files {
+        if path.file_name().is_some_and(|name| name == "host_db.rs") {
+            continue;
+        }
+        let contents = fs::read_to_string(path).unwrap();
+        // Tests may build any error they like.
+        let code = contents.split("#[cfg(test)]").next().unwrap();
+        for line in stringified_errors(code) {
+            offenders.push(format!("{}: {line}", path.display()));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "host functions must keep an error they meet as its source \
+         (`extism::Error::new(e).context(..)`, `host_db::failed`, `host_db::settle`):\n{}",
+        offenders.join("\n")
+    );
+    // The scan sees each shape it forbids.
+    for shape in [
+        "map_err(|e| extism::Error::msg(e.to_string()))",
+        "map_err(|e| extism::Error::msg(format!(\"x: {e}\")))",
+        "map_err(|e| extism::Error::msg(format!(\"x: {}\", e)))",
+        "Err(error) => HostDbResponse::err(error.to_string()).to_json_string(),",
+        "extism::Error::msg(\"Database error\")",
+    ] {
+        assert_eq!(stringified_errors(shape).len(), 1, "{shape}");
+    }
+    assert!(
+        stringified_errors("extism::Error::msg(format!(\"{plugin_id} is not enabled\"))")
+            .is_empty()
+    );
 }
 
 #[derive(Debug)]

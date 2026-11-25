@@ -82,8 +82,7 @@ fn start_detached_windowed_evaluate_fn(
         call.plugin_id.clone(),
         call.deps.for_current_call(),
         input,
-    )
-    .map_err(|e| extism::Error::msg(e.to_string()))?;
+    )?;
     super::write_json(plugin, outputs, &session, "session")
 }
 
@@ -96,13 +95,12 @@ fn start_evaluate_batch_fn(
     let input: StartEvaluateBatchInput = super::read_json(plugin, inputs, "input")?;
     let call = super::HostCall::enter(&user_data, "start_evaluate_batch")?;
 
-    let batch_id = tokio::runtime::Handle::current()
-        .block_on(evaluate_batch::start_evaluate_batch(
+    let batch_id =
+        tokio::runtime::Handle::current().block_on(evaluate_batch::start_evaluate_batch(
             call.plugin_id.clone(),
             call.deps.for_current_call(),
             input,
-        ))
-        .map_err(|e| extism::Error::msg(e.to_string()))?;
+        ))?;
 
     super::write_json(plugin, outputs, &BatchId { batch_id }, "batch_id")
 }
@@ -122,8 +120,7 @@ fn get_next_evaluate_result_fn(
         &deps.evaluate_batches,
         &input.batch_id,
         super::within_call_deadline(Duration::from_millis(input.timeout_ms)),
-    )
-    .map_err(|e| extism::Error::msg(e.to_string()))?;
+    )?;
     super::write_json(plugin, outputs, &NextResultOutput { result }, "result")
 }
 

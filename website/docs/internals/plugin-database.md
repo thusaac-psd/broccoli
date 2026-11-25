@@ -205,7 +205,17 @@ A plugin's SQL runs within the deadline of the call that runs it
   (`DispatchFault::DatabaseUnavailable`) instead of spending its budget. One
   rule decides both (`host_funcs::sql::settle`), for raw plugin SQL and the
   host-pool writes of `host.submission.*` and `host.code_run.*` alike; any
-  other error goes back to the plugin in its response;
+  other error goes back to the plugin in its response. The host's own SQL in
+  every other host function (`host.storage.*`, `host.timer.*`, `config_get`,
+  `config_set`, `submission_feedback_*`, `submission_slot_observe`) answers an outage the same way,
+  through `host_funcs::host_db` (`failed`, `settle`, `failed_service`, and
+  the outage mapping `fail_call` the SQL path shares): a route answers the
+  database's 503, a timer delivery is handed back with its attempt refunded
+  and a dispatch hands its attempt back. A host function keeps the error it
+  meets as the source of the one it returns, never as text, and
+  `host_function` applies the rule to every error a host function returns
+  (`host_db::settle_call`), so an outage anywhere in its chain counts;
+  `source_invariants.rs` checks that no host function stringifies an error;
 - a transaction lives no longer than the call tree that opened it: one still
   open when the tree ends (the guest trapped, was cancelled or returned
   without committing) is rolled back then, from the tree's `CallLocals`;

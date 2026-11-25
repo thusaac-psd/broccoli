@@ -136,7 +136,7 @@ fn checker_stage_call(
                 )
                 .await
         })
-        .map_err(|e| extism::Error::msg(format!("Checker stage plugin error: {e}")))
+        .map_err(|e| extism::Error::new(e).context("Checker stage plugin error"))
 }
 
 fn resolve_checker_fn(
@@ -147,7 +147,7 @@ fn resolve_checker_fn(
 ) -> Result<(), extism::Error> {
     let input: ResolveCheckerInput = super::read_json(plugin, inputs, "input")?;
     let request_bytes = serde_json::to_vec(&input)
-        .map_err(|e| extism::Error::msg(format!("Failed to serialize resolve input: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context("Failed to serialize resolve input"))?;
 
     let output_bytes = checker_stage_call(
         &user_data,
@@ -160,7 +160,7 @@ fn resolve_checker_fn(
     // Validate the plugin returned a well-formed CheckerStage before handing it
     // back, so a malformed stage fails here rather than deep in op assembly.
     let _stage: CheckerStage = serde_json::from_slice(&output_bytes)
-        .map_err(|e| extism::Error::msg(format!("Failed to deserialize checker stage: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context("Failed to deserialize checker stage"))?;
 
     super::write_bytes(plugin, outputs, &output_bytes)
 }
@@ -173,7 +173,7 @@ fn interpret_checker_fn(
 ) -> Result<(), extism::Error> {
     let input: InterpretCheckerInput = super::read_json(plugin, inputs, "input")?;
     let request_bytes = serde_json::to_vec(&input)
-        .map_err(|e| extism::Error::msg(format!("Failed to serialize interpret input: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context("Failed to serialize interpret input"))?;
 
     let output_bytes = checker_stage_call(
         &user_data,
@@ -184,7 +184,7 @@ fn interpret_checker_fn(
     )?;
 
     let verdict: CheckerVerdict = serde_json::from_slice(&output_bytes)
-        .map_err(|e| extism::Error::msg(format!("Failed to deserialize checker verdict: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context("Failed to deserialize checker verdict"))?;
     // A checker that failed itself fails every attempt alike: the dispatch's
     // system error stands under `CHECKER_FAILED`, with how it failed for
     // staff, instead of being judged again.

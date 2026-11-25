@@ -13,7 +13,6 @@ use sea_orm::{
     TransactionTrait,
 };
 use serde_json::Value;
-use tracing::error;
 
 use crate::entity::plugin_storage;
 use crate::utils::text::plugin_storage_text as extract_str;
@@ -25,7 +24,7 @@ host_fn!(pub store_get(user_data: Arc<(String, DatabaseConnection)>; input: Stri
     let (plugin_id, db) = &*call;
 
     let parsed: StoreGetInput = serde_json::from_str(&input)
-        .map_err(|e| extism::Error::msg(format!("Invalid store_get input: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context("Invalid store_get input"))?;
 
     if parsed.keys.is_empty() {
         return Ok(serde_json::to_string(&StoreGetOutput::default())?);
@@ -40,10 +39,7 @@ host_fn!(pub store_get(user_data: Arc<(String, DatabaseConnection)>; input: Stri
                 .all(db)
                 .await
         })
-        .map_err(|e| {
-            error!("DB store_get error: {e}");
-            extism::Error::msg("Database error")
-        })?;
+        .map_err(super::host_db::failed)?;
 
     let output = StoreGetOutput {
         values: results.iter().map(|r| (r.key.clone(), extract_str(&r.data))).collect(),
@@ -57,7 +53,7 @@ host_fn!(pub store_set(user_data: Arc<(String, DatabaseConnection)>; input: Stri
     let (plugin_id, db) = &*call;
 
     let parsed: StoreSetInput = serde_json::from_str(&input)
-        .map_err(|e| extism::Error::msg(format!("Invalid store_set input: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context("Invalid store_set input"))?;
 
     if parsed.entries.is_empty() {
         return Ok(());
@@ -95,10 +91,7 @@ host_fn!(pub store_set(user_data: Arc<(String, DatabaseConnection)>; input: Stri
             txn.commit().await?;
             Ok::<(), sea_orm::DbErr>(())
         })
-        .map_err(|e| {
-            error!("DB store_set error: {e}");
-            extism::Error::msg("Database error")
-        })?;
+        .map_err(super::host_db::failed)?;
 
     Ok(())
 });
@@ -108,7 +101,7 @@ host_fn!(pub store_delete(user_data: Arc<(String, DatabaseConnection)>; input: S
     let (plugin_id, db) = &*call;
 
     let parsed: StoreDeleteInput = serde_json::from_str(&input)
-        .map_err(|e| extism::Error::msg(format!("Invalid store_delete input: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context("Invalid store_delete input"))?;
 
     if parsed.keys.is_empty() {
         return Ok(());
@@ -123,10 +116,7 @@ host_fn!(pub store_delete(user_data: Arc<(String, DatabaseConnection)>; input: S
                 .exec(db)
                 .await
         })
-        .map_err(|e| {
-            error!("DB store_delete error: {e}");
-            extism::Error::msg("Database error")
-        })?;
+        .map_err(super::host_db::failed)?;
 
     Ok(())
 });
@@ -136,17 +126,14 @@ host_fn!(pub store_compare_and_set(user_data: Arc<(String, DatabaseConnection)>;
     let (plugin_id, db) = &*call;
 
     let parsed: StoreCasInput = serde_json::from_str(&input)
-        .map_err(|e| extism::Error::msg(format!("Invalid store_compare_and_set input: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context("Invalid store_compare_and_set input"))?;
 
     let swapped = tokio::runtime::Handle::current()
         .block_on(crate::services::plugin_storage::compare_and_set(
             db, plugin_id, &parsed.key, parsed.expected.as_deref(),
             &parsed.new, parsed.expected_revision,
         ))
-        .map_err(|e| {
-            error!("DB store_compare_and_set error: {e}");
-            extism::Error::msg("Database error")
-        })?;
+        .map_err(super::host_db::failed)?;
 
     Ok(serde_json::to_string(&StoreCasOutput { swapped })?)
 });

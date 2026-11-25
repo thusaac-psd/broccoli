@@ -251,12 +251,6 @@ fn settle_under<T>(
     crate::plugin_db::Unavailable::settle(answer)
 }
 
-/// The plugin's answer to its statement that failed with `e`, an error of
-/// the statement's own (an outage never reaches here, see [`settle`]).
-fn db_error(e: &sea_orm::DbErr) -> Result<String, extism::Error> {
-    HostDbResponse::err(e.to_string()).to_json_string()
-}
-
 /// Fail the running call as unavailable: the plugin's SQL cannot run right
 /// now, which says nothing about the request, so callers answer it with "try
 /// again". The call names why, by one mapping: a database that cannot be
@@ -267,11 +261,11 @@ fn db_error(e: &sea_orm::DbErr) -> Result<String, extism::Error> {
 fn unavailable(e: crate::plugin_db::Unavailable) -> extism::Error {
     tracing::warn!(error = %e, "Plugin SQL unavailable");
     match Unanswered::of(&e) {
-        Unanswered::DatabaseLost => plugin_core::executor::fail_database_unavailable(),
-        Unanswered::DatabaseBusy => plugin_core::executor::fail_database_busy(),
+        Unanswered::DatabaseLost => super::host_db::fail_call(common::db::Outage::Lost),
+        Unanswered::DatabaseBusy => super::host_db::fail_call(common::db::Outage::Busy),
         Unanswered::Plugin => plugin_core::executor::fail_unavailable(),
     }
-    extism::Error::msg(e.to_string())
+    extism::Error::new(e)
 }
 
 /// What a call whose SQL is unavailable fails as (see [`unavailable`]).
@@ -414,7 +408,7 @@ impl HostDbResponse {
     }
     pub(super) fn to_json_string(&self) -> Result<String, extism::Error> {
         serde_json::to_string(self)
-            .map_err(|e| extism::Error::msg(format!("Serialization error: {}", e)))
+            .map_err(|e| extism::Error::new(e).context("Serialization error"))
     }
 }
 
@@ -799,7 +793,7 @@ fn parse_args(args_json: &str) -> Result<Vec<sea_orm::Value>, extism::Error> {
         return Ok(vec![]);
     }
     let json_arr: Vec<JsonValue> = serde_json::from_str(args_json)
-        .map_err(|e| extism::Error::msg(format!("Invalid args JSON: {}", e)))?;
+        .map_err(|e| extism::Error::new(e).context("Invalid args JSON"))?;
 
     Ok(json_arr.into_iter().map(json_to_sea_value).collect())
 }
@@ -845,7 +839,7 @@ host_fn!(pub db_execute(user_data: Arc<(String, PluginSql)>; sql: String, args: 
             let sql_preview: String = sql.chars().take(800).collect();
             let args_preview: String = args.chars().take(800).collect();
             error!(plugin_id = %plugin_id, sql_len = sql.len(), args_len = args.len(), sql = %sql_preview, args = %args_preview, "DB execution error: {}", e);
-            db_error(&e)
+            super::host_db::refused(&e)
         }
     }
 });
@@ -876,7 +870,7 @@ host_fn!(pub db_query(user_data: Arc<(String, PluginSql)>; sql: String, args: St
         Ok(None) => HostDbResponse::ok(serde_json::json!([])).to_json_string(),
         Err(e) => {
             error!("DB query error: {}", e);
-            db_error(&e)
+            super::host_db::refused(&e)
         }
     }
 });
@@ -926,7 +920,7 @@ host_fn!(pub db_begin(user_data: Arc<(String, PluginSql, TransactionMap)>; _inpu
         .map_err(unavailable)?
         .map_err(|e| {
             error!("DB begin error: {}", e);
-            extism::Error::msg(e.to_string())
+            extism::Error::new(e).context("db_begin")
         })?;
 
     let txn_id = Uuid::new_v4().to_string();
@@ -968,7 +962,7 @@ host_fn!(pub db_query_in(user_data: Arc<(String, PluginSql, TransactionMap)>; tx
         Ok(None) => HostDbResponse::ok(serde_json::json!([])).to_json_string(),
         Err(e) => {
             error!("DB query_in error: {}", e);
-            db_error(&e)
+            super::host_db::refused(&e)
         }
     }
 });
@@ -990,7 +984,7 @@ host_fn!(pub db_execute_in(user_data: Arc<(String, PluginSql, TransactionMap)>; 
         Ok(res) => HostDbResponse::ok(JsonValue::from(res.rows_affected())).to_json_string(),
         Err(e) => {
             error!("DB execute_in error: {}", e);
-            db_error(&e)
+            super::host_db::refused(&e)
         }
     }
 });
@@ -1018,7 +1012,7 @@ host_fn!(pub db_commit(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_
         Ok(()) => HostDbResponse::ok(serde_json::json!({"ok": true})).to_json_string(),
         Err(e) => {
             error!("DB commit error: {}", e);
-            db_error(&e)
+            super::host_db::refused(&e)
         }
     }
 });
@@ -1057,7 +1051,7 @@ host_fn!(pub db_rollback(user_data: Arc<(String, PluginSql, TransactionMap)>; tx
                 Ok(()) => HostDbResponse::ok(serde_json::json!({"ok": true})).to_json_string(),
                 Err(e) => {
                     error!("DB rollback error: {}", e);
-                    db_error(&e)
+                    super::host_db::refused(&e)
                 }
             }
         }
@@ -1088,7 +1082,7 @@ pub(super) fn execute_on_pool(
             let sql_preview: String = sql.chars().take(800).collect();
             let args_preview: String = args.chars().take(800).collect();
             error!(plugin_id = %plugin_id, sql_len = sql.len(), args_len = args.len(), sql = %sql_preview, args = %args_preview, "Submission DB execution error: {}", e);
-            db_error(&e)
+            super::host_db::refused(&e)
         }
     }
 }
@@ -1159,7 +1153,7 @@ pub(super) fn query_on_pool(
         Ok(None) => HostDbResponse::ok(serde_json::json!([])).to_json_string(),
         Err(e) => {
             error!(plugin_id, "Submission DB query error: {}", e);
-            db_error(&e)
+            super::host_db::refused(&e)
         }
     }
 }

@@ -6,7 +6,6 @@ use extism::host_fn;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, QueryFilter, Statement,
 };
-use tracing::error;
 
 use crate::entity::plugin_timer;
 
@@ -54,10 +53,7 @@ pub(crate) async fn schedule(
         .filter(plugin_timer::Column::Key.ne(key))
         .count(db)
         .await
-        .map_err(|e| {
-            error!("DB timer_schedule count error: {e}");
-            extism::Error::msg("Database error")
-        })?;
+        .map_err(super::host_db::failed)?;
 
     if pending >= MAX_PENDING_PER_PLUGIN {
         return Err(extism::Error::msg(format!(
@@ -99,10 +95,7 @@ pub(crate) async fn schedule(
             ],
         ))
         .await
-        .map_err(|e| {
-            error!("DB timer_schedule insert error: {e}");
-            extism::Error::msg("Database error")
-        })?
+        .map_err(super::host_db::failed)?
         .rows_affected();
     if inserted == 0 {
         return Err(extism::Error::msg(format!(
@@ -126,10 +119,7 @@ pub(crate) async fn cancel(
         .filter(plugin_timer::Column::Key.eq(key))
         .exec(db)
         .await
-        .map_err(|e| {
-            error!("DB timer_cancel error: {e}");
-            extism::Error::msg("Database error")
-        })?;
+        .map_err(super::host_db::failed)?;
     Ok(())
 }
 
@@ -138,7 +128,7 @@ host_fn!(pub timer_schedule(user_data: Arc<(String, DatabaseConnection)>; input:
     let (plugin_id, db) = &*call;
 
     let parsed: TimerScheduleInput = serde_json::from_str(&input)
-        .map_err(|e| extism::Error::msg(format!("Invalid timer_schedule input: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context("Invalid timer_schedule input"))?;
 
     tokio::runtime::Handle::current()
         .block_on(schedule(db, plugin_id, &parsed.key, parsed.fire_at_ms, &parsed.payload))?;
@@ -151,7 +141,7 @@ host_fn!(pub timer_cancel(user_data: Arc<(String, DatabaseConnection)>; input: S
     let (plugin_id, db) = &*call;
 
     let parsed: TimerCancelInput = serde_json::from_str(&input)
-        .map_err(|e| extism::Error::msg(format!("Invalid timer_cancel input: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context("Invalid timer_cancel input"))?;
 
     tokio::runtime::Handle::current()
         .block_on(cancel(db, plugin_id, &parsed.key))?;
