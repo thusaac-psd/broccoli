@@ -20,8 +20,7 @@ use extism::{CurrentPlugin, Function, UserData, Val, ValType};
 use plugin_core::host::HostFunctionRegistry;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use tracing::Span;
 use tracing::span::EnteredSpan;
 
@@ -407,7 +406,7 @@ fn register_sql_functions(hr: &mut HostFunctionRegistry, pools: &sql::PluginSql)
         sql::db_query,
     );
 
-    let txn_map: sql::TransactionMap = Arc::new(StdMutex::new(HashMap::new()));
+    let txn_map = sql::TransactionMap::default();
     let with_txns = || {
         let (pools, txn_map) = (pools.clone(), txn_map.clone());
         move |plugin_id: &str| (plugin_id.to_string(), pools.clone(), txn_map.clone())

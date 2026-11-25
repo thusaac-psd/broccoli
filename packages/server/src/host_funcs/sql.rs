@@ -188,7 +188,103 @@ impl PluginTransaction {
 /// Every open plugin transaction, server-wide. The map lock is held only to
 /// look an entry up, insert or remove it; statements run under the entry's own
 /// lock, so plugins' transactions never wait on each other.
-pub type TransactionMap = Arc<StdMutex<HashMap<String, Arc<PluginTransaction>>>>;
+pub type TransactionMap = Arc<StdMutex<Transactions>>;
+
+/// The open plugin transactions by id, and the slots under each plugin's cap
+/// ([`MAX_OPEN_TXNS_PER_PLUGIN`]) taken by a `db_begin` still beginning one.
+/// It reads as the map of open transactions.
+#[derive(Debug, Default)]
+pub struct Transactions {
+    open: HashMap<String, Arc<PluginTransaction>>,
+    beginning: HashMap<String, usize>,
+}
+
+impl std::ops::Deref for Transactions {
+    type Target = HashMap<String, Arc<PluginTransaction>>;
+    fn deref(&self) -> &Self::Target {
+        &self.open
+    }
+}
+
+impl std::ops::DerefMut for Transactions {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.open
+    }
+}
+
+impl Transactions {
+    /// The transactions `plugin_id` holds against its cap: those open and
+    /// those a `db_begin` is beginning.
+    fn held_by(&self, plugin_id: &str) -> usize {
+        let open = self
+            .open
+            .values()
+            .filter(|t| t.plugin_id == plugin_id)
+            .count();
+        open + self.beginning.get(plugin_id).copied().unwrap_or(0)
+    }
+
+    fn release_slot(&mut self, plugin_id: &str) {
+        if let Some(n) = self.beginning.get_mut(plugin_id) {
+            *n -= 1;
+            if *n == 0 {
+                self.beginning.remove(plugin_id);
+            }
+        }
+    }
+}
+
+/// A slot under a plugin's open-transaction cap, taken under the same lock
+/// that counts the plugin's transactions, before its transaction begins: two
+/// `db_begin`s can never both pass the cap's last slot. It becomes the open
+/// transaction ([`TxnSlot::fill`]) or, dropped, frees the slot.
+struct TxnSlot {
+    txn_map: TransactionMap,
+    plugin_id: String,
+    filled: bool,
+}
+
+impl TxnSlot {
+    /// Take a slot for `plugin_id`, or answer how many it holds when its cap
+    /// is reached.
+    fn take(
+        txn_map: &TransactionMap,
+        plugin_id: &str,
+    ) -> Result<Result<Self, usize>, extism::Error> {
+        let mut map = txn_map
+            .lock()
+            .map_err(|_| extism::Error::msg("Transaction map lock poisoned"))?;
+        let held = map.held_by(plugin_id);
+        if held >= MAX_OPEN_TXNS_PER_PLUGIN {
+            return Ok(Err(held));
+        }
+        *map.beginning.entry(plugin_id.to_string()).or_default() += 1;
+        Ok(Ok(Self {
+            txn_map: txn_map.clone(),
+            plugin_id: plugin_id.to_string(),
+            filled: false,
+        }))
+    }
+
+    /// Record the begun transaction under `txn_id` in the slot's place.
+    fn fill(mut self, txn_id: String, txn: Arc<PluginTransaction>) {
+        let mut map = self.txn_map.lock().unwrap_or_else(|p| p.into_inner());
+        map.release_slot(&self.plugin_id);
+        map.open.insert(txn_id, txn);
+        self.filled = true;
+    }
+}
+
+impl Drop for TxnSlot {
+    fn drop(&mut self) {
+        if !self.filled {
+            self.txn_map
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .release_slot(&self.plugin_id);
+        }
+    }
+}
 
 /// Maximum transactions a single plugin may hold open concurrently: each pins
 /// one connection of the plugin pools, so without a cap one plugin could take
@@ -897,15 +993,13 @@ host_fn!(pub db_begin(user_data: Arc<(String, PluginSql, TransactionMap)>; _inpu
     let call = super::HostCall::enter(&user_data, "db_begin")?;
     let (plugin_id, pools, txn_map) = &*call;
 
-    // Per-plugin cap on concurrently open transactions, checked BEFORE
-    // checking out a pool connection: each open transaction pins one plugin
-    // DB pool connection, so without a cap a plugin that keeps opening
+    // Per-plugin cap on concurrently open transactions, taken as a slot
+    // BEFORE checking out a pool connection: each open transaction pins one
+    // plugin DB pool connection, so without a cap a plugin that keeps opening
     // transactions (or trapping after db_begin) exhausts the pool for everyone.
-    {
-        let map_guard = txn_map.lock()
-            .map_err(|_| extism::Error::msg("Transaction map lock poisoned"))?;
-        let open = map_guard.values().filter(|t| t.plugin_id == *plugin_id).count();
-        if open >= MAX_OPEN_TXNS_PER_PLUGIN {
+    let slot = match TxnSlot::take(txn_map, plugin_id)? {
+        Ok(slot) => slot,
+        Err(open) => {
             tracing::warn!(
                 plugin_id = %plugin_id,
                 open,
@@ -916,7 +1010,7 @@ host_fn!(pub db_begin(user_data: Arc<(String, PluginSql, TransactionMap)>; _inpu
                 "Too many open transactions for this plugin (max {MAX_OPEN_TXNS_PER_PLUGIN}); commit or roll back existing transactions first"
             )).to_json_string();
         }
-    }
+    };
 
     let call = crate::plugin_db::SqlCall::current();
     let opened = tokio::runtime::Handle::current().block_on(async {
@@ -947,9 +1041,7 @@ host_fn!(pub db_begin(user_data: Arc<(String, PluginSql, TransactionMap)>; _inpu
         })?;
 
     let txn_id = Uuid::new_v4().to_string();
-    txn_map.lock()
-        .map_err(|_| extism::Error::msg("Transaction map lock poisoned"))?
-        .insert(txn_id.clone(), Arc::new(PluginTransaction::new(txn, plugin_id.clone(), pid, permit)));
+    slot.fill(txn_id.clone(), Arc::new(PluginTransaction::new(txn, plugin_id.clone(), pid, permit)));
     // The transaction ends with the call tree that opened it.
     match &call.locals {
         Some(locals) => locals.with(|open: &mut OpenTxns| open.0.push((txn_map.clone(), txn_id.clone()))),
@@ -1176,6 +1268,37 @@ mod tests {
     use sea_orm::{ConnectOptions, Database};
 
     use super::*;
+
+    /// A `db_begin` holds its slot under the cap from the check until its
+    /// transaction is recorded, so begins that check together never pass the
+    /// cap; a begin that fails frees its slot.
+    #[test]
+    fn a_beginning_transaction_holds_its_slot_under_the_cap() {
+        let txn_map = TransactionMap::default();
+        let slots: Vec<_> = (0..MAX_OPEN_TXNS_PER_PLUGIN)
+            .map(|_| {
+                TxnSlot::take(&txn_map, "p")
+                    .unwrap()
+                    .expect("under the cap")
+            })
+            .collect();
+        assert_eq!(
+            TxnSlot::take(&txn_map, "p").unwrap().err(),
+            Some(MAX_OPEN_TXNS_PER_PLUGIN),
+            "every slot is held while its transactions begin"
+        );
+        assert!(
+            TxnSlot::take(&txn_map, "other").unwrap().is_ok(),
+            "another plugin's cap is its own"
+        );
+        drop(slots);
+        assert_eq!(
+            txn_map.lock().unwrap().held_by("p"),
+            0,
+            "failed begins free their slots"
+        );
+        assert!(TxnSlot::take(&txn_map, "p").unwrap().is_ok());
+    }
 
     fn permit() -> Arc<OwnedSemaphorePermit> {
         Arc::new(
@@ -1803,7 +1926,7 @@ mod tests {
     async fn a_statement_past_its_calls_deadline_is_cancelled_and_ends_its_transaction() {
         let (_container, url, db) = one_connection().await;
         let sql = plugin_sql(&url).await;
-        let txn_map: TransactionMap = Arc::new(StdMutex::new(HashMap::new()));
+        let txn_map: TransactionMap = TransactionMap::default();
         open(&db, &txn_map, "slow", "p").await;
 
         let started = Instant::now();
@@ -1911,7 +2034,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_transaction_ends_with_the_call_that_opened_it() {
         let (_container, _url, db) = one_connection().await;
-        let txn_map: TransactionMap = Arc::new(StdMutex::new(HashMap::new()));
+        let txn_map: TransactionMap = TransactionMap::default();
         open(&db, &txn_map, "left-open", "p").await;
         let call = Arc::<plugin_core::executor::CallLocals>::default();
         call.with(|open: &mut OpenTxns| open.0.push((txn_map.clone(), "left-open".into())));
@@ -2003,7 +2126,7 @@ mod tests {
             .expect("connect")
             .into();
 
-        let txn_map: TransactionMap = Arc::new(StdMutex::new(HashMap::new()));
+        let txn_map: TransactionMap = TransactionMap::default();
         for (id, owner) in [("slow", "plugin-a"), ("fast", "plugin-b")] {
             let txn = db.begin().await.expect("begin");
             txn_map.lock().unwrap().insert(
