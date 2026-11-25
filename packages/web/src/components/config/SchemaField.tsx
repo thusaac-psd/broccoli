@@ -464,15 +464,20 @@ export function SchemaField({
       );
     }
 
-    // Default: string input. A secret is never read back: an empty input
-    // writes `null`, which keeps whatever secret is stored.
+    // Default: string input. A secret is never read back: a stored one
+    // reads `null`, and an empty input writes `null` again, which keeps it.
+    // Clearing it sends the explicit marker.
     {
       const secret = prop.writeOnly === true;
-      const stringPlaceholder = secret
-        ? t('config.secretKept')
-        : showAsPlaceholder && inheritedResult
-          ? inheritedResult.display
-          : undefined;
+      const stored = secret && value === null;
+      const clearing = secret && isClearMarker(value);
+      const stringPlaceholder = clearing
+        ? t('config.secretCleared')
+        : stored
+          ? t('config.secretKept')
+          : showAsPlaceholder && inheritedResult
+            ? inheritedResult.display
+            : undefined;
 
       return (
         <div className="flex flex-col gap-1.5">
@@ -491,23 +496,52 @@ export function SchemaField({
             )}
           </div>
           <div>
-            <Input
-              id={fieldId}
-              value={
-                showAsPlaceholder ? '' : typeof value === 'string' ? value : ''
-              }
-              onChange={(e) =>
-                updateValue(
-                  path,
-                  secret && e.target.value === '' ? null : e.target.value,
-                )
-              }
-              type={secret ? 'password' : undefined}
-              autoComplete={secret ? 'off' : undefined}
-              placeholder={stringPlaceholder}
-              minLength={prop.minLength}
-              maxLength={prop.maxLength}
-            />
+            <div className="flex gap-1.5">
+              <Input
+                id={fieldId}
+                value={
+                  showAsPlaceholder
+                    ? ''
+                    : typeof value === 'string'
+                      ? value
+                      : ''
+                }
+                onChange={(e) =>
+                  updateValue(
+                    path,
+                    secret && e.target.value === '' ? null : e.target.value,
+                  )
+                }
+                disabled={clearing}
+                type={secret ? 'password' : undefined}
+                autoComplete={secret ? 'off' : undefined}
+                placeholder={stringPlaceholder}
+                minLength={prop.minLength}
+                maxLength={prop.maxLength}
+              />
+              {stored && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-9 shrink-0"
+                  onClick={() => updateValue(path, { [CLEAR_SECRET]: true })}
+                >
+                  {t('config.clearSecret')}
+                </Button>
+              )}
+              {clearing && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-9 shrink-0"
+                  onClick={() => updateValue(path, null)}
+                >
+                  {t('config.keepSecret')}
+                </Button>
+              )}
+            </div>
             <FieldError problem={error} />
             {annotation}
           </div>
@@ -515,6 +549,18 @@ export function SchemaField({
       );
     }
   }
+}
+
+/** What a write sends for a secret to clear it: `{"$clear": true}`. */
+const CLEAR_SECRET = '$clear';
+
+function isClearMarker(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    Object.keys(value).length === 1 &&
+    (value as Record<string, unknown>)[CLEAR_SECRET] === true
+  );
 }
 
 /** `items` with the items at `a` and `b` swapped. */

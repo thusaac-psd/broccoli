@@ -286,6 +286,40 @@ mod unknown_schema {
     }
 }
 
+/// A stored secret is cleared only by the explicit marker
+/// `{"$clear": true}`: `null` keeps it, and a string replaces it.
+mod clear_secret {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_clear_marker_clears_a_stored_secret() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("clear_secret_admin", "password123", "admin")
+            .await;
+        let problem_id = app.insert_public_problem("P").await;
+        let path = routes::problem_config_ns(problem_id, "server-plugin", "bundled");
+        let save = |config: serde_json::Value| {
+            let (app, admin, path) = (&app, &admin, &path);
+            async move {
+                let res = app
+                    .put_with_token(path, &json!({ "config": config }), admin)
+                    .await;
+                assert_eq!(res.status, 200, "{}", res.text);
+                res.body
+            }
+        };
+
+        let saved = save(json!({ "token": "to-clear" })).await;
+        assert_eq!(saved["secrets"], json!(["token"]), "{saved}");
+        let kept = save(json!({ "token": null })).await;
+        assert_eq!(kept["secrets"], json!(["token"]), "null keeps it: {kept}");
+        let cleared = save(json!({ "token": { "$clear": true } })).await;
+        assert_eq!(cleared["secrets"], json!([]), "{cleared}");
+        assert_eq!(cleared["config"], json!({}), "{cleared}");
+    }
+}
+
 mod namespace_validation {
     use super::*;
 

@@ -549,6 +549,17 @@ fn unset(value: &serde_json::Value) -> bool {
     value.is_null() || value.as_str() == Some("")
 }
 
+/// What a write sends for a secret to clear it: `{"$clear": true}`. `null`
+/// keeps the stored secret, and any string replaces it.
+pub const CLEAR_SECRET: &str = "$clear";
+
+/// Whether `value` is the marker that clears a secret ([`CLEAR_SECRET`]).
+fn clears(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|marker| {
+        marker.len() == 1 && marker.get(CLEAR_SECRET) == Some(&serde_json::Value::Bool(true))
+    })
+}
+
 /// One step to a secret by identity: a field, or the item of an array whose
 /// key field (the array's `key`) holds `value`. A secret belongs to the item
 /// it was set on, never to a position.
@@ -677,8 +688,9 @@ fn at_identity_mut<'a>(
 }
 
 /// Keeps, at field `key` of `fields`, the secret `identity` names in
-/// `stored` when a write sends `null` for it. `false` when the write keeps
-/// a secret `stored` does not hold.
+/// `stored` when a write sends `null` for it, and clears it on the
+/// [`CLEAR_SECRET`] marker. `false` when the write keeps a secret `stored`
+/// does not hold.
 fn keep(
     fields: &mut serde_json::Map<String, serde_json::Value>,
     key: &str,
@@ -686,6 +698,10 @@ fn keep(
     stored: Option<&serde_json::Value>,
 ) -> bool {
     match fields.get(key) {
+        Some(marker) if clears(marker) => {
+            fields.remove(key);
+            true
+        }
         Some(serde_json::Value::Null) => {
             match stored
                 .and_then(|stored| at_identity(stored, identity))
@@ -754,6 +770,7 @@ impl ConfigNamespace {
     /// `null` from what `stored` holds for the same item, matched by the
     /// item's key field, never its position: a client that read the config
     /// back writes it unchanged, whatever items it added, removed or moved.
+    /// A field sent as `{"$clear": true}` ([`CLEAR_SECRET`]) is cleared.
     /// Refused with the paths of the `null` secrets `stored` holds nothing
     /// for: there is no secret to keep.
     pub fn keep_secrets(
@@ -1115,6 +1132,27 @@ mod tests {
         assert_eq!(
             stations().keep_secrets(&mut nothing, None),
             Err(vec!["stations[0].token".to_string()])
+        );
+    }
+
+    #[test]
+    fn the_clear_marker_clears_a_secret_and_a_string_replaces_it() {
+        assert_eq!(
+            kept(json!({"stations": [
+                {"name": "alpha", "token": {"$clear": true}},
+                {"name": "beta", "token": "B2"},
+            ]})),
+            Ok(json!({"stations": [{"name": "alpha"}, {"name": "beta", "token": "B2"}]}))
+        );
+        let mut extra = json!({"stations": [{"name": "alpha", "token": {"$clear": true, "x": 1}}]});
+        assert_eq!(
+            stations().keep_secrets(&mut extra, Some(&stored_pair())),
+            Ok(()),
+            "only the exact marker clears"
+        );
+        assert_eq!(
+            extra["stations"][0]["token"],
+            json!({"$clear": true, "x": 1})
         );
     }
 

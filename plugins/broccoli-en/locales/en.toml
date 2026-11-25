@@ -986,6 +986,9 @@
 'config.level.plugin' = "Server-wide"
 'config.withheldValue' = "hidden"
 'config.secretKept' = "Leave empty to keep the stored secret"
+'config.clearSecret' = "Clear"
+'config.secretCleared' = "Cleared when you save"
+'config.keepSecret' = "Keep it"
 'config.moveUp' = "Move up"
 'config.moveDown' = "Move down"
 

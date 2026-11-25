@@ -127,3 +127,28 @@ test('a kept secret stays on its station through delete, add and reorder', async
     ],
   });
 });
+
+// A stored secret is cleared only on purpose: the form sends the explicit
+// marker, and taking the clear back keeps the stored secret.
+test('a stored secret is cleared with its own action, which can be taken back', async ({
+  page,
+}) => {
+  const { dialog, saves } = await openStations(page);
+  const save = dialog.getByRole('button', { name: 'Save' });
+  const clear = dialog.getByRole('button', { name: 'Clear' });
+
+  await clear.first().click();
+  await expect(dialog.locator('#cfg-stations-0-token')).toBeDisabled();
+  await dialog.getByRole('button', { name: 'Keep it' }).click();
+  await expect(dialog.locator('#cfg-stations-0-token')).toBeEnabled();
+
+  await clear.nth(1).click();
+  await save.click();
+  await expect.poll(() => saves.length).toBe(1);
+  expect(saves[0]).toEqual({
+    stations: [
+      { name: 'alpha', token: null },
+      { name: 'beta', token: { $clear: true } },
+    ],
+  });
+});
