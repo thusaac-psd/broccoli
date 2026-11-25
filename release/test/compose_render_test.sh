@@ -37,7 +37,7 @@ render() {
   shift
   out="$(docker compose "$@" config 2>&1 >/dev/null)" \
     || { printf '%s\n' "$out"; fail "$label does not render"; }
-  if printf '%s\n' "$out" | grep -q 'variable is not set'; then
+  if grep -q 'variable is not set' <<<"$out"; then
     printf '%s\n' "$out"
     fail "$label reads a variable its env files do not set"
   fi
@@ -146,7 +146,7 @@ render_plan() {
   [ "${#plan_vars[@]}" -eq 0 ] || unset "${plan_vars[@]}"
   plan="$(bash "$rel/airgap/install.sh" --dry-run "$@" 2>&1)" \
     || { printf '%s\n' "$plan"; fail "airgap install.sh $* --dry-run"; }
-  eval "$(printf '%s\n' "$plan" | grep '^export ')"
+  eval "$(grep '^export ' <<<"$plan")"
   read -r -a plan_vars <<< "$(printf '%s\n' "$plan" | sed -n 's/^export \([A-Z_]*\)=.*/\1/p' | tr '\n' ' ')"
   eval "dir=$(printf '%s\n' "$plan" | sed -n 's/^compose dir: //p')"
   eval "args=($(printf '%s\n' "$plan" | sed -n 's/^compose: //p'))"

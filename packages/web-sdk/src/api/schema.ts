@@ -1387,8 +1387,8 @@ export interface paths {
       cookie?: never;
     };
     /**
-     * Server readiness and dependency health
-     * @description Public, unauthenticated. Pings the database, message queue and blob storage concurrently, within a 1.5s total budget. Returns 200 with `status: "ok"` when no probed component is down (a database whose pool is saturated reads `db: "busy"` and is not down); 503 with `status: "degraded"` otherwise. This is the deep readiness check; load balancers should probe the shallow `GET /livez`, which makes no dependency calls.
+     * Server dependency health
+     * @description Public, unauthenticated. Pings the database, message queue and blob storage concurrently, within a 1.5s total budget. Returns 200 with `status: "ok"` when no probed component is down (a database whose pool is saturated reads `db: "busy"` and is not down); 503 with `status: "degraded"` otherwise. This is the deep check for monitoring; load balancers should probe `GET /readyz`, which makes no dependency calls.
      */
     get: operations['getHealth'];
     put?: never;

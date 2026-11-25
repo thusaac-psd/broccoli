@@ -20,11 +20,11 @@ openssl verify -CAfile "$CA/root.crt" "$LEAF/server.crt" >/dev/null \
 
 # SAN carries both the DNS name and the IP literal
 san="$(openssl x509 -in "$LEAF/server.crt" -noout -ext subjectAltName)"
-echo "$san" | grep -q 'DNS:judge.contest.lan' || { echo "FAIL: DNS SAN missing"; exit 1; }
-echo "$san" | grep -q 'IP Address:10.0.0.5'   || { echo "FAIL: IP SAN missing"; exit 1; }
+grep -q 'DNS:judge.contest.lan' <<<"$san" || { echo "FAIL: DNS SAN missing"; exit 1; }
+grep -q 'IP Address:10.0.0.5' <<<"$san"   || { echo "FAIL: IP SAN missing"; exit 1; }
 
 # serverAuth EKU present
-openssl x509 -in "$LEAF/server.crt" -noout -ext extendedKeyUsage | grep -q 'TLS Web Server Authentication' \
+grep -q 'TLS Web Server Authentication' <<<"$(openssl x509 -in "$LEAF/server.crt" -noout -ext extendedKeyUsage)" \
   || { echo "FAIL: serverAuth EKU missing"; exit 1; }
 
 # the leaf out dir is created 0700 so server.key is never momentarily exposed to

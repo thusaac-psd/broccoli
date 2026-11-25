@@ -42,17 +42,33 @@ docker compose --env-file .env.gateway -f docker-compose.gateway.yaml logs --tai
 
 ### Health probes and metrics
 
-Each server answers `/livez` (the process is up), `/healthz` (it can also reach
-Postgres, Redis and blob storage) and `/metrics` on its main HTTP port. These
-share the runtime that serves API requests and judging, so a server saturated by
-a submission burst can answer a probe slowly and fail it even though it is still
-working. The gateway probes `/livez` every 5 s with a 2 s timeout and ejects a
-server after 2 misses (`health_interval`, `health_timeout` and `health_fails` in
-`examples/Caddyfile.gateway`, and in `airgap/caddy/Caddyfile.airgap` for an
-airgap install). If servers are ejected under load while their logs show them
-still serving, raise `health_timeout` or `health_fails` there and restart the
-gateway. A Prometheus scrape of `/metrics` can likewise time out under load;
-give it a scrape timeout of a few seconds.
+Each server answers three probes and `/metrics` on its main HTTP port:
+
+- `/livez`, liveness: the process is up and serving HTTP. It calls nothing else.
+- `/readyz`, readiness: this server should take browsers. It answers 503
+  `"not_ready"` while another live server can take submissions this one would
+  refuse: a contest type's plugin is loaded there but not here (its load keeps
+  failing, or its files are missing), so a submission or code run pinned here
+  would answer `CONTEST_TYPE_UNAVAILABLE` until the load succeeds. Servers that
+  each lack a different plugin, or a plugin no server could load, are all ready,
+  so the gateway always keeps a server. It makes no database or Redis call.
+- `/healthz`, the deep check for monitoring: it also reaches Postgres, Redis and
+  blob storage (below). It is never a gateway probe: the servers share those, so
+  one blip would fail it on every server at once.
+
+These share the runtime that serves API requests and judging, so a server
+saturated by a submission burst can answer a probe slowly and fail it even
+though it is still working. The gateway probes `/readyz` every 5 s with a 2 s
+timeout and ejects a server after 2 misses (`health_interval`, `health_timeout`
+and `health_fails` in `examples/Caddyfile.gateway`, and in
+`airgap/caddy/Caddyfile.airgap` for an airgap install). An ejected server's
+browsers are pinned to a ready one on their next request, and come back to it
+only if that one goes away. A server that stays not ready names the plugin in
+the admin plugin page (each server's state) and its logs; fix the load and click
+Reload. If servers are ejected under load while their logs show them still
+serving, raise `health_timeout` or `health_fails` there and restart the gateway.
+A Prometheus scrape of `/metrics` can likewise time out under load; give it a
+scrape timeout of a few seconds.
 
 `/healthz` answers 200 with `"status": "ok"` while no dependency is down, and
 503 with `"status": "degraded"` and the component that is (`"db"`, `"mq"` or
@@ -235,9 +251,10 @@ stored, so a failed import changes nothing. It refuses:
   least as new as the source;
 - a database this build has not migrated yet: start this build's server once
   first;
-- a database that already has problems, unless `--replace-problems`; and, with
-  `--replace-problems`, problems that submissions, code runs or contests still
-  reference, unless `--wipe-dependents` deletes those too;
+- a database that already has problems, unless `--replace-problems`, which
+  removes every problem the database has, those the bundle does not carry
+  included; and, with `--replace-problems`, problems that submissions, code runs
+  or contests still reference, unless `--wipe-dependents` deletes those too;
 - a contest bundle onto a database that has a contest with the bundle's contest
   id, unless `--replace-contest`. The bundle's contest replaces that one: its
   roster, problem links and contest configs go, and so do its clarifications,
@@ -262,11 +279,26 @@ with a bundle_ section (`website/docs/building-plugins/configuration.md`,
 carries its problems' and contest's configs, never a plugin-wide one, and an
 import replaces the configs of every problem it replaces. A config field its
 plugin marks secret, such as a print station's token, never travels, with or
-without `--with-secrets`: an import keeps the secret the target stored before
-the import for the same item of the same config (a print station is the same
-item by its name), else leaves it unset. Re-importing a server's own export
-keeps every secret it had, `--replace-problems` included; on another server a
-contest's print stations need their tokens set again before they can sign in.
+without `--with-secrets`. A bundle names the installation it was exported from,
+and the secrets an import keeps follow these rules:
+
+- Importing into the installation that exported the bundle keeps the secrets
+  that installation stores, `--replace-problems` included.
+- Importing it anywhere else leaves every secret unset, and the import summary
+  counts them (`secrets_unset`): enter them again on the target, such as a
+  contest's print station tokens, before the stations can sign in.
+
+A secret belongs to its item by key (a print station by its name). Once a save
+drops an item, its secret is gone: re-adding a station with the same name, or
+renaming one, makes a new station whose token is entered again. Two stations
+with the same name are refused.
+
+When an admin saves a config, a secret the save leaves out or sends as null
+keeps the stored value, so a form never has to show it; only Clear
+(`{"$clear": true}`) removes it. A secret its item requires, such as a station's
+token, cannot be cleared: Clear is hidden and the server refuses with
+`secret_required`. Replace it by typing a new one.
+
 The export reads each plugin's schema from its published upload or the server's
 plugin directory. The configs of a plugin with neither (removed, or never
 installed on the source), and a config whose namespace its plugin no longer

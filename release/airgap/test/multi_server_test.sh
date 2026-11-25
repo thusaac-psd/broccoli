@@ -30,7 +30,7 @@ bundle() {
 }
 run_setup() { bash "$setup" --non-interactive --dry-run "$@"; }
 # plan_get OUTPUT VAR: a variable install.sh --dry-run exports.
-plan_get() { ( eval "$(printf '%s\n' "$1" | grep '^export ')"; printf '%s' "${!2-}" ); }
+plan_get() { ( eval "$(grep '^export ' <<<"$1")"; printf '%s' "${!2-}" ); }
 
 # --- infra node, gateway on its own host ---
 bundle infra
@@ -39,7 +39,7 @@ out="$(run_setup --role server --bundle "$T/infra" --gateway-host 10.0.0.5 \
 sv="$T/infra/compose/.env.server"
 [ "$(env_get "$sv" BROCCOLI_GATEWAY_HOSTS)" = 10.0.0.5 ] || fail "infra node did not record its gateway"
 [ "$(env_get "$sv" BROCCOLI__SERVER__ID)" = server-a ] || fail "--server-id not written"
-printf '%s\n' "$out" | grep -q -- '--lan-host' && fail "a server behind a gateway-only node asked for a TLS host"
+grep -q -- '--lan-host' <<<"$out" && fail "a server behind a gateway-only node asked for a TLS host"
 [ ! -e "$T/infra.server-secret" ] || fail "fixture: no server-secret dir expected"
 join="$T/infra/compose/server-join.env"
 [ "$(stat -c %a "$join")" = 600 ] || fail "server-join.env is not private"
@@ -60,7 +60,7 @@ case "$compose" in
   *) fail "infra node does not compose infra and server: $compose" ;;
 esac
 case "$compose" in *gateway-airgap*) fail "infra node still runs its own gateway" ;; esac
-printf '%s\n' "$plan" | grep -q 'TLS gateway will serve' && fail "infra node planned a TLS leaf"
+grep -q 'TLS gateway will serve' <<<"$plan" && fail "infra node planned a TLS leaf"
 
 # --- a further server joins the infra node ---
 bundle extra
@@ -90,7 +90,7 @@ run_setup --role server --bundle "$T/extra" --reconfigure >/dev/null || fail "jo
 # Without the infra node's server-join.env the join is refused up front.
 bundle lost
 set +e; out="$(run_setup --role server --bundle "$T/lost" --infra-host 10.0.0.10 --gateway-host 10.0.0.5 2>&1)"; rc=$?; set -e
-[ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q 'FAIL: a server joining' || fail "a join without server-join.env was not refused ($rc): $out"
+[ "$rc" = 2 ] && grep -q 'FAIL: a server joining' <<<"$out" || fail "a join without server-join.env was not refused ($rc): $out"
 # A gateway named by something that is not an address is refused.
 set +e; out="$(run_setup --role server --bundle "$T/extra" --reconfigure --gateway-host 'gw;rm' 2>&1)"; rc=$?; set -e
 [ "$rc" = 2 ] || fail "a malformed --gateway-host was accepted: $out"
@@ -100,7 +100,7 @@ bundle gw
 sec="$T/gw.server-secret"; mkdir -p "$sec"; echo k > "$sec/root.key"
 out="$(run_setup --role gateway --bundle "$T/gw" --lan-host contest.lan --lan-host 10.0.0.5 \
   --upstream 10.0.0.10 --upstream localhost:3001)" || fail "gateway setup: $out"
-printf '%s\n' "$out" | grep -q 'install.sh --role gateway' || fail "gateway setup does not hand off to the gateway role"
+grep -q 'install.sh --role gateway' <<<"$out" || fail "gateway setup does not hand off to the gateway role"
 ge="$T/gw/compose/.env.gateway"
 [ "$(env_get "$ge" LAN_HOST)" = contest.lan ] && [ "$(env_get "$ge" LAN_HOST_ALIASES)" = 10.0.0.5 ] \
   || fail "gateway LAN hosts: $(cat "$ge")"
@@ -114,7 +114,7 @@ grep -q 'runs on this machine' "$T/gw.err" || fail "no warning about an upstream
 compose="$(printf '%s\n' "$plan" | sed -n 's/^compose: //p')"
 [ "$compose" = "-p broccoli-gateway --env-file .env.gateway -f docker-compose.gateway-airgap.yaml.template up -d --pull never" ] \
   || fail "gateway compose: $compose"
-printf '%s\n' "$plan" | grep -q -- "setup.sh --role server --gateway-host '" || fail "gateway does not say how servers trust it"
+grep -q -- "setup.sh --role server --gateway-host '" <<<"$plan" || fail "gateway does not say how servers trust it"
 # Re-running keeps the generated settings.
 cp "$ge" "$T/ge.before"
 run_setup --role gateway --bundle "$T/gw" --reconfigure >/dev/null || fail "gateway re-run"
@@ -127,7 +127,7 @@ set +e; out="$(bash "$install" --role gateway --bundle "$T/gw" --lan-host 'a}b' 
 # The gateway holds the TLS material; without it the preflight stops.
 bundle gw2
 set +e; out="$(run_setup --role gateway --bundle "$T/gw2" --lan-host contest.lan --upstream 10.0.0.10 2>&1)"; rc=$?; set -e
-[ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q '^FAIL: server-secret dir' || fail "gateway without TLS material passed preflight: $out"
+[ "$rc" = 2 ] && grep -q '^FAIL: server-secret dir' <<<"$out" || fail "gateway without TLS material passed preflight: $out"
 
 # --- the single-host server still runs its gateway and trusts only the edge ---
 bundle single
@@ -136,7 +136,7 @@ run_setup --role server --bundle "$T/single" --lan-host contest.lan --admin-pass
 plan="$(bash "$install" --role server --bundle "$T/single" --lan-host contest.lan --dry-run)" || fail "single-host dry run: $plan"
 [ "$(plan_get "$plan" BROCCOLI_GATEWAY_TRUSTED_PROXIES)" = '["172.31.250.2/32"]' ] || fail "single host trust list"
 [ "$(plan_get "$plan" BROCCOLI_HTTP_BIND)" = 127.0.0.1:3000 ] || fail "single host :3000 not on loopback"
-printf '%s\n' "$plan" | grep -q 'docker-compose.gateway-airgap.yaml.template' || fail "single host lost its gateway"
+grep -q 'docker-compose.gateway-airgap.yaml.template' <<<"$plan" || fail "single host lost its gateway"
 # A new server's id is blank until install.sh asks the loaded image for it.
 [ "$(env_get "$T/single/compose/.env.server" BROCCOLI__SERVER__ID)" != server-1 ] \
   || fail "a new server kept the example's shared id"

@@ -33,7 +33,7 @@ E
 chmod +x "$pbin/podman"
 pout="$(PATH="$pbin:$PATH" BROCCOLI_ENGINE=podman bash "$lb" --bundle "$T" 2>&1)" \
   || { echo "FAIL: podman-engine image load failed"; echo "$pout"; exit 1; }
-echo "$pout" | grep -q 'PODMAN-LOAD load' || { echo "FAIL: load-bundle did not use the podman engine to load images"; echo "$pout"; exit 1; }
+grep -q 'PODMAN-LOAD load' <<<"$pout" || { echo "FAIL: load-bundle did not use the podman engine to load images"; echo "$pout"; exit 1; }
 
 # --- --pristine: a freshly-transported bundle must carry NONE of the on-host
 #     env files. They are manifest-excluded, so integrity alone can't see a

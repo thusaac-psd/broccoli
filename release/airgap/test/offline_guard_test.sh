@@ -45,20 +45,21 @@ code_lines() {
 
 for f in "${targets[@]}"; do
   rel="${f#"$release"/}"
+  lines="$(code_lines "$f")"
   case "$f" in
     *.ps1)
-      if code_lines "$f" | grep -Eqi 'invoke-webrequest|invoke-restmethod|net\.webclient|downloadfile|downloadstring|start-bitstransfer|bitsadmin|\b(iwr|irm|curl|wget)\b|certutil[^|]*-urlcache'; then
+      if grep -Eqi 'invoke-webrequest|invoke-restmethod|net\.webclient|downloadfile|downloadstring|start-bitstransfer|bitsadmin|\b(iwr|irm|curl|wget)\b|certutil[^|]*-urlcache' <<<"$lines"; then
         echo "FAIL: $rel contains a network fetch"; rc=1
       fi
       continue ;;
   esac
-  if code_lines "$f" | grep -Eq '\b(curl|wget|apt|apt-get|pip[0-9]*)\b'; then
+  if grep -Eq '\b(curl|wget|apt|apt-get|pip[0-9]*)\b' <<<"$lines"; then
     echo "FAIL: $rel contains a network fetch:"; code_lines "$f" | grep -E '\b(curl|wget|apt|apt-get|pip[0-9]*)\b'; rc=1
   fi
-  if code_lines "$f" | grep -Eq '(docker|podman)[[:space:]]+(image[[:space:]]+)?pull'; then
+  if grep -Eq '(docker|podman)[[:space:]]+(image[[:space:]]+)?pull' <<<"$lines"; then
     echo "FAIL: $rel uses 'docker/podman pull'"; rc=1
   fi
-  if code_lines "$f" | grep -E '\bup[[:space:]]+-d\b' | grep -vq -- '--pull never'; then
+  if grep -E '\bup[[:space:]]+-d\b' <<<"$lines" | grep -v -- '--pull never' >/dev/null; then
     echo "FAIL: $rel runs compose up without --pull never"; rc=1
   fi
 done

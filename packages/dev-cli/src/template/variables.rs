@@ -9,29 +9,25 @@ pub struct TemplateVars {
     pub web_root: String,
 }
 
+/// Check `name` as a new plugin's id: the one plugin id rule the server
+/// applies (`check_plugin_id`), so a scaffolded plugin always loads, narrowed
+/// to lowercase letters and digits in words joined by single hyphens, since
+/// its crate and npm package are named after it. Both refusals read as the
+/// id rule's, naming the id and the rule it breaks.
 pub fn validate_plugin_name(name: &str) -> Result<()> {
-    if name.is_empty() {
-        bail!("Plugin name cannot be empty");
-    }
-    // The one plugin id rule the server applies, so a scaffolded plugin
-    // always loads; the scaffold's own naming convention narrows it below.
     broccoli_api_types::plugin_id::check_plugin_id(name)?;
-
-    if name.starts_with('-') || name.ends_with('-') {
-        bail!("Plugin name cannot start or end with a hyphen");
+    let conventional = name.split('-').all(|word| {
+        !word.is_empty()
+            && word
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    });
+    if !conventional {
+        bail!(
+            "Invalid plugin ID '{name}': a new plugin's ID must be lowercase letters and digits \
+             in words joined by single hyphens, since its crate and npm package are named after it"
+        );
     }
-
-    if name.contains("--") {
-        bail!("Plugin name cannot contain consecutive hyphens");
-    }
-
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-    {
-        bail!("Plugin name must contain only lowercase letters, digits, and hyphens");
-    }
-
     Ok(())
 }
 
@@ -75,6 +71,29 @@ mod tests {
         assert!(validate_plugin_name("Upper").is_err());
         assert!(validate_plugin_name("has space").is_err());
         assert!(validate_plugin_name("has_underscore").is_err());
+    }
+
+    /// Every refusal of a plugin name speaks as the one plugin id rule does,
+    /// naming the id and the rule, whether the shared rule or the scaffold's
+    /// narrower convention refused it.
+    #[test]
+    fn every_refusal_reads_as_the_plugin_id_rule() {
+        for name in [
+            "",
+            "-leading",
+            "trailing-",
+            "double--hyphen",
+            "Upper",
+            "has space",
+            "has_underscore",
+            "users",
+        ] {
+            let error = validate_plugin_name(name).expect_err(name).to_string();
+            assert!(
+                error.starts_with(&format!("Invalid plugin ID '{name}': ")),
+                "{name:?}: {error}"
+            );
+        }
     }
 
     /// A scaffolded plugin's id passes the server's one id rule: a host

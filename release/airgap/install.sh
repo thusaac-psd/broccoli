@@ -253,7 +253,7 @@ case "$ROLE" in
     export BROCCOLI_UPSTREAMS
     gateway_tls_plan
     edge_network
-    echo "gateway balances across $BROCCOLI_UPSTREAMS, health-checked on /livez"
+    echo "gateway balances across $BROCCOLI_UPSTREAMS, health-checked on /readyz"
     trust="$(gateway_source_addrs "$BROCCOLI_UPSTREAMS")"
     cat <<EOF
 Servers behind this gateway must trust it for X-Forwarded-For, or every

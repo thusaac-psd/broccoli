@@ -21,18 +21,18 @@ run() { PATH="$tmp/bin:$PATH" bash -c '. '"$here"'/../lib/preflight.sh; prefligh
 
 # server with good runtime + bundle + secret -> rc 0
 if ! out="$(run server "$tmp/bundle" "$sec")"; then echo "FAIL: good server preflight returned nonzero"; echo "$out"; exit 1; fi
-echo "$out" | grep -q '^PASS: container engine: docker' || { echo "FAIL: engine pass line missing"; exit 1; }
+grep -q '^PASS: container engine: docker' <<<"$out" || { echo "FAIL: engine pass line missing"; exit 1; }
 
 # server missing secret -> FAIL rc1
 set +e; out="$(run server "$tmp/bundle" "$tmp/nope")"; rc=$?; set -e
 [ "$rc" = 1 ] || { echo "FAIL: missing secret should fail (rc=$rc)"; exit 1; }
-echo "$out" | grep -q '^FAIL:' || { echo "FAIL: no FAIL line for missing secret"; exit 1; }
+grep -q '^FAIL:' <<<"$out" || { echo "FAIL: no FAIL line for missing secret"; exit 1; }
 
 # nonexistent bundle but valid secret -> FAIL rc1, role check still runs
 set +e; out="$(run server "$tmp/no-such-bundle" "$sec")"; rc=$?; set -e
 [ "$rc" = 1 ] || { echo "FAIL: nonexistent bundle should fail (rc=$rc)"; exit 1; }
-echo "$out" | grep -q '^FAIL: bundle integrity' || { echo "FAIL: no bundle integrity FAIL line"; exit 1; }
-echo "$out" | grep -q '^PASS: server TLS material present' || { echo "FAIL: server role check did not run"; exit 1; }
+grep -q '^FAIL: bundle integrity' <<<"$out" || { echo "FAIL: no bundle integrity FAIL line"; exit 1; }
+grep -q '^PASS: server TLS material present' <<<"$out" || { echo "FAIL: server role check did not run"; exit 1; }
 
 # no engine (empty PATH stubs failing) -> FAIL
 mkdir -p "$tmp/nobin"
@@ -50,17 +50,17 @@ out="$(PATH="$tmp/nobin:$tmp/bin_missing:/usr/bin:/bin" bash -c '. '"$here"'/../
 rc=$?
 set -e
 [ "$rc" = 1 ] || { echo "FAIL: no-engine should fail (rc=$rc)"; exit 1; }
-echo "$out" | grep -q '^FAIL: no working docker' || { echo "FAIL: no docker/podman FAIL line"; exit 1; }
+grep -q '^FAIL: no working docker' <<<"$out" || { echo "FAIL: no docker/podman FAIL line"; exit 1; }
 
 # worker preflight PASSES with a cluster-secret sidecar present (4th arg)
 cls="$tmp/cls"; mkdir -p "$cls"; : > "$cls/cluster-secrets.env"
 set +e; out="$(run worker "$tmp/bundle" "" "$cls")"; rc=$?; set -e
 [ "$rc" = 0 ] || { echo "FAIL: worker preflight failed despite cluster-secret present (rc=$rc)"; echo "$out"; exit 1; }
-echo "$out" | grep -q '^PASS: cluster-secret present' || { echo "FAIL: no cluster-secret PASS line"; echo "$out"; exit 1; }
+grep -q '^PASS: cluster-secret present' <<<"$out" || { echo "FAIL: no cluster-secret PASS line"; echo "$out"; exit 1; }
 
 # worker preflight FAILS without a cluster-secret sidecar
 set +e; out="$(run worker "$tmp/bundle" "" "")"; rc=$?; set -e
 [ "$rc" = 1 ] || { echo "FAIL: worker preflight should fail without cluster-secret (rc=$rc)"; echo "$out"; exit 1; }
-echo "$out" | grep -q '^FAIL:' || { echo "FAIL: expected a FAIL line for missing cluster-secret"; echo "$out"; exit 1; }
+grep -q '^FAIL:' <<<"$out" || { echo "FAIL: expected a FAIL line for missing cluster-secret"; echo "$out"; exit 1; }
 
 echo "PASS: preflight go/no-go"

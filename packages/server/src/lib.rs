@@ -461,13 +461,15 @@ pub fn build_router(state: AppState) -> anyhow::Result<axum::Router> {
         )
         .fallback_service(frontend_assets_service(&frontend_dist));
 
-    // `/livez` is the shallow liveness probe for load balancers (no dependency
-    // calls); `/healthz` is the deep readiness check (DB + Redis).
+    // `/livez` is liveness (the process serves), `/readyz` readiness (this
+    // replica should take browsers; the gateways probe it), neither making a
+    // dependency call; `/healthz` is the deep check for monitoring.
     let app = axum::Router::new()
         .nest("/api", router)
         .route("/metrics", axum::routing::get(metrics_handler))
         .route("/healthz", axum::routing::get(handlers::health::healthz))
         .route("/livez", axum::routing::get(handlers::health::livez))
+        .route("/readyz", axum::routing::get(handlers::health::readyz))
         .nest("/assets", assets_router)
         .fallback_service(spa_fallback_service(frontend_dist))
         .with_state(state)

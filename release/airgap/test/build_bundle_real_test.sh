@@ -68,7 +68,7 @@ done
 nmc="$(find "$b/compose/plugins" -type d -name node_modules | wc -l)"
 [ "$nmc" -eq 0 ] \
   || { echo "FAIL: $nmc node_modules dir(s) leaked into bundle plugins (~460MB bloat; dockerignore plugins node_modules re-exclude regressed)"; exit 1; }
-find "$b/compose/plugins" -path '*/dist/*' -type f | grep -q . \
+[ -n "$(find "$b/compose/plugins" -path '*/dist/*' -type f -print -quit)" ] \
   || { echo "FAIL: no built plugin frontend dist in bundle — dockerignore over-excluded (dist is runtime-required for plugin frontends)"; exit 1; }
 # shipped plugin code is integrity-protected (present in the manifest)
 grep -q 'compose/plugins/standard-checkers/plugin.toml' "$b/manifest.sha256" \
@@ -80,9 +80,9 @@ echo "== CLI is a static musl ELF =="
 # load-bearing property is that NO dynamic interpreter is required (offline hosts
 # have no matching loader/libc), so also assert it is not "dynamically linked".
 cli_file="$(file "$b/cli/broccoli")"
-echo "$cli_file" | grep -qE 'static-pie linked|statically linked' \
+grep -qE 'static-pie linked|statically linked' <<<"$cli_file" \
   || { echo "FAIL: CLI is not statically linked (need static-pie or classic static): $cli_file"; exit 1; }
-echo "$cli_file" | grep -q 'dynamically linked' \
+grep -q 'dynamically linked' <<<"$cli_file" \
   && { echo "FAIL: CLI is dynamically linked — will not run on an offline host: $cli_file"; exit 1; } || true
 
 echo "== compose smoke: server up + gateway responds =="
@@ -107,12 +107,12 @@ echo "== compose smoke: plugins actually register at boot (not just 'healthy') =
 # healthcheck stays green throughout. Assert the boot actually registered plugins:
 # zero activation failures AND at least one contest type registered (both come
 # from the plugin init() path the cache bug breaks).
-scid="$($ENGINE ps --filter ancestor="$srv_ref" --format '{{.ID}}' | head -1)"
+scid="$($ENGINE ps --filter ancestor="$srv_ref" --format '{{.ID}}' | sed -n 1p)"
 [ -n "$scid" ] || { echo "FAIL: could not locate the running server container to inspect plugin registration"; exit 1; }
 slog="$("$ENGINE" logs "$scid" 2>&1)"
-echo "$slog" | grep -qiE 'failed to create cache directory|activation failed|init\(\) failed' \
+grep -qiE 'failed to create cache directory|activation failed|init\(\) failed' <<<"$slog" \
   && { echo "FAIL: server logged plugin activation/cache failures — evaluator registry is empty, nothing will judge"; exit 1; } || true
-echo "$slog" | grep -q 'Contest type registered' \
+grep -q 'Contest type registered' <<<"$slog" \
   || { echo "FAIL: no 'Contest type registered' in server log — plugin init() did not run (writable HOME/wasmtime cache?)"; exit 1; }
 
 echo "== compose smoke: worker up + becomes healthy =="

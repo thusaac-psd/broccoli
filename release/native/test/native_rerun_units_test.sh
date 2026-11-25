@@ -20,8 +20,8 @@ start_worker_units
 calls="$(cat "$T/calls")"
 
 grep -q -- '--now' "$T/calls" && fail "a unit is still started with enable --now, which never restarts it"
-line() { grep -nxF "$1" "$T/calls" | head -n 1 | cut -d: -f1; }
-stop="$(grep -n '^stop .*broccoli-weed' "$T/calls" | head -n 1 | cut -d: -f1)"
+line() { grep -nxF "$1" "$T/calls" | sed -n 1p | cut -d: -f1; }
+stop="$(grep -n '^stop .*broccoli-weed' "$T/calls" | sed -n 1p | cut -d: -f1)"
 sock="$(line 'restart broccoli-weed-s3.socket')"
 [ -n "$stop" ] && [ -n "$sock" ] && [ "$stop" -lt "$sock" ] \
   || fail "the old weed is not stopped before the S3 socket takes :8333: $calls"

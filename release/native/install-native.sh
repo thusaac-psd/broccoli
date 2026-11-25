@@ -36,11 +36,11 @@ done
 
 die(){ echo "error: $*" >&2; exit 1; }
 need_root(){ [ "$(id -u)" = 0 ] || die "run with sudo"; }
-gen(){ head -c "${1:-24}" /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c "${2:-32}"; }
+gen(){ local s; s="$(head -c "${1:-24}" /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"; printf '%s' "${s:0:${2:-32}}"; }
 # toml_string FILE KEY: the first `KEY = "value"` in FILE.
-toml_string(){ sed -n "s/^$2 *= *\"\(.*\)\"\$/\1/p" "$1" | head -n 1; }
+toml_string(){ sed -n "s/^$2 *= *\"\(.*\)\"\$/\1/p" "$1" | sed -n 1p; }
 # toml_url_password FILE SCHEME: the password in the first SCHEME:// url.
-toml_url_password(){ sed -n "s|^url *= *\"$2://[^:]*:\([^@]*\)@.*|\1|p" "$1" | head -n 1; }
+toml_url_password(){ sed -n "s|^url *= *\"$2://[^:]*:\([^@]*\)@.*|\1|p" "$1" | sed -n 1p; }
 
 # (Re)start a role's units after their config and unit files are written. A
 # re-run (upgrade, --rotate-secrets, a new LAN) must restart what is already
@@ -150,8 +150,8 @@ ensure_redis7(){
 # a PostgreSQL server keeps it.
 ensure_postgres(){
   local set major
-  dpkg-query -W -f='${Package} ${Status}\n' 'postgresql-[0-9]*' 2>/dev/null \
-    | grep -q '^postgresql-[0-9]* install ok installed$' && return 0
+  grep -q '^postgresql-[0-9]* install ok installed$' \
+    <<<"$(dpkg-query -W -f='${Package} ${Status}\n' 'postgresql-[0-9]*' 2>/dev/null)" && return 0
   set="$(first_match "$BUNDLE/postgres/$(ubuntu_version)"/postgresql-[0-9]*_*.deb)"
   [ -n "$set" ] || die_unstaged postgres "a PostgreSQL server"
   major="$(basename "$set" | sed -n 's/^postgresql-\([0-9]*\)_.*/\1/p')"
@@ -192,7 +192,7 @@ ensure_toolchain(){
   and re-run: sudo ./install-native.sh worker
   (Deliberate Python-only worker pool? re-run with BROCCOLI_ALLOW_NO_CXX=1.)"
   fi
-  echo ">> toolchain OK: $(gcc --version | head -1) / $(g++ --version | head -1) / $(python3 --version 2>&1)"
+  echo ">> toolchain OK: $(gcc --version | sed -n 1p) / $(g++ --version | sed -n 1p) / $(python3 --version 2>&1)"
 }
 
 install_common_dirs(){
@@ -239,12 +239,12 @@ install_infra_server(){
 
   # postgres: role + db + LAN access (scram)
   echo ">> configuring postgres"
-  sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1 \
+  grep -q 1 <<<"$(sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'")" \
     || sudo -u postgres psql -c "CREATE ROLE $DB_USER LOGIN CREATEROLE PASSWORD '$db_pw'"
   # CREATEROLE and nothing more: the server provisions each plugin's own
   # role and schema with it.
   sudo -u postgres psql -c "ALTER ROLE $DB_USER LOGIN CREATEROLE PASSWORD '$db_pw'"
-  sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 \
+  grep -q 1 <<<"$(sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'")" \
     || sudo -u postgres createdb -O "$DB_USER" "$DB_NAME"
   local pgconf pghba subnet
   pgconf="$(first_match /etc/postgresql/*/main/postgresql.conf)"
