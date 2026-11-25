@@ -5,6 +5,7 @@ pub mod config_schema;
 mod deadline;
 pub mod error;
 pub mod executor;
+pub mod guest_log;
 pub mod hook;
 pub mod host;
 pub mod http;
@@ -14,5 +15,7 @@ pub mod manifest;
 pub mod memory;
 pub mod pool;
 pub mod registry;
+#[cfg(test)]
+mod test_logs;
 pub mod threads;
 pub mod traits;

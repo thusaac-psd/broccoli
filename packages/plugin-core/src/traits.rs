@@ -280,6 +280,7 @@ fn run_guest(
     let _admitted = admitted;
     let locals = resolved.locals.clone();
     let _scope = ScopeGuard::enter(NewScope {
+        plugin_id: plugin_id.as_str().into(),
         admission: Some(admission),
         instance: instance.clone(),
         class: resolved.class,
@@ -338,14 +339,17 @@ fn run_guest(
             MarkedUnavailable::No if cancelled => return unavailable(),
             MarkedUnavailable::No => {}
         }
-        let message = failure_reason(&e);
-        warn!(
-            plugin_id = %plugin_id,
-            func_name = %func_name,
-            depth = resolved.depth,
-            reason = %message,
-            "Plugin call failed"
-        );
+        let message = crate::guest_log::bounded(&failure_reason(&e)).into_owned();
+        // The plugin causes the line, so it spends the plugin's log budget.
+        if crate::guest_log::admit(&plugin_id) {
+            warn!(
+                plugin_id = %plugin_id,
+                func_name = %func_name,
+                depth = resolved.depth,
+                reason = %message,
+                "Plugin call failed"
+            );
+        }
         PluginError::ExecutionFailed {
             plugin_id: plugin_id.clone(),
             func_name: func_name.clone(),
@@ -473,6 +477,7 @@ pub trait PluginManager: PluginInvoker {
 
         let build_metrics = self.get_metrics().cloned();
         let build_plugin_id = plugin_id.to_string();
+        crate::guest_log::install();
         let source: crate::pool::PluginSource = std::sync::Arc::new(move || {
             let started = std::time::Instant::now();
             let builder = PluginBuilder::new(&manifest)

@@ -31,6 +31,24 @@ fn guest(version: i64) -> String {
         (import "extism:host/user" "nest_hold" (func $nest_hold (param i64) (result i64)))
         (import "extism:host/user" "nest_spin" (func $nest_spin (param i64) (result i64)))
         (import "extism:host/user" "broken" (func $broken (param i64) (result i64)))
+        (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+        (import "extism:host/env" "store_u64" (func $store_u64 (param i64 i64)))
+        (import "extism:host/env" "log_error" (func $log_error (param i64)))
+        (func (export "log_lines") (result i32)
+            (local $line i32) (local $offset i64) (local $at i64)
+            (loop $lines
+                (local.set $offset (call $alloc (i64.const 4000)))
+                (local.set $at (i64.const 0))
+                (loop $words
+                    (call $store_u64
+                        (i64.add (local.get $offset) (local.get $at))
+                        (i64.const 0x7878787878787878))
+                    (local.set $at (i64.add (local.get $at) (i64.const 8)))
+                    (br_if $words (i64.lt_u (local.get $at) (i64.const 4000))))
+                (call $log_error (local.get $offset))
+                (local.set $line (i32.add (local.get $line) (i32.const 1)))
+                (br_if $lines (i32.lt_u (local.get $line) (i32.const 3))))
+            (i32.const 0))
         (func (export "broken") (result i32) (drop (call $broken (i64.const 0))) (i32.const 0))
         (func (export "nest_spin") (result i32) (drop (call $nest_spin (i64.const 0))) (i32.const 0))
         (func (export "busy") (result i32) (drop (call $busy (i64.const 0))) (i32.const 0))
@@ -371,6 +389,22 @@ impl Harness {
         )
         .unwrap();
         std::fs::write(root.join("guest.wat"), guest(version)).unwrap();
+    }
+
+    /// Load the guest a second time, as plugin `id`, so a test whose
+    /// assertions read per-plugin state (its log budget) has a plugin of its
+    /// own.
+    fn load_also(&self, id: &str) {
+        let root = self.dir.path().join(id);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("plugin.toml"),
+            format!("name = \"{id}\"\nversion = \"0.1.0\"\n\n[server]\nentry = \"guest.wat\"\npermissions = [\"test\"]\n"),
+        )
+        .unwrap();
+        std::fs::write(root.join("guest.wat"), guest(1)).unwrap();
+        self.manager.discover_plugins().unwrap();
+        self.manager.load_plugin(id).unwrap();
     }
 
     fn admission(&self) -> &crate::admission::Admission {
@@ -944,59 +978,28 @@ async fn a_host_function_can_fail_its_call_as_unavailable() {
         .expect("the next call runs");
 }
 
-/// Every event logged while the tests run, rendered as its message and
-/// fields, with its level.
-fn captured_logs() -> &'static Mutex<Vec<(tracing::Level, String)>> {
-    use tracing_subscriber::layer::{Context, SubscriberExt};
-
-    static LOGS: std::sync::OnceLock<Mutex<Vec<(tracing::Level, String)>>> =
-        std::sync::OnceLock::new();
-
-    struct Render(String);
-    impl tracing::field::Visit for Render {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            use std::fmt::Write as _;
-            let _ = write!(self.0, " {}={:?}", field.name(), value);
-        }
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            use std::fmt::Write as _;
-            let _ = write!(self.0, " {}={}", field.name(), value);
-        }
-    }
-    struct Capture;
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
-        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
-            let mut render = Render(String::new());
-            event.record(&mut render);
-            captured_logs()
-                .lock()
-                .push((*event.metadata().level(), render.0));
-        }
-    }
-
-    LOGS.get_or_init(|| {
-        tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Capture))
-            .expect("no other test sets a global subscriber");
-        Mutex::new(Vec::new())
-    })
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_call_logs_one_line_and_an_unavailable_one_logs_nothing() {
-    let logs = captured_logs();
+    let logs = crate::test_logs::captured();
     let h = Harness::new(2);
+    // A plugin of its own: the failure line spends the plugin's log budget.
+    h.load_also("fails");
     for func in ["busy", "db_down", "db_busy", "broken"] {
         h.manager
-            .call_raw(PLUGIN, func, vec![], CallOptions::interactive(later()))
+            .call_raw("fails", func, vec![], CallOptions::interactive(later()))
             .await
             .unwrap_err();
     }
     // Other tests log too, so only the events naming these calls count, at
     // the levels a deployment logs.
     let logs = logs.lock();
-    let naming = |func: &str| -> Vec<(tracing::Level, String)> {
+    let naming = |func: &str| -> Vec<crate::test_logs::Logged> {
         logs.iter()
-            .filter(|(level, text)| *level <= tracing::Level::INFO && text.contains(func))
+            .filter(|l| {
+                l.level <= tracing::Level::INFO
+                    && l.text.contains("plugin_id=fails")
+                    && l.text.contains(func)
+            })
             .cloned()
             .collect()
     };
@@ -1007,8 +1010,46 @@ async fn a_failed_call_logs_one_line_and_an_unavailable_one_logs_nothing() {
     // A failure is one line, without the wasm backtrace.
     let broken = naming("broken");
     assert_eq!(broken.len(), 1, "{broken:#?}");
-    let (level, text) = &broken[0];
-    assert_eq!(*level, tracing::Level::WARN);
-    assert!(!text.contains('\n'), "{text}");
-    assert!(text.contains("the host function is broken"), "{text}");
+    let line = &broken[0];
+    assert_eq!(line.level, tracing::Level::WARN);
+    assert!(!line.text.contains('\n'), "{}", line.text);
+    assert!(
+        line.text.contains("the host function is broken"),
+        "{}",
+        line.text
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guests_log_lines_name_the_plugin_are_bounded_and_never_read_as_the_hosts_errors() {
+    let logs = crate::test_logs::captured();
+    let h = Harness::new(2);
+    h.load_also("chatty");
+    h.manager
+        .call_raw(
+            "chatty",
+            "log_lines",
+            vec![],
+            CallOptions::interactive(later()),
+        )
+        .await
+        .expect("the guest logs and returns");
+    let logs = logs.lock();
+    let lines: Vec<_> = logs
+        .iter()
+        .filter(|l| l.text.contains("plugin_id=chatty") && l.text.contains("guest_level"))
+        .collect();
+    // The guest logged three lines through extism's `log_error`.
+    assert_eq!(lines.len(), 3, "{lines:#?}");
+    for line in lines {
+        assert_eq!(line.target, crate::guest_log::TARGET);
+        assert_eq!(line.level, tracing::Level::WARN, "never the host's ERROR");
+        assert!(line.text.contains("guest_level=error"), "{}", line.text);
+        assert!(
+            line.text.len() < crate::guest_log::MAX_LINE_BYTES + 200,
+            "{}",
+            line.text.len()
+        );
+        assert!(line.text.contains("more bytes]"), "{}", &line.text[..80]);
+    }
 }
