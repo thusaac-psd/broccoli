@@ -24,7 +24,7 @@ import type {
   InheritedConfig,
   JsonSchemaProperty,
 } from './types';
-import { defaultForType } from './utils';
+import { defaultForType, defaultText } from './utils';
 
 function DefaultBadge() {
   const { t } = useTranslation();
@@ -109,6 +109,11 @@ export function SchemaField({
     source: configSourceName(inheritedValue.source, t),
   };
   const showAsPlaceholder = !isFieldExplicit && !isFieldDirty;
+  // What an unset field shows, for every kind of field: the value it
+  // inherits, else its default.
+  const unsetText = showAsPlaceholder
+    ? (inheritedResult?.display ?? defaultText(prop, path, inherited))
+    : undefined;
 
   const badge = (() => {
     if (isFieldExplicit || isFieldDirty) return null;
@@ -225,9 +230,7 @@ export function SchemaField({
     // Boolean -> horizontal settings-style card with switch on the right
     if (prop.type === 'boolean') {
       const inheritedBoolLabel =
-        showAsPlaceholder && inheritedResult
-          ? `(${inheritedResult.display})`
-          : undefined;
+        unsetText === undefined ? undefined : `(${unsetText})`;
 
       return (
         <div className="flex items-center justify-between gap-4 rounded-lg border px-4 py-3">
@@ -264,10 +267,7 @@ export function SchemaField({
 
     // String enum -> styled select
     if (prop.type === 'string' && prop.enum) {
-      const selectPlaceholder =
-        showAsPlaceholder && inheritedResult
-          ? inheritedResult.display
-          : undefined;
+      const selectPlaceholder = unsetText;
 
       return (
         <div className="flex flex-col gap-1.5">
@@ -317,10 +317,7 @@ export function SchemaField({
 
     // Number / integer -> custom NumericInput
     if (prop.type === 'number' || prop.type === 'integer') {
-      const inheritedPlaceholder =
-        showAsPlaceholder && inheritedResult
-          ? inheritedResult.display
-          : undefined;
+      const inheritedPlaceholder = unsetText;
 
       return (
         <div className="flex flex-col gap-1.5">
@@ -475,9 +472,7 @@ export function SchemaField({
         ? t('config.secretCleared')
         : stored
           ? t('config.secretKept')
-          : showAsPlaceholder && inheritedResult
-            ? inheritedResult.display
-            : undefined;
+          : unsetText;
 
       return (
         <div className="flex flex-col gap-1.5">

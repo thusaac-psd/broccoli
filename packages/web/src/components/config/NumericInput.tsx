@@ -23,6 +23,7 @@ export function NumericInput({
   precision?: number;
   unit?: string;
   id?: string;
+  /** What the field shows while unset: what it inherits, else its default. */
   inheritedPlaceholder?: string;
 }>) {
   const { t } = useTranslation();
@@ -139,7 +140,7 @@ export function NumericInput({
           onFocus={() => setFocused(true)}
           onKeyDown={handleKeyDown}
           className="flex h-9 w-full rounded-l-md border border-r-0 border-input bg-transparent px-3 py-1 text-sm tabular-nums shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring focus-visible:z-10 disabled:cursor-not-allowed disabled:opacity-50"
-          placeholder={inheritedPlaceholder ?? (integer ? '0' : '0.0')}
+          placeholder={inheritedPlaceholder}
         />
         {(rangeHint || unit) && (
           <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground pointer-events-none select-none tabular-nums">
