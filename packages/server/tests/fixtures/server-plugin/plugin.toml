@@ -154,3 +154,7 @@ type = "integer"
 
 [config.bundled.properties.from]
 type = "string"
+
+[config.bundled.properties.token]
+type = "string"
+secret = true

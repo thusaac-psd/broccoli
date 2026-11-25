@@ -822,30 +822,57 @@ mod copy_text {
     }
 }
 
+/// The configs the target stores for the rows whose secrets the export
+/// withheld, read before the import replaces anything: replacing a problem
+/// deletes its configs, and the secrets they hold are what the import keeps.
+async fn stored_configs(
+    tx: &mut Transaction<'_, Postgres>,
+    withheld: &[Withheld],
+) -> anyhow::Result<BTreeMap<(String, String, String), serde_json::Value>> {
+    let mut stored = BTreeMap::new();
+    for row in withheld {
+        let config: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT config FROM plugin_config WHERE scope = $1 AND ref_id = $2 AND namespace = $3",
+        )
+        .bind(&row.scope)
+        .bind(&row.ref_id)
+        .bind(&row.namespace)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(config) = config {
+            stored.insert(
+                (row.scope.clone(), row.ref_id.clone(), row.namespace.clone()),
+                config,
+            );
+        }
+    }
+    Ok(stored)
+}
+
 /// Keeps, in the staged `plugin_config` rows, each secret the export
-/// withheld: the value the target stores at the same row and path, else
-/// nothing, so the field reads unset until someone sets it.
+/// withheld: the value the target stored for the same item of the same
+/// config before the import (`stored`), else nothing, so the field reads
+/// unset until someone sets it.
 async fn keep_withheld_secrets(
     tx: &mut Transaction<'_, Postgres>,
     withheld: &[Withheld],
+    stored: &BTreeMap<(String, String, String), serde_json::Value>,
 ) -> anyhow::Result<()> {
     let staged = staging("plugin_config");
     for row in withheld {
-        let found: Option<(serde_json::Value, Option<serde_json::Value>)> =
-            sqlx::query_as(AssertSqlSafe(format!(
-                "SELECT s.config, t.config FROM {staged} s LEFT JOIN plugin_config t \
-                   ON (t.scope, t.ref_id, t.namespace) = (s.scope, s.ref_id, s.namespace) \
-                 WHERE s.scope = $1 AND s.ref_id = $2 AND s.namespace = $3"
-            )))
-            .bind(&row.scope)
-            .bind(&row.ref_id)
-            .bind(&row.namespace)
-            .fetch_optional(&mut **tx)
-            .await?;
-        let Some((mut config, stored)) = found else {
+        let found: Option<serde_json::Value> = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT config FROM {staged} WHERE scope = $1 AND ref_id = $2 AND namespace = $3"
+        )))
+        .bind(&row.scope)
+        .bind(&row.ref_id)
+        .bind(&row.namespace)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let Some(mut config) = found else {
             continue;
         };
-        keep_withheld(&mut config, stored.as_ref(), &row.secrets);
+        let key = (row.scope.clone(), row.ref_id.clone(), row.namespace.clone());
+        keep_withheld(&mut config, stored.get(&key), &row.secrets);
         sqlx::query(AssertSqlSafe(format!(
             "UPDATE {staged} SET config = $4 \
              WHERE scope = $1 AND ref_id = $2 AND namespace = $3"
@@ -912,6 +939,7 @@ pub async fn import(
          so it migrates the database",
         known.last().map(String::as_str).unwrap_or_default()
     );
+    let stored = stored_configs(&mut tx, &manifest.withheld).await?;
     prepare_problem_tables(&mut tx, options).await?;
 
     let mut summary = Summary::default();
@@ -964,7 +992,7 @@ pub async fn import(
         .iter()
         .any(|(table, _)| table.name == "plugin_config")
     {
-        keep_withheld_secrets(&mut tx, &manifest.withheld).await?;
+        keep_withheld_secrets(&mut tx, &manifest.withheld, &stored).await?;
     }
     if loaded.iter().any(|(table, _)| table.name == "contest") {
         prepare_contest(&mut tx, options).await?;

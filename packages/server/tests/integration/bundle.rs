@@ -864,3 +864,66 @@ async fn a_bundle_leaves_out_the_configs_of_a_plugin_without_a_manifest() {
         "only the configs of a plugin the source knows travel"
     );
 }
+
+/// A bundle never carries a secret, and an import keeps what the target
+/// stores for the same config: re-importing a server's own export over its
+/// problems leaves their secrets as they were, though replacing the
+/// problems deletes their configs first.
+#[tokio::test]
+async fn reimporting_an_export_over_its_own_problems_keeps_their_secrets() {
+    let app = TestApp::spawn().await;
+    let problem = seed_problem_with_configs(&app, "source").await;
+    exec(
+        &app,
+        &format!(
+            "UPDATE plugin_config SET config = config || '{{\"token\": \"problem-secret\"}}' \
+             WHERE scope = 'problem' AND ref_id = '{problem}'"
+        ),
+    )
+    .await;
+    let archive = export(
+        &app,
+        ExportOptions {
+            selection: Selection::Problems(vec![problem]),
+            with_secrets: false,
+        },
+    )
+    .await
+    .expect("export");
+    assert!(
+        !String::from_utf8_lossy(&unpacked(&archive)).contains("problem-secret"),
+        "the bundle carries the secret"
+    );
+
+    import(
+        &app,
+        &archive,
+        ImportOptions {
+            replace_problems: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("re-import");
+    assert_eq!(
+        text(
+            &app,
+            &format!(
+                "SELECT config->>'token' AS v FROM plugin_config \
+                 WHERE scope = 'problem' AND ref_id = '{problem}'"
+            )
+        )
+        .await,
+        "problem-secret"
+    );
+}
+
+/// The archive's entries, uncompressed.
+fn unpacked(archive: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(archive)
+        .read_to_end(&mut out)
+        .expect("a gzip archive");
+    out
+}
