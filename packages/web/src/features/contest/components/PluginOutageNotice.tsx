@@ -36,15 +36,20 @@ export function PluginOutageNotice({
 }) {
   const { t, lookup } = useTranslation();
   if (!outage) return null;
-  const text =
-    outage.state === 'unavailable'
-      ? t('contests.pluginOutage.unavailable')
-      : t(
-          outage.state === 'disabled'
-            ? 'contests.pluginOutage.disabled'
-            : 'contests.pluginOutage.notLoaded',
-          { plugin: pluginName(lookup, outage.plugin_id) },
-        );
+  const text = (() => {
+    switch (outage.state) {
+      case 'disabled':
+        return t('contests.pluginOutage.disabled', {
+          plugin: pluginName(lookup, outage.plugin_id),
+        });
+      case 'not_loaded':
+        return t('contests.pluginOutage.notLoaded', {
+          plugin: pluginName(lookup, outage.plugin_id),
+        });
+      case 'unavailable':
+        return t('contests.pluginOutage.unavailable');
+    }
+  })();
   return <Notice text={text} className={className} />;
 }
 
