@@ -181,6 +181,11 @@ pub struct SubmissionJudgementResponse {
     /// it was not judged with. `null` for everyone else.
     #[serde(default)]
     pub judged_on_earlier_inputs: Option<bool>,
+    /// The plugin that keeps this judgement waiting, and why, while it is
+    /// not finished and cannot run now: the same as its submission's
+    /// `parked_by`, so the history says what the submission row says.
+    #[serde(default)]
+    pub parked_by: Option<broccoli_api_types::visibility::ClosedBy>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]

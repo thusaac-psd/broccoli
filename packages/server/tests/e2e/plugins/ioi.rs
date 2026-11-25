@@ -1876,6 +1876,22 @@ async fn cut_by_a_disable(change: Change) {
         )
         .await;
     assert_eq!(res.body["data"][0]["parked_by"], parked, "{}", res.text);
+    // The judgement history names what parks the judgement too, to its
+    // submitter as to an administrator: who parks it is the host's to say.
+    for viewer in [&admin, &contestant] {
+        let res = app
+            .get_with_token(&format!("/api/v1/submissions/{sub_id}/judgements"), viewer)
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        let current = res
+            .body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["is_current"] == true);
+        let current = current.unwrap_or_else(|| panic!("no current judgement: {}", res.text));
+        assert_eq!(current["parked_by"], parked, "{}", res.text);
+    }
     let res = app
         .get_with_token(&format!("/api/v1/submissions/{sub_id}"), &contestant)
         .await;

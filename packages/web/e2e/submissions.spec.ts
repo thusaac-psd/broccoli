@@ -113,6 +113,53 @@ test('a parked submission shows one consistent status: waiting, with nothing in 
   await expect(page.locator('.animate-spin')).toHaveCount(0);
 });
 
+test('a parked judgement in the history says what it waits for, as its submission does', async ({
+  page,
+}) => {
+  await mockApi(page, 'admin');
+  await page.route(/\/api\/v1\/submissions\/6(\?|$)/, (route) =>
+    route.fulfill({ json: { ...parked(6), files: [], result: null } }),
+  );
+  const judgement = {
+    id: 61,
+    submission_id: 6,
+    version: 2,
+    is_current: true,
+    is_finalized: false,
+    status: 'Queued',
+    verdict: null,
+    score: null,
+    time_used: null,
+    memory_used: null,
+    compile_output: null,
+    error_code: null,
+    error_message: null,
+    judge_epoch: 2,
+    target_worker_id: null,
+    created_at: new Date(NOW).toISOString(),
+    finalized_at: null,
+    test_case_results: [],
+    test_case_pagination: null,
+    withheld: null,
+    case_changes: null,
+    config_issues: false,
+    judged_on_earlier_inputs: false,
+    parked_by: CLOSED_BY_ICPC,
+  };
+  await page.route('**/api/v1/submissions/6/judgements', (route) =>
+    route.fulfill({
+      json: [
+        { ...judgement, id: 60, version: 1, is_current: false },
+        judgement,
+      ],
+    }),
+  );
+  await page.goto('/submissions/6');
+  const history = page.getByText('v2').locator('xpath=ancestor::div[2]');
+  await expect(history.getByText(WAITING)).toBeVisible();
+  await expect(history.getByText('Queued', { exact: true })).toHaveCount(0);
+});
+
 test('a problem whose practice contest type has no provider offers no submit', async ({
   page,
 }) => {

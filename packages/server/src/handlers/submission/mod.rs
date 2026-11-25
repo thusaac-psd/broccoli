@@ -566,6 +566,15 @@ async fn build_visible_judgement(
     .await?;
     response.config_issues = config_issues;
     response.judged_on_earlier_inputs = judged_on_earlier_inputs;
+    // A judgement waits on what its submission waits on: the same needs, by
+    // the same rule (`PluginLifecycle::parked_by`), shown the same way.
+    response.parked_by = state.plugin_lifecycle.parked_by(
+        state
+            .plugin_lifecycle
+            .needs_on(&sub.contest_type, &problem_model, Some(&sub.language)),
+        response.status,
+    );
+    response.status = response::shown_status(response.status, response.parked_by.as_ref());
     if visibility.has_view_all && !response.is_current {
         let row = state
             .db

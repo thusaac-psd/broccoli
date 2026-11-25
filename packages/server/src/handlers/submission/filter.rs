@@ -144,7 +144,7 @@ pub(super) async fn apply_filter_to_judgement_response(
         created_at: sub.created_at,
         result: result_response,
         withheld: None,
-        parked_by: None,
+        parked_by: response.parked_by.clone(),
     };
 
     let filtered_value = apply_filter_to_response(kernel, synthetic_submission).await?;
@@ -198,6 +198,7 @@ pub(super) async fn apply_filter_to_judgement_response(
 
     obj.insert("status".into(), filtered_value["status"].clone());
     obj.insert("withheld".into(), filtered_value["withheld"].clone());
+    obj.insert("parked_by".into(), filtered_value["parked_by"].clone());
     if !filtered_value["withheld"].is_null() {
         obj.insert("is_finalized".into(), serde_json::Value::Bool(false));
         obj.insert("finalized_at".into(), serde_json::Value::Null);
