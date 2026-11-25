@@ -16,7 +16,10 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertCircle, ChevronDown } from 'lucide-react';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 
-import { resolveFeedbackVisibility } from './feedback-visibility';
+import {
+  hostShowsResult,
+  resolveFeedbackVisibility,
+} from './feedback-visibility';
 import { useIoiApi } from './hooks/useIoiApi';
 import { useIoiContestInfo } from './hooks/useIoiContestInfo';
 import { type DisplayTestCaseResult, memberCell } from './subtask-members';
@@ -657,10 +660,7 @@ export function IoiSubmissionResult({
 
   // Mounted only on IOI contests (the slot's `contest_type`); with no
   // submission yet, the host's own view shows.
-  if (!submission) return <>{children}</>;
-
-  // Host handles code viewer + compile output above the slot for these states
-  if (submission.status === 'CompilationError') return <>{children}</>;
+  if (!submission || hostShowsResult(submission)) return <>{children}</>;
 
   // Loading state for task config
   if (!taskConfig && taskConfigQuery.isLoading) {
