@@ -1,12 +1,12 @@
-import type { QueryFailure } from '@broccoli/web-sdk/hooks';
+import type { QueryFailure, QueryState } from '@broccoli/web-sdk/hooks';
 import { Slot } from '@broccoli/web-sdk/slot';
 import type {
-  ClosedLanguage,
   Submission,
   SubmissionSummary,
 } from '@broccoli/web-sdk/submission';
 
 import { CodeEditor, type EditorFile } from '@/components/CodeEditor';
+import type { ProblemLanguages } from '@/features/problem/utils/submit-closure';
 import { RecentSubmissionOverview } from '@/features/submission/components/RecentSubmissionOverview';
 import { TargetWorkerSelector } from '@/features/submission/components/TargetWorkerSelector';
 import type { SubmissionEntry } from '@/features/submission/hooks/use-submissions';
@@ -26,7 +26,7 @@ interface ProblemCodingTabProps {
   onContestTypeChange?: (value: string) => void;
   contestTypes?: string[];
   submissionFormat?: Record<string, string[]> | null;
-  closedLanguages?: ClosedLanguage[];
+  languages: QueryState<ProblemLanguages>;
   latestSubmission: Submission | null;
   submissionHistory: SubmissionSummary[];
   submissionHistoryError: QueryFailure | null;
@@ -55,7 +55,7 @@ export function ProblemCodingTab({
   onContestTypeChange,
   contestTypes,
   submissionFormat,
-  closedLanguages,
+  languages,
   latestSubmission,
   submissionHistory,
   submissionHistoryError,
@@ -97,7 +97,7 @@ export function ProblemCodingTab({
           onContestTypeChange={onContestTypeChange}
           contestTypes={contestTypes}
           submissionFormat={submissionFormat}
-          closedLanguages={closedLanguages}
+          languages={languages}
         />
       </div>
 

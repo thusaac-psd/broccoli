@@ -198,14 +198,17 @@ export function pollTarget(entry: SubmissionEntry): PollTarget | null {
 }
 
 /**
- * The codes of a refusal that says the plugin judging the contest type is
- * out: whatever the page shows of the contest's (or problem's) outage is
- * stale, so it is read again.
+ * The codes of a refusal that says a plugin the work needs is out (its
+ * contest type's, its evaluator, its checker, its language's): disabled,
+ * loaded on no server, or not answering. Whatever the page shows of what is
+ * open (the contest's or problem's outage, the problem's closed languages,
+ * the registries) is stale, so it is read again.
  */
 const OUTAGE_REFUSALS: ReadonlySet<string> = new Set([
   'CONTEST_TYPE_DISABLED',
   'CONTEST_TYPE_UNAVAILABLE',
   'PLUGIN_DISABLED',
+  'PLUGIN_NOT_LOADED',
   'PLUGIN_UNAVAILABLE',
 ]);
 

@@ -1,6 +1,10 @@
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { pollInterval, useQueryState } from '@broccoli/web-sdk/hooks';
+import {
+  pollInterval,
+  REGISTRIES_QUERY_KEY,
+  useQueryState,
+} from '@broccoli/web-sdk/hooks';
 import {
   pluginKeys,
   useFormat,
@@ -107,6 +111,8 @@ export default function PluginsPage() {
     queryClient.invalidateQueries({ queryKey: ['admin-plugins'] });
     queryClient.invalidateQueries({ queryKey: ['admin-plugin-detail'] });
     queryClient.invalidateQueries({ queryKey: ['i18n'] });
+    // What is registered changes with the plugins that serve.
+    queryClient.invalidateQueries({ queryKey: REGISTRIES_QUERY_KEY });
   }, [queryClient]);
 
   const applyToggle = useCallback(

@@ -2,7 +2,7 @@ import '@/lib/monaco-setup';
 
 import { useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { useQueryState } from '@broccoli/web-sdk/hooks';
+import type { QueryState } from '@broccoli/web-sdk/hooks';
 import {
   pluginName,
   useIdentifierLabel,
@@ -41,13 +41,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import { KeybindingModeDropdown } from '@/components/KeybindingModeDropdown';
-import type { SupportedLanguage } from '@/features/problem/api/fetch-supported-languages';
-import { useSupportedLanguages } from '@/features/problem/hooks/use-supported-languages';
+import type { ProblemLanguages } from '@/features/problem/utils/submit-closure';
+import type { SupportedLanguage } from '@/features/problem/utils/supported-languages';
 import type { SubmissionEntry } from '@/features/submission/hooks/use-submissions';
 import { useEditorKeybindings } from '@/lib/use-editor-keybindings';
 
 import {
-  acceptedLanguages,
   applyEditorUploads,
   type EditorDraft,
   type EditorFile,
@@ -88,10 +87,11 @@ export interface CodeEditorProps {
    */
   submissionFormat?: Record<string, string[]> | null;
   /**
-   * Languages the problem would take but whose plugin is disabled: listed in
-   * the picker as unavailable, naming the plugin.
+   * The languages the problem takes work in (`useProblemLanguages`): the
+   * open ones are offered, the closed ones listed in the picker as
+   * unavailable, naming the plugin.
    */
-  closedLanguages?: ClosedLanguage[];
+  languages: QueryState<ProblemLanguages>;
 }
 
 const EXT_TO_MONACO: Record<string, string> = {
@@ -121,19 +121,18 @@ function getMonacoLanguage(filename: string): string {
 }
 
 export function CodeEditor(props: CodeEditorProps) {
-  const languages = useQueryState(useSupportedLanguages());
+  const { languages } = props;
 
   // Editor state (saved language + draft file) initializes only against the
   // real language list: against any other, the saved language id would not
   // be found, the draft for the real language would not load, and the
   // auto-save effect would overwrite the contestant's persisted draft with
-  // the template. So the stateful editor mounts only once the
-  // supported-languages query has answered, and a failed fetch is said for
-  // what it is, with a retry.
+  // the template. So the stateful editor mounts only once the registries
+  // have answered, and a failed fetch is said for what it is, with a retry.
   if (languages.status === 'error') {
     return <QueryErrorState className="h-full" state={languages} />;
   }
-  if (languages.status !== 'data') {
+  if (languages.status !== 'data' && languages.status !== 'empty') {
     return (
       <div className="h-full flex flex-col p-3">
         <div className="flex-1 min-h-0 rounded-lg border bg-muted/30 animate-pulse" />
@@ -141,11 +140,17 @@ export function CodeEditor(props: CodeEditorProps) {
     );
   }
 
-  const available = acceptedLanguages(languages.data, props.submissionFormat);
+  const { open, closed } = languages.data;
   // No language to write in: the problem view shows that as a closed submit
   // (`submitClosure`), so no editor is offered for code the server refuses.
-  if (available.length === 0) return null;
-  return <CodeEditorContent {...props} availableLanguages={available} />;
+  if (open.length === 0) return null;
+  return (
+    <CodeEditorContent
+      {...props}
+      availableLanguages={open}
+      closedLanguages={closed}
+    />
+  );
 }
 
 function CodeEditorContent({
@@ -159,9 +164,12 @@ function CodeEditorContent({
   onContestTypeChange,
   contestTypes,
   submissionFormat,
-  closedLanguages = [],
+  closedLanguages,
   availableLanguages,
-}: CodeEditorProps & { availableLanguages: Language[] }) {
+}: CodeEditorProps & {
+  availableLanguages: Language[];
+  closedLanguages: ClosedLanguage[];
+}) {
   const { t, lookup } = useTranslation();
   const label = useIdentifierLabel();
   const errorMessage = useErrorMessage();

@@ -4,7 +4,11 @@ import {
   useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import { useSessionView } from '@broccoli/web-sdk/auth';
-import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
+import {
+  isAlreadyDone,
+  REGISTRIES_QUERY_KEY,
+  useIdempotentRequest,
+} from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   type CodeRun,
@@ -177,17 +181,21 @@ export function useSubmissions({
       .catch(() => {});
   });
 
-  // A submit or run refused because the contest type's plugin is out means
-  // the page's view of that outage is stale (opened before a disable, say):
-  // read it again, so the page closes submissions or shows them open.
+  // A submit or run refused because a plugin it needs is out means the
+  // page's view of what is open is stale (opened before a disable, say):
+  // the contest, the problem (its closure and closed languages) and the
+  // registries are read again, so the page closes submissions, with the
+  // plugin named, or shows them open.
   const rereadOutage = useCallback(
     (err: unknown) => {
       if (!isOutageRefusal(err)) return;
-      void queryClient.invalidateQueries({
-        queryKey: contestId
-          ? contestQueryKey(contestId)
-          : ['problem', problemId],
-      });
+      if (contestId) {
+        void queryClient.invalidateQueries({
+          queryKey: contestQueryKey(contestId),
+        });
+      }
+      void queryClient.invalidateQueries({ queryKey: ['problem', problemId] });
+      void queryClient.invalidateQueries({ queryKey: REGISTRIES_QUERY_KEY });
     },
     [contestId, problemId, queryClient],
   );

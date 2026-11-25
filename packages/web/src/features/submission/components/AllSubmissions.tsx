@@ -13,7 +13,7 @@ import { Code2, ListFilter, Search } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 
-import { fetchSupportedLanguages } from '@/features/problem/api/fetch-supported-languages';
+import { useSupportedLanguages } from '@/features/problem/hooks/use-supported-languages';
 import {
   fetchAllPages,
   MAX_PER_PAGE,
@@ -102,11 +102,7 @@ export function AllSubmissions() {
     return () => clearTimeout(handle);
   }, [appliedQ, searchInput, updateSearchParams]);
 
-  const languages = useQuery({
-    queryKey: ['supported-languages'],
-    queryFn: () => fetchSupportedLanguages(apiClient),
-    staleTime: 5 * 60 * 1000,
-  });
+  const languages = useSupportedLanguages();
 
   const filters = {
     q: appliedQ || null,

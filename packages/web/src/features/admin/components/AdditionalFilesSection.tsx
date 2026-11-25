@@ -20,10 +20,8 @@ import {
   fetchAdditionalFiles,
   groupFilesByLanguage,
 } from '@/features/problem/api/additional-files';
-import {
-  fetchSupportedLanguages,
-  type SupportedLanguage,
-} from '@/features/problem/api/fetch-supported-languages';
+import { useSupportedLanguages } from '@/features/problem/hooks/use-supported-languages';
+import type { SupportedLanguage } from '@/features/problem/utils/supported-languages';
 
 interface StagedFile {
   id: string;
@@ -67,11 +65,7 @@ export function AdditionalFilesSection({
   const filesState = useQueryState(filesQuery);
   const files = filesQuery.data ?? NO_FILES;
 
-  const languagesQuery = useQuery({
-    queryKey: ['supported-languages'],
-    queryFn: () => fetchSupportedLanguages(apiClient),
-    staleTime: 60_000,
-  });
+  const languagesQuery = useSupportedLanguages();
   const languagesState = useQueryState(languagesQuery);
   const languages = languagesQuery.data ?? NO_LANGUAGES;
 
