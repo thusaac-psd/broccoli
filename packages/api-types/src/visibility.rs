@@ -46,8 +46,9 @@ impl PluginOutage {
         }
     }
 
-    /// The outage of two plugins at once: the one that lasts longer
-    /// ([`Self::rank`]), and of two alike the plugin whose id sorts first.
+    /// The outage of two plugins at once: the one that lasts longer (a
+    /// disabled plugin, then one loaded nowhere, then an unavailable one),
+    /// and of two alike the plugin whose id sorts first.
     /// Commutative.
     pub fn worst(self, other: PluginOutage) -> PluginOutage {
         let key = |o: &PluginOutage| (o.rank(), o.plugin_id().map(str::to_owned));
