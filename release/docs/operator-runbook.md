@@ -251,9 +251,10 @@ stored, so a failed import changes nothing. It refuses:
   least as new as the source;
 - a database this build has not migrated yet: start this build's server once
   first;
-- a database that already has problems, unless `--replace-problems`; and, with
-  `--replace-problems`, problems that submissions, code runs or contests still
-  reference, unless `--wipe-dependents` deletes those too;
+- a database that already has problems, unless `--replace-problems`, which
+  removes every problem the database has, those the bundle does not carry
+  included; and, with `--replace-problems`, problems that submissions, code runs
+  or contests still reference, unless `--wipe-dependents` deletes those too;
 - a contest bundle onto a database that has a contest with the bundle's contest
   id, unless `--replace-contest`. The bundle's contest replaces that one: its
   roster, problem links and contest configs go, and so do its clarifications,
@@ -281,17 +282,22 @@ plugin marks secret, such as a print station's token, never travels, with or
 without `--with-secrets`. A bundle names the installation it was exported from,
 and the secrets an import keeps follow these rules:
 
-- Re-importing into the same installation keeps every secret it stores for the
-  same item of the same config (a print station is the same item by its name),
-  `--replace-problems` included.
-- Importing into any other installation leaves every secret unset, even for an
-  item of the same name there: set a contest's print station tokens again before
-  the stations can sign in.
-- A renamed or re-added item is a new item: its secret is entered again.
+- Importing into the installation that exported the bundle keeps the secrets
+  that installation stores, `--replace-problems` included.
+- Importing it anywhere else leaves every secret unset, and the import summary
+  counts them (`secrets_unset`): enter them again on the target, such as a
+  contest's print station tokens, before the stations can sign in.
 
-When an admin saves a config, a secret the save leaves absent or null keeps the
-stored value, so a form never has to show it, and a secret the plugin requires
-cannot be cleared.
+A secret belongs to its item by key (a print station by its name). Once a save
+drops an item, its secret is gone: re-adding a station with the same name, or
+renaming one, makes a new station whose token is entered again. Two stations
+with the same name are refused.
+
+When an admin saves a config, a secret the save leaves out or sends as null
+keeps the stored value, so a form never has to show it; only Clear
+(`{"$clear": true}`) removes it. A secret its item requires, such as a station's
+token, cannot be cleared: Clear is hidden and the server refuses with
+`secret_required`. Replace it by typing a new one.
 
 The export reads each plugin's schema from its published upload or the server's
 plugin directory. The configs of a plugin with neither (removed, or never

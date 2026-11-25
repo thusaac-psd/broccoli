@@ -100,7 +100,8 @@ the problems on the server box:
 ```bash
 cd contest
 ./import-problems.sh ../broccoli-problems-*.tar.gz
-#   --replace-problems  replace problems if the target already has some
+#   --replace-problems  remove every problem the database has, those the
+#                       bundle does not carry included, and load its own
 #   --wipe-dependents   with --replace-problems, also delete the submissions,
 #                       code runs and contest links that reference them
 ```
@@ -158,15 +159,20 @@ to another server.
   cannot log in until an admin sets its password.
 - **Secret plugin settings never travel.** A print station's token, or any
   setting a plugin marks secret, stays out of the archive even with
-  `--with-secrets`. The archive names the installation it came from, and only a
-  re-import into that same installation keeps the secrets it already stores, for
-  the same item (a print station is the same item by its name) of the same
-  config. On any other installation the secrets are unset, whatever it stored
-  before: set the stations' tokens there before they can sign in.
-- **Secret settings follow their item.** A renamed or re-added item (a print
-  station) is a new item, so its secret is entered again. A save that leaves a
-  secret absent or null keeps the stored one; a secret the plugin requires
-  cannot be cleared.
+  `--with-secrets`. The archive names the installation it came from. An import
+  into that same installation keeps the secrets it already stores. An import
+  anywhere else leaves every secret unset, and the import summary counts them
+  (`secrets_unset`): enter them again on the target before the stations can sign
+  in.
+- **A secret belongs to its item by key** (a print station by its name). Once a
+  save drops an item, its secret is gone: re-adding a station with the same
+  name, or renaming one, makes a new station whose token is entered again. Two
+  stations with the same name are refused.
+- **Saving keeps a secret unless it is cleared.** A save that leaves a secret
+  out or sends it as null keeps the stored one; only Clear (`{"$clear": true}`)
+  removes it. A secret its item requires (a station's token) cannot be cleared:
+  Clear is hidden and the server refuses with `secret_required`. Replace it by
+  typing a new one.
 - **Schema versions.** The archive records the source database's schema version
   and each table's columns. It restores onto a server of the same or a newer
   build, which has started once (so its database is migrated); a column the
