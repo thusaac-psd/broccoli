@@ -3597,6 +3597,10 @@ export interface components {
           scope: string;
         }
       | {
+          /** @enum {string} */
+          kind: 'secret_not_stored';
+        }
+      | {
           key?: string | null;
           /** @enum {string} */
           kind: 'plugin';

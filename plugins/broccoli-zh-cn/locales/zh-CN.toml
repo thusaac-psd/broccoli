@@ -987,6 +987,8 @@
 'config.level.plugin' = "全服务器"
 'config.withheldValue' = "已隐藏"
 'config.secretKept' = "留空则保留已保存的密钥"
+'config.moveUp' = "上移"
+'config.moveDown' = "下移"
 
 # Language switcher
 'locale.switch' = "语言"
@@ -1102,6 +1104,7 @@
 'config.validation.pattern' = "格式不符合要求"
 'config.validation.unknownField' = "不存在此设置"
 'config.validation.required' = "必填"
+'config.validation.secretNotStored' = "此项没有已保存的密钥，请重新输入。"
 'config.blob.default' = "默认"
 'config.blob.replaceLabel' = "替换 {name}"
 'config.blob.replace' = "替换"

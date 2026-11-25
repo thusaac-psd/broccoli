@@ -120,11 +120,47 @@ fn check_property(prop: &SchemaProperty, path: &str) -> Result<(), String> {
     if !errors.is_empty() {
         return Err(format!("'{path}': {}", describe(&errors)));
     }
+    check_key(prop, path)?;
     if let Some(items) = &prop.items {
         check_property(items, &format!("{path}[]"))?;
     }
     for (name, child) in &prop.properties {
         check_property(child, &join(path, name))?;
+    }
+    Ok(())
+}
+
+/// An array whose items hold a secret names them by a key field, a string
+/// each item requires, so a secret is matched to the item it was set on and
+/// never to a position. A `key` names a field only on an array of objects.
+fn check_key(prop: &SchemaProperty, path: &str) -> Result<(), String> {
+    let items = prop
+        .items
+        .as_deref()
+        .filter(|_| prop.schema_type == "array");
+    let Some(key) = &prop.key else {
+        return match items {
+            Some(items) if items.holds_secret() => Err(format!(
+                "'{path}': its items hold a secret, so it names them by a key field (`key`)"
+            )),
+            _ => Ok(()),
+        };
+    };
+    let Some(items) = items else {
+        return Err(format!("'{path}': only an array names a key field"));
+    };
+    let field = items
+        .properties
+        .get(key)
+        .filter(|f| f.schema_type == "string");
+    let required = items.required.iter().flatten().any(|r| r == key);
+    if field.is_none() || !required {
+        return Err(format!(
+            "'{path}': its key field '{key}' is a string each item requires"
+        ));
+    }
+    if field.is_some_and(|f| f.secret) {
+        return Err(format!("'{path}': its key field '{key}' is a secret"));
     }
     Ok(())
 }
@@ -487,5 +523,48 @@ mod tests {
         .unwrap();
         let err = check_manifest(&manifest).expect_err("no server module");
         assert!(err.contains("validate function"), "{err}");
+    }
+
+    fn stations_manifest(array: &str, items: &str) -> PluginManifest {
+        toml::from_str(&format!(
+            r#"
+            name = "p"
+            version = "1.0.0"
+            [config.print]
+            scopes = ["contest"]
+            [config.print.properties.stations]
+            type = "array"
+            {array}
+            [config.print.properties.stations.items]
+            type = "object"
+            {items}
+            [config.print.properties.stations.items.properties.name]
+            type = "string"
+            [config.print.properties.stations.items.properties.token]
+            type = "string"
+            secret = true
+        "#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_array_whose_items_hold_a_secret_names_them_by_a_required_key_field() {
+        let err = check_manifest(&stations_manifest("", "")).expect_err("no key field");
+        assert!(err.contains("key field"), "{err}");
+        let err = check_manifest(&stations_manifest(r#"key = "name""#, ""))
+            .expect_err("a key field the items may leave out");
+        assert!(err.contains("each item requires"), "{err}");
+        let err = check_manifest(&stations_manifest(
+            r#"key = "token""#,
+            r#"required = ["token"]"#,
+        ))
+        .expect_err("a secret key field");
+        assert!(err.contains("is a secret"), "{err}");
+        check_manifest(&stations_manifest(
+            r#"key = "name""#,
+            r#"required = ["name"]"#,
+        ))
+        .expect("a required string key field");
     }
 }

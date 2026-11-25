@@ -265,6 +265,8 @@ export function serverProblem(field: ServerFieldError): FieldProblem {
       return { key: 'config.validation.unknownField' };
     case 'missing':
       return { key: 'config.validation.required' };
+    case 'secret_not_stored':
+      return { key: 'config.validation.secretNotStored' };
     case 'plugin':
       return {
         pluginKey: field.key ?? null,

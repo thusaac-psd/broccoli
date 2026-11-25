@@ -660,3 +660,105 @@ async fn a_bundle_withholds_a_secret_config_field() {
     assert_eq!(res.status, 200, "{}", res.text);
     assert_eq!(station(&target, contest_id).await, 200);
 }
+
+/// A secret belongs to the item it was set on: saving the stations back
+/// with their tokens `null` keeps each station's own token whatever the
+/// form deleted, inserted or moved, and a station whose name changed has no
+/// stored token to keep.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_secret_stays_with_its_item_through_delete_insert_and_reorder() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("secret_items_admin", "password", "admin")
+        .await;
+    let config = "/api/v1/admin/plugins/print/config/print";
+    let save = |stations: serde_json::Value| {
+        let (app, admin) = (&app, &admin);
+        async move {
+            app.put_with_token(
+                config,
+                &json!({ "config": { "stations": stations } }),
+                admin,
+            )
+            .await
+        }
+    };
+    let signs_in = |token: &'static str| {
+        let app = &app;
+        async move {
+            app.client
+                .get(format!(
+                    "{}/api/v1/p/print/api/plugins/print/stations/jobs",
+                    app.base_url
+                ))
+                .header("Authorization", format!("PrintStation {token}"))
+                .send()
+                .await
+                .expect("station request")
+                .status()
+                .as_u16()
+                == 200
+        }
+    };
+
+    let res = save(json!([
+        { "name": "alpha", "token": "token-a" },
+        { "name": "beta", "token": "token-b" },
+    ]))
+    .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(signs_in("token-a").await && signs_in("token-b").await);
+
+    // alpha deleted: beta keeps its own token, and alpha's no longer signs in.
+    let res = save(json!([{ "name": "beta", "token": null }])).await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(
+        !signs_in("token-a").await,
+        "a deleted station's token is gone"
+    );
+    assert!(signs_in("token-b").await, "beta keeps its token");
+
+    // A station inserted before beta.
+    let res = save(json!([
+        { "name": "gamma", "token": "token-g" },
+        { "name": "beta", "token": null },
+    ]))
+    .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(signs_in("token-g").await && signs_in("token-b").await);
+
+    // Reordered.
+    let res = save(json!([
+        { "name": "beta", "token": null },
+        { "name": "gamma", "token": null },
+    ]))
+    .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert!(signs_in("token-g").await && signs_in("token-b").await);
+    let read = app.get_with_token(config, &admin).await;
+    assert_eq!(
+        read.body["config"]["stations"],
+        json!([{ "name": "beta", "token": null }, { "name": "gamma", "token": null }]),
+        "{}",
+        read.text
+    );
+
+    // Renamed: no stored station has the new name, so there is no token to keep.
+    let res = save(json!([
+        { "name": "renamed", "token": null },
+        { "name": "gamma", "token": null },
+    ]))
+    .await;
+    assert_eq!(res.status, 400, "{}", res.text);
+    assert_eq!(
+        res.body["details"]["fields"][0]["path"], "stations[0].token",
+        "{}",
+        res.text
+    );
+    assert_eq!(
+        res.body["details"]["fields"][0]["kind"], "secret_not_stored",
+        "{}",
+        res.text
+    );
+    assert!(signs_in("token-b").await, "a refused save changes nothing");
+}

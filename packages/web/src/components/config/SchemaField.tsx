@@ -12,7 +12,7 @@ import {
 } from '@broccoli/web-sdk/slot';
 import { Button, Input, Label, Switch } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
-import { Minus, Plus } from 'lucide-react';
+import { ArrowDown, ArrowUp, Minus, Plus } from 'lucide-react';
 
 import { BlobRefField } from './BlobRefField';
 import { FieldError } from './FieldError';
@@ -405,6 +405,30 @@ export function SchemaField({
                     inherited={inherited}
                   />
                 </div>
+                {/* An item moves with everything it holds, its secrets too:
+                    the server matches a kept secret to its item by key. */}
+                <Button
+                  aria-label={t('config.moveUp')}
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="shrink-0 h-9 w-9 text-muted-foreground"
+                  disabled={i === 0}
+                  onClick={() => updateValue(path, swapped(items, i - 1, i))}
+                >
+                  <ArrowUp className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  aria-label={t('config.moveDown')}
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="shrink-0 h-9 w-9 text-muted-foreground"
+                  disabled={i === items.length - 1}
+                  onClick={() => updateValue(path, swapped(items, i, i + 1))}
+                >
+                  <ArrowDown className="h-3.5 w-3.5" />
+                </Button>
                 <Button
                   aria-label={t('common.remove')}
                   type="button"
@@ -491,4 +515,11 @@ export function SchemaField({
       );
     }
   }
+}
+
+/** `items` with the items at `a` and `b` swapped. */
+function swapped<T>(items: readonly T[], a: number, b: number): T[] {
+  const next = [...items];
+  [next[a], next[b]] = [next[b], next[a]];
+  return next;
 }

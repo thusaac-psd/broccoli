@@ -41,7 +41,7 @@ use crate::host_funcs::config::{extract_plugin_id, strip_namespace_prefix};
 use crate::migration::{Migrator, known_migrations};
 use crate::plugin_archive::PluginArchive;
 use crate::services::plugin_config::ConfigScope;
-use plugin_core::manifest::{ConfigNamespace, keep_withheld};
+use plugin_core::manifest::{ConfigNamespace, SecretStep, keep_withheld};
 
 /// [`Manifest::format`] of every bundle this build writes and reads.
 pub const FORMAT: &str = "broccoli-bundle/v1";
@@ -100,13 +100,15 @@ pub struct Manifest {
 }
 
 /// The secret fields of one `plugin_config` row that an export withheld:
-/// `null` in the bundle at each of `paths` (`stations[0].token`).
+/// `null` in the bundle at each of `secrets`, each named by identity: an
+/// array item by its key field, never by its position, so the import keeps
+/// what the target holds for the same item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Withheld {
     pub scope: String,
     pub ref_id: String,
     pub namespace: String,
-    pub paths: Vec<String>,
+    pub secrets: Vec<Vec<SecretStep>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -708,13 +710,17 @@ fn withhold_secrets(
             continue;
         };
         if let Some(ns) = namespaces.get(strip_namespace_prefix(&stored)) {
-            let paths = ns.withhold_secrets(&mut value);
-            if !paths.is_empty() {
+            let secrets: Vec<_> = ns
+                .withhold_secrets(&mut value)
+                .into_iter()
+                .map(|set| set.identity)
+                .collect();
+            if !secrets.is_empty() {
                 withheld.push(Withheld {
                     scope: copy_text::decode(&fields[scope])?,
                     ref_id: copy_text::decode(&fields[ref_id])?,
                     namespace: stored,
-                    paths,
+                    secrets,
                 });
             }
         }
@@ -832,7 +838,7 @@ async fn keep_withheld_secrets(
         let Some((mut config, stored)) = found else {
             continue;
         };
-        keep_withheld(&mut config, stored.as_ref(), &row.paths);
+        keep_withheld(&mut config, stored.as_ref(), &row.secrets);
         sqlx::query(AssertSqlSafe(format!(
             "UPDATE {staged} SET config = $4 \
              WHERE scope = $1 AND ref_id = $2 AND namespace = $3"

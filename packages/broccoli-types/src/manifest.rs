@@ -549,17 +549,41 @@ fn unset(value: &serde_json::Value) -> bool {
     value.is_null() || value.as_str() == Some("")
 }
 
-/// What [`each_secret`] calls with each secret field: its path, the object
-/// that holds it, and its key there.
-type SecretVisit<'a> = dyn FnMut(&str, &mut serde_json::Map<String, serde_json::Value>, &str) + 'a;
+/// One step to a secret by identity: a field, or the item of an array whose
+/// key field (the array's `key`) holds `value`. A secret belongs to the item
+/// it was set on, never to a position.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretStep {
+    Field(String),
+    Item {
+        key: String,
+        value: serde_json::Value,
+    },
+}
+
+/// A secret field that holds a value: `path` names it in the config as it
+/// is (`stations[0].token`), `identity` by its items' keys.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetSecret {
+    pub path: String,
+    pub identity: Vec<SecretStep>,
+}
+
+/// What [`each_secret`] calls with each secret field: its path, its
+/// identity, the object that holds it, and its key there.
+type SecretVisit<'a> =
+    dyn FnMut(&str, &[SecretStep], &mut serde_json::Map<String, serde_json::Value>, &str) + 'a;
 
 /// Calls `visit` with each secret field of `value` that `properties`
-/// declare, and its path (`stations[0].token`), inside nested objects and
-/// array items too.
+/// declare, inside nested objects and array items too, with its path
+/// (`stations[0].token`) and its identity, each item named by its array's
+/// key field.
 fn each_secret(
     properties: &HashMap<String, SchemaProperty>,
     value: &mut serde_json::Value,
     path: &str,
+    identity: &mut Vec<SecretStep>,
     visit: &mut SecretVisit<'_>,
 ) {
     let serde_json::Value::Object(fields) = value else {
@@ -574,115 +598,186 @@ fn each_secret(
         } else {
             format!("{path}.{key}")
         };
+        identity.push(SecretStep::Field(key.clone()));
         if property.secret {
-            visit(&at, fields, key);
-            continue;
-        }
-        let Some(child) = fields.get_mut(key) else {
-            continue;
-        };
-        each_secret(&property.properties, child, &at, visit);
-        if let (Some(items), serde_json::Value::Array(elements)) = (&property.items, child) {
-            for (i, element) in elements.iter_mut().enumerate() {
-                each_secret(&items.properties, element, &format!("{at}[{i}]"), visit);
+            visit(&at, identity, fields, key);
+        } else if let Some(child) = fields.get_mut(key) {
+            each_secret(&property.properties, child, &at, identity, visit);
+            if let (Some(items), serde_json::Value::Array(elements)) = (&property.items, child) {
+                for (i, element) in elements.iter_mut().enumerate() {
+                    let item = SecretStep::Item {
+                        key: property.key.clone().unwrap_or_default(),
+                        value: property
+                            .key
+                            .as_ref()
+                            .and_then(|k| element.get(k))
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                    };
+                    identity.push(item);
+                    each_secret(
+                        &items.properties,
+                        element,
+                        &format!("{at}[{i}]"),
+                        identity,
+                        visit,
+                    );
+                    identity.pop();
+                }
             }
         }
+        identity.pop();
     }
 }
 
-/// The value at `path` (as [`each_secret`] names it) in `value`.
-fn at_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
-    path.split('.').try_fold(value, |value, segment| {
-        let (key, indices) = segment.split_once('[').unwrap_or((segment, ""));
-        let mut value = value.get(key)?;
-        for index in indices.split('[').filter(|i| !i.is_empty()) {
-            value = value.get(index.trim_end_matches(']').parse::<usize>().ok()?)?;
+/// The value `identity` names in `value`: an item step takes the one item
+/// whose key field holds the step's value, and no item when none or several
+/// do.
+fn at_identity<'a>(
+    value: &'a serde_json::Value,
+    identity: &[SecretStep],
+) -> Option<&'a serde_json::Value> {
+    identity.iter().try_fold(value, |value, step| match step {
+        SecretStep::Field(name) => value.get(name),
+        SecretStep::Item { key, value: wanted } => {
+            if wanted.is_null() {
+                return None;
+            }
+            let mut found = value
+                .as_array()?
+                .iter()
+                .filter(|item| item.get(key) == Some(wanted));
+            let item = found.next()?;
+            found.next().is_none().then_some(item)
         }
-        Some(value)
     })
 }
 
-/// [`at_path`], for writing.
-fn at_path_mut<'a>(
+/// [`at_identity`], for writing.
+fn at_identity_mut<'a>(
     value: &'a mut serde_json::Value,
-    path: &str,
+    identity: &[SecretStep],
 ) -> Option<&'a mut serde_json::Value> {
-    path.split('.').try_fold(value, |value, segment| {
-        let (key, indices) = segment.split_once('[').unwrap_or((segment, ""));
-        let mut value = value.get_mut(key)?;
-        for index in indices.split('[').filter(|i| !i.is_empty()) {
-            value = value.get_mut(index.trim_end_matches(']').parse::<usize>().ok()?)?;
+    identity.iter().try_fold(value, |value, step| match step {
+        SecretStep::Field(name) => value.get_mut(name),
+        SecretStep::Item { key, value: wanted } => {
+            if wanted.is_null() {
+                return None;
+            }
+            let items = value.as_array_mut()?;
+            let found: Vec<usize> = (0..items.len())
+                .filter(|&i| items[i].get(key) == Some(wanted))
+                .collect();
+            match found[..] {
+                [index] => items.get_mut(index),
+                _ => None,
+            }
         }
-        Some(value)
     })
 }
 
-/// Keeps the secret at `path`, field `key` of `fields`, when it is `null`:
-/// the value `stored` holds at that path, else nothing, so it reads unset.
+/// Keeps, at field `key` of `fields`, the secret `identity` names in
+/// `stored` when a write sends `null` for it. `false` when the write keeps
+/// a secret `stored` does not hold.
 fn keep(
     fields: &mut serde_json::Map<String, serde_json::Value>,
     key: &str,
-    path: &str,
+    identity: &[SecretStep],
     stored: Option<&serde_json::Value>,
-) {
-    if !fields.get(key).is_some_and(serde_json::Value::is_null) {
-        return;
-    }
-    match stored.and_then(|stored| at_path(stored, path)) {
-        Some(kept) => {
-            fields.insert(key.to_string(), kept.clone());
+) -> bool {
+    match fields.get(key) {
+        Some(serde_json::Value::Null) => {
+            match stored
+                .and_then(|stored| at_identity(stored, identity))
+                .filter(|kept| !unset(kept))
+            {
+                Some(kept) => {
+                    fields.insert(key.to_string(), kept.clone());
+                    true
+                }
+                None => false,
+            }
         }
-        None => {
-            fields.remove(key);
-        }
+        _ => true,
     }
 }
 
-/// [`ConfigNamespace::keep_secrets`] for the `paths` a
-/// [`ConfigNamespace::withhold_secrets`] returned, without the schema: what
-/// restores a config whose secrets were withheld where the schema is not at
-/// hand.
+/// Restores, in a config whose secrets were withheld where the schema is
+/// not at hand (a bundle's), each secret `identities` names from what
+/// `stored` holds for the same item, and leaves the field unset where it
+/// holds none: the rule of [`ConfigNamespace::keep_secrets`], by the
+/// identities [`ConfigNamespace::withhold_secrets`] returned.
 pub fn keep_withheld(
     value: &mut serde_json::Value,
     stored: Option<&serde_json::Value>,
-    paths: &[String],
+    identities: &[Vec<SecretStep>],
 ) {
-    for path in paths {
-        let (parent, key) = match path.rsplit_once('.') {
-            Some((parent, key)) => (at_path_mut(value, parent), key),
-            None => (Some(&mut *value), path.as_str()),
+    for identity in identities {
+        let Some((SecretStep::Field(key), parent)) = identity.split_last() else {
+            continue;
         };
-        if let Some(serde_json::Value::Object(fields)) = parent {
-            keep(fields, key, path, stored);
+        if let Some(serde_json::Value::Object(fields)) = at_identity_mut(value, parent)
+            && !keep(fields, key, identity, stored)
+        {
+            fields.remove(key);
         }
     }
 }
 
 impl ConfigNamespace {
     /// Replaces each secret field of `value` that holds a value with `null`,
-    /// and returns the paths of those fields: what a read may say about a
-    /// secret, that it is set.
-    pub fn withhold_secrets(&self, value: &mut serde_json::Value) -> Vec<String> {
+    /// and returns those fields: what a read may say about a secret, that
+    /// it is set.
+    pub fn withhold_secrets(&self, value: &mut serde_json::Value) -> Vec<SetSecret> {
         let mut set = Vec::new();
-        each_secret(&self.properties, value, "", &mut |path, fields, key| {
-            if let Some(secret) = fields.get_mut(key)
-                && !unset(secret)
-            {
-                *secret = serde_json::Value::Null;
-                set.push(path.to_string());
-            }
-        });
+        each_secret(
+            &self.properties,
+            value,
+            "",
+            &mut Vec::new(),
+            &mut |path, identity, fields, key| {
+                if let Some(secret) = fields.get_mut(key)
+                    && !unset(secret)
+                {
+                    *secret = serde_json::Value::Null;
+                    set.push(SetSecret {
+                        path: path.to_string(),
+                        identity: identity.to_vec(),
+                    });
+                }
+            },
+        );
         set
     }
 
     /// Restores, in a value a client writes, each secret field it sends as
-    /// `null` from `stored`, at the same path: a client that read the
-    /// config back writes it unchanged. A secret inside an array item is
-    /// matched by the item's position.
-    pub fn keep_secrets(&self, value: &mut serde_json::Value, stored: Option<&serde_json::Value>) {
-        each_secret(&self.properties, value, "", &mut |path, fields, key| {
-            keep(fields, key, path, stored)
-        });
+    /// `null` from what `stored` holds for the same item, matched by the
+    /// item's key field, never its position: a client that read the config
+    /// back writes it unchanged, whatever items it added, removed or moved.
+    /// Refused with the paths of the `null` secrets `stored` holds nothing
+    /// for: there is no secret to keep.
+    pub fn keep_secrets(
+        &self,
+        value: &mut serde_json::Value,
+        stored: Option<&serde_json::Value>,
+    ) -> Result<(), Vec<String>> {
+        let mut unstored = Vec::new();
+        each_secret(
+            &self.properties,
+            value,
+            "",
+            &mut Vec::new(),
+            &mut |path, identity, fields, key| {
+                if !keep(fields, key, identity, stored) {
+                    unstored.push(path.to_string());
+                }
+            },
+        );
+        if unstored.is_empty() {
+            Ok(())
+        } else {
+            Err(unstored)
+        }
     }
 
     /// The config with nothing stored: every default the schema declares.
@@ -783,9 +878,24 @@ pub struct SchemaProperty {
     /// `writeOnly`.
     #[serde(default)]
     pub secret: bool,
+    /// For an array of objects: the field of its items that names each one
+    /// (a station's `name`). An array whose items hold a secret declares it,
+    /// so a secret belongs to the item it was set on whatever its position.
+    /// The JSON schema carries it as `x-key`.
+    pub key: Option<String>,
 }
 
 impl SchemaProperty {
+    /// Whether this property, or anything inside it, is a secret field.
+    pub fn holds_secret(&self) -> bool {
+        self.secret
+            || self.properties.values().any(SchemaProperty::holds_secret)
+            || self
+                .items
+                .as_ref()
+                .is_some_and(|items| items.holds_secret())
+    }
+
     pub fn default_value(&self) -> Option<serde_json::Value> {
         if let Some(ref d) = self.default {
             return Some(d.clone());
@@ -868,6 +978,9 @@ impl SchemaProperty {
         if self.secret {
             schema.insert("writeOnly".into(), true.into());
         }
+        if let Some(key) = &self.key {
+            schema.insert("x-key".into(), key.clone().into());
+        }
         if let Some(v) = self.precision {
             schema.insert("x-precision".into(), v.into());
         }
@@ -896,6 +1009,7 @@ mod tests {
             type = "string"
             [properties.stations]
             type = "array"
+            key = "name"
             [properties.stations.items]
             type = "object"
             [properties.stations.items.properties.name]
@@ -914,9 +1028,20 @@ mod tests {
             "banner": "b",
             "stations": [{"name": "a", "token": "s1"}, {"name": "b", "token": ""}],
         });
+        let set = stations().withhold_secrets(&mut value);
         assert_eq!(
-            stations().withhold_secrets(&mut value),
-            ["stations[0].token"]
+            set,
+            [SetSecret {
+                path: "stations[0].token".into(),
+                identity: vec![
+                    SecretStep::Field("stations".into()),
+                    SecretStep::Item {
+                        key: "name".into(),
+                        value: json!("a")
+                    },
+                    SecretStep::Field("token".into()),
+                ],
+            }]
         );
         assert_eq!(
             value,
@@ -925,48 +1050,90 @@ mod tests {
                 "stations": [{"name": "a", "token": null}, {"name": "b", "token": ""}],
             })
         );
+    }
+
+    /// Two stations stored, alpha with token A and beta with token B.
+    fn stored_pair() -> serde_json::Value {
+        json!({"stations": [{"name": "alpha", "token": "A"}, {"name": "beta", "token": "B"}]})
+    }
+
+    fn kept(write: serde_json::Value) -> Result<serde_json::Value, Vec<String>> {
+        let mut write = write;
+        stations()
+            .keep_secrets(&mut write, Some(&stored_pair()))
+            .map(|()| write)
+    }
+
+    #[test]
+    fn a_deleted_item_takes_its_secret_with_it() {
         assert_eq!(
-            stations().to_json_schema()["properties"]["stations"]["items"]["properties"]["token"]["writeOnly"],
-            json!(true)
+            kept(json!({"stations": [{"name": "beta", "token": null}]})),
+            Ok(json!({"stations": [{"name": "beta", "token": "B"}]}))
         );
     }
 
     #[test]
-    fn a_write_of_null_keeps_the_stored_secret_and_anything_else_replaces_it() {
-        let stored = json!({"stations": [{"name": "a", "token": "s1"}]});
-        let mut unchanged =
-            json!({"stations": [{"name": "a", "token": null}, {"name": "b", "token": null}]});
-        stations().keep_secrets(&mut unchanged, Some(&stored));
+    fn an_inserted_item_leaves_the_others_their_secrets() {
         assert_eq!(
-            unchanged,
-            json!({"stations": [{"name": "a", "token": "s1"}, {"name": "b"}]})
+            kept(json!({"stations": [
+                {"name": "new", "token": "N"},
+                {"name": "alpha", "token": null},
+                {"name": "beta", "token": null},
+            ]})),
+            Ok(json!({"stations": [
+                {"name": "new", "token": "N"},
+                {"name": "alpha", "token": "A"},
+                {"name": "beta", "token": "B"},
+            ]}))
         );
-        let mut replaced = json!({"stations": [{"name": "a", "token": "s2"}]});
-        stations().keep_secrets(&mut replaced, Some(&stored));
-        assert_eq!(replaced["stations"][0]["token"], "s2");
     }
 
     #[test]
-    fn the_withheld_paths_restore_a_config_as_its_schema_would() {
-        let stored = json!({"stations": [{"name": "a", "token": "s1"}]});
-        let mut exported =
-            json!({"stations": [{"name": "a", "token": "s1"}, {"name": "b", "token": "s2"}]});
-        let paths = stations().withhold_secrets(&mut exported);
-        assert_eq!(paths, ["stations[0].token", "stations[1].token"]);
-        let mut by_schema = exported.clone();
-        stations().keep_secrets(&mut by_schema, Some(&stored));
-        let mut by_paths = exported.clone();
-        keep_withheld(&mut by_paths, Some(&stored), &paths);
-        assert_eq!(by_paths, by_schema);
+    fn reordered_items_keep_their_own_secrets() {
         assert_eq!(
-            by_paths,
-            json!({"stations": [{"name": "a", "token": "s1"}, {"name": "b"}]})
+            kept(json!({"stations": [
+                {"name": "beta", "token": null},
+                {"name": "alpha", "token": null},
+            ]})),
+            Ok(json!({"stations": [
+                {"name": "beta", "token": "B"},
+                {"name": "alpha", "token": "A"},
+            ]}))
         );
-        let mut nothing_stored = exported;
-        keep_withheld(&mut nothing_stored, None, &paths);
+    }
+
+    #[test]
+    fn a_secret_no_stored_item_holds_is_refused() {
         assert_eq!(
-            nothing_stored,
-            json!({"stations": [{"name": "a"}, {"name": "b"}]})
+            kept(json!({"stations": [
+                {"name": "renamed", "token": null},
+                {"name": "beta", "token": null},
+            ]})),
+            Err(vec!["stations[0].token".to_string()])
+        );
+        let mut nothing = json!({"stations": [{"name": "alpha", "token": null}]});
+        assert_eq!(
+            stations().keep_secrets(&mut nothing, None),
+            Err(vec!["stations[0].token".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_bundles_withheld_secrets_return_to_the_same_items_on_the_target() {
+        let mut exported = json!({"stations": [
+            {"name": "beta", "token": "source-B"},
+            {"name": "gamma", "token": "source-G"},
+        ]});
+        let identities: Vec<_> = stations()
+            .withhold_secrets(&mut exported)
+            .into_iter()
+            .map(|set| set.identity)
+            .collect();
+        keep_withheld(&mut exported, Some(&stored_pair()), &identities);
+        assert_eq!(
+            exported,
+            json!({"stations": [{"name": "beta", "token": "B"}, {"name": "gamma"}]}),
+            "beta keeps the target's own token; gamma, which the target lacks, is unset"
         );
     }
 
@@ -1119,6 +1286,7 @@ mod tests {
             unit: None,
             span: None,
             secret: false,
+            key: None,
         };
 
         let schema = prop.to_json_schema();
@@ -1198,6 +1366,7 @@ mod tests {
             unit: None,
             span: None,
             secret: false,
+            key: None,
         };
 
         let schema = prop.to_json_schema();

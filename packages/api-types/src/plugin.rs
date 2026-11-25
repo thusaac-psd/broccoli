@@ -278,6 +278,10 @@ pub enum FieldErrorKind {
     Pattern { pattern: String },
     /// The plugin no longer declares the config's namespace at its scope.
     NamespaceUndeclared { scope: String },
+    /// A write keeps (sends `null` for) a secret that no stored item it
+    /// names holds: a new item, or one whose key field changed. Its secret
+    /// is entered again.
+    SecretNotStored,
     /// The plugin's own `validate` function refuses the value. `key`, when
     /// present, is a key of that plugin's language pack and `params` the
     /// values its message names; without it, `message` is all there is.
@@ -304,6 +308,9 @@ impl std::fmt::Display for FieldErrorKind {
             Self::MinLength { limit } => write!(f, "must be at least {limit} characters"),
             Self::MaxLength { limit } => write!(f, "must be at most {limit} characters"),
             Self::Pattern { pattern } => write!(f, "must match the pattern {pattern}"),
+            Self::SecretNotStored => {
+                f.write_str("no secret is stored for this item: enter it again")
+            }
             Self::NamespaceUndeclared { scope } => write!(
                 f,
                 "the plugin no longer declares this namespace at the {scope} scope"

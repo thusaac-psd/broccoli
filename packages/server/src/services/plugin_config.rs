@@ -175,7 +175,7 @@ pub(crate) fn shown(
     let secrets = declared(registry, plugin_id, namespace)
         .map(|ns| ns.withhold_secrets(&mut config))
         .unwrap_or_default();
-    (config, secrets)
+    (config, secrets.into_iter().map(|set| set.path).collect())
 }
 
 pub(crate) async fn get_config<C: ConnectionTrait>(
@@ -552,8 +552,8 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
             .one(&txn)
             .await?;
     }
-    // A secret the client sends back as `null` (it reads them so) keeps the
-    // stored value.
+    // A secret the client sends back as `null` (it reads them so) keeps what
+    // the stored config holds for the same item.
     let mut config = config;
     if let Some(ns) = declared(plugins.get_registry(), plugin_id, namespace) {
         let stored = plugin_config::Entity::find_by_id((
@@ -563,7 +563,15 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
         ))
         .one(&txn)
         .await?;
-        ns.keep_secrets(&mut config, stored.as_ref().map(|row| &row.config));
+        ns.keep_secrets(&mut config, stored.as_ref().map(|row| &row.config))
+            .map_err(|unstored| {
+                AppError::InvalidConfig(
+                    unstored
+                        .into_iter()
+                        .map(|path| FieldError::new(path, FieldErrorKind::SecretNotStored))
+                        .collect(),
+                )
+            })?;
     }
     let findings = check_config(plugins, target, plugin_id, namespace, &config, reads).await?;
     if !findings.refusals.is_empty() {
