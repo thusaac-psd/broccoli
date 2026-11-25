@@ -307,7 +307,7 @@ impl Unanswered {
         match e {
             Unavailable::Outage(Outage::Lost, _) => Self::DatabaseLost,
             Unavailable::Outage(Outage::Busy, _) | Unavailable::Busy => Self::Contended,
-            Unavailable::SelfHeld => Self::Itself,
+            Unavailable::SelfHeld | Unavailable::Dropped(_) => Self::Itself,
             Unavailable::Deadline | Unavailable::Unloaded | Unavailable::Unprovisioned(_) => {
                 Self::Plugin
             }
@@ -382,7 +382,7 @@ fn with_owned_txn<T>(
         .ok_or_else(|| extism::Error::msg(format!("Transaction not found: {txn_id}")))?;
     let runtime = tokio::runtime::Handle::current();
     match runtime.block_on(by_deadline(deadline, statement(txn))) {
-        Ok(answer) => settle(answer).map_err(unavailable),
+        Ok(answer) => settle(answer).map_err(|e| unavailable(sql.pools.confirmed(e))),
         Err(cut) => {
             let txn = guard.take();
             drop(guard);
@@ -672,7 +672,7 @@ fn reject_session_escape(plugin_id: &str, sql: &str) -> Result<(), extism::Error
             "Rejected a role/session change on the plugin SQL path",
         );
         return Err(extism::Error::msg(
-            "not permitted on the plugin SQL capability: SET/RESET ROLE, SET SESSION AUTHORIZATION, set_config, ALTER ROLE/USER, DISCARD, anonymous code blocks, pg_settings, and changes to host-enforced settings (statement_timeout, tcp_keepalives_*) in any scope are forbidden",
+            "not permitted on the plugin SQL capability: SET/RESET ROLE, SET SESSION AUTHORIZATION, set_config, ALTER ROLE/USER, DISCARD, anonymous code blocks, pg_settings, signalling a backend (pg_terminate_backend, pg_cancel_backend, pg_signal_backend), and changes to host-enforced settings (statement_timeout, tcp_keepalives_*) in any scope are forbidden",
         ));
     }
     Ok(())
@@ -737,6 +737,18 @@ fn statement_escapes_session(stmt: &str) -> bool {
         .iter()
         .any(|t| *t == "set_config" || *t == "session_authorization")
     {
+        return true;
+    }
+    // Signalling a backend (its own, or a sibling's of its role) ends a
+    // connection mid-statement, which would read as the database lost: a
+    // plugin's own failure passed off as the platform's outage. A plugin
+    // never needs it, so a statement naming one in any form is refused.
+    if tokens.iter().any(|t| {
+        matches!(
+            *t,
+            "pg_terminate_backend" | "pg_cancel_backend" | "pg_signal_backend"
+        )
+    }) {
         return true;
     }
     // `pg_settings` is `set_config` by another name: its update rule applies
@@ -853,7 +865,7 @@ host_fn!(pub db_execute(user_data: Arc<(String, PluginSql)>; sql: String, args: 
     let call = crate::plugin_db::SqlCall::current();
     let exec_result = tokio::runtime::Handle::current().block_on(
         pools.execute(plugin_id, &call, stmt),
-    ).map_err(unavailable)?;
+    ).map_err(|e| unavailable(pools.pools.confirmed(e)))?;
 
     match exec_result {
         Ok(rows) => HostDbResponse::ok(JsonValue::from(rows)).to_json_string(),
@@ -878,7 +890,7 @@ host_fn!(pub db_query(user_data: Arc<(String, PluginSql)>; sql: String, args: St
     let call = crate::plugin_db::SqlCall::current();
     let query_result = tokio::runtime::Handle::current().block_on(
         pools.query_one(plugin_id, &call, stmt),
-    ).map_err(unavailable)?;
+    ).map_err(|e| unavailable(pools.pools.confirmed(e)))?;
 
     match query_result {
         Ok(Some(row)) => {
@@ -937,10 +949,10 @@ host_fn!(pub db_begin(user_data: Arc<(String, PluginSql, TransactionMap)>; _inpu
             begun.map(|(txn, pid)| (txn, pid, lease.permit)),
             reused,
         ))
-    }).map_err(unavailable)?;
+    }).map_err(|e| unavailable(pools.pools.confirmed(e)))?;
     let (opened, reused) = opened;
     let (txn, pid, permit) = crate::plugin_db::Unavailable::settle_acquire(opened, reused)
-        .map_err(unavailable)?
+        .map_err(|e| unavailable(pools.pools.confirmed(e)))?
         .map_err(|e| {
             error!("DB begin error: {}", e);
             extism::Error::new(e).context("db_begin")
@@ -1012,7 +1024,7 @@ host_fn!(pub db_execute_in(user_data: Arc<(String, PluginSql, TransactionMap)>; 
 
 host_fn!(pub db_commit(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_id: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_commit")?;
-    let (plugin_id, _, txn_map) = &*call;
+    let (plugin_id, sql, txn_map) = &*call;
 
     let entry = {
         let mut map_guard = txn_map.lock()
@@ -1027,7 +1039,7 @@ host_fn!(pub db_commit(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_
 
     let result = settle(
         tokio::runtime::Handle::current().block_on(txn.commit()),
-    ).map_err(unavailable)?;
+    ).map_err(|e| unavailable(sql.pools.confirmed(e)))?;
 
     match result {
         Ok(()) => HostDbResponse::ok(serde_json::json!({"ok": true})).to_json_string(),
@@ -1039,7 +1051,7 @@ host_fn!(pub db_commit(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_
 
 host_fn!(pub db_rollback(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_id: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_rollback")?;
-    let (plugin_id, _, txn_map) = &*call;
+    let (plugin_id, sql, txn_map) = &*call;
 
     let entry = {
         let mut map_guard = txn_map.lock()
@@ -1066,7 +1078,7 @@ host_fn!(pub db_rollback(user_data: Arc<(String, PluginSql, TransactionMap)>; tx
         Some(txn) => {
             let result = settle(
                 tokio::runtime::Handle::current().block_on(txn.rollback()),
-            ).map_err(unavailable)?;
+            ).map_err(|e| unavailable(sql.pools.confirmed(e)))?;
             match result {
                 Ok(()) => HostDbResponse::ok(serde_json::json!({"ok": true})).to_json_string(),
                 Err(e) => {
@@ -1188,6 +1200,12 @@ mod tests {
     #[test]
     fn role_escalation_guard_blocks_every_escape_vector() {
         for sql in [
+            // signalling a backend, its own or a sibling of its role, would
+            // pass a plugin's own failure off as the database's outage
+            "SELECT pg_terminate_backend(pg_backend_pid())",
+            "SELECT pg_catalog.pg_cancel_backend(pid) FROM pg_stat_activity",
+            "select \"pg_terminate_backend\"(1)",
+            "GRANT pg_signal_backend TO me",
             "RESET ROLE",
             // a SET of a host-enforced bound, in any scope, lifts it: for the
             // session on the pooled connection, or for the transaction
@@ -1605,6 +1623,57 @@ mod tests {
             ),
             "{answer:?}"
         );
+        // The probe finds the host database gone too: an outage it stays.
+        let confirmed = tokio::task::spawn_blocking({
+            let pools = sql.pools.clone();
+            move || pools.confirmed(answer.unwrap_err())
+        })
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                confirmed,
+                crate::plugin_db::Unavailable::Outage(common::db::Outage::Lost, _)
+            ),
+            "{confirmed}"
+        );
+    }
+
+    /// A plugin that cuts its own connection (terminates its backend) while
+    /// the database answers cannot pass that off as the database's outage:
+    /// the probe on the host's pool answers, so the loss is the plugin's own
+    /// failure, never a hand-back or a refunded timer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_the_plugin_cut_itself_is_its_own_failure() {
+        let (_container, url, _db) = one_connection().await;
+        migrate(&url).await;
+        let sql = plugin_sql(&url).await;
+        let call = crate::plugin_db::SqlCall::default();
+        let answer = sql
+            .execute(
+                "p",
+                &call,
+                Statement::from_string(
+                    DbBackend::Postgres,
+                    "SELECT pg_terminate_backend(pg_backend_pid())",
+                ),
+            )
+            .await;
+        let lost = match answer {
+            Err(lost @ crate::plugin_db::Unavailable::Outage(common::db::Outage::Lost, _)) => lost,
+            other => panic!("the cut reads as a lost database: {other:?}"),
+        };
+        let confirmed = tokio::task::spawn_blocking({
+            let pools = sql.pools.clone();
+            move || pools.confirmed(lost)
+        })
+        .await
+        .unwrap();
+        assert!(
+            matches!(confirmed, crate::plugin_db::Unavailable::Dropped(_)),
+            "{confirmed}"
+        );
+        assert_eq!(Unanswered::of(&confirmed), Unanswered::Itself);
     }
 
     /// A plugin's table `t` and an observer counting the statements that

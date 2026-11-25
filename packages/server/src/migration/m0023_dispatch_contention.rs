@@ -10,6 +10,14 @@ use sea_orm_migration::prelude::*;
 /// may read the new columns as it reads every other column that is not
 /// content.
 ///
+/// The plugin group role holds no grant to signal a backend
+/// (`pg_terminate_backend`, `pg_cancel_backend`, `pg_signal_backend`): a
+/// plugin that cut a connection could pass its own failure off as the
+/// database lost. The plugin SQL guard refuses any statement naming them
+/// (`host_funcs::sql`), and a lost plugin connection is confirmed against the
+/// host pool (`plugin_db::PluginSqlPools::confirmed`), since PUBLIC keeps
+/// its default right to the functions.
+///
 /// Additive (release/docs/upgrade.md): defaulted columns servers of the
 /// previous release keep working against.
 pub struct Migration;
@@ -38,6 +46,26 @@ BEGIN
 EXCEPTION
   WHEN insufficient_privilege THEN
     RAISE WARNING 'plugin group grants skipped (insufficient privilege): %', SQLERRM;
+END $$;
+DO $$
+DECLARE
+  plugin_group name;
+BEGIN
+  SELECT g.name INTO plugin_group FROM public.plugin_group_role g LIMIT 1;
+  IF plugin_group IS NULL THEN
+    RETURN;
+  END IF;
+  EXECUTE format(
+    'REVOKE EXECUTE ON FUNCTION pg_catalog.pg_terminate_backend(integer, bigint), '
+    || 'pg_catalog.pg_cancel_backend(integer) FROM %I', plugin_group);
+  IF EXISTS (SELECT 1 FROM pg_auth_members m
+              WHERE m.roleid = 'pg_signal_backend'::regrole
+                AND m.member = plugin_group::regrole) THEN
+    EXECUTE format('REVOKE pg_signal_backend FROM %I', plugin_group);
+  END IF;
+EXCEPTION
+  WHEN insufficient_privilege THEN
+    RAISE WARNING 'plugin group revokes skipped (insufficient privilege): %', SQLERRM;
 END $$;
 "#;
 

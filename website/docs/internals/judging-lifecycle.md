@@ -363,7 +363,12 @@ refused (`QUEUE_UNREACHABLE`), an operation the queue lost
 (`NO_CAPABLE_WORKER`), a plugin the unit needs that stopped being loaded on
 the replica that claimed it (`PLUGIN_NOT_LOADED_HERE`), a statement the
 dispatch or its plugins ran that the database could not serve
-(`DATABASE_UNAVAILABLE`): the database lost. One rule records it,
+(`DATABASE_UNAVAILABLE`): the database lost. A plugin's connection that is
+lost is confirmed with one probe on the host's own pool: if the host database
+answers, the plugin's connection was cut under it, which is the plugin's own
+failure, and the plugin SQL guard refuses the statements that would cut one
+(`pg_terminate_backend`, `pg_cancel_backend`, `pg_signal_backend`). One rule
+records it,
 `host_funcs::host_db`: plugin SQL where every unavailable statement ends
 (`host_funcs::sql::unavailable`, through `host_db::fail_under`), the host's
 own SQL in a host function through `host_db::failed`, and the dispatch's own
@@ -371,7 +376,9 @@ statements (reading the inputs, stamping their version) through
 `host_db::dispatch_failed`, as `common::db::outage` decides it. Each of these
 faults is a hand-back
 (`SystemErrorClass::HandBack`): the platform lost the attempt, and it never
-becomes a verdict. Plugin SQL that found no connection or permit free in
+becomes a verdict. A hand-back for a database outage is queued
+`OUTAGE_HANDBACK_DELAY` (2 s) ahead, so an outage that persists never hands
+one unit back and forth in a loop. Plugin SQL that found no connection or permit free in
 time, for a call that held none, is contention with the work running beside
 it (`DATABASE_BUSY`, `DispatchFault::SqlContended`): it hands back the same
 way, but only `CONTENTION_HANDBACKS` (5) times per unit, counted on the
