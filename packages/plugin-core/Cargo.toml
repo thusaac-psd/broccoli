@@ -20,6 +20,7 @@ thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
+unicode-properties = "0.1.5"
 utoipa.workspace = true
 wasmtime.workspace = true
 
