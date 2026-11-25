@@ -375,9 +375,11 @@ binaries warn about every key they do not read.
   Register and resolve through these, never through a map of your own.
 - A server is ready (`/readyz`, the probe the shipped gateways health-check)
   unless a live peer misses only a strict part of the contest types it misses on
-  their fleet-wide provider: one rule, `PluginLifecycle::ready` on
-  `PluginLifecycle::missing_here`. `/livez` is liveness and `/healthz` the deep
-  check for monitoring; no gateway probe makes a dependency call.
+  their fleet-wide provider: one rule, `PluginLifecycle::ready` on the one
+  missing-provider predicate, `PluginLifecycle::providers_missing_here`, over
+  the one fleet read, `plugin_fleet::live_loaded`. `/livez` is liveness and
+  `/healthz` the deep check for monitoring; no gateway probe makes a dependency
+  call.
 - Every submit path (practice and contest submissions, code runs) accepts work
   through one rule, `plugin_lifecycle::accepting_handler`, which refuses a
   contest type no provider can judge now; a new submit path calls it too.
