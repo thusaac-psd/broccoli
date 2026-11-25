@@ -232,7 +232,7 @@
 'ioi.config.task.duplicateTestCase' = '测试点“{testCase}”已在此子任务中。'
 'ioi.config.task.ambiguousTestCase' = '“{testCase}”对应 {count} 个测试点，请用编号指定其中一个。'
 'ioi.config.task.zeroWeight' = '此求和子任务的所有测试点分值都为 0，永远无法得分。'
-'ioi.config.task.sampleScoreIgnored' = '样例“{testCase}”带有 {score} 分，但样例除非被子任务列出，否则不计分。'
+'ioi.config.task.scoreIgnored' = '测试点“{testCase}”带有 {score} 分，但没有子任务列出它，因此不计分。'
 'ioi.config.task.problemHasNoTestCases' = '本题没有测试点，无法评测。请在选手提交前添加测试点。'
 'ioi.config.task.nothingToScore' = '本题没有任何能得分的子任务：没有子任务既有分值、又含有计入其得分的测试点。请为子任务设置分值并加入本题的测试点，或为测试点设置分数。'
 

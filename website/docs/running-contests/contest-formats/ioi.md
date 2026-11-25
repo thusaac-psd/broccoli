@@ -53,9 +53,11 @@ stored name: the plugin's routes give it an empty `name`, which no configured
 subtask can have.
 
 A test case counts only toward the subtasks that name it, and the default
-subtask names no sample. A sample is still judged, for its feedback, and its
-row scores 0 whatever points it carries. A sample worth points that no subtask
-names is listed on the problem's config issues, since those points count for
+subtask names no sample. A case that counts toward no subtask scores 0 whatever
+points it carries. A sample is still judged, for its feedback. Any other such
+case is not judged at all, since it would score nothing and appears in no
+subtask's feedback. A test case worth points that no subtask names, sample or
+not, is listed on the problem's config issues, since those points count for
 nothing.
 
 A problem none of whose subtasks can score is not judged: every submission

@@ -9,7 +9,7 @@ use broccoli_server_sdk::types::{ConfigValidateOutput, ConfigViolation, TestCase
 
 use crate::config::{SubtaskDef, SubtaskScoringMethod};
 use crate::subtasks::{
-    Member, MemberIndex, Unjudgeable, counted_test_case_ids, effective_subtasks, unjudgeable,
+    Counting, Member, MemberIndex, Unjudgeable, effective_subtasks, unjudgeable,
 };
 
 /// The validate answer for `subtasks` over `test_cases`.
@@ -42,7 +42,7 @@ use crate::subtasks::{
 pub fn check_task(subtasks: &[SubtaskDef], test_cases: &[TestCaseRow]) -> ConfigValidateOutput {
     let mut output = ConfigValidateOutput::default();
     check_subtasks(subtasks, test_cases, &mut output);
-    check_samples(subtasks, test_cases, &mut output);
+    check_uncounted_points(subtasks, test_cases, &mut output);
     if let Some(reason) = unjudgeable(subtasks, test_cases) {
         let key = match reason {
             Unjudgeable::NoTestCases => "ioi.config.task.problemHasNoTestCases",
@@ -55,26 +55,27 @@ pub fn check_task(subtasks: &[SubtaskDef], test_cases: &[TestCaseRow]) -> Config
     output
 }
 
-/// A sample that carries points no subtask counts: it is judged for its
-/// feedback and scores nothing, so its points are ignored.
-fn check_samples(
+/// A test case that carries points no subtask counts ([`Counting`]): it
+/// scores nothing, so its points are ignored. A sample is still judged for
+/// its feedback; any other such case is not judged at all.
+fn check_uncounted_points(
     subtasks: &[SubtaskDef],
     test_cases: &[TestCaseRow],
     output: &mut ConfigValidateOutput,
 ) {
-    let counted = counted_test_case_ids(&effective_subtasks(subtasks, test_cases), test_cases);
+    let counting = Counting::new(&effective_subtasks(subtasks, test_cases), test_cases);
     for tc in test_cases {
-        if tc.is_sample && tc.score > 0.0 && !counted.contains(&tc.id) {
+        if tc.score > 0.0 && !counting.counts(tc.id) {
             let name = tc.label.clone().unwrap_or_else(|| tc.id.to_string());
             output.issues.push(
                 ConfigViolation::new(
                     "subtasks",
                     format!(
-                        "sample '{name}' carries {} points, but samples score nothing unless a subtask names them",
+                        "test case '{name}' carries {} points, but no subtask names it, so it scores nothing",
                         tc.score
                     ),
                 )
-                .key("ioi.config.task.sampleScoreIgnored")
+                .key("ioi.config.task.scoreIgnored")
                 .param("testCase", name.as_str())
                 .param("score", tc.score),
             );
@@ -239,7 +240,7 @@ mod tests {
     /// never a refusal.
     #[test]
     fn a_member_that_names_no_test_case_is_an_issue() {
-        let subtasks = [subtask("S", SubtaskScoringMethod::Sum, &["a", "nope"])];
+        let subtasks = [subtask("S", SubtaskScoringMethod::Sum, &["a", "nope", "b"])];
         let output = check_task(&subtasks, &problem());
         assert_eq!(output.errors, []);
         assert_eq!(paths(&output.issues), ["subtasks[0].test_cases[1]"]);
@@ -250,9 +251,17 @@ mod tests {
     fn a_label_two_test_cases_share_is_an_ambiguous_issue() {
         let cases = vec![tc(11, 10.0, Some("a")), tc(12, 10.0, Some("a"))];
         let subtasks = [subtask("S", SubtaskScoringMethod::GroupMin, &["a", "12"])];
+        // The shared label names neither case, so case 11's points count
+        // toward no subtask.
         assert_eq!(
             found(&subtasks, &cases),
-            (vec![], vec!["subtasks[0].test_cases[0]".to_string()])
+            (
+                vec![],
+                vec![
+                    "subtasks[0].test_cases[0]".to_string(),
+                    "subtasks".to_string()
+                ]
+            )
         );
     }
 
@@ -260,12 +269,12 @@ mod tests {
     /// that name one test case are so only by the data.
     #[test]
     fn one_test_case_twice_in_a_subtask_is_refused_only_when_written_twice() {
-        let written_twice = [subtask("S", SubtaskScoringMethod::Sum, &["a", "a"])];
+        let written_twice = [subtask("S", SubtaskScoringMethod::Sum, &["a", "a", "b"])];
         assert_eq!(
             found(&written_twice, &problem()),
             (vec!["subtasks[0].test_cases[1]".to_string()], vec![])
         );
-        let named_twice = [subtask("S", SubtaskScoringMethod::Sum, &["a", "11"])];
+        let named_twice = [subtask("S", SubtaskScoringMethod::Sum, &["a", "11", "b"])];
         assert_eq!(
             found(&named_twice, &problem()),
             (vec![], vec!["subtasks[0].test_cases[1]".to_string()])
@@ -278,6 +287,7 @@ mod tests {
             subtask("Empty", SubtaskScoringMethod::GroupMin, &[]),
             subtask("Weightless", SubtaskScoringMethod::Sum, &["13"]),
             subtask("Pass/fail", SubtaskScoringMethod::GroupMin, &["13"]),
+            subtask("Rest", SubtaskScoringMethod::GroupMin, &["a", "b"]),
         ];
         assert_eq!(
             found(&subtasks, &problem()),
@@ -304,32 +314,52 @@ mod tests {
     /// A sample scores nothing unless a subtask names it, so points it
     /// carries are ignored: staff learn so, and the config stands.
     #[test]
-    fn a_sample_that_carries_points_no_subtask_counts_is_an_issue() {
+    fn a_case_that_carries_points_no_subtask_counts_is_an_issue() {
         let mut sample = tc(1, 50.0, Some("sample_01"));
         sample.is_sample = true;
-        let cases = vec![sample, tc(2, 100.0, Some("a"))];
-        let output = check_task(&[], &cases);
-        assert_eq!(output.errors, []);
-        let issues: Vec<_> = output
-            .issues
-            .iter()
-            .map(|v| (v.path.as_str(), v.key.as_deref()))
-            .collect();
-        assert_eq!(
-            issues,
-            [("subtasks", Some("ioi.config.task.sampleScoreIgnored"))]
-        );
-        assert!(
-            output.issues[0].message.contains("'sample_01'"),
-            "{output:?}"
-        );
+        let cases = vec![
+            sample.clone(),
+            tc(2, 100.0, Some("a")),
+            tc(3, 30.0, Some("b")),
+        ];
+        let keyed = |subtasks: &[SubtaskDef]| {
+            let output = check_task(subtasks, &cases);
+            assert_eq!(output.errors, []);
+            output
+                .issues
+                .into_iter()
+                .map(|v| (v.path, v.key, v.message))
+                .collect::<Vec<_>>()
+        };
 
-        // A subtask that names the sample counts it.
-        let named = [subtask("S", SubtaskScoringMethod::Sum, &["sample_01", "a"])];
+        // The default subtask counts every weighted case but the sample.
+        let issues = keyed(&[]);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].0, "subtasks");
+        assert_eq!(issues[0].1.as_deref(), Some("ioi.config.task.scoreIgnored"));
+        assert!(issues[0].2.contains("'sample_01'"), "{issues:?}");
+
+        // A configured subtask that leaves a weighted case out ignores its
+        // points too, sample or not.
+        let only_a = [subtask("A", SubtaskScoringMethod::Sum, &["a"])];
+        let names: Vec<_> = keyed(&only_a)
+            .into_iter()
+            .filter(|(_, key, _)| key.as_deref() == Some("ioi.config.task.scoreIgnored"))
+            .map(|(_, _, message)| message)
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names[0].contains("'sample_01'") && names[1].contains("'b'"));
+
+        // A subtask that names every weighted case counts them all.
+        let named = [subtask(
+            "S",
+            SubtaskScoringMethod::Sum,
+            &["sample_01", "a", "b"],
+        )];
         assert_eq!(found(&named, &cases), (vec![], vec![]));
-        // A sample worth nothing ignores nothing.
-        let mut free = tc(1, 0.0, Some("sample_01"));
-        free.is_sample = true;
+        // A case worth nothing ignores nothing.
+        let mut free = sample;
+        free.score = 0.0;
         assert_eq!(
             found(&[], &[free, tc(2, 100.0, Some("a"))]),
             (vec![], vec![])
