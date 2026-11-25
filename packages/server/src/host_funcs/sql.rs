@@ -191,7 +191,7 @@ impl PluginTransaction {
 pub type TransactionMap = Arc<StdMutex<Transactions>>;
 
 /// The open plugin transactions by id, and the slots under each plugin's cap
-/// ([`MAX_OPEN_TXNS_PER_PLUGIN`]) taken by a `db_begin` still beginning one.
+/// (`MAX_OPEN_TXNS_PER_PLUGIN`) taken by a `db_begin` still beginning one.
 /// It reads as the map of open transactions.
 #[derive(Debug, Default)]
 pub struct Transactions {
