@@ -121,7 +121,7 @@ host_fn!(pub submission_update(user_data: Arc<(String, DatabaseConnection)>; inp
     let (plugin_id, db) = &*call;
 
     let update: SubmissionUpdate = serde_json::from_str(&input)
-        .map_err(|e| extism::Error::msg(format!("Invalid submission_update input: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context("Invalid submission_update input"))?;
     let unit = judgement_unit(update.submission_id, update.judgement_id, update.judge_epoch);
     let dispatch = match owned_write(plugin_id, "submission_update", [unit]) {
         Ok(dispatch) => dispatch.expect("one unit was checked"),
@@ -300,7 +300,7 @@ host_fn!(pub submission_insert_results(user_data: Arc<(String, DatabaseConnectio
     let (plugin_id, db) = &*call;
 
     let results: Vec<TestCaseResultRow> = serde_json::from_str(&input)
-        .map_err(|e| extism::Error::msg(format!("Invalid submission_insert_results input: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context("Invalid submission_insert_results input"))?;
     let units = results.iter().map(|r| judgement_unit(r.submission_id, r.judgement_id, r.judge_epoch));
     if let Err(refused) = owned_write(plugin_id, "submission_insert_results", units) {
         return refused;
@@ -334,7 +334,7 @@ host_fn!(pub submission_delete_results(user_data: Arc<(String, DatabaseConnectio
     let (plugin_id, db) = &*call;
 
     let (submission_id, judgement_id, judge_epoch): (i32, i32, i32) = serde_json::from_str(&input)
-        .map_err(|e| extism::Error::msg(format!("Invalid submission_delete_results input: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context("Invalid submission_delete_results input"))?;
     let unit = judgement_unit(submission_id, judgement_id, judge_epoch);
     if let Err(refused) = owned_write(plugin_id, "submission_delete_results", [unit]) {
         return refused;
@@ -350,7 +350,7 @@ host_fn!(pub submission_query_test_cases(user_data: Arc<(String, DatabaseConnect
     let (plugin_id, db) = &*call;
 
     let problem_id: i32 = serde_json::from_str(&input)
-        .map_err(|e| extism::Error::msg(format!("Invalid submission_query_test_cases input: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context("Invalid submission_query_test_cases input"))?;
 
     let mut p = Params::new();
     let sql = format!(
@@ -378,7 +378,7 @@ host_fn!(pub code_run_update(user_data: Arc<(String, DatabaseConnection)>; input
     let (plugin_id, db) = &*call;
 
     let update: CodeRunUpdate = serde_json::from_str(&input)
-        .map_err(|e| extism::Error::msg(format!("Invalid code_run_update input: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context("Invalid code_run_update input"))?;
     let unit = code_run_unit(update.code_run_id, update.judge_epoch);
     let dispatch = match owned_write(plugin_id, "code_run_update", [unit]) {
         Ok(dispatch) => dispatch.expect("one unit was checked"),
@@ -434,7 +434,7 @@ host_fn!(pub code_run_insert_results(user_data: Arc<(String, DatabaseConnection)
     let (plugin_id, db) = &*call;
 
     let results: Vec<CodeRunResultRow> = serde_json::from_str(&input)
-        .map_err(|e| extism::Error::msg(format!("Invalid code_run_insert_results input: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context("Invalid code_run_insert_results input"))?;
     let units = results.iter().map(|r| code_run_unit(r.code_run_id, r.judge_epoch));
     if let Err(refused) = owned_write(plugin_id, "code_run_insert_results", units) {
         return refused;

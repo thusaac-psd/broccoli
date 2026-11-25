@@ -405,6 +405,9 @@ pub struct TestApp {
     pub addr: SocketAddr,
     pub client: Client,
     pub db: DatabaseConnection,
+    /// The pool the host functions run the host's own SQL on: `db`, unless
+    /// the app was spawned with [`SpawnOptions::own_host_db`].
+    pub host_db: DatabaseConnection,
     /// A clone of the `AppState` the router was built from. Lets a test call
     /// a dispatcher-internal `pub` function directly (e.g.
     /// `dispatcher::plugin_timer::tick_once`) instead of going through HTTP.
@@ -434,6 +437,7 @@ impl Drop for TestApp {
             dispatcher.abort();
         }
         close_database_pool(self.db.clone());
+        close_database_pool(self.host_db.clone());
     }
 }
 
@@ -550,6 +554,10 @@ pub struct SpawnOptions {
     /// Leave self-registration as a fresh install has it, closed. Otherwise
     /// it is opened, since most tests create their users by registering.
     pub registration_closed: bool,
+    /// Give the host functions a pool of their own, as production does, so
+    /// a test can take the database away from them alone
+    /// ([`TestApp::host_db`]).
+    pub own_host_db: bool,
 }
 
 impl TestApp {
@@ -627,6 +635,20 @@ impl TestApp {
                 .await
                 .expect("Failed to connect to test database"),
         );
+
+        let host_db = if options.own_host_db {
+            let mut opts = ConnectOptions::new(&db_url);
+            opts.max_connections(2)
+                .min_connections(0)
+                .idle_timeout(std::time::Duration::from_secs(2));
+            DatabaseConnection::from(
+                Database::connect(opts)
+                    .await
+                    .expect("Failed to connect to test database"),
+            )
+        } else {
+            db.clone()
+        };
 
         if !options.registration_closed {
             server::services::registration::set_open(&db, true)
@@ -770,7 +792,7 @@ impl TestApp {
                 // Plugin SQL runs as each plugin's own role, as in production;
                 // the host function pool shares the app pool.
                 plugin_sql: plugin_sql.clone(),
-                host_db: db.clone(),
+                host_db: host_db.clone(),
                 mq: None,
                 operation_batches: operation_batches.clone(),
                 operation_waiters: operation_waiters.clone(),
@@ -973,6 +995,7 @@ impl TestApp {
                 .build()
                 .expect("Failed to build reqwest client"),
             db,
+            host_db,
             state: state_for_app,
             database,
             plugin_cache,

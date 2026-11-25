@@ -38,9 +38,10 @@ pub mod sdk;
 pub use current_plugin::CurrentPlugin;
 pub use extism_convert::{FromBytes, FromBytesOwned, ToBytes};
 pub use extism_manifest::{Manifest, Wasm, WasmMetadata};
-pub use function::{Function, UserData, Val, ValType, PTR};
+pub use function::{Function, PTR, UserData, Val, ValType};
+pub use pdk::{GuestLog, set_guest_log};
 pub use plugin::{
-    CancelHandle, CompiledPlugin, Plugin, WasmInput, EXTISM_ENV_MODULE, EXTISM_USER_MODULE,
+    CancelHandle, CompiledPlugin, EXTISM_ENV_MODULE, EXTISM_USER_MODULE, Plugin, WasmInput,
 };
 pub use plugin_builder::{DebugOptions, PluginBuilder};
 pub use pool::{Pool, PoolBuilder, PoolPlugin};

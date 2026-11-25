@@ -225,6 +225,23 @@ other failed call logs one `Plugin call failed` warning with its reason
 (`failure_reason`), every cause of its error without the wasm backtrace.
 extism logs a failed call only at `debug`.
 
+## Plugin log lines
+
+Every line a plugin causes passes one sink, `plugin_core::guest_log`: the
+lines a guest logs through extism's `log_*` imports (linked into every
+instance, whatever its permissions) and the `logger` capability's
+`log_info`, and the `Plugin call failed` warning. Each line names the plugin
+by its Broccoli id (`plugin_id`, from the call scope, not extism's instance
+id) and is cut to `MAX_LINE_BYTES` (2 KiB) at a character boundary, saying
+how many bytes it left out; a failed call's reason is cut the same way. Each
+plugin has a budget of `BURST` lines (100), refilled at `PER_SECOND` (20) a
+second: a line over it is dropped, the first drop logs one warning that the
+plugin logs over its rate, and the next line admitted is preceded by one that
+says how many were dropped. A guest's lines go to the `plugin` target, and a
+guest's `error` and `warn` are both logged at `WARN` with `guest_level` naming
+what it asked for, so no plugin writes a line that reads as the host's own
+error.
+
 ## Unloaded instances
 
 Each loaded plugin's instance pool carries a `pool::Liveness`, live until the

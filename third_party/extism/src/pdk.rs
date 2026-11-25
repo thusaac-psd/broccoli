@@ -360,6 +360,18 @@ pub(crate) fn http_headers(
     Ok(())
 }
 
+/// Where a guest's log lines go when the embedder takes them
+/// ([`set_guest_log`]): the level the guest asked for and its message.
+pub type GuestLog = fn(tracing::Level, &str);
+
+static GUEST_LOG: std::sync::OnceLock<GuestLog> = std::sync::OnceLock::new();
+
+/// Send every line a guest logs through the `log_*` imports to `sink`
+/// instead of logging it here. The first sink set stays.
+pub fn set_guest_log(sink: GuestLog) {
+    let _ = GUEST_LOG.set(sink);
+}
+
 pub fn log(
     level: tracing::Level,
     mut caller: Caller<CurrentPlugin>,
@@ -369,6 +381,18 @@ pub fn log(
     let data: &mut CurrentPlugin = caller.data_mut();
 
     let offset = args!(input, 0, i64) as u64;
+
+    if let Some(sink) = GUEST_LOG.get() {
+        let Some(handle) = data.memory_handle(offset) else {
+            anyhow::bail!("invalid handle offset for log message: {offset}");
+        };
+        match data.memory_str(handle) {
+            Ok(message) => sink(level, message),
+            Err(_) => sink(level, "<a log line that is not UTF-8>"),
+        }
+        data.memory_free(handle)?;
+        return Ok(());
+    }
 
     // Check if the current log level should be logged
     let global_log_level = tracing::level_filters::LevelFilter::current();

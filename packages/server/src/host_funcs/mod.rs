@@ -4,6 +4,7 @@ pub mod context;
 pub mod dispatch;
 pub mod evaluate;
 pub mod feedback;
+pub(crate) mod host_db;
 pub mod language;
 pub mod logger;
 pub mod registry;
@@ -106,7 +107,9 @@ fn refuse_retired(name: &'static str) -> Result<(), extism::Error> {
 
 /// Build host function `name`, parking its call around the body when it
 /// [`Waits::Blocks`]. Every host function is built here, so every one
-/// refuses a call of an unloaded plugin ([`refuse_retired`]).
+/// refuses a call of an unloaded plugin ([`refuse_retired`]) and answers a
+/// database outage its error carries by the one rule
+/// ([`host_db::settle_call`]).
 pub(crate) fn host_function<T, F>(
     name: &'static str,
     params: impl IntoIterator<Item = ValType>,
@@ -133,6 +136,7 @@ where
                 Waits::Blocks => plugin_core::executor::parked(|| f(plugin, inputs, outputs, data)),
                 Waits::Returns => f(plugin, inputs, outputs, data),
             }
+            .inspect_err(host_db::settle_call)
         },
     )
 }
@@ -190,7 +194,7 @@ pub(crate) fn read_json<T: DeserializeOwned>(
 ) -> Result<T, extism::Error> {
     let bytes: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
     serde_json::from_slice(&bytes)
-        .map_err(|e| extism::Error::msg(format!("Failed to deserialize {what}: {e}")))
+        .map_err(|e| extism::Error::new(e).context(format!("Failed to deserialize {what}")))
 }
 
 /// Serialize `value` and hand it to the guest as a raw host fn's output.
@@ -201,7 +205,7 @@ pub(crate) fn write_json<T: Serialize + ?Sized>(
     what: &str,
 ) -> Result<(), extism::Error> {
     let bytes = serde_json::to_vec(value)
-        .map_err(|e| extism::Error::msg(format!("Failed to serialize {what}: {e}")))?;
+        .map_err(|e| extism::Error::new(e).context(format!("Failed to serialize {what}")))?;
     write_bytes(plugin, outputs, &bytes)
 }
 

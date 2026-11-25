@@ -84,7 +84,7 @@ fn resolve_language_fn(
     );
 
     let input_bytes = serde_json::to_vec(&input)
-        .map_err(|e| extism::Error::msg(format!("Failed to serialize resolver input: {}", e)))?;
+        .map_err(|e| extism::Error::new(e).context("Failed to serialize resolver input"))?;
 
     let output_bytes = tokio::runtime::Handle::current()
         .block_on(async {
@@ -98,16 +98,16 @@ fn resolve_language_fn(
                 )
                 .await
         })
-        .map_err(|e| extism::Error::msg(format!("Language resolver plugin error: {}", e)))?;
+        .map_err(|e| extism::Error::new(e).context("Language resolver plugin error"))?;
 
     let result: ResolveLanguageOutput = serde_json::from_slice(&output_bytes)
-        .map_err(|e| extism::Error::msg(format!("Failed to deserialize resolver output: {}", e)))?;
+        .map_err(|e| extism::Error::new(e).context("Failed to deserialize resolver output"))?;
 
     if let Some(compile) = &result.compile {
         for output in &compile.outputs {
             output
                 .validate()
-                .map_err(|e| extism::Error::msg(format!("Invalid compile output: {}", e)))?;
+                .map_err(|why| extism::Error::msg(format!("Invalid compile output: {why}")))?;
         }
     }
 

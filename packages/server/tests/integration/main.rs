@@ -28,6 +28,7 @@ mod downloads;
 mod downloads_slim;
 mod health;
 mod hook_enablement;
+mod host_db_outage;
 mod idempotency;
 mod login_quota;
 mod meta;

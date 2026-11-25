@@ -269,6 +269,8 @@ pub fn call_locals() -> Option<Arc<CallLocals>> {
 
 /// What the thread running a guest knows about its call.
 struct CallScope {
+    /// The plugin whose guest the call runs.
+    plugin_id: Arc<str>,
     admission: Option<Admission>,
     /// The liveness of the instance pool the guest runs on.
     instance: crate::pool::Liveness,
@@ -319,6 +321,11 @@ pub fn current_instance() -> Option<crate::pool::Liveness> {
     SCOPE.with(|scope| scope.borrow().as_ref().map(|s| s.instance.clone()))
 }
 
+/// The plugin whose guest the call running on this thread runs, if any.
+pub fn current_plugin_id() -> Option<Arc<str>> {
+    SCOPE.with(|scope| scope.borrow().as_ref().map(|s| s.plugin_id.clone()))
+}
+
 /// The deadline of the call running on this thread, if any. The host's result
 /// waits (`get_next_evaluate_result`, `get_next_operation_result`) end at it;
 /// its database waits are bounded by the statement timeout.
@@ -333,6 +340,7 @@ pub(crate) struct ScopeGuard {
 }
 
 pub(crate) struct NewScope {
+    pub plugin_id: Arc<str>,
     pub admission: Option<Admission>,
     pub instance: crate::pool::Liveness,
     pub class: Option<CallClass>,
@@ -345,6 +353,7 @@ pub(crate) struct NewScope {
 impl ScopeGuard {
     pub(crate) fn enter(new: NewScope) -> Self {
         let scope = CallScope {
+            plugin_id: new.plugin_id,
             admission: new.admission,
             instance: new.instance,
             class: new.class,
@@ -478,6 +487,7 @@ mod tests {
 
     fn scope(locals: Arc<CallLocals>, depth: u8) -> ScopeGuard {
         ScopeGuard::enter(NewScope {
+            plugin_id: "p".into(),
             admission: None,
             instance: Default::default(),
             class: None,

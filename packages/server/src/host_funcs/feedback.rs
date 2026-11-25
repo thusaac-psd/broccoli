@@ -10,11 +10,11 @@ host_fn!(pub submission_feedback_query(user_data: Arc<(String, DatabaseConnectio
     let call = super::HostCall::enter(&user_data, "submission_feedback_query")?;
     let (plugin_id, db) = &*call;
     let query: SubmissionFeedbackQuery = serde_json::from_str(&input)?;
-    let records = tokio::runtime::Handle::current().block_on(
-        crate::services::submission_feedback::query(db, plugin_id, &query));
+    let records = super::host_db::settle(tokio::runtime::Handle::current().block_on(
+        crate::services::submission_feedback::query(db, plugin_id, &query)))?;
     match records {
         Ok(records) => HostDbResponse::ok(serde_json::to_value(records)?).to_json_string(),
-        Err(error) => HostDbResponse::err(error.to_string()).to_json_string(),
+        Err(e) => super::host_db::refused(&e),
     }
 });
 
@@ -22,11 +22,11 @@ host_fn!(pub submission_feedback_update(user_data: Arc<(String, DatabaseConnecti
     let call = super::HostCall::enter(&user_data, "submission_feedback_update")?;
     let (plugin_id, db) = &*call;
     let input: FeedbackUpdateInput = serde_json::from_str(&input)?;
-    let result = tokio::runtime::Handle::current().block_on(crate::services::submission_feedback::update(
-        db, plugin_id, input.submission_id, &input.action));
+    let result = super::host_db::settle(tokio::runtime::Handle::current().block_on(
+        crate::services::submission_feedback::update(db, plugin_id, input.submission_id, &input.action)))?;
     match result {
         Ok(outcome) => HostDbResponse::ok(serde_json::to_value(outcome)?).to_json_string(),
-        Err(error) => HostDbResponse::err(error.to_string()).to_json_string(),
+        Err(e) => super::host_db::refused(&e),
     }
 });
 
@@ -34,10 +34,10 @@ host_fn!(pub submission_slot_observe(user_data: Arc<(String, DatabaseConnection)
     let call = super::HostCall::enter(&user_data, "submission_slot_observe")?;
     let (plugin_id, db) = &*call;
     let key: String = serde_json::from_str(&input)?;
-    let observation = tokio::runtime::Handle::current().block_on(
-        crate::services::submission_feedback::observe_slot(db, plugin_id, &key));
+    let observation = super::host_db::settle(tokio::runtime::Handle::current().block_on(
+        crate::services::submission_feedback::observe_slot(db, plugin_id, &key)))?;
     match observation {
         Ok(observation) => HostDbResponse::ok(serde_json::to_value(observation)?).to_json_string(),
-        Err(error) => HostDbResponse::err(error.to_string()).to_json_string(),
+        Err(e) => super::host_db::refused(&e),
     }
 });

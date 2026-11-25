@@ -149,7 +149,7 @@ fn config_get_fn(
 
     let result = tokio::runtime::Handle::current()
         .block_on(async { cache.get(db, &input.scope, &ref_id, &namespace).await })
-        .map_err(|e| extism::Error::msg(format!("DB error in config_get: {}", e)))?;
+        .map_err(super::host_db::failed)?;
 
     // The plugin reads its config with every default its schema declares
     // filled in, so it never needs defaults of its own.
@@ -188,9 +188,7 @@ fn config_set_fn(
             input.scope
         ))
     })?;
-    let manager = manager
-        .get()
-        .map_err(|e| extism::Error::msg(format!("config_set: {e}")))?;
+    let manager = manager.get().map_err(|e| e.context("config_set"))?;
     // A plugin's write is checked like an admin's, its validate function
     // running as a call nested under this one, and rechecks the config
     // issues it reaches.
@@ -218,12 +216,14 @@ fn config_set_fn(
             Ok::<_, AppError>(())
         })
         .map_err(|e| {
-            let why = match e {
-                AppError::InvalidConfig(fields) => config_schema::describe(&fields),
-                AppError::ConfigNamespaceNotFound(why) => why,
-                other => format!("{other:?}"),
-            };
-            extism::Error::msg(format!("config_set refused: {why}"))
+            super::host_db::failed_service(e, |refused| {
+                let why = match refused {
+                    AppError::InvalidConfig(fields) => config_schema::describe(&fields),
+                    AppError::ConfigNamespaceNotFound(why) => why,
+                    other => format!("{other:?}"),
+                };
+                extism::Error::msg(format!("config_set refused: {why}"))
+            })
         })
 }
 

@@ -9,8 +9,9 @@ from the patches. The upstream SDK documentation is the crate's page on
 crates.io and docs.rs.
 
 The patches make a call's cancel (`CancelHandle::cancel`) and its manifest
-timeout bound every piece of guest code the call runs, and leave a failed call's
-report to the caller. All of them are in `src/plugin.rs`.
+timeout bound every piece of guest code the call runs, leave a failed call's
+report to the caller, and let the embedder take a guest's log lines. They are in
+`src/plugin.rs`, apart from the log sink in `src/pdk.rs`.
 
 ## The deadline is armed before the call registers
 
@@ -74,6 +75,15 @@ Broccoli's host logs any other failure once, with its reason (`plugin_core`
 "Plugin call failed").
 `a_failed_call_logs_one_line_and_an_unavailable_one_logs_nothing` in
 `packages/plugin-core/src/traits/tests.rs` pins it.
+
+## The embedder takes a guest's log lines
+
+`pdk::log`, behind the `log_*` imports every instance links, hands the line to
+the sink the embedder set with `set_guest_log` (the level the guest asked for
+and its message) instead of logging it under extism's instance id. Without a
+sink it logs as the published crate does. Broccoli's sink,
+`plugin_core::guest_log`, names the Broccoli plugin, bounds each line and each
+plugin's rate, and keeps a guest's lines below the host's `ERROR`.
 
 ## The test hook
 
