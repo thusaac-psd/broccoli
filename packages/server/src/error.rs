@@ -570,14 +570,32 @@ impl IntoResponse for AppError {
             _ => None,
         };
 
+        let plugin_caused = matches!(self, AppError::PluginFailed(_));
         let (status, body) = self.status_and_body();
 
-        if let Some(seconds) = retry_after {
+        let mut response = if let Some(seconds) = retry_after {
             (status, [("Retry-After", seconds.to_string())], Json(body)).into_response()
         } else {
             (status, Json(body)).into_response()
+        };
+        if plugin_caused {
+            response.extensions_mut().insert(PluginCaused);
         }
+        response
     }
+}
+
+/// Marks a response a plugin's failure caused ([`AppError::PluginFailed`]),
+/// which its own line about the plugin already logged.
+#[derive(Debug, Clone, Copy)]
+pub struct PluginCaused;
+
+/// Whether `response` is a server error the host logs as its own: every 5xx
+/// but one a plugin caused, so a plugin's failures (a route answering 500 a
+/// contestant can call at will) log only under that plugin's budget, at
+/// most as a warning.
+pub fn is_host_failure<B>(response: &axum::http::Response<B>) -> bool {
+    response.status().is_server_error() && response.extensions().get::<PluginCaused>().is_none()
 }
 
 impl From<DbErr> for AppError {
@@ -764,6 +782,20 @@ impl From<TypedMultipartError> for AppError {
 mod tests {
     use super::*;
 
+    /// A plugin's failure is a 500 the host does not log as its own: the
+    /// plugin's line about it is the only one, under the plugin's budget.
+    #[test]
+    fn a_server_error_a_plugin_caused_is_not_logged_as_the_hosts() {
+        let plugin = AppError::PluginFailed(PluginFailure::new("p", "A route failed", "boom"))
+            .into_response();
+        assert_eq!(plugin.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!is_host_failure(&plugin));
+        let host = AppError::Internal("x".into()).into_response();
+        assert!(is_host_failure(&host));
+        assert!(!is_host_failure(
+            &AppError::NotFound("x".into()).into_response()
+        ));
+    }
     use axum::body::to_bytes;
 
     #[tokio::test]
