@@ -155,11 +155,24 @@ function validateItems(
   itemSchema: JsonSchemaProperty,
   parentPath: string[],
   errors: Record<string, FieldProblem>,
+  key?: string,
 ): void {
   for (let i = 0; i < items.length; i++) {
     const itemPath = [...parentPath, String(i)];
     const item = items[i];
     if (itemSchema.type === 'object' && itemSchema.properties) {
+      // A new item has no stored secret to keep: one it requires is entered.
+      if (isNewItem(item, key)) {
+        for (const name of itemSchema.required ?? []) {
+          const field = itemSchema.properties[name];
+          const value = (item as Record<string, unknown>)[name];
+          if (field?.writeOnly && (value == null || value === '')) {
+            errors[[...itemPath, name].join('.')] = {
+              key: 'config.validation.required',
+            };
+          }
+        }
+      }
       Object.assign(
         errors,
         validateAll(
@@ -208,7 +221,7 @@ export function validateAll(
       );
       Object.assign(errors, nested);
     } else if (prop.type === 'array' && prop.items && Array.isArray(value)) {
-      validateItems(value, prop.items, path, errors);
+      validateItems(value, prop.items, path, errors, prop['x-key']);
     } else {
       const err = validateField(value, prop);
       if (err) errors[dotPath] = err;
@@ -355,4 +368,168 @@ export function defaultText(
   return value === undefined || value === null || typeof value === 'object'
     ? undefined
     : String(value);
+}
+
+/**
+ * The field of a loaded array item that records the key it was saved
+ * under. A keyed array's secret belongs to the item, so the form tells the
+ * items it read from the server from those added since: an item whose key
+ * no longer matches (renamed, or removed and added again) is new, and none
+ * of a stored item's secrets is its own. Stripped before a write.
+ */
+export const SAVED = '$saved';
+
+/** What a write sends for a secret to clear it. */
+export const CLEAR_SECRET = '$clear';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Whether `item` of a keyed array is new: not saved under its key. */
+export function isNewItem(item: unknown, key: string | undefined): boolean {
+  if (!key || !isRecord(item)) return false;
+  return item[SAVED] === undefined || item[SAVED] !== item[key];
+}
+
+/**
+ * `value` with every item of each keyed array `prop` holds marked as saved
+ * under its key ([`SAVED`]): what the form reads, or has just saved.
+ */
+export function markSaved(value: unknown, prop: JsonSchemaProperty): unknown {
+  if (Array.isArray(value)) {
+    const key = prop['x-key'];
+    return value.map((item) => {
+      const marked = prop.items ? markSaved(item, prop.items) : item;
+      return key && isRecord(marked) && typeof marked[key] === 'string'
+        ? { ...marked, [SAVED]: marked[key] }
+        : marked;
+    });
+  }
+  if (!isRecord(value) || !prop.properties) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([name, field]) => {
+      const child = prop.properties?.[name];
+      return [name, child ? markSaved(field, child) : field];
+    }),
+  );
+}
+
+/**
+ * `value` as a write sends it: without the saved marks, and with each
+ * blank secret of a new item cleared, so the server never keeps a secret a
+ * stored item of the same key held.
+ */
+export function forWrite(
+  value: unknown,
+  prop: JsonSchemaProperty,
+  inNewItem = false,
+): unknown {
+  if (Array.isArray(value)) {
+    const key = prop['x-key'];
+    return value.map((item) =>
+      prop.items
+        ? forWrite(item, prop.items, inNewItem || isNewItem(item, key))
+        : item,
+    );
+  }
+  if (!isRecord(value) || !prop.properties) return value;
+  const out: Record<string, unknown> = {};
+  for (const [name, child] of Object.entries(prop.properties)) {
+    const field = value[name];
+    if (child.writeOnly && inNewItem && (field == null || field === '')) {
+      out[name] = { [CLEAR_SECRET]: true };
+    } else if (field !== undefined) {
+      out[name] = forWrite(field, child, inNewItem);
+    }
+  }
+  for (const [name, field] of Object.entries(value)) {
+    if (name !== SAVED && !(name in prop.properties)) out[name] = field;
+  }
+  return out;
+}
+
+/**
+ * What the form holds as saved once `written` (what [`forWrite`] sent) is
+ * stored: each secret it set reads as stored (`null`), each it cleared is
+ * gone, and every item of a keyed array is saved under its key.
+ */
+export function afterWrite(
+  written: unknown,
+  prop: JsonSchemaProperty,
+): unknown {
+  const stored = (value: unknown, at: JsonSchemaProperty): unknown => {
+    if (Array.isArray(value)) {
+      return value.map((item) => (at.items ? stored(item, at.items) : item));
+    }
+    if (!isRecord(value) || !at.properties) return value;
+    const out: Record<string, unknown> = {};
+    for (const [name, field] of Object.entries(value)) {
+      const child = at.properties[name];
+      if (child?.writeOnly) {
+        if (isRecord(field) && field[CLEAR_SECRET] === true) continue;
+        out[name] = typeof field === 'string' && field !== '' ? null : field;
+      } else {
+        out[name] = child ? stored(field, child) : field;
+      }
+    }
+    return out;
+  };
+  return markSaved(stored(written, prop), prop);
+}
+
+/** `value` without the saved marks, as a plugin's slot component reads it. */
+export function unmarked(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(unmarked);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([name]) => name !== SAVED)
+      .map(([name, field]) => [name, unmarked(field)]),
+  );
+}
+
+/** One step of a field's path, as the form names it. */
+export type PathStep =
+  | { kind: 'field'; path: string[]; title: string }
+  | { kind: 'item'; label: string | null; index: number };
+
+/**
+ * The steps of the dot path `path` (`stations.0.token`) through `schema`
+ * and `values`: each field with its schema title (else its name), and each
+ * array item by its key field's value, `null` when it has none.
+ */
+export function pathSteps(
+  path: string,
+  schema: JsonSchemaProperty,
+  values: unknown,
+): PathStep[] {
+  const steps: PathStep[] = [];
+  const at: string[] = [];
+  let prop: JsonSchemaProperty | undefined = schema;
+  let value: unknown = values;
+  for (const segment of path.split('.').filter(Boolean)) {
+    at.push(segment);
+    if (/^\d+$/.test(segment) && prop?.type === 'array') {
+      const index = Number(segment);
+      value = Array.isArray(value) ? value[index] : undefined;
+      const key = prop['x-key'];
+      const named = key && isRecord(value) ? value[key] : undefined;
+      steps.push({
+        kind: 'item',
+        label: typeof named === 'string' && named !== '' ? named : null,
+        index,
+      });
+      prop = prop.items;
+    } else {
+      prop = prop?.properties?.[segment];
+      value = isRecord(value) ? value[segment] : undefined;
+      steps.push({
+        kind: 'field',
+        path: [...at],
+        title: prop?.title ?? segment,
+      });
+    }
+  }
+  return steps;
 }

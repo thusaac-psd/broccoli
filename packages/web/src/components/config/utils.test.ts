@@ -3,9 +3,13 @@ import { test } from 'node:test';
 
 import type { JsonSchema } from './types.ts';
 import {
+  afterWrite,
   defaultText,
   extractDefaults,
+  forWrite,
   hasOwnDescendantValue,
+  markSaved,
+  pathSteps,
   serverFieldErrors,
   setAtPath,
   validateAll,
@@ -198,4 +202,94 @@ test('a field left at its default reads its default, the resolved one first', ()
     '0.5',
   );
   assert.equal(defaultText(schema.properties!.weights, ['weights']), undefined);
+});
+
+const stations: JsonSchema = {
+  type: 'object',
+  properties: {
+    stations: {
+      type: 'array',
+      title: 'Print stations',
+      'x-key': 'name',
+      items: {
+        type: 'object',
+        required: ['name', 'token'],
+        properties: {
+          name: { type: 'string', title: 'Station name' },
+          token: { type: 'string', title: 'Token', writeOnly: true },
+        },
+      },
+    },
+  },
+};
+
+test('a saved item keeps its secret, and a new or renamed one clears what it leaves blank', () => {
+  const loaded = markSaved(
+    {
+      stations: [
+        { name: 'alpha', token: null },
+        { name: 'beta', token: null },
+      ],
+    },
+    stations,
+  ) as { stations: Record<string, unknown>[] };
+  const [alpha, beta] = loaded.stations;
+  const edited = {
+    stations: [
+      beta,
+      { ...alpha, name: 'renamed' },
+      { name: 'alpha', token: '' },
+    ],
+  };
+  assert.deepEqual(forWrite(edited, stations), {
+    stations: [
+      { name: 'beta', token: null },
+      { name: 'renamed', token: { $clear: true } },
+      { name: 'alpha', token: { $clear: true } },
+    ],
+  });
+});
+
+test('a new item that requires its secret has one entered before it is saved', () => {
+  const values = markSaved(
+    { stations: [{ name: 'alpha', token: null }] },
+    stations,
+  ) as { stations: Record<string, unknown>[] };
+  const errors = validateAll(
+    { stations: [...values.stations, { name: 'new', token: '' }] },
+    stations,
+  );
+  assert.deepEqual(Object.keys(errors), ['stations.1.token']);
+});
+
+test('once written, a set secret reads as stored and a cleared one is gone', () => {
+  const saved = afterWrite(
+    {
+      stations: [
+        { name: 'a', token: 'typed' },
+        { name: 'b', token: { $clear: true } },
+      ],
+    },
+    stations,
+  );
+  assert.deepEqual(saved, {
+    stations: [
+      { name: 'a', token: null, $saved: 'a' },
+      { name: 'b', $saved: 'b' },
+    ],
+  });
+});
+
+test('a field path reads as its titles and its items by their key', () => {
+  const values = { stations: [{ name: 'desk' }, { name: '' }] };
+  assert.deepEqual(pathSteps('stations.0.token', stations, values), [
+    { kind: 'field', path: ['stations'], title: 'Print stations' },
+    { kind: 'item', label: 'desk', index: 0 },
+    { kind: 'field', path: ['stations', '0', 'token'], title: 'Token' },
+  ]);
+  assert.deepEqual(pathSteps('stations.1', stations, values)[1], {
+    kind: 'item',
+    label: null,
+    index: 1,
+  });
 });

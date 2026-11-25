@@ -24,7 +24,7 @@ import type {
   InheritedConfig,
   JsonSchemaProperty,
 } from './types';
-import { defaultForType, defaultText } from './utils';
+import { CLEAR_SECRET, defaultForType, defaultText, isNewItem } from './utils';
 
 function DefaultBadge() {
   const { t } = useTranslation();
@@ -51,6 +51,8 @@ export function SchemaField({
   isDirty,
   inherited,
   itemLabel,
+  required = false,
+  inNewItem = false,
 }: Readonly<{
   name: string;
   prop: JsonSchemaProperty;
@@ -71,6 +73,13 @@ export function SchemaField({
    * title and description: its key field's value, or its number.
    */
   itemLabel?: string;
+  /** Whether the object that holds this field requires it. */
+  required?: boolean;
+  /**
+   * Whether the field belongs to an array item added (or re-keyed) since the
+   * form loaded: a secret of it has no stored value to keep.
+   */
+  inNewItem?: boolean;
 }>) {
   const { t } = useTranslation();
   const pluginText = usePluginText();
@@ -218,7 +227,11 @@ export function SchemaField({
           </div>
           <div className="p-4 pt-5">
             <SchemaFields
-              schema={{ type: 'object' as const, properties: prop.properties }}
+              schema={{
+                type: 'object' as const,
+                properties: prop.properties,
+                required: prop.required,
+              }}
               values={objValue}
               rootValues={rootValues}
               path={path}
@@ -231,6 +244,7 @@ export function SchemaField({
               hasExplicitDescendant={hasExplicitDescendant}
               isDirty={isDirty}
               inherited={inherited}
+              inNewItem={inNewItem}
             />
           </div>
         </div>
@@ -411,6 +425,7 @@ export function SchemaField({
                     isDirty={isDirty}
                     inherited={inherited}
                     itemLabel={itemName(item, prop['x-key'], i)}
+                    inNewItem={inNewItem || isNewItem(item, prop['x-key'])}
                   />
                 </div>
                 {/* An item moves with everything it holds, its secrets too:
@@ -477,7 +492,9 @@ export function SchemaField({
     // Clearing it sends the explicit marker.
     {
       const secret = prop.writeOnly === true;
-      const stored = secret && value === null;
+      // A stored secret reads `null`; one of an item added since the form
+      // loaded has no stored value, whatever its key.
+      const stored = secret && value === null && !inNewItem;
       const clearing = secret && isClearMarker(value);
       const stringPlaceholder = clearing
         ? t('config.secretCleared')
@@ -518,14 +535,14 @@ export function SchemaField({
                     secret && e.target.value === '' ? null : e.target.value,
                   )
                 }
-                disabled={clearing}
                 type={secret ? 'password' : undefined}
                 autoComplete={secret ? 'off' : undefined}
                 placeholder={stringPlaceholder}
                 minLength={prop.minLength}
                 maxLength={prop.maxLength}
               />
-              {stored && (
+              {/* A secret its item requires is replaced, never cleared. */}
+              {stored && !required && (
                 <Button
                   type="button"
                   variant="outline"
@@ -556,9 +573,6 @@ export function SchemaField({
     }
   }
 }
-
-/** What a write sends for a secret to clear it: `{"$clear": true}`. */
-const CLEAR_SECRET = '$clear';
 
 function isClearMarker(value: unknown): boolean {
   return (

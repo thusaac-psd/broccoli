@@ -3,31 +3,40 @@ import { expect, type Page, test } from '@playwright/test';
 import { mockApi } from './api';
 import plugin from './fixture-plugin.json' with { type: 'json' };
 
-/** The print plugin's stations, each token a secret named by its station. */
-const SCHEMA = {
-  type: 'object',
-  properties: {
-    stations: {
-      type: 'array',
-      title: 'Print stations',
-      'x-key': 'name',
-      items: {
-        type: 'object',
-        required: ['name', 'token'],
-        properties: {
-          name: { type: 'string', title: 'Station name' },
-          token: { type: 'string', title: 'Token', writeOnly: true },
+/**
+ * The print plugin's stations, each token a secret named by its station:
+ * one each station requires, unless `optional`.
+ */
+function stationsSchema(optional = false) {
+  return {
+    type: 'object',
+    properties: {
+      stations: {
+        type: 'array',
+        title: 'Print stations',
+        'x-key': 'name',
+        items: {
+          type: 'object',
+          required: optional ? ['name'] : ['name', 'token'],
+          properties: {
+            name: { type: 'string', title: 'Station name' },
+            token: { type: 'string', title: 'Token', writeOnly: true },
+          },
         },
       },
     },
-  },
-};
+  };
+}
 
 /**
  * The plugin-wide print settings form over a server that stores what each
  * save sends. Returns the bodies of the saves.
  */
-async function openStations(page: Page) {
+async function openStations(
+  page: Page,
+  { optional = false, refuse }: { optional?: boolean; refuse?: unknown } = {},
+) {
+  const SCHEMA = stationsSchema(optional);
   await mockApi(page, 'admin', { plugins: ['print'] });
   let stored: unknown = {
     stations: [
@@ -72,6 +81,7 @@ async function openStations(page: Page) {
   await page.route('**/api/v1/admin/plugins/print/config/print', (route) => {
     const body = route.request().postDataJSON() as { config: unknown };
     saves.push(body.config);
+    if (refuse) return route.fulfill({ status: 400, json: refuse });
     stored = body.config;
     return route.fulfill({
       json: {
@@ -120,9 +130,10 @@ test('a kept secret stays on its station through delete, add and reorder', async
   await dialog.getByRole('button', { name: 'Move up' }).nth(1).click();
   await save.click();
   await expect.poll(() => saves.length).toBe(3);
+  // Saved, gamma's token reads as stored too: kept, never sent again.
   expect(saves[2]).toEqual({
     stations: [
-      { name: 'gamma', token: 'token-g' },
+      { name: 'gamma', token: null },
       { name: 'beta', token: null },
     ],
   });
@@ -133,14 +144,16 @@ test('a kept secret stays on its station through delete, add and reorder', async
 test('a stored secret is cleared with its own action, which can be taken back', async ({
   page,
 }) => {
-  const { dialog, saves } = await openStations(page);
+  const { dialog, saves } = await openStations(page, { optional: true });
   const save = dialog.getByRole('button', { name: 'Save' });
   const clear = dialog.getByRole('button', { name: 'Clear' });
 
   await clear.first().click();
-  await expect(dialog.locator('#cfg-stations-0-token')).toBeDisabled();
+  await expect(dialog.locator('#cfg-stations-0-token')).toHaveAttribute(
+    'placeholder',
+    'Cleared when you save',
+  );
   await dialog.getByRole('button', { name: 'Keep it' }).click();
-  await expect(dialog.locator('#cfg-stations-0-token')).toBeEnabled();
 
   await clear.nth(1).click();
   await save.click();
@@ -151,4 +164,88 @@ test('a stored secret is cleared with its own action, which can be taken back', 
       { name: 'beta', token: { $clear: true } },
     ],
   });
+});
+
+// Typing a new secret over a pending clear replaces the clear.
+test('typing a secret replaces a pending clear', async ({ page }) => {
+  const { dialog, saves } = await openStations(page, { optional: true });
+  await dialog.getByRole('button', { name: 'Clear' }).first().click();
+  await dialog.locator('#cfg-stations-0-token').fill('token-new');
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect.poll(() => saves.length).toBe(1);
+  expect(saves[0]).toEqual({
+    stations: [
+      { name: 'alpha', token: 'token-new' },
+      { name: 'beta', token: null },
+    ],
+  });
+});
+
+// A secret every station requires is replaced, never cleared.
+test('a required secret offers no clear', async ({ page }) => {
+  const { dialog } = await openStations(page);
+  await expect(dialog.locator('#cfg-stations-0-token')).toHaveAttribute(
+    'placeholder',
+    'Leave empty to keep the stored secret',
+  );
+  await expect(dialog.getByRole('button', { name: 'Clear' })).toHaveCount(0);
+});
+
+// A station removed and added again, or renamed, is a new station: none of
+// a stored station's token is its own, so its token reads as new and is
+// entered before the form saves.
+test('a re-added or renamed station has no stored secret to keep', async ({
+  page,
+}) => {
+  const { dialog, saves } = await openStations(page);
+  await dialog.getByRole('button', { name: 'Remove' }).first().click();
+  await dialog.getByRole('button', { name: 'Add item' }).click();
+  await dialog.locator('#cfg-stations-1-name').fill('alpha');
+  await dialog.locator('#cfg-stations-0-name').fill('beta-renamed');
+  for (const i of [0, 1]) {
+    await expect(
+      dialog.locator(`#cfg-stations-${i}-token`),
+    ).not.toHaveAttribute(
+      'placeholder',
+      'Leave empty to keep the stored secret',
+    );
+  }
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(
+    dialog.getByText('Required', { exact: true }).first(),
+  ).toBeVisible();
+  expect(saves).toEqual([]);
+
+  await dialog.locator('#cfg-stations-1-token').fill('token-a2');
+  await dialog.locator('#cfg-stations-0-token').fill('token-b2');
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect.poll(() => saves.length).toBe(1);
+  expect(saves[0]).toEqual({
+    stations: [
+      { name: 'beta-renamed', token: 'token-b2' },
+      { name: 'alpha', token: 'token-a2' },
+    ],
+  });
+});
+
+// A refusal names the field by its titles and its item, not its raw path.
+test('a refused field is named by its title and its item', async ({ page }) => {
+  const { dialog } = await openStations(page, {
+    refuse: {
+      code: 'VALIDATION_ERROR',
+      message: 'invalid',
+      details: {
+        fields: [
+          {
+            path: 'stations[1].token',
+            message: 'no secret is stored for this item',
+            kind: 'secret_not_stored',
+          },
+        ],
+      },
+    },
+  });
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(dialog.getByText('Print stations › beta › Token')).toBeVisible();
+  await expect(dialog.getByText('stations.1.token')).toHaveCount(0);
 });
