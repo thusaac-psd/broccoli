@@ -307,6 +307,7 @@ pub async fn upsert_plugin_global_config(
     let (result, change) = write_config(
         &state.db,
         state.plugins.as_ref(),
+        SchemaSource::of(&state),
         Reads::Committed,
         &target,
         &plugin_id,
@@ -542,6 +543,7 @@ pub async fn upsert_problem_config(
     let (result, change) = write_config(
         &txn,
         state.plugins.as_ref(),
+        SchemaSource::of(&state),
         Reads::Committed,
         &target,
         &plugin_id,
@@ -751,6 +753,7 @@ pub async fn upsert_contest_problem_config(
     let (result, change) = write_config(
         &txn,
         state.plugins.as_ref(),
+        SchemaSource::of(&state),
         Reads::Committed,
         &target,
         &plugin_id,
@@ -990,6 +993,7 @@ pub async fn upsert_contest_config(
     let (result, change) = write_config(
         &txn,
         state.plugins.as_ref(),
+        SchemaSource::of(&state),
         Reads::Committed,
         &target,
         &plugin_id,

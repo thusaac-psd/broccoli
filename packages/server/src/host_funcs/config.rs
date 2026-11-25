@@ -6,10 +6,11 @@ use std::sync::Arc;
 
 use super::context::ManagerRef;
 use crate::error::AppError;
+use crate::plugin_lifecycle::PluginLifecycle;
 use crate::registry::TypeProviders;
 use crate::services::config_issues::ConfigChecker;
 use crate::services::plugin_config::{
-    ConfigTarget, Reads, RowSettings, config_result, write_config,
+    ConfigTarget, Reads, RowSettings, SchemaSource, config_result, write_config,
 };
 use crate::services::plugin_config_cache::PluginConfigCache;
 use plugin_core::config_schema;
@@ -26,6 +27,7 @@ type ConfigSetUserData = (
     ManagerRef,
     TypeProviders,
     PluginConfigCache,
+    Arc<PluginLifecycle>,
 );
 
 const VALID_SCOPES: &[&str] = &["problem", "contest_problem", "contest", "plugin"];
@@ -114,12 +116,13 @@ pub fn create_config_set_function(
     manager: ManagerRef,
     types: TypeProviders,
     cache: PluginConfigCache,
+    lifecycle: Arc<PluginLifecycle>,
 ) -> Function {
     super::host_function(
         "config_set",
         [ValType::I64],
         [],
-        super::host_data((plugin_id, db, manager, types, cache)),
+        super::host_data((plugin_id, db, manager, types, cache, lifecycle)),
         super::Waits::Blocks,
         config_set_fn,
     )
@@ -171,7 +174,7 @@ fn config_set_fn(
 ) -> Result<(), extism::Error> {
     let input: ConfigSetInput = super::read_json(plugin, inputs, "config_set input")?;
     let call = super::HostCall::enter(&user_data, "config_set")?;
-    let (plugin_id, db, manager, types, cache) = &*call;
+    let (plugin_id, db, manager, types, cache, lifecycle) = &*call;
 
     let ref_id = if input.scope == "plugin" {
         plugin_id.clone()
@@ -194,9 +197,12 @@ fn config_set_fn(
     // issues it reaches.
     tokio::runtime::Handle::current()
         .block_on(async {
+            // A plugin's own write is refused on a replica behind its
+            // published version, as an admin's is.
             let (_, change) = write_config(
                 db,
                 manager.as_ref(),
+                SchemaSource::serving(manager.get_registry(), lifecycle),
                 Reads::InCall,
                 &target,
                 plugin_id,

@@ -1361,6 +1361,7 @@
 'apiError.SUBMISSION_TOO_LATE' = "提交在截止之后才送达。"
 'apiError.NO_PROVIDER' = "没有已启用的插件提供此工作所需的内容，因此无法评测。"
 'apiError.PLUGIN_NOT_LOADED' = "所需的插件「{plugin}」尚未在任何服务器上加载。请在加载后重试。"
+'apiError.PLUGIN_OUTDATED_HERE' = "此服务器尚未运行「{plugin}」的已发布版本，暂时无法保存其设置。请稍后重试。"
 'apiError.PROBLEM_NOT_FOUND' = "题目在评测前已被删除。"
 'apiError.DATABASE_ERROR' = "数据库未响应，无法开始评测。"
 'apiError.INVALID_FILES' = "无法读取提交的文件。"

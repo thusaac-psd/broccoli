@@ -52,6 +52,7 @@ pub async fn upload_checker_source(
     let (_, change) = write_config(
         &state.db,
         state.plugins.as_ref(),
+        SchemaSource::of(&state),
         Reads::Committed,
         &ConfigTarget::problem(id),
         &owner.plugin_id,

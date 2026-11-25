@@ -1360,6 +1360,7 @@
 'apiError.SUBMISSION_TOO_LATE' = "The submission arrived after submissions closed."
 'apiError.NO_PROVIDER' = "No enabled plugin provides what this work needs, so it could not be judged."
 'apiError.PLUGIN_NOT_LOADED' = "The plugin {plugin} this needs is loaded on no server yet. Try again once one loads it."
+'apiError.PLUGIN_OUTDATED_HERE' = "This server does not run the published version of {plugin} yet, so it cannot save its settings. Try again in a moment."
 'apiError.PROBLEM_NOT_FOUND' = "The problem was removed before it could be judged."
 'apiError.DATABASE_ERROR' = "Judging could not start because the database did not answer."
 'apiError.INVALID_FILES' = "The submitted files could not be read."

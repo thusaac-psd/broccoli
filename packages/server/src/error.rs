@@ -24,6 +24,10 @@ pub const PLUGIN_RETRY_AFTER_SECS: u64 = 2;
 /// a client asks again at this pace rather than a plugin call's.
 pub const DISABLED_RETRY_AFTER_SECS: u64 = 30;
 
+/// `Retry-After` for [`AppError::PluginOutdatedHere`]: a server loads a
+/// plugin's published version on its next reconcile, within seconds.
+pub const OUTDATED_RETRY_AFTER_SECS: u64 = 5;
+
 /// The `Retry-After` of a `STORAGE_UNAVAILABLE` answer.
 pub const STORAGE_RETRY_AFTER_SECS: u64 = 5;
 
@@ -158,6 +162,11 @@ pub enum AppError {
     /// reloading it). A client asks again after [`DISABLED_RETRY_AFTER_SECS`]:
     /// it serves once a replica loads the plugin.
     PluginNotLoaded(String),
+    /// This server does not run plugin `id` at the version the fleet
+    /// published, so it writes none of its configs. A client asks again
+    /// after [`OUTDATED_RETRY_AFTER_SECS`]: the server reconciles its
+    /// plugins within seconds.
+    PluginOutdatedHere(String),
     /// Blob storage did not answer through its retries: an outage, retried
     /// by the client after [`STORAGE_RETRY_AFTER_SECS`].
     StorageUnavailable,
@@ -447,6 +456,17 @@ impl AppError {
                     plugin_id,
                 ),
             ),
+            AppError::PluginOutdatedHere(plugin_id) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                naming_plugin(
+                    HostCode::PluginOutdatedHere,
+                    format!(
+                        "This server does not run the published version of the plugin \
+                         '{plugin_id}' yet, so it writes none of its configs until it does"
+                    ),
+                    plugin_id,
+                ),
+            ),
             AppError::StorageUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 simple(
@@ -571,6 +591,7 @@ impl IntoResponse for AppError {
             AppError::PluginDisabled(_)
             | AppError::PluginNotLoaded(_)
             | AppError::ContestTypeDisabled { .. } => Some(DISABLED_RETRY_AFTER_SECS),
+            AppError::PluginOutdatedHere(_) => Some(OUTDATED_RETRY_AFTER_SECS),
             AppError::StorageUnavailable => Some(STORAGE_RETRY_AFTER_SECS),
             AppError::DatabaseUnavailable => Some(DATABASE_RETRY_AFTER_SECS),
             AppError::DatabaseBusy => Some(DATABASE_BUSY_RETRY_AFTER_SECS),
@@ -896,6 +917,22 @@ mod tests {
 
     /// A plugin call failed by its database's saturated pool names the
     /// database as busy: a 503 DATABASE_BUSY with the busy Retry-After.
+    /// A server behind the fleet's published plugin version refuses that
+    /// plugin's config writes as a retryable 503 that names the plugin.
+    #[tokio::test]
+    async fn a_write_on_a_server_behind_the_published_version_is_a_503_to_retry() {
+        let response = AppError::PluginOutdatedHere("print".into()).into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get("Retry-After").unwrap(),
+            &OUTDATED_RETRY_AFTER_SECS.to_string()
+        );
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "PLUGIN_OUTDATED_HERE");
+        assert_eq!(body["details"]["plugin_id"], "print", "{body}");
+    }
+
     #[tokio::test]
     async fn a_plugin_call_failed_by_a_busy_database_is_the_databases_busy_503() {
         let response = AppError::from(PluginError::DatabaseBusy {
@@ -930,6 +967,7 @@ mod tests {
             },
             AppError::PluginDisabled("ioi".into()),
             AppError::PluginNotLoaded("ioi".into()),
+            AppError::PluginOutdatedHere("ioi".into()),
         ];
         let mut answered = std::collections::BTreeSet::new();
         for answer in answers {

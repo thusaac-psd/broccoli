@@ -164,11 +164,12 @@ pub(crate) fn declared(
         .cloned()
 }
 
-/// The schemas a read shows configs by: this replica's registry, trusted
-/// for a plugin only while this replica serves the version the fleet
-/// published (`PluginLifecycle::serves_published`). An outdated replica's
-/// manifest may lack a field the published one marks secret, so a read
-/// there shows nothing of the plugin's configs.
+/// The schemas a read shows configs by and a write stores them by: this
+/// replica's registry, trusted for a plugin only while this replica serves
+/// the version the fleet published (`PluginLifecycle::serves_published`).
+/// An outdated replica's manifest may lack a field the published one marks
+/// secret, so a read there shows nothing of the plugin's configs, and a
+/// write there is refused ([`SchemaSource::writable`]).
 #[derive(Clone, Copy)]
 pub(crate) struct SchemaSource<'a> {
     registry: &'a PluginRegistry,
@@ -176,20 +177,35 @@ pub(crate) struct SchemaSource<'a> {
 }
 
 impl<'a> SchemaSource<'a> {
-    /// The schemas a request on this server reads by.
+    /// The schemas a request on this server reads and writes by.
     pub(crate) fn of(state: &'a crate::state::AppState) -> Self {
+        Self::serving(state.plugins.get_registry(), &state.plugin_lifecycle)
+    }
+
+    /// The schemas of `registry`, trusted for the plugins `lifecycle` says
+    /// this replica serves at their published version.
+    pub(crate) fn serving(
+        registry: &'a PluginRegistry,
+        lifecycle: &'a crate::plugin_lifecycle::PluginLifecycle,
+    ) -> Self {
         Self {
-            registry: state.plugins.get_registry(),
-            lifecycle: Some(&state.plugin_lifecycle),
+            registry,
+            lifecycle: Some(lifecycle),
         }
     }
 
-    /// The schemas of this replica's registry, trusted as they are: for a
-    /// config a client just wrote, whose values it knows.
-    pub(crate) fn local(registry: &'a PluginRegistry) -> Self {
-        Self {
-            registry,
-            lifecycle: None,
+    /// Refuses a write of `plugin_id`'s configs on a replica that does not
+    /// serve the plugin's published version
+    /// ([`AppError::PluginOutdatedHere`]): the schema it knows may not mark
+    /// a field the published one marks secret, so a write by it could drop
+    /// a stored secret, or answer one in clear. The client retries on a
+    /// replica that serves it, or once this one does.
+    pub(crate) fn writable(&self, plugin_id: &str) -> Result<(), AppError> {
+        match self.lifecycle {
+            Some(lifecycle) if !lifecycle.serves_published(plugin_id) => {
+                Err(AppError::PluginOutdatedHere(plugin_id.to_string()))
+            }
+            _ => Ok(()),
         }
     }
 
@@ -614,10 +630,14 @@ async fn problems_of_contest<C: ConnectionTrait>(
 /// from its check until the write commits: no test-data change lands between
 /// the check and the stored config. The write takes it in the order every
 /// config write and delete takes its rows ([`lock_reached`]).
+///
+/// A replica that does not serve the plugin's published version writes
+/// none of its configs ([`SchemaSource::writable`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     plugins: &dyn PluginManager,
+    schemas: SchemaSource<'_>,
     reads: Reads<'_>,
     target: &ConfigTarget,
     plugin_id: &str,
@@ -625,13 +645,14 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     config: serde_json::Value,
     settings: RowSettings,
 ) -> Result<(PluginConfigResponse, ConfigChange), AppError> {
+    schemas.writable(plugin_id)?;
     let txn = db.begin().await?;
     lock_reached(&txn, target).await?;
     // A secret the client sends back as the ref a read showed it keeps what
     // the stored config holds for the same item.
     let mut config = config;
     let mut refs = Vec::new();
-    if let Some(ns) = declared(plugins.get_registry(), plugin_id, namespace) {
+    if let Some(ns) = declared(schemas.registry, plugin_id, namespace) {
         // Under the row's lock: a save that rotates a secret meanwhile is
         // waited for, so this one, holding the old ref, keeps nothing.
         let stored = plugin_config::Entity::find_by_id((
@@ -707,13 +728,7 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     .await?;
     let change = ConfigChange::of(&txn, target).await?;
     txn.commit().await?;
-    let shown = shown(
-        SchemaSource::local(plugins.get_registry()),
-        plugin_id,
-        namespace,
-        row.config,
-        &refs,
-    );
+    let shown = shown(schemas, plugin_id, namespace, row.config, &refs);
     Ok((
         PluginConfigResponse {
             plugin_id: plugin_id.to_string(),
@@ -1331,6 +1346,54 @@ mod tests {
             );
             assert!(served.withheld, "{status:?}");
             assert_eq!(served.config, serde_json::Value::Null, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn a_replica_that_does_not_serve_the_published_version_writes_none_of_its_configs() {
+        use crate::plugin_fleet::{ReplicaPluginState, ReplicaPluginStatus};
+        use crate::plugin_lifecycle::PluginLifecycle;
+        let registry = registry_with_a_secret();
+        let reporting = |status| {
+            PluginLifecycle::reporting(
+                [(
+                    "p".to_string(),
+                    ReplicaPluginState {
+                        status,
+                        error: None,
+                        generation: 1,
+                        retry_in_ms: None,
+                        version: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            )
+        };
+        let current = reporting(ReplicaPluginStatus::Loaded);
+        assert!(
+            SchemaSource::serving(&registry, &current)
+                .writable("p")
+                .is_ok()
+        );
+        for status in [
+            ReplicaPluginStatus::Outdated,
+            ReplicaPluginStatus::Mismatched,
+        ] {
+            let behind = reporting(status);
+            assert!(
+                matches!(
+                    SchemaSource::serving(&registry, &behind).writable("p"),
+                    Err(AppError::PluginOutdatedHere(plugin)) if plugin == "p"
+                ),
+                "{status:?}"
+            );
+            assert!(
+                SchemaSource::serving(&registry, &behind)
+                    .writable("other")
+                    .is_ok(),
+                "another plugin's configs are written as ever"
+            );
         }
     }
 
