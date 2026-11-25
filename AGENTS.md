@@ -219,8 +219,12 @@ binaries warn about every key they do not read.
   fails the call as the database's and, under a dispatch, hands the attempt
   back; any other error is the statement's. Plugin SQL that cannot run names why
   by one mapping (`host_funcs::sql::Unanswered`): a lost database answers
-  `DATABASE_UNAVAILABLE`, a pool or plugin SQL permit with nothing free
-  `DATABASE_BUSY`, a deadline cut `PLUGIN_UNAVAILABLE`.
+  `DATABASE_UNAVAILABLE` (a hand-back), a plugin SQL pool or permit with nothing
+  free for a call that held none `DATABASE_BUSY` (contention:
+  `DispatchFault::SqlContended` hands back only `CONTENTION_HANDBACKS` times per
+  unit, counted on its row, then spends the submission's budget), a wait for a
+  connection while the call holds one of its own the plugin's own error, a
+  deadline cut `PLUGIN_UNAVAILABLE`.
 - `packages/plugin-core` holds the plugin abstractions shared by the host:
   manifest parsing, the registry, instance pools, hooks, admission, config, i18n
   and the plugin HTTP proxy types.

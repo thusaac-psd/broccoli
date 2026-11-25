@@ -818,6 +818,7 @@ mod judgement_history_tests {
             inputs_version: 0,
             judged_on_earlier_inputs: false,
             plugin_epochs: serde_json::json!({}),
+            contended_handbacks: 0,
             created_at: now,
             queued_at: now,
             finalized_at: Some(now),

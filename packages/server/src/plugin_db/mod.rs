@@ -102,6 +102,11 @@ const PROVISION_BACKOFF: Duration = Duration::from_secs(30);
 pub enum Unavailable {
     #[error("no plugin SQL connection was free within the call's deadline")]
     Busy,
+    #[error(
+        "the call waited for a plugin SQL connection while it holds one of its own; \
+         its transaction or statement must end first"
+    )]
+    SelfHeld,
     #[error("the plugin SQL statement was cut at the call's deadline; its backend is cancelled")]
     Deadline,
     #[error("the plugin was unloaded while this call ran")]
@@ -113,6 +118,24 @@ pub enum Unavailable {
 }
 
 impl Unavailable {
+    /// A connection (or a transaction's) a call asked its lease for, as the
+    /// call takes it: no connection free in time is contention
+    /// ([`Self::Busy`]), unless the call already holds one of its own
+    /// (`reused`), which is the plugin waiting on itself
+    /// ([`Self::SelfHeld`]); any other answer is as [`Self::settle`] takes
+    /// it.
+    pub fn settle_acquire<T>(
+        answer: Result<T, DbErr>,
+        reused: bool,
+    ) -> Result<Result<T, DbErr>, Self> {
+        match answer {
+            Err(e) if common::db::outage(&e) == Some(common::db::Outage::Busy) => {
+                Err(if reused { Self::SelfHeld } else { Self::Busy })
+            }
+            answer => Self::settle(answer),
+        }
+    }
+
     /// A plugin statement's answer, as the call takes it: an outage of the
     /// database ([`common::db::is_outage`]) says nothing about the
     /// statement, so it fails the call as unavailable, which callers answer
@@ -163,6 +186,10 @@ impl SqlCall {
 pub struct Lease {
     pub db: DatabaseConnection,
     pub permit: Arc<OwnedSemaphorePermit>,
+    /// The call already held its permit (a transaction or a statement of
+    /// its own is open): a wait for a connection now is one the call made
+    /// itself ([`Unavailable::SelfHeld`]).
+    pub reused: bool,
 }
 
 impl Lease {
@@ -239,6 +266,7 @@ impl PluginSqlPools {
         let budget = &self.inner.leases;
         let locals = call.locals.as_deref();
         let held = locals.and_then(|c| c.with(|held: &mut HeldPermits| held.live(budget)));
+        let reused = held.is_some();
         let permit = match held {
             Some(permit) => permit,
             None => {
@@ -259,7 +287,7 @@ impl PluginSqlPools {
         };
         let db = self.pool(plugin_id, read, call).await?;
         self.inner.make_room(plugin_id).await;
-        Ok(Lease { db, permit })
+        Ok(Lease { db, permit, reused })
     }
 
     /// `plugin_id`'s pool. A failed provisioning is logged once, at error

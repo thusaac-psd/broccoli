@@ -117,6 +117,20 @@ pub(crate) fn fail_under(dispatch: Option<&Dispatch>, outage: Outage, message: &
     fail_call(outage);
 }
 
+/// Fail the running call as busy (`DATABASE_BUSY`) because no plugin SQL
+/// connection was free for it while it held none, and, under `dispatch`,
+/// record the contention (`DispatchFault::SqlContended`): the attempt is
+/// handed back, but only up to the unit's contention cap, since the plugin's
+/// own pool, not the host's database, is what ran out.
+pub(crate) fn contended_under(dispatch: Option<&Dispatch>, message: &str) {
+    if let Some(dispatch) = dispatch {
+        dispatch
+            .faults()
+            .record(DispatchFault::SqlContended, message.to_string());
+    }
+    fail_call(Outage::Busy);
+}
+
 /// What a dispatch's own statement (`what`, as "Failed to {what}") that met
 /// `e` fails its attempt with, by the same rule: an outage hands the attempt
 /// back ([`DispatchFault::DatabaseUnavailable`]); any other error is a

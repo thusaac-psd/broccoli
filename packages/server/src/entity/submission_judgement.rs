@@ -103,6 +103,10 @@ pub struct Model {
         default_expr = "Expr::cust(\"'{}'::jsonb\")"
     )]
     pub plugin_epochs: Json,
+    /// How many times its attempt was handed back for plugin SQL contention
+    /// (`judging::fault::CONTENTION_HANDBACKS` caps it).
+    #[sea_orm(default_value = 0)]
+    pub contended_handbacks: i32,
 
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeUtc,

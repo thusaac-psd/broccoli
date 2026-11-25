@@ -363,8 +363,7 @@ refused (`QUEUE_UNREACHABLE`), an operation the queue lost
 (`NO_CAPABLE_WORKER`), a plugin the unit needs that stopped being loaded on
 the replica that claimed it (`PLUGIN_NOT_LOADED_HERE`), a statement the
 dispatch or its plugins ran that the database could not serve
-(`DATABASE_UNAVAILABLE`): the database lost, its pool or the plugin's own SQL
-permits with nothing free in time. One rule records it,
+(`DATABASE_UNAVAILABLE`): the database lost. One rule records it,
 `host_funcs::host_db`: plugin SQL where every unavailable statement ends
 (`host_funcs::sql::unavailable`, through `host_db::fail_under`), the host's
 own SQL in a host function through `host_db::failed`, and the dispatch's own
@@ -372,7 +371,15 @@ statements (reading the inputs, stamping their version) through
 `host_db::dispatch_failed`, as `common::db::outage` decides it. Each of these
 faults is a hand-back
 (`SystemErrorClass::HandBack`): the platform lost the attempt, and it never
-becomes a verdict. The judging session ends as `Lost` before another result
+becomes a verdict. Plugin SQL that found no connection or permit free in
+time, for a call that held none, is contention with the work running beside
+it (`DATABASE_BUSY`, `DispatchFault::SqlContended`): it hands back the same
+way, but only `CONTENTION_HANDBACKS` (5) times per unit, counted on the
+unit's row (`contended_handbacks`) so the cap holds across replicas, and is a
+failure judging the submission after that, within its retry budget. A plugin
+that waits for a connection while its own call already holds one (an open
+transaction) is failing on its own: the call answers it an error, and the
+attempt spends the submission's budget as any plugin error does. The judging session ends as `Lost` before another result
 reaches the plugin, a plugin write that would finalize the judgement is fenced
 out like a stale dispatch's, and the dispatch ends through `fail_dispatch`,
 which sends the judgement back to `Queued` under a fresh epoch spending

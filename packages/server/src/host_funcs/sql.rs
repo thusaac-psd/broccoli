@@ -56,7 +56,10 @@ impl PluginSql {
         statement: impl AsyncFnOnce(&mut common::db::PooledConnection) -> Result<T, sea_orm::DbErr>,
     ) -> Result<Result<T, sea_orm::DbErr>, crate::plugin_db::Unavailable> {
         let lease = self.lease(plugin_id, call).await?;
-        let (mut conn, pid) = match settle(by_deadline(call.deadline, lease.connection()).await?)? {
+        let (mut conn, pid) = match crate::plugin_db::Unavailable::settle_acquire(
+            by_deadline(call.deadline, lease.connection()).await?,
+            lease.reused,
+        )? {
             Ok(opened) => opened,
             Err(e) => return Ok(Err(e)),
         };
@@ -238,13 +241,15 @@ fn settle<T>(
 /// now, which says nothing about the request, so callers answer it with "try
 /// again". Every way plugin SQL becomes unavailable ends here, so the call
 /// names why by one mapping: a database that cannot be reached fails it as
-/// `DATABASE_UNAVAILABLE`; a pool with no connection free in time, the
-/// host's or the plugin's own SQL permits, as `DATABASE_BUSY`; a statement
-/// cut at its deadline, an unloaded plugin or an unprovisioned role as the
-/// plugin's `PLUGIN_UNAVAILABLE`. Under a dispatch the database's two are
-/// the platform's, not the submission's: [`super::host_db::fail_under`] also
-/// records them on the dispatch, which hands the attempt back instead of
-/// spending its budget.
+/// `DATABASE_UNAVAILABLE`, the platform's, which under a dispatch hands the
+/// attempt back ([`super::host_db::fail_under`]); no plugin SQL connection or
+/// permit free in time for a call that held none as `DATABASE_BUSY`,
+/// contention, which under a dispatch hands back only up to the unit's
+/// contention cap ([`super::host_db::contended_under`]); a wait on a
+/// connection the call already holds as the call's own error, which the
+/// plugin answers or fails on within its budget; a statement cut at its
+/// deadline, an unloaded plugin or an unprovisioned role as the plugin's
+/// `PLUGIN_UNAVAILABLE`.
 fn unavailable(e: crate::plugin_db::Unavailable) -> extism::Error {
     unavailable_under(
         crate::services::judging::Dispatch::of_current_call().as_ref(),
@@ -262,10 +267,11 @@ fn unavailable_under(
         Unanswered::DatabaseLost => {
             super::host_db::fail_under(dispatch, common::db::Outage::Lost, &e.to_string())
         }
-        Unanswered::DatabaseBusy => {
-            super::host_db::fail_under(dispatch, common::db::Outage::Busy, &e.to_string())
-        }
+        Unanswered::Contended => super::host_db::contended_under(dispatch, &e.to_string()),
         Unanswered::Plugin => plugin_core::executor::fail_unavailable(),
+        // The plugin waits on a connection it holds itself: an error of its
+        // own, which it answers or fails on within its budget.
+        Unanswered::Itself => {}
     }
     extism::Error::new(e)
 }
@@ -273,12 +279,16 @@ fn unavailable_under(
 /// What a call whose SQL is unavailable fails as (see [`unavailable`]).
 #[derive(Debug, PartialEq, Eq)]
 enum Unanswered {
-    /// `DATABASE_UNAVAILABLE`.
+    /// `DATABASE_UNAVAILABLE`: the database is lost, the platform's fault.
     DatabaseLost,
-    /// `DATABASE_BUSY`.
-    DatabaseBusy,
+    /// `DATABASE_BUSY`: no plugin SQL connection was free for a call that
+    /// held none, contention with the work beside it
+    /// (`DispatchFault::SqlContended`, handed back up to a cap).
+    Contended,
     /// `PLUGIN_UNAVAILABLE`.
     Plugin,
+    /// The call's own error: it waited for a connection while holding one.
+    Itself,
 }
 
 impl Unanswered {
@@ -287,7 +297,8 @@ impl Unanswered {
         use common::db::Outage;
         match e {
             Unavailable::Outage(Outage::Lost, _) => Self::DatabaseLost,
-            Unavailable::Outage(Outage::Busy, _) | Unavailable::Busy => Self::DatabaseBusy,
+            Unavailable::Outage(Outage::Busy, _) | Unavailable::Busy => Self::Contended,
+            Unavailable::SelfHeld => Self::Itself,
             Unavailable::Deadline | Unavailable::Unloaded | Unavailable::Unprovisioned(_) => {
                 Self::Plugin
             }
@@ -905,6 +916,7 @@ host_fn!(pub db_begin(user_data: Arc<(String, PluginSql, TransactionMap)>; _inpu
     let call = crate::plugin_db::SqlCall::current();
     let opened = tokio::runtime::Handle::current().block_on(async {
         let lease = pools.lease(plugin_id, &call).await?;
+        let reused = lease.reused;
         let begun = by_deadline(call.deadline, async {
             let txn = lease.db.begin().await?;
             // The backend, so a statement past its deadline can be cancelled.
@@ -916,9 +928,13 @@ host_fn!(pub db_begin(user_data: Arc<(String, PluginSql, TransactionMap)>; _inpu
             Ok::<_, sea_orm::DbErr>((txn, pid))
         })
         .await?;
-        Ok::<_, crate::plugin_db::Unavailable>(begun.map(|(txn, pid)| (txn, pid, lease.permit)))
+        Ok::<_, crate::plugin_db::Unavailable>((
+            begun.map(|(txn, pid)| (txn, pid, lease.permit)),
+            reused,
+        ))
     }).map_err(unavailable)?;
-    let (txn, pid, permit) = settle(opened)
+    let (opened, reused) = opened;
+    let (txn, pid, permit) = crate::plugin_db::Unavailable::settle_acquire(opened, reused)
         .map_err(unavailable)?
         .map_err(|e| {
             error!("DB begin error: {}", e);
@@ -1471,9 +1487,10 @@ mod tests {
         drop(dispatch);
         assert!(faults.get().is_none());
 
-        // Every way plugin SQL finds the database unable to serve it, a lost
-        // database, a saturated pool or no plugin SQL permit free in time,
-        // hands the attempt back.
+        // A lost database is the platform's: the attempt is handed back.
+        // No plugin SQL connection free for a call that held none is
+        // contention with the work beside it: handed back too, but only up
+        // to the unit's contention cap (`SqlContended`).
         for (cause, fault) in [
             (
                 settle::<()>(Err(sea_orm::DbErr::ConnectionAcquire(
@@ -1483,12 +1500,16 @@ mod tests {
                 DispatchFault::DatabaseUnavailable,
             ),
             (
-                settle::<()>(Err(common::db::pool_busy())).unwrap_err(),
-                DispatchFault::DatabaseUnavailable,
+                crate::plugin_db::Unavailable::settle_acquire::<()>(
+                    Err(common::db::pool_busy()),
+                    false,
+                )
+                .unwrap_err(),
+                DispatchFault::SqlContended,
             ),
             (
                 crate::plugin_db::Unavailable::Busy,
-                DispatchFault::DatabaseUnavailable,
+                DispatchFault::SqlContended,
             ),
         ] {
             let (dispatch, faults) = under();
@@ -1499,12 +1520,28 @@ mod tests {
         let (dispatch, faults) = under();
         let _ = unavailable_under(Some(&dispatch), crate::plugin_db::Unavailable::Deadline);
         assert!(faults.get().is_none(), "a deadline cut is the call's own");
+
+        // A call that waits for a connection while it holds one of its own
+        // is the plugin failing on itself: nothing is the platform's, so the
+        // attempt spends the submission's budget as any plugin error does.
+        let held =
+            crate::plugin_db::Unavailable::settle_acquire::<()>(Err(common::db::pool_busy()), true)
+                .unwrap_err();
+        assert!(
+            matches!(held, crate::plugin_db::Unavailable::SelfHeld),
+            "{held}"
+        );
+        let (dispatch, faults) = under();
+        let _ = unavailable_under(Some(&dispatch), held);
+        assert!(faults.get().is_none(), "the plugin's own failure");
     }
 
     /// Plugin SQL that cannot run fails its call by one mapping: a lost
-    /// database as the database's outage, a saturated pool (the host's or
-    /// the plugin's own) as the database being busy, and a deadline cut, an
-    /// unloaded plugin or an unprovisioned role as the plugin's.
+    /// database as the database's outage, no connection free for a call that
+    /// held none as contention (answered as the database being busy), a wait
+    /// on a connection the call holds itself as the call's own error, and a
+    /// deadline cut, an unloaded plugin or an unprovisioned role as the
+    /// plugin's.
     #[test]
     fn unavailable_sql_fails_its_call_as_what_stopped_it() {
         use crate::plugin_db::Unavailable;
@@ -1518,8 +1555,9 @@ mod tests {
             )),
             Unanswered::DatabaseLost
         );
-        assert_eq!(settled(common::db::pool_busy()), Unanswered::DatabaseBusy);
-        assert_eq!(Unanswered::of(&Unavailable::Busy), Unanswered::DatabaseBusy);
+        assert_eq!(settled(common::db::pool_busy()), Unanswered::Contended);
+        assert_eq!(Unanswered::of(&Unavailable::Busy), Unanswered::Contended);
+        assert_eq!(Unanswered::of(&Unavailable::SelfHeld), Unanswered::Itself);
         for plugin in [
             Unavailable::Deadline,
             Unavailable::Unloaded,
@@ -1527,6 +1565,28 @@ mod tests {
         ] {
             assert_eq!(Unanswered::of(&plugin), Unanswered::Plugin, "{plugin}");
         }
+    }
+
+    /// A lease knows whether its call already held its permit: the first
+    /// lease of a call tree takes one, a lease while the call holds it (an
+    /// open transaction, a statement of its own) reuses it, and a wait for
+    /// a connection on that lease is the call waiting on itself.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_lease_knows_whether_its_call_already_held_a_permit() {
+        let (_container, url, _db) = one_connection().await;
+        migrate(&url).await;
+        let sql = plugin_sql(&url).await;
+        let call = crate::plugin_db::SqlCall {
+            locals: Some(Arc::new(plugin_core::executor::CallLocals::default())),
+            ..Default::default()
+        };
+        let first = sql.lease("p", &call).await.expect("leased");
+        assert!(!first.reused, "the call held no permit");
+        let second = sql.lease("p", &call).await.expect("leased");
+        assert!(second.reused, "the call holds the first lease's permit");
+        drop((first, second));
+        let again = sql.lease("p", &call).await.expect("leased");
+        assert!(!again.reused, "nothing held once both ended");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

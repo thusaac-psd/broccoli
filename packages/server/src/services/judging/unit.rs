@@ -1307,6 +1307,21 @@ pub(crate) async fn fail_dispatch(
     if failure.class == SystemErrorClass::HandBack {
         return hand_back(db, unit, id, judge_epoch, None).await;
     }
+    let past_cap;
+    let failure = if failure.class == SystemErrorClass::Contended {
+        if counted_contention(db, unit, id, judge_epoch).await? {
+            return hand_back(db, unit, id, judge_epoch, None).await;
+        }
+        // The unit used its contention hand-backs: the failure is the
+        // submission's to spend a retry on.
+        past_cap = DispatchFailure {
+            class: SystemErrorClass::Judging,
+            ..failure.clone()
+        };
+        &past_cap
+    } else {
+        failure
+    };
     let open_now = unit.open_dispatch("t", "$1", "$2");
     let sql = match unit {
         // A judgement locks its submission first, as every judgement
@@ -1363,6 +1378,34 @@ pub(crate) async fn fail_dispatch(
 /// the in-flight unit. With `unless_open`, the failure is the disable's only
 /// while the unit's type is still parked: if a provider was enabled since, it
 /// is finalized with that failure instead.
+/// Counts one contention hand-back on unit `id` at `judge_epoch`, if it has
+/// any left (`super::fault::CONTENTION_HANDBACKS`): whether it was counted,
+/// so the attempt is handed back.
+async fn counted_contention(
+    db: &DatabaseConnection,
+    unit: Unit,
+    id: i32,
+    judge_epoch: i32,
+) -> Result<bool, DbErr> {
+    Ok(db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!(
+                "UPDATE {table} SET contended_handbacks = contended_handbacks + 1 \
+                  WHERE id = $1 AND judge_epoch = $2 AND contended_handbacks < $3",
+                table = unit.table(),
+            ),
+            [
+                id.into(),
+                judge_epoch.into(),
+                super::fault::CONTENTION_HANDBACKS.into(),
+            ],
+        ))
+        .await?
+        .rows_affected()
+        == 1)
+}
+
 async fn hand_back(
     db: &DatabaseConnection,
     unit: Unit,

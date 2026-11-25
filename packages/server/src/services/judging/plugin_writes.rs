@@ -118,7 +118,7 @@ pub(crate) fn as_recorded<W: PluginWrite>(
         return Some(update);
     };
     let class = SystemErrorClass::of_fault(fault.fault);
-    if class == SystemErrorClass::HandBack {
+    if class.hands_back() {
         return (!update.finalizes()).then_some(update);
     }
     if ends_in_system_error {

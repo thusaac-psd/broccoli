@@ -1490,6 +1490,63 @@ async fn a_type_change_after_a_pending_submission_finds_it() {
     assert!(change.await.unwrap(), "the change sees the submission");
 }
 
+/// An attempt that found no plugin SQL connection free (contention with the
+/// work beside it) is handed back spending nothing, but only
+/// `CONTENTION_HANDBACKS` times per unit, counted on its row: the next one
+/// is a failure judging the submission, so contention that never clears
+/// cannot hand a unit back forever.
+#[tokio::test]
+async fn a_contended_attempt_is_handed_back_only_up_to_its_cap() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    new_submission(&db).await;
+    let contended = || {
+        DispatchFailure::from(super::fault::Recorded {
+            fault: DispatchFault::SqlContended,
+            message: "no plugin SQL connection was free".into(),
+        })
+    };
+    for handed_back in 1..=super::fault::CONTENTION_HANDBACKS {
+        let claimed = claim_one(&db, "srv").await;
+        assert_eq!(
+            fail_dispatch(
+                &db,
+                Unit::Judgement,
+                claimed.judgement.id,
+                claimed.judgement.judge_epoch,
+                &contended(),
+            )
+            .await
+            .unwrap(),
+            DispatchFailed::HandedBack,
+            "hand-back {handed_back}"
+        );
+        let j = judgement(&db, claimed.judgement.id).await;
+        assert_eq!(j.status, SubmissionStatus::Queued);
+        assert_eq!(j.contended_handbacks, handed_back);
+    }
+    let claimed = claim_one(&db, "srv").await;
+    assert_eq!(
+        fail_dispatch(
+            &db,
+            Unit::Judgement,
+            claimed.judgement.id,
+            claimed.judgement.judge_epoch,
+            &contended(),
+        )
+        .await
+        .unwrap(),
+        DispatchFailed::SystemError,
+        "past the cap the failure is the submission's"
+    );
+    let j = judgement(&db, claimed.judgement.id).await;
+    assert_eq!(j.status, SubmissionStatus::SystemError);
+    assert_eq!(
+        j.error_code.as_deref(),
+        Some(HostCode::DatabaseBusy.as_str())
+    );
+    assert!(!j.error_stands, "within its retry budget");
+}
+
 /// An attempt the platform lost (the queue was unreachable or lost an
 /// operation, its worker lacks a platform tool, or no worker takes work)
 /// goes back to the queue however often it happens, never finalized and with
