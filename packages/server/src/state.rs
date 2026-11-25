@@ -80,38 +80,14 @@ impl AppState {
         &self,
         kind: broccoli_api_types::visibility::Provided,
     ) -> std::collections::HashSet<String> {
-        use broccoli_api_types::visibility::Provided;
         let mut known = self.plugin_lifecycle.recorded_keys(kind);
-        let registries = &self.registries;
-        match kind {
-            Provided::ContestType => known.extend(
-                registries
-                    .contest_type_registry
-                    .read()
-                    .await
-                    .keys()
-                    .cloned(),
-            ),
-            Provided::ProblemType => {
-                known.extend(registries.evaluator_registry.read().await.keys().cloned())
-            }
-            Provided::CheckerFormat => known.extend(
-                registries
-                    .checker_stage_registry
-                    .read()
-                    .await
-                    .keys()
-                    .cloned(),
-            ),
-            Provided::Language => known.extend(
-                registries
-                    .language_resolver_registry
-                    .read()
-                    .await
-                    .keys()
-                    .cloned(),
-            ),
-        }
+        known.extend(
+            crate::providers::Loaded::here(&self.registries)
+                .await
+                .of(kind)
+                .keys()
+                .cloned(),
+        );
         known
     }
 
