@@ -536,6 +536,14 @@ pub struct ConfigNamespace {
     /// and nowhere else; a plugin declares at most one.
     #[serde(default)]
     pub checker_source: bool,
+    /// Whether judging reads this namespace: a change to one of its stored
+    /// configs changes what a problem is judged with, so it counts in the
+    /// inputs version of every problem the config reaches (a contest-scope
+    /// config each problem of the contest, a plugin-scope one every
+    /// problem). A `checker_source` namespace is one whether it says so or
+    /// not ([`ConfigNamespace::is_judging_input`]).
+    #[serde(default)]
+    pub judging_input: bool,
     /// The plugin function that checks an admin's write to this namespace
     /// beyond its schema (see `types::ConfigValidateInput`). The host stores
     /// nothing it refuses, and lists stored configs it now refuses on the
@@ -659,6 +667,11 @@ pub fn keep_withheld(
 }
 
 impl ConfigNamespace {
+    /// Whether judging reads this namespace (see [`Self::judging_input`]).
+    pub fn is_judging_input(&self) -> bool {
+        self.judging_input || self.checker_source
+    }
+
     /// Replaces each secret field of `value` that holds a value with `null`,
     /// and returns the paths of those fields: what a read may say about a
     /// secret, that it is set.

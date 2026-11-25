@@ -11,6 +11,7 @@ entry = "batch_evaluator.wasm"
 permissions = ["logger", "plugin:register", "operations:dispatch", "checker:resolve", "checker:interpret", "language:resolve", "config:read"]
 
 [config.sandbox]
+judging_input = true
 description = "Sandbox resource limits for compilation and execution steps"
 scopes = ["plugin"]
 

@@ -216,6 +216,22 @@ let config: ContestConfig = host.config.get_contest(contest_id, "contest")?.pars
 `GET …/config/cascade`（`/problems/{id}`、`/contests/{id}` 和 `/contests/{id}/problems/{problem_id}`）显示每个作用域
 继承的内容；以及宿主决定提交运行哪些资源级钩子（插件的任一命名空间在该处开启时，该插件即运行）。
 
+## 标记评测读取的配置
+
+对插件评测时读取的每个命名空间（沙箱限制、检查器选项、题目的子任务）声明
+`judging_input = true`：
+
+```toml
+[config.sandbox]
+judging_input = true
+scopes = ["plugin"]
+```
+
+此后该命名空间某条已存配置的变更，会计为它所涉及的每道题目评测输入的变更：题目或竞赛题目的配置涉及
+该题目，竞赛的配置涉及该竞赛的每道题目，插件作用域的配置涉及所有题目。变更之前完成的评测只有加上
+`force` 才会被应用，并显示为基于较早的输入评测。其他命名空间（榜单、显示设置）的变更不影响已有评测。
+`checker_source` 命名空间无论是否声明，都是评测输入。
+
 ## 保存题目的检查器源代码
 
 若检查器插件的格式要编译题目自带的检查器（例如 testlib），插件应声明一个题目作用域、带

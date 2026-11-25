@@ -1134,6 +1134,7 @@ async fn scope_fixture_to(app: &TestApp, governed_type: &str) {
                 "languages": [],
                 "unchecked_problem_types": [],
                 "hooks": [],
+                "judging_inputs": [],
             })
             .into()],
         ))

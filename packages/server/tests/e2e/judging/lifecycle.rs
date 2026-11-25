@@ -373,7 +373,7 @@ async fn a_submission_whose_plugin_is_loaded_nowhere_is_refused_until_one_loads_
             "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
              ('absent-checker', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [], \
                \"problem_types\": [], \"checker_formats\": [\"absent-format\"], \
-               \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": []}')"
+               \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}')"
                 .to_string(),
         ))
         .await

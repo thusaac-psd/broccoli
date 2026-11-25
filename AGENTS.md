@@ -368,12 +368,15 @@ binaries warn about every key they do not read.
   through one rule, `plugin_lifecycle::accepting_handler`, which refuses a
   contest type no provider can judge now; a new submit path calls it too.
 - Everything judging reads of a problem (test cases, limits, type, checker
-  format, additional files, problem-scoped and contest-problem configs) is
-  versioned as one in `problem.inputs_version`, counted by database triggers
+  format, additional files, its contests' types, and the configs of every
+  namespace a manifest marks `judging_input` at each scope the cascade reads:
+  problem, contest problem, contest, plugin) is versioned as one in
+  `problem.inputs_version`, counted by database triggers
   (`services::judging::inputs`), never by a write path: a new input table gets
-  the trigger. The dispatch stamps the version it read the inputs at on the
-  judgement; applying a judgement of another version needs `force` and marks it
-  `judged_on_earlier_inputs`.
+  the trigger. A namespace judging reads is marked `judging_input`, or its
+  changes count nothing. The dispatch stamps the version it read the inputs at
+  on the judgement; applying a judgement of another version needs `force` and
+  marks it `judged_on_earlier_inputs`.
 - A change to a problem's test data goes through
   `services::test_data::TestDataEdit`, whose commit checks the problem's stored
   configs against the data as the change leaves it and refuses a change that

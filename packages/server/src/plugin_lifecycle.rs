@@ -181,6 +181,11 @@ pub struct Governs {
     /// still knows which background events it is owed
     /// ([`PluginLifecycle::hook_plugins`]).
     pub hooks: Vec<HookTopic>,
+    /// The config namespaces its manifest declares judging reads
+    /// (`ConfigNamespace::is_judging_input`), sorted: a change to one of
+    /// their stored configs counts in the inputs version of the problems it
+    /// reaches (the `broccoli_inputs_changed` trigger, migration m0018).
+    pub judging_inputs: Vec<String>,
 }
 
 /// One topic a plugin hooks, and where its hook runs.
@@ -188,6 +193,19 @@ pub struct Governs {
 pub struct HookTopic {
     pub topic: String,
     pub scope: plugin_core::hook::HookScope,
+}
+
+/// The config namespaces `manifest` declares judging reads, as
+/// [`Governs::judging_inputs`] records them.
+pub fn declared_judging_inputs(manifest: &plugin_core::manifest::PluginManifest) -> Vec<String> {
+    let mut inputs: Vec<String> = manifest
+        .config
+        .iter()
+        .filter(|(_, namespace)| namespace.is_judging_input())
+        .map(|(name, _)| name.clone())
+        .collect();
+    inputs.sort();
+    inputs
 }
 
 /// The hooks `manifest` declares, as [`Governs::hooks`] records them.
@@ -1256,18 +1274,26 @@ async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
         .map(|(problem_type, _)| problem_type)
         .collect();
     unchecked_problem_types.sort();
-    let hooks = state
+    let (hooks, judging_inputs) = state
         .plugins
         .get_registry()
         .read()
         .ok()
-        .and_then(|r| r.get(plugin_id).map(|e| declared_hooks(&e.manifest)))
+        .and_then(|r| {
+            r.get(plugin_id).map(|e| {
+                (
+                    declared_hooks(&e.manifest),
+                    declared_judging_inputs(&e.manifest),
+                )
+            })
+        })
         .unwrap_or_default();
     Governs {
         visibility,
         provides: Provides::registered_by(&state.registries, plugin_id).await,
         unchecked_problem_types,
         hooks,
+        judging_inputs,
     }
 }
 
@@ -2155,11 +2181,11 @@ mod tests {
             serde_json::json!({"visibility": false, "contest_types": ["x"]}),
             serde_json::json!({
                 "visibility": false, "contest_types": [], "problem_types": [], "checker_formats": [],
-                "languages": [], "unchecked_problem_types": [], "hooks": [], "host_locale": null,
+                "languages": [], "unchecked_problem_types": [], "hooks": [], "judging_inputs": [], "host_locale": null,
             }),
             serde_json::json!({
                 "visibility": "no", "contest_types": [], "problem_types": [], "checker_formats": [],
-                "languages": [], "unchecked_problem_types": [], "hooks": [],
+                "languages": [], "unchecked_problem_types": [], "hooks": [], "judging_inputs": [],
             }),
             serde_json::json!([]),
         ] {
@@ -2181,6 +2207,7 @@ mod tests {
                 topic: "after_submission".into(),
                 scope: plugin_core::hook::HookScope::Global,
             }],
+            judging_inputs: vec!["checker".into()],
         };
         write(serde_json::to_value(&whole).unwrap())
             .await

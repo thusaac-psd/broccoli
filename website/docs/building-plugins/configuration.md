@@ -299,6 +299,26 @@ inherits from `GET …/config/cascade` (`/problems/{id}`, `/contests/{id}` and
 resource-scoped hooks run for a submission (a plugin runs when any of its
 namespaces is on there).
 
+## Mark what judging reads
+
+Declare `judging_input = true` on every namespace your plugin reads while it
+judges (sandbox limits, a checker's options, a task's subtasks):
+
+```toml
+[config.sandbox]
+judging_input = true
+scopes = ["plugin"]
+```
+
+A change to one of its stored configs then counts as a change to the
+judging inputs of every problem the config reaches: a problem's or contest
+problem's config that problem, a contest's config each problem of the
+contest, and a plugin-scope config every problem. A judgement judged before
+the change is applied only with `force` and shows as judged on earlier
+inputs. A change to any other namespace (standings, display settings) leaves
+judgements as they are. A `checker_source` namespace is a judging input
+whether or not it says so.
+
 ## Hold a problem's checker source
 
 A checker plugin whose formats compile a problem's own checker (testlib, for
