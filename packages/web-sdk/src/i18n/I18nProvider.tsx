@@ -73,7 +73,7 @@ export function I18nProvider({
   );
 
   // The bundled locales are offered before (and without) the server's list.
-  const { data: availableLocales } = useQuery({
+  const localesQuery = useQuery({
     queryKey: ['i18n', 'locales'],
     queryFn: async () => {
       const { data: pluginLocales = [] } = await apiClient.GET('/i18n/locales');
@@ -81,6 +81,14 @@ export function I18nProvider({
       return Array.from(new Set([...coreLocales, ...pluginLocales]));
     },
   });
+
+  const availableLocales = useMemo(
+    () =>
+      localesQuery.isSuccess
+        ? localesQuery.data
+        : Object.keys(embeddedCatalogs),
+    [localesQuery.isSuccess, localesQuery.data, embeddedCatalogs],
+  );
 
   // Plugin translations add to the bundled catalogs; until they arrive, or if
   // they cannot be fetched, the bundled text is shown, which is correct.
@@ -95,8 +103,9 @@ export function I18nProvider({
     // Keep previous translations while loading new ones to prevent UI flickering
     placeholderData: (prev) => prev,
   });
-  // eslint-disable-next-line query/no-defaulted-query-data -- the bundled catalogs stand in for plugin translations that could not load
-  const pluginTranslations = pluginQuery.data ?? EMPTY_TRANSLATIONS;
+  const pluginTranslations = pluginQuery.isSuccess
+    ? pluginQuery.data
+    : EMPTY_TRANSLATIONS;
   const isLoading = pluginQuery.isLoading;
 
   // Default-locale plugin translations, used as a fallback so plugin keys
@@ -114,8 +123,9 @@ export function I18nProvider({
     enabled: locale !== defaultLocale,
     placeholderData: (prev) => prev,
   });
-  // eslint-disable-next-line query/no-defaulted-query-data -- the bundled catalogs stand in for plugin translations that could not load
-  const fallbackPluginTranslations = fallbackQuery.data ?? EMPTY_TRANSLATIONS;
+  const fallbackPluginTranslations = fallbackQuery.isSuccess
+    ? fallbackQuery.data
+    : EMPTY_TRANSLATIONS;
 
   const lookup = useCallback(
     (key: string, params?: MessageParams) => {
@@ -147,21 +157,12 @@ export function I18nProvider({
     () => ({
       locale,
       setLocale,
-      // eslint-disable-next-line query/no-defaulted-query-data -- the embedded catalogs name the locales until the server's list arrives, or if it cannot
-      availableLocales: availableLocales ?? Object.keys(embeddedCatalogs),
+      availableLocales,
       t,
       lookup,
       isLoading,
     }),
-    [
-      locale,
-      setLocale,
-      availableLocales,
-      embeddedCatalogs,
-      t,
-      lookup,
-      isLoading,
-    ],
+    [locale, setLocale, availableLocales, t, lookup, isLoading],
   );
 
   return <I18nContext value={value}>{children}</I18nContext>;

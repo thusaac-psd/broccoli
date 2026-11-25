@@ -73,11 +73,11 @@ export function PrintQueuePage() {
 
   // The station and printer names the filter dropdowns offer. The stations
   // tab polls the same query and says when its refreshes fail.
-  const { data: stationsResp } = useQuery({
+  const { data: stationsResp, isSuccess: stationsLoaded } = useQuery({
     queryKey: ['print', 'stations'],
     queryFn: () => api.listStations(),
   });
-  const stations = stationsResp?.data ?? [];
+  const stations = stationsLoaded ? stationsResp.data : [];
   const stationNames = stations.map((s) => s.name);
   const printerNames = [
     ...new Set(

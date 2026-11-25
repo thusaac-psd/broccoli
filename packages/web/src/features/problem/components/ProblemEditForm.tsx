@@ -23,10 +23,14 @@ import {
   problemRequestBody,
 } from '@/features/admin/problem-form-values';
 import {
+  type Attachment,
   attachmentsQueryKey,
   fetchAttachments,
 } from '@/features/problem/api/attachments';
 import { changedFields } from '@/lib/changed-fields';
+
+/** Offered to the content editor until the attachments load. */
+const NO_ATTACHMENTS: Attachment[] = [];
 
 async function fetchProblem(apiClient: ApiClient, id: number) {
   const { data, error } = await apiClient.GET('/problems/{id}', {
@@ -74,11 +78,13 @@ function ProblemEditFields({
 
   const [formData, setFormData] = useState(initial);
   // Offered to the content editor for embedding only.
-  const attachments =
-    useQuery({
-      queryKey: attachmentsQueryKey(problemIdNum),
-      queryFn: () => fetchAttachments(apiClient, problemIdNum),
-    }).data ?? [];
+  const attachmentsQuery = useQuery({
+    queryKey: attachmentsQueryKey(problemIdNum),
+    queryFn: () => fetchAttachments(apiClient, problemIdNum),
+  });
+  const attachments = attachmentsQuery.isSuccess
+    ? attachmentsQuery.data
+    : NO_ATTACHMENTS;
 
   async function save() {
     const { error } = await apiClient.PATCH('/problems/{id}', {

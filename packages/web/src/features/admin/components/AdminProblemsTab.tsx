@@ -71,6 +71,7 @@ import {
 import { fetchContestProblems } from '@/features/contest/api/fetch-contest-problems';
 import { nextProblemLabel } from '@/features/contest/utils/problem-label';
 import {
+  type Attachment,
   attachmentsQueryKey,
   fetchAttachments,
 } from '@/features/problem/api/attachments';
@@ -78,6 +79,9 @@ import { fetchProblems } from '@/features/problem/api/fetch-problems';
 import { useTableSearchParams } from '@/hooks/use-table-search-params';
 import { changedFields } from '@/lib/changed-fields';
 import { toastUnsettled } from '@/lib/idempotency-feedback';
+
+/** Offered to the content editor until the attachments load. */
+const NO_ATTACHMENTS: Attachment[] = [];
 
 // -- Problem Form Dialog --
 
@@ -173,12 +177,14 @@ function ProblemDialogForm({
 
   // Offered to the content editor for embedding; the attachments section
   // of the form reports its own load failure.
-  const attachments =
-    useQuery({
-      queryKey: attachmentsQueryKey(problemId ?? 0),
-      queryFn: () => fetchAttachments(apiClient, problemId!),
-      enabled: isEdit,
-    }).data ?? [];
+  const attachmentsQuery = useQuery({
+    queryKey: attachmentsQueryKey(problemId ?? 0),
+    queryFn: () => fetchAttachments(apiClient, problemId!),
+    enabled: isEdit,
+  });
+  const attachments = attachmentsQuery.isSuccess
+    ? attachmentsQuery.data
+    : NO_ATTACHMENTS;
 
   // `unsettled`: an earlier attempt to attach it is still running or was cut
   // off, so it may or may not be in the contest yet.

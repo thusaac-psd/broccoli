@@ -18,7 +18,7 @@ export function useContestProblems(contestId: number | undefined) {
   const apiClient = useApiClient();
   const { user } = useAuth();
   const { allowedProblemIds } = useProblemPresentation(contestId, user?.id);
-  const { data } = useQuery({
+  const { data, isSuccess } = useQuery({
     queryKey: ['codelink-bracket-problems', contestId, viewerCacheKey(user)],
     enabled: !!contestId,
     queryFn: async () => {
@@ -34,8 +34,7 @@ export function useContestProblems(contestId: number | undefined) {
       );
     },
   });
-  // eslint-disable-next-line query/no-defaulted-query-data -- an absent problem shows a neutral placeholder, which is what this hook promises
-  const list = (data ?? []).filter(
+  const list = (isSuccess ? data : []).filter(
     (problem) =>
       allowedProblemIds === null ||
       allowedProblemIds.includes(problem.problem_id),
