@@ -179,7 +179,7 @@ test('a boolean reads in words, other values as text', () => {
   );
   assert.equal(valueText(true, { yes: '是', no: '否' }), '是');
   assert.equal(valueText('fast', words), 'fast');
-  assert.equal(valueText(['x'], say), undefined);
+  assert.equal(valueText(['x'], words), undefined);
 });
 
 test('a field left at its default reads its default, the resolved one first', () => {
