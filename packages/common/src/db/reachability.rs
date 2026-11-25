@@ -102,7 +102,7 @@ impl Reachability {
                 Ok((conn, Held(self.clone())))
             }
             Err(e) => {
-                if is_acquire_timeout(&e) && self.busy.load(Ordering::Acquire) > 0 {
+                if is_acquire_timeout(&e) && self.saturated() {
                     return Err(super::pool_busy());
                 }
                 if super::is_outage(&e) {
@@ -112,6 +112,26 @@ impl Reachability {
                 }
                 Err(e)
             }
+        }
+    }
+
+    /// Whether a wait for a connection that runs out now is saturation: some
+    /// connection is checked out, so the wait may be for that one to come
+    /// free. Without one, nothing could be opened.
+    fn saturated(&self) -> bool {
+        self.busy.load(Ordering::Acquire) > 0
+    }
+
+    /// The error a wait for a connection that ran out of a caller's own
+    /// budget answers: busy when the pool is [`saturated`](Self::saturated),
+    /// the acquire timeout otherwise. It records nothing, since a budget
+    /// shorter than the pool's acquire timeout is no evidence the database
+    /// is lost.
+    pub(super) fn wait_expired(&self) -> DbErr {
+        if self.saturated() {
+            super::pool_busy()
+        } else {
+            DbErr::ConnectionAcquire(ConnAcquireErr::Timeout)
         }
     }
 
@@ -164,6 +184,22 @@ mod tests {
 
     fn refused(reach: &Reachability) -> bool {
         reach.pass().is_err()
+    }
+
+    /// A wait that runs out of a caller's own budget answers by the acquire
+    /// timeout's rule, busy while a connection is checked out, and records
+    /// nothing either way.
+    #[test]
+    fn an_expired_wait_is_busy_only_while_a_connection_is_checked_out() {
+        use crate::db::{Outage, outage};
+        let reach = Arc::new(Reachability::default());
+        assert_eq!(outage(&reach.wait_expired()), Some(Outage::Lost));
+        assert!(!refused(&reach));
+        let held = acquire(&reach, Ok(())).unwrap();
+        assert_eq!(outage(&reach.wait_expired()), Some(Outage::Busy));
+        drop(held);
+        assert_eq!(outage(&reach.wait_expired()), Some(Outage::Lost));
+        assert!(!refused(&reach));
     }
 
     #[test]

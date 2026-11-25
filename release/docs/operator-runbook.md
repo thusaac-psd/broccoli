@@ -54,6 +54,18 @@ still serving, raise `health_timeout` or `health_fails` there and restart the
 gateway. A Prometheus scrape of `/metrics` can likewise time out under load;
 give it a scrape timeout of a few seconds.
 
+`/healthz` answers 200 with `"status": "ok"` while no dependency is down, and
+503 with `"status": "degraded"` and the component that is (`"db"`, `"mq"` or
+`"storage"` reads `"down"`) otherwise. `"db": "busy"` means every connection of
+this server's pool is in use: the API answers requests that find no connection
+with the retryable `DATABASE_BUSY` (503 with `Retry-After`) and serves the rest
+as connections come free, so the check stays 200 and an alert on `"down"` does
+not page for it. A server that stays busy needs a larger pool, which comes from
+Postgres `max_connections` and the CPU count (see Database connections below),
+or more servers; a database that is down needs Postgres looked at.
+`"plugins": "degraded"` means a plugin enabled for the fleet is not loaded on
+this server; it does not change the status code.
+
 `/metrics` and the API documentation (`/swagger-ui`, `/scalar`,
 `/api-docs/openapi.json`) answer without authentication, so they are for the
 internal network only: every shipped gateway Caddyfile answers them with 404,

@@ -5,7 +5,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+use sea_orm::{DatabaseBackend, Statement};
 use serde::Serialize;
 use tokio::time::timeout;
 use tracing::{instrument, warn};
@@ -21,11 +21,12 @@ const PROBE_BUDGET: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct HealthResponse {
-    /// Aggregate status: `"ok"` when every probed component is healthy,
-    /// `"degraded"` otherwise.
+    /// Aggregate status: `"ok"` when no probed component is down,
+    /// `"degraded"` otherwise. A busy database is not down.
     #[schema(example = "ok")]
     pub status: String,
-    /// Database probe result: `"ok"` or `"down"`.
+    /// Database probe result: `"ok"`, `"busy"` when every pooled connection
+    /// is in use (the API answers `DATABASE_BUSY` meanwhile), or `"down"`.
     #[schema(example = "ok")]
     pub db: String,
     /// Message-queue (Redis) probe result: `"ok"` or `"down"`.
@@ -59,6 +60,10 @@ pub struct HealthResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Probe {
     Ok,
+    /// Every pooled connection is in use, and the probe found none free: the API
+    /// answers `DATABASE_BUSY` meanwhile and serves requests as connections
+    /// come free, so this does not fail readiness.
+    Busy,
     Down,
 }
 
@@ -66,12 +71,13 @@ impl Probe {
     fn as_str(self) -> &'static str {
         match self {
             Probe::Ok => "ok",
+            Probe::Busy => "busy",
             Probe::Down => "down",
         }
     }
 
     fn healthy(self) -> bool {
-        self == Probe::Ok
+        self != Probe::Down
     }
 
     /// Run `ping` within `PROBE_BUDGET`, logging why it failed.
@@ -80,16 +86,52 @@ impl Probe {
         ping: impl std::future::Future<Output = Result<(), E>>,
     ) -> Self {
         match timeout(PROBE_BUDGET, ping).await {
-            Ok(Ok(())) => Probe::Ok,
-            Ok(Err(e)) => {
-                warn!(component, error = %e, "Health check: ping failed");
-                Probe::Down
-            }
+            Ok(outcome) => Probe::settle(component, outcome, |_| false),
             Err(_) => {
                 warn!(component, "Health check: ping timed out");
                 Probe::Down
             }
         }
+    }
+
+    /// What `outcome` says about `component`: an error `busy` holds for is
+    /// [`Probe::Busy`], any other one [`Probe::Down`].
+    fn settle<E: std::fmt::Display>(
+        component: &'static str,
+        outcome: Result<(), E>,
+        busy: impl Fn(&E) -> bool,
+    ) -> Self {
+        match outcome {
+            Ok(()) => Probe::Ok,
+            Err(e) if busy(&e) => {
+                warn!(component, error = %e, "Health check: every connection is in use");
+                Probe::Busy
+            }
+            Err(e) => {
+                warn!(component, error = %e, "Health check: ping failed");
+                Probe::Down
+            }
+        }
+    }
+
+    /// The database probe. Waiting for a connection and running `SELECT 1`
+    /// share `PROBE_BUDGET`; a wait that outlasts it while the pool is
+    /// saturated reads as busy by the rule the API answers `DATABASE_BUSY` by
+    /// ([`common::db::outage`]), and a statement that does not answer on a
+    /// connection it holds reads as down.
+    async fn database(db: &DatabaseConnection) -> Self {
+        let deadline = tokio::time::Instant::now() + PROBE_BUDGET;
+        let ping = async {
+            let mut conn = db.acquire_within(PROBE_BUDGET).await?;
+            let select = Statement::from_string(DatabaseBackend::Postgres, "SELECT 1");
+            match tokio::time::timeout_at(deadline, conn.execute(select)).await {
+                Ok(outcome) => outcome.map(|_| ()),
+                Err(_) => Err(sea_orm::DbErr::Custom("SELECT 1 timed out".into())),
+            }
+        };
+        Probe::settle("db", ping.await, |e| {
+            common::db::outage(e) == Some(common::db::Outage::Busy)
+        })
     }
 }
 
@@ -127,7 +169,7 @@ pub async fn probe_dependencies(
     blob_store: &dyn common::storage::BlobStore,
 ) -> DependencyHealth {
     let (db, mq, storage) = tokio::join!(
-        Probe::run("db", ping_db(db)),
+        Probe::database(db),
         Probe::run("mq", mq.ping()),
         Probe::run("storage", blob_store.probe()),
     );
@@ -155,15 +197,6 @@ pub async fn compute_health(state: &AppState) -> HealthResponse {
             .to_string(),
         plugins: if plugins_ready { "ok" } else { "degraded" }.to_string(),
     }
-}
-
-async fn ping_db(db: &DatabaseConnection) -> Result<(), sea_orm::DbErr> {
-    db.execute_raw(Statement::from_string(
-        DatabaseBackend::Postgres,
-        "SELECT 1".to_string(),
-    ))
-    .await
-    .map(|_| ())
 }
 
 fn status_code(body: &HealthResponse) -> StatusCode {
@@ -203,8 +236,9 @@ pub async fn livez() -> impl IntoResponse {
     operation_id = "getHealth",
     summary = "Server readiness and dependency health",
     description = "Public, unauthenticated. Pings the database, message queue and blob storage concurrently, \
-                   within a 1.5s total budget. Returns 200 with `status: \"ok\"` when all probed \
-                   components are healthy; 503 with `status: \"degraded\"` otherwise. This is the \
+                   within a 1.5s total budget. Returns 200 with `status: \"ok\"` when no probed \
+                   component is down (a database whose pool is saturated reads `db: \"busy\"` \
+                   and is not down); 503 with `status: \"degraded\"` otherwise. This is the \
                    deep readiness check; load balancers should probe the shallow `GET /livez`, \
                    which makes no dependency calls.",
     responses(
