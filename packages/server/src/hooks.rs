@@ -918,7 +918,14 @@ async fn dispatch_hooks_inner(
                     Ok(action) => action,
                     Err(e) if is_unavailable(&e) => {
                         tracing::warn!(topic, plugin_id = %entry.plugin_id, "Hook unavailable: {e}");
-                        return Err(AppError::PluginUnavailable);
+                        *unanswered = true;
+                        // What stopped it (the plugin, or the database it
+                        // needed) keeps its own code and Retry-After.
+                        return Err(match e.downcast::<PluginError>() {
+                            // Between loads: the plugin is busy, not gone.
+                            Ok(PluginError::NotLoaded(_)) | Err(_) => AppError::PluginUnavailable,
+                            Ok(plugin) => AppError::from(plugin),
+                        });
                     }
                     Err(e) => {
                         tracing::error!(topic, "Hook execution error: {e}");
@@ -2307,6 +2314,85 @@ mod tests {
             matches!(result, Err(AppError::PluginUnavailable)),
             "{result:?}"
         );
+    }
+
+    /// A hook that could not answer because the database could not serve
+    /// it keeps the database's code: a blocking hook failing as the
+    /// database being busy or unreachable answers `DATABASE_BUSY` or
+    /// `DATABASE_UNAVAILABLE` (each with its own `Retry-After`), not the
+    /// plugin's being busy.
+    #[tokio::test]
+    async fn an_unavailable_blocking_hook_keeps_the_databases_code() {
+        struct DatabaseHook {
+            topics: Vec<String>,
+            lost: bool,
+        }
+
+        #[async_trait]
+        impl GenericHook for DatabaseHook {
+            type Context = CallOptions;
+
+            fn id(&self) -> &str {
+                "db"
+            }
+
+            fn topics(&self) -> &[String] {
+                &self.topics
+            }
+
+            async fn on_event(
+                &self,
+                _ctx: CallOptions,
+                _event: &GenericEvent,
+            ) -> anyhow::Result<GenericHookAction> {
+                let (plugin_id, func_name) = ("db".to_string(), "gate".to_string());
+                Err(if self.lost {
+                    PluginError::DatabaseUnavailable {
+                        plugin_id,
+                        func_name,
+                    }
+                } else {
+                    PluginError::DatabaseBusy {
+                        plugin_id,
+                        func_name,
+                    }
+                }
+                .into())
+            }
+        }
+
+        for lost in [false, true] {
+            let registry = new_shared_registry();
+            registry.write().await.hooks.insert(
+                "test".into(),
+                vec![HookEntry {
+                    plugin_id: "db".into(),
+                    function: "on_event".into(),
+                    scope: HookScope::Global,
+                    mode: HookMode::Blocking,
+                    hook: Arc::new(DatabaseHook {
+                        topics: vec!["test".into()],
+                        lost,
+                    }),
+                }],
+            );
+            let result = dispatch_hooks(
+                "test",
+                serde_json::json!({}),
+                None,
+                &registry,
+                CallClass::Interactive,
+            )
+            .await;
+            if lost {
+                assert!(
+                    matches!(result, Err(AppError::DatabaseUnavailable)),
+                    "{result:?}"
+                );
+            } else {
+                assert!(matches!(result, Err(AppError::DatabaseBusy)), "{result:?}");
+            }
+        }
     }
 
     #[tokio::test]
