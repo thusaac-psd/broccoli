@@ -385,11 +385,15 @@ fn live_replicas() -> String {
 /// SQL: the fleet-wide provider of `key` (an SQL expression) of `kind`: the
 /// enabled plugin providing it whose id sorts first, bytewise as Rust sorts
 /// it; NULL when none is enabled. The SQL form of
-/// `PluginLifecycle::provider`.
+/// `PluginLifecycle::provider`. The key is bound before the plugin table is
+/// named, so a caller's alias in `key` is never shadowed.
 pub(crate) fn provider(kind: Provided, key: &str) -> String {
     format!(
-        "(SELECT min(p.id COLLATE \"C\") FROM plugin p \
-           WHERE p.is_enabled AND p.governs->'{field}' @> jsonb_build_array({key}))",
+        "(SELECT min(provider_plugin.id COLLATE \"C\") \
+            FROM (SELECT {key} AS key) provider_key \
+            JOIN plugin provider_plugin \
+              ON provider_plugin.is_enabled \
+             AND provider_plugin.governs->'{field}' @> jsonb_build_array(provider_key.key))",
         field = field(kind),
     )
 }
