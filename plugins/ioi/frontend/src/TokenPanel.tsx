@@ -22,6 +22,7 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { useIoiApi } from './hooks/useIoiApi';
 import { useIoiContestInfo } from './hooks/useIoiContestInfo';
+import { tokenTarget } from './token-target';
 import type { TokenStatusResponse } from './types';
 
 interface TokenPanelProps {
@@ -152,15 +153,11 @@ export function TokenPanel({
   }
   if (!showTokens || !tokenStatus) return null;
 
-  // The submission a token would go to: the one the page shows, or else the
-  // newest of this problem's, whichever the plugin says a token can be spent
-  // on. Its own status cannot say: feedback may withhold it from its owner.
-  const usable = tokenStatus.usable_submissions.filter(
-    (u) => u.problem_id === problemId,
+  const targetId = tokenTarget(
+    tokenStatus.usable_submissions,
+    problemId,
+    submission?.id,
   );
-  const targetId = submission
-    ? usable.find((u) => u.submission_id === submission.id)?.submission_id
-    : usable[0]?.submission_id;
   const canUseToken = targetId !== undefined && tokenStatus.available > 0;
 
   const alreadyTokened =
