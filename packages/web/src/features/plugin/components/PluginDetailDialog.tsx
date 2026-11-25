@@ -135,7 +135,9 @@ function ReplicaFailure({ replica }: { replica: PluginReplica }) {
   if (!text) return null;
   return (
     <div className="space-y-1">
-      <p className="text-destructive">{t(text)}</p>
+      <p className="text-destructive">
+        {t(text, { servers: replica.server_id })}
+      </p>
       {replica.error && (
         <pre className="whitespace-pre-wrap break-words font-mono text-muted-foreground">
           {replica.error}

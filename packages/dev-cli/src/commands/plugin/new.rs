@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
@@ -57,6 +58,10 @@ pub struct NewPluginArgs {
     pub sdk: Option<PathBuf>,
 }
 
+/// What to say when no flag chose the scaffold and none was picked.
+const NO_KIND: &str = "Choose what to scaffold: pass --backend (a Rust/WASM server module), \
+                       --frontend (a React frontend) or --full (both).";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScaffoldKind {
     Backend,
@@ -67,7 +72,9 @@ pub enum ScaffoldKind {
 pub fn run(args: NewPluginArgs) -> Result<()> {
     validate_plugin_name(&args.name)?;
 
-    let kind = determine_kind(&args)?;
+    // The prompt reads the keyboard and draws on stderr.
+    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    let kind = determine_kind(&args, interactive)?;
     let output_dir = args.output.unwrap_or_else(|| PathBuf::from(&args.name));
 
     if output_dir.exists() {
@@ -134,7 +141,9 @@ pub fn run(args: NewPluginArgs) -> Result<()> {
     Ok(())
 }
 
-fn determine_kind(args: &NewPluginArgs) -> Result<ScaffoldKind> {
+/// What to scaffold: the flag given, else what the user picks when there is
+/// a terminal to ask on. Without one, the error names the flags.
+fn determine_kind(args: &NewPluginArgs, interactive: bool) -> Result<ScaffoldKind> {
     if args.backend {
         return Ok(ScaffoldKind::Backend);
     }
@@ -143,6 +152,10 @@ fn determine_kind(args: &NewPluginArgs) -> Result<ScaffoldKind> {
     }
     if args.full {
         return Ok(ScaffoldKind::Full);
+    }
+
+    if !interactive {
+        bail!(NO_KIND);
     }
 
     let options = &[
@@ -160,9 +173,7 @@ fn determine_kind(args: &NewPluginArgs) -> Result<ScaffoldKind> {
         Some(0) => Ok(ScaffoldKind::Backend),
         Some(1) => Ok(ScaffoldKind::Frontend),
         Some(_) => Ok(ScaffoldKind::Full),
-        None => bail!(
-            "No scaffold kind selected. Use --backend, --frontend, or --full in non-interactive mode."
-        ),
+        None => bail!(NO_KIND),
     }
 }
 
@@ -311,6 +322,35 @@ mod tests {
     use broccoli_types::manifest::PluginManifest;
 
     use super::*;
+
+    /// Without a terminal there is nothing to ask on: the error names the
+    /// flags that choose the scaffold, never a terminal IO error.
+    #[test]
+    fn without_a_terminal_the_scaffold_kind_comes_from_a_flag() {
+        let args = |backend, frontend, full| NewPluginArgs {
+            name: "my-plugin".into(),
+            backend,
+            frontend,
+            full,
+            output: None,
+            sdk: None,
+        };
+        let err = determine_kind(&args(false, false, false), false)
+            .unwrap_err()
+            .to_string();
+        for flag in ["--backend", "--frontend", "--full"] {
+            assert!(err.contains(flag), "{err}");
+        }
+        assert!(!err.contains("terminal"), "{err}");
+        assert_eq!(
+            determine_kind(&args(true, false, false), false).unwrap(),
+            ScaffoldKind::Backend
+        );
+        assert_eq!(
+            determine_kind(&args(false, false, true), false).unwrap(),
+            ScaffoldKind::Full
+        );
+    }
 
     #[test]
     fn scaffolded_plugin_toml_parses_for_every_kind() {

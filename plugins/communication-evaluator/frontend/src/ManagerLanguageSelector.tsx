@@ -1,9 +1,16 @@
-import { useRegistries } from '@broccoli/web-sdk/hooks';
+import {
+  loadedData,
+  registryChoiceLabel,
+  registryChoices,
+  useQueryState,
+  useRegistries,
+} from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { ConfigFieldSlotProps } from '@broccoli/web-sdk/slot';
 import { InheritedAnnotation, InheritedBadge } from '@broccoli/web-sdk/slot';
 import {
   Label,
+  QueryErrorState,
   Select,
   SelectContent,
   SelectItem,
@@ -21,8 +28,9 @@ export function ManagerLanguageSelector({
   inheritedSource,
 }: ConfigFieldSlotProps) {
   const { t } = useTranslation();
-  const { data, isLoading } = useRegistries();
-  const languages = data?.languages ?? [];
+  const registries = useQueryState(useRegistries());
+  const languages = loadedData(registries)?.languages;
+  const isLoading = registries.status === 'loading';
 
   const selectedValue = showAsPlaceholder
     ? ''
@@ -34,9 +42,14 @@ export function ManagerLanguageSelector({
       ? inheritedValue
       : undefined;
 
-  // If current value is not in the list, show it as fallback to prevent data loss
-  const hasCurrentValue =
-    selectedValue !== '' && languages.some((lang) => lang.id === selectedValue);
+  // A stored language this server does not register stays chosen, shown as
+  // unavailable.
+  const choices = registryChoices(
+    languages?.map((lang) => lang.id),
+    selectedValue,
+  );
+  const nameOf = (id: string) =>
+    languages?.find((lang) => lang.id === id)?.name ?? id;
 
   return (
     <div className="flex flex-col gap-2">
@@ -55,7 +68,7 @@ export function ManagerLanguageSelector({
       <Select
         value={selectedValue || undefined}
         onValueChange={(v) => onChange(v)}
-        disabled={isLoading}
+        disabled={languages === undefined}
       >
         <SelectTrigger aria-label={label}>
           <SelectValue
@@ -69,16 +82,16 @@ export function ManagerLanguageSelector({
           />
         </SelectTrigger>
         <SelectContent>
-          {languages.map((lang) => (
-            <SelectItem key={lang.id} value={lang.id}>
-              {lang.name}
+          {choices.map((choice) => (
+            <SelectItem key={choice.value} value={choice.value}>
+              {registryChoiceLabel(choice, nameOf(choice.value), t)}
             </SelectItem>
           ))}
-          {selectedValue && !hasCurrentValue && !isLoading && (
-            <SelectItem value={selectedValue}>{selectedValue}</SelectItem>
-          )}
         </SelectContent>
       </Select>
+      {registries.status === 'error' && (
+        <QueryErrorState state={registries} className="py-4" />
+      )}
       {inheritedSource && (
         <InheritedAnnotation
           source={inheritedSource}

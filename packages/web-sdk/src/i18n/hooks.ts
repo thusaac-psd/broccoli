@@ -5,6 +5,7 @@ import {
   type DateInput,
   formatDate,
   formatDateTime,
+  formatList,
   formatLongDate,
   formatRelativeSeconds,
   formatRelativeTime,
@@ -31,6 +32,8 @@ export interface Formatters {
   relative: (value: DateInput) => string;
   /** An offset from now in seconds (negative is past), e.g. "in 2 hours". */
   relativeSeconds: (offsetSeconds: number) => string;
+  /** Names joined as the UI language lists them, e.g. "a, b and c". */
+  list: (items: readonly string[]) => string;
 }
 
 export function useFormat(): Formatters {
@@ -43,6 +46,7 @@ export function useFormat(): Formatters {
       time: (value) => formatTime(value, locale),
       relative: (value) => formatRelativeTime(value, serverNow(), locale),
       relativeSeconds: (offset) => formatRelativeSeconds(offset, locale),
+      list: (items) => formatList(items, locale),
     }),
     [locale],
   );

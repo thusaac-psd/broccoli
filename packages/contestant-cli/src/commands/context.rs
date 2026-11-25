@@ -105,11 +105,13 @@ pub fn server_languages(client: &Client) -> Result<Vec<LanguageRegistryItem>> {
     }
 }
 
-/// The languages of the problem a command works on that a plugin closes
-/// now (its `closed_languages`), and the names to call those plugins by.
-/// A language whose plugin is out is in no registry, so this is what says
-/// which plugin a contestant waits for.
+/// What a plugin closes now of the problem a command works on: every
+/// language (its `closed_by`: an evaluator, a checker, or the plugin of its
+/// last open language) and single languages (its `closed_languages`), with
+/// the names to call those plugins by. A language whose plugin is out is in
+/// no registry, so this is what says which plugin a contestant waits for.
 pub struct Closed<'a> {
+    pub problem: Option<ClosedBy>,
     pub languages: Vec<ClosedLanguage>,
     pub names: PluginNames<'a>,
 }
@@ -117,6 +119,7 @@ pub struct Closed<'a> {
 impl Default for Closed<'_> {
     fn default() -> Self {
         Self {
+            problem: None,
             languages: Vec::new(),
             names: PluginNames::ids(),
         }
@@ -124,22 +127,39 @@ impl Default for Closed<'_> {
 }
 
 impl<'a> Closed<'a> {
-    /// The closed languages of `problem_id`, read through its contest when
-    /// there is one, with plugins named by the server's catalog. Read only
-    /// when detection fails; a problem that cannot be read closes none.
+    /// What is closed of `problem_id`, read through its contest when there
+    /// is one, with plugins named by the server's catalog. Read only when
+    /// detection fails; a problem that cannot be read closes nothing.
     pub fn of(client: &'a Client, contest_id: Option<ContestId>, problem_id: ProblemId) -> Self {
         let problem = match contest_id {
             Some(cid) => client.get_contest_problem(cid, problem_id),
             None => client.get_problem(problem_id),
         };
+        let (problem, languages) = match problem {
+            Ok(p) => (p.closed_by, p.closed_languages),
+            Err(_) => (None, Vec::new()),
+        };
         Self {
-            languages: problem.map(|p| p.closed_languages).unwrap_or_default(),
+            problem,
+            languages,
             names: client.plugin_names(),
         }
     }
 
-    /// One line per plugin that closes languages: `c, cpp: closed while ...`.
+    /// Whether no language is open for the problem.
+    fn all(&self) -> bool {
+        self.problem.is_some()
+    }
+
+    /// One line per plugin that closes the problem or its languages: `closed
+    /// by ...` for the problem's own, unless it is a language's, and `c,
+    /// cpp: closed by ...` for languages.
     fn lines(&self) -> Vec<String> {
+        let own = self
+            .problem
+            .as_ref()
+            .filter(|by| !self.languages.iter().any(|l| l.closed_by == **by))
+            .map(|by| format!("closed by {}", closed_by_text(by, &self.names)));
         let mut groups: Vec<(&ClosedBy, Vec<&str>)> = Vec::new();
         for closed in &self.languages {
             match groups.iter_mut().find(|(by, _)| **by == closed.closed_by) {
@@ -147,15 +167,14 @@ impl<'a> Closed<'a> {
                 None => groups.push((&closed.closed_by, vec![&closed.language])),
             }
         }
-        groups
-            .into_iter()
-            .map(|(by, languages)| {
+        own.into_iter()
+            .chain(groups.into_iter().map(|(by, languages)| {
                 format!(
-                    "{}: closed while {}",
+                    "{}: closed by {}",
                     languages.join(", "),
                     closed_by_text(by, &self.names)
                 )
-            })
+            }))
             .collect()
     }
 }
@@ -216,12 +235,18 @@ pub fn resolve_language<'a>(
             extensions: l.extensions.clone(),
         })
         .ok_or_else(|| {
-            let mut message = format!(
-                "Cannot detect a language from the file extensions; specify --language. \
-                 This server supports: {}.",
-                supported(&languages)
-            );
-            for line in closed().lines() {
+            let closed = closed();
+            // With no language open, no --language would be taken.
+            let mut message = if closed.all() || languages.is_empty() {
+                "No language is open for this problem right now.".to_string()
+            } else {
+                format!(
+                    "Cannot detect a language from the file extensions; specify --language. \
+                     This server supports: {}.",
+                    supported(&languages)
+                )
+            };
+            for line in closed.lines() {
                 message.push_str("\n  ");
                 message.push_str(&line);
             }
@@ -231,9 +256,6 @@ pub fn resolve_language<'a>(
 
 /// `id (.ext, .ext)` for each language, for error messages.
 fn supported(languages: &[LanguageRegistryItem]) -> String {
-    if languages.is_empty() {
-        return "no language right now".into();
-    }
     languages
         .iter()
         .map(|l| {
@@ -345,6 +367,7 @@ mod tests {
             reason,
         };
         let closed = || Closed {
+            problem: None,
             languages: vec![
                 ClosedLanguage {
                     language: "c".into(),
@@ -361,23 +384,97 @@ mod tests {
             ],
             names: broccoli_cli_core::model::PluginNames::ids(),
         };
-        let err = resolve_language(&files(&["main.cpp"]), None, || Ok(Vec::new()), closed)
-            .unwrap_err()
-            .to_string();
+        let err = resolve_language(
+            &files(&["main.cpp"]),
+            None,
+            || Ok(vec![lang("python", &["py"])]),
+            closed,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(
             err.contains(
-                "c, cpp: closed while its language plugin standard-languages: \
-                 disabled until an administrator enables it"
+                "c, cpp: closed by its language plugin standard-languages \
+                 (disabled until an administrator enables it)"
             ),
             "{err}"
         );
         assert!(
             err.contains(
-                "java: closed while its language plugin extra-languages: \
-                 loaded on no server until one loads it"
+                "java: closed by its language plugin extra-languages \
+                 (loaded on no server until one loads it)"
             ),
             "{err}"
         );
+        assert!(!err.contains(": closed while"), "{err}");
         assert!(!err.contains("no language plugin is loaded"), "{err}");
+    }
+
+    /// A problem no language is open for (its evaluator out, or every
+    /// language closed) says so and names why, never asking for a
+    /// `--language` no answer would take.
+    #[test]
+    fn a_problem_no_language_is_open_for_names_why_without_asking_for_a_language() {
+        use broccoli_cli_core::api::visibility::{
+            ClosedBy, ClosedLanguage, ClosedReason, Provided,
+        };
+        let evaluator = ClosedBy {
+            plugin_id: "batch-evaluator".into(),
+            provides: Provided::ProblemType,
+            reason: ClosedReason::Disabled,
+        };
+        let err = resolve_language(
+            &files(&["main.cpp"]),
+            None,
+            || Ok(vec![lang("python", &["py"])]),
+            || Closed {
+                problem: Some(evaluator.clone()),
+                languages: Vec::new(),
+                names: PluginNames::ids(),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.starts_with("No language is open for this problem right now"),
+            "{err}"
+        );
+        assert!(!err.contains("--language"), "{err}");
+        assert!(
+            err.contains(
+                "closed by its evaluator plugin batch-evaluator \
+                 (disabled until an administrator enables it)"
+            ),
+            "{err}"
+        );
+
+        // Every language closed by its plugin: the problem's own closure is
+        // that plugin, named once.
+        let languages = ClosedBy {
+            plugin_id: "standard-languages".into(),
+            provides: Provided::Language,
+            reason: ClosedReason::Disabled,
+        };
+        let err = resolve_language(
+            &files(&["main.cpp"]),
+            None,
+            || Ok(Vec::new()),
+            || Closed {
+                problem: Some(languages.clone()),
+                languages: vec![ClosedLanguage {
+                    language: "cpp".into(),
+                    closed_by: languages.clone(),
+                }],
+                names: PluginNames::ids(),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.starts_with("No language is open for this problem right now"),
+            "{err}"
+        );
+        assert!(!err.contains("--language"), "{err}");
+        assert_eq!(err.matches("standard-languages").count(), 1, "{err}");
     }
 }

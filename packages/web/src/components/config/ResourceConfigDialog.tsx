@@ -1,5 +1,5 @@
 import { parseApiError, useApiClient } from '@broccoli/web-sdk/api';
-import { useQueryState } from '@broccoli/web-sdk/hooks';
+import { loadedData, useQueryState } from '@broccoli/web-sdk/hooks';
 import {
   pluginKeys,
   usePluginText,
@@ -656,10 +656,7 @@ function SinglePluginContent({
   // A form shown without what it inherits would read the schema's defaults
   // as inherited, so it waits for the cascade and says when it failed.
   const cascade = useQueryState(cascadeQuery);
-  const cascadeEntries =
-    cascade.status === 'data' || cascade.status === 'empty'
-      ? cascade.data
-      : undefined;
+  const cascadeEntries = loadedData(cascade);
   const inheritedByNamespace = useMemo(() => {
     const byNamespace: Record<string, InheritedConfig> = {};
     for (const entry of cascadeEntries ?? []) {

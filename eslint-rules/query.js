@@ -1,23 +1,30 @@
 /**
- * `query.data ?? []` reads a `useQuery` result as if a failed or unfinished
+ * `query.data ?? []` reads a query result as if a failed or unfinished
  * fetch were an empty answer. A query whose data is read with a fallback is
  * rendered through `QueryView` (`query={query}`) or `useQueryState(query)`,
  * which keep loading, failure and empty apart, or its failure is read
  * (`query.isError`); the fallback is then only what the view shows while the
  * state says why. A hook that returns the query leaves that to its caller.
- * A destructured query (`const { data: x } = useQuery(...)`, a second
- * destructure of a stored one, or the `...rest` of either) is held to the
- * same rule, and so is a read through a member chain (`x?.items ?? []`)
- * and a query no name holds (`useQuery(...).data ?? []`). A default that is
- * deliberate is the query's own (`initialData`), never a fallback at a read.
+ *
+ * A query result is whatever has one's type (`data`, `isError`, `refetch`
+ * and `fetchStatus`): a `useQuery` call, a hook that returns one
+ * (`useRegistries()`), an element of `useQueries`, a prop, an alias or a
+ * conditional choosing one. Without type information, only the `useQuery`
+ * hooks by name. A fallback is `x ?? f`, `x || f`, or a conditional on the
+ * read (`x ? g(x) : f`, `x == null ? f : x`), through any member chain
+ * (`x?.items ?? []`), on a destructured or stored `data` (`const { data } =
+ * q`, `const rows = q.data`) and on the `...rest` of a destructure. A default
+ * that is deliberate is the query's own (`initialData`), never a fallback at
+ * a read.
  */
 
 const QUERY_HOOKS = /^use(Suspense)?(Infinite)?Query$/;
 const RENDERERS = new Set(['useQueryState', 'queryState']);
+/** The properties a query result has and a view state does not. */
+const QUERY_SHAPE = ['data', 'isError', 'refetch', 'fetchStatus'];
 
-/** Whether `ref` hands the query to something that renders its state. */
-function rendersState(ref) {
-  const node = ref.identifier;
+/** Whether `node` hands the query to something that renders its state. */
+function rendersState(node) {
   const parent = node.parent;
   if (
     parent.type === 'CallExpression' &&
@@ -64,11 +71,10 @@ const STATE = new Set([
 ]);
 
 /**
- * Whether `ref` reads the query's state (`query.isError`), or hands the
+ * Whether `node` reads the query's state (`query.isError`), or hands the
  * query on (`return query`, `return { query }`) to a caller that does.
  */
-function handlesState(ref) {
-  const node = ref.identifier;
+function handlesState(node) {
   const parent = node.parent;
   if (
     parent.type === 'MemberExpression' &&
@@ -87,7 +93,7 @@ function handlesState(ref) {
   );
 }
 
-/** Whether `node` calls a query hook (`useQuery(...)`). */
+/** Whether `node` calls a query hook by name (`useQuery(...)`). */
 function isQueryCall(node) {
   return (
     node?.type === 'CallExpression' &&
@@ -115,17 +121,43 @@ function chainTop(node) {
   }
 }
 
+/** Whether `node` is `null` or `undefined`. */
+function isNullish(node) {
+  return (
+    (node.type === 'Literal' && node.value === null) ||
+    (node.type === 'Identifier' && node.name === 'undefined')
+  );
+}
+
 /**
  * Whether `node`'s value, read through any member chain, falls back:
- * `x ?? []`, `x?.items || []`.
+ * `x ?? []`, `x?.items || []`, `x ? f(x) : []`, `!x ? [] : x`,
+ * `x === undefined ? [] : x`. `x ?? null` substitutes nothing and is not
+ * one.
  */
 function fallsBack(node) {
   const top = chainTop(node);
-  const logical = top.parent;
+  const parent = top.parent;
+  if (
+    parent?.type === 'LogicalExpression' &&
+    (parent.operator === '??' || parent.operator === '||') &&
+    parent.left === top
+  ) {
+    // `x ?? undefined` substitutes nothing: it only says absent one way.
+    return !isNullish(parent.right);
+  }
+  let test = top;
+  if (parent?.type === 'UnaryExpression' && parent.operator === '!') {
+    test = parent;
+  } else if (
+    parent?.type === 'BinaryExpression' &&
+    ['==', '===', '!=', '!=='].includes(parent.operator) &&
+    isNullish(parent.left === top ? parent.right : parent.left)
+  ) {
+    test = parent;
+  }
   return (
-    logical?.type === 'LogicalExpression' &&
-    (logical.operator === '??' || logical.operator === '||') &&
-    logical.left === top
+    test.parent?.type === 'ConditionalExpression' && test.parent.test === test
   );
 }
 
@@ -140,75 +172,211 @@ function dataOf(node) {
     : null;
 }
 
-/** The variable `pattern` (of `declarator`) declares as `name`. */
-function declared(context, declarator, name) {
-  return context.sourceCode
-    .getDeclaredVariables(declarator)
-    .find((variable) => variable.name === name);
+/** `node` without the wrappers that do not change its value. */
+function unwrap(node) {
+  let at = node;
+  while (at.type === 'TSNonNullExpression' || at.type === 'ChainExpression') {
+    at = at.expression;
+  }
+  return at;
 }
 
-/**
- * A query held whole in `variable` (`const q = useQuery(...)`, or the rest
- * of a destructured one): its `data` read with a fallback is reported,
- * through a second destructure too, unless the query's state is rendered or
- * read beside it.
- */
-function checkQuery(context, variable) {
-  if (
-    !variable ||
-    variable.references.some((ref) => rendersState(ref) || handlesState(ref))
-  ) {
-    return;
+/** The identifier a member chain (`a.b[0]!`) starts from, if any. */
+function rootOf(node) {
+  let at = unwrap(node);
+  while (at.type === 'MemberExpression') at = unwrap(at.object);
+  return at.type === 'Identifier' ? at : null;
+}
+
+/** The variable `name` refers to from `node`. */
+function variableOf(context, node) {
+  let scope = context.sourceCode.getScope(node);
+  for (; scope; scope = scope.upper) {
+    const variable = scope.set.get(node.name);
+    if (variable) return variable;
   }
-  for (const ref of variable.references) {
-    const data = dataOf(ref.identifier);
-    if (data && fallsBack(data)) {
-      context.report({ node: data, messageId: 'defaulted' });
+  return null;
+}
+
+/** Whether `pattern` takes the query's state (`{ data, isError }`). */
+function takesState(pattern) {
+  return pattern.properties.some(
+    (p) =>
+      p.type === 'Property' &&
+      p.key.type === 'Identifier' &&
+      STATE.has(p.key.name),
+  );
+}
+
+function create(context) {
+  const services = context.sourceCode.parserServices;
+  const checker = services?.program?.getTypeChecker();
+  const reported = new Set();
+  const report = (node) => {
+    if (reported.has(node)) return;
+    reported.add(node);
+    context.report({ node, messageId: 'defaulted' });
+  };
+  const text = (node) =>
+    context.sourceCode.getText(node).replace(/\?\./g, '.').replace(/!/g, '');
+
+  /**
+   * Whether the data `node` reads may be missing there: always without
+   * types, and with them unless the code already narrowed it to present
+   * (`q.data && q.data.total ?? 0` reads a field's own default, not a
+   * fallback for the fetch).
+   */
+  function mayBeMissing(node) {
+    if (!checker) return true;
+    const type = services.getTypeAtLocation(node);
+    return checker.getNonNullableType(type) !== type;
+  }
+
+  /** Whether `node` is a query result. */
+  function isQuery(node) {
+    if (!node) return false;
+    if (isQueryCall(node)) return true;
+    if (checker) {
+      const type = services.getTypeAtLocation(node);
+      return QUERY_SHAPE.every((p) => checker.getPropertyOfType(type, p));
     }
-    const declarator = ref.identifier.parent;
-    if (
-      declarator.type === 'VariableDeclarator' &&
-      declarator.init === ref.identifier &&
-      declarator.id.type === 'ObjectPattern'
+    // Without types: a name declared as a query hook's result, or the
+    // `...rest` of a destructure of one that leaves its state in `rest`.
+    if (node.type !== 'Identifier') return false;
+    const def = variableOf(context, node)?.defs[0];
+    if (def?.type !== 'Variable' || !isQueryCall(def.node.init)) return false;
+    return (
+      def.node.id === def.name ||
+      (def.name.parent.type === 'RestElement' &&
+        def.node.id.type === 'ObjectPattern' &&
+        !takesState(def.node.id))
+    );
+  }
+
+  /**
+   * Whether the query `node` is has its state rendered or read anywhere
+   * its variable is: `useQueryState(q)` beside `q.data ?? []`, and
+   * `useQueryState(results[0])` beside `results[0].data ?? []`.
+   */
+  function stateHandled(node) {
+    const root = rootOf(node);
+    if (!root) return false;
+    const variable = variableOf(context, root);
+    if (!variable) return false;
+    const want = text(node);
+    return variable.references.some((ref) => {
+      let at = ref.identifier;
+      for (;;) {
+        if (text(at) === want) return rendersState(at) || handlesState(at);
+        const parent = at.parent;
+        if (
+          (parent?.type === 'MemberExpression' && parent.object === at) ||
+          ((parent?.type === 'TSNonNullExpression' ||
+            parent?.type === 'ChainExpression') &&
+            parent.expression === at)
+        ) {
+          at = parent;
+        } else {
+          return false;
+        }
+      }
+    });
+  }
+
+  /** The variables `pattern`'s declarator or function declares. */
+  function declaredIn(pattern) {
+    let owner = pattern;
+    while (
+      owner &&
+      owner.type !== 'VariableDeclarator' &&
+      !owner.type.includes('Function')
     ) {
-      checkPattern(context, declarator);
+      owner = owner.parent;
     }
+    return owner ? context.sourceCode.getDeclaredVariables(owner) : [];
   }
-}
 
-/**
- * `const { data: x, ...rest } = <query>`: the `data` binding reported where
- * it is read with a fallback, or the default it is given, and `rest` held
- * as the query, unless the pattern also takes the query's state.
- */
-function checkPattern(context, declarator) {
-  const properties = declarator.id.properties;
-  const named = (p) =>
-    p.type === 'Property' && p.key.type === 'Identifier' ? p.key.name : null;
-  if (properties.some((p) => STATE.has(named(p)))) return;
-  for (const property of properties) {
-    if (property.type === 'RestElement') {
-      if (property.argument.type === 'Identifier') {
-        checkQuery(
-          context,
-          declared(context, declarator, property.argument.name),
-        );
-      }
-      continue;
-    }
-    if (named(property) !== 'data') continue;
-    if (property.value.type === 'AssignmentPattern') {
-      context.report({ node: property.value, messageId: 'defaulted' });
-      continue;
-    }
-    if (property.value.type !== 'Identifier') continue;
-    const variable = declared(context, declarator, property.value.name);
+  /** Reports each read of `identifier`'s variable that falls back. */
+  function checkReads(identifier) {
+    const variable = declaredIn(identifier).find((v) =>
+      v.identifiers.includes(identifier),
+    );
     for (const ref of variable?.references ?? []) {
-      if (fallsBack(ref.identifier)) {
-        context.report({ node: ref.identifier, messageId: 'defaulted' });
+      if (
+        ref.identifier !== identifier &&
+        fallsBack(ref.identifier) &&
+        mayBeMissing(ref.identifier)
+      ) {
+        report(ref.identifier);
       }
     }
   }
+
+  /**
+   * `{ data: x, ...rest } = <query>`: the `data` binding reported where it
+   * is read with a fallback, or the default it is given, unless the pattern
+   * also takes the query's state.
+   */
+  function checkPattern(pattern) {
+    if (takesState(pattern)) return;
+    for (const property of pattern.properties) {
+      if (
+        property.type !== 'Property' ||
+        property.key.type !== 'Identifier' ||
+        property.key.name !== 'data'
+      ) {
+        continue;
+      }
+      if (property.value.type === 'AssignmentPattern') {
+        report(property.value);
+      } else if (property.value.type === 'Identifier') {
+        checkReads(property.value);
+      }
+    }
+  }
+
+  return {
+    // A destructure of a query: `const { data } = q`, `[{ data }] = qs`,
+    // a component's `{ query: { data } }`.
+    ObjectPattern(node) {
+      const declarator = node.parent;
+      const value =
+        declarator.type === 'VariableDeclarator' && declarator.id === node
+          ? declarator.init
+          : node;
+      if (!isQuery(value)) return;
+      if (value !== node && value.type === 'Identifier' && stateHandled(value))
+        return;
+      checkPattern(node);
+    },
+    // `const rows = q.data`: an alias of the data is read as the data.
+    VariableDeclarator(node) {
+      if (node.id.type !== 'Identifier' || !node.init) return;
+      const init = unwrap(node.init);
+      if (
+        init.type !== 'MemberExpression' ||
+        dataOf(init.object) !== init ||
+        !isQuery(init.object) ||
+        stateHandled(init.object)
+      ) {
+        return;
+      }
+      checkReads(node.id);
+    },
+    // `q.data ?? []`, `useQuery(o).data ?? []`, `results[0].data ?? []`.
+    MemberExpression(node) {
+      if (
+        dataOf(node.object) !== node ||
+        !fallsBack(node) ||
+        !mayBeMissing(node) ||
+        !isQuery(node.object) ||
+        stateHandled(node.object)
+      ) {
+        return;
+      }
+      report(node);
+    },
+  };
 }
 
 const noDefaultedQueryData = {
@@ -220,28 +388,7 @@ const noDefaultedQueryData = {
     },
     schema: [],
   },
-  create(context) {
-    return {
-      VariableDeclarator(node) {
-        if (!isQueryCall(node.init)) return;
-        if (node.id.type === 'ObjectPattern') {
-          checkPattern(context, node);
-        } else if (node.id.type === 'Identifier') {
-          checkQuery(context, declared(context, node, node.id.name));
-        }
-      },
-      // `useQuery(...).data ?? []`: a query no one can ask about.
-      MemberExpression(node) {
-        if (
-          isQueryCall(node.object) &&
-          dataOf(node.object) === node &&
-          fallsBack(node)
-        ) {
-          context.report({ node, messageId: 'defaulted' });
-        }
-      },
-    };
-  },
+  create,
 };
 
 export default {

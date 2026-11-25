@@ -43,6 +43,8 @@ import { testCaseDiffStatus } from './testCaseDiff';
 const NO_JUDGEMENTS: SubmissionJudgement[] = [];
 
 const PRESERVE_TARGET_WORKER = '__preserve__';
+/** The note, never a choice, that the live workers could not load. */
+const WORKERS_FAILED = '__workers-failed__';
 
 interface Props {
   submissionId: number;
@@ -69,8 +71,8 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
   // Worker list only feeds the admin worker-pin dropdown below, so only fetch
   // (and poll) it for system admins. Without this gate the admin-only overview
   // endpoint 403-loops for every contestant viewing a submission.
-  const { data: systemOverview } = useSystemOverview({ enabled: canPinWorker });
-  const liveWorkers = systemOverview?.workers ?? [];
+  const overview = useSystemOverview({ enabled: canPinWorker });
+  const liveWorkers = overview.data?.workers;
 
   const judgementsQuery = useQuery({
     queryKey: submissionViewKeys.judgements(submissionId),
@@ -226,11 +228,16 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
                 <option value="">
                   {t('submissionDetail.workerSharedPool')}
                 </option>
-                {liveWorkers.map((worker) => (
+                {liveWorkers?.map((worker) => (
                   <option key={worker.id} value={worker.id}>
                     {worker.id}
                   </option>
                 ))}
+                {overview.isError && (
+                  <option value={WORKERS_FAILED} disabled>
+                    {t('submissionDetail.workersUnavailable')}
+                  </option>
+                )}
               </select>
             )}
             <Button

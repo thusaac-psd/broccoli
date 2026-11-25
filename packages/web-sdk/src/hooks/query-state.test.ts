@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { RequestError } from '../api/errors.ts';
-import { type QueryLike, queryState } from './query-state.ts';
+import { loadedData, type QueryLike, queryState } from './query-state.ts';
 
 function query<T>(fields: Partial<QueryLike<T>>): QueryLike<T> {
   return {
@@ -101,4 +101,29 @@ test('a first load that failed shows its failure while it is retried', () => {
   assert.equal(state.status, 'error');
   assert.equal(state.status === 'error' && state.error, error);
   assert.equal(state.status === 'error' && state.retrying, true);
+});
+
+test('loadedData is the data once it arrived, and nothing before', () => {
+  const retry = () => {};
+  assert.equal(loadedData({ status: 'loading' }), undefined);
+  assert.equal(loadedData({ status: 'idle' }), undefined);
+  assert.equal(
+    loadedData({
+      status: 'error',
+      error: new Error('x'),
+      kind: 'server',
+      retry,
+      retrying: false,
+    }),
+    undefined,
+  );
+  const rows = [1];
+  assert.equal(
+    loadedData({ status: 'data', data: rows, refreshError: null, retry }),
+    rows,
+  );
+  assert.deepEqual(
+    loadedData({ status: 'empty', data: [], refreshError: 'x', retry }),
+    [],
+  );
 });

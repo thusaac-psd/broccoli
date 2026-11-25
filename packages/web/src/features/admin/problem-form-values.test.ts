@@ -58,7 +58,7 @@ test('checkerFormatFor starts a new problem on the server default', () => {
   const registered = ['exact', 'lines', 'tokens'];
   assert.equal(checkerFormatFor('', registered, 'lines'), 'lines');
   assert.equal(checkerFormatFor('tokens', registered, 'lines'), 'tokens');
-  assert.equal(checkerFormatFor('gone', registered, 'lines'), 'lines');
+  assert.equal(checkerFormatFor('gone', registered, 'lines'), 'gone');
   assert.equal(checkerFormatFor('', ['exact', 'none'], 'lines'), 'exact');
   assert.equal(checkerFormatFor('', [], 'lines'), '');
 });

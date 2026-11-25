@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import {
   formatDateTime,
+  formatList,
   formatRelativeSeconds,
   formatRelativeTime,
 } from './format.ts';
@@ -40,4 +41,11 @@ test('relative time is measured against the clock it is given', () => {
     formatRelativeTime(new Date(AT).toISOString(), AT + 7_200_000, 'en'),
     '2 hours ago',
   );
+});
+
+test('a list is joined as the locale lists names', () => {
+  assert.equal(formatList(['server-2'], 'en'), 'server-2');
+  assert.equal(formatList(['a', 'b'], 'en'), 'a and b');
+  assert.equal(formatList(['a', 'b', 'c'], 'en'), 'a, b, and c');
+  assert.equal(formatList(['a', 'b'], 'zh-CN'), 'a和b');
 });

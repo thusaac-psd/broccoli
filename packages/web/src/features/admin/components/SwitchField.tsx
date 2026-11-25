@@ -6,12 +6,14 @@ export function SwitchField({
   description,
   checked,
   onCheckedChange,
+  disabled,
 }: {
   id: string;
   label: string;
   description?: string;
   checked: boolean;
   onCheckedChange: (v: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
     <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
@@ -23,7 +25,12 @@ export function SwitchField({
           <p className="text-muted-foreground text-sm">{description}</p>
         ) : null}
       </div>
-      <Switch id={id} checked={checked} onCheckedChange={onCheckedChange} />
+      <Switch
+        id={id}
+        checked={checked}
+        onCheckedChange={onCheckedChange}
+        disabled={disabled}
+      />
     </div>
   );
 }

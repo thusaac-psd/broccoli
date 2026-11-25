@@ -105,3 +105,79 @@ for (const [name, path, api] of [
     );
   });
 }
+
+// A setting or list that cannot load is never shown as an answer: the
+// registration switch never reads "closed", a contest's sidebar never reads
+// as a contest with no problems, and a filter's choices say they are
+// incomplete.
+
+test('the registration switch whose setting cannot load says so instead of reading closed', async ({
+  page,
+}) => {
+  await page.clock.install({ time: NOW });
+  await mockApi(page, 'admin');
+  await page.route('**/api/v1/auth/registration', (route) =>
+    route.fulfill({ status: 500, json: { code: 'INTERNAL', message: '' } }),
+  );
+  await page.goto('/admin/users');
+  await runClockUntil(page, () =>
+    expect(
+      page.getByRole('alert').filter({ hasText: 'Something went wrong' }),
+    ).toBeVisible({ timeout: 500 }),
+  );
+  await expect(page.getByRole('switch', { name: /registration/i })).toHaveCount(
+    0,
+  );
+});
+
+test("a contest's sidebar whose problems cannot load offers to load them again", async ({
+  page,
+}, info) => {
+  test.skip(info.project.name === 'phone', 'the sidebar is a sheet there');
+  await page.clock.install({ time: NOW });
+  await mockApi(page, 'contestant');
+  let down = true;
+  await page.route('**/api/v1/contests/1/problems', (route) =>
+    down
+      ? route.fulfill({ status: 500, json: { code: 'INTERNAL', message: '' } })
+      : route.fallback(),
+  );
+  await page.goto('/contests/1/qa');
+  const retry = page.getByRole('button', {
+    name: 'Problems could not load: retry',
+  });
+  await runClockUntil(page, () => expect(retry).toBeVisible({ timeout: 500 }));
+  down = false;
+  await retry.click();
+  await expect(retry).toHaveCount(0);
+  await expect(
+    page.getByRole('link', { name: /Sum of Two Integers/ }),
+  ).toBeVisible();
+});
+
+test("the contest submissions' problem filter whose problems cannot load says so", async ({
+  page,
+}) => {
+  await page.clock.install({ time: NOW });
+  await mockApi(page, 'admin');
+  await page.route('**/api/v1/contests/1/problems', (route) =>
+    route.fulfill({ status: 500, json: { code: 'INTERNAL', message: '' } }),
+  );
+  await page.goto('/contests/1/submissions?problem=2');
+  // The applied filter keeps its choice, named by its id until the problems
+  // load, and the list says it is incomplete.
+  const filter = page.getByRole('button').filter({ hasText: /^2$/ });
+  await expect(filter).toBeVisible();
+  await runClockUntil(page, async () => {
+    await filter.click();
+    try {
+      await expect(
+        page.getByRole('menuitem', {
+          name: 'All problems (the list could not load)',
+        }),
+      ).toBeVisible({ timeout: 500 });
+    } finally {
+      await page.keyboard.press('Escape');
+    }
+  });
+});

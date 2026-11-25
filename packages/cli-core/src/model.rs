@@ -165,8 +165,9 @@ fn contest_plugin(plugin_id: &str, reason: ClosedReason, names: &PluginNames<'_>
 
 /// What keeps work from running (`closed`), as a phrase: the plugin by its
 /// role and its name (`names`), and why, such as "its language plugin
-/// standard-languages: disabled until an administrator enables it". Every
-/// line that names a plugin closing work says it this way.
+/// standard-languages (disabled until an administrator enables it)". Every
+/// line that names a plugin closing work says it this way, and the phrase
+/// holds no colon, so a line can lead with its own.
 pub fn closed_by_text(closed: &ClosedBy, names: &PluginNames<'_>) -> String {
     let ClosedBy {
         plugin_id,
@@ -183,7 +184,7 @@ pub fn closed_by_text(closed: &ClosedBy, names: &PluginNames<'_>) -> String {
         ClosedReason::Disabled => "disabled until an administrator enables it",
         ClosedReason::NotLoaded => "loaded on no server until one loads it",
     };
-    format!("{role} {}: {why}", names.name(plugin_id))
+    format!("{role} {} ({why})", names.name(plugin_id))
 }
 
 /// Plugins by the names the server's catalog gives them
@@ -377,7 +378,7 @@ mod tests {
             parked("ioi", Provided::ContestType)
                 .waiting_for(&names)
                 .as_deref(),
-            Some("Waiting for its contest plugin IOI: disabled until an administrator enables it")
+            Some("Waiting for its contest plugin IOI (disabled until an administrator enables it)")
         );
         // A plugin the catalog does not name is named by its id.
         assert_eq!(
@@ -385,21 +386,21 @@ mod tests {
                 .waiting_for(&names)
                 .as_deref(),
             Some(
-                "Waiting for its evaluator plugin batch: disabled until an administrator \
-                 enables it"
+                "Waiting for its evaluator plugin batch (disabled until an administrator \
+                 enables it)"
             )
         );
         assert!(
             parked("standard-checkers", Provided::CheckerFormat)
                 .waiting_for(&names)
                 .unwrap()
-                .starts_with("Waiting for its checker plugin standard-checkers:")
+                .starts_with("Waiting for its checker plugin standard-checkers (")
         );
         assert!(
             parked("standard-languages", Provided::Language)
                 .waiting_for(&names)
                 .unwrap()
-                .starts_with("Waiting for its language plugin standard-languages:")
+                .starts_with("Waiting for its language plugin standard-languages (")
         );
         // A provider loaded on no server says so, not that it is disabled.
         // A contest plugin loaded nowhere also withholds the outcome, as the
@@ -419,7 +420,7 @@ mod tests {
         );
         assert_eq!(
             not_loaded.waiting_for(&names).as_deref(),
-            Some("Waiting for its contest plugin IOI: loaded on no server until one loads it")
+            Some("Waiting for its contest plugin IOI (loaded on no server until one loads it)")
         );
         assert!(not_loaded.is_in_progress());
         // A contest plugin a peer serves and this server lacks names it too.
@@ -450,7 +451,7 @@ mod tests {
         );
         assert_eq!(
             evaluator.waiting_for(&names).as_deref(),
-            Some("Waiting for its evaluator plugin batch: loaded on no server until one loads it")
+            Some("Waiting for its evaluator plugin batch (loaded on no server until one loads it)")
         );
         // A finished submission is finished whatever its plugin does now.
         let judged = Standing::new(

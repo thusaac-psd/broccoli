@@ -9,15 +9,16 @@ import { useBracket } from './useBracket';
 /**
  * The viewer's own current match (their latest round), from the same cached
  * `GET /bracket` the ranking page polls. Null for staff, spectators, and
- * players with no match yet.
+ * players with no match yet, and until the bracket loads: the ranking page,
+ * which polls the same query, says when it cannot.
  */
 export function useMyMatch(
   contestId: number | undefined,
 ): { match: MatchView; side: Side } | null {
   const auth = useAuth();
   const viewerId = auth.user?.id ?? null;
-  const { data } = useBracket(contestId, { enabled: viewerId !== null });
-  const match = (data?.matches ?? [])
+  const bracket = useBracket(contestId, { enabled: viewerId !== null });
+  const match = bracket.data?.matches
     .filter((m) => sideOf(m, viewerId) !== null)
     .sort((a, b) => b.round - a.round)[0];
   const side = match ? sideOf(match, viewerId) : null;

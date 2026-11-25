@@ -1,8 +1,10 @@
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import {
+  loadedData,
   PLUGIN_OUTAGE_POLL_MS,
   pollInterval,
+  registryChoices,
   useQueryState,
   useRegistries,
 } from '@broccoli/web-sdk/hooks';
@@ -81,7 +83,7 @@ export default function ProblemView({
   const [contestType, setContestType] = useState<string | undefined>(undefined);
   const [targetWorkers, setTargetWorkers] = useState<string[]>([]);
   const apiClient = useApiClient();
-  const { data: registries } = useRegistries();
+  const registries = useQueryState(useRegistries());
   const canPinWorker = !!user?.permissions.includes(SYSTEM_ADMIN);
 
   const rawTab = searchParams.get('tab');
@@ -170,7 +172,7 @@ export default function ProblemView({
 
   useRestoreSubmissionScroll(!isLoading);
   // Only for the problem's label; the page does not depend on it.
-  const contestProblems = useContestProblems(contestId).data ?? [];
+  const contestProblems = useContestProblems(contestId).data;
 
   const historyQuery = useQuery<SubmissionSummary[]>({
     queryKey: submissionViewKeys.list(
@@ -391,10 +393,14 @@ export default function ProblemView({
     ? `contest-${contestId}-problem-${problemId}`
     : `problem-${problemId}`;
 
-  const contestProblemLabel = contestId
-    ? contestProblems.find((item) => item.problem_id === problemId)?.label
-    : undefined;
-  const headerId = contestProblemLabel ?? (problem ? String(problem.id) : '—');
+  // In a contest the header names the problem by its label once the
+  // contest's problems load, and never by its id in the meantime.
+  const headerId = contestId
+    ? (contestProblems?.find((item) => item.problem_id === problemId)?.label ??
+      '—')
+    : problem
+      ? String(problem.id)
+      : '—';
   const submissionDetailLinkBuilder = useCallback(
     (submissionId: number) =>
       contestId
@@ -531,7 +537,12 @@ export default function ProblemView({
                   contestType={effectiveContestType}
                   onContestTypeChange={!contestId ? setContestType : undefined}
                   contestTypes={
-                    !contestId ? (registries?.contest_types ?? []) : undefined
+                    !contestId
+                      ? registryChoices(
+                          loadedData(registries)?.contest_types,
+                          effectiveContestType,
+                        )
+                      : undefined
                   }
                   submissionFormat={problem?.submission_format}
                   languages={languages}

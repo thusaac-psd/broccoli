@@ -13,11 +13,13 @@ export {
 } from '@/hooks/idempotency';
 export * from '@/hooks/poll';
 export {
+  loadedData,
   type QueryFailure,
   type QueryLike,
   type QueryState,
   useQueryState,
 } from '@/hooks/query-state';
+export * from '@/hooks/registry-choices';
 export * from '@/hooks/use-async-submit';
 export * from '@/hooks/use-idempotent-request';
 export * from '@/hooks/use-mobile';

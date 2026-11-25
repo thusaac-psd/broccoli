@@ -25,13 +25,45 @@ export function failureText(replica: PluginReplica): TranslationKey | null {
   return FAILURE_TEXT[replica.status];
 }
 
-/** The first server the plugin fails on, for a compact hint. */
-export function firstFailure(
-  fleet: PluginFleet,
-): { replica: PluginReplica; text: TranslationKey } | undefined {
+/** The servers that fail to run a plugin for one reason. */
+export interface FleetFailure {
+  /** Why, as a translation taking the servers (`{servers}`). */
+  text: TranslationKey;
+  /** The failing servers, by `server_id`, in the fleet's order. */
+  servers: string[];
+  /** The servers' own words, `server_id: error`, as secondary detail. */
+  errors: string[];
+}
+
+/**
+ * Where and why the plugin fails, one entry per reason in the order the
+ * fleet first reports it, each naming its servers: the server that answered
+ * may be one the plugin runs on, so nothing says "this server".
+ */
+export function fleetFailures(fleet: PluginFleet): FleetFailure[] {
+  const byText = new Map<TranslationKey, FleetFailure>();
   for (const replica of fleet.replicas) {
     const text = failureText(replica);
-    if (text) return { replica, text };
+    if (!text) continue;
+    let failure = byText.get(text);
+    if (!failure) {
+      failure = { text, servers: [], errors: [] };
+      byText.set(text, failure);
+    }
+    failure.servers.push(replica.server_id);
+    if (replica.error)
+      failure.errors.push(`${replica.server_id}: ${replica.error}`);
   }
-  return undefined;
+  return [...byText.values()];
+}
+
+/** The failures said as one text, each reason naming its servers. */
+export function fleetFailureText(
+  failures: readonly FleetFailure[],
+  t: (key: TranslationKey, params: { servers: string }) => string,
+  list: (items: readonly string[]) => string,
+): string {
+  return failures
+    .map((failure) => t(failure.text, { servers: list(failure.servers) }))
+    .join(' ');
 }

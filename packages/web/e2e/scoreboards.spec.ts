@@ -91,9 +91,9 @@ test('the IOI contest card whose info cannot load says so, with a retry', async 
   await page.route(`${IOI}/info`, (route) => route.fulfill(UNAVAILABLE));
   await page.goto('/contests/4');
   await runClockUntil(page, () =>
-    expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({
-      timeout: 500,
-    }),
+    expect(
+      page.getByRole('button', { name: 'Retry', exact: true }),
+    ).toBeVisible({ timeout: 500 }),
   );
 });
 

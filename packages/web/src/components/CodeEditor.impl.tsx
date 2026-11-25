@@ -2,7 +2,11 @@ import '@/lib/monaco-setup';
 
 import { useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
-import type { QueryState } from '@broccoli/web-sdk/hooks';
+import {
+  type QueryState,
+  type RegistryChoice,
+  registryChoiceLabel,
+} from '@broccoli/web-sdk/hooks';
 import {
   pluginName,
   useIdentifierLabel,
@@ -79,7 +83,8 @@ export interface CodeEditorProps {
   /** Callback when contest type changes. */
   onContestTypeChange?: (contestType: string) => void;
   /** Available contest types from registry. */
-  contestTypes?: string[];
+  /** The contest types to judge a practice submission as, the chosen one kept. */
+  contestTypes?: RegistryChoice[];
   /**
    * Server-provided file names per language (from problem.submission_format).
    * Keys are language ids (e.g. "cpp", "java"), values are arrays of filenames.
@@ -567,17 +572,23 @@ function CodeEditorContent({
               size="sm"
               className="h-7 px-2 text-xs gap-1 text-muted-foreground"
             >
-              {contestType || t('admin.field.selectPlaceholder')}
+              {contestType
+                ? label('contestType', contestType)
+                : t('admin.field.selectPlaceholder')}
               <ChevronDown className="h-3 w-3" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
-            {contestTypes.map((ct) => (
+            {contestTypes.map((choice) => (
               <DropdownMenuItem
-                key={ct}
-                onClick={() => onContestTypeChange(ct)}
+                key={choice.value}
+                onClick={() => onContestTypeChange(choice.value)}
               >
-                {label('contestType', ct)}
+                {registryChoiceLabel(
+                  choice,
+                  label('contestType', choice.value),
+                  t,
+                )}
               </DropdownMenuItem>
             ))}
           </DropdownMenuContent>

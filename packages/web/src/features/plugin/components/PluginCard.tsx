@@ -1,5 +1,6 @@
 import {
   pluginKeys,
+  useFormat,
   usePluginText,
   useTranslation,
 } from '@broccoli/web-sdk/i18n';
@@ -27,7 +28,7 @@ import { useState } from 'react';
 
 import { ResourceConfigDialog } from '@/components/config';
 
-import { firstFailure } from '../fleet';
+import { fleetFailures, fleetFailureText } from '../fleet';
 import { PluginFleetBadge } from './PluginFleetBadge';
 
 export function PluginCard({
@@ -46,6 +47,7 @@ export function PluginCard({
   onClick?: (plugin: PluginDetail) => void;
 }) {
   const { t } = useTranslation();
+  const format = useFormat();
   const pluginText = usePluginText();
   const name = pluginText(pluginKeys.name(plugin.id), plugin.name);
   const [configOpen, setConfigOpen] = useState(false);
@@ -53,7 +55,7 @@ export function PluginCard({
   // it loaded: a plugin enabled but failing to load is still enabled.
   const isEnabled = plugin.enabled;
   const failed = plugin.fleet.state === 'failed';
-  const failure = firstFailure(plugin.fleet);
+  const failures = fleetFailures(plugin.fleet);
   const hasPluginSchemas = plugin.config_schemas?.some((schema) =>
     schema.scopes.includes('plugin'),
   );
@@ -90,9 +92,11 @@ export function PluginCard({
           {failed && (
             <p
               className="text-xs text-destructive mb-3 line-clamp-2 break-words"
-              title={failure?.replica.error ?? undefined}
+              title={failures.flatMap((f) => f.errors).join('\n') || undefined}
             >
-              {t(failure?.text ?? 'plugins.fleet.notInstalled')}
+              {failures.length > 0
+                ? fleetFailureText(failures, t, format.list)
+                : t('plugins.fleet.notInstalled')}
             </p>
           )}
           <div className="flex items-end justify-between gap-4">

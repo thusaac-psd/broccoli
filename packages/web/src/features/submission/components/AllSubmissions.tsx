@@ -21,7 +21,7 @@ import {
 import { fetchSubmissions } from '@/features/submission/api/fetch-submissions';
 import { useBulkRejudge } from '@/features/submission/hooks/use-bulk-rejudge';
 import { useCursorPages } from '@/features/submission/hooks/use-cursor-pages';
-import { languageFilterOptions } from '@/features/submission/utils/language-filter';
+import { filterOptions } from '@/features/submission/utils/filter-options';
 
 import { BulkRejudgeBar, BulkRejudgeToggle } from './BulkRejudge';
 import { SubmissionListPager } from './SubmissionListPager';
@@ -146,12 +146,12 @@ export function AllSubmissions() {
 
   const languageOptions = useMemo(
     () =>
-      languageFilterOptions(
+      filterOptions(
         {
           all: t('submissions.filters.allLanguages'),
           allUnavailable: t('submissions.filters.allLanguagesUnavailable'),
         },
-        languages.data,
+        languages.data?.map((l) => ({ value: l.id, label: l.name })),
         languages.isError,
         appliedLanguage ?? null,
       ),

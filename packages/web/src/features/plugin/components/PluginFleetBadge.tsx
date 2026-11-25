@@ -1,8 +1,8 @@
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Badge } from '@broccoli/web-sdk/ui';
 import { AlertTriangle, Loader2 } from 'lucide-react';
 
-import { firstFailure, type PluginFleet } from '../fleet';
+import { fleetFailures, fleetFailureText, type PluginFleet } from '../fleet';
 
 /**
  * The plugin's state across all servers, when it needs attention: failing
@@ -11,14 +11,15 @@ import { firstFailure, type PluginFleet } from '../fleet';
  */
 export function PluginFleetBadge({ fleet }: { fleet: PluginFleet }) {
   const { t } = useTranslation();
+  const format = useFormat();
 
   if (fleet.state === 'failed') {
-    const failure = firstFailure(fleet);
+    const failures = fleetFailures(fleet);
     return (
       <Badge
         variant="destructive"
         className="gap-1 text-xs"
-        title={failure && t(failure.text)}
+        title={fleetFailureText(failures, t, format.list) || undefined}
       >
         <AlertTriangle className="h-3 w-3" />
         {t('plugins.fleet.failedOn', {

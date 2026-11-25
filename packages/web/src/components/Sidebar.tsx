@@ -52,6 +52,7 @@ import {
   MessageCircle,
   Presentation,
   Puzzle,
+  RotateCcw,
   Server,
   Trophy,
   User,
@@ -209,8 +210,10 @@ function ContestProblemsGroup() {
 
   const resolvedTitle = contestTitle ?? contestData?.title ?? null;
 
-  // Navigation only: the contest pages themselves report a failed load.
-  const problems = useContestProblems(contestId).data ?? [];
+  // A problem list that could not load offers to load it again, instead of
+  // reading as a contest with no problems.
+  const problemsQuery = useContestProblems(contestId);
+  const problems = problemsQuery.data;
 
   if (!contestId) return <></>;
 
@@ -251,7 +254,19 @@ function ContestProblemsGroup() {
             pathname={pathname}
             t={t}
           />
-          {problems.map((p) => {
+          {problemsQuery.isError && !problems && (
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                onClick={() => void problemsQuery.refetch()}
+                disabled={problemsQuery.isFetching}
+                tooltip={t('sidebar.problemsRetry')}
+              >
+                <RotateCcw />
+                <span>{t('sidebar.problemsRetry')}</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          )}
+          {problems?.map((p) => {
             const isActive =
               pathname === `/contests/${contestId}/problems/${p.problem_id}`;
             return (
@@ -299,7 +314,7 @@ function PlatformGroup() {
   const permissions = user?.permissions || [];
   const adminItems = filterByPermissions(adminMenuItems, permissions);
 
-  const { data: contests } = useQuery({
+  const contests = useQuery({
     queryKey: ['dashboard-contests'],
     enabled: !!user,
     staleTime: 5 * 60 * 1000,
@@ -319,7 +334,9 @@ function PlatformGroup() {
     },
   });
 
-  const multipleContests = contests ? contests.length > 1 : false;
+  // A contest list that could not load still offers the contest selector,
+  // which says why.
+  const multipleContests = contests.isError || (contests.data?.length ?? 0) > 1;
   const havePermissions = user
     ? USER_PERMISSIONS.some((perm) => user.permissions.includes(perm))
     : false;
