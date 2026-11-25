@@ -676,7 +676,11 @@ async fn a_missing_visibility_plugin_fails_closed_only_for_its_contest_types() {
         .get_with_token(&routes::contest(governed), &outsider)
         .await;
     assert_eq!(res.status, 200, "a contest is a host record: {}", res.text);
-    assert_eq!(res.body["plugin_outage"], json!({"state": "unavailable"}));
+    // Replica a serves the plugin: b lacks it, by name.
+    assert_eq!(
+        res.body["plugin_outage"],
+        json!({"state": "not_loaded_here", "plugin_id": PLUGIN})
+    );
     let res = b.get_with_token(&routes::contest(other), &outsider).await;
     assert_eq!(res.status, 200, "outside the plugin's scope: {}", res.text);
 }

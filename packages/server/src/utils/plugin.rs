@@ -103,11 +103,11 @@ pub async fn activate_plugin(state: &AppState, plugin_id: &str) -> Result<(), Pl
         register_plugin_hooks(state, plugin_id, &manifest).await;
         call_plugin_init(state.plugins.as_ref(), plugin_id).await?;
         update_translations(state).await;
-        Ok(())
+        Ok::<(), PluginError>(())
     }
     .await;
     if let Err(error) = &result {
-        tracing::error!("Plugin '{}' activation failed: {}", plugin_id, error);
+        plugin_core::guest_log::about(plugin_id, "A plugin failed to activate", &error.to_string());
         fail_plugin(state, plugin_id, error).await;
     }
     result
@@ -150,7 +150,9 @@ pub async fn update_translations(state: &AppState) {
             }
         }
     }
-    state.plugins.update_translations(&owners);
+    state
+        .plugins
+        .update_translations(&owners, &state.plugin_lifecycle.recorded_names());
 }
 
 /// Drop everything a half-activated plugin registered and mark it `Failed`.
@@ -382,7 +384,11 @@ pub(crate) fn register_unloaded(state: &AppState, plugin_id: &str, root: &std::p
             Ok(entry) => {
                 registry.insert(plugin_id.to_string(), entry);
             }
-            Err(e) => tracing::warn!(plugin_id, error = %e, "Failed to read a plugin manifest"),
+            Err(e) => plugin_core::guest_log::about(
+                plugin_id,
+                "A plugin's manifest is unreadable",
+                &e.to_string(),
+            ),
         },
     }
 }

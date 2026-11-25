@@ -397,6 +397,7 @@ test('a refusal for a plugin outage asks for the outage to be read again', () =>
     'CONTEST_TYPE_UNAVAILABLE',
     'PLUGIN_DISABLED',
     'PLUGIN_NOT_LOADED',
+    'PLUGIN_NOT_LOADED_HERE',
     'PLUGIN_UNAVAILABLE',
   ]) {
     assert.equal(isOutageRefusal({ code, message: '' }), true);

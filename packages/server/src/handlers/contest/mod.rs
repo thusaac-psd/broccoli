@@ -1,4 +1,5 @@
 use crate::extractors::query::AppQuery;
+use crate::providers::Provided;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -50,7 +51,7 @@ use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::contest::*;
-use crate::models::problem::validate_contest_type;
+use crate::models::problem::validate_key;
 use crate::models::shared::{PageWindow, escape_like};
 use crate::services::config_issues::ConfigChecker;
 use crate::services::plugin_config::{ConfigChange, Reads, delete_configs_of_contest};
@@ -91,10 +92,11 @@ pub async fn create_contest(
 ) -> Result<impl IntoResponse, AppError> {
     auth_user.require_permission(perm::CONTEST_CREATE)?;
     validate_create_contest(&payload)?;
-    validate_contest_type(
+    validate_key(
+        &state,
+        Provided::ContestType,
         "contest_type",
         &payload.contest_type,
-        &state.registries.contest_type_registry,
     )
     .await?;
 
@@ -365,12 +367,7 @@ pub async fn update_contest(
     auth_user.require_permission(perm::CONTEST_MANAGE)?;
     validate_update_contest(&payload)?;
     if let Some(ref contest_type) = payload.contest_type {
-        validate_contest_type(
-            "contest_type",
-            contest_type,
-            &state.registries.contest_type_registry,
-        )
-        .await?;
+        validate_key(&state, Provided::ContestType, "contest_type", contest_type).await?;
     }
 
     if payload == UpdateContestRequest::default() {

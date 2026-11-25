@@ -46,6 +46,10 @@ export function withheldLabel(
       return t('submission.resultUnavailableNotLoaded', {
         plugin: pluginName(lookup, outage.plugin_id),
       });
+    case 'not_loaded_here':
+      return t('submission.resultUnavailableNotLoadedHere', {
+        plugin: pluginName(lookup, outage.plugin_id),
+      });
     case 'unavailable':
       return t('submission.resultUnavailable');
   }

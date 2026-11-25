@@ -57,12 +57,17 @@ const TCP_KEEPALIVES: [(&str, &str); 3] = [
 /// would outlive the call on a pooled connection and silently lift the bound
 /// for whoever reuses it, so the plugin SQL guard refuses it (see
 /// `server::host_funcs::sql`).
-pub const ENFORCED_SESSION_SETTINGS: [&str; 4] = [
+pub const ENFORCED_SESSION_SETTINGS: [&str; 5] = [
     "statement_timeout",
     TCP_KEEPALIVES[0].0,
     TCP_KEEPALIVES[1].0,
     TCP_KEEPALIVES[2].0,
+    CLIENT_CHECK_INTERVAL,
 ];
+
+/// The session setting that has a backend running a statement check that its
+/// client is still connected ([`PgSession::client_check_interval`]).
+pub const CLIENT_CHECK_INTERVAL: &str = "client_connection_check_interval";
 
 /// Per-connection session settings applied at connect time (startup
 /// `options`), so they hold for every physical connection in the pool,
@@ -118,6 +123,13 @@ impl PgSession {
         }
     }
 
+    /// Whether the session sends startup `options` at all: an operator who
+    /// puts a pooler such as PgBouncer in front of Postgres turns every bound
+    /// off so it sends none.
+    pub fn sends_startup_options(&self) -> bool {
+        !self.startup_options().is_empty()
+    }
+
     /// The startup `options` to send; empty when every bound is disabled.
     fn startup_options(&self) -> Vec<(String, String)> {
         let keepalives = TCP_KEEPALIVES
@@ -127,12 +139,9 @@ impl PgSession {
         let timeout = self
             .statement_timeout
             .map(|d| ("statement_timeout".to_string(), d.as_millis().to_string()));
-        let check = self.client_check_interval.map(|d| {
-            (
-                "client_connection_check_interval".to_string(),
-                d.as_millis().to_string(),
-            )
-        });
+        let check = self
+            .client_check_interval
+            .map(|d| (CLIENT_CHECK_INTERVAL.to_string(), d.as_millis().to_string()));
         keepalives.chain(timeout).chain(check).collect()
     }
 }

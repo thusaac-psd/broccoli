@@ -248,9 +248,9 @@ async fn staff_keep_the_full_view_while_a_contest_plugin_is_disabled() {
     assert_eq!(res.body["plugin_outage"], disabled());
 }
 
-/// An enabled plugin missing on this replica is a transient outage: the same
-/// rows, marked unavailable, and a retryable 503 where the whole answer is
-/// the plugin's.
+/// An enabled plugin missing on this replica while another serves it is
+/// named: the same rows, marked as missing here, and a retryable 503 naming
+/// it where the whole answer is the plugin's.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_missing_contest_plugin_marks_what_it_governs_unavailable() {
     let a = TestApp::spawn_with_plugins().await;
@@ -264,7 +264,8 @@ async fn a_missing_contest_plugin_marks_what_it_governs_unavailable() {
         })
         .await;
     plugin_lifecycle::reconcile(&b.state).await.unwrap();
-    let unavailable = json!({"state": "unavailable"});
+    // Replica a serves the plugin: b lacks it, by name.
+    let unavailable = json!({"state": "not_loaded_here", "plugin_id": "server-plugin"});
 
     let res = b
         .get_with_token(&routes::contest(fx.governed), &fx.contestant)
@@ -286,6 +287,7 @@ async fn a_missing_contest_plugin_marks_what_it_governs_unavailable() {
         )
         .await;
     assert_eq!(res.status, 503, "{}", res.text);
-    assert_eq!(res.body["code"], "PLUGIN_UNAVAILABLE");
+    assert_eq!(res.body["code"], "PLUGIN_NOT_LOADED_HERE");
+    assert_eq!(res.body["details"]["plugin_id"], "server-plugin");
     assert!(res.headers.contains_key("retry-after"));
 }

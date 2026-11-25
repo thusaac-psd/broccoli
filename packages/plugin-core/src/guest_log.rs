@@ -7,10 +7,12 @@
 //!
 //! - each line names the plugin (`plugin_id`), the Broccoli id of the call
 //!   running on the thread, not extism's instance id;
-//! - a plugin's text draws nothing of its own: every control character
-//!   (a line break, a carriage return, an ANSI escape) is written as its
-//!   escape, so the text and pretty log formats show one line the host
-//!   wrote ([`plugin_text`]);
+//! - a plugin's text draws nothing of its own: every character that acts on
+//!   how a line shows (a control character such as a line break or an ANSI
+//!   escape, a line or paragraph separator, a format character such as a
+//!   bidirectional override or a zero-width space) is written as its escape,
+//!   so the text and pretty log formats show one line the host wrote
+//!   ([`plugin_text`]);
 //! - each line is at most [`MAX_LINE_BYTES`], cut at a character boundary
 //!   with the number of bytes left out;
 //! - each plugin has a budget of [`BURST`] lines, refilled at [`PER_SECOND`]
@@ -80,18 +82,35 @@ pub(crate) fn failed_call(plugin_id: &str, func_name: &str, depth: u8, reason: &
     }
 }
 
-/// `message` as a log line may carry a plugin's text: every control
-/// character escaped (`\n`, `\r`, `\t`, `\u{1b}` and the like), then cut
+/// Whether `c` acts on how a line shows rather than showing as itself: a
+/// control character (`Cc`: a line break, an ANSI escape), a line or
+/// paragraph separator (`Zl`, `Zp`: U+2028, U+2029), or a format character
+/// (`Cf`: a bidirectional override such as U+202E, a zero-width space or
+/// joiner). [`plugin_text`] writes each as its escape.
+fn acts(c: char) -> bool {
+    use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
+    matches!(
+        c.general_category(),
+        GeneralCategory::Control
+            | GeneralCategory::Format
+            | GeneralCategory::LineSeparator
+            | GeneralCategory::ParagraphSeparator
+    )
+}
+
+/// `message` as a log line may carry a plugin's text: every character that
+/// acts on how the line shows escaped (`\n`, `\r`, `\t`, `\u{1b}`,
+/// `\u{2028}`, `\u{202e}` and the like), then cut
 /// to at most [`MAX_LINE_BYTES`] at a character boundary, saying how many
 /// bytes were left out.
 pub fn plugin_text(message: &str) -> Cow<'_, str> {
-    let escaped = if message.chars().any(char::is_control) {
+    let escaped = if message.chars().any(acts) {
         Cow::Owned(message.chars().fold(String::new(), |mut out, c| {
             match c {
                 '\n' => out.push_str("\\n"),
                 '\r' => out.push_str("\\r"),
                 '\t' => out.push_str("\\t"),
-                c if c.is_control() => out.push_str(&c.escape_unicode().to_string()),
+                c if acts(c) => out.push_str(&c.escape_unicode().to_string()),
                 c => out.push(c),
             }
             out
@@ -257,6 +276,22 @@ mod tests {
         let cut = plugin_text(&breaks);
         assert!(cut.len() < MAX_LINE_BYTES + 32, "{}", cut.len());
         assert!(!cut.contains('\n'));
+    }
+
+    /// A separator breaks a line in viewers that honour it, a bidirectional
+    /// override reorders what follows, a zero-width character hides text:
+    /// each is escaped like a control character.
+    #[test]
+    fn a_plugins_text_cannot_break_reorder_or_hide_what_it_shows() {
+        assert_eq!(
+            plugin_text("a\u{2028}b\u{2029}c\u{202e}gnp.exe\u{200b}d\u{200d}e\u{feff}"),
+            "a\\u{2028}b\\u{2029}c\\u{202e}gnp.exe\\u{200b}d\\u{200d}e\\u{feff}"
+        );
+        assert_eq!(
+            plugin_text("café, 汉字, 🙂"),
+            "café, 汉字, 🙂",
+            "text that shows itself stays"
+        );
     }
 
     /// A host line about a plugin (its call failed, its route answered a

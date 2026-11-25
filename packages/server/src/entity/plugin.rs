@@ -45,6 +45,12 @@ pub struct Model {
     /// entity describes it (see `crate::migration`).
     #[sea_orm(nullable, indexed)]
     pub host_locale: Option<String>,
+    /// The plugin's display name per locale, as its own pack gives it
+    /// (`plugin.<id>.name`), recorded with `governs` when it was last
+    /// published, so it is named even where no replica has its files
+    /// loaded. `None` until first published.
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub names: Option<Json>,
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub updated_at: DateTimeUtc,
 }

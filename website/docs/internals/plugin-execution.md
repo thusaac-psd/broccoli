@@ -236,8 +236,11 @@ server-error body, a hook's failure, a visibility query's failure and a
 plugin statement's own error (`host_db::refused`). Each line names the plugin
 by its Broccoli id (`plugin_id`, from the call scope, not extism's instance
 id). The plugin's text is written as `guest_log::plugin_text` makes it: every
-control character escaped (`\n`, `\r`, `\t`, `\u{1b}`), so a plugin cannot
-draw a line, a colour or a fake host line in the text and pretty formats,
+character that acts on how a line shows escaped (a control character such as
+`\n`, `\r`, `\t` or `\u{1b}`, a line or paragraph separator such as
+`\u{2028}`, a format character such as the bidirectional override `\u{202e}`
+or a zero-width space), so a plugin cannot draw a line, a colour, reordered
+text or a fake host line in the text and pretty formats,
 then cut to `MAX_LINE_BYTES` (2 KiB) at a character boundary, saying how many
 bytes it left out; a failed call's reason, which every answer and log line
 about the failure carries, is made the same way. Each plugin has a budget of
@@ -252,8 +255,16 @@ naming what it asked for, and a host line about a plugin is a `WARN`, so no
 plugin writes a line that reads as the host's own error. A plugin that fails
 what a request needed of it answers `AppError::PluginFailed`: the client sees
 the host's internal error, and the plugin's text goes only to the host's line
-about the plugin. `tests/integration/source_invariants.rs` checks that where
-the host calls plugins no ERROR line names a plugin and no internal error
+about the plugin (`PluginFailure::new` bounds the text when the error is
+built, so its debug print is bounded too), and its response is marked
+(`error::PluginCaused`), so the HTTP trace layer, which logs every other 5xx
+as the host's `ERROR`, does not log it again: a contestant calling a failing
+plugin route at will writes only lines under that plugin's budget. A host
+line about a plugin that carries the host's own error (a database or queue
+failure) logs it as `host_error`. `tests/integration/source_invariants.rs`
+checks that in the server and the plugin runtime no log line at any level
+names a plugin and carries an error's text other than as `host_error`, and
+no internal error
 carries a plugin's answer.
 
 ## Unloaded instances

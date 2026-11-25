@@ -79,6 +79,16 @@ pub fn bundled_root(state: &AppState, plugin_id: &PluginId) -> Option<PathBuf> {
     root.join("plugin.toml").is_file().then_some(root)
 }
 
+/// Whether this server can load `plugin_id` from `source` ([`locate`]): its
+/// bundle has the plugin, or the source is an upload and this server takes
+/// uploads.
+pub fn loadable_here(state: &AppState, plugin_id: &PluginId, source: &PluginSource) -> bool {
+    match source {
+        PluginSource::Bundle => bundled_root(state, plugin_id).is_some(),
+        PluginSource::Upload(_) => state.config.plugin.uploads_enabled,
+    }
+}
+
 /// The directory to load `plugin_id` from on this server, fetching and
 /// unpacking an uploaded archive first if it is not cached here yet.
 pub async fn locate(

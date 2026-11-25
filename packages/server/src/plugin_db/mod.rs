@@ -38,7 +38,7 @@ use common::db::{DatabaseConnection, PgPoolSpec, PgSession};
 use plugin_core::executor::CallLocals;
 use plugin_core::manifest::SqlReadScope;
 use plugin_core::pool::Liveness;
-use sea_orm::{ConnectionTrait, DbBackend, DbErr, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, DbBackend, DbErr, Statement};
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 /// Every plugin's SQL pool, built on first use. Clones share the pools.
@@ -288,37 +288,65 @@ impl PluginSqlPools {
         self
     }
 
-    /// How a cut statement is stopped on this database, asked once: a
-    /// database that takes `client_connection_check_interval` (its platform
-    /// can tell a closed client) stops one by its connection closing; any
-    /// other cancels it by pid. An outage while asking leaves it unasked.
+    /// How a cut statement is stopped on this database, asked once. Closing
+    /// its connection stops it only when the backend's client is this
+    /// process and the backend checks it: the host's sessions send startup
+    /// `options` (an operator who puts a pooler such as PgBouncer in front of
+    /// Postgres turns them off), and a connection that asks for
+    /// `client_connection_check_interval` at startup has it (the platform
+    /// takes it, and nothing between drops it). A pooler keeps the backend's
+    /// own client, itself, connected after the host closes its side, and
+    /// passes no startup `options` through, so behind one a cut is cancelled
+    /// by pid. An outage while asking leaves it unasked.
     async fn cut_by(&self) -> Result<CutBy, DbErr> {
         self.inner
             .cut_by
             .get_or_try_init(|| async {
-                let txn = self.inner.host.begin().await?;
-                let set = txn
-                    .execute_unprepared(&format!(
-                        "SET LOCAL client_connection_check_interval = {}",
-                        CUT_CHECK_INTERVAL.as_millis()
-                    ))
-                    .await;
-                let _ = txn.rollback().await;
-                match set {
-                    Ok(_) => Ok(CutBy::Closing),
-                    Err(e) if common::db::is_outage(&e) => Err(e),
-                    Err(e) => {
-                        tracing::info!(
-                            error = %e,
-                            "The database cannot check its clients; a cut plugin statement \
-                             is cancelled by its backend's pid"
-                        );
-                        Ok(CutBy::Cancelling)
-                    }
+                if !self.inner.session.sends_startup_options() {
+                    return Ok(CutBy::Cancelling);
                 }
+                let checked = self.checks_its_client().await?;
+                if !checked {
+                    tracing::info!(
+                        "The database does not check a plugin connection's client; a cut plugin \
+                         statement is cancelled by its backend's pid"
+                    );
+                }
+                Ok(if checked {
+                    CutBy::Closing
+                } else {
+                    CutBy::Cancelling
+                })
             })
             .await
             .copied()
+    }
+
+    /// Whether a connection that asks at startup for its backend to check
+    /// its client every [`CUT_CHECK_INTERVAL`] has its backend do so.
+    async fn checks_its_client(&self) -> Result<bool, DbErr> {
+        use sea_orm::sqlx::{ConnectOptions, Connection};
+
+        let session = PgSession {
+            client_check_interval: Some(CUT_CHECK_INTERVAL),
+            ..self.inner.session.clone()
+        };
+        let options = common::db::pg_connect_options(&self.inner.url, &session)?;
+        let mut conn = match options.connect().await {
+            Ok(conn) => conn,
+            // The database refused the setting (a platform that cannot
+            // check its clients).
+            Err(e) if e.as_database_error().is_some() => return Ok(false),
+            Err(e) => return Err(DbErr::Conn(sea_orm::RuntimeErr::SqlxError(e.into()))),
+        };
+        let shown: Result<String, _> = sea_orm::sqlx::query_scalar(
+            "SELECT current_setting('client_connection_check_interval')",
+        )
+        .fetch_one(&mut conn)
+        .await;
+        let _ = conn.close().await;
+        let shown = shown.map_err(|e| DbErr::Conn(sea_orm::RuntimeErr::SqlxError(e.into())))?;
+        Ok(shown == format!("{}ms", CUT_CHECK_INTERVAL.as_millis()))
     }
 
     /// A lease on `plugin_id`'s pool for `call`, provisioning the plugin's
@@ -423,13 +451,13 @@ impl PluginSqlPools {
                 if first {
                     tracing::error!(
                         plugin_id,
-                        error = %e,
+                        host_error = %e,
                         "Could not provision the plugin's database role; its SQL is \
                          unavailable and is retried every {}s",
                         PROVISION_BACKOFF.as_secs()
                     );
                 } else {
-                    tracing::debug!(plugin_id, error = %e, "Plugin provisioning failed again");
+                    tracing::debug!(plugin_id, host_error = %e, "Plugin provisioning failed again");
                 }
                 Err(Unavailable::Unprovisioned(e.to_string()))
             }

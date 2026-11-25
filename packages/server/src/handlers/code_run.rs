@@ -150,7 +150,7 @@ async fn build_code_run_response(
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
         (status = 429, description = "Per-user rate limited (RATE_LIMITED)", body = ErrorBody),
-        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, carries Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, carries Retry-After), loaded on no server (PLUGIN_NOT_LOADED, carries Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE); an answer about one plugin names it in details.plugin_id", body = ErrorBody),
+        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, carries Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, carries Retry-After), loaded on no server (PLUGIN_NOT_LOADED, carries Retry-After), served by another server but not this one (PLUGIN_NOT_LOADED_HERE, carries Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE); an answer about one plugin names it in details.plugin_id", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -207,7 +207,7 @@ pub async fn run_code(
         return Err(AppError::NotFound("Problem not found".into()));
     }
 
-    let known_languages = state.registries.known_language_ids().await;
+    let known_languages = state.known_languages().await;
     validate_run_language(&payload.language, &known_languages)?;
 
     let contest_type = problem.default_contest_type.clone();
@@ -268,7 +268,7 @@ pub async fn run_code(
         (status = 403, description = "Forbidden (PERMISSION_DENIED); or the caller has not registered for this public contest (CONTEST_NOT_REGISTERED)", body = ErrorBody),
         (status = 404, description = "Contest or problem not found (NOT_FOUND)", body = ErrorBody),
         (status = 429, description = "Per-user rate limited (RATE_LIMITED)", body = ErrorBody),
-        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, carries Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, carries Retry-After), loaded on no server (PLUGIN_NOT_LOADED, carries Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE); an answer about one plugin names it in details.plugin_id", body = ErrorBody),
+        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, carries Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, carries Retry-After), loaded on no server (PLUGIN_NOT_LOADED, carries Retry-After), served by another server but not this one (PLUGIN_NOT_LOADED_HERE, carries Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE); an answer about one plugin names it in details.plugin_id", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -308,7 +308,7 @@ pub async fn run_contest_code(
     require_contest_running(&auth_user, &contest_model, now)?;
     require_contest_participant(&state.db, &auth_user, &contest_model).await?;
 
-    let known_languages = state.registries.known_language_ids().await;
+    let known_languages = state.known_languages().await;
     validate_run_language(&payload.language, &known_languages)?;
 
     let custom_tcs_json =

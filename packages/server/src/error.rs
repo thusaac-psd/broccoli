@@ -24,6 +24,12 @@ pub const PLUGIN_RETRY_AFTER_SECS: u64 = 2;
 /// a client asks again at this pace rather than a plugin call's.
 pub const DISABLED_RETRY_AFTER_SECS: u64 = 30;
 
+/// The `Retry-After` of a `PLUGIN_NOT_LOADED_HERE` answer: how long the
+/// shipped gateways take to stop sending this replica's browsers here once
+/// its readiness fails (two failed checks five seconds apart), after which
+/// the retry lands on a replica that serves the plugin.
+pub const NOT_LOADED_HERE_RETRY_AFTER_SECS: u64 = 10;
+
 /// The `Retry-After` of a `STORAGE_UNAVAILABLE` answer.
 pub const STORAGE_RETRY_AFTER_SECS: u64 = 5;
 
@@ -158,6 +164,11 @@ pub enum AppError {
     /// reloading it). A client asks again after [`DISABLED_RETRY_AFTER_SECS`]:
     /// it serves once a replica loads the plugin.
     PluginNotLoaded(String),
+    /// What the request needs is provided by plugin `id`, enabled and served
+    /// by another live replica but not loaded on this one. A client asks
+    /// again after [`NOT_LOADED_HERE_RETRY_AFTER_SECS`], by when the gateway
+    /// sends it to a replica that serves the plugin.
+    PluginNotLoadedHere(String),
     /// Blob storage did not answer through its retries: an outage, retried
     /// by the client after [`STORAGE_RETRY_AFTER_SECS`].
     StorageUnavailable,
@@ -166,11 +177,7 @@ pub enum AppError {
     /// plugin gave. Answered as an internal error, which says nothing of the
     /// plugin's text; the text is logged as a host line about the plugin
     /// (`plugin_core::guest_log::about`), never as the host's own error.
-    PluginFailed {
-        plugin_id: String,
-        what: &'static str,
-        text: String,
-    },
+    PluginFailed(PluginFailure),
     /// A plugin refused the request (a route's client error or a hook's
     /// rejection), confined to the plugin's namespace.
     PluginRefusal(crate::services::plugin_output::PluginRefusal),
@@ -447,6 +454,17 @@ impl AppError {
                     plugin_id,
                 ),
             ),
+            AppError::PluginNotLoadedHere(plugin_id) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                naming_plugin(
+                    HostCode::PluginNotLoadedHere,
+                    format!(
+                        "The plugin '{plugin_id}' is not loaded on this server; another server \
+                         serves it, and a retry is sent there"
+                    ),
+                    plugin_id,
+                ),
+            ),
             AppError::StorageUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 simple(
@@ -528,12 +546,8 @@ impl AppError {
                         .into(),
                 ),
             ),
-            AppError::PluginFailed {
-                plugin_id,
-                what,
-                text,
-            } => {
-                plugin_core::guest_log::about(&plugin_id, what, &text);
+            AppError::PluginFailed(failure) => {
+                failure.log();
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     simple(
@@ -571,6 +585,7 @@ impl IntoResponse for AppError {
             AppError::PluginDisabled(_)
             | AppError::PluginNotLoaded(_)
             | AppError::ContestTypeDisabled { .. } => Some(DISABLED_RETRY_AFTER_SECS),
+            AppError::PluginNotLoadedHere(_) => Some(NOT_LOADED_HERE_RETRY_AFTER_SECS),
             AppError::StorageUnavailable => Some(STORAGE_RETRY_AFTER_SECS),
             AppError::DatabaseUnavailable => Some(DATABASE_RETRY_AFTER_SECS),
             AppError::DatabaseBusy => Some(DATABASE_BUSY_RETRY_AFTER_SECS),
@@ -578,14 +593,32 @@ impl IntoResponse for AppError {
             _ => None,
         };
 
+        let plugin_caused = matches!(self, AppError::PluginFailed(_));
         let (status, body) = self.status_and_body();
 
-        if let Some(seconds) = retry_after {
+        let mut response = if let Some(seconds) = retry_after {
             (status, [("Retry-After", seconds.to_string())], Json(body)).into_response()
         } else {
             (status, Json(body)).into_response()
+        };
+        if plugin_caused {
+            response.extensions_mut().insert(PluginCaused);
         }
+        response
     }
+}
+
+/// Marks a response a plugin's failure caused ([`AppError::PluginFailed`]),
+/// which its own line about the plugin already logged.
+#[derive(Debug, Clone, Copy)]
+pub struct PluginCaused;
+
+/// Whether `response` is a server error the host logs as its own: every 5xx
+/// but one a plugin caused, so a plugin's failures (a route answering 500 a
+/// contestant can call at will) log only under that plugin's budget, at
+/// most as a warning.
+pub fn is_host_failure<B>(response: &axum::http::Response<B>) -> bool {
+    response.status().is_server_error() && response.extensions().get::<PluginCaused>().is_none()
 }
 
 impl From<DbErr> for AppError {
@@ -669,13 +702,49 @@ impl From<PluginError> for AppError {
                 ref func_name,
                 ref message,
                 ..
-            } => AppError::PluginFailed {
-                plugin_id: plugin_id.clone(),
-                what: "A plugin call the request needed failed",
-                text: format!("{func_name}: {message}"),
-            },
+            } => AppError::PluginFailed(PluginFailure::new(
+                plugin_id,
+                "A plugin call the request needed failed",
+                &format!("{func_name}: {message}"),
+            )),
             _ => AppError::Internal(err.to_string()),
         }
+    }
+}
+
+/// What a plugin failed ([`AppError::PluginFailed`]): `what` happened to
+/// `plugin_id`, with `text` the plugin gave. Built only by
+/// [`PluginFailure::new`], which keeps `text` as
+/// `plugin_core::guest_log::plugin_text` makes it, so no log line or debug
+/// print of the error carries more of the plugin's text than one escaped,
+/// bounded line.
+#[derive(Debug)]
+pub struct PluginFailure {
+    plugin_id: String,
+    what: &'static str,
+    text: String,
+}
+
+impl PluginFailure {
+    pub fn new(plugin_id: &str, what: &'static str, text: &str) -> Self {
+        Self {
+            plugin_id: plugin_id.to_string(),
+            what,
+            text: plugin_core::guest_log::plugin_text(text).into_owned(),
+        }
+    }
+
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    /// Log the failure as a host line about its plugin.
+    pub fn log(&self) {
+        plugin_core::guest_log::about(&self.plugin_id, self.what, &self.text);
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
     }
 }
 
@@ -685,6 +754,7 @@ impl From<broccoli_api_types::visibility::PluginOutage> for AppError {
         match outage {
             PluginOutage::Disabled { plugin_id } => AppError::PluginDisabled(plugin_id),
             PluginOutage::NotLoaded { plugin_id } => AppError::PluginNotLoaded(plugin_id),
+            PluginOutage::NotLoadedHere { plugin_id } => AppError::PluginNotLoadedHere(plugin_id),
             PluginOutage::Unavailable => AppError::PluginUnavailable,
         }
     }
@@ -735,6 +805,21 @@ impl From<TypedMultipartError> for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A plugin's failure is a 500 the host does not log as its own: the
+    /// plugin's line about it is the only one, under the plugin's budget.
+    #[test]
+    fn a_server_error_a_plugin_caused_is_not_logged_as_the_hosts() {
+        let plugin = AppError::PluginFailed(PluginFailure::new("p", "A route failed", "boom"))
+            .into_response();
+        assert_eq!(plugin.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!is_host_failure(&plugin));
+        let host = AppError::Internal("x".into()).into_response();
+        assert!(is_host_failure(&host));
+        assert!(!is_host_failure(
+            &AppError::NotFound("x".into()).into_response()
+        ));
+    }
     use axum::body::to_bytes;
 
     #[tokio::test]
@@ -930,6 +1015,7 @@ mod tests {
             },
             AppError::PluginDisabled("ioi".into()),
             AppError::PluginNotLoaded("ioi".into()),
+            AppError::PluginNotLoadedHere("ioi".into()),
         ];
         let mut answered = std::collections::BTreeSet::new();
         for answer in answers {
@@ -949,6 +1035,27 @@ mod tests {
             answered, naming,
             "every code about a plugin is answered here"
         );
+    }
+
+    /// A plugin another replica serves but this one lacks is answered by
+    /// name, retried once the gateway has moved the browser to a replica
+    /// that serves it.
+    #[tokio::test]
+    async fn a_plugin_missing_here_is_a_503_naming_it_retried_after_the_gateway_moves() {
+        use broccoli_api_types::visibility::PluginOutage;
+        let response = AppError::from(PluginOutage::NotLoadedHere {
+            plugin_id: "ioi".into(),
+        })
+        .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get("Retry-After").unwrap(),
+            &NOT_LOADED_HERE_RETRY_AFTER_SECS.to_string()
+        );
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "PLUGIN_NOT_LOADED_HERE");
+        assert_eq!(body["details"], serde_json::json!({ "plugin_id": "ioi" }));
     }
 
     /// Every 503 is retryable and says when to ask again. A disabled plugin

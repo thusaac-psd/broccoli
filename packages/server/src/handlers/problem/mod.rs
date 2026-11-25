@@ -1,4 +1,5 @@
 use crate::extractors::query::AppQuery;
+use crate::providers::Provided;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -71,7 +72,7 @@ pub async fn create_problem(
     let problem_type = payload.problem_type;
     let default_contest_type = payload.default_contest_type;
 
-    validate_problem_type(&problem_type, &state.registries.evaluator_registry).await?;
+    validate_key(&state, Provided::ProblemType, "problem_type", &problem_type).await?;
     let checker_format = match payload.checker_format.clone() {
         Some(format) => format,
         None => default_checker_format(
@@ -85,17 +86,24 @@ pub async fn create_problem(
             )
         })?,
     };
-    validate_checker_format(&checker_format, &state.registries.checker_stage_registry).await?;
-    let known_languages = state.registries.known_language_ids().await;
+    validate_key(
+        &state,
+        Provided::CheckerFormat,
+        "checker_format",
+        &checker_format,
+    )
+    .await?;
+    let known_languages = state.known_languages().await;
     let submission_format = payload
         .submission_format
         .as_ref()
         .map(|sf| parse_submission_format(sf, &known_languages))
         .transpose()?;
-    validate_contest_type(
+    validate_key(
+        &state,
+        Provided::ContestType,
         "default_contest_type",
         &default_contest_type,
-        &state.registries.contest_type_registry,
     )
     .await?;
 
@@ -393,27 +401,22 @@ pub async fn update_problem(
     auth_user.require_permission(perm::PROBLEM_EDIT)?;
     validate_update_problem(&payload)?;
     if let Some(ref pt) = payload.problem_type {
-        validate_problem_type(pt, &state.registries.evaluator_registry).await?;
+        validate_key(&state, Provided::ProblemType, "problem_type", pt).await?;
     }
     if let Some(ref cf) = payload.checker_format {
-        validate_checker_format(cf, &state.registries.checker_stage_registry).await?;
+        validate_key(&state, Provided::CheckerFormat, "checker_format", cf).await?;
     }
     // Parsed (normalised) once here; the parsed value is what gets stored.
     let submission_format = match &payload.submission_format {
         Some(Some(sf)) => {
-            let known_languages = state.registries.known_language_ids().await;
+            let known_languages = state.known_languages().await;
             Some(Some(parse_submission_format(sf, &known_languages)?))
         }
         Some(None) => Some(None),
         None => None,
     };
     if let Some(ref ct) = payload.default_contest_type {
-        validate_contest_type(
-            "default_contest_type",
-            ct,
-            &state.registries.contest_type_registry,
-        )
-        .await?;
+        validate_key(&state, Provided::ContestType, "default_contest_type", ct).await?;
     }
 
     if payload == UpdateProblemRequest::default() {

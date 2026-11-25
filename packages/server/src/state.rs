@@ -29,19 +29,6 @@ pub struct RegistryState {
     pub live_dispatches: crate::services::judging::LiveDispatches,
 }
 
-impl RegistryState {
-    /// Snapshot of the language ids currently registered by plugins, for
-    /// validating a request's language or submission format against.
-    pub async fn known_language_ids(&self) -> std::collections::HashSet<String> {
-        self.language_resolver_registry
-            .read()
-            .await
-            .keys()
-            .cloned()
-            .collect()
-    }
-}
-
 #[derive(Clone)]
 pub struct AppState {
     pub plugins: Arc<dyn PluginManager>,
@@ -80,5 +67,57 @@ impl AppState {
             self.registries.checker_stage_registry.clone(),
             self.plugin_lifecycle.clone(),
         )
+    }
+}
+
+impl AppState {
+    /// The `kind` keys work and requests may name: every key a plugin of the
+    /// fleet recorded providing, and every one registered here. A key whose
+    /// plugin is loaded nowhere or not here is still known, and refused by
+    /// why it cannot run (`PluginLifecycle::key_closure`, the submit paths'
+    /// `accepting_handler`), never as unknown.
+    pub async fn known_keys(
+        &self,
+        kind: broccoli_api_types::visibility::Provided,
+    ) -> std::collections::HashSet<String> {
+        use broccoli_api_types::visibility::Provided;
+        let mut known = self.plugin_lifecycle.recorded_keys(kind);
+        let registries = &self.registries;
+        match kind {
+            Provided::ContestType => known.extend(
+                registries
+                    .contest_type_registry
+                    .read()
+                    .await
+                    .keys()
+                    .cloned(),
+            ),
+            Provided::ProblemType => {
+                known.extend(registries.evaluator_registry.read().await.keys().cloned())
+            }
+            Provided::CheckerFormat => known.extend(
+                registries
+                    .checker_stage_registry
+                    .read()
+                    .await
+                    .keys()
+                    .cloned(),
+            ),
+            Provided::Language => known.extend(
+                registries
+                    .language_resolver_registry
+                    .read()
+                    .await
+                    .keys()
+                    .cloned(),
+            ),
+        }
+        known
+    }
+
+    /// The languages work may name ([`Self::known_keys`]).
+    pub async fn known_languages(&self) -> std::collections::HashSet<String> {
+        self.known_keys(broccoli_api_types::visibility::Provided::Language)
+            .await
     }
 }

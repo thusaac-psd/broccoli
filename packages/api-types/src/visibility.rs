@@ -19,6 +19,15 @@ pub enum PluginOutage {
         #[schema(example = "my-plugin")]
         plugin_id: String,
     },
+    /// The plugin is enabled and served by another live server, but not
+    /// loaded on this one (it failed to load here, or this server is behind
+    /// the fleet). The gateway moves this server's browsers to one that
+    /// serves it once this server reports not ready, so a retry soon lands
+    /// there.
+    NotLoadedHere {
+        #[schema(example = "my-plugin")]
+        plugin_id: String,
+    },
     /// The plugin is enabled but cannot answer on this server right now (it
     /// is loading, reloading or busy). A retry may succeed.
     Unavailable,
@@ -26,28 +35,31 @@ pub enum PluginOutage {
 
 impl PluginOutage {
     /// How long the outage lasts, longest first: a disabled plugin waits for
-    /// an administrator, a plugin loaded nowhere for a server to load it,
-    /// and an unavailable one for this server.
+    /// an administrator, a plugin loaded nowhere for a server to load it, a
+    /// plugin missing here for the gateway to move the browser, and an
+    /// unavailable one for this server.
     fn rank(&self) -> u8 {
         match self {
             PluginOutage::Disabled { .. } => 0,
             PluginOutage::NotLoaded { .. } => 1,
-            PluginOutage::Unavailable => 2,
+            PluginOutage::NotLoadedHere { .. } => 2,
+            PluginOutage::Unavailable => 3,
         }
     }
 
     /// The plugin the outage names, if it names one.
     pub fn plugin_id(&self) -> Option<&str> {
         match self {
-            PluginOutage::Disabled { plugin_id } | PluginOutage::NotLoaded { plugin_id } => {
-                Some(plugin_id)
-            }
+            PluginOutage::Disabled { plugin_id }
+            | PluginOutage::NotLoaded { plugin_id }
+            | PluginOutage::NotLoadedHere { plugin_id } => Some(plugin_id),
             PluginOutage::Unavailable => None,
         }
     }
 
     /// The outage of two plugins at once: the one that lasts longer (a
-    /// disabled plugin, then one loaded nowhere, then an unavailable one),
+    /// disabled plugin, then one loaded nowhere, then one missing here, then
+    /// an unavailable one),
     /// and of two alike the plugin whose id sorts first.
     /// Commutative.
     pub fn worst(self, other: PluginOutage) -> PluginOutage {
@@ -195,6 +207,22 @@ mod tests {
             (not_loaded("a"), PluginOutage::Unavailable, not_loaded("a")),
             (not_loaded("a"), disabled.clone(), disabled.clone()),
             (not_loaded("b"), not_loaded("a"), not_loaded("a")),
+            (
+                PluginOutage::NotLoadedHere {
+                    plugin_id: "a".into(),
+                },
+                not_loaded("b"),
+                not_loaded("b"),
+            ),
+            (
+                PluginOutage::NotLoadedHere {
+                    plugin_id: "a".into(),
+                },
+                PluginOutage::Unavailable,
+                PluginOutage::NotLoadedHere {
+                    plugin_id: "a".into(),
+                },
+            ),
         ] {
             assert_eq!(a.clone().worst(b.clone()), worst);
             assert_eq!(b.worst(a), worst);

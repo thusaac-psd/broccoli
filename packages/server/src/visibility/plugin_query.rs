@@ -678,7 +678,7 @@ pub(crate) async fn query_plugins(
             Err(e) if e.is_unavailable() => {
                 // It cannot answer in time: what it governs is withheld, as
                 // for a plugin that is not loaded at all.
-                tracing::warn!(plugin_id = %querier.plugin_id, error = %e, "visibility querier unavailable");
+                tracing::warn!(plugin_id = %querier.plugin_id, host_error = %e, "visibility querier unavailable");
                 for &i in &governed {
                     if resources[i].degrades_in_outage() {
                         let outage = outages[i].take().map_or(PluginOutage::Unavailable, |o| {

@@ -527,6 +527,30 @@ pub fn build_router(state: AppState) -> anyhow::Result<axum::Router> {
                           span: &tracing::Span| {
                         span.record("status", response.status().as_u16());
                         span.record("latency_ms", latency.as_millis() as u64);
+                        if crate::error::is_host_failure(response) {
+                            tracing::error!(
+                                status = response.status().as_u16(),
+                                latency_ms = latency.as_millis() as u64,
+                                "response failed"
+                            );
+                        }
+                    },
+                )
+                // A server error status is logged by `on_response`, which
+                // can tell a plugin's failure from the host's; only a failure
+                // with no response logs here.
+                .on_failure(
+                    |class: tower_http::classify::ServerErrorsFailureClass,
+                     latency: std::time::Duration,
+                     _span: &tracing::Span| {
+                        if let tower_http::classify::ServerErrorsFailureClass::Error(error) = class
+                        {
+                            tracing::error!(
+                                error,
+                                latency_ms = latency.as_millis() as u64,
+                                "response failed"
+                            );
+                        }
                     },
                 ),
         )

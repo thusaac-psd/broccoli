@@ -74,6 +74,9 @@ pub struct PluginLifecycle {
     reported: std::sync::Mutex<Option<Reported>>,
     /// The recorded [`Governs`] per plugin, as of the last reconcile.
     governs: RwLock<HashMap<String, Governs>>,
+    /// Each plugin's recorded display name per locale (`plugin.names`), as
+    /// of the last reconcile.
+    names: RwLock<HashMap<String, std::collections::BTreeMap<String, String>>>,
     /// What the live replicas have loaded, each key with the plugins that
     /// registered it on one of them, as of the last reconcile
     /// (`plugin_replica.provides`); `None` before the first read.
@@ -85,6 +88,9 @@ pub struct PluginLifecycle {
     /// What each other live replica has loaded, as of the last reconcile
     /// (its `plugin_replica.provides`), for [`Self::ready`].
     fleet_peers: RwLock<Vec<crate::providers::Loaded>>,
+    /// The plugins another live replica serves, as of the last reconcile,
+    /// for [`Self::missing_here`].
+    peers_serving: RwLock<std::collections::BTreeSet<String>>,
     /// Set by [`stop`] at shutdown: no further report writes.
     stopped: std::sync::atomic::AtomicBool,
 }
@@ -310,6 +316,12 @@ fn retry_delay(attempts: u32) -> Duration {
 impl PluginLifecycle {
     /// Whether `plugin_id` is enabled in the desired state this replica last
     /// applied. Unknown ids are not enabled.
+    /// Whether the fleet has `plugin_id` (its `plugin` row, enabled or not),
+    /// as of the last apply, whether or not this replica has its files.
+    pub fn is_known(&self, plugin_id: &str) -> bool {
+        self.desired.read().is_ok_and(|d| d.contains_key(plugin_id))
+    }
+
     pub fn is_desired_enabled(&self, plugin_id: &str) -> bool {
         self.desired
             .read()
@@ -519,6 +531,30 @@ impl PluginLifecycle {
         if let Ok(mut slot) = self.fleet_loaded.write() {
             *slot = Some(loaded);
         }
+    }
+
+    /// Records the plugins another live replica serves (see
+    /// [`Self::missing_here`]).
+    pub(crate) fn set_peers_serving(&self, serving: std::collections::BTreeSet<String>) {
+        if let Ok(mut slot) = self.peers_serving.write() {
+            *slot = serving;
+        }
+    }
+
+    /// Whether `plugin_id`, enabled fleet-wide and not loaded here
+    /// (`loaded_here` false), is served by another live replica: this
+    /// replica is behind the fleet for it. The one rule both admission (what
+    /// a request that needs the plugin answers, [`Self::outage`]) and
+    /// readiness (whether the gateway sends browsers here) read, so a
+    /// request is refused by name exactly while readiness moves its browser
+    /// to a replica that serves the plugin.
+    pub fn missing_here(&self, plugin_id: &str, loaded_here: bool) -> bool {
+        !loaded_here
+            && self.is_desired_enabled(plugin_id)
+            && self
+                .peers_serving
+                .read()
+                .is_ok_and(|serving| serving.contains(plugin_id))
     }
 
     /// Records what each other live replica has loaded (see
@@ -737,19 +773,19 @@ impl PluginLifecycle {
 
     /// Why plugin `plugin_id`, known not to be loaded here, cannot serve:
     /// the fleet disabled it, it is enabled and loaded on no live replica
-    /// ([`Self::loaded_nowhere`]), or it is enabled and missing on this
-    /// replica for now. This is the one place the three are told apart, so
-    /// every answer about a plugin that is out (`AppError::from`) names the
-    /// plugin unless a retry here may serve.
+    /// ([`Self::loaded_nowhere`]), it is enabled and another live replica
+    /// serves it ([`Self::missing_here`]), or it is enabled and missing on
+    /// this replica for now (loading). This is the one place the four are
+    /// told apart, so every answer about a plugin that is out
+    /// (`AppError::from`) names the plugin unless a retry here may serve.
     pub fn outage(&self, plugin_id: &str) -> PluginOutage {
-        if !self.is_desired_enabled(plugin_id) {
-            PluginOutage::Disabled {
-                plugin_id: plugin_id.to_string(),
-            }
-        } else if self.loaded_nowhere(plugin_id) {
-            PluginOutage::NotLoaded {
-                plugin_id: plugin_id.to_string(),
-            }
+        let plugin_id = plugin_id.to_string();
+        if !self.is_desired_enabled(&plugin_id) {
+            PluginOutage::Disabled { plugin_id }
+        } else if self.loaded_nowhere(&plugin_id) {
+            PluginOutage::NotLoaded { plugin_id }
+        } else if self.missing_here(&plugin_id, false) {
+            PluginOutage::NotLoadedHere { plugin_id }
         } else {
             PluginOutage::Unavailable
         }
@@ -793,6 +829,21 @@ impl PluginLifecycle {
             .collect()
     }
 
+    /// Every `kind` key a plugin of the fleet recorded providing, enabled or
+    /// not: what work may name, whether or not a provider can run it now
+    /// ([`Self::key_closure`] says why one cannot).
+    pub fn recorded_keys(&self, kind: Provided) -> std::collections::HashSet<String> {
+        self.governs
+            .read()
+            .map(|governs| {
+                governs
+                    .values()
+                    .flat_map(|g| g.provides.keys(kind).iter().cloned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Every plugin's recorded [`Governs`], in plugin id order.
     pub fn recorded_governs(&self) -> Vec<(String, Governs)> {
         let mut recorded: Vec<(String, Governs)> = self
@@ -802,6 +853,36 @@ impl PluginLifecycle {
             .unwrap_or_default();
         recorded.sort_by(|a, b| a.0.cmp(&b.0));
         recorded
+    }
+
+    /// Every plugin's display name per locale as the fleet recorded it
+    /// (`plugin.names`), for naming a plugin no pack here names.
+    pub fn recorded_names(&self) -> plugin_core::i18n::RecordedNames {
+        let mut recorded = plugin_core::i18n::RecordedNames::default();
+        if let Ok(names) = self.names.read() {
+            for (plugin_id, by_locale) in names.iter() {
+                for (locale, name) in by_locale {
+                    recorded.insert(plugin_id, locale, name);
+                }
+            }
+        }
+        recorded
+    }
+
+    /// `plugin_id`'s recorded display names, if any.
+    pub fn names_of(&self, plugin_id: &str) -> Option<std::collections::BTreeMap<String, String>> {
+        self.names.read().ok()?.get(plugin_id).cloned()
+    }
+
+    /// Records `plugin_id`'s display names; whether they changed.
+    pub(crate) fn set_names(
+        &self,
+        plugin_id: &str,
+        names: std::collections::BTreeMap<String, String>,
+    ) -> bool {
+        self.names
+            .write()
+            .is_ok_and(|mut map| map.insert(plugin_id.to_string(), names.clone()) != Some(names))
     }
 
     pub(crate) fn set_governs(&self, plugin_id: &str, governs: Governs) {
@@ -817,6 +898,9 @@ impl PluginLifecycle {
         }
         if let Ok(mut g) = self.governs.write() {
             g.remove(plugin_id);
+        }
+        if let Ok(mut n) = self.names.write() {
+            n.remove(plugin_id);
         }
     }
 }
@@ -853,7 +937,13 @@ pub async fn contest_type_outage(state: &AppState, contest_type: &str) -> Option
         Provided::ContestType,
         contest_type,
     );
-    resolved.is_err().then_some(PluginOutage::Unavailable)
+    resolved.err().map(|unresolved| {
+        unresolved
+            .provider
+            .map_or(PluginOutage::Unavailable, |plugin_id| {
+                state.plugin_lifecycle.outage(&plugin_id)
+            })
+    })
 }
 
 /// The handler a new submission or code run with `needs` is accepted
@@ -905,7 +995,17 @@ pub async fn accepting_handler(
         Provided::ContestType,
         contest_type,
     )
-    .map_err(|_| AppError::ContestTypeUnavailable(contest_type.to_string()))
+    .map_err(|unresolved| {
+        // Its provider is not loaded here: by name while another replica
+        // serves it, else briefly unavailable while this one loads it.
+        match unresolved
+            .provider
+            .map(|plugin_id| state.plugin_lifecycle.outage(&plugin_id))
+        {
+            Some(outage @ PluginOutage::NotLoadedHere { .. }) => outage.into(),
+            _ => AppError::ContestTypeUnavailable(contest_type.to_string()),
+        }
+    })
 }
 
 /// Plugins that are enabled in the desired state but not `Loaded` here,
@@ -1200,6 +1300,7 @@ async fn reconcile_locked(
         forget(state, applied, id).await;
     }
     let published_archives = published_archives(&rows);
+    let mut renamed = false;
     for row in rows {
         if let Some(governs) = row.governs.clone() {
             match serde_json::from_value::<Governs>(governs) {
@@ -1207,8 +1308,18 @@ async fn reconcile_locked(
                 // The table's shape check stores only rows this reads.
                 Err(e) => tracing::error!(
                     plugin_id = %row.id,
-                    error = %e,
+                    host_error = %e,
                     "A plugin's recorded governs does not have the one shape both readers share"
+                ),
+            }
+        }
+        if let Some(names) = row.names.clone() {
+            match serde_json::from_value(names) {
+                Ok(names) => renamed |= state.plugin_lifecycle.set_names(&row.id, names),
+                Err(e) => tracing::warn!(
+                    plugin_id = %row.id,
+                    host_error = %e,
+                    "A plugin's recorded names are not a map of locales to names"
                 ),
             }
         }
@@ -1227,6 +1338,10 @@ async fn reconcile_locked(
     }
     if fleet_changed || !gone.is_empty() {
         retain_cache(state, published_archives).await;
+    }
+    // A name another replica recorded names its plugin here too.
+    if renamed {
+        plugin_utils::update_translations(state).await;
     }
     // What the live replicas have loaded, this one's own registrations
     // included before its next report lands.
@@ -1248,6 +1363,13 @@ async fn reconcile_locked(
             .into_iter()
             .filter(|(server_id, _)| *server_id != state.config.server.id)
             .map(|(_, theirs)| theirs)
+            .collect(),
+    );
+    state.plugin_lifecycle.set_peers_serving(
+        live.serving_by
+            .into_iter()
+            .filter(|(server_id, _)| *server_id != state.config.server.id)
+            .flat_map(|(_, theirs)| theirs)
             .collect(),
     );
     Ok(failures)
@@ -1289,14 +1411,14 @@ async fn retain_cache(state: &AppState, mut keep: HashSet<String>) {
 /// recorded about it.
 async fn forget(state: &AppState, applied: &mut HashMap<String, Applied>, plugin_id: &str) {
     if let Err(e) = deactivate(state, plugin_id).await {
-        tracing::warn!(plugin_id, error = %e, "Could not unload a plugin the fleet forgot");
+        tracing::warn!(plugin_id, host_error = %e, "Could not unload a plugin the fleet forgot");
     }
     if let Ok(mut registry) = state.plugins.get_registry().write() {
         registry.remove(plugin_id);
     }
-    plugin_utils::update_translations(state).await;
     applied.remove(plugin_id);
     state.plugin_lifecycle.forget(plugin_id);
+    plugin_utils::update_translations(state).await;
     tracing::info!(plugin_id, "Plugin removed from the fleet; unloaded it here");
 }
 
@@ -1351,7 +1473,7 @@ async fn apply(
             match plugin_distribution::locate(state, id, &desired.source).await {
                 Ok(root) => plugin_utils::register_unloaded(state, plugin_id, &root),
                 Err(e) => {
-                    tracing::debug!(plugin_id, error = %e, "Disabled plugin's files are not available here");
+                    tracing::debug!(plugin_id, host_error = %e, "Disabled plugin's files are not available here");
                 }
             }
         }
@@ -1423,13 +1545,17 @@ async fn apply(
         },
         Err(failure) => {
             let r = Retry::after(retry, now);
-            tracing::warn!(
+            // Why it failed is the plugin's (its manifest, module or init).
+            plugin_core::guest_log::about(
                 plugin_id,
-                attempts = r.attempts,
-                retry_in_secs = retry_delay(r.attempts).as_secs(),
-                kept_previous = failure.kept_previous,
-                error = %failure.error,
-                "Plugin failed to load on this replica; will retry"
+                "A plugin failed to load on this replica; it is retried",
+                &format!(
+                    "attempt {}, next in {}s, previous version kept: {}: {}",
+                    r.attempts,
+                    retry_delay(r.attempts).as_secs(),
+                    failure.kept_previous,
+                    failure.error
+                ),
             );
             Applied {
                 generation: desired.generation,
@@ -1566,6 +1692,28 @@ fn registered_host_locale(state: &AppState, plugin_id: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The display name per locale `plugin_id`'s own packs give it
+/// (`plugin.<id>.name`), as registered here.
+fn registered_names(
+    state: &AppState,
+    plugin_id: &str,
+) -> std::collections::BTreeMap<String, String> {
+    let key = format!("plugin.{plugin_id}.name");
+    let Ok(registry) = state.plugins.get_registry().read() else {
+        return Default::default();
+    };
+    registry
+        .get(plugin_id)
+        .map(|entry| {
+            entry
+                .translations
+                .iter()
+                .filter_map(|(locale, map)| Some((locale.clone(), map.get(&key)?.clone())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// What the plugin loaded here governs.
 async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
     let declared = state
@@ -1664,7 +1812,8 @@ async fn record_declared(state: &AppState, ids: &[String]) -> Result<(), DbErr> 
 }
 
 /// Record what the published version of a plugin, just loaded here at
-/// `generation`, governs, if that changed: the first load of a bundled
+/// `generation`, governs and how its pack names it, if that changed: the
+/// first load of a bundled
 /// plugin, which no change published, records it this way. Fenced on the
 /// generation, so a replica applying an older generation never overwrites
 /// what a newer change published with it ([`publish`]). Best-effort: a
@@ -1672,27 +1821,43 @@ async fn record_declared(state: &AppState, ids: &[String]) -> Result<(), DbErr> 
 /// for a slightly different scope.
 async fn record_governs(state: &AppState, plugin_id: &str, generation: i64) {
     let governs = loaded_governs(state, plugin_id).await;
-    if state.plugin_lifecycle.governs(plugin_id).as_ref() == Some(&governs) {
+    let names = registered_names(state, plugin_id);
+    if state.plugin_lifecycle.governs(plugin_id).as_ref() == Some(&governs)
+        && state.plugin_lifecycle.names_of(plugin_id).as_ref() == Some(&names)
+    {
         return;
     }
-    let Ok(value) = serde_json::to_value(&governs) else {
+    let (Ok(value), Ok(names_value)) =
+        (serde_json::to_value(&governs), serde_json::to_value(&names))
+    else {
         return;
     };
     let result = state
         .db
         .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE plugin SET governs = $2 \
-              WHERE id = $1 AND generation = $3 AND governs IS DISTINCT FROM $2",
-            [plugin_id.into(), value.into(), generation.into()],
+            "UPDATE plugin SET governs = $2, names = $4 \
+              WHERE id = $1 AND generation = $3 \
+                AND (governs IS DISTINCT FROM $2 OR names IS DISTINCT FROM $4)",
+            [
+                plugin_id.into(),
+                value.into(),
+                generation.into(),
+                names_value.into(),
+            ],
         ))
         .await;
     match result {
         Ok(done) if done.rows_affected() > 0 => {
-            state.plugin_lifecycle.set_governs(plugin_id, governs)
+            state.plugin_lifecycle.set_governs(plugin_id, governs);
+            if state.plugin_lifecycle.set_names(plugin_id, names) {
+                plugin_utils::update_translations(state).await;
+            }
         }
         Ok(_) => {}
-        Err(e) => tracing::warn!(plugin_id, error = %e, "Failed to record what a plugin governs"),
+        Err(e) => {
+            tracing::warn!(plugin_id, host_error = %e, "Failed to record what a plugin governs")
+        }
     }
 }
 
@@ -1752,12 +1917,13 @@ async fn publish(
     let hash = loaded.fingerprint.map(|f| f.hash.clone());
     let governs = loaded.governs.and_then(|g| serde_json::to_value(g).ok());
     let host_locale = loaded.host_locale.map(str::to_string);
+    let names = loaded.names.and_then(|n| serde_json::to_value(n).ok());
     let archive = source.archive_hash().map(str::to_string);
     let statement = match change {
         Change::Enable => Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash, governs, host_locale)
-               VALUES ($1, TRUE, 1, NOW(), $2, $3, $4, $5, $6)
+            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash, governs, host_locale, names)
+               VALUES ($1, TRUE, 1, NOW(), $2, $3, $4, $5, $6, $7)
                ON CONFLICT (id) DO UPDATE
                  SET is_enabled = TRUE,
                      generation = plugin.generation + 1,
@@ -1766,7 +1932,9 @@ async fn publish(
                      content_hash = COALESCE(EXCLUDED.content_hash, plugin.content_hash),
                      governs = COALESCE(EXCLUDED.governs, plugin.governs),
                      host_locale = CASE WHEN EXCLUDED.governs IS NULL THEN plugin.host_locale
-                                        ELSE EXCLUDED.host_locale END
+                                        ELSE EXCLUDED.host_locale END,
+                     names = CASE WHEN EXCLUDED.governs IS NULL THEN plugin.names
+                                  ELSE EXCLUDED.names END
                  WHERE plugin.archive_hash IS NOT DISTINCT FROM EXCLUDED.archive_hash
                RETURNING generation"#,
             [
@@ -1776,6 +1944,7 @@ async fn publish(
                 archive.into(),
                 governs.into(),
                 host_locale.into(),
+                names.clone().into(),
             ],
         ),
         Change::Disable => Statement::from_sql_and_values(
@@ -1792,8 +1961,8 @@ async fn publish(
         // clause decides; without either, nothing is written.
         Change::Upload(replaces) => Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash, governs, host_locale)
-               SELECT $1, TRUE, 1, NOW(), $2, $3, $4, $7, $8
+            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash, governs, host_locale, names)
+               SELECT $1, TRUE, 1, NOW(), $2, $3, $4, $7, $8, $9
                 WHERE $5 OR EXISTS (SELECT 1 FROM plugin WHERE id = $1)
                ON CONFLICT (id) DO UPDATE
                  SET is_enabled = TRUE,
@@ -1804,7 +1973,9 @@ async fn publish(
                      archive_hash = EXCLUDED.archive_hash,
                      governs = COALESCE(EXCLUDED.governs, plugin.governs),
                      host_locale = CASE WHEN EXCLUDED.governs IS NULL THEN plugin.host_locale
-                                        ELSE EXCLUDED.host_locale END
+                                        ELSE EXCLUDED.host_locale END,
+                     names = CASE WHEN EXCLUDED.governs IS NULL THEN plugin.names
+                                  ELSE EXCLUDED.names END
                  WHERE NOT $5 AND plugin.archive_hash IS NOT DISTINCT FROM $6
                RETURNING generation"#,
             [
@@ -1819,6 +1990,7 @@ async fn publish(
                     .into(),
                 governs.into(),
                 host_locale.into(),
+                names.clone().into(),
             ],
         ),
         Change::Reload => Statement::from_sql_and_values(
@@ -1828,7 +2000,8 @@ async fn publish(
                       version = COALESCE($2, version),
                       content_hash = COALESCE($3, content_hash),
                       governs = COALESCE($5, governs),
-                      host_locale = CASE WHEN $5 IS NULL THEN host_locale ELSE $6 END
+                      host_locale = CASE WHEN $5 IS NULL THEN host_locale ELSE $6 END,
+                      names = CASE WHEN $5 IS NULL THEN names ELSE $7 END
                WHERE id = $1 AND is_enabled AND archive_hash IS NOT DISTINCT FROM $4
                RETURNING generation"#,
             [
@@ -1838,6 +2011,7 @@ async fn publish(
                 archive.into(),
                 governs.into(),
                 host_locale.into(),
+                names.clone().into(),
             ],
         ),
         Change::RemoveUpload(removed) => Statement::from_sql_and_values(
@@ -1847,7 +2021,8 @@ async fn publish(
                       version = COALESCE($2, version),
                       content_hash = COALESCE($3, content_hash),
                       governs = COALESCE($5, governs),
-                      host_locale = CASE WHEN $5 IS NULL THEN host_locale ELSE $6 END
+                      host_locale = CASE WHEN $5 IS NULL THEN host_locale ELSE $6 END,
+                      names = CASE WHEN $5 IS NULL THEN names ELSE $7 END
                WHERE id = $1 AND archive_hash = $4
                RETURNING generation"#,
             [
@@ -1857,6 +2032,7 @@ async fn publish(
                 removed.into(),
                 governs.into(),
                 host_locale.into(),
+                names.clone().into(),
             ],
         ),
     };
@@ -1908,6 +2084,9 @@ struct Loaded<'a> {
     /// The locale its manifest provides as a language pack; recorded with
     /// `governs`.
     host_locale: Option<&'a str>,
+    /// Its display name per locale ([`registered_names`]); recorded with
+    /// `governs`.
+    names: Option<&'a std::collections::BTreeMap<String, String>>,
 }
 
 /// Why a lifecycle change did not go through.
@@ -2005,10 +2184,12 @@ async fn load_then_publish(
     let fingerprint = plugin_utils::fingerprint(&root).await;
     let governs = loaded_governs(state, plugin_id).await;
     let host_locale = registered_host_locale(state, plugin_id);
+    let names = registered_names(state, plugin_id);
     let loaded = Loaded {
         fingerprint: fingerprint.as_ref(),
         governs: Some(&governs),
         host_locale: host_locale.as_deref(),
+        names: Some(&names),
     };
     let published = match publish(&state.db, plugin_id, change, loaded, source).await {
         Ok(Some(generation)) => Ok(generation),
@@ -2032,7 +2213,7 @@ async fn load_then_publish(
                 Some(previous) => plugin_utils::roll_back(state, plugin_id, previous).await,
                 None => {
                     if let Err(e) = deactivate(state, plugin_id).await {
-                        tracing::warn!(plugin_id, error = %e, "Failed to unload an unpublished plugin");
+                        tracing::warn!(plugin_id, host_error = %e, "Failed to unload an unpublished plugin");
                     }
                     before.restore(state, plugin_id).await;
                 }
@@ -2041,6 +2222,9 @@ async fn load_then_publish(
         }
     };
     state.plugin_lifecycle.set_governs(plugin_id, governs);
+    if state.plugin_lifecycle.set_names(plugin_id, names) {
+        plugin_utils::update_translations(state).await;
+    }
     applied.insert(
         plugin_id.to_string(),
         Applied {
@@ -2168,6 +2352,11 @@ pub async fn enable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
                 "Plugin '{plugin_id}' is already enabled"
             )));
         }
+        // Enabling is the fleet's state: a replica without the plugin's
+        // files records it for the replicas that have them, which load it.
+        if !plugin_distribution::loadable_here(state, id, &source) {
+            return enable_elsewhere(state, plugin_id, &source).await;
+        }
         Ok(load_then_publish(state, applied, id, Change::Enable, &source).await?)
     })
     .await;
@@ -2175,6 +2364,44 @@ pub async fn enable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
         recheck_config_issues(state, &[plugin_id]).await;
     }
     result
+}
+
+/// Enable `plugin_id`, whose `source` this replica cannot load, for the
+/// fleet: the version, governs and locale it last recorded stand, and the
+/// replicas that have its files load it.
+async fn enable_elsewhere(
+    state: &AppState,
+    plugin_id: &str,
+    source: &PluginSource,
+) -> Result<(), AppError> {
+    let published = publish(
+        &state.db,
+        plugin_id,
+        Change::Enable,
+        Loaded::default(),
+        source,
+    )
+    .await;
+    match published {
+        Ok(Some(_)) => {
+            state.plugin_lifecycle.set_desired(plugin_id, true);
+            Ok(())
+        }
+        Ok(None) => Err(refused(state, plugin_id, Change::Enable).await.into()),
+        Err(e) if breaks_locale_index(&e) => {
+            let locale = plugin_entity::Entity::find_by_id(plugin_id)
+                .one(&state.db)
+                .await?
+                .and_then(|row| row.host_locale)
+                .unwrap_or_default();
+            Err(match locale_taken(&state.db, plugin_id, &locale).await? {
+                Some(by) => ChangeError::LanguagePackTaken { locale, by },
+                None => ChangeError::Stale(plugin_id.to_string()),
+            }
+            .into())
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Disable a plugin fleet-wide. Its pending timers are deleted: the plugin is
@@ -2225,7 +2452,7 @@ async fn delete_timers(state: &AppState, plugin_id: &str) {
     {
         tracing::error!(
             plugin_id,
-            error = %e,
+            host_error = %e,
             "Failed to delete pending timers for a plugin that is off"
         );
     }
@@ -2373,6 +2600,7 @@ pub async fn remove_upload(
                     fingerprint: fingerprint.as_ref(),
                     governs: None,
                     host_locale: None,
+                    names: None,
                 };
                 let generation = publish(&state.db, plugin_id, change, loaded, &PluginSource::Bundle)
                 .await?
@@ -2401,7 +2629,7 @@ pub async fn remove_upload(
                 forget(state, applied, plugin_id).await;
                 delete_timers(state, plugin_id).await;
                 if let Err(e) = crate::plugin_db::schema::retire(&state.db, plugin_id).await {
-                    tracing::warn!(plugin_id, error = %e, "Could not retire the plugin's database role");
+                    tracing::warn!(plugin_id, host_error = %e, "Could not retire the plugin's database role");
                 }
                 UploadRemoval::Removed
             }
@@ -2435,7 +2663,7 @@ pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError>
             match load_then_publish(state, applied, &id, Change::Reload, &source).await {
                 Ok(()) => reloaded.push(id.to_string()),
                 Err(e) => {
-                    tracing::error!(plugin_id = %id, error = %e, "Failed to reload plugin");
+                    plugin_core::guest_log::about(&id, "A plugin failed to reload", &e.to_string());
                     failed.push(ReloadFailure {
                         id: id.to_string(),
                         error: e.to_string(),
@@ -2457,7 +2685,11 @@ pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError>
             let Some(id) = row_id(&row) else { continue };
             let desired = Desired::of(&row);
             if let Err(e) = apply(state, applied, &id, desired, now).await {
-                tracing::error!(plugin_id = %row.id, error = %e, "Failed to load new plugin");
+                plugin_core::guest_log::about(
+                    &row.id,
+                    "A new plugin failed to load",
+                    &e.to_string(),
+                );
                 failed.push(ReloadFailure {
                     id: row.id.clone(),
                     error: e.to_string(),
@@ -2810,6 +3042,35 @@ mod tests {
         // A disabled provider is nobody's to load.
         lifecycle.set_desired("eval", false);
         assert_eq!(lifecycle.providers_missing_here(&local), vec![]);
+    }
+
+    /// A plugin another live replica serves and this one lacks is out here
+    /// by name, the one rule admission and readiness read: only while it
+    /// is enabled, a peer serves it, and it is not loaded here.
+    #[test]
+    fn a_plugin_a_peer_serves_and_this_replica_lacks_is_missing_here_by_name() {
+        let lifecycle = PluginLifecycle::default();
+        lifecycle.set_desired("p", true);
+        lifecycle.set_fleet_serving(["p".to_string()].into());
+        assert_eq!(
+            lifecycle.outage("p"),
+            PluginOutage::Unavailable,
+            "loading here"
+        );
+        lifecycle.set_peers_serving(["p".to_string()].into());
+        assert!(lifecycle.missing_here("p", false));
+        assert!(!lifecycle.missing_here("p", true), "loaded here");
+        assert_eq!(
+            lifecycle.outage("p"),
+            PluginOutage::NotLoadedHere {
+                plugin_id: "p".into()
+            }
+        );
+        lifecycle.set_desired("p", false);
+        assert!(
+            !lifecycle.missing_here("p", false),
+            "disabled is nobody's to load"
+        );
     }
 
     /// A plugin is out as loaded nowhere only while no live replica serves

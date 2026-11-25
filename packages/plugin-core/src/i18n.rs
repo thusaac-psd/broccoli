@@ -14,6 +14,10 @@ impl TranslationMap {
     pub fn new() -> Self {
         Self(HashMap::new())
     }
+
+    pub fn get(&self, key: &str) -> Option<&String> {
+        self.0.get(key)
+    }
 }
 
 impl From<HashMap<String, String>> for TranslationMap {
@@ -145,6 +149,21 @@ impl IdentifierOwners {
     }
 }
 
+/// Each plugin's display name per locale (`plugin.<id>.name`), as the fleet
+/// recorded it from the plugin's own pack when it was last published.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RecordedNames(HashMap<String, Vec<(String, String)>>);
+
+impl RecordedNames {
+    /// Record that `plugin_id`'s pack names it `name` in `locale`.
+    pub fn insert(&mut self, plugin_id: &str, locale: &str, name: &str) {
+        self.0
+            .entry(plugin_id.to_string())
+            .or_default()
+            .push((locale.to_string(), name.to_string()));
+    }
+}
+
 /// The translations the host serves, in every locale a loaded plugin
 /// provides:
 ///
@@ -161,10 +180,14 @@ impl IdentifierOwners {
 /// - a plugin installed but not loaded (disabled, or failed to load) adds
 ///   only its manifest text, which the admin pages show for it, and the
 ///   names of the identifiers it last provided, to the locales the loaded
-///   plugins serve.
+///   plugins serve;
+/// - a plugin no pack here names (its files are not on this replica, or no
+///   replica loads it) keeps the name the fleet recorded for it
+///   (`recorded`), in the locales served.
 pub fn served_translations<'a>(
     plugins: impl IntoIterator<Item = InstalledPacks<'a>>,
     owners: &IdentifierOwners,
+    recorded: &RecordedNames,
 ) -> I18nData {
     let plugins: Vec<InstalledPacks<'a>> = plugins.into_iter().collect();
     let mut merged = I18nData::new();
@@ -215,6 +238,16 @@ pub fn served_translations<'a>(
             }
         }
     }
+    for (plugin_id, names) in &recorded.0 {
+        for (locale, name) in names {
+            if let Some(served) = merged.get_mut(locale) {
+                served
+                    .0
+                    .entry(format!("plugin.{plugin_id}.name"))
+                    .or_insert_with(|| name.clone());
+            }
+        }
+    }
     merged
 }
 
@@ -253,8 +286,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        IdentifierKind, IdentifierOwners, InstalledPacks, TranslationMap, foreign_keys,
-        served_translations,
+        IdentifierKind, IdentifierOwners, InstalledPacks, RecordedNames, TranslationMap,
+        foreign_keys, served_translations,
     };
 
     fn pack(lang: &str, entries: &[(&str, &str)]) -> (String, TranslationMap) {
@@ -323,6 +356,7 @@ mod tests {
                 language_pack("broccoli-zh-cn", "zh-CN", &host),
             ],
             &owners,
+            &RecordedNames::default(),
         );
         assert_eq!(served.keys().collect::<Vec<_>>(), vec!["zh-CN"]);
         let expected = HashMap::from([
@@ -368,6 +402,7 @@ mod tests {
                 language_pack("broccoli-zh-cn", "zh-CN", &host),
             ],
             &owners,
+            &RecordedNames::default(),
         );
         assert_eq!(served["zh-CN"].0["identifier.problemType.batch"], "传统题");
         assert!(
@@ -390,8 +425,16 @@ mod tests {
         let mut owners = IdentifierOwners::default();
         owners.insert(IdentifierKind::Checker, "lines", "b");
         owners.insert(IdentifierKind::ContestType, "icpc", "icpc");
-        let forward = served_translations([loaded("a", &a), loaded("b", &b)], &owners);
-        let reverse = served_translations([loaded("b", &b), loaded("a", &a)], &owners);
+        let forward = served_translations(
+            [loaded("a", &a), loaded("b", &b)],
+            &owners,
+            &RecordedNames::default(),
+        );
+        let reverse = served_translations(
+            [loaded("b", &b), loaded("a", &a)],
+            &owners,
+            &RecordedNames::default(),
+        );
         assert_eq!(forward["en"].0, reverse["en"].0);
         assert_eq!(
             forward["en"].0,
@@ -410,7 +453,11 @@ mod tests {
         let real = [pack("en", &[("nav.signIn", "Sign in")])];
         let hijack = [pack("en", &[("nav.signIn", "HIJACKED SIGN IN")])];
         let owners = IdentifierOwners::default();
-        let one = served_translations([language_pack("broccoli-en", "en", &real)], &owners);
+        let one = served_translations(
+            [language_pack("broccoli-en", "en", &real)],
+            &owners,
+            &RecordedNames::default(),
+        );
         assert_eq!(one["en"].0["nav.signIn"], "Sign in");
         let two = served_translations(
             [
@@ -418,8 +465,38 @@ mod tests {
                 language_pack("broccoli-en", "en", &real),
             ],
             &owners,
+            &RecordedNames::default(),
         );
         assert!(two["en"].0.is_empty(), "{:?}", two["en"].0);
+    }
+
+    /// A plugin no pack here names (its files are on no replica this one
+    /// sees) keeps the name the fleet recorded from its pack, in the locales
+    /// served; a pack here that names it speaks for it instead.
+    #[test]
+    fn a_plugin_no_pack_here_names_keeps_its_recorded_name() {
+        let host = [pack("en", &[("nav.signIn", "Sign in")])];
+        let here = [pack("en", &[("plugin.icpc.name", "ICPC here")])];
+        let mut recorded = RecordedNames::default();
+        recorded.insert("ioi", "en", "IOI");
+        recorded.insert("ioi", "fr", "IOI (fr)");
+        recorded.insert("icpc", "en", "ICPC recorded");
+        let served = served_translations(
+            [
+                language_pack("broccoli-en", "en", &host),
+                InstalledPacks {
+                    plugin_id: "icpc",
+                    loaded: false,
+                    host_locale: None,
+                    packs: &here,
+                },
+            ],
+            &IdentifierOwners::default(),
+            &recorded,
+        );
+        assert_eq!(served["en"].0["plugin.ioi.name"], "IOI");
+        assert_eq!(served["en"].0["plugin.icpc.name"], "ICPC here");
+        assert!(!served.contains_key("fr"), "only locales served");
     }
 
     #[test]

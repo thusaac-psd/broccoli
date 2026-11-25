@@ -217,11 +217,11 @@ pub async fn run_windowed_session<S: WindowedSession>(
     let mut active = Vec::<(S::SlotId, String)>::new();
     let end = drive(&mut driver, &mut active, items, concurrency, timeout, state).await;
     if let SessionEnd::Aborted(error) = &end {
-        tracing::error!(
-            plugin_id = %driver.plugin_id(),
-            session_id = %driver.session_id(),
-            error = %error,
-            "Detached windowed session aborted"
+        // Its callback's failure is the plugin's text.
+        plugin_core::guest_log::about(
+            driver.plugin_id(),
+            "A detached windowed session aborted",
+            &format!("session {}: {error}", driver.session_id()),
         );
     }
     driver.cancel_active(&active).await;
@@ -389,7 +389,7 @@ async fn drive<S: WindowedSession>(
                     tracing::error!(
                         plugin_id = %driver.plugin_id(),
                         session_id = %driver.session_id(),
-                        error = %e,
+                        host_error = %e,
                         "Failed to refill detached windowed slot"
                     );
                     let event = SlotEvent::Timeout {

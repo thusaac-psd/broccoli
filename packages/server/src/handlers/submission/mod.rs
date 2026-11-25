@@ -30,7 +30,7 @@ use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::hooks;
-use crate::models::problem::validate_contest_type;
+use crate::models::problem::validate_key;
 use crate::models::shared::{PageWindow, escape_like};
 use crate::models::submission::*;
 use crate::providers::Provided;
@@ -87,7 +87,7 @@ use response::{
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
         (status = 429, description = "Per-user rate limit (RATE_LIMITED), or a submission hook refused the submission (`<plugin_id>.<CODE>`; a hook may also refuse with 400, 403, 404, 409 or 413)", body = ErrorBody),
-        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, carries Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, carries Retry-After), loaded on no server (PLUGIN_NOT_LOADED, carries Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE); an answer about one plugin names it in details.plugin_id", body = ErrorBody),
+        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, carries Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, carries Retry-After), loaded on no server (PLUGIN_NOT_LOADED, carries Retry-After), served by another server but not this one (PLUGIN_NOT_LOADED_HERE, carries Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE); an answer about one plugin names it in details.plugin_id", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -155,14 +155,7 @@ pub async fn create_submission(
     {
         return Err(AppError::NotFound("Problem not found".into()));
     }
-    let known_languages: std::collections::HashSet<String> = state
-        .registries
-        .language_resolver_registry
-        .read()
-        .await
-        .keys()
-        .cloned()
-        .collect();
+    let known_languages: std::collections::HashSet<String> = state.known_languages().await;
     validate_submission_contract(
         &payload.files,
         &payload.language,
@@ -179,8 +172,7 @@ pub async fn create_submission(
                 .key_closure(Provided::ContestType, ct)
                 .is_none() =>
         {
-            validate_contest_type("contest_type", ct, &state.registries.contest_type_registry)
-                .await?;
+            validate_key(&state, Provided::ContestType, "contest_type", ct).await?;
             ct.clone()
         }
         Some(ref ct) => ct.clone(),
@@ -692,7 +684,7 @@ pub async fn get_submission_judgement(
         (status = 404, description = "Contest or problem not found (NOT_FOUND)", body = ErrorBody),
         (status = 409, description = "What the contest's plugin admitted the submission against changed before it was stored (SUBMISSION_IN_FLIGHT, SUBMISSION_STATE_CHANGED, SUBMISSION_TOO_LATE)", body = ErrorBody),
         (status = 429, description = "Per-user rate limit (RATE_LIMITED), or a submission hook refused the submission (`<plugin_id>.<CODE>`; a hook may also refuse with 400, 403, 404, 409 or 413)", body = ErrorBody),
-        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest's type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest's type is disabled (CONTEST_TYPE_DISABLED, carries Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, carries Retry-After), loaded on no server (PLUGIN_NOT_LOADED, carries Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE); an answer about one plugin names it in details.plugin_id", body = ErrorBody),
+        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest's type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest's type is disabled (CONTEST_TYPE_DISABLED, carries Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, carries Retry-After), loaded on no server (PLUGIN_NOT_LOADED, carries Retry-After), served by another server but not this one (PLUGIN_NOT_LOADED_HERE, carries Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE); an answer about one plugin names it in details.plugin_id", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -771,14 +763,7 @@ pub async fn create_contest_submission(
     let now = state.clock.now();
     require_contest_running(&auth_user, &contest_model, now)?;
     require_contest_participant(&state.db, &auth_user, &contest_model).await?;
-    let known_languages: std::collections::HashSet<String> = state
-        .registries
-        .language_resolver_registry
-        .read()
-        .await
-        .keys()
-        .cloned()
-        .collect();
+    let known_languages: std::collections::HashSet<String> = state.known_languages().await;
     validate_submission_contract(
         &payload.files,
         &payload.language,

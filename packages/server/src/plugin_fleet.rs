@@ -142,6 +142,8 @@ pub struct LiveLoaded {
     /// What each of them has loaded, by server id, sorted: its own reported
     /// `plugin_replica.provides`.
     pub replicas: Vec<(String, crate::providers::Loaded)>,
+    /// The plugins each of them serves, by server id, sorted.
+    pub serving_by: Vec<(String, std::collections::BTreeSet<String>)>,
 }
 
 /// What the live replicas have loaded ([`LiveLoaded`]).
@@ -171,12 +173,15 @@ pub async fn live_loaded(db: &DatabaseConnection) -> Result<LiveLoaded, DbErr> {
         }
         let plugins: serde_json::Value = row.try_get("", "plugins")?;
         match serde_json::from_value::<ReplicaReport>(plugins) {
-            Ok(report) => live.serving.extend(
-                report
+            Ok(report) => {
+                let theirs: std::collections::BTreeSet<String> = report
                     .into_iter()
                     .filter(|(_, p)| p.status.serves())
-                    .map(|(id, _)| id),
-            ),
+                    .map(|(id, _)| id)
+                    .collect();
+                live.serving.extend(theirs.iter().cloned());
+                live.serving_by.push((server_id.clone(), theirs));
+            }
             Err(e) => unread(e),
         }
     }
