@@ -38,7 +38,7 @@ use common::db::{DatabaseConnection, PgPoolSpec, PgSession};
 use plugin_core::executor::CallLocals;
 use plugin_core::manifest::SqlReadScope;
 use plugin_core::pool::Liveness;
-use sea_orm::{ConnectionTrait, DbBackend, DbErr, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, DbBackend, DbErr, Statement};
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 /// Every plugin's SQL pool, built on first use. Clones share the pools.
