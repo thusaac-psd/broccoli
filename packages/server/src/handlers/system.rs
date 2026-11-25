@@ -173,7 +173,7 @@ async fn read_backlog(db: &common::db::DatabaseConnection) -> Result<Backlog, se
             DbBackend::Postgres,
             format!(
                 "WITH waiting AS (SELECT s.contest_type, p.problem_type, p.checker_format, \
-                                         s.language, p.checker_language, \
+                                         s.language, p.id AS problem_id, \
                                          s.status IN {queued} AS queued, COUNT(*) AS n \
                                   FROM submission s JOIN problem p ON p.id = s.problem_id \
                                   WHERE s.status IN {queued} OR s.status IN {in_flight} \
@@ -192,7 +192,7 @@ async fn read_backlog(db: &common::db::DatabaseConnection) -> Result<Backlog, se
                     "waiting.problem_type",
                     "waiting.checker_format",
                     "waiting.language",
-                    "waiting.checker_language",
+                    "waiting.problem_id",
                 )),
             ),
         ))

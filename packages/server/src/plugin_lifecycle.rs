@@ -194,15 +194,20 @@ pub struct Governs {
     /// reaches (the `broccoli_inputs_changed` trigger, migration m0018).
     pub judging_inputs: Vec<String>,
     /// The languages its `checker_source` namespace compiles in, by file
-    /// extension (`ConfigNamespace::checker_languages`), sorted: the
-    /// `broccoli_checker_language` trigger (migration m0018) reads a
-    /// problem's checker language from them.
+    /// extension, for each checker format whose checker compiles it
+    /// (`ConfigNamespace::checker_languages`, `compiles`), sorted: a
+    /// problem's checker language is derived from them and its stored source
+    /// wherever it is needed (`providers::checker_language_sql`).
     pub checker_languages: Vec<CheckerLanguage>,
 }
 
-/// One extension a plugin's checker source compiles in a language.
+/// One extension a plugin's checker source compiles in a language, for one
+/// checker format whose checker compiles the source.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct CheckerLanguage {
+    /// The checker format whose checker compiles the source
+    /// (`ConfigNamespace::compiles`).
+    pub format: String,
     /// The `checker_source` namespace.
     pub namespace: String,
     /// A primary file's extension, without the dot, in lower case.
@@ -221,16 +226,19 @@ pub fn declared_checker_languages(
         .iter()
         .filter(|(_, namespace)| namespace.checker_source)
         .flat_map(|(name, namespace)| {
-            namespace
-                .checker_languages
-                .iter()
-                .flat_map(move |(language, extensions)| {
-                    extensions.iter().map(move |extension| CheckerLanguage {
-                        namespace: name.clone(),
-                        extension: extension.trim_start_matches('.').to_ascii_lowercase(),
-                        language: language.clone(),
+            namespace.compiles.iter().flat_map(move |format| {
+                namespace
+                    .checker_languages
+                    .iter()
+                    .flat_map(move |(language, extensions)| {
+                        extensions.iter().map(move |extension| CheckerLanguage {
+                            format: format.clone(),
+                            namespace: name.clone(),
+                            extension: extension.trim_start_matches('.').to_ascii_lowercase(),
+                            language: language.clone(),
+                        })
                     })
-                })
+            })
         })
         .collect();
     languages.sort();
@@ -681,13 +689,13 @@ impl PluginLifecycle {
             FleetProvider::Closed | FleetProvider::Unknown => false,
         };
         let checker_format = (!unchecked).then_some(checker_format);
-        // The checker's compile language is a need only where its checker
-        // compiles in a language it declares.
+        // The checker's compile language is a need only where the format's
+        // provider declares that its checker compiles the source.
         let compiles = checker_format.is_some_and(|format| {
             match self.provider(Provided::CheckerFormat, format) {
                 FleetProvider::Plugin(checker) => self
                     .governs(&checker)
-                    .is_some_and(|g| !g.checker_languages.is_empty()),
+                    .is_some_and(|g| g.checker_languages.iter().any(|l| l.format == format)),
                 FleetProvider::Closed | FleetProvider::Unknown => false,
             }
         });
@@ -700,19 +708,22 @@ impl PluginLifecycle {
         }
     }
 
-    /// [`Self::needs`] of work of `contest_type` on `problem`.
+    /// [`Self::needs`] of work of `contest_type` on `problem`, whose checker
+    /// compiles its source in `checker_language`
+    /// (`providers::checker_language_of`).
     pub fn needs_on<'a>(
         &self,
         contest_type: &'a str,
         problem: &'a crate::entity::problem::Model,
         language: Option<&'a str>,
+        checker_language: Option<&'a str>,
     ) -> Needs<'a> {
         self.needs(
             contest_type,
             &problem.problem_type,
             &problem.checker_format,
             language,
-            problem.checker_language.as_deref(),
+            checker_language,
         )
     }
 

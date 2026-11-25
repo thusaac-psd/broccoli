@@ -211,11 +211,15 @@ pub async fn run_code(
     validate_run_language(&payload.language, &known_languages)?;
 
     let contest_type = problem.default_contest_type.clone();
+    let checker_language = crate::providers::checker_language_of(&state.db, problem.id).await?;
     crate::plugin_lifecycle::accepting_handler(
         &state,
-        state
-            .plugin_lifecycle
-            .needs_on(&contest_type, &problem, Some(payload.language.trim())),
+        state.plugin_lifecycle.needs_on(
+            &contest_type,
+            &problem,
+            Some(payload.language.trim()),
+            checker_language.as_deref(),
+        ),
     )
     .await?;
     let custom_tcs_json =
@@ -316,11 +320,15 @@ pub async fn run_contest_code(
 
     let language = payload.language.trim().to_string();
     let contest_type = required_contest_type(&contest_model)?;
+    let checker_language = crate::providers::checker_language_of(&state.db, problem.id).await?;
     crate::plugin_lifecycle::accepting_handler(
         &state,
-        state
-            .plugin_lifecycle
-            .needs_on(&contest_type, &problem, Some(&language)),
+        state.plugin_lifecycle.needs_on(
+            &contest_type,
+            &problem,
+            Some(&language),
+            checker_language.as_deref(),
+        ),
     )
     .await?;
     let new_code_run = code_run::ActiveModel {

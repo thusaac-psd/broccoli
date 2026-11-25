@@ -308,24 +308,28 @@ binaries warn about every key they do not read.
   `PluginLifecycle::needs`): its contest type's plugin, its problem type's
   evaluator, its language's resolver, its checker format's checker only when the
   evaluator registered with `uses_checker`, and the language that checker
-  compiles the problem's checker source in (`problem.checker_language`, by the
-  `checker_languages` its `checker_source` namespace declares). A plugin a
-  dispatch reaches for outside its needs stands, never hands back. Work that
-  cannot run because one is disabled fleet-wide is parked, not failed: the
-  claim, the system-error retry, the stuck detector and the overview's parked
-  count read one predicate (`judging::Unit::runnable`, built on
-  `providers::runnable`; `PluginLifecycle::closed_by` in Rust), the submit paths
-  refuse it (`accepting_handler`), and it resumes when a provider is enabled. A
-  replica takes a unit only when it has every key's fleet-wide provider loaded
-  (`providers::runs_here`, local registrations from `Loaded::here`). A provider
-  enabled but loaded on no live replica parks the work the same way
-  (`ClosedReason::NotLoaded`; the submit paths answer `PLUGIN_NOT_LOADED`),
-  never another provider; only a key no enabled plugin provides is taken without
-  its plugin, to stand as `NO_PROVIDER`. A plugin missing at dispatch while an
-  enabled plugin provides the key hands the attempt back
-  (`Dispatch::missing_plugin`). A new scan that hands out or retries judging
-  work uses these predicates too. A judgement whose session the disable cut goes
-  straight back to `Queued` (`judging::fail_dispatch`), never through
+  compiles the problem's checker source in (its own role,
+  `Provided::CheckerLanguage`), derived at need time, never stored, by one SQL
+  expression (`providers::checker_language_sql`) from the stored source and the
+  `checker_languages` its fleet-wide provider declares for a format its
+  `checker_source` namespace lists in `compiles`, pinned to
+  `broccoli_types::manifest::checker_language`, the rule the checker compiles
+  by. A plugin a dispatch reaches for outside its needs stands, never hands
+  back. Work that cannot run because one is disabled fleet-wide is parked, not
+  failed: the claim, the system-error retry, the stuck detector and the
+  overview's parked count read one predicate (`judging::Unit::runnable`, built
+  on `providers::runnable`; `PluginLifecycle::closed_by` in Rust), the submit
+  paths refuse it (`accepting_handler`), and it resumes when a provider is
+  enabled. A replica takes a unit only when it has every key's fleet-wide
+  provider loaded (`providers::runs_here`, local registrations from
+  `Loaded::here`). A provider enabled but loaded on no live replica parks the
+  work the same way (`ClosedReason::NotLoaded`; the submit paths answer
+  `PLUGIN_NOT_LOADED`), never another provider; only a key no enabled plugin
+  provides is taken without its plugin, to stand as `NO_PROVIDER`. A plugin
+  missing at dispatch while an enabled plugin provides the key hands the attempt
+  back (`Dispatch::missing_plugin`). A new scan that hands out or retries
+  judging work uses these predicates too. A judgement whose session the disable
+  cut goes straight back to `Queued` (`judging::fail_dispatch`), never through
   `SystemError`, on every replica alike, since the decision reads the fleet-wide
   `plugin` table.
 - A worker that lacks a platform tool takes no work

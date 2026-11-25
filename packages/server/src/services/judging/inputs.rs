@@ -170,50 +170,6 @@ BEGIN
   RETURN NULL;
 END $$";
 
-    /// Keeps `problem.checker_language`: the language the first file of a
-    /// problem's stored checker source compiles in, by the extensions its
-    /// plugin declares (`governs -> 'checker_languages'`); NULL when none
-    /// maps or the source is gone.
-    const CHECKER_LANGUAGE_FUNCTION: &str =
-        "CREATE OR REPLACE FUNCTION public.broccoli_checker_language() RETURNS trigger
-LANGUAGE plpgsql AS $$
-DECLARE
-  changed jsonb;
-  target integer;
-  config_plugin text;
-  config_namespace text;
-  language text;
-BEGIN
-  IF current_setting('broccoli.restoring', true) = 'on' THEN
-    RETURN NULL;
-  END IF;
-  changed := CASE WHEN TG_OP = 'DELETE' THEN to_jsonb(OLD) ELSE to_jsonb(NEW) END;
-  IF changed->>'scope' IS DISTINCT FROM 'problem' THEN
-    RETURN NULL;
-  END IF;
-  target := substring(changed->>'ref_id' FROM '^([0-9]+)$')::integer;
-  config_plugin := split_part(changed->>'namespace', ':', 1);
-  config_namespace := substring(changed->>'namespace' FROM '^[^:]*:(.*)$');
-  IF target IS NULL OR NOT EXISTS (
-       SELECT 1 FROM public.plugin p, jsonb_array_elements(p.governs -> 'checker_languages') l
-        WHERE p.id = config_plugin AND l->>'namespace' = config_namespace) THEN
-    RETURN NULL;
-  END IF;
-  IF TG_OP <> 'DELETE' THEN
-    SELECT l->>'language' INTO language
-      FROM jsonb_array_elements(changed->'config'->'files') WITH ORDINALITY AS f(file, n)
-      JOIN public.plugin p ON p.id = config_plugin
-      CROSS JOIN jsonb_array_elements(p.governs -> 'checker_languages') l
-     WHERE l->>'namespace' = config_namespace
-       AND lower(f.file->>'filename') LIKE '%.' || (l->>'extension')
-     ORDER BY f.n
-     LIMIT 1;
-  END IF;
-  UPDATE public.problem SET checker_language = language
-   WHERE id = target AND checker_language IS DISTINCT FROM language;
-  RETURN NULL;
-END $$";
-
     async fn has_trigger<C: ConnectionTrait>(db: &C, table: &str) -> Result<bool, DbErr> {
         has_named_trigger(db, TRIGGER, table).await
     }
@@ -239,15 +195,6 @@ END $$";
         db.execute_unprepared(PROBLEM_FUNCTION).await?;
         db.execute_unprepared(ROW_FUNCTION).await?;
         db.execute_unprepared(CONTEST_FUNCTION).await?;
-        db.execute_unprepared(CHECKER_LANGUAGE_FUNCTION).await?;
-        if !has_named_trigger(db, "broccoli_checker_language", "plugin_config").await? {
-            db.execute_unprepared(
-                "CREATE TRIGGER broccoli_checker_language \
-                 AFTER INSERT OR UPDATE OR DELETE ON public.plugin_config \
-                 FOR EACH ROW EXECUTE FUNCTION public.broccoli_checker_language()",
-            )
-            .await?;
-        }
         if !has_trigger(db, "contest").await? {
             db.execute_unprepared(&format!(
                 "CREATE TRIGGER {TRIGGER} AFTER UPDATE ON public.contest \

@@ -167,9 +167,12 @@ evaluator of its problem's type, the resolver of its language, and the checker
 of its problem's checker format only when the evaluator registered with
 `uses_checker` (an evaluator that does not is recorded in
 `unchecked_problem_types`), and, when that checker compiles the problem's
-checker source, the language the source is in (`problem.checker_language`,
-kept by the `broccoli_checker_language` trigger from the extensions the
-checker's `checker_source` namespace declares in `checker_languages`). A
+checker source, the language the source is in: derived wherever it is
+needed, never stored, by one SQL expression (`providers::checker_language_sql`)
+from the stored source and the extensions the checker format's fleet-wide
+provider declares in `checker_languages` for a format its `checker_source`
+namespace lists in `compiles`, pinned to the Rust rule the checker compiles by
+(`broccoli_types::manifest::checker_language`). A
 plugin the dispatch reaches for outside those needs stands at once
 (`NO_PROVIDER`) instead of being handed back, since no parking waits for it.
 It is parked while every plugin that recorded one

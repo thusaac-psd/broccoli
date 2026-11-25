@@ -89,6 +89,12 @@ pub enum Provided {
     CheckerFormat,
     /// Its language: the plugin's resolver says how to compile and run it.
     Language,
+    /// The language its problem's checker compiles the checker source in: a
+    /// language key like [`Self::Language`], provided by the same plugins,
+    /// needed when the checker format's provider declares that its checker
+    /// compiles the source. Its own role, so what is waited for is said as
+    /// the checker's language, not the submission's.
+    CheckerLanguage,
 }
 
 /// The plugin that keeps new work of a resource from running, and why

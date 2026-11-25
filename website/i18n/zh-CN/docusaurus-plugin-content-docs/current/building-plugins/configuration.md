@@ -281,16 +281,17 @@ default = []
 插件像读取其他题目配置一样读取它：`host.config.get_problem(problem_id, "checker_source")`。一个
 清单最多只能标记一个命名空间，且其 `scopes` 只能是 `["problem"]`。
 
-若检查器要编译这些源代码，请在同一命名空间上用 `checker_languages` 声明每种主文件扩展名所用的语言：
+若检查器要编译这些源代码，请在同一命名空间上用 `compiles` 列出会编译它的检查器格式，并用 `checker_languages` 声明每种主文件扩展名所用的语言：
 
 ```toml
 [config.checker_source]
 scopes = ["problem"]
 checker_source = true
+compiles = ["testlib"]
 checker_languages = { cpp = ["cpp", "cc", "cxx"], c = ["c"] }
 ```
 
-宿主根据第一个扩展名被列出的已存文件读取题目的检查器语言，此后该题目的工作像需要其自身语言的插件一样需要该语言的插件：该插件被禁用时，工作排队等待而不是失败。
+题目的检查器语言是第一个扩展名（不区分大小写）被列出的已存文件的语言。宿主在每次需要时推导它，且仅对检查器格式列在 `compiles` 中、其集群范围提供者为你的插件的题目推导，因此它始终跟随已存的源代码。此后该题目的工作像需要其自身语言的插件一样需要该语言的插件：该插件被禁用时，工作排队等待而不是失败。请按同一规则 `broccoli_server_sdk::checker_language` 编译，这样你编译所用的语言就是宿主等待的语言。
 
 ## 测试
 

@@ -524,39 +524,56 @@ fn the_upgrade_guide_names_every_migration_of_this_release_that_is_not_additive(
     }
 }
 
-/// A problem's checker language follows its stored checker source, whatever
-/// path writes it: the language of the first file whose extension the
-/// checker's `checker_source` namespace maps, none when no file maps or the
-/// source is gone. A config of any other namespace leaves it.
+/// A problem's checker language is derived by the one rule, in SQL
+/// (`providers::checker_language_sql`) as in the shared Rust rule
+/// (`manifest::checker_language`) the checker compiles by: the first file of
+/// the stored source, in order, whose extension the checker format's
+/// fleet-wide provider declares for that format, in any case. A format the
+/// provider declares no compiling for, another namespace's config, or a
+/// provider that changes all answer at once, since nothing is stored.
 #[tokio::test]
-async fn a_problems_checker_language_follows_its_stored_checker_source() {
-    use sea_orm::EntityTrait;
+async fn the_checker_language_is_derived_by_the_one_rule() {
     let (_pg, db) = crate::test_support::postgres().await;
     let (_, problem_id) = crate::test_support::seed_user_and_problem(&db).await;
-    let governs = serde_json::json!({
-        "visibility": false, "contest_types": [], "problem_types": [],
-        "checker_formats": ["testlib"], "languages": [], "unchecked_problem_types": [],
-        "hooks": [], "judging_inputs": [],
-        "checker_languages": [
-            {"namespace": "checker_source", "extension": "c", "language": "c"},
-            {"namespace": "checker_source", "extension": "cpp", "language": "cpp"},
-        ],
-    });
     db.execute_unprepared(&format!(
-        "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) \
-         VALUES ('checkers', TRUE, 0, NOW(), '{governs}')"
+        "UPDATE problem SET checker_format = 'testlib' WHERE id = {problem_id}"
     ))
     .await
     .unwrap();
-    let language = || {
+    let declared = serde_json::json!([
+        {"namespace": "checker_source", "format": "testlib", "extension": "c", "language": "c"},
+        {"namespace": "checker_source", "format": "testlib", "extension": "cpp", "language": "cpp"},
+        {"namespace": "checker_source", "format": "testlib", "extension": "cc", "language": "cpp"},
+    ]);
+    let governs = |languages: &serde_json::Value| {
+        serde_json::json!({
+            "visibility": false, "contest_types": [], "problem_types": [],
+            "checker_formats": ["testlib", "other"], "languages": [],
+            "unchecked_problem_types": [], "hooks": [], "judging_inputs": [],
+            "checker_languages": languages,
+        })
+        .to_string()
+    };
+    db.execute_unprepared(&format!(
+        "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) \
+         VALUES ('checkers', TRUE, 0, NOW(), '{}')",
+        governs(&declared)
+    ))
+    .await
+    .unwrap();
+    // The Rust rule over the same declaration (language to extensions).
+    let mut rule = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for entry in declared.as_array().unwrap() {
+        rule.entry(entry["language"].as_str().unwrap().to_owned())
+            .or_default()
+            .push(entry["extension"].as_str().unwrap().to_owned());
+    }
+    let derived = || {
         let db = db.clone();
         async move {
-            crate::entity::problem::Entity::find_by_id(problem_id)
-                .one(&db)
+            crate::providers::checker_language_of(&db, problem_id)
                 .await
                 .unwrap()
-                .unwrap()
-                .checker_language
         }
     };
     let files = |names: &[&str]| {
@@ -565,53 +582,161 @@ async fn a_problems_checker_language_follows_its_stored_checker_source() {
                 .collect::<Vec<_>>(),
         })
     };
-    let cases = [
-        (
-            format!(
-                "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
-                 VALUES ('problem', '{problem_id}', 'checkers:checker_source', '{}', 0, NOW())",
-                files(&["testlib.h", "check.cpp"])
-            ),
-            Some("cpp"),
-        ),
-        (
-            format!(
-                "UPDATE plugin_config SET config = '{}' WHERE namespace = 'checkers:checker_source'",
-                files(&["check.c", "other.cpp"])
-            ),
-            Some("c"),
-        ),
-        (
-            format!(
-                "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
-                 VALUES ('problem', '{problem_id}', 'checkers:options', '{}', 0, NOW())",
-                files(&["check.cpp"])
-            ),
-            Some("c"),
-        ),
-        (
-            format!(
-                "UPDATE plugin_config SET config = '{}' WHERE namespace = 'checkers:checker_source'",
-                files(&["testlib.h"])
-            ),
-            None,
-        ),
-        (
-            format!(
-                "UPDATE plugin_config SET config = '{}' WHERE namespace = 'checkers:checker_source'",
-                files(&["check.cpp"])
-            ),
-            Some("cpp"),
-        ),
-        (
-            "DELETE FROM plugin_config WHERE namespace = 'checkers:checker_source'".to_string(),
-            None,
-        ),
+    let store = |names: &[&str]| {
+        format!(
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+             VALUES ('problem', '{problem_id}', 'checkers:checker_source', '{}', 0, NOW()) \
+             ON CONFLICT (scope, ref_id, namespace) DO UPDATE SET config = EXCLUDED.config",
+            files(names)
+        )
+    };
+    let sources: [&[&str]; 7] = [
+        &["testlib.h", "check.cpp"],
+        &["check.c", "other.cpp"],
+        &["README", "CHECK.CPP"],
+        &["Check.Cc", "check.c"],
+        &["testlib.h"],
+        &["check.cpp.txt", "a.c"],
+        &[],
     ];
-    for (sql, expected) in cases {
-        db.execute_unprepared(&sql).await.unwrap();
-        assert_eq!(language().await.as_deref(), expected, "{sql}");
+    for names in sources {
+        db.execute_unprepared(&store(names)).await.unwrap();
+        assert_eq!(
+            derived().await.as_deref(),
+            plugin_core::manifest::checker_language(&rule, names.iter().copied()),
+            "{names:?}"
+        );
     }
+
+    db.execute_unprepared(&store(&["check.cpp"])).await.unwrap();
+    assert_eq!(derived().await.as_deref(), Some("cpp"));
+    // Another namespace's config is no checker source.
+    db.execute_unprepared(&format!(
+        "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+         VALUES ('problem', '{problem_id}', 'checkers:options', '{}', 0, NOW())",
+        files(&["check.c"])
+    ))
+    .await
+    .unwrap();
+    assert_eq!(derived().await.as_deref(), Some("cpp"));
+    // A format the provider declares no compiling for has no checker language.
+    db.execute_unprepared(&format!(
+        "UPDATE problem SET checker_format = 'other' WHERE id = {problem_id}"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(derived().await, None);
+    db.execute_unprepared(&format!(
+        "UPDATE problem SET checker_format = 'testlib' WHERE id = {problem_id}"
+    ))
+    .await
+    .unwrap();
+    // A provider that sorts first and declares no compiling takes the format.
+    db.execute_unprepared(&format!(
+        "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) \
+         VALUES ('a-checkers', TRUE, 0, NOW(), '{}')",
+        governs(&serde_json::json!([]))
+    ))
+    .await
+    .unwrap();
+    assert_eq!(derived().await, None);
+    db.execute_unprepared("UPDATE plugin SET is_enabled = FALSE WHERE id = 'a-checkers'")
+        .await
+        .unwrap();
+    assert_eq!(derived().await.as_deref(), Some("cpp"));
+    // A declaration's change takes effect at once.
+    db.execute_unprepared(
+        "UPDATE plugin SET governs = jsonb_set(governs, '{checker_languages}', '[]') \
+         WHERE id = 'checkers'",
+    )
+    .await
+    .unwrap();
+    assert_eq!(derived().await, None);
+    // A source that is gone has no checker language.
+    db.execute_unprepared(&store(&["check.cpp"])).await.unwrap();
+    db.execute_unprepared("DELETE FROM plugin_config WHERE namespace = 'checkers:checker_source'")
+        .await
+        .unwrap();
+    assert_eq!(derived().await, None);
+}
+
+/// A unit whose checker compiles the problem's checker source needs that
+/// source's language as much as its own (derived from the stored source,
+/// `providers::checker_language_sql`), and while every provider of that
+/// language is disabled the work is parked, unclaimed, until one is enabled.
+/// A checker that declares no compiling for the format needs none. Here,
+/// beside the derivation's pin, since the stored source is a config written
+/// directly.
+#[tokio::test]
+async fn work_whose_checker_language_plugin_is_disabled_is_parked_until_it_is_enabled() {
+    use crate::services::judging::tests::{claimable, new_submission};
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (sub, _) = new_submission(&db).await;
+    let problem_id = sub.problem_id;
+    let checker = |languages: serde_json::Value| {
+        format!(
+            "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
+               ('checkers', TRUE, 0, NOW(), '{}') \
+             ON CONFLICT (id) DO UPDATE SET governs = EXCLUDED.governs",
+            serde_json::json!({
+                "visibility": false, "contest_types": [], "problem_types": [],
+                "checker_formats": ["lines"], "languages": [],
+                "unchecked_problem_types": [], "hooks": [], "judging_inputs": [],
+                "checker_languages": languages,
+            })
+        )
+    };
+    let compilers = |enabled: bool| {
+        format!(
+            "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
+               ('compilers', {enabled}, 0, NOW(), '{}') \
+             ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled",
+            serde_json::json!({
+                "visibility": false, "contest_types": [], "problem_types": [],
+                "checker_formats": [], "languages": ["checker-cpp"],
+                "unchecked_problem_types": [], "hooks": [], "judging_inputs": [],
+                "checker_languages": [],
+            })
+        )
+    };
+    db.execute_unprepared(&checker(serde_json::json!([
+        {"namespace": "checker_source", "format": "lines", "extension": "cpp", "language": "checker-cpp"},
+    ])))
+    .await
+    .unwrap();
+    db.execute_unprepared(&compilers(false)).await.unwrap();
+    db.execute_unprepared(&format!(
+        "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+         VALUES ('problem', '{problem_id}', 'checkers:checker_source', \
+                 '{{\"files\": [{{\"filename\": \"check.cpp\", \"content\": \"\"}}]}}', 0, NOW())"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        crate::providers::checker_language_of(&db, problem_id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("checker-cpp")
+    );
+    assert_eq!(
+        claimable(&db).await,
+        0,
+        "parked while its compiler is disabled"
+    );
+    db.execute_unprepared(&compilers(true)).await.unwrap();
+    assert_eq!(claimable(&db).await, 1, "it resumes");
+
+    new_submission(&db).await;
+    db.execute_unprepared(&compilers(false)).await.unwrap();
+    db.execute_unprepared(&checker(serde_json::json!([])))
+        .await
+        .unwrap();
+    assert_eq!(
+        claimable(&db).await,
+        1,
+        "a checker that compiles nothing needs no language"
+    );
 }
 
 /// Every change to what judging reads of a problem counts in its

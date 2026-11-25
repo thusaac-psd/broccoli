@@ -136,9 +136,12 @@ pub(crate) fn missing_plugin(
     unresolved: &crate::providers::Unresolved,
 ) -> Recorded {
     let outside = needed.is_some_and(|needed| {
-        !needed
-            .iter()
-            .any(|(kind, key)| *kind == unresolved.kind && *key == unresolved.key)
+        !needed.iter().any(|(kind, key)| {
+            // A checker language resolves as any language does: both
+            // kinds name the same keys.
+            crate::providers::field(*kind) == crate::providers::field(unresolved.kind)
+                && *key == unresolved.key
+        })
     });
     if outside {
         return Recorded {

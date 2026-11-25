@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import type { I18nContextValue } from '@/i18n';
+import type { Provided } from '@/submission/types';
 
 import { SUBMISSION_STATUS_FILTER_OPTIONS } from './utils.ts';
 import { getVerdictBadge, progressLabel } from './verdict.ts';
@@ -34,12 +35,15 @@ test('a superseded judgement reads as superseded, and no submission filters by i
 });
 
 test('a parked submission names what parks it and the plugin, as the server records it', () => {
-  for (const provides of [
-    'contest_type',
-    'problem_type',
-    'checker_format',
-    'language',
-  ] as const) {
+  // Every role `Provided` names, so a new one does not compile untested.
+  const roles: Record<Provided, true> = {
+    contest_type: true,
+    problem_type: true,
+    checker_format: true,
+    language: true,
+    checker_language: true,
+  };
+  for (const provides of Object.keys(roles) as Provided[]) {
     assert.deepEqual(
       getVerdictBadge(
         {
