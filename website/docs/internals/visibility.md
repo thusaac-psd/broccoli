@@ -127,9 +127,10 @@ Degrading is per resource and per field, never per batch:
 - An outage is one of four (`PluginLifecycle::outage`, the one place they
   are told apart): the plugin is disabled (`disabled`), it is enabled and no
   live replica serves it (`not_loaded`, judged by the replicas' reports as of
-  the last reconcile), it is enabled and another live replica serves it but
-  this one does not (`not_loaded_here`, `PluginLifecycle::missing_here`), or
-  it is enabled and this replica is loading it now (`unavailable`). They
+  the last reconcile), it is enabled and a peer with a fresh heartbeat serves
+  it but this one does not (`not_loaded_here`,
+  `PluginLifecycle::missing_here`), or it is enabled and this replica is
+  loading it now (`unavailable`). They
   answer `503 PLUGIN_DISABLED`, `503 PLUGIN_NOT_LOADED`,
   `503 PLUGIN_NOT_LOADED_HERE` and `503 PLUGIN_UNAVAILABLE`, each with
   `Retry-After`: every 503 is retryable. A disabled plugin's or a
@@ -138,7 +139,9 @@ Degrading is per resource and per field, never per batch:
   an administrator enables it or a replica loads it; a plugin missing here
   asks again after 10 seconds (`NOT_LOADED_HERE_RETRY_AFTER_SECS`), by when
   the shipped gateways have moved the browser to a replica that serves it.
-  `missing_here` is the one rule admission and readiness both read. All three
+  `missing_here` reads the one rule readiness reads too
+  (`PluginLifecycle::missing_here_served_by_peer`), over the same fresh peers,
+  so a stale peer refuses nothing here. All three
   name the plugin in `details.plugin_id`. A plugin's own routes answer the
   same, on a replica that lacks the plugin's files too (only a plugin no
   replica knows is `404`); a submission to a contest whose type its disabled
