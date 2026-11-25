@@ -2,7 +2,6 @@ import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { isStaff } from '@broccoli/web-sdk/permissions';
 import { useSlotPermissions } from '@broccoli/web-sdk/slot';
 import {
-  isTerminalStatus,
   type ShownStatus,
   type Submission,
   TestCaseOutput,
@@ -12,9 +11,9 @@ import {
 } from '@broccoli/web-sdk/submission';
 import { Badge, PaginatedList } from '@broccoli/web-sdk/ui';
 import { cn, formatKibibytes } from '@broccoli/web-sdk/utils';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { AlertCircle, ChevronDown } from 'lucide-react';
-import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useState } from 'react';
 
 import {
   hostShowsResult,
@@ -621,31 +620,11 @@ export function IoiSubmissionResult({
   const contestId = submission?.contest_id;
   const problemId = submission?.problem_id;
   const api = useIoiApi();
-  const queryClient = useQueryClient();
   const { t } = useTranslation();
   const slotPermissions = useSlotPermissions();
   const hasPrivilegedSubmissionAccess = isStaff(
     slotPermissions?.permissions ?? [],
   );
-
-  // Invalidate submission-status when a submission reaches terminal status.
-  const prevStatusRef = useRef(submission?.status);
-  useEffect(() => {
-    const prev = prevStatusRef.current;
-    const curr = submission?.status;
-    prevStatusRef.current = curr;
-    if (
-      curr &&
-      isTerminalStatus(curr) &&
-      prev !== curr &&
-      contestId &&
-      problemId
-    ) {
-      queryClient.invalidateQueries({
-        queryKey: ['ioi-submission-status', contestId, problemId],
-      });
-    }
-  }, [submission?.status, contestId, problemId, queryClient]);
 
   const taskConfigQuery = useQuery<TaskConfigResponse>({
     queryKey: ['ioi-task-config', contestId, problemId],
