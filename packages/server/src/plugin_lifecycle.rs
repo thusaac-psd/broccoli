@@ -373,6 +373,47 @@ impl PluginLifecycle {
             .unwrap_or(true)
     }
 
+    /// Every key recorded fleet-wide whose fleet-wide provider
+    /// ([`Self::provider`]) `local` (what this replica has loaded,
+    /// `providers::Loaded::here`) does not have loaded, sorted: work on such
+    /// a key is never run here (`providers::runs_here`). The one readiness
+    /// rule for a replica's plugins; `loaded_elsewhere` says whether a live
+    /// replica serves the provider ([`Self::loaded_nowhere`]), so a probe can
+    /// tell a replica behind the fleet from a plugin no replica can load.
+    pub fn providers_missing_here(&self, local: &crate::providers::Loaded) -> Vec<MissingProvider> {
+        use crate::providers::FleetProvider;
+        let mut keys: Vec<(Provided, String)> = self
+            .governs
+            .read()
+            .map(|governs| {
+                governs
+                    .values()
+                    .flat_map(|g| {
+                        crate::providers::KINDS.iter().flat_map(move |&kind| {
+                            g.provides.keys(kind).iter().map(move |k| (kind, k.clone()))
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let order = |kind: &Provided| crate::providers::KINDS.iter().position(|k| k == kind);
+        keys.sort_by(|a, b| (order(&a.0), &a.1).cmp(&(order(&b.0), &b.1)));
+        keys.dedup();
+        keys.into_iter()
+            .filter_map(|(provides, key)| match self.provider(provides, &key) {
+                FleetProvider::Plugin(plugin_id) if !local.has(provides, &key, &plugin_id) => {
+                    Some(MissingProvider {
+                        loaded_elsewhere: !self.loaded_nowhere(&plugin_id),
+                        provides,
+                        key,
+                        plugin_id,
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Whether `plugin_id` is loaded on no live replica: no live replica,
     /// this one included, reports serving it, as of the last reconcile's
     /// read of the fleet. Before the first read every plugin counts as
@@ -639,6 +680,23 @@ impl PluginLifecycle {
             g.remove(plugin_id);
         }
     }
+}
+
+/// A key whose fleet-wide provider this replica does not have loaded
+/// ([`PluginLifecycle::providers_missing_here`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingProvider {
+    pub provides: Provided,
+    pub key: String,
+    pub plugin_id: String,
+    /// A live replica serves the provider: this one is behind the fleet.
+    pub loaded_elsewhere: bool,
+}
+
+/// [`PluginLifecycle::providers_missing_here`] for this replica.
+pub async fn providers_missing_here(state: &AppState) -> Vec<MissingProvider> {
+    let local = crate::providers::Loaded::here(&state.registries).await;
+    state.plugin_lifecycle.providers_missing_here(&local)
 }
 
 /// Why contests of `contest_type` cannot be served on this replica, if they
@@ -2470,6 +2528,35 @@ mod tests {
                 reason: broccoli_api_types::visibility::ClosedReason::Disabled,
             })
         );
+    }
+
+    /// A replica misses a provider exactly where a key's fleet-wide provider
+    /// is not loaded here, and says whether another replica serves it.
+    #[test]
+    fn a_replica_misses_each_fleet_wide_provider_it_has_not_loaded() {
+        let lifecycle = providers(true, true, true);
+        lifecycle.set_fleet_serving(["eval".to_string()].into());
+        let mut local = crate::providers::Loaded::default();
+        for (kind, key, plugin) in [
+            (Provided::ContestType, "t", "judge"),
+            (Provided::CheckerFormat, "c", "check"),
+        ] {
+            local
+                .of_mut(kind)
+                .insert(key.to_string(), vec![plugin.to_string()]);
+        }
+        assert_eq!(
+            lifecycle.providers_missing_here(&local),
+            vec![MissingProvider {
+                provides: Provided::ProblemType,
+                key: "p".into(),
+                plugin_id: "eval".into(),
+                loaded_elsewhere: true,
+            }]
+        );
+        // A disabled provider is nobody's to load.
+        lifecycle.set_desired("eval", false);
+        assert_eq!(lifecycle.providers_missing_here(&local), vec![]);
     }
 
     /// A plugin is out as loaded nowhere only while no live replica serves
