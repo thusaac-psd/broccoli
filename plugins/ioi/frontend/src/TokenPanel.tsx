@@ -22,6 +22,7 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { useIoiApi } from './hooks/useIoiApi';
 import { useIoiContestInfo } from './hooks/useIoiContestInfo';
+import { ioiKeys } from './query-keys';
 import { tokenTarget } from './token-target';
 import type { TokenStatusResponse } from './types';
 
@@ -66,7 +67,7 @@ export function TokenPanel({
   const showTokens = tokenMode !== undefined && tokenMode !== 'none';
 
   const tokenQuery = useQuery({
-    queryKey: ['ioi-token-status', cId],
+    queryKey: ioiKeys.tokenStatus(cId),
     enabled: !!cId && showTokens,
     queryFn: async (): Promise<TokenStatusResponse | null> => {
       try {
@@ -127,7 +128,7 @@ export function TokenPanel({
       () => {
         setRegenChecks({ target: countdownTargetMs, count: count + 1 });
         void queryClient.invalidateQueries({
-          queryKey: ['ioi-token-status', cId],
+          queryKey: ioiKeys.tokenStatus(cId),
         });
       },
       count === 0 ? 0 : REGEN_RECHECK_MS,
@@ -176,14 +177,10 @@ export function TokenPanel({
       setError(errorMessage(e, t('ioi.tokenPanel.useFailed')));
     } finally {
       setIsUsing(false);
-      // Refetch on failure too: the token may have been spent (an unknown
-      // outcome) or the count may have changed under us.
-      queryClient.invalidateQueries({ queryKey: ['ioi-token-status', cId] });
-      queryClient.invalidateQueries({
-        queryKey: ['ioi-subtask-scores', cId, submissionId],
-      });
-      // A token unlocks the submission's hidden outcome: every view of it
-      // reads it again.
+      // A token unlocks the submission's hidden outcome: every view of it,
+      // the token count and the board included, reads it again in every tab.
+      // On failure too: the token may have been spent (an unknown outcome)
+      // or the count may have changed under us.
       announceSubmissionVisibilityChange(submissionId);
     }
   };

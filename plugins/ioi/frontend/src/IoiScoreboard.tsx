@@ -9,6 +9,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 
 import { useIoiApi } from './hooks/useIoiApi';
+import { ioiKeys } from './query-keys';
 import type { ScoreboardEntry, ScoreboardResponse } from './types';
 
 interface IoiScoreboardProps {
@@ -182,7 +183,7 @@ export function IoiScoreboard({ contestId }: IoiScoreboardProps) {
   const [now, setNow] = useState(Date.now());
 
   const query = useQuery<ScoreboardResponse>({
-    queryKey: ['ioi-scoreboard', contestId],
+    queryKey: ioiKeys.scoreboard(contestId),
     enabled: contestId !== undefined,
     queryFn: () => api.getScoreboard(contestId!),
     retry: 2,

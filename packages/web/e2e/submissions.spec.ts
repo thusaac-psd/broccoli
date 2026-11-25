@@ -416,11 +416,17 @@ test('a token unlocks a hidden IOI result where the problem page shows it, witho
 type TokenState = { tokened: boolean };
 
 /**
- * Serves `page` an IOI contest at feedback `subtask_scores` with one token
- * and submission 9, whose test case rows read redacted until `state` says
- * the token is spent on it.
+ * Serves `page` an IOI contest at feedback `feedback` with one token and
+ * submission 9, whose test case rows read redacted until `state` says the
+ * token is spent on it. Its one subtask is `subtaskName`, the empty name
+ * of the default subtask of a problem with no subtask config.
  */
-async function serveTokenAtSubtaskScores(page: Page, state: TokenState) {
+async function serveTokenAt(
+  page: Page,
+  state: TokenState,
+  feedback: 'none' | 'subtask_scores' | 'full' = 'subtask_scores',
+  subtaskName = 'Small',
+) {
   await mockApi(page, 'contestant', { plugins: ['ioi'] });
   const judged = {
     ...submission(9, 2, 'Accepted'),
@@ -506,19 +512,19 @@ async function serveTokenAtSubtaskScores(page: Page, state: TokenState) {
     route.fulfill({
       json: {
         scoring_mode: 'max_submission',
-        feedback_level: 'subtask_scores',
+        feedback_level: feedback,
         scoreboard_visibility: 'all_contest_viewers',
         scoreboard_tiebreaker: 'equal_rank',
         token_mode: 'fixed_budget',
       },
     }),
   );
-  const subtask = { name: 'Small', scoring_method: 'sum', max_score: 100 };
+  const subtask = { name: subtaskName, scoring_method: 'sum', max_score: 100 };
   await page.route(`${IOI}/problems/1/config`, (route) =>
     route.fulfill({
       json: {
         scoring_mode: 'max_submission',
-        feedback_level: 'subtask_scores',
+        feedback_level: feedback,
         max_score: 100,
         subtasks: [{ ...subtask, test_cases: ['a'] }],
         label_map: { a: 101 },
@@ -557,7 +563,7 @@ test('a token at subtask scores shows the test case rows of the submission it un
 }, info) => {
   test.skip(info.project.name === 'phone', 'the sidebar is a sheet there');
   const state = { tokened: false };
-  await serveTokenAtSubtaskScores(page, state);
+  await serveTokenAt(page, state);
   // The submission's own page shows its test case rows redacted.
   await page.goto('/submissions/9');
   await expect(page.getByText('Test Case #1')).toBeVisible();
@@ -587,11 +593,11 @@ test('a token spent in one tab shows the result in another tab already open on i
 }, info) => {
   test.skip(info.project.name === 'phone', 'one check of the tabs is enough');
   const state = { tokened: false };
-  await serveTokenAtSubtaskScores(page, state);
+  await serveTokenAt(page, state);
   // The other tab shows the redacted rows and polls no more: the outcome
   // it may see is final.
   const other = await page.context().newPage();
-  await serveTokenAtSubtaskScores(other, state);
+  await serveTokenAt(other, state);
   await other.goto('/submissions/9');
   await expect(other.getByText('Test Case #1')).toBeVisible();
   await expect(other.getByText(/37\s?ms/)).toHaveCount(0);
@@ -604,9 +610,48 @@ test('a token spent in one tab shows the result in another tab already open on i
   await expect(other.getByText(/37\s?ms/).first()).toBeVisible();
 });
 
+test('a token spent in one tab shows the IOI breakdown in another tab that read it as hidden', async ({
+  page,
+}, info) => {
+  test.skip(info.project.name === 'phone', 'one check of the tabs is enough');
+  const state = { tokened: false };
+  // At feedback "none" the IOI view hides the outcome until its own token
+  // status names the submission tokened.
+  await serveTokenAt(page, state, 'none');
+  const other = await page.context().newPage();
+  await serveTokenAt(other, state, 'none');
+  await other.goto('/contests/4/problems/1?tab=coding');
+  await other.getByText('#9').first().click();
+  await expect(
+    other.getByText('Results are not visible for this contest.'),
+  ).toBeVisible();
+
+  await page.goto('/contests/4/problems/1?tab=coding');
+  await page
+    .getByRole('button', { name: 'Use a token on submission #9' })
+    .click();
+  await page.getByRole('button', { name: 'Confirm' }).click();
+  await expect(other.getByText('Tokened').first()).toBeVisible();
+  await expect(other.getByText('Small')).toBeVisible();
+  await expect(
+    other.getByText('Results are not visible for this contest.'),
+  ).toHaveCount(0);
+});
+
+for (const feedback of ['subtask_scores', 'full'] as const) {
+  test(`a problem with no subtask config names its one subtask in the viewer's language (${feedback})`, async ({
+    page,
+  }) => {
+    await serveTokenAt(page, { tokened: false }, feedback, '');
+    await page.goto('/contests/4/problems/1?tab=coding');
+    await page.getByText('#9').first().click();
+    await expect(page.getByText('All Tests')).toBeVisible();
+  });
+}
+
 for (const theme of ['light', 'dark']) {
   test(`a tokened IOI result reads clearly (${theme})`, async ({ page }) => {
-    await serveTokenAtSubtaskScores(page, { tokened: true });
+    await serveTokenAt(page, { tokened: true });
     await page.addInitScript((t) => localStorage.setItem('theme', t), theme);
     await page.goto('/contests/4/problems/1?tab=coding');
     await page.getByText('#9').first().click();

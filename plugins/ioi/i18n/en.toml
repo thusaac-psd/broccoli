@@ -232,6 +232,7 @@
 'ioi.config.task.duplicateTestCase' = 'Test case “{testCase}” is already in this subtask.'
 'ioi.config.task.ambiguousTestCase' = '“{testCase}” names {count} test cases; refer to one by its id.'
 'ioi.config.task.zeroWeight' = 'Every test case of this sum subtask has score 0, so it can never score.'
+'ioi.config.task.sampleScoreIgnored' = 'Sample “{testCase}” carries {score} points, but a sample scores nothing unless a subtask names it.'
 'ioi.config.task.problemHasNoTestCases' = 'This problem has no test cases, so it cannot be judged. Add test cases before contestants submit.'
 'ioi.config.task.nothingToScore' = 'No subtask of this problem can score: none is worth points and has a test case that counts toward it. Give a subtask points and a test case of this problem, or give a test case a score.'
 

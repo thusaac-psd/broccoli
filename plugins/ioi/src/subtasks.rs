@@ -202,6 +202,21 @@ pub fn score_all_subtasks(
         .collect()
 }
 
+/// The ids of the test cases `subtask_defs` count: every case a member names.
+/// A case outside them scores nothing, whatever points it carries.
+pub fn counted_test_case_ids(
+    subtask_defs: &[SubtaskDef],
+    test_cases: &[TestCaseRow],
+) -> HashSet<i32> {
+    let members = MemberIndex::new(test_cases);
+    subtask_defs
+        .iter()
+        .flat_map(|def| def.test_cases.iter())
+        .filter_map(|key| members.test_case(key))
+        .map(|tc| tc.id)
+        .collect()
+}
+
 /// Return test case IDs that should be evaluated for IOI scoring/feedback.
 ///
 /// Samples are retained for feedback. Positive-score cases are retained for
@@ -211,14 +226,7 @@ pub fn compute_scoring_test_case_ids(
     subtask_defs: &[SubtaskDef],
     test_cases: &[TestCaseRow],
 ) -> Vec<i32> {
-    let members = MemberIndex::new(test_cases);
-    let in_a_subtask: HashSet<i32> = subtask_defs
-        .iter()
-        .flat_map(|def| def.test_cases.iter())
-        .filter_map(|key| members.test_case(key))
-        .map(|tc| tc.id)
-        .collect();
-
+    let in_a_subtask = counted_test_case_ids(subtask_defs, test_cases);
     test_cases
         .iter()
         .filter(|tc| tc.is_sample || tc.score > 0.0 || in_a_subtask.contains(&tc.id))

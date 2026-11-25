@@ -50,7 +50,12 @@ impl ContestJudge for IoiJudge {
     }
 
     fn db_score(&self, outcome: &CaseOutcome, tc: &ScoringCase) -> f64 {
-        // Weight the case's raw 0..1 score by its point value.
+        // Weight the case's raw 0..1 score by its point value. A case that
+        // counts toward no subtask (a sample, unless a subtask names it)
+        // adds nothing to the total, so its row records nothing either.
+        if !self.short_circuit.case_subtasks.contains_key(&tc.id) {
+            return 0.0;
+        }
         round_score(outcome.score * tc.score)
     }
 

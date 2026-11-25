@@ -2,6 +2,7 @@ import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useQuery } from '@tanstack/react-query';
 
 import { useIoiApi } from './hooks/useIoiApi';
+import { ioiKeys } from './query-keys';
 
 interface IoiConfigBannerProps {
   scope?: {
@@ -20,7 +21,7 @@ export function IoiConfigBanner({ scope }: IoiConfigBannerProps) {
     scope?.scope === 'contest' || scope?.scope === 'contest_problem';
 
   const { data: scoreboard } = useQuery({
-    queryKey: ['ioi-scoreboard', contestId],
+    queryKey: ioiKeys.scoreboard(contestId),
     enabled: !!contestId && isContestScope,
     queryFn: () => api.getScoreboard(contestId!),
     staleTime: 60000,

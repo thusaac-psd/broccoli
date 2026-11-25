@@ -8,7 +8,9 @@ use std::collections::HashSet;
 use broccoli_server_sdk::types::{ConfigValidateOutput, ConfigViolation, TestCaseRow};
 
 use crate::config::{SubtaskDef, SubtaskScoringMethod};
-use crate::subtasks::{Member, MemberIndex, Unjudgeable, unjudgeable};
+use crate::subtasks::{
+    Member, MemberIndex, Unjudgeable, counted_test_case_ids, effective_subtasks, unjudgeable,
+};
 
 /// The validate answer for `subtasks` over `test_cases`.
 ///
@@ -30,6 +32,7 @@ use crate::subtasks::{Member, MemberIndex, Unjudgeable, unjudgeable};
 /// - two members that name the same test case, which a `sum` subtask counts
 ///   twice;
 /// - a `sum` subtask whose members all weigh 0, which can never score;
+/// - a sample that carries points no subtask counts, which scores nothing;
 /// - a problem judging would refuse outright ([`unjudgeable`]), in the words
 ///   the refused submission records: one with no test cases yet, or none of
 ///   whose subtasks can score. The host checks the defaults (no subtasks) of
@@ -39,6 +42,7 @@ use crate::subtasks::{Member, MemberIndex, Unjudgeable, unjudgeable};
 pub fn check_task(subtasks: &[SubtaskDef], test_cases: &[TestCaseRow]) -> ConfigValidateOutput {
     let mut output = ConfigValidateOutput::default();
     check_subtasks(subtasks, test_cases, &mut output);
+    check_samples(subtasks, test_cases, &mut output);
     if let Some(reason) = unjudgeable(subtasks, test_cases) {
         let key = match reason {
             Unjudgeable::NoTestCases => "ioi.config.task.problemHasNoTestCases",
@@ -49,6 +53,33 @@ pub fn check_task(subtasks: &[SubtaskDef], test_cases: &[TestCaseRow]) -> Config
             .push(ConfigViolation::new("subtasks", reason.message()).key(key));
     }
     output
+}
+
+/// A sample that carries points no subtask counts: it is judged for its
+/// feedback and scores nothing, so its points are ignored.
+fn check_samples(
+    subtasks: &[SubtaskDef],
+    test_cases: &[TestCaseRow],
+    output: &mut ConfigValidateOutput,
+) {
+    let counted = counted_test_case_ids(&effective_subtasks(subtasks, test_cases), test_cases);
+    for tc in test_cases {
+        if tc.is_sample && tc.score > 0.0 && !counted.contains(&tc.id) {
+            let name = tc.label.clone().unwrap_or_else(|| tc.id.to_string());
+            output.issues.push(
+                ConfigViolation::new(
+                    "subtasks",
+                    format!(
+                        "sample '{name}' carries {} points, but samples score nothing unless a subtask names them",
+                        tc.score
+                    ),
+                )
+                .key("ioi.config.task.sampleScoreIgnored")
+                .param("testCase", name.as_str())
+                .param("score", tc.score),
+            );
+        }
+    }
 }
 
 fn check_subtasks(
@@ -267,6 +298,41 @@ mod tests {
         assert_eq!(
             found(&subtasks, &problem()),
             (vec!["subtasks[1].name".to_string()], vec![])
+        );
+    }
+
+    /// A sample scores nothing unless a subtask names it, so points it
+    /// carries are ignored: staff learn so, and the config stands.
+    #[test]
+    fn a_sample_that_carries_points_no_subtask_counts_is_an_issue() {
+        let mut sample = tc(1, 50.0, Some("sample_01"));
+        sample.is_sample = true;
+        let cases = vec![sample, tc(2, 100.0, Some("a"))];
+        let output = check_task(&[], &cases);
+        assert_eq!(output.errors, []);
+        let issues: Vec<_> = output
+            .issues
+            .iter()
+            .map(|v| (v.path.as_str(), v.key.as_deref()))
+            .collect();
+        assert_eq!(
+            issues,
+            [("subtasks", Some("ioi.config.task.sampleScoreIgnored"))]
+        );
+        assert!(
+            output.issues[0].message.contains("'sample_01'"),
+            "{output:?}"
+        );
+
+        // A subtask that names the sample counts it.
+        let named = [subtask("S", SubtaskScoringMethod::Sum, &["sample_01", "a"])];
+        assert_eq!(found(&named, &cases), (vec![], vec![]));
+        // A sample worth nothing ignores nothing.
+        let mut free = tc(1, 0.0, Some("sample_01"));
+        free.is_sample = true;
+        assert_eq!(
+            found(&[], &[free, tc(2, 100.0, Some("a"))]),
+            (vec![], vec![])
         );
     }
 

@@ -14,8 +14,10 @@ test('a visibility change reads every view of a submission again, and nothing el
     submissionViewKeys.judgement(9, 3),
     submissionViewKeys.testCases(9, 3, 1, '101,102', undefined, false, false),
     submissionViewKeys.list('contest', '4', 'all'),
+    // A plugin's own view of what the viewer may see of a submission.
+    submissionViewKeys.plugin('some-plugin', 'token-status', 4),
   ];
-  const other = ['ioi-token-status', 4];
+  const other = ['some-plugin-settings', 4];
   for (const key of [...views, other]) queryClient.setQueryData(key, {});
 
   rereadSubmissionViews(queryClient);

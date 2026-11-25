@@ -252,6 +252,53 @@ mod tests {
     }
 
     #[test]
+    fn a_case_that_counts_toward_no_subtask_records_no_score() {
+        // A sample carrying a weight still counts toward nothing: its row
+        // shows 0, as the total does, not its weight.
+        let host = Host::mock();
+        host.submission.add_test_case(1, 50.0);
+        host.submission.add_test_case(2, 100.0);
+        let tcs = vec![
+            TestCaseRow {
+                id: 1,
+                score: 50.0,
+                is_sample: true,
+                position: 0,
+                description: None,
+                label: Some("sample_01".into()),
+                input: TestCaseBodyRef::Missing,
+                expected_output: TestCaseBodyRef::Missing,
+                is_custom: false,
+            },
+            TestCaseRow {
+                id: 2,
+                score: 100.0,
+                is_sample: false,
+                position: 1,
+                description: None,
+                label: Some("tc_01".into()),
+                input: TestCaseBodyRef::Missing,
+                expected_output: TestCaseBodyRef::Missing,
+                is_custom: false,
+            },
+        ];
+        judge(
+            &host,
+            &default_ctx(tcs),
+            vec![TestCaseVerdict::accepted(1), TestCaseVerdict::accepted(2)],
+        );
+
+        let recorded: Vec<(Option<i32>, f64)> = host
+            .submission
+            .results()
+            .iter()
+            .map(|row| (row.test_case_id, row.score))
+            .collect();
+        assert_eq!(recorded, vec![(Some(1), 0.0), (Some(2), 100.0)]);
+        assert_eq!(host.submission.last_update().score, Some(100.0));
+    }
+
+    #[test]
     fn judge_filters_zero_score_cases_unless_sample_or_subtask_member() {
         let host = Host::mock();
         host.submission.add_test_case(1, 0.0);

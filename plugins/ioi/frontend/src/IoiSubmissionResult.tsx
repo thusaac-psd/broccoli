@@ -22,6 +22,7 @@ import {
 } from './feedback-visibility';
 import { useIoiApi } from './hooks/useIoiApi';
 import { useIoiContestInfo } from './hooks/useIoiContestInfo';
+import { ioiKeys } from './query-keys';
 import { type DisplayTestCaseResult, memberCell } from './subtask-members';
 import type {
   SubtaskInfo,
@@ -658,7 +659,7 @@ export function IoiSubmissionResult({
   const contestInfo = useIoiContestInfo(contestId ?? undefined).data;
 
   const { data: tokenStatus } = useQuery({
-    queryKey: ['ioi-token-status', contestId],
+    queryKey: ioiKeys.tokenStatus(contestId),
     enabled:
       !!contestId &&
       !!taskConfig &&
@@ -690,13 +691,12 @@ export function IoiSubmissionResult({
   // The server answers once the judgement stands; the key carries the
   // submission's status, so the query asks again when it changes.
   const subtaskScoresQuery = useQuery<SubtaskScoresResponse>({
-    queryKey: [
-      'ioi-subtask-scores',
+    queryKey: ioiKeys.subtaskScores(
       contestId,
       submission?.id,
       submission?.judge_epoch,
       submission?.status,
-    ],
+    ),
     enabled: !!contestId && !!submission?.id && feedbackShowsTotal,
     queryFn: () => api.getSubmissionSubtaskScores(contestId!, submission!.id),
     retry: 2,
