@@ -111,6 +111,7 @@
 'print.apiError.SIGN_IN_REQUIRED' = '请先登录。'
 
 # Config schema text
+'config.print.print.title' = '打印'
 'config.print.print.description' = '代码打印设置'
 'config.print.print.enabled.title' = '启用打印'
 'config.print.print.enabled.description' = '允许选手提交打印任务。'

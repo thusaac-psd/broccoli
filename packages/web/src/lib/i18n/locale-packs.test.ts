@@ -45,6 +45,8 @@ interface SchemaProperty {
   title?: string;
   description?: string;
   unit?: string;
+  enum?: unknown[];
+  enum_titles?: string[];
   properties?: Record<string, SchemaProperty>;
   items?: SchemaProperty;
 }
@@ -85,6 +87,10 @@ function schemaText(
             text[pluginKeys.configField(plugin, namespace, at, part)] = value;
           }
         }
+        property.enum_titles?.forEach((title, index) => {
+          const value = String(property.enum?.[index]);
+          text[pluginKeys.configOption(plugin, namespace, at, value)] = title;
+        });
         if (property.properties) walk(at, property.properties);
         if (property.items?.properties) walk(at, property.items.properties);
       }
@@ -114,3 +120,52 @@ for (const plugin of plugins) {
     });
   }
 }
+
+// A plugin with several namespaces shows each as a tab of its settings, which
+// its title labels: without one the tab reads the namespace's raw id.
+test('every namespace of a plugin with several has a title', () => {
+  const untitled = plugins.flatMap((plugin) => {
+    const manifest = parse(
+      readFileSync(join(PLUGINS_DIR, plugin, 'plugin.toml'), 'utf8'),
+    ) as { config?: Record<string, Namespace> };
+    const config = manifest.config ?? {};
+    const namespaces = Object.keys(config);
+    return namespaces.length > 1
+      ? namespaces
+          .filter((namespace) => !config[namespace].title)
+          .map((namespace) => `${plugin}/${namespace}`)
+      : [];
+  });
+  assert.deepEqual(untitled, [], 'namespaces without a title');
+});
+
+// An enum's options read as their titles: without them the settings form
+// shows each option's raw value.
+test('every enum option a plugin declares has a title', () => {
+  const untitled: string[] = [];
+  const walk = (
+    at: string,
+    properties: Record<string, SchemaProperty & { items?: SchemaProperty }>,
+  ) => {
+    for (const [name, property] of Object.entries(properties)) {
+      const path = `${at}.${name}`;
+      if (
+        property.enum &&
+        property.enum_titles?.length !== property.enum.length
+      ) {
+        untitled.push(path);
+      }
+      if (property.properties) walk(path, property.properties);
+      if (property.items?.properties) walk(path, property.items.properties);
+    }
+  };
+  for (const plugin of plugins) {
+    const manifest = parse(
+      readFileSync(join(PLUGINS_DIR, plugin, 'plugin.toml'), 'utf8'),
+    ) as { config?: Record<string, Namespace> };
+    for (const [namespace, ns] of Object.entries(manifest.config ?? {})) {
+      walk(`${plugin}/${namespace}`, ns.properties ?? {});
+    }
+  }
+  assert.deepEqual(untitled, [], 'enums without a title for each option');
+});

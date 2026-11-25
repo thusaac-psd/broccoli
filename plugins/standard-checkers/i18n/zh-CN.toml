@@ -9,10 +9,12 @@
 'plugin.standard-checkers.description' = '标准输出校验器：完全匹配、逐行、逐词与 testlib 比较。'
 
 # Config schema text
+'config.standard-checkers.checker_source.title' = '检查器源码'
 'config.standard-checkers.checker_source.description' = '本题的检查器源文件：一个 .c 或 .cpp 文件，以及 testlib.h 等头文件。'
 'config.standard-checkers.checker_source.files.title' = '检查器源文件'
 'config.standard-checkers.checker_source.files.filename.title' = '文件名'
 'config.standard-checkers.checker_source.files.content.title' = '内容'
+'config.standard-checkers.testlib.title' = 'Testlib'
 'config.standard-checkers.testlib.description' = 'Testlib 检查器的编译器与资源限制设置。'
 'config.standard-checkers.testlib.cpp.title' = 'C++ 检查器编译器'
 'config.standard-checkers.testlib.cpp.description' = 'C++ testlib 检查器的编译器设置'
@@ -34,6 +36,7 @@
 'config.standard-checkers.testlib.run_memory_limit_kb.title' = '运行内存限制'
 'config.standard-checkers.testlib.run_memory_limit_kb.description' = '检查器运行可用的最大内存（KB）'
 'config.standard-checkers.testlib.run_memory_limit_kb.unit' = 'KB'
+'config.standard-checkers.checker.title' = '检查器'
 'config.standard-checkers.checker.description' = 'tokens-float 检查器格式的容差：当一个记号与答案的差不超过 max(abs_tol, rel_tol * max(|answer|, |output|)) 时视为匹配。'
 'config.standard-checkers.checker.abs_tol.title' = '绝对容差'
 'config.standard-checkers.checker.abs_tol.description' = '输出中的数与答案之间可接受的最大绝对差。'

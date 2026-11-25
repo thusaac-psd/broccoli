@@ -389,7 +389,7 @@ export function valueText(
 export function defaultText(
   prop: JsonSchemaProperty,
   path: readonly string[],
-  words: BooleanWords,
+  say: (value: unknown) => string | undefined,
   inherited?: InheritedConfig,
 ): string | undefined {
   const [field] = path;
@@ -397,7 +397,8 @@ export function defaultText(
     path.length === 1 && inherited?.fields?.[field] === 'default'
       ? (inherited.config as Record<string, unknown> | null)?.[field]
       : undefined;
-  return valueText(resolved ?? prop.default, words);
+  const shown = resolved ?? prop.default;
+  return shown === undefined ? undefined : say(shown);
 }
 
 /**

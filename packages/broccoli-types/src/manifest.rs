@@ -1073,6 +1073,11 @@ pub struct SchemaProperty {
     pub format: Option<String>,
     #[serde(rename = "enum")]
     pub enum_values: Option<Vec<serde_json::Value>>,
+    /// What each `enum` value reads as, in its order: the option's title in
+    /// the settings form, which the plugin's pack translates. The JSON
+    /// schema carries it as `x-enum-titles`.
+    #[serde(default)]
+    pub enum_titles: Option<Vec<String>>,
     pub items: Option<Box<SchemaProperty>>,
     #[serde(default)]
     pub properties: HashMap<String, SchemaProperty>,
@@ -1191,6 +1196,9 @@ impl SchemaProperty {
         }
         if let Some(key) = &self.key {
             schema.insert("x-key".into(), key.clone().into());
+        }
+        if let Some(titles) = &self.enum_titles {
+            schema.insert("x-enum-titles".into(), titles.clone().into());
         }
         if let Some(v) = self.precision {
             schema.insert("x-precision".into(), v.into());
@@ -1650,6 +1658,7 @@ mod tests {
             pattern: Some("^[a-z]+$".into()),
             format: None,
             enum_values: None,
+            enum_titles: None,
             items: None,
             properties: HashMap::new(),
             required: None,
@@ -1730,6 +1739,7 @@ mod tests {
             pattern: None,
             format: None,
             enum_values: Some(vec![json!("fast"), json!("slow"), json!("balanced")]),
+            enum_titles: None,
             items: None,
             properties: HashMap::new(),
             required: None,

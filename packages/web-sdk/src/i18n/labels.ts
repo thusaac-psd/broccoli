@@ -59,6 +59,17 @@ export const pluginKeys = {
    * schema declares it, so the fields of every item of an array share one
    * key: the item positions in `path` are left out.
    */
+  /**
+   * The title of option `value` of a schema field's enum. Like a field's
+   * own text, the key names the field as the schema declares it.
+   */
+  configOption: (
+    pluginId: string,
+    namespace: string,
+    path: readonly string[],
+    value: string,
+  ) =>
+    `config.${pluginId}.${namespace}.${path.filter((segment) => !/^\d+$/.test(segment)).join('.')}.options.${value}`,
   configField: (
     pluginId: string,
     namespace: string,

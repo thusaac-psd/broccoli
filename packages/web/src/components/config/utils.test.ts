@@ -170,28 +170,29 @@ test("a plugin's refusal keeps its pack key, its parameters and its words", () =
 });
 
 const words = { yes: 'Yes', no: 'No' };
+const say = (value: unknown) => valueText(value, words);
 
 test('a boolean reads in words, other values as text', () => {
   assert.equal(
-    defaultText({ type: 'boolean', default: false }, ['on'], words),
+    defaultText({ type: 'boolean', default: false }, ['on'], say),
     'No',
   );
   assert.equal(valueText(true, { yes: '是', no: '否' }), '是');
   assert.equal(valueText('fast', words), 'fast');
-  assert.equal(valueText(['x'], words), undefined);
+  assert.equal(valueText(['x'], say), undefined);
 });
 
 test('a field left at its default reads its default, the resolved one first', () => {
   const limit = schema.properties!.limit;
-  assert.equal(defaultText(limit, ['limit'], words), '3');
+  assert.equal(defaultText(limit, ['limit'], say), '3');
   assert.equal(
-    defaultText({ type: 'integer', default: 0 }, ['retries'], words),
+    defaultText({ type: 'integer', default: 0 }, ['retries'], say),
     '0',
     'a default of zero is a default',
   );
-  assert.equal(defaultText({ type: 'integer' }, ['free'], words), undefined);
+  assert.equal(defaultText({ type: 'integer' }, ['free'], say), undefined);
   assert.equal(
-    defaultText(limit, ['limit'], words, {
+    defaultText(limit, ['limit'], say, {
       config: { limit: 7 },
       source: 'default',
       is_enabled: true,
@@ -211,12 +212,12 @@ test('a field left at its default reads its default, the resolved one first', ()
     defaultText(
       schema.properties!.nested.properties!.ratio,
       ['nested', 'ratio'],
-      words,
+      say,
     ),
     '0.5',
   );
   assert.equal(
-    defaultText(schema.properties!.weights, ['weights'], words),
+    defaultText(schema.properties!.weights, ['weights'], say),
     undefined,
   );
 });

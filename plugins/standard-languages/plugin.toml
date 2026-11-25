@@ -23,6 +23,7 @@ position = "prepend"
 component = "CompileInfoBanner"
 
 [config.compilation]
+title = "Compilation"
 judging_input = true
 description = "Compiler and interpreter paths and default flags"
 scopes = ["plugin", "contest", "problem", "contest_problem"]
@@ -161,6 +162,7 @@ title = "Interpreter Path"
 default = "/usr/bin/node"
 
 [config.entry-points]
+title = "Entry points"
 judging_input = true
 description = "Per-language entry point and extra compile flag overrides"
 scopes = ["problem"]

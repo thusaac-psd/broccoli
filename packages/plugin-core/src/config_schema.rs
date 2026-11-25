@@ -121,6 +121,13 @@ fn check_property(prop: &SchemaProperty, path: &str) -> Result<(), String> {
         return Err(format!("'{path}': {}", describe(&errors)));
     }
     check_key(prop, path)?;
+    if let Some(titles) = &prop.enum_titles
+        && prop.enum_values.as_ref().map(Vec::len) != Some(titles.len())
+    {
+        return Err(format!(
+            "'{path}': its enum_titles name each of its enum values, in order"
+        ));
+    }
     if let Some(items) = &prop.items {
         check_property(items, &format!("{path}[]"))?;
     }
@@ -543,6 +550,34 @@ mod tests {
         .unwrap();
         let err = check_manifest(&manifest).expect_err("no server module");
         assert!(err.contains("validate function"), "{err}");
+    }
+
+    #[test]
+    fn enum_titles_name_each_enum_value_in_order() {
+        let mode = |titles: &str| -> PluginManifest {
+            toml::from_str(&format!(
+                r#"
+                name = "p"
+                version = "1.0.0"
+                [config.task]
+                scopes = ["contest"]
+                [config.task.properties.mode]
+                type = "string"
+                enum = ["fast", "slow"]
+                {titles}
+            "#
+            ))
+            .unwrap()
+        };
+        check_manifest(&mode(r#"enum_titles = ["Fast", "Slow"]"#)).expect("a title each");
+        check_manifest(&mode("")).expect("no titles");
+        let err = check_manifest(&mode(r#"enum_titles = ["Fast"]"#)).expect_err("one short");
+        assert!(err.contains("enum_titles"), "{err}");
+        assert_eq!(
+            mode(r#"enum_titles = ["Fast", "Slow"]"#).config["task"].to_json_schema()["properties"]
+                ["mode"]["x-enum-titles"],
+            serde_json::json!(["Fast", "Slow"])
+        );
     }
 
     fn stations_manifest(array: &str, items: &str) -> PluginManifest {

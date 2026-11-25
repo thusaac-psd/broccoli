@@ -42,6 +42,7 @@
 'icpc.apiError.SIGN_IN_REQUIRED' = '请先登录。'
 
 # Config schema text
+'config.icpc.contest.title' = 'ICPC 规则'
 'config.icpc.contest.description' = 'ICPC 比赛级配置'
 'config.icpc.contest.penalty_minutes.title' = '罚时（分钟）'
 'config.icpc.contest.penalty_minutes.description' = '通过前每次错误提交增加的罚时（分钟）'

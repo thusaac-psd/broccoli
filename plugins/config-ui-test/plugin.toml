@@ -36,6 +36,7 @@ component = "CollapsibleWrapper"
 
 # Namespace 1: stress-test
 [config.stress-test]
+title = "Stress test"
 description = "Kitchen-sink config schema — every feature the UI supports"
 scopes = ["plugin", "contest", "problem", "contest_problem"]
 
@@ -51,6 +52,7 @@ type = "string"
 title = "Mode"
 description = "Operation mode"
 enum = ["fast", "balanced", "thorough", "experimental"]
+enum_titles = ["Fast", "Balanced", "Thorough", "Experimental"]
 default = "balanced"
 
 [config.stress-test.properties.label]
@@ -230,6 +232,7 @@ precision = 1
 type = "string"
 title = "Strategy"
 enum = ["sequential", "parallel", "random"]
+enum_titles = ["Sequential", "Parallel", "Random"]
 default = "sequential"
 
 # Array of arrays
@@ -290,6 +293,7 @@ unit = "KB"
 
 # Namespace 2: appearance
 [config.appearance]
+title = "Appearance"
 description = "Visual appearance settings (tests multi-namespace tab UI)"
 scopes = ["plugin", "contest"]
 
@@ -297,6 +301,7 @@ scopes = ["plugin", "contest"]
 type = "string"
 title = "Theme"
 enum = ["light", "dark", "auto", "high-contrast"]
+enum_titles = ["Light", "Dark", "Automatic", "High contrast"]
 default = "auto"
 
 [config.appearance.properties.accent_color]

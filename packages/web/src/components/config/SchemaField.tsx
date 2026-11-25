@@ -103,6 +103,22 @@ export function SchemaField({
   // Nothing typed and no ref: nothing is stored (any longer).
   if (value == null && keptRef !== null) setKeptRef(null);
   const words = { yes: t('config.yes'), no: t('config.no') };
+  // An option of an enum reads as its title, in the plugin's pack.
+  const optionText = (option: unknown) => {
+    const index = prop.enum?.indexOf(option) ?? -1;
+    const plain =
+      (index >= 0 ? prop['x-enum-titles']?.[index] : undefined) ??
+      valueText(option, words) ??
+      String(option);
+    return pluginId && namespace
+      ? pluginText(
+          pluginKeys.configOption(pluginId, namespace, path, String(option)),
+          plain,
+        )
+      : plain;
+  };
+  const say = (shown: unknown) =>
+    prop.enum?.includes(shown) ? optionText(shown) : valueText(shown, words);
   const fieldId = `cfg-${path.join('-')}`;
   // A plugin can name its fields in its own translation pack.
   const label =
@@ -143,14 +159,14 @@ export function SchemaField({
     // A value from a scope the viewer may not read is shown as withheld.
     display: inheritedValue.withheld
       ? t('config.withheldValue')
-      : (valueText(inheritedValue.value, words) ?? ''),
+      : (say(inheritedValue.value) ?? ''),
     source: configSourceName(inheritedValue.source, t),
   };
   const showAsPlaceholder = !isFieldExplicit && !isFieldDirty;
   // What an unset field shows, for every kind of field: the value it
   // inherits, else its default.
   const unsetText = showAsPlaceholder
-    ? (inheritedResult?.display ?? defaultText(prop, path, words, inherited))
+    ? (inheritedResult?.display ?? defaultText(prop, path, say, inherited))
     : undefined;
 
   const badge = (() => {
@@ -347,7 +363,7 @@ export function SchemaField({
               )}
               {prop.enum.map((opt) => (
                 <option key={String(opt)} value={String(opt)}>
-                  {valueText(opt, words) ?? String(opt)}
+                  {optionText(opt)}
                 </option>
               ))}
             </select>
