@@ -378,26 +378,14 @@ pub(crate) async fn discard_judgement(
     Ok(DiscardJudgement::Discarded)
 }
 
-/// Whether any plugin's inputs epoch differs between `stamped` (what a
-/// judgement recorded) and `now` (its plugins' epochs as they are), a plugin
-/// one of them does not name reading as epoch 0: an epoch only moves when a
-/// plugin-scope judging-input config changes, so a plugin that never had one
-/// changed is at 0 on both sides.
+/// Whether the plugins a judgement was judged by, with their inputs epochs
+/// (`stamped`), are not the plugins that judge its work now with theirs
+/// (`now`; none read as none): another plugin judging it (a provider switch)
+/// or one of them at another epoch (a plugin-scope judging-input config
+/// changed) means it was judged on other inputs.
 fn epochs_moved(stamped: &serde_json::Value, now: Option<&serde_json::Value>) -> bool {
-    let epoch = |map: Option<&serde_json::Value>, plugin: &str| {
-        map.and_then(|m| m.get(plugin))
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or(0)
-    };
-    let names = |map: Option<&serde_json::Value>| {
-        map.and_then(serde_json::Value::as_object)
-            .map(|m| m.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default()
-    };
-    names(Some(stamped))
-        .into_iter()
-        .chain(names(now))
-        .any(|plugin| epoch(Some(stamped), &plugin) != epoch(now, &plugin))
+    let none = serde_json::json!({});
+    stamped != now.unwrap_or(&none)
 }
 
 #[cfg(test)]
@@ -405,15 +393,19 @@ mod tests {
     use super::epochs_moved;
     use serde_json::json;
 
-    /// A plugin's epoch moved only when the two sides name it at different
-    /// epochs, a plugin one side does not name reading as 0.
+    /// The epochs moved when the judgement's plugins are not the plugins
+    /// that judge its work now, or when one of them is at another epoch: a
+    /// provider switch counts, even when both plugins are at epoch 0.
     #[test]
-    fn only_a_plugin_whose_epoch_changed_moves_the_epochs() {
+    fn the_epochs_moved_when_the_plugins_or_an_epoch_differ() {
         let stamped = json!({"judge": 2});
         assert!(!epochs_moved(&stamped, Some(&json!({"judge": 2}))));
         assert!(epochs_moved(&stamped, Some(&json!({"judge": 3}))));
-        assert!(!epochs_moved(&json!({}), Some(&json!({"judge": 0}))));
-        assert!(epochs_moved(&json!({}), Some(&json!({"judge": 1}))));
+        assert!(epochs_moved(
+            &json!({"judge": 0}),
+            Some(&json!({"other": 0}))
+        ));
+        assert!(epochs_moved(&json!({}), Some(&json!({"judge": 0}))));
         assert!(epochs_moved(&stamped, Some(&json!({}))));
         assert!(!epochs_moved(&json!({}), None));
     }
