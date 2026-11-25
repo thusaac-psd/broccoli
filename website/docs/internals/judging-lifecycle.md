@@ -110,7 +110,8 @@ fleet is reloading it, the replica that enabled it restarted), work that
 needs it is parked, exactly as when every provider is disabled: it stays
 `Queued` with `parked_by` naming the plugin (`reason: not_loaded`), a submit
 path refuses new work retryably (`503 PLUGIN_NOT_LOADED` with `Retry-After`,
-where a disabled provider answers `PLUGIN_DISABLED`), and it runs once a
+where a disabled provider answers `PLUGIN_DISABLED`; both name the plugin in
+`details.plugin_id`), and it runs once a
 replica that loads the provider is live (`providers::runnable`,
 `PluginLifecycle::closed_by`, which reads the live replicas' loads as of the
 last reconcile). An administrator who wants the next provider to take the
@@ -344,11 +345,13 @@ refused (`QUEUE_UNREACHABLE`), an operation the queue lost
 the replica that claimed it (`PLUGIN_NOT_LOADED_HERE`), a statement the
 dispatch or its plugins ran that the database could not serve
 (`DATABASE_UNAVAILABLE`): the database lost, its pool or the plugin's own SQL
-permits with nothing free in time. Plugin SQL records it where every
-unavailable statement ends (`host_funcs::sql::unavailable`, through
-`Dispatch::note_outage`), and the dispatch's own statements (reading the
-inputs, stamping their version) by the same rule
-(`DispatchFailure::database`, as `common::db::is_outage` decides it). Each of these faults is a hand-back
+permits with nothing free in time. One rule records it,
+`host_funcs::host_db`: plugin SQL where every unavailable statement ends
+(`host_funcs::sql::unavailable`, through `host_db::fail_under`), the host's
+own SQL in a host function through `host_db::failed`, and the dispatch's own
+statements (reading the inputs, stamping their version) through
+`host_db::dispatch_failed`, as `common::db::outage` decides it. Each of these
+faults is a hand-back
 (`SystemErrorClass::HandBack`): the platform lost the attempt, and it never
 becomes a verdict. The judging session ends as `Lost` before another result
 reaches the plugin, a plugin write that would finalize the judgement is fenced

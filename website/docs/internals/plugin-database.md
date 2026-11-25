@@ -201,8 +201,10 @@ A plugin's SQL runs within the deadline of the call that runs it
   `Retry-After`, or, when the host's pool had no connection free, as the
   database being busy (`503 DATABASE_BUSY`), not the plugin's "busy" (a
   statement cut at its deadline stays `PLUGIN_UNAVAILABLE`); one mapping
-  decides which (`host_funcs::sql::Unanswered`), and under a judging dispatch the attempt is handed back
-  (`DispatchFault::DatabaseUnavailable`) instead of spending its budget. One
+  decides which (`host_funcs::sql::Unanswered`), and under a judging
+  dispatch the attempt is handed back (`DispatchFault::DatabaseUnavailable`,
+  through `host_db::fail_under`) instead of spending its budget, as it is
+  when no plugin SQL permit is free in time. One
   rule decides both (`host_funcs::sql::settle`), for raw plugin SQL and the
   host-pool writes of `host.submission.*` and `host.code_run.*` alike; any
   other error goes back to the plugin in its response. The host's own SQL in

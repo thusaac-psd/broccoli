@@ -213,12 +213,15 @@ binaries warn about every key they do not read.
   its own schema, on its own pool (`packages/server/src/plugin_db`). Host tables
   are read-only to plugins, and content columns stay hidden unless the manifest
   declares a `[server.sql] read` scope. The app role provisions these roles, so
-  it needs `CREATEROLE` but never superuser. Every plugin statement's answer
-  passes one outage rule (`host_funcs::sql::settle`): an outage fails the call
-  as unavailable and, under a dispatch, hands the attempt back. The call names
-  why by one mapping (`host_funcs::sql::Unanswered`): a lost database answers
-  `DATABASE_UNAVAILABLE`, a pool with no connection free `DATABASE_BUSY`, a
-  deadline cut `PLUGIN_UNAVAILABLE`.
+  it needs `CREATEROLE` but never superuser. Every database error a host
+  function meets, the plugin's SQL or the host's own, and every one a
+  dispatch's own statement meets, passes one outage rule
+  (`host_funcs::host_db`): an outage fails the call as the database's and,
+  under a dispatch, hands the attempt back; any other error is the
+  statement's. Plugin SQL that cannot run names why by one mapping
+  (`host_funcs::sql::Unanswered`): a lost database answers
+  `DATABASE_UNAVAILABLE`, a pool or plugin SQL permit with nothing free
+  `DATABASE_BUSY`, a deadline cut `PLUGIN_UNAVAILABLE`.
 - `packages/plugin-core` holds the plugin abstractions shared by the host:
   manifest parsing, the registry, instance pools, hooks, admission, config, i18n
   and the plugin HTTP proxy types.
