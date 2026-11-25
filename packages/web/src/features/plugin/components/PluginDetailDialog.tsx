@@ -29,7 +29,7 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 
-import type { PluginFleet } from '../fleet';
+import { failureText, type PluginFleet, type PluginReplica } from '../fleet';
 import { PluginSourceBadge } from './PluginCard';
 import { PluginFleetBadge } from './PluginFleetBadge';
 
@@ -125,6 +125,26 @@ const REPLICA_BADGE: Record<
   unloaded: 'outline',
 };
 
+/**
+ * Why a server fails to run the plugin, in the reader's language, with the
+ * server's own error beneath it as detail. Nothing while it runs.
+ */
+function ReplicaFailure({ replica }: { replica: PluginReplica }) {
+  const { t } = useTranslation();
+  const text = failureText(replica);
+  if (!text) return null;
+  return (
+    <div className="space-y-1">
+      <p className="text-destructive">{t(text)}</p>
+      {replica.error && (
+        <pre className="whitespace-pre-wrap break-words font-mono text-muted-foreground">
+          {replica.error}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 function FleetSection({ fleet }: { fleet: PluginFleet }) {
   const { t } = useTranslation();
   const format = useFormat();
@@ -158,11 +178,7 @@ function FleetSection({ fleet }: { fleet: PluginFleet }) {
                   </span>
                 )}
               </div>
-              {r.error && (
-                <pre className="whitespace-pre-wrap break-words font-mono text-destructive">
-                  {r.error}
-                </pre>
-              )}
+              <ReplicaFailure replica={r} />
               {r.retry_at && (
                 <p className="text-muted-foreground">
                   {t('plugins.detail.retryAt', {

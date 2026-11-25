@@ -27,7 +27,7 @@ import { useState } from 'react';
 
 import { ResourceConfigDialog } from '@/components/config';
 
-import { firstFleetError } from '../fleet';
+import { firstFailure } from '../fleet';
 import { PluginFleetBadge } from './PluginFleetBadge';
 
 export function PluginCard({
@@ -53,6 +53,7 @@ export function PluginCard({
   // it loaded: a plugin enabled but failing to load is still enabled.
   const isEnabled = plugin.enabled;
   const failed = plugin.fleet.state === 'failed';
+  const failure = firstFailure(plugin.fleet);
   const hasPluginSchemas = plugin.config_schemas?.some((schema) =>
     schema.scopes.includes('plugin'),
   );
@@ -89,9 +90,9 @@ export function PluginCard({
           {failed && (
             <p
               className="text-xs text-destructive mb-3 line-clamp-2 break-words"
-              title={firstFleetError(plugin.fleet)}
+              title={failure?.replica.error ?? undefined}
             >
-              {firstFleetError(plugin.fleet) ?? t('plugins.fleet.notInstalled')}
+              {t(failure?.text ?? 'plugins.fleet.notInstalled')}
             </p>
           )}
           <div className="flex items-end justify-between gap-4">

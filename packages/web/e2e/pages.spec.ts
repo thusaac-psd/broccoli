@@ -2,6 +2,7 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, type Page, test } from '@playwright/test';
 
 import { mockApi, type Viewer } from './api';
+import fixturePlugin from './fixture-plugin.json' with { type: 'json' };
 
 // The pages each kind of visitor opens, checked in both themes: no WCAG A/AA
 // violation axe can find, a name in the browser tab, the document language
@@ -306,3 +307,46 @@ for (const width of [390, 768, 1024, 1280, 1536, 1920]) {
     }
   });
 }
+
+// A plugin failing on a server says why in the reader's language, from the
+// failure's status; the server's own words stay as secondary detail.
+test('a plugin failing on a server says why in the UI language, with the raw error as detail', async ({
+  page,
+}) => {
+  await page.addInitScript(() =>
+    localStorage.setItem('broccoli-locale', 'zh-CN'),
+  );
+  await mockApi(page, 'admin');
+  const raw = 'Plugin not found: print';
+  await page.route(/\/api\/v1\/admin\/plugins$/, (route) =>
+    route.fulfill({
+      json: [
+        {
+          ...fixturePlugin,
+          fleet: {
+            state: 'failed',
+            replicas_total: 2,
+            replicas_loaded: 1,
+            replicas_failed: 1,
+            replicas: [
+              fixturePlugin.fleet.replicas[0],
+              {
+                server_id: 'server-2',
+                status: 'not_installed',
+                error: raw,
+                up_to_date: true,
+                retry_at: null,
+                version: null,
+              },
+            ],
+          },
+        },
+      ],
+    }),
+  );
+  await page.goto('/admin/plugins');
+  const card = page.getByText('此服务器上找不到该插件的文件。');
+  await expect(card).toBeVisible();
+  await expect(card).toHaveAttribute('title', raw);
+  await expect(page.getByText(raw)).toHaveCount(0);
+});
