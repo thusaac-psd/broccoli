@@ -30,7 +30,7 @@ use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::hooks;
-use crate::models::problem::validate_contest_type;
+use crate::models::problem::validate_key;
 use crate::models::shared::{PageWindow, escape_like};
 use crate::models::submission::*;
 use crate::providers::Provided;
@@ -155,14 +155,7 @@ pub async fn create_submission(
     {
         return Err(AppError::NotFound("Problem not found".into()));
     }
-    let known_languages: std::collections::HashSet<String> = state
-        .registries
-        .language_resolver_registry
-        .read()
-        .await
-        .keys()
-        .cloned()
-        .collect();
+    let known_languages: std::collections::HashSet<String> = state.known_languages().await;
     validate_submission_contract(
         &payload.files,
         &payload.language,
@@ -179,8 +172,7 @@ pub async fn create_submission(
                 .key_closure(Provided::ContestType, ct)
                 .is_none() =>
         {
-            validate_contest_type("contest_type", ct, &state.registries.contest_type_registry)
-                .await?;
+            validate_key(&state, Provided::ContestType, "contest_type", ct).await?;
             ct.clone()
         }
         Some(ref ct) => ct.clone(),
@@ -771,14 +763,7 @@ pub async fn create_contest_submission(
     let now = state.clock.now();
     require_contest_running(&auth_user, &contest_model, now)?;
     require_contest_participant(&state.db, &auth_user, &contest_model).await?;
-    let known_languages: std::collections::HashSet<String> = state
-        .registries
-        .language_resolver_registry
-        .read()
-        .await
-        .keys()
-        .cloned()
-        .collect();
+    let known_languages: std::collections::HashSet<String> = state.known_languages().await;
     validate_submission_contract(
         &payload.files,
         &payload.language,

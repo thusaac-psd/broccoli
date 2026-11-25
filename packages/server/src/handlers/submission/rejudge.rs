@@ -1,4 +1,5 @@
 use crate::extractors::query::AppQuery;
+use crate::providers::Provided;
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::State;
@@ -32,7 +33,7 @@ use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
-use crate::models::problem::{ApplyJudgementQuery, validate_contest_type};
+use crate::models::problem::{ApplyJudgementQuery, validate_key};
 use crate::models::submission::*;
 use crate::services::judging::{
     self, ApplyJudgement, DiscardJudgement, OpenJudgement, apply_judgement, discard_judgement,
@@ -467,14 +468,7 @@ pub async fn admin_fan_out_submission(
     let txn = state.db.begin().await?;
 
     let problem = find_problem(&txn, payload.problem_id).await?;
-    let known_languages: std::collections::HashSet<String> = state
-        .registries
-        .language_resolver_registry
-        .read()
-        .await
-        .keys()
-        .cloned()
-        .collect();
+    let known_languages: std::collections::HashSet<String> = state.known_languages().await;
     validate_submission_contract(
         &payload.files,
         &payload.language,
@@ -506,8 +500,7 @@ pub async fn admin_fan_out_submission(
         }
         None => match payload.contest_type {
             Some(ref ct) => {
-                validate_contest_type("contest_type", ct, &state.registries.contest_type_registry)
-                    .await?;
+                validate_key(&state, Provided::ContestType, "contest_type", ct).await?;
                 ct.clone()
             }
             None => problem.default_contest_type.clone(),

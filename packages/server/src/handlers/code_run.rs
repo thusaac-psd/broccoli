@@ -207,7 +207,7 @@ pub async fn run_code(
         return Err(AppError::NotFound("Problem not found".into()));
     }
 
-    let known_languages = state.registries.known_language_ids().await;
+    let known_languages = state.known_languages().await;
     validate_run_language(&payload.language, &known_languages)?;
 
     let contest_type = problem.default_contest_type.clone();
@@ -308,7 +308,7 @@ pub async fn run_contest_code(
     require_contest_running(&auth_user, &contest_model, now)?;
     require_contest_participant(&state.db, &auth_user, &contest_model).await?;
 
-    let known_languages = state.registries.known_language_ids().await;
+    let known_languages = state.known_languages().await;
     validate_run_language(&payload.language, &known_languages)?;
 
     let custom_tcs_json =

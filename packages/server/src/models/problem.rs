@@ -260,7 +260,7 @@ pub fn truncate_preview(s: &str) -> String {
     }
 }
 
-use crate::registry::{CheckerStageRegistry, ContestTypeRegistry, EvaluatorRegistry};
+use crate::registry::CheckerStageRegistry;
 
 /// The checker format a problem gets when it names none: the
 /// `default_checker_format` of the one loaded plugin whose manifest declares
@@ -298,57 +298,32 @@ pub async fn default_checker_format(
     provided.next().is_none().then_some(first)
 }
 
-pub async fn validate_checker_format(
-    format: &str,
-    registry: &CheckerStageRegistry,
-) -> Result<(), AppError> {
-    let reg = registry.read().await;
-    if !reg.contains_key(format) {
-        let mut valid: Vec<_> = reg.keys().cloned().collect();
-        valid.sort();
-        return Err(AppError::Validation(format!(
-            "checker_format must be one of: {}",
-            valid.join(", ")
-        )));
-    }
-    Ok(())
-}
-
-pub async fn validate_problem_type(
-    problem_type: &str,
-    registry: &EvaluatorRegistry,
-) -> Result<(), AppError> {
-    let reg = registry.read().await;
-    if !reg.contains_key(problem_type) {
-        let mut valid: Vec<_> = reg.keys().cloned().collect();
-        valid.sort();
-        return Err(AppError::Validation(format!(
-            "problem_type must be one of: {}",
-            valid.join(", ")
-        )));
-    }
-    Ok(())
-}
-
-/// Check that `contest_type` names a registered contest type. `field` is the
-/// request field reported in the error. Every request that names a contest
-/// type (problem default, contest, practice or fan-out submission) goes
-/// through here.
-pub async fn validate_contest_type(
+/// Check that `value` names a `kind` key the fleet knows
+/// ([`crate::state::AppState::known_keys`]); `field` is the request field
+/// reported in the error. Every request that names a contest type, problem
+/// type or checker format goes through here. A key whose plugin cannot run
+/// now (disabled, loaded nowhere, not loaded here) is known: what needs it
+/// is refused or parked by why, never as unknown.
+pub async fn validate_key(
+    state: &crate::state::AppState,
+    kind: broccoli_api_types::visibility::Provided,
     field: &str,
-    contest_type: &str,
-    registry: &ContestTypeRegistry,
+    value: &str,
 ) -> Result<(), AppError> {
-    let reg = registry.read().await;
-    if !reg.contains_key(contest_type) {
-        let mut valid: Vec<_> = reg.keys().cloned().collect();
-        valid.sort();
-        return Err(AppError::Validation(format!(
-            "{field} must be one of: {}",
-            valid.join(", ")
-        )));
+    check_known_key(field, value, &state.known_keys(kind).await)
+}
+
+/// Check that `value` is one of `known`, listing them when it is not.
+pub fn check_known_key(field: &str, value: &str, known: &HashSet<String>) -> Result<(), AppError> {
+    if known.contains(value) {
+        return Ok(());
     }
-    Ok(())
+    let mut valid: Vec<&str> = known.iter().map(String::as_str).collect();
+    valid.sort_unstable();
+    Err(AppError::Validation(format!(
+        "{field} must be one of: {}",
+        valid.join(", ")
+    )))
 }
 
 pub fn validate_create_problem(req: &CreateProblemRequest) -> Result<(), AppError> {
@@ -631,45 +606,24 @@ mod test_case_description_tests {
 #[cfg(test)]
 mod checker_format_tests {
     use super::*;
-    use crate::registry::CheckerStageHandlers;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
 
-    fn stage_reg(formats: &[&str]) -> CheckerStageRegistry {
-        let mut map = crate::registry::Providers::default();
-        for f in formats {
-            map.insert(
-                f.to_string(),
-                CheckerStageHandlers {
-                    plugin_id: "checker-plugin".into(),
-                    resolve_fn: "resolve_standard_checker".into(),
-                    interpret_fn: "interpret_standard_checker_result".into(),
-                },
-            );
-        }
-        Arc::new(RwLock::new(map))
-    }
-
-    #[tokio::test]
-    async fn validate_checker_format_accepts_stage_registered_formats() {
-        // The fused stage registry is the source of truth - incl. `none`.
-        let reg = stage_reg(&["exact", "tokens", "testlib", "none"]);
+    #[test]
+    fn a_known_key_validates_and_an_unknown_one_lists_the_known() {
+        let known: HashSet<String> = ["exact", "tokens", "testlib", "none"]
+            .map(String::from)
+            .into();
         for fmt in ["exact", "tokens", "testlib", "none"] {
             assert!(
-                validate_checker_format(fmt, &reg).await.is_ok(),
-                "{fmt} should validate"
+                check_known_key("checker_format", fmt, &known).is_ok(),
+                "{fmt}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn validate_checker_format_rejects_unknown_and_lists_valid() {
-        let reg = stage_reg(&["exact", "none"]);
-        let err = validate_checker_format("bogus", &reg).await.unwrap_err();
-        match err {
+        match check_known_key("checker_format", "bogus", &known).unwrap_err() {
             AppError::Validation(m) => {
-                assert!(m.contains("exact"), "lists exact: {m}");
-                assert!(m.contains("none"), "lists none: {m}");
+                assert_eq!(
+                    m,
+                    "checker_format must be one of: exact, none, testlib, tokens"
+                );
             }
             other => panic!("expected Validation error, got {other:?}"),
         }

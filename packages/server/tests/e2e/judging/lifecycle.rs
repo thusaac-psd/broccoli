@@ -527,6 +527,103 @@ async fn a_practice_type_whose_only_plugin_is_loaded_nowhere_names_it() {
     );
 }
 
+/// Records `plugin_id` enabled fleet-wide, providing `contest_type` and
+/// `language`, with files on no replica this test runs.
+async fn record_plugin_elsewhere(
+    app: &E2eTestApp,
+    plugin_id: &str,
+    visibility: bool,
+    contest_type: &str,
+    language: &str,
+) {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let governs = json!({
+        "visibility": visibility,
+        "contest_types": [contest_type],
+        "problem_types": [],
+        "checker_formats": [],
+        "languages": [language],
+        "unchecked_problem_types": [],
+        "hooks": [],
+        "judging_inputs": [],
+        "checker_languages": [],
+    });
+    app.db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) \
+             VALUES ($1, TRUE, 1, NOW(), $2)",
+            [plugin_id.into(), governs.into()],
+        ))
+        .await
+        .unwrap();
+}
+
+/// Reading a practice problem needs no contest plugin: while the plugin
+/// of its default contest type is loaded nowhere, its statement reads, its
+/// submit is closed by that plugin, and a submission in a language only
+/// that plugin provides is refused by its name, never as unsupported.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_practice_problem_reads_while_its_contest_plugin_is_loaded_nowhere() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("nowhere_read_admin", "pass1234", "admin")
+        .await;
+    let problem_id = app
+        .create_public_problem(&admin, "Readable while its plugin is out")
+        .await;
+    app.create_test_case(problem_id, &admin).await;
+    record_plugin_elsewhere(&app, "nowhere-viz", true, "nowhere-type", "nowhere-lang").await;
+    app.db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE problem SET default_contest_type = 'nowhere-type' WHERE id = $1",
+            [problem_id.into()],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(app.reconcile_plugins_failing().await, ["nowhere-viz"]);
+    let contestant = app
+        .create_authenticated_user("nowhere_read_user", "pass1234")
+        .await;
+
+    let res = app
+        .get_with_token(&format!("/api/v1/problems/{problem_id}"), &contestant)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(
+        res.body["plugin_outage"],
+        json!({"state": "not_loaded", "plugin_id": "nowhere-viz"}),
+        "{}",
+        res.text
+    );
+    assert_eq!(
+        res.body["closed_by"]["plugin_id"], "nowhere-viz",
+        "{}",
+        res.text
+    );
+
+    let res = app
+        .post_with_token(
+            &format!("/api/v1/problems/{problem_id}/submissions"),
+            &json!({
+                "language": "nowhere-lang",
+                "contest_type": "nowhere-type",
+                "files": [{"filename": "main.cpp", "content": CPP_SUM}],
+            }),
+            &contestant,
+        )
+        .await;
+    assert_eq!(res.status, 503, "{}", res.text);
+    assert_eq!(res.body["code"], "PLUGIN_NOT_LOADED", "{}", res.text);
+    assert_eq!(
+        res.body["details"]["plugin_id"], "nowhere-viz",
+        "{}",
+        res.text
+    );
+}
+
 /// Work needing a key no enabled plugin provides (a checker format nothing
 /// registered) fails on its first attempt and stands: no replica will ever
 /// run it. Its system error names the role and the key (`NO_PROVIDER`); it

@@ -793,6 +793,21 @@ impl PluginLifecycle {
             .collect()
     }
 
+    /// Every `kind` key a plugin of the fleet recorded providing, enabled or
+    /// not: what work may name, whether or not a provider can run it now
+    /// ([`Self::key_closure`] says why one cannot).
+    pub fn recorded_keys(&self, kind: Provided) -> std::collections::HashSet<String> {
+        self.governs
+            .read()
+            .map(|governs| {
+                governs
+                    .values()
+                    .flat_map(|g| g.provides.keys(kind).iter().cloned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Every plugin's recorded [`Governs`], in plugin id order.
     pub fn recorded_governs(&self) -> Vec<(String, Governs)> {
         let mut recorded: Vec<(String, Governs)> = self
