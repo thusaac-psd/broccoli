@@ -1273,8 +1273,7 @@ impl Answers {
     fn failed(&mut self, why: impl std::fmt::Display) {
         self.running_unanswered = true;
         if self.failure.is_none() {
-            self.failure =
-                Some(plugin_core::guest_log::plugin_text(&why.to_string()).into_owned());
+            self.failure = Some(plugin_core::guest_log::plugin_text(&why.to_string()).into_owned());
         }
     }
 
