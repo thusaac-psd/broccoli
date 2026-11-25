@@ -3619,6 +3619,10 @@ export interface components {
         }
       | {
           /** @enum {string} */
+          kind: 'secret_required';
+        }
+      | {
+          /** @enum {string} */
           kind: 'duplicate_key';
           value: unknown;
         }

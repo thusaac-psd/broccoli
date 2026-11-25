@@ -272,6 +272,8 @@ export function serverProblem(field: ServerFieldError): FieldProblem {
       return { key: 'config.validation.required' };
     case 'secret_not_stored':
       return { key: 'config.validation.secretNotStored' };
+    case 'secret_required':
+      return { key: 'config.validation.secretRequired' };
     case 'duplicate_key':
       return {
         key: 'config.validation.duplicateKey',

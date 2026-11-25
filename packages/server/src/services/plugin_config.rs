@@ -11,7 +11,7 @@ use broccoli_server_sdk::types::{
 };
 use plugin_core::config_schema::{self, FieldError, FieldErrorKind};
 pub(crate) use plugin_core::manifest::ConfigScope;
-use plugin_core::manifest::{ConfigNamespace, PluginManifest};
+use plugin_core::manifest::{ConfigNamespace, PluginManifest, SecretRefusal};
 use plugin_core::registry::PluginRegistry;
 use plugin_core::traits::PluginManager;
 
@@ -588,11 +588,18 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
         .one(&txn)
         .await?;
         ns.keep_secrets(&mut config, stored.as_ref().map(|row| &row.config))
-            .map_err(|unstored| {
+            .map_err(|refused| {
                 AppError::InvalidConfig(
-                    unstored
+                    refused
                         .into_iter()
-                        .map(|path| FieldError::new(path, FieldErrorKind::SecretNotStored))
+                        .map(|refusal| match refusal {
+                            SecretRefusal::NotStored(path) => {
+                                FieldError::new(path, FieldErrorKind::SecretNotStored)
+                            }
+                            SecretRefusal::Required(path) => {
+                                FieldError::new(path, FieldErrorKind::SecretRequired)
+                            }
+                        })
                         .collect(),
                 )
             })?;

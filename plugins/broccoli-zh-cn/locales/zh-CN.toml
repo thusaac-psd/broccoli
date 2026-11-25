@@ -1114,6 +1114,7 @@
 'config.validation.unknownField' = "不存在此设置"
 'config.validation.required' = "必填"
 'config.validation.secretNotStored' = "此项没有已保存的密钥，请重新输入。"
+'config.validation.secretRequired' = "此密钥为必填项，请输入新值来替换它。"
 'config.validation.duplicateKey' = "已有另一项名为 {value}。"
 'config.blob.default' = "默认"
 'config.blob.replaceLabel' = "替换 {name}"

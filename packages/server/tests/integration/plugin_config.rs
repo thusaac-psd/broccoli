@@ -326,6 +326,52 @@ mod clear_secret {
     }
 }
 
+/// A secret its item requires is never cleared: the marker is refused with
+/// its own error, so the form can say to replace it instead.
+mod required_secret {
+    use super::*;
+
+    #[tokio::test]
+    async fn clearing_a_required_secret_is_refused_with_its_own_error() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("required_secret_admin", "password123", "admin")
+            .await;
+        let problem_id = app.insert_public_problem("P").await;
+        let path = routes::problem_config_ns(problem_id, "server-plugin", "keyed");
+        let res = app
+            .put_with_token(
+                &path,
+                &json!({ "config": { "stations": [{ "name": "desk", "token": "t" }] } }),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+
+        let res = app
+            .put_with_token(
+                &path,
+                &json!({ "config": { "stations": [
+                    { "name": "desk", "token": { "$clear": true } },
+                ] } }),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 400, "{}", res.text);
+        let field = &res.body["details"]["fields"][0];
+        assert_eq!(field["path"], "stations[0].token", "{}", res.text);
+        assert_eq!(field["kind"], "secret_required", "{}", res.text);
+
+        let res = app.get_with_token(&path, &admin).await;
+        assert_eq!(
+            res.body["secrets"],
+            json!(["stations[0].token"]),
+            "a refused clear keeps the secret: {}",
+            res.text
+        );
+    }
+}
+
 mod namespace_validation {
     use super::*;
 

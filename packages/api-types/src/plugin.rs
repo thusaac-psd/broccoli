@@ -282,6 +282,9 @@ pub enum FieldErrorKind {
     /// names holds: a new item, or one whose key field changed. Its secret
     /// is entered again.
     SecretNotStored,
+    /// A write clears (`{"$clear": true}`) a secret its item requires. The
+    /// secret is replaced with a new one instead.
+    SecretRequired,
     /// Another item of the array already has this value in the array's key
     /// field, which names one item.
     DuplicateKey { value: serde_json::Value },
@@ -313,6 +316,9 @@ impl std::fmt::Display for FieldErrorKind {
             Self::Pattern { pattern } => write!(f, "must match the pattern {pattern}"),
             Self::DuplicateKey { value } => {
                 write!(f, "another item already has the key {value}")
+            }
+            Self::SecretRequired => {
+                f.write_str("this secret is required: replace it instead of clearing it")
             }
             Self::SecretNotStored => {
                 f.write_str("no secret is stored for this item: enter it again")
