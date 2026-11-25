@@ -85,9 +85,10 @@ pub struct PluginLifecycle {
     /// last reconcile (`plugin_replica.plugins`); `None` before the first
     /// read.
     fleet_serving: RwLock<Option<std::collections::BTreeSet<String>>>,
-    /// What each other live replica has loaded, as of the last reconcile
-    /// (its `plugin_replica.provides`), for [`Self::ready`].
-    fleet_peers: RwLock<Vec<crate::providers::Loaded>>,
+    /// The plugins each other live replica with a fresh heartbeat serves,
+    /// as of the last reconcile (its `plugin_replica.plugins`), for
+    /// [`Self::ready`].
+    fleet_peers: RwLock<Vec<std::collections::BTreeSet<String>>>,
     /// The plugins another live replica serves, as of the last reconcile,
     /// for [`Self::missing_here`].
     peers_serving: RwLock<std::collections::BTreeSet<String>>,
@@ -565,50 +566,73 @@ impl PluginLifecycle {
                 .is_ok_and(|serving| serving.contains(plugin_id))
     }
 
-    /// Records what each other live replica has loaded (see
-    /// [`Self::ready`]).
-    pub(crate) fn set_fleet_peers(&self, peers: Vec<crate::providers::Loaded>) {
+    /// Records the plugins each other live replica with a fresh heartbeat
+    /// serves (see [`Self::ready`]).
+    pub(crate) fn set_fleet_peers(&self, peers: Vec<std::collections::BTreeSet<String>>) {
         if let Ok(mut slot) = self.fleet_peers.write() {
             *slot = peers;
         }
     }
 
-    /// The contest types whose fleet-wide provider `loaded` does not have
-    /// loaded ([`Self::providers_missing_here`]), each with that provider.
-    fn contest_types_missing(
+    /// The plugins this replica serves, as its latest report says
+    /// ([`ReplicaPluginStatus::serves`]); `None` before its first report.
+    pub fn serving_here(&self) -> Option<std::collections::BTreeSet<String>> {
+        let reported = self.reported.lock().ok()?;
+        reported.as_ref().map(|r| plugin_fleet::serving(&r.report))
+    }
+
+    /// The enabled plugins a replica serving `here` lacks while one of
+    /// `peers` (what other replicas serve) serves them, sorted: the one
+    /// "missing here while a peer serves it" rule. Readiness
+    /// ([`Self::ready_among`]) and the admin overview's per-server reason
+    /// both read it, and every kind of plugin counts alike (a contest type,
+    /// a language, an evaluator, a checker, a route), since a browser pinned
+    /// to a replica loses whatever that replica lacks.
+    pub fn missing_here_served_by_peer<'a>(
         &self,
-        loaded: &crate::providers::Loaded,
-    ) -> std::collections::BTreeSet<(String, String)> {
-        self.providers_missing_here(loaded)
+        here: &std::collections::BTreeSet<String>,
+        peers: impl IntoIterator<Item = &'a std::collections::BTreeSet<String>>,
+    ) -> std::collections::BTreeSet<String> {
+        peers
             .into_iter()
-            .filter(|missing| missing.provides == Provided::ContestType)
-            .map(|missing| (missing.key, missing.plugin_id))
+            .flatten()
+            .filter(|id| !here.contains(*id) && self.is_desired_enabled(id))
+            .cloned()
             .collect()
     }
 
-    /// Whether this replica, with `local` loaded, should take browsers: no
-    /// live peer misses only a strict part of the contest types it misses
-    /// ([`Self::providers_missing_here`]). A peer that does serves every submission
-    /// this replica takes and more, so a gateway that health-checks
-    /// readiness re-pins this replica's browsers there instead of leaving
-    /// them refused. The order is partial, so some replica is always ready:
-    /// replicas that each lack a different type, or a type no replica has
-    /// loaded, are all ready, and a plugin failing everywhere never takes
-    /// the fleet out of rotation. Only contest types count, since they are
-    /// what a request on this replica needs loaded here; the other keys only
-    /// steer which replica claims judging work.
-    pub fn ready(&self, local: &crate::providers::Loaded) -> bool {
-        let mine = self.contest_types_missing(local);
-        if mine.is_empty() {
+    /// Whether a replica serving `here` should take browsers while `peers`
+    /// serve what they do: no peer serves every enabled plugin it serves
+    /// and more ([`Self::missing_here_served_by_peer`] both ways). A peer
+    /// that does takes every request this replica takes and more, so a
+    /// gateway that health-checks readiness re-pins this replica's browsers
+    /// there instead of leaving them without a plugin. The order is partial,
+    /// so some replica is always ready: replicas that each lack a different
+    /// plugin, or a plugin no replica has loaded, are all ready, and a
+    /// plugin failing everywhere never takes the fleet out of rotation.
+    pub fn ready_among(
+        &self,
+        here: &std::collections::BTreeSet<String>,
+        peers: &[std::collections::BTreeSet<String>],
+    ) -> bool {
+        !peers.iter().any(|peer| {
+            !self.missing_here_served_by_peer(here, [peer]).is_empty()
+                && self.missing_here_served_by_peer(peer, [here]).is_empty()
+        })
+    }
+
+    /// Whether this replica should take browsers ([`Self::ready_among`]),
+    /// by its latest report against the peers with a fresh heartbeat
+    /// (`plugin_fleet::PEER_FRESH_SECS`) as of the last reconcile. Ready
+    /// before its first report.
+    pub fn ready(&self) -> bool {
+        let Some(here) = self.serving_here() else {
             return true;
-        }
+        };
         let Ok(peers) = self.fleet_peers.read() else {
             return true;
         };
-        !peers.iter().any(|peer| {
-            let theirs = self.contest_types_missing(peer);
-            theirs.len() < mine.len() && theirs.is_subset(&mine)
-        })
+        self.ready_among(&here, &peers)
     }
 
     /// What closes new work on a problem whose `needs` name no language yet
@@ -1372,8 +1396,8 @@ async fn reconcile_locked(
     state.plugin_lifecycle.set_fleet_peers(
         live.replicas
             .into_iter()
-            .filter(|(server_id, _)| *server_id != state.config.server.id)
-            .map(|(_, theirs)| theirs)
+            .filter(|r| r.fresh && r.server_id != state.config.server.id)
+            .map(|r| r.serving)
             .collect(),
     );
     state.plugin_lifecycle.set_peers_serving(
@@ -2900,55 +2924,54 @@ mod tests {
     /// browsers to a replica that takes their submissions. Replicas that
     /// each lack a different type, and a type no replica has loaded, leave
     /// every replica ready, so the gateways always keep one.
+    /// Readiness counts every enabled plugin a peer serves, of any kind
+    /// (a route-only plugin provides no key at all), and a replica is
+    /// unready only while some peer serves strictly more of them.
     #[test]
-    fn a_replica_is_unready_only_while_a_peer_serves_strictly_more_contest_types() {
-        let lifecycle = PluginLifecycle::default();
-        for (plugin, types) in [
-            ("judge1", vec!["t1"]),
-            ("judge2", vec!["t2"]),
-            ("zz", vec!["t2"]),
-        ] {
-            lifecycle.set_governs(
-                plugin,
-                Governs {
-                    provides: Provides {
-                        contest_types: types.into_iter().map(String::from).collect(),
-                        ..Provides::default()
-                    },
-                    ..Governs::default()
-                },
-            );
-            lifecycle.set_desired(plugin, true);
-        }
-        let loaded = |types: &[(&str, &str)]| {
-            let mut loaded = crate::providers::Loaded::default();
-            for (key, plugin) in types {
-                loaded
-                    .of_mut(Provided::ContestType)
-                    .entry(key.to_string())
-                    .or_default()
-                    .push(plugin.to_string());
-            }
-            loaded
+    fn a_replica_is_unready_only_while_a_peer_serves_strictly_more_plugins() {
+        let set = |ids: &[&str]| -> std::collections::BTreeSet<String> {
+            ids.iter().map(|id| id.to_string()).collect()
         };
-        let here = loaded(&[("t1", "judge1")]);
-        assert_eq!(
-            lifecycle.contest_types_missing(&here),
-            [("t2".to_string(), "judge2".to_string())].into()
+        let state = |status| ReplicaPluginState {
+            status,
+            error: None,
+            generation: 1,
+            retry_in_ms: None,
+            version: None,
+        };
+        let lifecycle = PluginLifecycle::reporting(
+            [
+                ("judge".to_string(), state(ReplicaPluginStatus::Loaded)),
+                ("routes".to_string(), state(ReplicaPluginStatus::Failed)),
+            ]
+            .into(),
         );
+        for (plugin, enabled) in [("judge", true), ("routes", true), ("old", false)] {
+            lifecycle.set_desired(plugin, enabled);
+        }
+        let here = set(&["judge"]);
+        assert_eq!(lifecycle.serving_here(), Some(here.clone()));
 
-        assert!(lifecycle.ready(&here), "no peer known yet");
-        lifecycle.set_fleet_peers(vec![loaded(&[("t1", "judge1"), ("t2", "judge2")])]);
-        assert!(!lifecycle.ready(&here), "a peer serves t2 as well");
-        assert!(lifecycle.ready(&loaded(&[("t1", "judge1"), ("t2", "judge2")])));
+        assert!(lifecycle.ready(), "no peer known yet");
+        lifecycle.set_fleet_peers(vec![set(&["judge", "routes"])]);
+        assert_eq!(
+            lifecycle
+                .missing_here_served_by_peer(&here, &lifecycle.fleet_peers.read().unwrap()[..]),
+            set(&["routes"])
+        );
+        assert!(!lifecycle.ready(), "a peer serves the route plugin as well");
+        assert!(lifecycle.ready_among(&set(&["judge", "routes"]), std::slice::from_ref(&here)));
 
-        // t2 on a provider that is not its fleet-wide one serves nothing more.
-        lifecycle.set_fleet_peers(vec![loaded(&[("t1", "judge1"), ("t2", "zz")])]);
-        assert!(lifecycle.ready(&here));
+        // A disabled plugin a peer still serves counts for nothing.
+        lifecycle.set_fleet_peers(vec![set(&["judge", "old"])]);
+        assert!(lifecycle.ready());
         // Each lacks what the other has: neither serves more.
-        lifecycle.set_fleet_peers(vec![loaded(&[("t2", "judge2")])]);
-        assert!(lifecycle.ready(&here));
-        assert!(lifecycle.ready(&loaded(&[("t2", "judge2")])));
+        lifecycle.set_fleet_peers(vec![set(&["routes"])]);
+        assert!(lifecycle.ready());
+        assert!(lifecycle.ready_among(&set(&["routes"]), std::slice::from_ref(&here)));
+        // A plugin no replica serves leaves every replica ready.
+        lifecycle.set_fleet_peers(vec![here.clone()]);
+        assert!(lifecycle.ready());
     }
 
     /// A problem's submit is closed for each language whose providers are

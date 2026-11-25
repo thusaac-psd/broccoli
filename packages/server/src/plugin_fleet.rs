@@ -35,6 +35,13 @@ pub const LIVE_WINDOW_SECS: i64 = 60;
 /// How often a replica touches its row's heartbeat.
 pub const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// A replica counts as a peer for readiness (`PluginLifecycle::ready`) only
+/// while its heartbeat is this fresh: two intervals, so one late touch never
+/// drops a running peer, while a server that died, or stopped without
+/// retiring its row, stops counting within half a minute instead of
+/// holding its peers out of rotation for the whole [`LIVE_WINDOW_SECS`].
+pub const PEER_FRESH_SECS: i64 = 2 * HEARTBEAT_INTERVAL.as_secs() as i64;
+
 /// One plugin's state on one replica.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -139,11 +146,32 @@ pub struct LiveLoaded {
     /// The plugins one of them serves ([`ReplicaPluginStatus::serves`]), as
     /// their reported `plugin_replica.plugins` say.
     pub serving: std::collections::BTreeSet<String>,
-    /// What each of them has loaded, by server id, sorted: its own reported
-    /// `plugin_replica.provides`.
-    pub replicas: Vec<(String, crate::providers::Loaded)>,
     /// The plugins each of them serves, by server id, sorted.
     pub serving_by: Vec<(String, std::collections::BTreeSet<String>)>,
+    /// Each of them, by server id, sorted.
+    pub replicas: Vec<LiveReplicaLoaded>,
+}
+
+/// What one live replica reported having loaded.
+#[derive(Debug, Default, Clone)]
+pub struct LiveReplicaLoaded {
+    pub server_id: String,
+    /// Its own reported `plugin_replica.provides`.
+    pub provides: crate::providers::Loaded,
+    /// The plugins it serves ([`ReplicaPluginStatus::serves`]).
+    pub serving: std::collections::BTreeSet<String>,
+    /// Whether its heartbeat is within [`PEER_FRESH_SECS`]: only then does
+    /// it count as a peer for readiness.
+    pub fresh: bool,
+}
+
+/// The plugins a report says its replica serves.
+pub fn serving(report: &ReplicaReport) -> std::collections::BTreeSet<String> {
+    report
+        .iter()
+        .filter(|(_, p)| p.status.serves())
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 /// What the live replicas have loaded ([`LiveLoaded`]).
@@ -151,22 +179,33 @@ pub async fn live_loaded(db: &DatabaseConnection) -> Result<LiveLoaded, DbErr> {
     let rows = db
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT server_id, provides, plugins FROM plugin_replica \
+            "SELECT server_id, provides, plugins, \
+                    heartbeat_at > NOW() - make_interval(secs => $2) AS fresh \
+               FROM plugin_replica \
               WHERE heartbeat_at > NOW() - make_interval(secs => $1) \
               ORDER BY server_id",
-            [(LIVE_WINDOW_SECS as f64).into()],
+            [
+                (LIVE_WINDOW_SECS as f64).into(),
+                (PEER_FRESH_SECS as f64).into(),
+            ],
         ))
         .await?;
     let mut live = LiveLoaded::default();
     for row in rows {
         let server_id: String = row.try_get("", "server_id")?;
+        let fresh: bool = row.try_get("", "fresh")?;
         let unread = |e: serde_json::Error| tracing::warn!(server_id, error = %e, "A replica reported what it has loaded in a shape this build does not read");
+        let mut replica = LiveReplicaLoaded {
+            server_id: server_id.clone(),
+            fresh,
+            ..LiveReplicaLoaded::default()
+        };
         let provides: Option<serde_json::Value> = row.try_get("", "provides")?;
         if let Some(provides) = provides {
             match serde_json::from_value::<crate::providers::Loaded>(provides) {
                 Ok(theirs) => {
                     live.provides.merge(&theirs);
-                    live.replicas.push((server_id.clone(), theirs));
+                    replica.provides = theirs;
                 }
                 Err(e) => unread(e),
             }
@@ -174,16 +213,14 @@ pub async fn live_loaded(db: &DatabaseConnection) -> Result<LiveLoaded, DbErr> {
         let plugins: serde_json::Value = row.try_get("", "plugins")?;
         match serde_json::from_value::<ReplicaReport>(plugins) {
             Ok(report) => {
-                let theirs: std::collections::BTreeSet<String> = report
-                    .into_iter()
-                    .filter(|(_, p)| p.status.serves())
-                    .map(|(id, _)| id)
-                    .collect();
-                live.serving.extend(theirs.iter().cloned());
-                live.serving_by.push((server_id.clone(), theirs));
+                replica.serving = serving(&report);
+                live.serving.extend(replica.serving.iter().cloned());
+                live.serving_by
+                    .push((server_id.clone(), replica.serving.clone()));
             }
             Err(e) => unread(e),
         }
+        live.replicas.push(replica);
     }
     Ok(live)
 }

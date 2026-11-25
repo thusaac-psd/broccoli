@@ -14,7 +14,8 @@ use common::worker::HeartbeatPayload;
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;
 use crate::models::system::{
-    QueueInfo, QueueState, QueuesResponse, SystemOverviewResponse, WorkerInfo, WorkersResponse,
+    QueueInfo, QueueState, QueuesResponse, ServerReadiness, SystemOverviewResponse, WorkerInfo,
+    WorkersResponse,
 };
 use crate::state::AppState;
 
@@ -97,7 +98,7 @@ pub async fn list_queues(
     tag = "System",
     operation_id = "getSystemOverview",
     summary = "Aggregated system health",
-    description = "Returns workers, queue depths, whether the fleet takes work (`intake`), submissions in flight, queued and parked (waiting until every plugin they need, of any kind `Provided` names, has an enabled provider), and the unresolved DLQ count in a single response. While the message queue is unreachable, `queue_state` is `unreachable`, `queues` is empty and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.",
+    description = "Returns workers, queue depths, whether the fleet takes work (`intake`), submissions in flight, queued and parked (waiting until every plugin they need, of any kind `Provided` names, has an enabled provider), the unresolved DLQ count, and each server's readiness (`servers`: whether it passes `GET /readyz`, and the plugins it lacks while another server serves them) in a single response. While the message queue is unreachable, `queue_state` is `unreachable`, `queues` is empty and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.",
     responses(
         (status = 200, description = "System overview", body = SystemOverviewResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
@@ -132,6 +133,7 @@ pub async fn system_overview(
     } = workers;
 
     let backlog = read_backlog(&state.db).await?;
+    let servers = read_server_readiness(&state).await?;
 
     Ok(Json(SystemOverviewResponse {
         queue_state,
@@ -143,7 +145,42 @@ pub async fn system_overview(
         submissions_queued: count(backlog.queued),
         submissions_parked: count(backlog.parked),
         dlq_unresolved_count: count(backlog.dlq_unresolved),
+        servers,
     }))
+}
+
+/// Each server with a fresh heartbeat, by the readiness rule `/readyz`
+/// applies (`PluginLifecycle::ready_among`), each against the others, with
+/// the plugins it lacks while another serves them
+/// (`PluginLifecycle::missing_here_served_by_peer`).
+async fn read_server_readiness(state: &AppState) -> Result<Vec<ServerReadiness>, sea_orm::DbErr> {
+    let replicas: Vec<_> = crate::plugin_fleet::live_loaded(&state.db)
+        .await?
+        .replicas
+        .into_iter()
+        .filter(|r| r.fresh)
+        .collect();
+    let lifecycle = &state.plugin_lifecycle;
+    Ok(replicas
+        .iter()
+        .enumerate()
+        .map(|(i, replica)| {
+            let peers: Vec<_> = replicas
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, peer)| peer.serving.clone())
+                .collect();
+            ServerReadiness {
+                server_id: replica.server_id.clone(),
+                ready: lifecycle.ready_among(&replica.serving, &peers),
+                missing: lifecycle
+                    .missing_here_served_by_peer(&replica.serving, &peers)
+                    .into_iter()
+                    .collect(),
+            }
+        })
+        .collect())
 }
 
 /// A `COUNT(*)`, never negative.

@@ -36,7 +36,7 @@ need /usr/local/bin/weed
 # BROCCOLI_WEED_ANY_VERSION=1 ships another one; install-native.sh then drops
 # any flag that binary does not know.
 weed_pin="$(sed -n 's/^SEAWEEDFS_IMAGE=.*:\([^:]*\)$/\1/p' "$HERE/../.env.infra.example")"
-weed_have="$(/usr/local/bin/weed version 2>/dev/null | awk '/^version/ { print $3; exit }')"
+weed_have="$(/usr/local/bin/weed version 2>/dev/null | awk '/^version/ && !found { print $3; found = 1 }')"
 if [ "$weed_have" != "$weed_pin" ] && [ "${BROCCOLI_WEED_ANY_VERSION:-0}" != 1 ]; then
   die "/usr/local/bin/weed is SeaweedFS ${weed_have:-unknown}, not the pinned $weed_pin; install $weed_pin or set BROCCOLI_WEED_ANY_VERSION=1"
 fi

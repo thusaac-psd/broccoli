@@ -381,12 +381,14 @@ binaries warn about every key they do not read.
   plugin and a replica that lacks that plugin never falls back to another.
   Register and resolve through these, never through a map of your own.
 - A server is ready (`/readyz`, the probe the shipped gateways health-check)
-  unless a live peer misses only a strict part of the contest types it misses on
-  their fleet-wide provider: one rule, `PluginLifecycle::ready` on the one
-  missing-provider predicate, `PluginLifecycle::providers_missing_here`, over
-  the one fleet read, `plugin_fleet::live_loaded`. `/livez` is liveness and
-  `/healthz` the deep check for monitoring; no gateway probe makes a dependency
-  call.
+  unless a peer with a fresh heartbeat (`plugin_fleet::PEER_FRESH_SECS`) serves
+  every enabled plugin it serves and more, of any kind: one rule,
+  `PluginLifecycle::ready_among` on the one "missing here while a peer serves
+  it" predicate, `PluginLifecycle::missing_here_served_by_peer`, over the one
+  fleet read, `plugin_fleet::live_loaded`. The admin system overview shows each
+  server's verdict and what it lacks through the same two; `/readyz` names no
+  plugin. `/livez` is liveness and `/healthz` the deep check for monitoring; no
+  gateway probe makes a dependency call.
 - Every submit path (practice and contest submissions, code runs) accepts work
   through one rule, `plugin_lifecycle::accepting_handler`, which refuses a
   contest type no provider can judge now; a new submit path calls it too.

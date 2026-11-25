@@ -46,16 +46,18 @@ Each server answers three probes and `/metrics` on its main HTTP port:
 
 - `/livez`, liveness: the process is up and serving HTTP. It calls nothing else.
 - `/readyz`, readiness: this server should take browsers. It answers 503
-  `"not_ready"` while another live server can take submissions this one would
-  refuse: a contest type's plugin is loaded there but not here (its load keeps
-  failing, or its files are missing), so a submission or code run pinned here
-  would answer `503 PLUGIN_NOT_LOADED_HERE`, naming the plugin in
-  `details.plugin_id`, until the load succeeds. That answer, like every request
-  here that needs the plugin (its own routes, the results it governs), carries
+  `"not_ready"` while another server serves every enabled plugin this one serves
+  and more: a plugin is loaded there but not here (its load keeps failing, or
+  its files are missing), so a browser pinned here would miss it, whatever it
+  provides (a contest type, a language, an evaluator, a checker, a page or
+  route), until the load succeeds. A request here that needs it answers
+  `503 PLUGIN_NOT_LOADED_HERE`, naming the plugin in `details.plugin_id`, and a
+  result it governs reads as withheld (`not_loaded_here`). The answer carries
   `Retry-After: 10`: two failed probes five seconds apart, after which the
   gateway sends the retry to a server that serves it. Servers that each lack a
   different plugin, or a plugin no server could load, are all ready, so the
-  gateway always keeps a server. It makes no database or Redis call.
+  gateway always keeps a server. It makes no database or Redis call, and its
+  body never names a plugin.
 - `/healthz`, the deep check for monitoring: it also reaches Postgres, Redis and
   blob storage (below). It is never a gateway probe: the servers share those, so
   one blip would fail it on every server at once.
@@ -67,12 +69,21 @@ timeout and ejects a server after 2 misses (`health_interval`, `health_timeout`
 and `health_fails` in `examples/Caddyfile.gateway`, and in
 `airgap/caddy/Caddyfile.airgap` for an airgap install). An ejected server's
 browsers are pinned to a ready one on their next request, and come back to it
-only if that one goes away. A server that stays not ready names the plugin in
-the admin plugin page (each server's state) and its logs; fix the load and click
-Reload. If servers are ejected under load while their logs show them still
-serving, raise `health_timeout` or `health_fails` there and restart the gateway.
-A Prometheus scrape of `/metrics` can likewise time out under load; give it a
-scrape timeout of a few seconds.
+only if that one goes away. The admin System page lists each server, whether it
+is ready, and the plugins it lacks while another server serves them; the admin
+plugin page shows each server's load state and error, and the server's logs have
+the rest. Fix the load and click Reload.
+
+Readiness compares a server with every other server that shares its database and
+whose heartbeat is fresh: servers touch it every 15 s, and one counts for 30 s
+after its last touch, so a server that died, or stopped without leaving cleanly,
+stops holding the others out of rotation within half a minute. Every server on
+one database therefore belongs behind the same gateway: a server outside it
+still counts, and can keep the gateway's servers not ready for a plugin only it
+serves while the gateway cannot send it a browser. If servers are ejected under
+load while their logs show them still serving, raise `health_timeout` or
+`health_fails` there and restart the gateway. A Prometheus scrape of `/metrics`
+can likewise time out under load; give it a scrape timeout of a few seconds.
 
 `/healthz` answers 200 with `"status": "ok"` while no dependency is down, and
 503 with `"status": "degraded"` and the component that is (`"db"`, `"mq"` or
@@ -256,9 +267,10 @@ stored, so a failed import changes nothing. It refuses:
 - a database this build has not migrated yet: start this build's server once
   first;
 - a database that already has problems, unless `--replace-problems`, which
-  removes every problem the database has, those the bundle does not carry
-  included; and, with `--replace-problems`, problems that submissions, code runs
-  or contests still reference, unless `--wipe-dependents` deletes those too;
+  removes every problem the database has (the import summary names, by id and
+  title, those the bundle does not carry); and, with `--replace-problems`,
+  problems that submissions, code runs or contests still reference, unless
+  `--wipe-dependents` deletes those too;
 - a contest bundle onto a database that has a contest with the bundle's contest
   id, unless `--replace-contest`. The bundle's contest replaces that one: its
   roster, problem links and contest configs go, and so do its clarifications,
@@ -283,25 +295,35 @@ with a bundle_ section (`website/docs/building-plugins/configuration.md`,
 carries its problems' and contest's configs, never a plugin-wide one, and an
 import replaces the configs of every problem it replaces. A config field its
 plugin marks secret, such as a print station's token, never travels, with or
-without `--with-secrets`. A bundle names the installation it was exported from,
-and the secrets an import keeps follow these rules:
+without `--with-secrets`: the bundle carries an opaque ref in its place.
 
-- Importing into the installation that exported the bundle keeps the secrets
-  that installation stores, `--replace-problems` included.
-- Importing it anywhere else leaves every secret unset, and the import summary
-  counts them (`secrets_unset`): enter them again on the target, such as a
-  contest's print station tokens, before the stations can sign in.
+- An import keeps the target's stored secret only where the target holds the
+  bundle's ref for the same item, which means the same stored secret,
+  `--replace-problems` included.
+- Every other secret is left unset, and the import summary counts them
+  (`secrets_unset`): enter them again on the target, such as a contest's print
+  station tokens, before the stations can sign in.
+- A copy restored from a database dump shares refs with its source only for
+  secrets neither side has set again since.
+- A problem that replaces another at its id keeps none of that problem's
+  secrets.
 
-A secret belongs to its item by key (a print station by its name). Once a save
-drops an item, its secret is gone: re-adding a station with the same name, or
-renaming one, makes a new station whose token is entered again. Two stations
-with the same name are refused.
+A secret belongs to its item by key (a print station by its name). A renamed
+station, or one deleted and added again under the same name, is a new station:
+enter its token again. Two stations cannot share a name.
 
-When an admin saves a config, a secret the save leaves out or sends as null
-keeps the stored value, so a form never has to show it; only Clear
-(`{"$clear": true}`) removes it. A secret its item requires, such as a station's
-token, cannot be cleared: Clear is hidden and the server refuses with
-`secret_required`. Replace it by typing a new one.
+No read ever shows a secret's value: a set secret reads as an opaque ref,
+`{"$secret": "<ref>"}`. When an admin saves a config, the stored secret is kept
+only when the save sends that ref back on the same item; the settings form does
+this when the field is left empty. A save that leaves a stored secret out, null
+or empty, or sends a ref the item does not hold (or one read before the secret
+was set again), is refused with `secret_not_stored`: re-enter the secret, or
+clear it on purpose. A station's token is required, so it can never be cleared
+or left empty (`secret_required`): enter one.
+
+A server not yet running a plugin's published version refuses saves of that
+plugin's settings with `PLUGIN_OUTDATED_HERE` (503 with `Retry-After`); it
+serves them once it reconciles, within seconds, so a retry lands.
 
 The export reads each plugin's schema from its published upload or the server's
 plugin directory. The configs of a plugin with neither (removed, or never
@@ -416,6 +438,20 @@ size:
 
 Raise `POSTGRES_MAX_CONNECTIONS` in `.env.infra` for a larger fleet. The native
 installer sets 500 too, and the development `docker-compose.yaml` 200.
+
+**Behind PgBouncer**
+
+A plugin statement that runs past its call's deadline is cut. Talking to
+Postgres directly, the server cuts it by closing its connection, which Postgres
+notices within 100 ms (`client_connection_check_interval`, which plugin SQL may
+not change). That needs startup options, and PgBouncer rejects them, so behind
+PgBouncer set `database.statement_timeout_secs = 0` and
+`database.tcp_keepalives = false` (see the configuration reference). The server
+then sends no startup options and cuts a statement by cancelling its backend
+instead (`pg_cancel_backend`, by the pid it read when it checked the connection
+out). It closes only when it sends startup options and a probe connection reads
+the check interval back as set, so a pooler that ignores the options is cut by
+cancelling too.
 
 **Sizing Redis memory**
 

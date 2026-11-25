@@ -296,7 +296,7 @@ export interface paths {
     };
     /**
      * Aggregated system health
-     * @description Returns workers, queue depths, whether the fleet takes work (`intake`), submissions in flight, queued and parked (waiting until every plugin they need, of any kind `Provided` names, has an enabled provider), and the unresolved DLQ count in a single response. While the message queue is unreachable, `queue_state` is `unreachable`, `queues` is empty and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.
+     * @description Returns workers, queue depths, whether the fleet takes work (`intake`), submissions in flight, queued and parked (waiting until every plugin they need, of any kind `Provided` names, has an enabled provider), the unresolved DLQ count, and each server's readiness (`servers`: whether it passes `GET /readyz`, and the plugins it lacks while another server serves them) in a single response. While the message queue is unreachable, `queue_state` is `unreachable`, `queues` is empty and `workers` is the list last read, marked by `workers_stale`. Requires `system:view` permission.
      */
     get: operations['getSystemOverview'];
     put?: never;
@@ -4630,6 +4630,21 @@ export interface components {
        */
       sql_read: string[];
     };
+    /** @description One server's readiness, with the reason `GET /readyz` leaves out. */
+    ServerReadiness: {
+      /**
+       * @description The enabled plugins it does not serve while another server does,
+       *     sorted. Not empty while it is not ready; it can be non-empty on a
+       *     ready server that serves a plugin the others lack.
+       */
+      missing: string[];
+      /**
+       * @description Whether it passes `GET /readyz`: no other server serves every
+       *     enabled plugin it serves and more.
+       */
+      ready: boolean;
+      server_id: string;
+    };
     /**
      * @description A `[[server.routes]]` entry, as written in `plugin.toml`. The host checks
      *     who may call the route and reads the resources it addresses before the
@@ -4970,6 +4985,12 @@ export interface components {
       queue_state: components['schemas']['QueueState'];
       /** @description Queue depths; empty while the queue is unreachable. */
       queues: components['schemas']['QueueInfo'][];
+      /**
+       * @description Each server with a fresh heartbeat, by id: whether it is ready
+       *     (`GET /readyz`) and the plugins it lacks while another serves them,
+       *     as each last reported.
+       */
+      servers: components['schemas']['ServerReadiness'][];
       /**
        * Format: int64
        * @description Submissions being judged: claimed and not finished (Pending,

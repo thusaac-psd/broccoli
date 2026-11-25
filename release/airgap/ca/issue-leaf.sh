@@ -91,7 +91,7 @@ san_key() {
 leaf_sans() {
   local san
   openssl x509 -in "$1" -noout -text \
-    | awk '/X509v3 Subject Alternative Name/ { getline; print; exit }' \
+    | awk '/X509v3 Subject Alternative Name/ && !found { getline; print; found = 1 }' \
     | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/^IP Address:/IP:/' \
     | while IFS= read -r san; do san_key "$san"; done
 }

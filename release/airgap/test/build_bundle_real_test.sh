@@ -15,7 +15,7 @@ ENGINE="$(runtime_engine)"; [ -n "$ENGINE" ] || { echo "SKIP: no docker/podman";
 COMPOSE="$(runtime_compose "$ENGINE")"; [ -n "$COMPOSE" ] || { echo "SKIP: no compose provider"; exit 0; }
 
 V="realv"
-HOST="${AIRGAP_TEST_HOST:-$(ip route get 1 2>/dev/null | awk '{print $7; exit}')}"
+HOST="${AIRGAP_TEST_HOST:-$(ip route get 1 2>/dev/null | awk 'NR == 1 { print $7 }')}"
 [ -n "$HOST" ] || HOST=127.0.0.1
 T="$(mktemp -d)"
 cleanup() {

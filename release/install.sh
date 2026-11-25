@@ -356,7 +356,7 @@ load_image() {
   archive="$1"
   loaded="$(gzip -dc "$archive" | docker load)"
   printf '%s\n' "$loaded" >&2
-  image_tag="$(printf '%s\n' "$loaded" | awk -F': ' '/Loaded image:/{print $2; exit}')"
+  image_tag="$(printf '%s\n' "$loaded" | awk -F': ' '/Loaded image:/ && !found { print $2; found = 1 }')"
   [ -n "$image_tag" ] || die "docker load did not report an image tag for $archive"
   printf '%s\n' "$image_tag"
 }
