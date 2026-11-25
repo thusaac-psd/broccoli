@@ -139,6 +139,11 @@ pub async fn get_dlq_message(
 enum StuckRetrySkip {
     AlreadyResolved,
     NotStuckSubmission,
+    /// A dead hook event that is no longer dead (completed, revived, or
+    /// purged).
+    HookEventNotDead {
+        event_id: String,
+    },
     UnknownSubmission,
     SubmissionMissing {
         submission_id: i32,
@@ -151,7 +156,13 @@ enum StuckRetrySkip {
 
 /// Outcome of `retry_stuck_submission` for a single DLQ message.
 enum StuckRetryOutcome {
-    Requeued { submission_id: i32 },
+    Requeued {
+        submission_id: i32,
+    },
+    /// A dead hook event given a fresh run (`hooks::revive_dead_event`).
+    Revived {
+        event_id: String,
+    },
     Skipped(StuckRetrySkip),
 }
 
@@ -181,6 +192,29 @@ async fn retry_stuck_submission(
         .ok_or_else(|| AppError::NotFound(format!("DLQ message {} not found", message_id)))?;
     if message.resolved {
         return Ok(StuckRetryOutcome::Skipped(StuckRetrySkip::AlreadyResolved));
+    }
+    if message.message_type == DlqMessageType::HookEvent.as_str() {
+        let Some(event_id) = crate::hooks::event_of_dlq_message(&message.message_id) else {
+            return Ok(StuckRetryOutcome::Skipped(
+                StuckRetrySkip::NotStuckSubmission,
+            ));
+        };
+        let event_id = event_id.to_string();
+        let message = dlq
+            .get_by_id_for_update(message_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("DLQ message {} not found", message_id)))?;
+        if message.resolved {
+            return Ok(StuckRetryOutcome::Skipped(StuckRetrySkip::AlreadyResolved));
+        }
+        if !crate::hooks::revive_dead_event(&txn, &event_id).await? {
+            return Ok(StuckRetryOutcome::Skipped(
+                StuckRetrySkip::HookEventNotDead { event_id },
+            ));
+        }
+        dlq.record_retry(message_id, admin_user_id).await?;
+        txn.commit().await?;
+        return Ok(StuckRetryOutcome::Revived { event_id });
     }
     if message.message_type != DlqMessageType::StuckSubmission.as_str() {
         return Ok(StuckRetryOutcome::Skipped(
@@ -240,8 +274,11 @@ fn stuck_retry_skip_to_error(skip: StuckRetrySkip) -> AppError {
     match skip {
         StuckRetrySkip::AlreadyResolved => AppError::Conflict("Message already resolved".into()),
         StuckRetrySkip::NotStuckSubmission => AppError::Validation(
-            "Only stuck_submission messages can be retried. operation_task, stuck_code_run, stuck_submission_judgement and hook_event messages are visibility-only from this endpoint.".into(),
+            "Only stuck_submission and hook_event messages can be retried. operation_task, stuck_code_run and stuck_submission_judgement messages are visibility-only from this endpoint.".into(),
         ),
+        StuckRetrySkip::HookEventNotDead { event_id } => AppError::Conflict(format!(
+            "Hook event {event_id} is no longer dead-lettered"
+        )),
         StuckRetrySkip::UnknownSubmission => AppError::Validation(
             "Cannot retry: submission_id is unknown (message had deserialization failure)".into(),
         ),
@@ -264,15 +301,15 @@ fn stuck_retry_skip_to_error(skip: StuckRetrySkip) -> AppError {
     tag = "Dead Letter Queue",
     operation_id = "retryDlqMessage",
     summary = "Retry a DLQ message",
-    description = "Retries a dead letter message by resetting the submission to Queued (the claim fiber then promotes it to Pending) and re-dispatching it to the plugin-based judging system. Only stuck_submission messages can be retried; operation_task, stuck_code_run, stuck_submission_judgement and hook_event messages are visibility-only from here. The message stays unresolved with the retry recorded in its history until the rejudge ends with a verdict other than a system error, which resolves it. Requires `dlq:manage` permission.",
+    description = "Retries a dead letter message by resetting the submission to Queued (the claim fiber then promotes it to Pending) and re-dispatching it to the plugin-based judging system. A hook_event message gives its event a fresh run: its attempts start over and it is delivered to the hook plugins still owed it; the message stays unresolved until the event completes, which resolves it. Only stuck_submission and hook_event messages can be retried; operation_task, stuck_code_run and stuck_submission_judgement messages are visibility-only from here. A stuck_submission message stays unresolved with the retry recorded in its history until the rejudge ends with a verdict other than a system error, which resolves it. Requires `dlq:manage` permission.",
     params(("id" = i32, Path, description = "DLQ message ID")),
     responses(
         (status = 200, description = "Submission re-dispatched", body = DlqRetryResponse),
-        (status = 400, description = "Only stuck_submission messages can be retried, or submission is not in a retryable state (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 400, description = "Only stuck_submission and hook_event messages can be retried, or submission is not in a retryable state (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Message or submission not found (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "Message already resolved (CONFLICT)", body = ErrorBody),
+        (status = 409, description = "Message already resolved, or its hook event is no longer dead (CONFLICT)", body = ErrorBody),
         (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED)", body = ErrorBody),
     ),
     security(("jwt" = [])),
@@ -297,6 +334,12 @@ pub async fn retry_dlq_message(
             );
             Ok(Json(DlqRetryResponse {
                 message: format!("Submission {} re-queued for judging", submission_id),
+            }))
+        }
+        StuckRetryOutcome::Revived { event_id } => {
+            info!(id, event_id, "DLQ hook event revived for redelivery");
+            Ok(Json(DlqRetryResponse {
+                message: format!("Hook event {event_id} queued for redelivery"),
             }))
         }
         StuckRetryOutcome::Skipped(skip) => Err(stuck_retry_skip_to_error(skip)),
@@ -349,7 +392,7 @@ pub async fn delete_dlq_message(
     tag = "Dead Letter Queue",
     operation_id = "bulkRetryDlq",
     summary = "Bulk-retry DLQ messages",
-    description = "Retries multiple dead letter messages by resetting their submissions to Queued (the claim fiber then promotes each to Pending) and re-dispatching to the plugin-based judging system. Supports either specific message IDs or filter-based selection. Only stuck_submission messages with a known submission_id in SystemError state are retryable; other message types are skipped. Requires `dlq:manage` permission.",
+    description = "Retries multiple dead letter messages by resetting their submissions to Queued (the claim fiber then promotes each to Pending) and re-dispatching to the plugin-based judging system. Supports either specific message IDs or filter-based selection. Only stuck_submission messages with a known submission_id in SystemError state, and hook_event messages whose event is dead, are retryable; other message types are skipped. Requires `dlq:manage` permission.",
     request_body = BulkRetryDlqRequest,
     responses(
         (status = 200, description = "Bulk retry result", body = BulkRetryDlqResponse),
@@ -433,6 +476,9 @@ pub async fn bulk_retry_dlq(
         match retry_stuck_submission(&state.db, *id, auth_user.user_id).await {
             Ok(StuckRetryOutcome::Requeued { submission_id }) => {
                 submissions_to_dispatch.push(submission_id);
+                retried += 1;
+            }
+            Ok(StuckRetryOutcome::Revived { .. }) => {
                 retried += 1;
             }
             // A missing submission is reported as an error to match the prior

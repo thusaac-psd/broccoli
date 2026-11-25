@@ -451,6 +451,83 @@ mod dlq_retry {
         assert_eq!(msg.retry_count, 4, "the retry is recorded in its history");
     }
 
+    /// Retrying a dead hook event gives it a fresh run: its attempts start
+    /// over and it is due at once. Retrying it again, while it is no longer
+    /// dead, is refused.
+    #[tokio::test]
+    async fn admin_can_retry_a_dead_hook_event() {
+        use sea_orm::ConnectionTrait;
+        let app = TestApp::spawn().await;
+        let admin_token = app
+            .create_user_with_role("admin_retry_hook", "password123", "admin")
+            .await;
+        app.db
+            .execute_unprepared(
+                "INSERT INTO hook_event (event_id, topic, payload, attempts, dead_at, last_error) \
+                 VALUES ('after_judging:9:1', 'after_judging', '{}', 12, NOW(), 'down'); \
+                 INSERT INTO hook_event_delivery (event_id, plugin_id, delivered_at) \
+                 VALUES ('after_judging:9:1', 'delivered-plugin', NOW())",
+            )
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let dlq_id = dead_letter_message::ActiveModel {
+            message_id: Set("hook_event:after_judging:9:1".into()),
+            message_type: Set("hook_event".into()),
+            submission_id: Set(None),
+            payload: Set(json!({"event_id": "after_judging:9:1"})),
+            error_code: Set("MAX_RETRIES_EXCEEDED".into()),
+            error_message: Set("not yet delivered to down".into()),
+            retry_count: Set(0),
+            retry_history: Set(json!([])),
+            first_failed_at: Set(now),
+            created_at: Set(now),
+            resolved: Set(false),
+            ..Default::default()
+        }
+        .insert(&app.db)
+        .await
+        .unwrap()
+        .id;
+
+        let res = app
+            .post_with_token(&routes::dlq_retry(dlq_id), &json!({}), &admin_token)
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        let row = app
+            .db
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Postgres,
+                "SELECT attempts, dead_at IS NULL AS alive, next_attempt_at <= NOW() AS due, \
+                        (SELECT COUNT(*) FROM hook_event_delivery \
+                          WHERE delivered_at IS NOT NULL)::bigint AS delivered \
+                   FROM hook_event",
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.try_get::<i32>("", "attempts").unwrap(), 0);
+        assert!(row.try_get::<bool>("", "alive").unwrap());
+        assert!(row.try_get::<bool>("", "due").unwrap());
+        assert_eq!(
+            row.try_get::<i64>("", "delivered").unwrap(),
+            1,
+            "a delivered plugin stays delivered"
+        );
+        let msg = dead_letter_message::Entity::find_by_id(dlq_id)
+            .one(&app.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!msg.resolved, "open until the event completes");
+        assert_eq!(msg.retry_count, 1);
+
+        let again = app
+            .post_with_token(&routes::dlq_retry(dlq_id), &json!({}), &admin_token)
+            .await;
+        assert_eq!(again.status, 409, "{}", again.text);
+    }
+
     #[tokio::test]
     async fn cannot_retry_already_resolved_message() {
         let app = TestApp::spawn().await;

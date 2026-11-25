@@ -234,9 +234,13 @@ is delivered at least once to each hook plugin it is for, and once while
 every write lands. The replica that dispatches it first records it in
 `hook_event` (its id, topic, payload and enablements) with a lease and a
 claim token, before its hooks run, so a duplicate dispatch on any replica, or
-after a restart, is skipped. Each plugin whose hooks answered is recorded in
-`hook_event_delivery`, and a later attempt calls only the plugins not
-recorded there. The event is complete once every hook plugin enabled
+after a restart, is skipped. Each hook plugin the event is owed to runs on
+its own, in plugin id order: a background event's rejections and stops
+change nothing, so one plugin's failure (an error, a trap, no answer) never
+holds back another's delivery in that attempt. Each plugin whose hooks
+answered is recorded delivered in `hook_event_delivery`, and a later attempt
+calls only the plugins not delivered; a plugin whose hooks failed keeps its
+last error there and stays owed. The event is complete once every hook plugin enabled
 fleet-wide that it is for has it, loaded on this replica or not: each
 plugin's recorded `governs` lists the hooks its manifest declares, so a
 replica that does not load one delivers what it loads and leaves the rest to
@@ -247,7 +251,10 @@ plugin not loaded here) gives the lease back and sets `next_attempt_at` 10 s
 later, doubling with each attempt up to an hour; after 12 attempts the event
 is dead-lettered: `dead_at` is set and a `hook_event` message, which
 administrators see in the dead letter queue, is filed in the same
-transaction. A dispatch that is dropped gives its lease back at once, without
+transaction, with each attempt and why it failed as its retry history and
+each still-owed plugin's last error in its payload. Retrying that message
+gives the event a fresh run for the plugins still owed it, and the event
+completing resolves the message. A dispatch that is dropped gives its lease back at once, without
 waiting on the database, so shutdown is never held up. Every replica
 re-scans the table every 10 s: it takes the events whose next attempt is due
 and whose lease is free or has lapsed (10 min, so the event of a replica that
