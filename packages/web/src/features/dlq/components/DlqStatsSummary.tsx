@@ -49,6 +49,12 @@ export function DlqStatsSummary({ stats }: Props) {
       icon: Clock,
       tone: 'default' as const,
     },
+    {
+      labelKey: 'dlq.stats.hookEvent',
+      value: stats.unresolved_by_message_type.hook_event,
+      icon: Clock,
+      tone: 'default' as const,
+    },
   ] as const;
 
   return (

@@ -45,6 +45,9 @@ pub enum DlqMessageType {
     StuckSubmission,
     StuckCodeRun,
     StuckSubmissionJudgement,
+    /// A background hook event that did not reach every hook plugin it is
+    /// for within its attempts.
+    HookEvent,
 }
 
 impl DlqMessageType {
@@ -54,6 +57,7 @@ impl DlqMessageType {
             Self::StuckSubmission => "stuck_submission",
             Self::StuckCodeRun => "stuck_code_run",
             Self::StuckSubmissionJudgement => "stuck_submission_judgement",
+            Self::HookEvent => "hook_event",
         }
     }
 }
@@ -73,8 +77,9 @@ impl std::str::FromStr for DlqMessageType {
             "stuck_submission" => Ok(Self::StuckSubmission),
             "stuck_code_run" => Ok(Self::StuckCodeRun),
             "stuck_submission_judgement" => Ok(Self::StuckSubmissionJudgement),
+            "hook_event" => Ok(Self::HookEvent),
             _ => Err(format!(
-                "Invalid message_type '{}'. Must be 'operation_task', 'stuck_submission', 'stuck_code_run', or 'stuck_submission_judgement'",
+                "Invalid message_type '{}'. Must be 'operation_task', 'stuck_submission', 'stuck_code_run', 'stuck_submission_judgement', or 'hook_event'",
                 s
             )),
         }
@@ -106,6 +111,7 @@ mod tests {
                 DlqMessageType::StuckSubmissionJudgement,
                 "stuck_submission_judgement",
             ),
+            (DlqMessageType::HookEvent, "hook_event"),
         ];
 
         for (message_type, value) in cases {

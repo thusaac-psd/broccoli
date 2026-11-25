@@ -4,6 +4,7 @@ import {
   FileText,
   History,
   type LucideIcon,
+  Webhook,
 } from 'lucide-react';
 
 import type { MessageKey } from '@/lib/i18n/catalog';
@@ -41,6 +42,13 @@ export function messageTypeMeta(type: string): MessageTypeMeta {
     return {
       labelKey: 'dlq.type.stuckSubmissionJudgement',
       icon: History,
+      retryable: false,
+    };
+  }
+  if (type === 'hook_event') {
+    return {
+      labelKey: 'dlq.type.hookEvent',
+      icon: Webhook,
       retryable: false,
     };
   }

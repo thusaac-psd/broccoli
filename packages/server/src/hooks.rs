@@ -14,14 +14,14 @@ use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
 use tokio::sync::RwLock;
 
 /// How long one dispatch holds a background event before the re-scan may
-/// run it again elsewhere: longer than a dispatch's hooks take, so a live
-/// dispatch is not repeated, and short enough that an event whose replica
-/// died runs again soon.
+/// take it elsewhere: longer than a dispatch's hooks run, so a live dispatch
+/// keeps it, and short enough that the event of a replica that died runs
+/// again soon.
 const EVENT_LEASE_SECS: i64 = 600;
 
-/// How long a completed event's row is kept: a duplicate dispatch of it
-/// within this is skipped.
-const COMPLETED_KEPT_SECS: i64 = 7 * 24 * 3600;
+/// How long a settled event's row (completed or dead-lettered) is kept: a
+/// duplicate dispatch of it within this is skipped.
+const SETTLED_KEPT_SECS: i64 = 7 * 24 * 3600;
 
 /// How many events one re-scan claims.
 const REDELIVERY_BATCH: i64 = 16;
@@ -32,6 +32,27 @@ pub const REDELIVERY_INTERVAL: std::time::Duration = std::time::Duration::from_s
 /// How many events whose claim could not be recorded a replica keeps for
 /// its next re-scan; past this the oldest are dropped, loudly.
 const UNRECORDED_MAX: usize = 10_000;
+
+/// The wait before the second attempt of an event its first left
+/// unfinished; each later wait is twice the one before, up to
+/// [`BACKOFF_MAX_SECS`].
+const BACKOFF_BASE_SECS: i64 = 10;
+
+/// The longest wait between two attempts of an event.
+const BACKOFF_MAX_SECS: i64 = 3600;
+
+/// How many attempts an event has to reach every hook plugin it is for; one
+/// that has not after this many is dead-lettered.
+pub const MAX_EVENT_ATTEMPTS: i32 = 12;
+
+/// The wait before the next attempt of an event whose `attempts` attempts
+/// left it unfinished.
+pub(crate) fn backoff_secs(attempts: i32) -> i64 {
+    let doublings = attempts.saturating_sub(1).clamp(0, 20) as u32;
+    BACKOFF_BASE_SECS
+        .saturating_mul(1i64 << doublings)
+        .min(BACKOFF_MAX_SECS)
+}
 
 /// A background event this replica could not record (the database refused
 /// the claim), kept for its next re-scan to record and run.
@@ -44,17 +65,29 @@ struct Unrecorded {
 
 /// One dispatch's lease on a background event, fleet-wide: its row of
 /// `hook_event`, which records the event (topic, payload, enablements)
-/// before its hooks run. Delivery is at least once: a duplicate dispatch of
-/// the event, on any replica and after a restart too, is skipped while the
-/// row exists; a dispatch that completes marks it done; one whose hooks
-/// could not answer, or that is dropped, gives the lease back; and the
-/// re-scan ([`redeliver_once`]) runs every event that is not done once its
-/// lease is free or has lapsed. Plugins take a hook event as idempotent.
+/// before its hooks run, and a token that fences every write the dispatch
+/// makes to it. Delivery is at least once per hook plugin, and once per
+/// plugin while every write lands:
+///
+/// - a duplicate dispatch of the event, on any replica and after a restart
+///   too, is skipped while the row exists;
+/// - each hook plugin whose hooks answered is recorded delivered
+///   (`hook_event_delivery`), renewing the lease, and a later attempt calls
+///   only the plugins not recorded;
+/// - once every hook plugin the event is for has it delivered, the event is
+///   complete; otherwise (a plugin could not answer, or is not loaded here)
+///   its lease is given back and its next attempt backed off
+///   ([`backoff_secs`]), until [`MAX_EVENT_ATTEMPTS`] dead-letters it;
+/// - a write under a lease another dispatch has since taken lands nowhere;
+/// - a dispatch dropped before it ends gives its lease back.
+///
+/// Plugins take a hook event as idempotent.
 struct EventClaim {
     db: common::db::DatabaseConnection,
     id: String,
-    /// The `attempts` the lease was taken at, so a lapsed lease another
-    /// replica took since is not given back.
+    topic: String,
+    token: uuid::Uuid,
+    /// The attempt this lease is.
     attempt: i32,
     settled: bool,
 }
@@ -74,16 +107,19 @@ impl EventClaim {
             .map(serde_json::to_value)
             .transpose()
             .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+        let token = uuid::Uuid::new_v4();
         let inserted = db
             .execute_raw(sea_orm::Statement::from_sql_and_values(
                 sea_orm::DbBackend::Postgres,
-                "INSERT INTO hook_event (event_id, topic, payload, enabled_plugins, claimed_at) \
-                 VALUES ($1, $2, $3, $4, now()) ON CONFLICT DO NOTHING",
+                "INSERT INTO hook_event (event_id, topic, payload, enabled_plugins, claimed_at, \
+                                         claim_token, attempts) \
+                 VALUES ($1, $2, $3, $4, now(), $5, 1) ON CONFLICT DO NOTHING",
                 [
                     id.into(),
                     topic.into(),
                     payload.clone().into(),
                     enabled.into(),
+                    token.into(),
                 ],
             ))
             .await?
@@ -91,34 +127,171 @@ impl EventClaim {
         Ok((inserted == 1).then(|| Self {
             db: db.clone(),
             id: id.to_string(),
+            topic: topic.to_string(),
+            token,
             attempt: 1,
             settled: false,
         }))
     }
 
-    /// Ends the lease: the event is done, or, when a hook could not answer
-    /// (`unanswered`), given back for the re-scan to run again.
-    async fn settle(mut self, unanswered: bool) {
-        self.settled = true;
-        let statement = if unanswered {
-            sea_orm::Statement::from_sql_and_values(
+    /// The hook plugins that have the event delivered.
+    async fn delivered(&self) -> Result<Vec<String>, sea_orm::DbErr> {
+        let rows = self
+            .db
+            .query_all_raw(sea_orm::Statement::from_sql_and_values(
                 sea_orm::DbBackend::Postgres,
-                "UPDATE hook_event SET claimed_at = NULL \
-                  WHERE event_id = $1 AND attempts = $2 AND completed_at IS NULL",
-                [self.id.clone().into(), self.attempt.into()],
-            )
-        } else {
-            sea_orm::Statement::from_sql_and_values(
-                sea_orm::DbBackend::Postgres,
-                "UPDATE hook_event SET completed_at = COALESCE(completed_at, now()) \
-                  WHERE event_id = $1",
+                "SELECT plugin_id FROM hook_event_delivery WHERE event_id = $1",
                 [self.id.clone().into()],
-            )
-        };
-        let settled = self.db.execute_raw(statement).await;
-        if let Err(e) = settled {
-            tracing::warn!(event_id = %self.id, error = %e, "Ending a hook event lease failed; the event runs again once the lease lapses");
+            ))
+            .await?;
+        rows.iter()
+            .map(|row| row.try_get::<String>("", "plugin_id"))
+            .collect()
+    }
+
+    /// Records that `plugin_id`'s hooks answered the event, renewing the
+    /// lease. `false` when the lease is no longer this dispatch's (it
+    /// lapsed and another took it): nothing is recorded, and the dispatch
+    /// stops.
+    async fn mark_delivered(&self, plugin_id: &str) -> Result<bool, sea_orm::DbErr> {
+        let row = self
+            .db
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
+                sea_orm::DbBackend::Postgres,
+                "WITH held AS (UPDATE hook_event SET claimed_at = now() \
+                                WHERE event_id = $1 AND claim_token = $2 \
+                                  AND completed_at IS NULL AND dead_at IS NULL \
+                               RETURNING event_id), \
+                      marked AS (INSERT INTO hook_event_delivery (event_id, plugin_id) \
+                                 SELECT event_id, $3 FROM held ON CONFLICT DO NOTHING) \
+                 SELECT COUNT(*)::bigint AS held FROM held",
+                [self.id.clone().into(), self.token.into(), plugin_id.into()],
+            ))
+            .await?;
+        Ok(row
+            .map(|r| r.try_get::<i64>("", "held"))
+            .transpose()?
+            .unwrap_or(0)
+            == 1)
+    }
+
+    /// Ends a lease another dispatch has since taken: nothing is written,
+    /// since the event is that dispatch's now.
+    async fn lost(mut self) {
+        self.settled = true;
+    }
+
+    /// Ends the lease with the event complete: every hook plugin it is for
+    /// has it delivered.
+    async fn complete(mut self) {
+        self.settled = true;
+        let completed = self
+            .db
+            .execute_raw(sea_orm::Statement::from_sql_and_values(
+                sea_orm::DbBackend::Postgres,
+                "UPDATE hook_event SET completed_at = now(), claimed_at = NULL \
+                  WHERE event_id = $1 AND claim_token = $2 AND completed_at IS NULL",
+                [self.id.clone().into(), self.token.into()],
+            ))
+            .await;
+        if let Err(e) = completed {
+            tracing::warn!(event_id = %self.id, error = %e, "Completing a hook event failed; its delivered plugins are not called again");
         }
+    }
+
+    /// Ends the lease with the event unfinished (`why`): its next attempt
+    /// is backed off, or, after [`MAX_EVENT_ATTEMPTS`], the event is
+    /// dead-lettered, loudly and in the dead letter queue.
+    async fn retry_later(mut self, why: String) {
+        self.settled = true;
+        if self.attempt >= MAX_EVENT_ATTEMPTS {
+            self.dead_letter(why).await;
+            return;
+        }
+        let released = self
+            .db
+            .execute_raw(sea_orm::Statement::from_sql_and_values(
+                sea_orm::DbBackend::Postgres,
+                "UPDATE hook_event SET claimed_at = NULL, last_error = $3, \
+                        next_attempt_at = now() + make_interval(secs => $4) \
+                  WHERE event_id = $1 AND claim_token = $2 AND completed_at IS NULL",
+                [
+                    self.id.clone().into(),
+                    self.token.into(),
+                    why.clone().into(),
+                    (backoff_secs(self.attempt) as f64).into(),
+                ],
+            ))
+            .await;
+        match released {
+            Ok(_) => tracing::info!(
+                event_id = %self.id,
+                attempt = self.attempt,
+                reason = %why,
+                "A hook event did not reach every hook plugin; it is retried later"
+            ),
+            Err(e) => {
+                tracing::warn!(event_id = %self.id, error = %e, "Giving back a hook event lease failed; it lapses instead")
+            }
+        }
+    }
+
+    /// Marks the event dead and files it in the dead letter queue, as one
+    /// transaction: a dead event is always one an administrator sees.
+    async fn dead_letter(&self, why: String) {
+        match self.try_dead_letter(&why).await {
+            Ok(false) => {}
+            Ok(true) => tracing::error!(
+                event_id = %self.id,
+                topic = %self.topic,
+                attempts = self.attempt,
+                reason = %why,
+                "A hook event did not reach every hook plugin after its last attempt; it is dead-lettered"
+            ),
+            Err(e) => {
+                tracing::warn!(event_id = %self.id, error = %e, "Dead-lettering a hook event failed; its lease lapses and it is tried again")
+            }
+        }
+    }
+
+    /// Whether this lease dead-lettered the event (it was still this
+    /// dispatch's).
+    async fn try_dead_letter(&self, why: &str) -> Result<bool, sea_orm::DbErr> {
+        use sea_orm::TransactionTrait;
+        let txn = self.db.begin().await?;
+        let dead = txn
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
+                sea_orm::DbBackend::Postgres,
+                "UPDATE hook_event SET claimed_at = NULL, last_error = $3, dead_at = now() \
+                  WHERE event_id = $1 AND claim_token = $2 AND completed_at IS NULL \
+                    AND dead_at IS NULL \
+                 RETURNING payload",
+                [self.id.clone().into(), self.token.into(), why.into()],
+            ))
+            .await?;
+        let Some(row) = dead else {
+            return Ok(false);
+        };
+        let payload: serde_json::Value = row.try_get("", "payload")?;
+        let envelope = common::dlq::DlqEnvelope {
+            message_id: format!("hook_event:{}", self.id),
+            message_type: common::DlqMessageType::HookEvent,
+            submission_id: None,
+            payload: serde_json::json!({
+                "event_id": self.id,
+                "topic": self.topic,
+                "payload": payload,
+                "attempts": self.attempt,
+            }),
+            error_code: common::dlq::DlqErrorCode::MaxRetriesExceeded,
+            error_message: why.to_string(),
+            retry_history: Vec::new(),
+        };
+        crate::dlq::DlqService::new(&txn)
+            .send_to_dlq(&envelope)
+            .await?;
+        txn.commit().await?;
+        Ok(true)
     }
 }
 
@@ -136,14 +309,14 @@ impl Drop for EventClaim {
         };
         let db = self.db.clone();
         let id = std::mem::take(&mut self.id);
-        let attempt = self.attempt;
+        let token = self.token;
         drop(runtime.spawn(async move {
             let released = db
                 .execute_raw(sea_orm::Statement::from_sql_and_values(
                     sea_orm::DbBackend::Postgres,
                     "UPDATE hook_event SET claimed_at = NULL \
-                      WHERE event_id = $1 AND attempts = $2 AND completed_at IS NULL",
-                    [id.clone().into(), attempt.into()],
+                      WHERE event_id = $1 AND claim_token = $2 AND completed_at IS NULL",
+                    [id.clone().into(), token.into()],
                 ))
                 .await;
             if let Err(e) = released {
@@ -194,6 +367,10 @@ pub struct ServerHookRegistry {
     hooks: HashMap<String, Vec<HookEntry>>,
     /// Background events this replica could not record yet, oldest first.
     unrecorded: std::sync::Mutex<std::collections::VecDeque<Unrecorded>>,
+    /// What the fleet has enabled, and which hooks each plugin declares:
+    /// a background event is complete only once every hook plugin it is
+    /// for, loaded here or not, has it delivered.
+    lifecycle: Arc<crate::plugin_lifecycle::PluginLifecycle>,
 }
 
 impl Default for ServerHookRegistry {
@@ -204,10 +381,40 @@ impl Default for ServerHookRegistry {
 
 impl ServerHookRegistry {
     pub fn new() -> Self {
+        Self::for_fleet(Default::default())
+    }
+
+    /// A registry whose background events are owed to the hook plugins
+    /// `lifecycle` records as enabled.
+    pub fn for_fleet(lifecycle: Arc<crate::plugin_lifecycle::PluginLifecycle>) -> Self {
         Self {
             hooks: HashMap::new(),
             unrecorded: Default::default(),
+            lifecycle,
         }
+    }
+
+    /// The hook plugins a `topic` event with `enabled_plugins` is for: the
+    /// ones enabled fleet-wide that declare a hook it runs, and the ones
+    /// registered here that it runs.
+    fn owed(
+        &self,
+        topic: &str,
+        enabled_plugins: Option<&ResourceEnablements>,
+    ) -> std::collections::BTreeSet<String> {
+        let mut owed = self.lifecycle.hook_plugins(topic, enabled_plugins);
+        for entry in self.hooks.get(topic).into_iter().flatten() {
+            let runs = match entry.scope {
+                HookScope::Global => true,
+                HookScope::Resource => {
+                    enabled_plugins.is_some_and(|e| e.contains_key(&entry.plugin_id))
+                }
+            };
+            if runs {
+                owed.insert(entry.plugin_id.clone());
+            }
+        }
+        owed
     }
 
     /// Keeps `event` for the next re-scan; past [`UNRECORDED_MAX`] the
@@ -278,6 +485,13 @@ pub type SharedHookRegistry = Arc<RwLock<ServerHookRegistry>>;
 
 pub fn new_shared_registry() -> SharedHookRegistry {
     Arc::new(RwLock::new(ServerHookRegistry::new()))
+}
+
+/// A shared registry for a server whose fleet `lifecycle` follows.
+pub fn shared_registry_for(
+    lifecycle: Arc<crate::plugin_lifecycle::PluginLifecycle>,
+) -> SharedHookRegistry {
+    Arc::new(RwLock::new(ServerHookRegistry::for_fleet(lifecycle)))
 }
 
 pub type ResourceEnablements = HashMap<String, i32>;
@@ -535,9 +749,10 @@ pub async fn dispatch_hooks(
             hook_registry,
             admission_owner: None,
             class,
+            skip: None,
         },
         0,
-        &mut false,
+        &mut Answers::default(),
     )
     .await
 }
@@ -561,9 +776,10 @@ pub(crate) async fn dispatch_submission_hooks(
             hook_registry,
             admission_owner,
             class: CallClass::Interactive,
+            skip: None,
         },
         0,
-        &mut false,
+        &mut Answers::default(),
     )
     .await
 }
@@ -635,8 +851,11 @@ pub async fn dispatch_hooks_once(
     }
 }
 
-/// Runs an event's hooks under `claim`, then ends the claim: done, or given
-/// back when a hook could not answer.
+/// Runs an event's hooks under `claim`: only the hook plugins that do not
+/// have it delivered yet, each recorded delivered once its hooks answered.
+/// The event completes once every hook plugin it is for has it delivered;
+/// one that could not answer, or is not loaded here, leaves it for a later
+/// attempt.
 async fn deliver(
     claim: Option<EventClaim>,
     topic: &str,
@@ -644,8 +863,23 @@ async fn deliver(
     enabled_plugins: Option<&ResourceEnablements>,
     hook_registry: &SharedHookRegistry,
 ) {
-    let mut unanswered = false;
-    match dispatch_hooks_inner(
+    let delivered: std::collections::BTreeSet<String> = match &claim {
+        Some(held) => match held.delivered().await {
+            Ok(delivered) => delivered.into_iter().collect(),
+            Err(e) => {
+                tracing::warn!(event_id = %held.id, error = %e, "Reading a hook event's deliveries failed");
+                if let Some(claim) = claim {
+                    claim
+                        .retry_later(format!("reading its deliveries failed: {e}"))
+                        .await;
+                }
+                return;
+            }
+        },
+        None => Default::default(),
+    };
+    let mut answers = Answers::default();
+    let dispatched = dispatch_hooks_inner(
         topic,
         event_payload,
         DispatchScope {
@@ -653,12 +887,15 @@ async fn deliver(
             hook_registry,
             admission_owner: None,
             class: CallClass::Background,
+            skip: Some(&delivered),
         },
         0,
-        &mut unanswered,
+        &mut answers,
     )
-    .await
-    {
+    .await;
+    // The hook the dispatch stopped at answered unless it could not.
+    answers.settle();
+    match dispatched {
         Ok(HookOutcome::Allowed(_)) => {}
         Ok(HookOutcome::Rejected(refusal)) => {
             tracing::warn!(
@@ -667,13 +904,43 @@ async fn deliver(
                 "Background hook returned Reject (no effect — response already sent)",
             );
         }
-        Err(AppError::PluginUnavailable) => unanswered = true,
         Err(e) => {
             tracing::warn!(topic, "Background hook dispatch failed: {e:?}");
         }
     }
-    if let Some(claim) = claim {
-        claim.settle(unanswered).await;
+    let Some(claim) = claim else {
+        return;
+    };
+    for plugin_id in answers.answered() {
+        match claim.mark_delivered(&plugin_id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(event_id = %claim.id, "A hook event's lease passed to another dispatch; this one stops");
+                claim.lost().await;
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(event_id = %claim.id, plugin_id, error = %e, "Recording a hook event delivered failed");
+                claim
+                    .retry_later(format!("recording it delivered to {plugin_id} failed: {e}"))
+                    .await;
+                return;
+            }
+        }
+    }
+    let answered = answers.answered();
+    let owed = hook_registry.read().await.owed(topic, enabled_plugins);
+    let pending: Vec<&String> = owed
+        .iter()
+        .filter(|id| !delivered.contains(*id) && !answered.contains(*id))
+        .collect();
+    if pending.is_empty() {
+        claim.complete().await;
+    } else {
+        let names: Vec<&str> = pending.iter().map(|id| id.as_str()).collect();
+        claim
+            .retry_later(format!("not yet delivered to {}", names.join(", ")))
+            .await;
     }
 }
 
@@ -700,23 +967,29 @@ pub async fn redeliver_once(
 
     db.execute_raw(sea_orm::Statement::from_sql_and_values(
         sea_orm::DbBackend::Postgres,
-        "DELETE FROM hook_event WHERE completed_at < now() - make_interval(secs => $1)",
-        [(COMPLETED_KEPT_SECS as f64).into()],
+        "DELETE FROM hook_event \
+          WHERE COALESCE(completed_at, dead_at) < now() - make_interval(secs => $1)",
+        [(SETTLED_KEPT_SECS as f64).into()],
     ))
     .await?;
 
+    // Due by `next_attempt_at`, earliest first: an event that keeps failing
+    // waits longer each time, so it never holds back the events behind it.
     let due = db
         .query_all_raw(sea_orm::Statement::from_sql_and_values(
             sea_orm::DbBackend::Postgres,
-            "UPDATE hook_event h SET claimed_at = now(), attempts = h.attempts + 1 \
+            "UPDATE hook_event h SET claimed_at = now(), attempts = h.attempts + 1, \
+                                     claim_token = gen_random_uuid() \
                FROM (SELECT event_id FROM hook_event \
-                      WHERE completed_at IS NULL \
+                      WHERE completed_at IS NULL AND dead_at IS NULL \
+                        AND next_attempt_at <= now() \
                         AND (claimed_at IS NULL \
                              OR claimed_at < now() - make_interval(secs => $1)) \
-                      ORDER BY created_at LIMIT $2 \
+                      ORDER BY next_attempt_at, created_at LIMIT $2 \
                       FOR UPDATE SKIP LOCKED) due \
               WHERE h.event_id = due.event_id \
-             RETURNING h.event_id, h.topic, h.payload, h.enabled_plugins, h.attempts",
+             RETURNING h.event_id, h.topic, h.payload, h.enabled_plugins, h.attempts, \
+                       h.claim_token",
             [(EVENT_LEASE_SECS as f64).into(), REDELIVERY_BATCH.into()],
         ))
         .await?;
@@ -726,6 +999,7 @@ pub async fn redeliver_once(
         let payload: serde_json::Value = row.try_get("", "payload")?;
         let enabled: Option<serde_json::Value> = row.try_get("", "enabled_plugins")?;
         let attempt: i32 = row.try_get("", "attempts")?;
+        let token: uuid::Uuid = row.try_get("", "claim_token")?;
         let enabled_plugins = match enabled.map(serde_json::from_value).transpose() {
             Ok(enabled) => enabled,
             Err(e) => {
@@ -736,6 +1010,8 @@ pub async fn redeliver_once(
         let claim = EventClaim {
             db: db.clone(),
             id,
+            topic: topic.clone(),
+            token,
             attempt,
             settled: false,
         };
@@ -807,23 +1083,79 @@ struct DispatchScope<'a> {
     hook_registry: &'a SharedHookRegistry,
     admission_owner: Option<&'a str>,
     class: CallClass,
+    /// Plugins whose hooks on the dispatched event are skipped (not its
+    /// chained events'): a background event's re-run skips the plugins
+    /// that have it delivered.
+    skip: Option<&'a std::collections::BTreeSet<String>>,
 }
 
-/// Runs `topic`'s hooks; `unanswered` is set when a hook could not answer
-/// (a notify hook's too, though the dispatch goes on without it).
+/// Which plugins' hooks answered one dispatch. A plugin answered when every
+/// one of its hooks on the dispatched event ran and none, nor any hook of an
+/// event it chained, could not answer; a plugin whose hook the dispatch
+/// stopped before (a rejection or an error ended it) did not.
+#[derive(Default)]
+struct Answers {
+    /// The dispatched event's hooks per plugin.
+    hooks: HashMap<String, usize>,
+    /// The hooks per plugin that answered.
+    answered: HashMap<String, usize>,
+    /// The plugin of the dispatched event's hook running now.
+    running: Option<String>,
+    /// Whether a hook could not answer since `running` started.
+    running_unanswered: bool,
+}
+
+impl Answers {
+    /// A hook (the running one, or one of an event it chained) could not
+    /// answer.
+    fn could_not_answer(&mut self) {
+        self.running_unanswered = true;
+    }
+
+    /// The dispatched event's next hook, of `plugin_id`, starts: the one
+    /// before it ends.
+    fn start(&mut self, plugin_id: &str) {
+        self.settle();
+        self.running = Some(plugin_id.to_string());
+    }
+
+    /// Ends the running hook: it answered unless it could not.
+    fn settle(&mut self) {
+        if let Some(plugin_id) = self.running.take()
+            && !std::mem::take(&mut self.running_unanswered)
+        {
+            *self.answered.entry(plugin_id).or_default() += 1;
+        }
+    }
+
+    /// The plugins every hook of which answered.
+    fn answered(&self) -> std::collections::BTreeSet<String> {
+        self.hooks
+            .iter()
+            .filter(|(id, hooks)| self.answered.get(id.as_str()) == Some(hooks))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+}
+
+/// Runs `topic`'s hooks, recording in `answers` which plugins' hooks
+/// answered (a notify hook that could not answer counts too, though the
+/// dispatch goes on without it).
 async fn dispatch_hooks_inner(
     topic: &str,
     mut event_payload: serde_json::Value,
     scope: DispatchScope<'_>,
     depth: u8,
-    unanswered: &mut bool,
+    answers: &mut Answers,
 ) -> Result<HookOutcome, AppError> {
     let DispatchScope {
         enabled_plugins,
         hook_registry,
         admission_owner,
         class,
+        skip,
     } = scope;
+    let skip = skip.filter(|_| depth == 0);
     if depth >= MAX_CHAIN_DEPTH {
         tracing::warn!(
             topic,
@@ -880,8 +1212,16 @@ async fn dispatch_hooks_inner(
             }
         }
 
+        if let Some(skip) = skip {
+            list.retain(|entry| !skip.contains(&entry.plugin_id));
+        }
         list
     };
+    if depth == 0 {
+        for entry in &dispatch_list {
+            *answers.hooks.entry(entry.plugin_id.clone()).or_default() += 1;
+        }
+    }
 
     // A total order: blocking before notify, global before resource-scoped,
     // then by position, and hooks that tie on all of these (every global
@@ -902,6 +1242,9 @@ async fn dispatch_hooks_inner(
     // switch off another's gates.
     let mut stopped: Vec<&str> = Vec::new();
     for entry in &dispatch_list {
+        if depth == 0 {
+            answers.start(&entry.plugin_id);
+        }
         if stopped.contains(&entry.plugin_id.as_str()) {
             continue;
         }
@@ -918,7 +1261,7 @@ async fn dispatch_hooks_inner(
                     Ok(action) => action,
                     Err(e) if is_unavailable(&e) => {
                         tracing::warn!(topic, plugin_id = %entry.plugin_id, "Hook unavailable: {e}");
-                        *unanswered = true;
+                        answers.could_not_answer();
                         // What stopped it (the plugin, or the database it
                         // needed) keeps its own code and Retry-After.
                         return Err(match e.downcast::<PluginError>() {
@@ -999,7 +1342,7 @@ async fn dispatch_hooks_inner(
                                 chained.payload,
                                 scope,
                                 depth + 1,
-                                unanswered,
+                                answers,
                             ))
                             .await?;
                             if let HookOutcome::Rejected(_) = result {
@@ -1026,13 +1369,18 @@ async fn dispatch_hooks_inner(
                     }
                 },
                 Err(e) => {
-                    *unanswered |= is_unavailable(&e);
+                    if is_unavailable(&e) {
+                        answers.could_not_answer();
+                    }
                     tracing::warn!(topic, "Notify hook error (ignored): {e}");
                 }
             },
         }
     }
 
+    if depth == 0 {
+        answers.settle();
+    }
     Ok(HookOutcome::Allowed(event_payload))
 }
 
@@ -1396,6 +1744,13 @@ mod tests {
         assert_eq!(flaky.call_count.load(Ordering::SeqCst), 1);
 
         redeliver_once(&db, &registry).await.unwrap();
+        assert_eq!(
+            flaky.call_count.load(Ordering::SeqCst),
+            1,
+            "not before its backoff"
+        );
+        due_now(&db).await;
+        redeliver_once(&db, &registry).await.unwrap();
         assert_eq!(flaky.call_count.load(Ordering::SeqCst), 2, "run again");
         redeliver_once(&db, &registry).await.unwrap();
         assert_eq!(flaky.call_count.load(Ordering::SeqCst), 2, "and then done");
@@ -1465,6 +1820,400 @@ mod tests {
         .await;
         redeliver_once(&db, &registry).await.unwrap();
         assert_eq!(rows(&db).await, 1, "the old completed row is purged");
+    }
+
+    /// Makes every unfinished event's next attempt due now, as if its
+    /// backoff had passed.
+    async fn due_now(db: &common::db::DatabaseConnection) {
+        execute(db, "UPDATE hook_event SET next_attempt_at = now()").await;
+    }
+
+    async fn scalar<T: sea_orm::TryGetable>(db: &common::db::DatabaseConnection, sql: &str) -> T {
+        db.query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            sql.to_string(),
+        ))
+        .await
+        .unwrap()
+        .expect("a row")
+        .try_get::<T>("", "v")
+        .unwrap()
+    }
+
+    /// Answers unavailable on every call.
+    struct DownHook {
+        id: String,
+        topics: Vec<String>,
+        call_count: AtomicUsize,
+    }
+
+    impl DownHook {
+        fn new(id: &str) -> Self {
+            Self {
+                id: id.into(),
+                topics: vec!["after_judging".into()],
+                call_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl GenericHook for DownHook {
+        type Context = CallOptions;
+
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn topics(&self) -> &[String] {
+            &self.topics
+        }
+
+        async fn on_event(
+            &self,
+            _ctx: CallOptions,
+            _event: &GenericEvent,
+        ) -> anyhow::Result<GenericHookAction> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Err(PluginError::Unavailable {
+                plugin_id: self.id.clone(),
+                func_name: "on_event".into(),
+            }
+            .into())
+        }
+    }
+
+    /// A re-run of an event calls only the hook plugins that do not have it
+    /// delivered: a plugin whose hooks answered is never called again for
+    /// it, whatever another plugin did.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_rerun_calls_only_the_plugins_not_yet_delivered() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let answered = Arc::new(MockHook::new(
+            "observer",
+            "after_judging",
+            GenericHookAction::Pass,
+        ));
+        let flaky = Arc::new(FlakyHook {
+            topics: vec!["after_judging".into()],
+            call_count: AtomicUsize::new(0),
+        });
+        let registry = replica_with(answered.clone()).await;
+        register_direct(
+            &mut *registry.write().await,
+            flaky.clone(),
+            HookScope::Global,
+            HookMode::Notify,
+        );
+        dispatch_once(&db, &registry).await;
+        assert_eq!(
+            (answered.calls(), flaky.call_count.load(Ordering::SeqCst)),
+            (1, 1)
+        );
+        let delivered: String = scalar(
+            &db,
+            "SELECT string_agg(plugin_id, ',' ORDER BY plugin_id) AS v FROM hook_event_delivery",
+        )
+        .await;
+        assert_eq!(delivered, "observer");
+
+        due_now(&db).await;
+        redeliver_once(&db, &registry).await.unwrap();
+        assert_eq!(
+            (answered.calls(), flaky.call_count.load(Ordering::SeqCst)),
+            (1, 2),
+            "only the plugin that had not answered ran again"
+        );
+        let completed: bool =
+            scalar(&db, "SELECT completed_at IS NOT NULL AS v FROM hook_event").await;
+        assert!(completed, "complete once both have it");
+    }
+
+    #[test]
+    fn the_backoff_doubles_from_its_base_up_to_its_cap() {
+        assert_eq!(backoff_secs(1), BACKOFF_BASE_SECS);
+        assert_eq!(backoff_secs(2), 2 * BACKOFF_BASE_SECS);
+        assert_eq!(backoff_secs(3), 4 * BACKOFF_BASE_SECS);
+        assert_eq!(backoff_secs(MAX_EVENT_ATTEMPTS), BACKOFF_MAX_SECS);
+        assert_eq!(backoff_secs(i32::MAX), BACKOFF_MAX_SECS);
+    }
+
+    /// An event a hook plugin never answers is retried each time later than
+    /// the last, and after its last attempt is dead-lettered: it leaves the
+    /// re-scan and stands in the dead letter queue as a `hook_event`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_event_never_answered_backs_off_and_is_dead_lettered_at_its_cap() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let down = Arc::new(DownHook::new("down"));
+        let registry = replica_with(down.clone()).await;
+        dispatch_once(&db, &registry).await;
+        let wait: f64 = scalar(
+            &db,
+            "SELECT EXTRACT(EPOCH FROM next_attempt_at - now())::float8 AS v FROM hook_event",
+        )
+        .await;
+        assert!(
+            wait > 0.0 && wait <= BACKOFF_BASE_SECS as f64,
+            "the second attempt waits the base backoff, waited {wait}"
+        );
+        let mut waits = vec![];
+        for _ in 1..MAX_EVENT_ATTEMPTS {
+            due_now(&db).await;
+            redeliver_once(&db, &registry).await.unwrap();
+            waits.push(
+                scalar::<Option<f64>>(
+                    &db,
+                    "SELECT CASE WHEN dead_at IS NULL \
+                         THEN EXTRACT(EPOCH FROM next_attempt_at - now())::float8 END AS v \
+                       FROM hook_event",
+                )
+                .await,
+            );
+        }
+        assert_eq!(
+            down.call_count.load(Ordering::SeqCst),
+            MAX_EVENT_ATTEMPTS as usize
+        );
+        // The wait after attempt `n` is that attempt's backoff, less the
+        // moments since it was set.
+        for (attempt, wait) in (2..).zip(&waits[..waits.len() - 1]) {
+            let wait = wait.expect("backed off, not dead");
+            let backoff = backoff_secs(attempt) as f64;
+            assert!(
+                wait <= backoff && backoff - wait < 1.0,
+                "attempt {attempt} waits {backoff}s, waited {wait}"
+            );
+        }
+        assert_eq!(waits.last(), Some(&None), "dead after the last attempt");
+
+        let (dead, attempts): (bool, i32) = (
+            scalar(&db, "SELECT dead_at IS NOT NULL AS v FROM hook_event").await,
+            scalar(&db, "SELECT attempts AS v FROM hook_event").await,
+        );
+        assert!(dead);
+        assert_eq!(attempts, MAX_EVENT_ATTEMPTS);
+        let letter: String = scalar(
+            &db,
+            "SELECT direction || ' ' || message_id || ' ' || error_message AS v \
+               FROM dead_letter_message WHERE NOT resolved",
+        )
+        .await;
+        assert_eq!(
+            letter,
+            "hook_event hook_event:after_judging:1:1 not yet delivered to down"
+        );
+
+        due_now(&db).await;
+        redeliver_once(&db, &registry).await.unwrap();
+        assert_eq!(
+            down.call_count.load(Ordering::SeqCst),
+            MAX_EVENT_ATTEMPTS as usize,
+            "a dead event is never run again"
+        );
+    }
+
+    /// Events that keep failing never starve newer ones: the re-scan takes
+    /// events by when their next attempt is due, so a batch's worth of old
+    /// events backed off leaves a fresh event the first taken.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn events_that_keep_failing_do_not_starve_newer_ones() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let hook = Arc::new(MockHook::new(
+            "observer",
+            "after_judging",
+            GenericHookAction::Pass,
+        ));
+        let registry = replica_with(hook.clone()).await;
+        execute(
+            &db,
+            &format!(
+                "INSERT INTO hook_event (event_id, topic, payload, created_at, attempts, \
+                                         next_attempt_at) \
+                 SELECT 'stuck:' || n, 'after_judging', '{{}}', now() - interval '1 day', 5, \
+                        now() + interval '1 hour' \
+                   FROM generate_series(1, {}) n",
+                REDELIVERY_BATCH * 2
+            ),
+        )
+        .await;
+        execute(
+            &db,
+            "INSERT INTO hook_event (event_id, topic, payload) \
+             VALUES ('fresh', 'after_judging', '{}')",
+        )
+        .await;
+        redeliver_once(&db, &registry).await.unwrap();
+        assert_eq!(hook.calls(), 1);
+        let fresh: bool = scalar(
+            &db,
+            "SELECT completed_at IS NOT NULL AS v FROM hook_event WHERE event_id = 'fresh'",
+        )
+        .await;
+        assert!(fresh, "the fresh event ran ahead of the backed-off ones");
+    }
+
+    /// Blocks its first call until `release`, then passes.
+    struct GatedHook {
+        call_count: AtomicUsize,
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        topics: Vec<String>,
+    }
+
+    #[async_trait]
+    impl GenericHook for GatedHook {
+        type Context = CallOptions;
+
+        fn id(&self) -> &str {
+            "observer"
+        }
+
+        fn topics(&self) -> &[String] {
+            &self.topics
+        }
+
+        async fn on_event(
+            &self,
+            _ctx: CallOptions,
+            _event: &GenericEvent,
+        ) -> anyhow::Result<GenericHookAction> {
+            if self.call_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            Ok(HookAction::Pass)
+        }
+    }
+
+    /// A dispatch whose lease lapsed and passed to another records nothing
+    /// when it ends: the event stays as the dispatch that holds it now left
+    /// it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dispatch_that_lost_its_lease_records_nothing() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let gated = Arc::new(GatedHook {
+            call_count: AtomicUsize::new(0),
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            topics: vec!["after_judging".into()],
+        });
+        let first = replica_with(gated.clone()).await;
+        let running = tokio::spawn({
+            let db = db.clone();
+            async move { dispatch_once(&db, &first).await }
+        });
+        gated.started.notified().await;
+
+        // Its lease lapses; another replica takes the event, and its hook
+        // plugin cannot answer.
+        execute(
+            &db,
+            "UPDATE hook_event SET claimed_at = claimed_at - interval '1 day'",
+        )
+        .await;
+        let down = Arc::new(DownHook::new("observer"));
+        redeliver_once(&db, &replica_with(down.clone()).await)
+            .await
+            .unwrap();
+        assert_eq!(down.call_count.load(Ordering::SeqCst), 1);
+
+        gated.release.notify_one();
+        running.await.unwrap();
+        let (completed, delivered, attempts): (bool, i64, i32) = (
+            scalar(&db, "SELECT completed_at IS NOT NULL AS v FROM hook_event").await,
+            scalar(&db, "SELECT COUNT(*)::bigint AS v FROM hook_event_delivery").await,
+            scalar(&db, "SELECT attempts AS v FROM hook_event").await,
+        );
+        assert!(!completed, "the stale dispatch did not complete it");
+        assert_eq!(delivered, 0, "nor record it delivered");
+        assert_eq!(attempts, 2);
+    }
+
+    /// An event is complete only once every hook plugin enabled fleet-wide
+    /// that it is for has it delivered: a replica that does not load one
+    /// delivers what it loads and gives the event back, and a replica that
+    /// loads the rest completes it without calling the first plugin again.
+    /// A disabled plugin is owed nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_event_waits_for_an_enabled_hook_plugin_this_replica_does_not_load() {
+        use crate::plugin_lifecycle::{Governs, HookTopic, PluginLifecycle};
+        let (_pg, db) = crate::test_support::postgres().await;
+        let lifecycle = Arc::new(PluginLifecycle::default());
+        let hooks_after_judging = Governs {
+            hooks: vec![HookTopic {
+                topic: "after_judging".into(),
+                scope: HookScope::Global,
+            }],
+            ..Governs::default()
+        };
+        for (id, enabled) in [("observer", true), ("elsewhere", true), ("off", false)] {
+            lifecycle.set_desired(id, enabled);
+            lifecycle.set_governs(id, hooks_after_judging.clone());
+        }
+        let replica = |hook: Arc<MockHook>| {
+            let registry = shared_registry_for(lifecycle.clone());
+            async move {
+                register_direct(
+                    &mut *registry.write().await,
+                    hook,
+                    HookScope::Global,
+                    HookMode::Notify,
+                );
+                registry
+            }
+        };
+        let observer = Arc::new(MockHook::new(
+            "observer",
+            "after_judging",
+            GenericHookAction::Pass,
+        ));
+        let elsewhere = Arc::new(MockHook::new(
+            "elsewhere",
+            "after_judging",
+            GenericHookAction::Pass,
+        ));
+        let here = replica(observer.clone()).await;
+        dispatch_once(&db, &here).await;
+        let (completed, why): (bool, String) = (
+            scalar(&db, "SELECT completed_at IS NOT NULL AS v FROM hook_event").await,
+            scalar(&db, "SELECT last_error AS v FROM hook_event").await,
+        );
+        assert!(!completed, "the event is owed to a plugin not loaded here");
+        assert_eq!(why, "not yet delivered to elsewhere");
+
+        let there = replica(elsewhere.clone()).await;
+        due_now(&db).await;
+        redeliver_once(&db, &there).await.unwrap();
+        assert_eq!((observer.calls(), elsewhere.calls()), (1, 1));
+        let completed: bool =
+            scalar(&db, "SELECT completed_at IS NOT NULL AS v FROM hook_event").await;
+        assert!(completed, "complete once every enabled hook plugin has it");
+    }
+
+    /// The re-scan loop stops when cancelled with a delivery in flight, and
+    /// the lease that delivery held is given back for the next re-scan.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_redelivery_loop_stops_with_a_delivery_in_flight() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let stalling = Arc::new(StallingHook {
+            id: "observer".into(),
+            topics: vec!["after_judging".into()],
+            call_count: AtomicUsize::new(0),
+            started: tokio::sync::Notify::new(),
+        });
+        execute(
+            &db,
+            "INSERT INTO hook_event (event_id, topic, payload) \
+             VALUES ('after_judging:1:1', 'after_judging', '{}')",
+        )
+        .await;
+        let registry = replica_with(stalling.clone()).await;
+        let (cancel, cancelled) = tokio::sync::watch::channel(false);
+        let running = tokio::spawn(run_redelivery(db.clone(), registry, cancelled));
+        stalling.started.notified().await;
+        cancel.send(true).unwrap();
+        running.await.expect("the loop returned");
+        wait_until_released(&db, "after_judging:1:1").await;
     }
 
     /// A runtime shutting down with a dispatch in flight exits: dropping the

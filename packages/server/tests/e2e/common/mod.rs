@@ -691,7 +691,9 @@ impl E2eTestApp {
         let operation_batches = OperationBatches::default();
         let operation_waiters: OperationWaiters = Arc::new(dashmap::DashMap::new());
         let evaluate_batches = EvaluateBatches::default();
-        let hook_registry = server::hooks::new_shared_registry();
+        let plugin_lifecycle: std::sync::Arc<server::plugin_lifecycle::PluginLifecycle> =
+            Default::default();
+        let hook_registry = server::hooks::shared_registry_for(plugin_lifecycle.clone());
 
         let judging_sessions = server::services::judging_sessions::JudgingSessions::default();
         let plugin_config_cache =
@@ -704,8 +706,6 @@ impl E2eTestApp {
             std::time::Duration::from_secs(30),
             &server::database::app_session(&app_config.database),
         );
-        let plugin_lifecycle: std::sync::Arc<server::plugin_lifecycle::PluginLifecycle> =
-            Default::default();
         let plugins = ServerManager::new(
             app_config.plugin.clone(),
             server::host_funcs::context::HostFunctionSystemDeps {

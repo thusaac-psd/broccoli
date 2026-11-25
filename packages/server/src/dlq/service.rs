@@ -25,6 +25,7 @@ pub struct DlqStats {
     pub stuck_submission_count: u64,
     pub stuck_code_run_count: u64,
     pub stuck_submission_judgement_count: u64,
+    pub hook_event_count: u64,
     pub unresolved_by_error_code: HashMap<String, u64>,
 }
 
@@ -354,6 +355,7 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
         let mut stuck_submission_count = 0u64;
         let mut stuck_code_run_count = 0u64;
         let mut stuck_submission_judgement_count = 0u64;
+        let mut hook_event_count = 0u64;
         let mut unresolved_by_error_code: HashMap<String, u64> = HashMap::new();
 
         for (message_type, error_code) in unresolved_data {
@@ -362,6 +364,7 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
                 "stuck_submission" => stuck_submission_count += 1,
                 "stuck_code_run" => stuck_code_run_count += 1,
                 "stuck_submission_judgement" => stuck_submission_judgement_count += 1,
+                "hook_event" => hook_event_count += 1,
                 _ => {}
             }
             *unresolved_by_error_code.entry(error_code).or_insert(0) += 1;
@@ -374,6 +377,7 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
             stuck_submission_count,
             stuck_code_run_count,
             stuck_submission_judgement_count,
+            hook_event_count,
             unresolved_by_error_code,
         })
     }

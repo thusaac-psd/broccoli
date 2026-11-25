@@ -232,7 +232,8 @@ impl ServerRuntime {
         ));
         info!("Operation result consumer started");
 
-        let hook_registry = crate::hooks::new_shared_registry();
+        let plugin_lifecycle: Arc<crate::plugin_lifecycle::PluginLifecycle> = Default::default();
+        let hook_registry = crate::hooks::shared_registry_for(plugin_lifecycle.clone());
         // Only a server whose claim fiber listens hears of config changes.
         let plugin_config_cache = if app_config.server.claim_fiber_enabled {
             crate::services::plugin_config_cache::PluginConfigCache::default()
@@ -253,7 +254,6 @@ impl ServerRuntime {
             ),
         );
 
-        let plugin_lifecycle: Arc<crate::plugin_lifecycle::PluginLifecycle> = Default::default();
         let manager = ServerManager::new(
             app_config.plugin.clone(),
             HostFunctionSystemDeps {

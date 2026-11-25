@@ -376,6 +376,7 @@ mod grants {
         "dead_letter_message",
         "device_authorization",
         "hook_event",
+        "hook_event_delivery",
         "idempotency_key",
         "plugin",
         "plugin_config",

@@ -229,16 +229,30 @@ hooks as part of itself (a contest plugin's submission call, a detached
 session); the reaper and an applied judgement start them in a task of their
 own that counts as judging work until they have run
 (`spawn_after_judging_hooks`), so neither waits for a hook. A hook event
-is delivered at least once fleet-wide. The replica that dispatches it first
-records it in `hook_event` (its id, topic, payload and enablements) with a
-lease, before its hooks run, so a duplicate dispatch on any replica, or after
-a restart, is skipped. A dispatch that completes marks the event done. One
-whose hooks could not answer (a busy plugin, a database outage), or that is
-dropped, gives the lease back, without waiting on the database, so shutdown
-is never held up. Every replica re-scans the table every 10 s: it runs again
-each event that is not done and whose lease is free or has lapsed (10 min, so
-the event of a replica that died runs again), records and runs the events it
-could not record itself, and deletes completed events after 7 days. Plugins
+is delivered at least once to each hook plugin it is for, and once while
+every write lands. The replica that dispatches it first records it in
+`hook_event` (its id, topic, payload and enablements) with a lease and a
+claim token, before its hooks run, so a duplicate dispatch on any replica, or
+after a restart, is skipped. Each plugin whose hooks answered is recorded in
+`hook_event_delivery`, and a later attempt calls only the plugins not
+recorded there. The event is complete once every hook plugin enabled
+fleet-wide that it is for has it, loaded on this replica or not: each
+plugin's recorded `governs` lists the hooks its manifest declares, so a
+replica that does not load one delivers what it loads and leaves the rest to
+a replica that does. Every write of a dispatch is fenced on its claim token,
+so a dispatch whose lease lapsed and passed to another records nothing. An
+attempt that leaves the event unfinished (a busy plugin, a database outage, a
+plugin not loaded here) gives the lease back and sets `next_attempt_at` 10 s
+later, doubling with each attempt up to an hour; after 12 attempts the event
+is dead-lettered: `dead_at` is set and a `hook_event` message, which
+administrators see in the dead letter queue, is filed in the same
+transaction. A dispatch that is dropped gives its lease back at once, without
+waiting on the database, so shutdown is never held up. Every replica
+re-scans the table every 10 s: it takes the events whose next attempt is due
+and whose lease is free or has lapsed (10 min, so the event of a replica that
+died runs again), earliest due first, so events that keep failing never hold
+back newer ones; it records and runs the events it could not record itself,
+and it deletes completed and dead events after 7 days. Plugins
 take a hook event as idempotent. A client therefore never sees a terminal status
 that a retry takes back: within an attempt the statuses only move forward,
 and a terminal status is final.

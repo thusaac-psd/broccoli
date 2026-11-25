@@ -1370,7 +1370,7 @@ export interface paths {
     put?: never;
     /**
      * Retry a DLQ message
-     * @description Retries a dead letter message by resetting the submission to Queued (the claim fiber then promotes it to Pending) and re-dispatching it to the plugin-based judging system. Only stuck_submission messages can be retried; operation_task, stuck_code_run, and stuck_submission_judgement messages are visibility-only from here. The message stays unresolved with the retry recorded in its history until the rejudge ends with a verdict other than a system error, which resolves it. Requires `dlq:manage` permission.
+     * @description Retries a dead letter message by resetting the submission to Queued (the claim fiber then promotes it to Pending) and re-dispatching it to the plugin-based judging system. Only stuck_submission messages can be retried; operation_task, stuck_code_run, stuck_submission_judgement and hook_event messages are visibility-only from here. The message stays unresolved with the retry recorded in its history until the rejudge ends with a verdict other than a system error, which resolves it. Requires `dlq:manage` permission.
      */
     post: operations['retryDlqMessage'];
     delete?: never;
@@ -3888,6 +3888,11 @@ export interface components {
       username: string;
     };
     MessageTypeCounts: {
+      /**
+       * Format: int64
+       * @example 0
+       */
+      hook_event: number;
       /**
        * Format: int64
        * @example 1

@@ -223,7 +223,7 @@ pub struct HookDeclaration {
     pub mode: HookMode,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum HookScope {
     /// Runs where the plugin applies: for a problem, contest, or contest

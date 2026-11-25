@@ -176,6 +176,34 @@ pub struct Governs {
     /// checker (`uses_checker` false), sorted: work on them needs no checker
     /// plugin.
     pub unchecked_problem_types: Vec<String>,
+    /// The hooks its manifest declares (`[[server.hooks]]`), as topic and
+    /// scope, sorted and without repeats: a replica that does not load it
+    /// still knows which background events it is owed
+    /// ([`PluginLifecycle::hook_plugins`]).
+    pub hooks: Vec<HookTopic>,
+}
+
+/// One topic a plugin hooks, and where its hook runs.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct HookTopic {
+    pub topic: String,
+    pub scope: plugin_core::hook::HookScope,
+}
+
+/// The hooks `manifest` declares, as [`Governs::hooks`] records them.
+pub fn declared_hooks(manifest: &plugin_core::manifest::PluginManifest) -> Vec<HookTopic> {
+    let mut hooks: Vec<HookTopic> = manifest
+        .server
+        .iter()
+        .flat_map(|server| &server.hooks)
+        .map(|decl| HookTopic {
+            topic: decl.topic.clone(),
+            scope: decl.scope,
+        })
+        .collect();
+    hooks.sort();
+    hooks.dedup();
+    hooks
 }
 
 /// A plugin that is enabled fleet-wide but not loaded on this replica.
@@ -441,6 +469,38 @@ impl PluginLifecycle {
         }
     }
 
+    /// The plugins enabled fleet-wide whose recorded hooks run for a
+    /// `topic` event with `enabled_plugins`: every one with a global hook on
+    /// it, and every one with a resource hook on it that the event's
+    /// resource enables. A background event is complete once each has it
+    /// delivered (`hooks::dispatch_hooks_once`).
+    pub fn hook_plugins(
+        &self,
+        topic: &str,
+        enabled_plugins: Option<&crate::hooks::ResourceEnablements>,
+    ) -> std::collections::BTreeSet<String> {
+        let desired = self.desired.read().map(|d| d.clone()).unwrap_or_default();
+        let Ok(governs) = self.governs.read() else {
+            return Default::default();
+        };
+        governs
+            .iter()
+            .filter(|(id, _)| desired.get(id.as_str()).copied().unwrap_or(false))
+            .filter(|(id, g)| {
+                g.hooks.iter().any(|hook| {
+                    hook.topic == topic
+                        && match hook.scope {
+                            plugin_core::hook::HookScope::Global => true,
+                            plugin_core::hook::HookScope::Resource => {
+                                enabled_plugins.is_some_and(|e| e.contains_key(id.as_str()))
+                            }
+                        }
+                })
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// Every plugin's recorded [`Governs`], in plugin id order.
     pub fn recorded_governs(&self) -> Vec<(String, Governs)> {
         let mut recorded: Vec<(String, Governs)> = self
@@ -452,7 +512,7 @@ impl PluginLifecycle {
         recorded
     }
 
-    fn set_governs(&self, plugin_id: &str, governs: Governs) {
+    pub(crate) fn set_governs(&self, plugin_id: &str, governs: Governs) {
         if let Ok(mut map) = self.governs.write() {
             map.insert(plugin_id.to_string(), governs);
         }
@@ -1197,10 +1257,18 @@ async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
         .map(|(problem_type, _)| problem_type)
         .collect();
     unchecked_problem_types.sort();
+    let hooks = state
+        .plugins
+        .get_registry()
+        .read()
+        .ok()
+        .and_then(|r| r.get(plugin_id).map(|e| declared_hooks(&e.manifest)))
+        .unwrap_or_default();
     Governs {
         visibility,
         provides: Provides::registered_by(&state.registries, plugin_id).await,
         unchecked_problem_types,
+        hooks,
     }
 }
 
@@ -2088,11 +2156,11 @@ mod tests {
             serde_json::json!({"visibility": false, "contest_types": ["x"]}),
             serde_json::json!({
                 "visibility": false, "contest_types": [], "problem_types": [], "checker_formats": [],
-                "languages": [], "unchecked_problem_types": [], "host_locale": null,
+                "languages": [], "unchecked_problem_types": [], "hooks": [], "host_locale": null,
             }),
             serde_json::json!({
                 "visibility": "no", "contest_types": [], "problem_types": [], "checker_formats": [],
-                "languages": [], "unchecked_problem_types": [],
+                "languages": [], "unchecked_problem_types": [], "hooks": [],
             }),
             serde_json::json!([]),
         ] {
@@ -2110,6 +2178,10 @@ mod tests {
                 languages: vec!["cpp".into()],
             },
             unchecked_problem_types: vec!["communication".into()],
+            hooks: vec![crate::plugin_lifecycle::HookTopic {
+                topic: "after_submission".into(),
+                scope: plugin_core::hook::HookScope::Global,
+            }],
         };
         write(serde_json::to_value(&whole).unwrap())
             .await
