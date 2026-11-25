@@ -351,7 +351,7 @@
 'problems.titleWithheld' = "Unavailable"
 'submission.resultHidden' = "Result hidden"
 'submission.resultUnavailable' = "Result unavailable right now"
-'submission.resultUnavailableDisabled' = "Result unavailable while the contest's plugin is disabled"
+'submission.resultUnavailableDisabled' = "Result unavailable while its contest plugin {plugin} is disabled"
 'contests.loadFailed' = "Could not load this contest."
 'contests.loadError' = "Failed to load contest data."
 'contests.loadProblemsError' = "Failed to load contest problems."

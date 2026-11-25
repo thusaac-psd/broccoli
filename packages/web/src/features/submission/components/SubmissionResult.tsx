@@ -83,7 +83,7 @@ export function SubmissionResult({
           role="status"
           className="py-6 text-center text-sm text-muted-foreground"
         >
-          {withheldLabel(submission.withheld, t)}
+          {withheldLabel(submission.withheld, { t, lookup })}
         </div>
       )}
 

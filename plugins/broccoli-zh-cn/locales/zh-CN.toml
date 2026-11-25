@@ -352,7 +352,7 @@
 'problems.titleWithheld' = "不可用"
 'submission.resultHidden' = "结果已隐藏"
 'submission.resultUnavailable' = "结果暂不可用"
-'submission.resultUnavailableDisabled' = "比赛插件已停用，结果不可用"
+'submission.resultUnavailableDisabled' = "比赛插件「{plugin}」已停用，结果不可用"
 'contests.loadFailed' = "无法加载此比赛。"
 'contests.loadError' = "加载比赛详情失败。"
 'contests.loadProblemsError' = "加载比赛题目失败。"

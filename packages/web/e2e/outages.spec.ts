@@ -80,7 +80,7 @@ test('a submission an outage withholds is asked for slowly, and shows its result
   await page.goto('/submissions/4');
   await expect(
     page
-      .getByText("Result unavailable while the contest's plugin is disabled")
+      .getByText('Result unavailable while its contest plugin icpc is disabled')
       .first(),
   ).toBeVisible();
 

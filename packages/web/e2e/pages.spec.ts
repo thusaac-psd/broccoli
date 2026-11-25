@@ -181,7 +181,7 @@ test('a contest whose plugin is disabled says so on every page', async ({
   await page.goto('/contests/3/submissions');
   await expect(
     page
-      .getByText("Result unavailable while the contest's plugin is disabled")
+      .getByText('Result unavailable while its contest plugin icpc is disabled')
       .first(),
   ).toBeVisible();
 });
