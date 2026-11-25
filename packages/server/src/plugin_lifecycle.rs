@@ -402,6 +402,7 @@ impl PluginLifecycle {
                     closed_by: ClosedBy {
                         plugin_id,
                         provides: Provided::Language,
+                        reason: broccoli_api_types::visibility::ClosedReason::Disabled,
                     },
                 })
             })
@@ -2368,6 +2369,7 @@ mod tests {
             closed_by: ClosedBy {
                 plugin_id: plugin_id.into(),
                 provides: Provided::Language,
+                reason: broccoli_api_types::visibility::ClosedReason::Disabled,
             },
         };
 
@@ -2385,6 +2387,7 @@ mod tests {
             Some(ClosedBy {
                 plugin_id: "langs-a".into(),
                 provides: Provided::Language,
+                reason: broccoli_api_types::visibility::ClosedReason::Disabled,
             })
         );
         assert_eq!(all.closed_languages.len(), 3);
@@ -2400,6 +2403,7 @@ mod tests {
             Some(ClosedBy {
                 plugin_id: "langs-a".into(),
                 provides: Provided::Language,
+                reason: broccoli_api_types::visibility::ClosedReason::Disabled,
             })
         );
 
@@ -2410,6 +2414,7 @@ mod tests {
             Some(ClosedBy {
                 plugin_id: "judge".into(),
                 provides: Provided::ContestType,
+                reason: broccoli_api_types::visibility::ClosedReason::Disabled,
             })
         );
     }
