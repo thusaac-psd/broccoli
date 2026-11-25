@@ -46,12 +46,13 @@ Each server answers three probes and `/metrics` on its main HTTP port:
 
 - `/livez`, liveness: the process is up and serving HTTP. It calls nothing else.
 - `/readyz`, readiness: this server should take browsers. It answers 503
-  `"not_ready"` while another live server can take submissions this one would
-  refuse: a contest type's plugin is loaded there but not here (its load keeps
-  failing, or its files are missing), so a submission or code run pinned here
-  would answer `CONTEST_TYPE_UNAVAILABLE` until the load succeeds. Servers that
-  each lack a different plugin, or a plugin no server could load, are all ready,
-  so the gateway always keeps a server. It makes no database or Redis call.
+  `"not_ready"` while another server serves every enabled plugin this one serves
+  and more: a plugin is loaded there but not here (its load keeps failing, or
+  its files are missing), so a browser pinned here would miss it, whatever it
+  provides (a contest type, a language, an evaluator, a checker, a page or
+  route), until the load succeeds. Servers that each lack a different plugin, or
+  a plugin no server could load, are all ready, so the gateway always keeps a
+  server. It makes no database or Redis call, and its body never names a plugin.
 - `/healthz`, the deep check for monitoring: it also reaches Postgres, Redis and
   blob storage (below). It is never a gateway probe: the servers share those, so
   one blip would fail it on every server at once.
@@ -63,12 +64,21 @@ timeout and ejects a server after 2 misses (`health_interval`, `health_timeout`
 and `health_fails` in `examples/Caddyfile.gateway`, and in
 `airgap/caddy/Caddyfile.airgap` for an airgap install). An ejected server's
 browsers are pinned to a ready one on their next request, and come back to it
-only if that one goes away. A server that stays not ready names the plugin in
-the admin plugin page (each server's state) and its logs; fix the load and click
-Reload. If servers are ejected under load while their logs show them still
-serving, raise `health_timeout` or `health_fails` there and restart the gateway.
-A Prometheus scrape of `/metrics` can likewise time out under load; give it a
-scrape timeout of a few seconds.
+only if that one goes away. The admin System page lists each server, whether it
+is ready, and the plugins it lacks while another server serves them; the admin
+plugin page shows each server's load state and error, and the server's logs have
+the rest. Fix the load and click Reload.
+
+Readiness compares a server with every other server that shares its database and
+whose heartbeat is fresh: servers touch it every 15 s, and one counts for 30 s
+after its last touch, so a server that died, or stopped without leaving cleanly,
+stops holding the others out of rotation within half a minute. Every server on
+one database therefore belongs behind the same gateway: a server outside it
+still counts, and can keep the gateway's servers not ready for a plugin only it
+serves while the gateway cannot send it a browser. If servers are ejected under
+load while their logs show them still serving, raise `health_timeout` or
+`health_fails` there and restart the gateway. A Prometheus scrape of `/metrics`
+can likewise time out under load; give it a scrape timeout of a few seconds.
 
 `/healthz` answers 200 with `"status": "ok"` while no dependency is down, and
 503 with `"status": "degraded"` and the component that is (`"db"`, `"mq"` or
