@@ -88,6 +88,7 @@ pub(crate) async fn schedule(
                      claimed_at = EXCLUDED.claimed_at,
                      attempts = EXCLUDED.attempts,
                      unanswered = 0,
+                     outages = 0,
                      retry_at = NULL"#,
             [
                 plugin_id.into(),

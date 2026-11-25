@@ -112,6 +112,18 @@ impl PluginError {
     /// host's database is unreachable or busy, the server is draining, the plugin is
     /// between loads, or no instance could be built. Callers answer these as
     /// "try again", never as a decision.
+    /// Whether the platform, not the plugin, kept the call from answering:
+    /// the host database is lost or saturated, or the server is draining.
+    /// The plugin had no say in it, so nothing it is owed may be spent on it.
+    pub fn is_host_outage(&self) -> bool {
+        matches!(
+            self,
+            PluginError::DatabaseUnavailable { .. }
+                | PluginError::DatabaseBusy { .. }
+                | PluginError::ShuttingDown
+        )
+    }
+
     pub fn is_unavailable(&self) -> bool {
         matches!(
             self,
