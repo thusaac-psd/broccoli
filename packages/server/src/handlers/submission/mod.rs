@@ -171,11 +171,12 @@ pub async fn create_submission(
     )?;
 
     let contest_type = match payload.contest_type {
-        // A type no plugin provides is a bad request, not an outage.
+        // A type no plugin provides is a bad request, not an outage; a closed
+        // one is refused below, naming its plugin.
         Some(ref ct)
             if state
                 .plugin_lifecycle
-                .disabled_provider(Provided::ContestType, ct)
+                .key_closure(Provided::ContestType, ct)
                 .is_none() =>
         {
             validate_contest_type("contest_type", ct, &state.registries.contest_type_registry)

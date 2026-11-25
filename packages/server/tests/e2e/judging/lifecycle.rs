@@ -477,6 +477,56 @@ async fn a_contest_whose_plugin_is_loaded_nowhere_names_it_wherever_it_is_out() 
     );
 }
 
+/// A practice submission in a contest type only a plugin loaded on no
+/// replica provides is refused naming that plugin, retryably, not as a type
+/// nothing provides.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_practice_type_whose_only_plugin_is_loaded_nowhere_names_it() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("nowhere_pt_admin", "pass1234", "admin")
+        .await;
+    let problem_id = app
+        .create_public_problem(&admin, "Practice loaded nowhere")
+        .await;
+    app.create_test_case(problem_id, &admin).await;
+    app.db
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
+             ('elsewhere-judge', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [\"elsewhere\"], \
+               \"problem_types\": [], \"checker_formats\": [], \
+               \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}')"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(app.reconcile_plugins_failing().await, ["elsewhere-judge"]);
+    let contestant = app
+        .create_authenticated_user("nowhere_pt_user", "pass1234")
+        .await;
+
+    let res = app
+        .post_with_token(
+            &format!("/api/v1/problems/{problem_id}/submissions"),
+            &json!({
+                "language": "cpp",
+                "contest_type": "elsewhere",
+                "files": [{"filename": "main.cpp", "content": CPP_SUM}],
+            }),
+            &contestant,
+        )
+        .await;
+    assert_eq!(res.status, 503, "{}", res.text);
+    assert_eq!(res.body["code"], "PLUGIN_NOT_LOADED", "{}", res.text);
+    assert_eq!(
+        res.body["details"]["plugin_id"], "elsewhere-judge",
+        "{}",
+        res.text
+    );
+}
+
 /// Work needing a key no enabled plugin provides (a checker format nothing
 /// registered) fails on its first attempt and stands: no replica will ever
 /// run it. Its system error names the role and the key (`NO_PROVIDER`); it

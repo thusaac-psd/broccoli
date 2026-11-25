@@ -398,7 +398,8 @@ impl PluginLifecycle {
     /// What closes new work on a problem whose `needs` name no language yet
     /// (a problem view, before the contestant picks one): each language it
     /// accepts (recorded fleet-wide, and among `accepted` when the problem
-    /// names its languages) whose providers are all disabled, and the work
+    /// names its languages) that is closed ([`Self::key_closure`]: its
+    /// providers all disabled, or its provider loaded nowhere), and the work
     /// outright when what it needs besides a language is closed
     /// ([`Self::closed_by`]) or none of its languages is left open (the
     /// first closed one's plugin). A fleet that recorded none of them closes
@@ -423,14 +424,9 @@ impl PluginLifecycle {
         let closed_languages: Vec<ClosedLanguage> = languages
             .iter()
             .filter_map(|language| {
-                let plugin_id = self.disabled_provider(Provided::Language, language)?;
                 Some(ClosedLanguage {
                     language: language.clone(),
-                    closed_by: ClosedBy {
-                        plugin_id,
-                        provides: Provided::Language,
-                        reason: broccoli_api_types::visibility::ClosedReason::Disabled,
-                    },
+                    closed_by: self.key_closure(Provided::Language, language)?,
                 })
             })
             .collect();
@@ -2452,6 +2448,57 @@ mod tests {
                 provides: Provided::ContestType,
                 reason: broccoli_api_types::visibility::ClosedReason::Disabled,
             })
+        );
+    }
+
+    /// A language whose fleet-wide provider is enabled but loaded on no live
+    /// replica closes the problem's submit for it as a disabled one does,
+    /// naming that provider as not loaded: one closure rule for each key.
+    #[test]
+    fn a_language_whose_provider_is_loaded_nowhere_is_closed_by_it() {
+        use broccoli_api_types::visibility::{ClosedLanguage, ClosedReason};
+        let lifecycle = providers(true, true, true);
+        lifecycle.set_governs(
+            "langs-a",
+            Governs {
+                provides: Provides {
+                    languages: vec!["cpp".into()],
+                    ..Provides::default()
+                },
+                ..Governs::default()
+            },
+        );
+        lifecycle.set_desired("langs-a", true);
+        let mut fleet = crate::providers::Loaded::default();
+        for (kind, key, plugin) in [
+            (Provided::ContestType, "t", "judge"),
+            (Provided::ProblemType, "p", "eval"),
+            (Provided::CheckerFormat, "c", "check"),
+        ] {
+            fleet
+                .of_mut(kind)
+                .insert(key.to_string(), vec![plugin.to_string()]);
+        }
+        lifecycle.set_fleet_loaded(fleet);
+        let not_loaded = ClosedBy {
+            plugin_id: "langs-a".into(),
+            provides: Provided::Language,
+            reason: ClosedReason::NotLoaded,
+        };
+        let closure = lifecycle.problem_closure(lifecycle.needs("t", "p", "c", None), None);
+        assert_eq!(
+            closure.closed_languages,
+            vec![ClosedLanguage {
+                language: "cpp".into(),
+                closed_by: not_loaded.clone(),
+            }]
+        );
+        assert_eq!(closure.closed_by, Some(not_loaded.clone()));
+        // Work in the language is closed by the same plugin, for the same
+        // reason.
+        assert_eq!(
+            lifecycle.closed_by(lifecycle.needs("t", "p", "c", Some("cpp"))),
+            Some(not_loaded)
         );
     }
 
