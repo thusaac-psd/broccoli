@@ -1910,8 +1910,8 @@ async fn work_whose_checker_plugin_is_disabled_is_parked_until_it_is_enabled() {
 }
 
 /// A unit whose checker compiles the problem's checker source needs that
-/// source's language as much as its own: the checker plugin's stored source
-/// names it (`problem.checker_language`, kept by the database), and while
+/// source's language as much as its own (`problem.checker_language`, kept by
+/// the database from the stored source), and while
 /// every provider of that language is disabled the work is parked, unclaimed,
 /// until one is enabled. A checker that declares no languages needs none.
 #[tokio::test]
@@ -1937,15 +1937,12 @@ async fn work_whose_checker_language_plugin_is_disabled_is_parked_until_it_is_en
         ),
     )
     .await;
+    // The language its checker source compiles in, as the database keeps it
+    // from the stored source (`broccoli_checker_language`, pinned by
+    // `a_problems_checker_language_follows_its_stored_checker_source`).
     exec(
         &db,
-        &format!(
-            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
-             VALUES ('problem', '{problem_id}', 'checkers:checker_source', \
-                     '{{\"files\": [{{\"filename\": \"testlib.h\", \"content\": \"\"}}, \
-                                    {{\"filename\": \"Checker.CPP\", \"content\": \"\"}}]}}', \
-                     0, NOW())"
-        ),
+        &format!("UPDATE problem SET checker_language = 'checker-cpp' WHERE id = {problem_id}"),
     )
     .await;
     let checker_language = crate::entity::problem::Entity::find_by_id(problem_id)
@@ -1954,11 +1951,7 @@ async fn work_whose_checker_language_plugin_is_disabled_is_parked_until_it_is_en
         .unwrap()
         .unwrap()
         .checker_language;
-    assert_eq!(
-        checker_language.as_deref(),
-        Some("checker-cpp"),
-        "the first file the checker compiles names the language"
-    );
+    assert_eq!(checker_language.as_deref(), Some("checker-cpp"),);
     assert_eq!(
         claimable(&db).await,
         0,
