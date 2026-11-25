@@ -1,8 +1,8 @@
 use axum::Json;
 use sea_orm::sea_query::{LockType, OnConflict};
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect, Set, TransactionSession,
-    TransactionTrait,
+    ColumnTrait, Condition, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+    Set, TransactionSession, TransactionTrait,
 };
 
 use broccoli_server_sdk::types::{
@@ -601,7 +601,8 @@ async fn problems_of_contest<C: ConnectionTrait>(
 /// problem or contest-problem config holds the problem's row lock, the lock
 /// a test-data change holds ([`crate::services::test_data::TestDataEdit`]),
 /// from its check until the write commits: no test-data change lands between
-/// the check and the stored config.
+/// the check and the stored config. The write takes it in the order every
+/// config write and delete takes its rows ([`lock_reached`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     db: &C,
@@ -614,12 +615,7 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     settings: RowSettings,
 ) -> Result<(PluginConfigResponse, ConfigChange), AppError> {
     let txn = db.begin().await?;
-    if let Some(problem_id) = target.problem_id {
-        problem::Entity::find_by_id(problem_id)
-            .lock(LockType::Update)
-            .one(&txn)
-            .await?;
-    }
+    lock_reached(&txn, target).await?;
     // A secret the client sends back as `null` (it reads them so) keeps what
     // the stored config holds for the same item.
     let mut config = config;
@@ -712,19 +708,63 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     ))
 }
 
+/// Locks the rows of the problems a config write or delete at `target`
+/// counts on (the inputs triggers update them as the config row changes):
+/// the problem of a problem or contest-problem config, every problem of a
+/// contest's. Every config write and delete takes them here, by id, before
+/// it touches a config row, and the triggers take a contest's problems by
+/// id too, so two config writes, two deletes, or a write and a delete never
+/// hold each other's rows in opposite orders. A plugin-scope config counts
+/// on its plugin's row alone, which every path takes after the config row.
+async fn lock_reached<C: ConnectionTrait>(db: &C, target: &ConfigTarget) -> Result<(), AppError> {
+    let reached = match (target.scope(), target.problem_id, target.contest_id) {
+        (_, Some(problem_id), _) => problem::Column::Id.eq(problem_id),
+        (ConfigScope::Contest, None, Some(contest_id)) => {
+            problem::Column::Id.in_subquery(problems_in_contest(contest_id))
+        }
+        _ => return Ok(()),
+    };
+    lock_problems(db, reached.into()).await
+}
+
+/// The ids of contest `contest_id`'s problems, as a subquery.
+fn problems_in_contest(contest_id: i32) -> sea_orm::sea_query::SelectStatement {
+    sea_orm::sea_query::Query::select()
+        .column(contest_problem::Column::ProblemId)
+        .from(contest_problem::Entity)
+        .and_where(contest_problem::Column::ContestId.eq(contest_id))
+        .to_owned()
+}
+
+/// Locks the problems `which` selects, in id order ([`lock_reached`]).
+async fn lock_problems<C: ConnectionTrait>(db: &C, which: Condition) -> Result<(), AppError> {
+    problem::Entity::find()
+        .select_only()
+        .column(problem::Column::Id)
+        .filter(which)
+        .order_by_asc(problem::Column::Id)
+        .lock(LockType::Update)
+        .into_tuple::<i32>()
+        .all(db)
+        .await?;
+    Ok(())
+}
+
 /// Deletes one stored config; [`AppError::NotFound`] when there is none.
-pub(crate) async fn delete_config<C: ConnectionTrait>(
+pub(crate) async fn delete_config<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     target: &ConfigTarget,
     plugin_id: &str,
     namespace: &str,
 ) -> Result<ConfigChange, AppError> {
+    let txn = db.begin().await?;
+    lock_reached(&txn, target).await?;
     let stored_namespace = target.stored_namespace(plugin_id, namespace);
     let deleted = plugin_config::Entity::delete_many()
         .filter(plugin_config::Column::Scope.eq(target.scope().as_str()))
         .filter(plugin_config::Column::RefId.eq(target.ref_id()))
         .filter(plugin_config::Column::Namespace.eq(&stored_namespace))
-        .exec(db)
+        .exec(&txn)
         .await?;
     if deleted.rows_affected == 0 {
         let display_ns = strip_namespace_prefix(&stored_namespace);
@@ -732,7 +772,9 @@ pub(crate) async fn delete_config<C: ConnectionTrait>(
             "Config '{display_ns}' not found"
         )));
     }
-    ConfigChange::of(db, target).await
+    let change = ConfigChange::of(&txn, target).await?;
+    txn.commit().await?;
+    Ok(change)
 }
 
 /// Deletes every config of problem `problem_id`, at the problem scope and in
@@ -741,6 +783,7 @@ pub(crate) async fn delete_configs_of_problem<C: ConnectionTrait>(
     db: &C,
     problem_id: i32,
 ) -> Result<ConfigChange, AppError> {
+    lock_problems(db, problem::Column::Id.eq(problem_id).into()).await?;
     delete_configs_at(db, &ConfigTarget::problem(problem_id)).await?;
     delete_configs_like(
         db,
@@ -757,6 +800,7 @@ pub(crate) async fn delete_configs_of_contest<C: ConnectionTrait>(
     contest_id: i32,
 ) -> Result<ConfigChange, AppError> {
     let target = ConfigTarget::contest(contest_id);
+    lock_reached(db, &target).await?;
     let change = ConfigChange::of_contest(db, contest_id).await?;
     delete_configs_at(db, &target).await?;
     delete_configs_like(
@@ -775,6 +819,13 @@ pub(crate) async fn delete_configs_of_contest_problems<C: ConnectionTrait>(
     problem_ids: &[i32],
 ) -> Result<ConfigChange, AppError> {
     if !problem_ids.is_empty() {
+        lock_problems(
+            db,
+            problem::Column::Id
+                .is_in(problem_ids.iter().copied())
+                .into(),
+        )
+        .await?;
         plugin_config::Entity::delete_many()
             .filter(plugin_config::Column::Scope.eq(ConfigScope::ContestProblem.as_str()))
             .filter(

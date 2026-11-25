@@ -179,3 +179,13 @@ type = "string"
 [config.keyed.properties.stations.items.properties.token]
 type = "string"
 secret = true
+
+# A judging input at the problem and contest scopes: its writes count on the
+# problems they reach, so they lock those problems' rows.
+[config.judged]
+description = "Fixture config judging reads"
+scopes = ["problem", "contest"]
+judging_input = true
+
+[config.judged.properties.level]
+type = "integer"

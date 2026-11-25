@@ -460,6 +460,232 @@ mod concurrent_secret {
     }
 }
 
+/// Every config write and delete takes the rows it locks in one order: the
+/// problems its triggers count on, by id, before any config row. Each test
+/// holds one row from its own connection, lets the server's write wait on
+/// it, and reads which rows the waiting write already holds.
+mod lock_order {
+    use super::*;
+    use sea_orm::{
+        ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, Statement,
+        TransactionTrait,
+    };
+
+    async fn own(app: &TestApp) -> DatabaseConnection {
+        sea_orm::Database::connect(app.database.url())
+            .await
+            .unwrap()
+    }
+
+    /// Holds `problem_id`'s row until the returned transaction ends.
+    async fn hold_problem(db: &DatabaseConnection, problem_id: i32) -> DatabaseTransaction {
+        let txn = db.begin().await.unwrap();
+        txn.execute_unprepared(&format!(
+            "SELECT id FROM problem WHERE id = {problem_id} FOR UPDATE"
+        ))
+        .await
+        .unwrap();
+        txn
+    }
+
+    /// Returns once some statement of the database waits on a lock.
+    async fn until_waiting(db: &DatabaseConnection) {
+        loop {
+            let waiting = db
+                .query_one_raw(Statement::from_string(
+                    DbBackend::Postgres,
+                    "SELECT count(*) AS n FROM pg_stat_activity \
+                     WHERE wait_event_type = 'Lock' AND datname = current_database()",
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get::<i64>("", "n")
+                .unwrap();
+            if waiting > 0 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Whether another transaction holds a row `select` reads.
+    async fn held(db: &DatabaseConnection, select: &str) -> bool {
+        let txn = db.begin().await.unwrap();
+        let result = txn
+            .execute_unprepared(&format!("{select} FOR UPDATE NOWAIT"))
+            .await;
+        txn.rollback().await.unwrap();
+        match result {
+            Ok(_) => false,
+            Err(error) => {
+                assert!(
+                    error.to_string().contains("could not obtain lock"),
+                    "{error}"
+                );
+                true
+            }
+        }
+    }
+
+    fn problem_row(problem_id: i32) -> String {
+        format!("SELECT id FROM problem WHERE id = {problem_id}")
+    }
+
+    fn config_row(scope: &str, ref_id: i32) -> String {
+        format!(
+            "SELECT 1 FROM plugin_config WHERE scope = '{scope}' AND ref_id = '{ref_id}' \
+             AND namespace = 'server-plugin:judged'"
+        )
+    }
+
+    /// A contest of problems `low` < `high`, each stored so that reading the
+    /// tables in the order they lie meets `high` first.
+    async fn contest_of_two(app: &TestApp, admin: &str) -> (i32, i32, i32) {
+        let low = app.insert_public_problem("Low").await;
+        let high = app.insert_public_problem("High").await;
+        let contest_id = app.create_contest(admin, "Locks", true, true).await;
+        let db = own(app).await;
+        db.execute_unprepared(&format!(
+            "INSERT INTO contest_problem (contest_id, problem_id, label, position) \
+             VALUES ({contest_id}, {high}, 'A', 0), ({contest_id}, {low}, 'B', 1); \
+             UPDATE problem SET title = 'Low' WHERE id = {low}"
+        ))
+        .await
+        .unwrap();
+        (contest_id, low, high)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delete_waiting_for_its_problem_holds_no_config_row_a_save_waits_on() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("lock_order_delete", "password123", "admin")
+            .await;
+        let problem_id = app.insert_public_problem("P").await;
+        let path = routes::problem_config_ns(problem_id, "server-plugin", "judged");
+        let res = app
+            .put_with_token(&path, &json!({ "config": { "level": 1 } }), &admin)
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+
+        let db = own(&app).await;
+        // A save in flight holds the problem.
+        let save = hold_problem(&db, problem_id).await;
+        let delete = {
+            let (url, admin, client) = (app.url(&path), admin.clone(), app.client.clone());
+            tokio::spawn(async move {
+                let res = client.delete(url).bearer_auth(admin).send().await.unwrap();
+                res.status().as_u16()
+            })
+        };
+        until_waiting(&db).await;
+        assert!(
+            !held(&db, &config_row("problem", problem_id)).await,
+            "the delete holds the config row while it waits for the problem"
+        );
+        save.commit().await.unwrap();
+        assert_eq!(delete.await.unwrap(), 204);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_contest_config_write_locks_its_problems_by_id_before_its_row() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("lock_order_contest", "password123", "admin")
+            .await;
+        let (contest_id, low, high) = contest_of_two(&app, &admin).await;
+        let path = routes::contest_config_ns(contest_id, "server-plugin", "judged");
+        let res = app
+            .put_with_token(&path, &json!({ "config": { "level": 1 } }), &admin)
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+
+        let db = own(&app).await;
+        // An overlapping write holds the contest's last problem.
+        let other = hold_problem(&db, high).await;
+        let write = {
+            let (url, admin, client) = (app.url(&path), admin.clone(), app.client.clone());
+            tokio::spawn(async move {
+                let res = client
+                    .put(url)
+                    .bearer_auth(admin)
+                    .json(&json!({ "config": { "level": 2 } }))
+                    .send()
+                    .await
+                    .unwrap();
+                res.status().as_u16()
+            })
+        };
+        until_waiting(&db).await;
+        assert!(
+            held(&db, &problem_row(low)).await,
+            "the write takes the lower problem first"
+        );
+        assert!(
+            !held(&db, &config_row("contest", contest_id)).await,
+            "the write holds the config row while it waits for a problem"
+        );
+        other.commit().await.unwrap();
+        assert_eq!(write.await.unwrap(), 200);
+    }
+
+    /// The counting triggers lock the problems they count on by id, whatever
+    /// statement fires them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_inputs_triggers_lock_a_contests_problems_by_id() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("lock_order_trigger", "password123", "admin")
+            .await;
+        let (contest_id, low, high) = contest_of_two(&app, &admin).await;
+        let res = app
+            .put_with_token(
+                &routes::contest_config_ns(contest_id, "server-plugin", "judged"),
+                &json!({ "config": { "level": 1 } }),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+
+        let db = own(&app).await;
+        for (what, statement) in [
+            (
+                "a contest config change",
+                format!(
+                    "UPDATE plugin_config SET config = '{{\"level\": 3}}' \
+                     WHERE scope = 'contest' AND ref_id = '{contest_id}' \
+                     AND namespace = 'server-plugin:judged'"
+                ),
+            ),
+            (
+                "a contest type change",
+                format!(
+                    "UPDATE contest SET contest_type = contest_type || '-next' \
+                     WHERE id = {contest_id}"
+                ),
+            ),
+        ] {
+            let other = hold_problem(&db, high).await;
+            let fired = {
+                let db = own(&app).await;
+                tokio::spawn(async move {
+                    let txn = db.begin().await.unwrap();
+                    txn.execute_unprepared(&statement).await.unwrap();
+                    txn.rollback().await.unwrap();
+                })
+            };
+            until_waiting(&db).await;
+            assert!(
+                held(&db, &problem_row(low)).await,
+                "{what} takes the lower problem first"
+            );
+            other.commit().await.unwrap();
+            fired.await.unwrap();
+        }
+    }
+}
+
 mod namespace_validation {
     use super::*;
 
