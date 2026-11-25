@@ -124,18 +124,29 @@ Degrading is per resource and per field, never per batch:
   keeps the row. A shape with no host-decided fields (a problem statement, its
   samples, its attachments) fails the request with the outage, and so does
   every action other than reading.
-- An outage is one of three (`PluginLifecycle::outage`, the one place they
+- An outage is one of four (`PluginLifecycle::outage`, the one place they
   are told apart): the plugin is disabled (`disabled`), it is enabled and no
   live replica serves it (`not_loaded`, judged by the replicas' reports as of
-  the last reconcile), or it is enabled and only this replica lacks it now
-  (`unavailable`). They answer `503 PLUGIN_DISABLED`, `503 PLUGIN_NOT_LOADED`
-  and `503 PLUGIN_UNAVAILABLE`, each with `Retry-After`: every 503 is
-  retryable. A disabled plugin's or a loaded-nowhere plugin's answer asks
-  again after 30 seconds (`DISABLED_RETRY_AFTER_SECS`), since what needs it is
-  parked and serves once an administrator enables it or a replica loads it;
-  both name the plugin in `details.plugin_id`. A plugin's own routes answer
-  the same; a submission to a contest whose type its disabled plugin
-  provides is `CONTEST_TYPE_DISABLED`, which names the plugin too.
+  the last reconcile), it is enabled and another live replica serves it but
+  this one does not (`not_loaded_here`, `PluginLifecycle::missing_here`), or
+  it is enabled and this replica is loading it now (`unavailable`). They
+  answer `503 PLUGIN_DISABLED`, `503 PLUGIN_NOT_LOADED`,
+  `503 PLUGIN_NOT_LOADED_HERE` and `503 PLUGIN_UNAVAILABLE`, each with
+  `Retry-After`: every 503 is retryable. A disabled plugin's or a
+  loaded-nowhere plugin's answer asks again after 30 seconds
+  (`DISABLED_RETRY_AFTER_SECS`), since what needs it is parked and serves once
+  an administrator enables it or a replica loads it; a plugin missing here
+  asks again after 10 seconds (`NOT_LOADED_HERE_RETRY_AFTER_SECS`), by when
+  the shipped gateways have moved the browser to a replica that serves it.
+  `missing_here` is the one rule admission and readiness both read. All three
+  name the plugin in `details.plugin_id`. A plugin's own routes answer the
+  same, on a replica that lacks the plugin's files too (only a plugin no
+  replica knows is `404`); a submission to a contest whose type its disabled
+  plugin provides is `CONTEST_TYPE_DISABLED`, which names the plugin too.
+- A request that names a key (a contest type, problem type, checker format
+  or language) is checked against every key the fleet records
+  (`AppState::known_keys`), never this replica's registries alone: a key
+  whose plugin is out is refused by why, as above, never as unknown.
 
 `ContestResponse.plugin_outage` and `ContestListItem.plugin_outage` come from
 `plugin_lifecycle::contest_type_outage`: the contest's type is closed
