@@ -78,6 +78,10 @@ pub struct PluginLifecycle {
     /// registered it on one of them, as of the last reconcile
     /// (`plugin_replica.provides`); `None` before the first read.
     fleet_loaded: RwLock<Option<crate::providers::Loaded>>,
+    /// The plugins a live replica serves, this one's included, as of the
+    /// last reconcile (`plugin_replica.plugins`); `None` before the first
+    /// read.
+    fleet_serving: RwLock<Option<std::collections::BTreeSet<String>>>,
     /// Set by [`stop`] at shutdown: no further report writes.
     stopped: std::sync::atomic::AtomicBool,
 }
@@ -369,22 +373,24 @@ impl PluginLifecycle {
             .unwrap_or(true)
     }
 
-    /// Whether `plugin_id` is loaded on no live replica, as far as the fleet
-    /// can tell: of the keys it last recorded providing, a live replica has
-    /// none loaded on it. A plugin that provides no key, or a fleet not yet
-    /// read, tells nothing, so it counts as loaded somewhere.
+    /// Whether `plugin_id` is loaded on no live replica: no live replica,
+    /// this one included, reports serving it, as of the last reconcile's
+    /// read of the fleet. Before the first read every plugin counts as
+    /// loaded somewhere.
     pub fn loaded_nowhere(&self, plugin_id: &str) -> bool {
-        let Some(governs) = self.governs(plugin_id) else {
-            return false;
-        };
-        let keys: Vec<(Provided, &String)> = crate::providers::KINDS
-            .iter()
-            .flat_map(|&kind| governs.provides.keys(kind).iter().map(move |k| (kind, k)))
-            .collect();
-        !keys.is_empty()
-            && keys
-                .iter()
-                .all(|(kind, key)| !self.loaded_somewhere(*kind, key, plugin_id))
+        self.fleet_serving
+            .read()
+            .ok()
+            .and_then(|serving| serving.as_ref().map(|s| !s.contains(plugin_id)))
+            .unwrap_or(false)
+    }
+
+    /// Records the plugins a live replica serves (see
+    /// [`Self::loaded_nowhere`]).
+    pub(crate) fn set_fleet_serving(&self, serving: std::collections::BTreeSet<String>) {
+        if let Ok(mut slot) = self.fleet_serving.write() {
+            *slot = Some(serving);
+        }
     }
 
     /// Records what the live replicas have loaded (see
@@ -1032,9 +1038,19 @@ async fn reconcile_locked(
     }
     // What the live replicas have loaded, this one's own registrations
     // included before its next report lands.
-    let mut loaded = plugin_fleet::live_loaded(&state.db).await?;
-    loaded.merge(&crate::providers::Loaded::here(&state.registries).await);
-    state.plugin_lifecycle.set_fleet_loaded(loaded);
+    let mut live = plugin_fleet::live_loaded(&state.db).await?;
+    live.provides
+        .merge(&crate::providers::Loaded::here(&state.registries).await);
+    if let Ok(registry) = state.plugins.get_registry().read() {
+        live.serving.extend(
+            registry
+                .iter()
+                .filter(|(_, entry)| entry.status == PluginStatus::Loaded)
+                .map(|(id, _)| id.clone()),
+        );
+    }
+    state.plugin_lifecycle.set_fleet_loaded(live.provides);
+    state.plugin_lifecycle.set_fleet_serving(live.serving);
     Ok(failures)
 }
 
@@ -2453,6 +2469,33 @@ mod tests {
                 provides: Provided::ContestType,
                 reason: broccoli_api_types::visibility::ClosedReason::Disabled,
             })
+        );
+    }
+
+    /// A plugin is out as loaded nowhere only while no live replica serves
+    /// it, whatever keys it last recorded: one a live replica serves is out
+    /// on this replica alone, which a retry elsewhere may serve.
+    #[test]
+    fn a_plugin_is_loaded_nowhere_only_while_no_live_replica_serves_it() {
+        let lifecycle = PluginLifecycle::default();
+        lifecycle.set_desired("p", true);
+        // Before the fleet is read nothing is out as loaded nowhere.
+        assert_eq!(lifecycle.outage("p"), PluginOutage::Unavailable);
+        lifecycle.set_fleet_serving(["q".to_string()].into());
+        assert_eq!(
+            lifecycle.outage("p"),
+            PluginOutage::NotLoaded {
+                plugin_id: "p".into()
+            }
+        );
+        lifecycle.set_fleet_serving(["p".to_string()].into());
+        assert_eq!(lifecycle.outage("p"), PluginOutage::Unavailable);
+        lifecycle.set_desired("p", false);
+        assert_eq!(
+            lifecycle.outage("p"),
+            PluginOutage::Disabled {
+                plugin_id: "p".into()
+            }
         );
     }
 

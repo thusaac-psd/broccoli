@@ -605,6 +605,14 @@ async fn a_missing_visibility_plugin_fails_closed_only_for_its_contest_types() {
             "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}' \
              WHERE id = '{PLUGIN}'"
         ),
+        // The replica that loaded the plugin registered the type, so it
+        // reports the type loaded.
+        format!(
+            "UPDATE plugin_replica SET provides = jsonb_set(\
+               COALESCE(provides::jsonb, '{{\"contest_types\": {{}}}}'::jsonb), \
+               '{{contest_types,fleet-only}}', '[\"{PLUGIN}\"]') \
+             WHERE plugins::jsonb -> '{PLUGIN}' ->> 'status' = 'loaded'"
+        ),
         format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {governed}"),
     ] {
         a.db.execute_raw(Statement::from_string(DbBackend::Postgres, sql))
@@ -643,6 +651,14 @@ async fn a_disabled_visibility_plugin_fails_closed_for_its_contest_types() {
         format!(
             "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}' \
              WHERE id = '{PLUGIN}'"
+        ),
+        // The replica that loaded the plugin registered the type, so it
+        // reports the type loaded.
+        format!(
+            "UPDATE plugin_replica SET provides = jsonb_set(\
+               COALESCE(provides::jsonb, '{{\"contest_types\": {{}}}}'::jsonb), \
+               '{{contest_types,fleet-only}}', '[\"{PLUGIN}\"]') \
+             WHERE plugins::jsonb -> '{PLUGIN}' ->> 'status' = 'loaded'"
         ),
         format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {governed}"),
     ] {
@@ -704,6 +720,14 @@ async fn a_type_another_enabled_plugin_provides_is_not_withheld_by_a_disabled_on
         "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
          ('second-provider', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}')"
             .to_string(),
+        // The replica that loaded the plugin registered the type, so it
+        // reports the type loaded.
+        format!(
+            "UPDATE plugin_replica SET provides = jsonb_set(\
+               COALESCE(provides::jsonb, '{{\"contest_types\": {{}}}}'::jsonb), \
+               '{{contest_types,fleet-only}}', '[\"{PLUGIN}\"]') \
+             WHERE plugins::jsonb -> '{PLUGIN}' ->> 'status' = 'loaded'"
+        ),
         format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {governed}"),
     ] {
         a.db.execute_raw(Statement::from_string(DbBackend::Postgres, sql))
@@ -881,6 +905,14 @@ async fn a_missing_visibility_plugin_also_hides_its_contests_problems_outside_th
             "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
              ('{PLUGIN}', TRUE, 1, NOW(), \
               '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}')"
+        ),
+        // The replica that loaded the plugin registered the type, so it
+        // reports the type loaded.
+        format!(
+            "UPDATE plugin_replica SET provides = jsonb_set(\
+               COALESCE(provides::jsonb, '{{\"contest_types\": {{}}}}'::jsonb), \
+               '{{contest_types,fleet-only}}', '[\"{PLUGIN}\"]') \
+             WHERE plugins::jsonb -> '{PLUGIN}' ->> 'status' = 'loaded'"
         ),
         format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {governed}"),
     ] {
