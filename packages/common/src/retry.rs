@@ -119,6 +119,14 @@ impl RetryTracker {
     }
 }
 
+/// The wait after the `attempt`th failure (1-based): `base`, doubling with
+/// each failure, never more than `max`. Deterministic, so every replica
+/// waits the same; `attempt` 0 waits `base` too.
+pub fn doubling_backoff(attempt: u32, base: Duration, max: Duration) -> Duration {
+    let factor = 1u32 << attempt.saturating_sub(1).min(20);
+    base.saturating_mul(factor).min(max)
+}
+
 pub fn calculate_backoff(attempt: u8, base_ms: u64, max_ms: u64) -> Duration {
     if attempt == 0 {
         return Duration::ZERO;
@@ -220,6 +228,16 @@ mod tests {
     fn backoff_is_capped_at_max_ms() {
         let d = calculate_backoff(10, 10000, 60000);
         assert!(d.as_millis() <= 60000, "d={d:?}");
+    }
+
+    #[test]
+    fn the_doubling_backoff_doubles_from_its_base_up_to_its_cap() {
+        let (base, max) = (Duration::from_secs(5), Duration::from_secs(300));
+        let waits: Vec<u64> = [0, 1, 2, 3, 7, u32::MAX]
+            .into_iter()
+            .map(|n| doubling_backoff(n, base, max).as_secs())
+            .collect();
+        assert_eq!(waits, [5, 5, 10, 20, 300, 300]);
     }
 
     #[test]

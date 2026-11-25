@@ -522,8 +522,11 @@ fn the_upgrade_guide_names_every_migration_of_this_release_that_is_not_additive(
 
 /// Every change to what judging reads of a problem counts in its
 /// `inputs_version`, whatever path makes it: its limits, type and checker
-/// format, its test cases, its additional files and its problem-scoped and
-/// contest-problem configs. A change to anything else (its title) does not.
+/// format, its test cases, its additional files, the type of a contest it is
+/// in, and the configs of a namespace its plugin declares a judging input at
+/// every scope the cascade reads (the problem's, its contest problem's, its
+/// contest's, the plugin's). A change to anything else (its title, a config
+/// of a namespace judging does not read) does not.
 #[tokio::test]
 async fn every_change_to_a_problems_judging_inputs_counts_in_its_version() {
     use sea_orm::EntityTrait;
@@ -546,6 +549,27 @@ async fn every_change_to_a_problems_judging_inputs_counts_in_its_version() {
                 .inputs_version
         }
     };
+    exec(format!(
+        "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
+           ('judge', TRUE, 0, NOW(), '{governs}'), ('display', TRUE, 0, NOW(), '{display}'); \
+         INSERT INTO contest (id, title, description, start_time, end_time, contest_type, \
+                              created_at, updated_at) \
+         VALUES (7, 'c', '', NOW(), NOW() + interval '1 day', 'judge', NOW(), NOW()), \
+                (8, 'd', '', NOW(), NOW() + interval '1 day', 'judge', NOW(), NOW()); \
+         INSERT INTO contest_problem (contest_id, problem_id, label, position) \
+         VALUES (7, {problem_id}, 'A', 0)",
+        governs = serde_json::json!({
+            "visibility": false, "contest_types": ["judge"], "problem_types": [],
+            "checker_formats": [], "languages": [], "unchecked_problem_types": [],
+            "hooks": [], "judging_inputs": ["checker"],
+        }),
+        display = serde_json::json!({
+            "visibility": false, "contest_types": [], "problem_types": [],
+            "checker_formats": [], "languages": [], "unchecked_problem_types": [],
+            "hooks": [], "judging_inputs": [],
+        }),
+    ))
+    .await;
     let mut last = version().await;
     let changes = [
         (
@@ -602,7 +626,7 @@ async fn every_change_to_a_problems_judging_inputs_counts_in_its_version() {
         (
             "problem config",
             "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
-             VALUES ('problem', '{p}', 'checker', '{{}}', 0, NOW())"
+             VALUES ('problem', '{p}', 'judge:checker', '{{}}', 0, NOW())"
                 .into(),
             true,
         ),
@@ -623,14 +647,54 @@ async fn every_change_to_a_problems_judging_inputs_counts_in_its_version() {
         (
             "contest-problem config",
             "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
-             VALUES ('contest_problem', '7:{p}', 'ioi', '{{}}', 0, NOW())"
+             VALUES ('contest_problem', '7:{p}', 'judge:checker', '{{}}', 0, NOW())"
                 .into(),
             true,
         ),
         (
+            "contest config",
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+             VALUES ('contest', '7', 'judge:checker', '{{}}', 0, NOW())"
+                .into(),
+            true,
+        ),
+        (
+            "another contest's config",
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+             VALUES ('contest', '8', 'judge:checker', '{{}}', 0, NOW())"
+                .into(),
+            false,
+        ),
+        (
+            "plugin config",
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+             VALUES ('plugin', 'judge', 'checker', '{{}}', 0, NOW())"
+                .into(),
+            true,
+        ),
+        (
+            "a config judging does not read",
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
+             VALUES ('problem', '{p}', 'display:checker', '{{}}', 0, NOW()), \
+                    ('contest', '7', 'judge:standings', '{{}}', 0, NOW()), \
+                    ('plugin', 'display', 'checker', '{{}}', 0, NOW())"
+                .into(),
+            false,
+        ),
+        (
+            "contest type",
+            "UPDATE contest SET contest_type = 'other' WHERE id = 7".into(),
+            true,
+        ),
+        (
+            "another contest's type",
+            "UPDATE contest SET contest_type = 'other' WHERE id = 8".into(),
+            false,
+        ),
+        (
             "another problem's config",
             "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
-             VALUES ('problem', '999999', 'checker', '{{}}', 0, NOW())"
+             VALUES ('problem', '999999', 'judge:checker', '{{}}', 0, NOW())"
                 .into(),
             false,
         ),

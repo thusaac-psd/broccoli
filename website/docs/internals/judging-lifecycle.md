@@ -102,22 +102,32 @@ with the first id among the enabled ones that provide it
 `plugin.is_enabled` and `plugin.governs`). The dispatch runs each key on
 that plugin only (`providers::resolve`), never on another provider that
 happens to be loaded here, so one contest is never judged by two plugins
-under two configs. The claim, the system-error retry, the steal and the
-stuck detector take a unit only when this replica has every key's
+under two configs. The provider is the first enabled one, not the first
+one some replica happens to have loaded: a transient load failure must not
+move a contest to another plugin and its config. While a key's provider is
+enabled but loaded on no live replica (its first load failed everywhere, the
+fleet is reloading it, the replica that enabled it restarted), work that
+needs it is parked, exactly as when every provider is disabled: it stays
+`Queued` with `parked_by` naming the plugin (`reason: not_loaded`), a submit
+path refuses new work retryably (`503 PLUGIN_NOT_LOADED` with `Retry-After`,
+where a disabled provider answers `PLUGIN_DISABLED`), and it runs once a
+replica that loads the provider is live (`providers::runnable`,
+`PluginLifecycle::closed_by`, which reads the live replicas' loads as of the
+last reconcile). An administrator who wants the next provider to take the
+key disables the first. The claim, the system-error retry, the steal and
+the stuck detector take a unit only when this replica has every key's
 fleet-wide provider loaded (`Loaded::here`, read from its registries, so the
-check costs no round trip), or when no live replica has one loaded: then the
-replica that takes the unit fails it visibly instead of it waiting unseen
-(`providers::runs_here`). Every attempt would meet the same, so its system
-error stands on the first attempt, never retried, as `PLUGIN_NOT_LOADED`
-with a message naming the plugin, its role and the key
-(`judging::fault::missing_plugin`). Each replica publishes what it has loaded, each key
-with the plugins that registered it there, in its `plugin_replica.provides`
-row. A unit
-this replica cannot run yet stays `Queued` for a replica that can, or for
-this one once it loads the plugin. A plugin that stops being loaded here
-after a unit was claimed with everything loaded (a reload, an unload) is
-this replica's fault, `PLUGIN_NOT_LOADED_HERE`: the attempt is handed back
-without spending any budget (`Dispatch::not_loaded_here`).
+check costs no round trip; `providers::runs_here`). Only a key no enabled
+plugin provides at all is taken by a replica without it, to fail visibly
+instead of waiting unseen: no replica will ever run it, so its system error
+stands on the first attempt, never retried, as `NO_PROVIDER`, with a message
+naming the role and the key (`judging::fault::missing_plugin`). Each replica
+publishes what it has loaded, each key with the plugins that registered it
+there, in its `plugin_replica.provides` row. A plugin the unit needs that is
+not loaded here at dispatch, while an enabled plugin provides the key (a
+reload, an unload, a claim that raced a load), is this replica's fault,
+`PLUGIN_NOT_LOADED_HERE`: the attempt is handed back without spending any
+budget (`Dispatch::missing_plugin`).
 
 ## Judging sessions end in a verdict
 
@@ -219,16 +229,30 @@ hooks as part of itself (a contest plugin's submission call, a detached
 session); the reaper and an applied judgement start them in a task of their
 own that counts as judging work until they have run
 (`spawn_after_judging_hooks`), so neither waits for a hook. A hook event
-is delivered at least once fleet-wide. The replica that dispatches it first
-records it in `hook_event` (its id, topic, payload and enablements) with a
-lease, before its hooks run, so a duplicate dispatch on any replica, or after
-a restart, is skipped. A dispatch that completes marks the event done. One
-whose hooks could not answer (a busy plugin, a database outage), or that is
-dropped, gives the lease back, without waiting on the database, so shutdown
-is never held up. Every replica re-scans the table every 10 s: it runs again
-each event that is not done and whose lease is free or has lapsed (10 min, so
-the event of a replica that died runs again), records and runs the events it
-could not record itself, and deletes completed events after 7 days. Plugins
+is delivered at least once to each hook plugin it is for, and once while
+every write lands. The replica that dispatches it first records it in
+`hook_event` (its id, topic, payload and enablements) with a lease and a
+claim token, before its hooks run, so a duplicate dispatch on any replica, or
+after a restart, is skipped. Each plugin whose hooks answered is recorded in
+`hook_event_delivery`, and a later attempt calls only the plugins not
+recorded there. The event is complete once every hook plugin enabled
+fleet-wide that it is for has it, loaded on this replica or not: each
+plugin's recorded `governs` lists the hooks its manifest declares, so a
+replica that does not load one delivers what it loads and leaves the rest to
+a replica that does. Every write of a dispatch is fenced on its claim token,
+so a dispatch whose lease lapsed and passed to another records nothing. An
+attempt that leaves the event unfinished (a busy plugin, a database outage, a
+plugin not loaded here) gives the lease back and sets `next_attempt_at` 10 s
+later, doubling with each attempt up to an hour; after 12 attempts the event
+is dead-lettered: `dead_at` is set and a `hook_event` message, which
+administrators see in the dead letter queue, is filed in the same
+transaction. A dispatch that is dropped gives its lease back at once, without
+waiting on the database, so shutdown is never held up. Every replica
+re-scans the table every 10 s: it takes the events whose next attempt is due
+and whose lease is free or has lapsed (10 min, so the event of a replica that
+died runs again), earliest due first, so events that keep failing never hold
+back newer ones; it records and runs the events it could not record itself,
+and it deletes completed and dead events after 7 days. Plugins
 take a hook event as idempotent. A client therefore never sees a terminal status
 that a retry takes back: within an attempt the statuses only move forward,
 and a terminal status is final.
@@ -261,11 +285,19 @@ are keyed on it.
 - Everything judging reads of a problem is versioned as one:
   `problem.inputs_version` counts every change to its test cases, its time
   and memory limits, its type, its checker format, its additional files
-  (graders) and its problem-scoped and contest-problem configs (its checker
-  source among them). Database triggers count them (`judging::inputs`), so
+  (graders), the type of each contest it is in, and the stored configs of
+  every namespace a plugin declares a judging input (`judging_input`, its
+  checker source among them) at each scope the config cascade reads: the
+  problem's, a contest problem's, a contest's (every problem of the contest)
+  and the plugin's (every problem). A config of any other namespace counts
+  nothing. Database triggers count them (`judging::inputs`), reading which
+  namespaces are judging inputs from each plugin's recorded `governs`, so
   every write path counts a change without knowing to. The dispatch reads the
   problem and its test cases in one snapshot and stamps the judgement with
-  that snapshot's version (`judging::stamp_inputs_version`). Applying a
+  that snapshot's version (`judging::stamp_inputs_version`). A plugin reads
+  its configs later, while it judges, so a change between the stamp and that
+  read counts after the stamp: the judgement shows as judged on earlier
+  inputs even if it read the new config, which only over-labels. Applying a
   judgement judged against other inputs than the problem has now is refused
   with `409 JUDGED_ON_OTHER_INPUTS` unless the request says `force=true`,
   since its verdicts would show beside inputs they were not judged with; a
@@ -309,10 +341,14 @@ refused (`QUEUE_UNREACHABLE`), an operation the queue lost
 (`OPERATION_LOST`), a worker without a platform tool
 (`PLATFORM_TOOL_MISSING`), a fleet with no live worker that takes work
 (`NO_CAPABLE_WORKER`), a plugin the unit needs that stopped being loaded on
-the replica that claimed it (`PLUGIN_NOT_LOADED_HERE`), a statement its
-plugins ran that the database did not answer (`DATABASE_UNAVAILABLE`, as
-`common::db::is_outage` decides it, recorded by the plugin SQL host functions
-through `Dispatch::note_database_error`). Each of these faults is a hand-back
+the replica that claimed it (`PLUGIN_NOT_LOADED_HERE`), a statement the
+dispatch or its plugins ran that the database could not serve
+(`DATABASE_UNAVAILABLE`): the database lost, its pool or the plugin's own SQL
+permits with nothing free in time. Plugin SQL records it where every
+unavailable statement ends (`host_funcs::sql::unavailable`, through
+`Dispatch::note_outage`), and the dispatch's own statements (reading the
+inputs, stamping their version) by the same rule
+(`DispatchFailure::database`, as `common::db::is_outage` decides it). Each of these faults is a hand-back
 (`SystemErrorClass::HandBack`): the platform lost the attempt, and it never
 becomes a verdict. The judging session ends as `Lost` before another result
 reaches the plugin, a plugin write that would finalize the judgement is fenced

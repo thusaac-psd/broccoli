@@ -2,8 +2,12 @@
 //!
 //! Everything judging reads of a problem is one versioned whole: its test
 //! cases, its time and memory limits, its type, its checker format, its
-//! additional files (graders) and its problem-scoped plugin configs (its
-//! checker source among them, and a contest's per-problem configs).
+//! additional files (graders), the type of each contest it is in, and the
+//! stored configs of every namespace a plugin declares judging reads
+//! (`ConfigNamespace::is_judging_input`, recorded in its `Governs`) at each
+//! scope the config cascade reads: the problem's, a contest problem's, a
+//! contest's (every problem of the contest) and the plugin's (every problem).
+//! A config of any other namespace counts nothing.
 //! `problem.inputs_version` counts every change to any of them, counted by
 //! database triggers (see [`expected`]), so every write path counts it
 //! without knowing to. A transaction that restores rows as they were (a
@@ -12,7 +16,9 @@
 //! with. The dispatch reads the
 //! problem and its test cases in one snapshot and stamps the judgement with
 //! that snapshot's version ([`stamp_inputs_version`]), so the version names
-//! the inputs the judgement was judged with. Applying a judgement of another
+//! the inputs the judgement was judged with. A config a plugin reads while it
+//! judges may change after the stamp; that change counts after it, so the
+//! judgement reads as judged on earlier inputs: it only over-labels. Applying a judgement of another
 //! version needs `force` and marks it (`judging::apply_judgement`).
 
 use common::db::DatabaseConnection;
@@ -74,17 +80,21 @@ BEGIN
   RETURN NEW;
 END $$";
 
-    /// Counts a change to a row of an input table on the problem it belongs
-    /// to: a test case's or additional file's `problem_id`, a problem- or
-    /// contest-problem-scoped config's problem. A rewrite that changes only
-    /// `updated_at` (a config saved as it was) changes nothing judging reads,
-    /// so it counts nothing.
+    /// Counts a change to a row of an input table on the problems it
+    /// reaches: a test case's or additional file's `problem_id`; for a
+    /// config of a namespace its plugin's recorded `governs` names a judging
+    /// input, the problem- or contest-problem-scoped config's problem, each
+    /// problem of a contest-scoped config's contest, and every problem for a
+    /// plugin-scoped one. A config of another namespace, or a rewrite that
+    /// changes only `updated_at` (a config saved as it was), changes nothing
+    /// judging reads, so it counts nothing.
     const ROW_FUNCTION: &str =
         "CREATE OR REPLACE FUNCTION public.broccoli_inputs_changed() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
   changed jsonb;
-  target integer;
+  config_plugin text;
+  config_namespace text;
 BEGIN
   IF current_setting('broccoli.restoring', true) = 'on' THEN
     RETURN NULL;
@@ -98,18 +108,56 @@ BEGIN
       CASE WHEN TG_OP <> 'DELETE' THEN to_jsonb(NEW) END]) AS r
     WHERE r IS NOT NULL
   LOOP
-    IF TG_TABLE_NAME = 'plugin_config' THEN
-      target := CASE changed->>'scope'
-        WHEN 'problem' THEN substring(changed->>'ref_id' FROM '^([0-9]+)$')::integer
-        WHEN 'contest_problem' THEN substring(changed->>'ref_id' FROM '^[0-9]+:([0-9]+)$')::integer
-      END;
+    IF TG_TABLE_NAME <> 'plugin_config' THEN
+      UPDATE public.problem SET inputs_version = inputs_version + 1
+       WHERE id = (changed->>'problem_id')::integer;
+      CONTINUE;
+    END IF;
+    IF changed->>'scope' = 'plugin' THEN
+      config_plugin := changed->>'ref_id';
+      config_namespace := changed->>'namespace';
     ELSE
-      target := (changed->>'problem_id')::integer;
+      config_plugin := split_part(changed->>'namespace', ':', 1);
+      config_namespace := substring(changed->>'namespace' FROM '^[^:]*:(.*)$');
     END IF;
-    IF target IS NOT NULL THEN
-      UPDATE public.problem SET inputs_version = inputs_version + 1 WHERE id = target;
-    END IF;
+    CONTINUE WHEN NOT EXISTS (
+      SELECT 1 FROM public.plugin p
+       WHERE p.id = config_plugin AND p.governs -> 'judging_inputs' ? config_namespace);
+    CASE changed->>'scope'
+      WHEN 'problem' THEN
+        UPDATE public.problem SET inputs_version = inputs_version + 1
+         WHERE id = substring(changed->>'ref_id' FROM '^([0-9]+)$')::integer;
+      WHEN 'contest_problem' THEN
+        UPDATE public.problem SET inputs_version = inputs_version + 1
+         WHERE id = substring(changed->>'ref_id' FROM '^[0-9]+:([0-9]+)$')::integer;
+      WHEN 'contest' THEN
+        UPDATE public.problem SET inputs_version = inputs_version + 1
+         WHERE id IN (SELECT cp.problem_id FROM public.contest_problem cp
+                       WHERE cp.contest_id
+                             = substring(changed->>'ref_id' FROM '^([0-9]+)$')::integer);
+      WHEN 'plugin' THEN
+        UPDATE public.problem SET inputs_version = inputs_version + 1;
+      ELSE
+        NULL;
+    END CASE;
   END LOOP;
+  RETURN NULL;
+END $$";
+
+    /// Counts a change of a contest's type on every problem of the contest:
+    /// the contest type's plugin judges them.
+    const CONTEST_FUNCTION: &str =
+        "CREATE OR REPLACE FUNCTION public.broccoli_contest_inputs_changed() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF current_setting('broccoli.restoring', true) = 'on' THEN
+    RETURN NULL;
+  END IF;
+  IF NEW.contest_type IS DISTINCT FROM OLD.contest_type THEN
+    UPDATE public.problem SET inputs_version = inputs_version + 1
+     WHERE id IN (SELECT cp.problem_id FROM public.contest_problem cp
+                   WHERE cp.contest_id = NEW.id);
+  END IF;
   RETURN NULL;
 END $$";
 
@@ -129,6 +177,14 @@ END $$";
     pub async fn install<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
         db.execute_unprepared(PROBLEM_FUNCTION).await?;
         db.execute_unprepared(ROW_FUNCTION).await?;
+        db.execute_unprepared(CONTEST_FUNCTION).await?;
+        if !has_trigger(db, "contest").await? {
+            db.execute_unprepared(&format!(
+                "CREATE TRIGGER {TRIGGER} AFTER UPDATE ON public.contest \
+                 FOR EACH ROW EXECUTE FUNCTION public.broccoli_contest_inputs_changed()"
+            ))
+            .await?;
+        }
         if !has_trigger(db, "problem").await? {
             db.execute_unprepared(&format!(
                 "CREATE TRIGGER {TRIGGER} BEFORE UPDATE ON public.problem \

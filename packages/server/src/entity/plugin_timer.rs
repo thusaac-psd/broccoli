@@ -29,6 +29,15 @@ pub struct Model {
     #[sea_orm(default_value = 0)]
     pub attempts: i32,
 
+    /// How many deliveries in a row the plugin could not answer.
+    #[sea_orm(default_value = 0)]
+    pub unanswered: i32,
+
+    /// When the timer may be delivered next, after an unanswered delivery;
+    /// `None` once scheduled anew.
+    #[sea_orm(nullable)]
+    pub retry_at: Option<DateTimeUtc>,
+
     pub created_at: DateTimeUtc,
 }
 

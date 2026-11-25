@@ -325,47 +325,96 @@ async fn mixed_contest_with_multiple_problems_and_contestants() {
 
 use super::CPP_SUM;
 
-/// A unit taken while no live replica has a plugin it needs loaded fails on
-/// its first attempt and stands: every attempt would meet the same. Its
-/// system error names the plugin and its role (`PLUGIN_NOT_LOADED`); it is
-/// judged once, never retried. Here the problem's checker plugin is enabled
-/// fleet-wide but loaded on no replica.
-#[tokio::test(flavor = "multi_thread")]
-async fn work_whose_plugin_is_loaded_nowhere_stands_at_once_naming_it() {
+/// The problem, public, with one test case, under `title`, and a contestant.
+async fn problem_with_checker_format(
+    app: &E2eTestApp,
+    admin: &str,
+    title: &str,
+    format: &str,
+) -> i32 {
     use sea_orm::{ConnectionTrait, DbBackend, Statement};
-    let app = E2eTestApp::spawn().await;
-    let admin = app
-        .create_user_with_role("nowhere_admin", "pass1234", "admin")
-        .await;
-    let problem_id = app.create_problem(&admin, "Checker loaded nowhere").await;
-    app.create_test_case_with(problem_id, "5\n1 2 3 4 5", "15", 100, true, &admin)
+    let problem_id = app.create_problem(admin, title).await;
+    app.create_test_case_with(problem_id, "5\n1 2 3 4 5", "15", 100, true, admin)
         .await;
     let res = app
         .patch_with_token(
             &format!("/api/v1/problems/{problem_id}"),
             &json!({"is_public": true}),
-            &admin,
+            admin,
         )
         .await;
     assert!(res.status < 300, "{}", res.text);
-    for sql in [
-        "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
-         ('absent-checker', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [], \
-           \"problem_types\": [], \"checker_formats\": [\"absent-format\"], \
-           \"languages\": [], \"unchecked_problem_types\": []}')"
-            .to_string(),
-        format!("UPDATE problem SET checker_format = 'absent-format' WHERE id = {problem_id}"),
-    ] {
-        app.db
-            .execute_raw(Statement::from_string(DbBackend::Postgres, sql))
-            .await
-            .unwrap();
-    }
+    app.db
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            format!("UPDATE problem SET checker_format = '{format}' WHERE id = {problem_id}"),
+        ))
+        .await
+        .unwrap();
+    problem_id
+}
+
+/// Work whose checker plugin is enabled fleet-wide but loaded on no replica
+/// waits for a replica to load it, as work of a disabled plugin does: a
+/// submission is refused, retryably, naming the plugin
+/// (`503 PLUGIN_NOT_LOADED` with `Retry-After`), and none is taken to fail.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_submission_whose_plugin_is_loaded_nowhere_is_refused_until_one_loads_it() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("nowhere_admin", "pass1234", "admin")
+        .await;
+    let problem_id =
+        problem_with_checker_format(&app, &admin, "Checker loaded nowhere", "absent-format").await;
+    app.db
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
+             ('absent-checker', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [], \
+               \"problem_types\": [], \"checker_formats\": [\"absent-format\"], \
+               \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}')"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
     // Converge on the table; the recorded plugin cannot load here (it has
     // no files), which is the point.
     assert_eq!(app.reconcile_plugins_failing().await, ["absent-checker"]);
     let contestant = app
         .create_authenticated_user("nowhere_user", "pass1234")
+        .await;
+
+    let res = app
+        .post_with_token(
+            &format!("/api/v1/problems/{problem_id}/submissions"),
+            &json!({
+                "language": "cpp",
+                "files": [{"filename": "main.cpp", "content": CPP_SUM}],
+            }),
+            &contestant,
+        )
+        .await;
+    assert_eq!(res.status, 503, "{}", res.text);
+    assert_eq!(res.body["code"], "PLUGIN_NOT_LOADED", "{}", res.text);
+    assert!(res.text.contains("absent-checker"), "{}", res.text);
+    assert!(res.headers.contains_key("retry-after"), "{:?}", res.headers);
+}
+
+/// Work needing a key no enabled plugin provides (a checker format nothing
+/// registered) fails on its first attempt and stands: no replica will ever
+/// run it. Its system error names the role and the key (`NO_PROVIDER`); it
+/// is judged once, never retried.
+#[tokio::test(flavor = "multi_thread")]
+async fn work_whose_key_no_plugin_provides_stands_at_once_naming_it() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("unprovided_admin", "pass1234", "admin")
+        .await;
+    let problem_id =
+        problem_with_checker_format(&app, &admin, "Checker nobody provides", "absent-format").await;
+    let contestant = app
+        .create_authenticated_user("unprovided_user", "pass1234")
         .await;
 
     let id = app
@@ -380,11 +429,9 @@ async fn work_whose_plugin_is_loaded_nowhere_stands_at_once_naming_it() {
     assert_eq!(staff.status, 200, "{}", staff.text);
     let result = &staff.body["result"];
     assert_eq!(result["verdict"], "SystemError", "{}", staff.text);
-    assert_eq!(result["error_code"], "PLUGIN_NOT_LOADED", "{}", staff.text);
+    assert_eq!(result["error_code"], "NO_PROVIDER", "{}", staff.text);
     assert_eq!(
-        result["error_message"],
-        "the checker plugin absent-checker for checker format \"absent-format\" \
-         is loaded on no live replica",
+        result["error_message"], "no checker plugin provides checker format \"absent-format\"",
         "{}",
         staff.text
     );

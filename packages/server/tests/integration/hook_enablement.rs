@@ -12,7 +12,10 @@ use tokio::sync::RwLock;
 
 const PROBLEM: i32 = 41;
 
-fn registry_owning(contest_type: &str, plugin_id: &str) -> ContestTypeRegistry {
+/// The owners of a replica where `plugin_id` registered `contest_type` and
+/// the fleet has recorded nothing, so the key is owned by what is loaded
+/// here.
+fn registry_owning(contest_type: &str, plugin_id: &str) -> server::registry::TypeProviders {
     let mut map = server::registry::Providers::default();
     map.insert(
         contest_type.to_string(),
@@ -23,7 +26,13 @@ fn registry_owning(contest_type: &str, plugin_id: &str) -> ContestTypeRegistry {
             submission_admission: false,
         },
     );
-    Arc::new(RwLock::new(map))
+    let contest_types: ContestTypeRegistry = Arc::new(RwLock::new(map));
+    server::registry::TypeProviders::new(
+        contest_types,
+        Default::default(),
+        Default::default(),
+        Default::default(),
+    )
 }
 
 async fn contest_of_type(app: &TestApp, contest_type: Option<&str>) -> i32 {

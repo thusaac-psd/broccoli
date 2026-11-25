@@ -151,6 +151,7 @@ impl From<DlqStats> for DlqStatsResponse {
                 stuck_submission: s.stuck_submission_count,
                 stuck_code_run: s.stuck_code_run_count,
                 stuck_submission_judgement: s.stuck_submission_judgement_count,
+                hook_event: s.hook_event_count,
             },
             unresolved_by_error_code: s.unresolved_by_error_code,
         }

@@ -40,15 +40,6 @@ impl RegistryState {
             .cloned()
             .collect()
     }
-
-    /// Which plugin provides each type a problem or contest has.
-    pub fn type_providers(&self) -> crate::registry::TypeProviders {
-        crate::registry::TypeProviders::new(
-            self.contest_type_registry.clone(),
-            self.evaluator_registry.clone(),
-            self.checker_stage_registry.clone(),
-        )
-    }
 }
 
 #[derive(Clone)]
@@ -77,4 +68,17 @@ pub struct AppState {
     pub plugin_sql: crate::plugin_db::PluginSqlPools,
     /// The worker list the system overview last read.
     pub last_workers: crate::handlers::system::LastWorkers,
+}
+
+impl AppState {
+    /// Which plugin owns each type a problem or contest has, by the fleet
+    /// rule (`registry::TypeProviders`).
+    pub fn type_providers(&self) -> crate::registry::TypeProviders {
+        crate::registry::TypeProviders::new(
+            self.registries.contest_type_registry.clone(),
+            self.registries.evaluator_registry.clone(),
+            self.registries.checker_stage_registry.clone(),
+            self.plugin_lifecycle.clone(),
+        )
+    }
 }

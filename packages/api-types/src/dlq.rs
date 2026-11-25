@@ -14,6 +14,8 @@ pub struct MessageTypeCounts {
     pub stuck_code_run: u64,
     #[schema(example = 1)]
     pub stuck_submission_judgement: u64,
+    #[schema(example = 0)]
+    pub hook_event: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

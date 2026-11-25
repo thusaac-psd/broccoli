@@ -226,43 +226,47 @@ async fn by_deadline<T>(
 /// A plugin statement's answer, as the call takes it: the one rule for a
 /// database outage on every plugin SQL path. An outage
 /// ([`common::db::is_outage`]) fails the call as unavailable
-/// ([`crate::plugin_db::Unavailable::settle`]), and under a dispatch it is
-/// the platform's, not the submission's, so it is also recorded on the
-/// dispatch (`judging::Dispatch::note_database_error`), which hands the
-/// attempt back instead of spending its budget. Any other error is the
-/// statement's own and goes back to the plugin.
+/// ([`crate::plugin_db::Unavailable::settle`], then [`unavailable`]). Any
+/// other error is the statement's own and goes back to the plugin.
 fn settle<T>(
     answer: Result<T, sea_orm::DbErr>,
 ) -> Result<Result<T, sea_orm::DbErr>, crate::plugin_db::Unavailable> {
-    settle_under(
-        crate::services::judging::Dispatch::of_current_call(),
-        answer,
-    )
-}
-
-/// [`settle`] for a call running under `dispatch`.
-fn settle_under<T>(
-    dispatch: Option<crate::services::judging::Dispatch>,
-    answer: Result<T, sea_orm::DbErr>,
-) -> Result<Result<T, sea_orm::DbErr>, crate::plugin_db::Unavailable> {
-    if let (Err(e), Some(dispatch)) = (&answer, dispatch) {
-        dispatch.note_database_error(e);
-    }
     crate::plugin_db::Unavailable::settle(answer)
 }
 
 /// Fail the running call as unavailable: the plugin's SQL cannot run right
 /// now, which says nothing about the request, so callers answer it with "try
-/// again". The call names why, by one mapping: a database that cannot be
-/// reached fails it as `DATABASE_UNAVAILABLE`; a pool with no connection
-/// free in time, the host's or the plugin's own, as `DATABASE_BUSY`; a
-/// statement cut at its deadline, an unloaded plugin or an unprovisioned role
-/// as the plugin's `PLUGIN_UNAVAILABLE`.
+/// again". Every way plugin SQL becomes unavailable ends here, so the call
+/// names why by one mapping: a database that cannot be reached fails it as
+/// `DATABASE_UNAVAILABLE`; a pool with no connection free in time, the
+/// host's or the plugin's own SQL permits, as `DATABASE_BUSY`; a statement
+/// cut at its deadline, an unloaded plugin or an unprovisioned role as the
+/// plugin's `PLUGIN_UNAVAILABLE`. Under a dispatch the database's two are
+/// the platform's, not the submission's: they are also recorded on the
+/// dispatch (`judging::Dispatch::note_outage`), which hands the attempt back
+/// instead of spending its budget.
 fn unavailable(e: crate::plugin_db::Unavailable) -> extism::Error {
+    unavailable_under(
+        crate::services::judging::Dispatch::of_current_call().as_ref(),
+        e,
+    )
+}
+
+/// [`unavailable`] for a call running under `dispatch`.
+fn unavailable_under(
+    dispatch: Option<&crate::services::judging::Dispatch>,
+    e: crate::plugin_db::Unavailable,
+) -> extism::Error {
     tracing::warn!(error = %e, "Plugin SQL unavailable");
-    match Unanswered::of(&e) {
-        Unanswered::DatabaseLost => super::host_db::fail_call(common::db::Outage::Lost),
-        Unanswered::DatabaseBusy => super::host_db::fail_call(common::db::Outage::Busy),
+    let unanswered = Unanswered::of(&e);
+    if let Some(dispatch) = dispatch
+        && unanswered != Unanswered::Plugin
+    {
+        dispatch.note_outage(e.to_string());
+    }
+    match unanswered {
+        Unanswered::DatabaseLost => plugin_core::executor::fail_database_unavailable(),
+        Unanswered::DatabaseBusy => plugin_core::executor::fail_database_busy(),
         Unanswered::Plugin => plugin_core::executor::fail_unavailable(),
     }
     extism::Error::new(e)
@@ -1447,43 +1451,56 @@ mod tests {
             Dispatch, DispatchFault, DispatchFaults, DispatchedUnit, LiveDispatches,
         };
 
-        let faults = DispatchFaults::default();
-        let dispatch = Dispatch::new(
-            "p",
-            LiveDispatches::default().enter(
-                DispatchedUnit::Judgement {
-                    submission_id: 1,
-                    judgement_id: 1,
-                    judge_epoch: 1,
-                },
-                true,
-            ),
-            faults.clone(),
-        );
-        let own = settle_under::<()>(
-            Some(dispatch.clone()),
-            Err(sea_orm::DbErr::Custom("duplicate key".into())),
-        );
+        let under = || {
+            let faults = DispatchFaults::default();
+            let dispatch = Dispatch::new(
+                "p",
+                LiveDispatches::default().enter(
+                    DispatchedUnit::Judgement {
+                        submission_id: 1,
+                        judgement_id: 1,
+                        judge_epoch: 1,
+                    },
+                    true,
+                ),
+                faults.clone(),
+            );
+            (dispatch, faults)
+        };
+        let (dispatch, faults) = under();
+        let own = settle::<()>(Err(sea_orm::DbErr::Custom("duplicate key".into())));
         assert!(matches!(own, Ok(Err(_))), "the plugin's own error");
+        drop(dispatch);
         assert!(faults.get().is_none());
 
-        let outage = settle_under::<()>(
-            Some(dispatch),
-            Err(sea_orm::DbErr::ConnectionAcquire(
-                sea_orm::error::ConnAcquireErr::Timeout,
-            )),
-        );
-        assert!(matches!(
-            outage,
-            Err(crate::plugin_db::Unavailable::Outage(
-                common::db::Outage::Lost,
-                _
-            ))
-        ));
-        assert_eq!(
-            faults.lost().map(|r| r.fault),
-            Some(DispatchFault::DatabaseUnavailable)
-        );
+        // Every way plugin SQL finds the database unable to serve it, a lost
+        // database, a saturated pool or no plugin SQL permit free in time,
+        // hands the attempt back.
+        for (cause, fault) in [
+            (
+                settle::<()>(Err(sea_orm::DbErr::ConnectionAcquire(
+                    sea_orm::error::ConnAcquireErr::Timeout,
+                )))
+                .unwrap_err(),
+                DispatchFault::DatabaseUnavailable,
+            ),
+            (
+                settle::<()>(Err(common::db::pool_busy())).unwrap_err(),
+                DispatchFault::DatabaseUnavailable,
+            ),
+            (
+                crate::plugin_db::Unavailable::Busy,
+                DispatchFault::DatabaseUnavailable,
+            ),
+        ] {
+            let (dispatch, faults) = under();
+            let what = cause.to_string();
+            let _ = unavailable_under(Some(&dispatch), cause);
+            assert_eq!(faults.lost().map(|r| r.fault), Some(fault), "{what}");
+        }
+        let (dispatch, faults) = under();
+        let _ = unavailable_under(Some(&dispatch), crate::plugin_db::Unavailable::Deadline);
+        assert!(faults.get().is_none(), "a deadline cut is the call's own");
     }
 
     /// Plugin SQL that cannot run fails its call by one mapping: a lost

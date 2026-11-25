@@ -1,6 +1,5 @@
 use crate::error::HostCode;
 use crate::providers::Provided;
-use crate::registry::ContestTypeRegistry;
 use broccoli_server_sdk::types::{
     AfterJudgingEvent, DetachedSubmissionCompletion, HookEvent, OnSubmissionInput,
     OnSubmissionOutput, SourceFile, TestCaseBodyRef, TestCaseRow,
@@ -68,10 +67,10 @@ pub(crate) fn spawn_after_judging_hooks(state: &AppState, submission_id: i32, sh
     let judging = state.registries.judging_sessions.track();
     let db = state.db.clone();
     let hook_registry = state.registries.hook_registry.clone();
-    let contest_types = state.registries.contest_type_registry.clone();
+    let owners = state.type_providers();
     tokio::spawn(async move {
         let _judging = judging;
-        fire_after_judging_hooks(&db, hook_registry, &contest_types, submission_id, shown).await;
+        fire_after_judging_hooks(&db, hook_registry, &owners, submission_id, shown).await;
     });
 }
 
@@ -80,7 +79,7 @@ pub(crate) fn spawn_after_judging_hooks(state: &AppState, submission_id: i32, sh
 pub(crate) async fn fire_after_judging_hooks(
     db: &DatabaseConnection,
     hook_registry: hooks::SharedHookRegistry,
-    contest_types: &ContestTypeRegistry,
+    owners: &crate::registry::TypeProviders,
     submission_id: i32,
     shown: ResultShown,
 ) {
@@ -100,13 +99,13 @@ pub(crate) async fn fire_after_judging_hooks(
         return;
     }
 
-    dispatch_after_judging_hooks(db, hook_registry, contest_types, &sub, shown).await;
+    dispatch_after_judging_hooks(db, hook_registry, owners, &sub, shown).await;
 }
 
 pub(crate) async fn fire_after_judging_hooks_for_detached_completion(
     db: &DatabaseConnection,
     hook_registry: hooks::SharedHookRegistry,
-    contest_types: &ContestTypeRegistry,
+    owners: &crate::registry::TypeProviders,
     completion: &DetachedSubmissionCompletion,
 ) {
     if !completion.fire_after_judging {
@@ -157,13 +156,13 @@ pub(crate) async fn fire_after_judging_hooks_for_detached_completion(
         }
     }
 
-    dispatch_after_judging_hooks(db, hook_registry, contest_types, &sub, ResultShown::Judged).await;
+    dispatch_after_judging_hooks(db, hook_registry, owners, &sub, ResultShown::Judged).await;
 }
 
 async fn dispatch_after_judging_hooks(
     db: &DatabaseConnection,
     hook_registry: hooks::SharedHookRegistry,
-    contest_types: &ContestTypeRegistry,
+    owners: &crate::registry::TypeProviders,
     sub: &submission::Model,
     shown: ResultShown,
 ) {
@@ -173,20 +172,14 @@ async fn dispatch_after_judging_hooks(
         .map(|v| v.to_string())
         .unwrap_or_else(|| sub.status.to_string());
 
-    let enabled_plugins = match hooks::resource_enablements(
-        db,
-        contest_types,
-        sub.problem_id,
-        sub.contest_id,
-    )
-    .await
-    {
-        Ok(e) => Some(e),
-        Err(e) => {
-            warn!(error = ?e, "Failed to fetch enablements for after_judging hook");
-            None
-        }
-    };
+    let enabled_plugins =
+        match hooks::resource_enablements(db, owners, sub.problem_id, sub.contest_id).await {
+            Ok(e) => Some(e),
+            Err(e) => {
+                warn!(error = ?e, "Failed to fetch enablements for after_judging hook");
+                None
+            }
+        };
 
     let event = AfterJudgingEvent {
         submission_id: sub.id,
@@ -347,10 +340,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &state.metrics,
                 judgement_ref,
                 &faults,
-                DispatchFailure::judging(
-                    HostCode::DatabaseError,
-                    format!("Failed to read the judging inputs: {e}"),
-                ),
+                DispatchFailure::database("read the judging inputs", &e),
             )
             .await;
             return;
@@ -383,10 +373,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &state.metrics,
                 judgement_ref,
                 &faults,
-                DispatchFailure::judging(
-                    HostCode::DatabaseError,
-                    format!("Failed to fetch problem: {}", e),
-                ),
+                DispatchFailure::database("fetch the problem", &e),
             )
             .await;
             return;
@@ -439,7 +426,12 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             .all(&inputs)
             .await
         {
-            Ok(tcs) => tcs,
+            // Everything judging reads in the snapshot is read: it closes
+            // before any body is spilled to blob storage.
+            Ok(tcs) => {
+                drop(inputs);
+                tcs
+            }
             Err(e) => {
                 error!(error = %e, "Failed to query test cases");
                 record_dispatch_failure(
@@ -447,7 +439,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                     &state.metrics,
                     judgement_ref,
                     &faults,
-                    DispatchFailure::judging(HostCode::DatabaseError, format!("Failed to query test cases: {}", e)),
+                    DispatchFailure::database("read the test cases", &e),
                 )
                 .await;
                 return;
@@ -561,7 +553,6 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
         }
         resolved_test_cases
     };
-    drop(inputs);
     if let Err(e) = judging::stamp_inputs_version(
         &state.db,
         judgement_ref.id,
@@ -576,10 +567,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             &state.metrics,
             judgement_ref,
             &faults,
-            DispatchFailure::judging(
-                HostCode::DatabaseError,
-                format!("Failed to record the judging inputs version: {e}"),
-            ),
+            DispatchFailure::database("record the judging inputs version", &e),
         )
         .await;
         return;
@@ -628,7 +616,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
     let dispatch = Dispatch::new(&plugin_id, live, faults.clone());
     let plugins = state.plugins.clone();
     let hook_registry = state.registries.hook_registry.clone();
-    let contest_types = state.registries.contest_type_registry.clone();
+    let owners = state.type_providers();
     let db = state.db.clone();
     let metrics = state.metrics.clone();
     let submission_id = submission.id;
@@ -714,7 +702,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 fire_after_judging_hooks(
                     &db,
                     hook_registry,
-                    &contest_types,
+                    &owners,
                     submission_id,
                     ResultShown::Judged,
                 )

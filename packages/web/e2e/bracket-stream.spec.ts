@@ -131,6 +131,7 @@ test("a match's submission feed names outcomes and times in the UI language", as
           parked_by: {
             plugin_id: 'codelink-bracket',
             provides: 'contest_type',
+            reason: 'disabled',
           },
         },
       ]),

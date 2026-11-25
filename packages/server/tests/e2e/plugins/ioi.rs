@@ -1867,7 +1867,7 @@ async fn cut_by_a_disable(change: Change) {
     assert!(res.body["withheld"].is_null(), "{}", res.text);
     assert_eq!(res.body["status"], "Queued", "{}", res.text);
     let outage = json!({"state": "disabled", "plugin_id": "ioi"});
-    let parked = json!({"plugin_id": "ioi", "provides": "contest_type"});
+    let parked = json!({"plugin_id": "ioi", "provides": "contest_type", "reason": "disabled"});
     assert_eq!(res.body["parked_by"], parked, "{}", res.text);
     let res = app
         .get_with_token(

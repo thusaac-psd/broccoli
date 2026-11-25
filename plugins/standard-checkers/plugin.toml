@@ -40,6 +40,7 @@ type = "string"
 title = "Content"
 
 [config.testlib]
+judging_input = true
 description = "Testlib checker compiler and resource limit settings."
 scopes = ["plugin"]
 
@@ -114,6 +115,7 @@ step = 1024
 unit = "KB"
 
 [config.checker]
+judging_input = true
 description = "Tolerances of the tokens-float checker format: a token matches when it differs from the answer by at most max(abs_tol, rel_tol * max(|answer|, |output|))."
 scopes = ["problem"]
 

@@ -9,7 +9,11 @@ import {
 } from './progress.ts';
 
 const DISABLED = { state: 'disabled', plugin_id: 'icpc' } as const;
-const PARKED = { plugin_id: 'icpc', provides: 'contest_type' } as const;
+const PARKED = {
+  plugin_id: 'icpc',
+  provides: 'contest_type',
+  reason: 'disabled',
+} as const;
 const UNAVAILABLE = { state: 'unavailable' } as const;
 
 describe('where a submission stands', () => {

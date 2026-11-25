@@ -3,7 +3,7 @@
 
 use crate::tui::theme::THEME;
 use broccoli_api_types::submission::{SubmissionListItem, SubmissionResponse};
-use broccoli_api_types::visibility::{ClosedBy, PluginOutage, Provided, Withheld};
+use broccoli_api_types::visibility::{ClosedBy, ClosedReason, PluginOutage, Provided, Withheld};
 pub use broccoli_api_types::{SubmissionStatus, Verdict};
 use ratatui::style::Color;
 use std::cell::OnceCell;
@@ -144,6 +144,7 @@ impl Standing {
             Self::Parked(ClosedBy {
                 plugin_id,
                 provides,
+                reason,
             }) => {
                 let role = match provides {
                     Provided::ContestType => "its contest plugin",
@@ -151,8 +152,12 @@ impl Standing {
                     Provided::CheckerFormat => "its checker plugin",
                     Provided::Language => "its language plugin",
                 };
+                let why = match reason {
+                    ClosedReason::Disabled => "disabled until an administrator enables it",
+                    ClosedReason::NotLoaded => "loaded on no server until one loads it",
+                };
                 Some(format!(
-                    "Waiting for {role} {}: disabled until an administrator enables it",
+                    "Waiting for {role} {}: {why}",
                     names.name(plugin_id)
                 ))
             }
@@ -321,6 +326,7 @@ mod tests {
                 Some(&ClosedBy {
                     plugin_id: plugin_id.into(),
                     provides,
+                    reason: ClosedReason::Disabled,
                 }),
             )
         };
@@ -352,6 +358,20 @@ mod tests {
                 .unwrap()
                 .starts_with("Waiting for its language plugin standard-languages:")
         );
+        // A provider loaded on no server says so, not that it is disabled.
+        let not_loaded = Standing::new(
+            Some(SubmissionStatus::Queued),
+            None,
+            Some(&ClosedBy {
+                plugin_id: "ioi".into(),
+                provides: Provided::ContestType,
+                reason: ClosedReason::NotLoaded,
+            }),
+        );
+        assert_eq!(
+            not_loaded.waiting_for(&names).as_deref(),
+            Some("Waiting for its contest plugin IOI: loaded on no server until one loads it")
+        );
         // A finished submission is finished whatever its plugin does now.
         let judged = Standing::new(
             Some(SubmissionStatus::Judged),
@@ -359,6 +379,7 @@ mod tests {
             Some(&ClosedBy {
                 plugin_id: "ioi".into(),
                 provides: Provided::ContestType,
+                reason: ClosedReason::Disabled,
             }),
         );
         assert_eq!(judged, Standing::Status(SubmissionStatus::Judged));

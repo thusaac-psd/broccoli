@@ -1318,6 +1318,8 @@ async fn a_disabled_provider_still_names_the_contest_types_it_provided() {
                 "checker_formats": [],
                 "languages": [],
                 "unchecked_problem_types": [],
+                "hooks": [],
+                "judging_inputs": [],
             })
             .into(),
             UPLOAD_ONLY.into(),

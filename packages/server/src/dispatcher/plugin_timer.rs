@@ -21,7 +21,10 @@
 //! `attempts` counts deliveries the plugin answered or that ran to the end
 //! of their lease. A delivery the plugin could not answer (its SQL met a
 //! database outage, the server is draining, the plugin is between loads)
-//! is handed back with its attempt refunded. The claim statement is the
+//! is handed back with its attempt refunded and its next delivery backed off
+//! (`retry_at`, [`unanswered_backoff`]); after [`MAX_UNANSWERED`] in a row
+//! the refund stops, so a plugin that never answers spends the timer's
+//! budget and the timer is dropped loudly. The claim statement is the
 //! single owner of the retry budget: it never claims a row whose budget is
 //! spent and, in the same statement, deletes every such row whose last
 //! claim's lease has expired, however that last delivery ended (a trap, a
@@ -53,6 +56,20 @@ use crate::state::AppState;
 /// How much longer a timer's claim lease runs than one delivery may: room for
 /// the delivery to wait for admission before its guest starts.
 pub const LEASE_MARGIN: StdDuration = StdDuration::from_secs(30);
+
+/// How many deliveries in a row the plugin may leave unanswered with their
+/// attempt refunded; past this each unanswered delivery spends one.
+pub const MAX_UNANSWERED: i32 = 12;
+
+/// The wait before delivering a timer again after its `unanswered`th
+/// unanswered delivery in a row: 5 s, doubling, up to 5 min.
+pub fn unanswered_backoff(unanswered: i32) -> StdDuration {
+    common::retry::doubling_backoff(
+        unanswered.max(0) as u32,
+        StdDuration::from_secs(5),
+        StdDuration::from_secs(300),
+    )
+}
 
 /// Config for the plugin-timer delivery loop. Defaults: 1s tick, 64-row
 /// batch, 5 delivery attempts before a timer is dropped, the default plugin
@@ -209,7 +226,10 @@ pub async fn tick_once(state: &AppState, config: &TimerConfig) -> Result<TickSta
             }
         }
     }
-    let unreached: Vec<plugin_timer::Model> = unanswered.into_iter().chain(rows).collect();
+    for row in &unanswered {
+        back_off_unanswered(&state.db, row).await;
+    }
+    let unreached: Vec<plugin_timer::Model> = rows.collect();
     if !unreached.is_empty() {
         release_unreached(&state.db, &unreached).await;
     }
@@ -235,6 +255,8 @@ struct ClaimRow {
     claimed_at: Option<chrono::DateTime<chrono::Utc>>,
     attempts: i32,
     created_at: chrono::DateTime<chrono::Utc>,
+    unanswered: i32,
+    retry_at: Option<chrono::DateTime<chrono::Utc>>,
     exhausted: bool,
 }
 
@@ -279,21 +301,24 @@ async fn claim_due(
           DELETE FROM plugin_timer
           WHERE attempts >= $4
             AND claimed_at < now() - ($1 || ' seconds')::interval
-          RETURNING id, plugin_id, key, fire_at, payload, claimed_at, attempts, created_at
+          RETURNING id, plugin_id, key, fire_at, payload, claimed_at, attempts, created_at,
+                    unanswered, retry_at
         ), due AS (
           UPDATE plugin_timer
           SET claimed_at = now(), attempts = attempts + 1
           WHERE id IN (
             SELECT id FROM plugin_timer
             WHERE fire_at <= now()
+              AND (retry_at IS NULL OR retry_at <= now())
               AND attempts < $4
               AND (claimed_at IS NULL OR claimed_at < now() - ($1 || ' seconds')::interval)
               AND plugin_id = ANY($3)
-            ORDER BY fire_at
+            ORDER BY COALESCE(retry_at, fire_at)
             LIMIT $2
             FOR UPDATE SKIP LOCKED
           )
-          RETURNING id, plugin_id, key, fire_at, payload, claimed_at, attempts, created_at
+          RETURNING id, plugin_id, key, fire_at, payload, claimed_at, attempts, created_at,
+                    unanswered, retry_at
         )
         SELECT *, FALSE AS exhausted FROM due
         UNION ALL
@@ -322,6 +347,8 @@ async fn claim_due(
             claimed_at: row.claimed_at,
             attempts: row.attempts,
             created_at: row.created_at,
+            unanswered: row.unanswered,
+            retry_at: row.retry_at,
         };
         if row.exhausted {
             claim.exhausted.push(model);
@@ -359,6 +386,50 @@ async fn release_unreached(db: &DatabaseConnection, rows: &[plugin_timer::Model]
         .await
     {
         error!(error = %e, rows = rows.len(), "Failed to release unreached plugin timers");
+    }
+}
+
+/// Hands a claimed row whose plugin could not answer back, its next delivery
+/// backed off by [`unanswered_backoff`]: with its attempt refunded while the
+/// plugin has left fewer than [`MAX_UNANSWERED`] deliveries in a row
+/// unanswered, and with it spent after that. Only a row still holding this
+/// claim is touched. Errors are logged: the row then stays claimed and is
+/// retried after the lease with one attempt spent.
+async fn back_off_unanswered(db: &DatabaseConnection, row: &plugin_timer::Model) {
+    let Some(claimed_at) = row.claimed_at else {
+        return;
+    };
+    let unanswered = row.unanswered.saturating_add(1);
+    let refund = i32::from(unanswered <= MAX_UNANSWERED);
+    if refund == 0 {
+        warn!(
+            plugin_id = %row.plugin_id,
+            key = %row.key,
+            unanswered,
+            "Plugin has not answered a timer's deliveries; each now spends an attempt"
+        );
+    }
+    let sql = r#"
+        UPDATE plugin_timer
+        SET claimed_at = NULL, attempts = attempts - $3, unanswered = $4,
+            retry_at = now() + make_interval(secs => $5)
+        WHERE id = $1 AND claimed_at = $2
+    "#;
+    if let Err(e) = db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            [
+                row.id.into(),
+                claimed_at.into(),
+                refund.into(),
+                unanswered.into(),
+                unanswered_backoff(unanswered).as_secs_f64().into(),
+            ],
+        ))
+        .await
+    {
+        error!(id = row.id, error = %e, "Failed to hand back an unanswered plugin timer");
     }
 }
 
@@ -817,6 +888,95 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["b"],
             "a released row is immediately claimable again"
+        );
+    }
+
+    async fn exec(db: &DatabaseConnection, sql: &str) {
+        sea_orm::ConnectionTrait::execute_unprepared(db, sql)
+            .await
+            .unwrap();
+    }
+
+    /// A delivery the plugin could not answer is handed back backed off:
+    /// it is not claimed again before its `retry_at`, each one in a row
+    /// waits longer, and its attempt is refunded only while the plugin has
+    /// left fewer than [`MAX_UNANSWERED`] in a row unanswered. Scheduling the
+    /// key anew forgets all of it.
+    #[tokio::test]
+    async fn an_unanswered_delivery_backs_off_and_refunds_only_up_to_its_cap() {
+        let db = test_db().await;
+        seed_timer(&db, "p", "t", now() - Duration::seconds(5), None).await;
+        let claimed = claim(&db, 64).await;
+        back_off_unanswered(&db, &claimed[0]).await;
+        let row = find(&db, "t").await.unwrap();
+        assert_eq!((row.attempts, row.unanswered, row.claimed_at), (0, 1, None));
+        let wait = (row.retry_at.expect("backed off") - now()).num_milliseconds();
+        assert!(
+            0 < wait && wait <= unanswered_backoff(1).as_millis() as i64,
+            "waits the first backoff, waited {wait} ms"
+        );
+        assert!(claim(&db, 64).await.is_empty(), "not before its retry_at");
+
+        exec(
+            &db,
+            "UPDATE plugin_timer SET retry_at = now() - interval '1 second'",
+        )
+        .await;
+        let claimed = claim(&db, 64).await;
+        assert_eq!(claimed.len(), 1, "claimed again once due");
+        back_off_unanswered(&db, &claimed[0]).await;
+        let row = find(&db, "t").await.unwrap();
+        assert_eq!((row.attempts, row.unanswered), (0, 2));
+        assert!(unanswered_backoff(2) > unanswered_backoff(1));
+
+        exec(
+            &db,
+            &format!(
+                "UPDATE plugin_timer SET unanswered = {MAX_UNANSWERED}, \
+                        retry_at = now() - interval '1 second'"
+            ),
+        )
+        .await;
+        let claimed = claim(&db, 64).await;
+        back_off_unanswered(&db, &claimed[0]).await;
+        let row = find(&db, "t").await.unwrap();
+        assert_eq!(
+            (row.attempts, row.unanswered),
+            (1, MAX_UNANSWERED + 1),
+            "past the cap an unanswered delivery spends its attempt"
+        );
+
+        crate::host_funcs::timer::schedule(
+            &db,
+            "p",
+            "t",
+            (now() - Duration::seconds(1)).timestamp_millis(),
+            "again",
+        )
+        .await
+        .unwrap();
+        let row = find(&db, "t").await.unwrap();
+        assert_eq!((row.attempts, row.unanswered, row.retry_at), (0, 0, None));
+    }
+
+    /// A timer backed off after unanswered deliveries never holds back one
+    /// that fell due after it: the claim takes timers by when they may next
+    /// be delivered.
+    #[tokio::test]
+    async fn a_backed_off_timer_does_not_starve_newer_ones() {
+        let db = test_db().await;
+        seed_timer(&db, "p", "old", now() - Duration::minutes(10), None).await;
+        seed_timer(&db, "p", "new", now() - Duration::seconds(5), None).await;
+        exec(
+            &db,
+            "UPDATE plugin_timer SET unanswered = 3, retry_at = now() - interval '1 second' \
+              WHERE key = 'old'",
+        )
+        .await;
+        let claimed = claim(&db, 1).await;
+        assert_eq!(
+            claimed.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(),
+            ["new"]
         );
     }
 

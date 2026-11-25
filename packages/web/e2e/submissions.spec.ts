@@ -42,7 +42,11 @@ test('a long problem title stays on one line on a phone, in full in its title', 
 
 const DISABLED_OUTAGE = { state: 'disabled', plugin_id: 'icpc' };
 /** What the server says closes work while `icpc` is disabled. */
-const CLOSED_BY_ICPC = { plugin_id: 'icpc', provides: 'contest_type' };
+const CLOSED_BY_ICPC = {
+  plugin_id: 'icpc',
+  provides: 'contest_type',
+  reason: 'disabled',
+};
 const WAITING = 'Waiting: its contest plugin icpc is disabled';
 
 /** A submission parked because its contest type's provider is disabled. */

@@ -49,16 +49,31 @@ pub enum Provided {
     Language,
 }
 
-/// The plugin that keeps new work of a resource from running: every plugin
-/// that provides what the work needs (`provides`) is disabled fleet-wide,
-/// and this is the first of them by id. A submission it closes is accepted
-/// by no submit path and, if already queued, waits (parked) until an
-/// administrator enables a provider.
+/// The plugin that keeps new work of a resource from running, and why
+/// (`reason`): every plugin that provides what the work needs (`provides`)
+/// is disabled fleet-wide, and this is the first of them by id; or this is
+/// the key's provider, enabled but loaded on no live replica. A submission it
+/// closes is accepted by no submit path and, if already queued, waits
+/// (parked) until a provider can run it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ClosedBy {
     #[schema(example = "my-plugin")]
     pub plugin_id: String,
     pub provides: Provided,
+    pub reason: ClosedReason,
+}
+
+/// Why a plugin keeps work from running ([`ClosedBy`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClosedReason {
+    /// It and every other provider of the key are disabled: the work waits
+    /// until an administrator enables one.
+    Disabled,
+    /// It is the key's provider, enabled, and loaded on no live replica (it
+    /// failed to load everywhere, or the fleet is reloading it): the work
+    /// waits until a replica that loads it is live.
+    NotLoaded,
 }
 
 /// A language new work may be written in that no enabled plugin provides

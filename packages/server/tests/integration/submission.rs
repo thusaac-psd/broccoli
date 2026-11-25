@@ -1659,14 +1659,23 @@ mod judgement_history {
                 _ => {
                     use sea_orm::ConnectionTrait;
                     app.db
-                        .execute_raw(sea_orm::Statement::from_string(
-                            sea_orm::DbBackend::Postgres,
-                            format!(
-                                "INSERT INTO plugin_config (scope, ref_id, namespace, config, \
+                        .execute_unprepared(
+                            // A config of a namespace its plugin declares
+                            // judging reads.
+                            &format!(
+                                "INSERT INTO plugin (id, is_enabled, generation, updated_at, \
+                                                     governs) \
+                                 VALUES ('inputs-plugin', TRUE, 0, NOW(), \
+                                         '{{\"visibility\": false, \"contest_types\": [], \
+                                           \"problem_types\": [], \"checker_formats\": [], \
+                                           \"languages\": [], \"unchecked_problem_types\": [], \
+                                           \"hooks\": [], \"judging_inputs\": [\"checker\"]}}'); \
+                                 INSERT INTO plugin_config (scope, ref_id, namespace, config, \
                                                             position, updated_at) \
-                                 VALUES ('problem', '{problem_id}', 'checker', '{{}}', 0, NOW())"
+                                 VALUES ('problem', '{problem_id}', 'inputs-plugin:checker', \
+                                         '{{}}', 0, NOW())"
                             ),
-                        ))
+                        )
                         .await
                         .unwrap();
                 }

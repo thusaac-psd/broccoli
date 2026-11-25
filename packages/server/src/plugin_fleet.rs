@@ -121,6 +121,32 @@ pub async fn report(
 /// Touch this replica's heartbeat, leaving its report as it is. Only an
 /// existing row is touched: the first [`report`] creates it, and a row
 /// [`retire`] removed stays removed.
+/// What the live replicas have loaded, each key with every plugin that
+/// registered it on one of them: the union of their reported
+/// `plugin_replica.provides`, live by their heartbeat on the database clock.
+pub async fn live_loaded(db: &DatabaseConnection) -> Result<crate::providers::Loaded, DbErr> {
+    let rows = db
+        .query_all_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT provides FROM plugin_replica \
+              WHERE provides IS NOT NULL \
+                AND heartbeat_at > NOW() - make_interval(secs => $1)",
+            [(LIVE_WINDOW_SECS as f64).into()],
+        ))
+        .await?;
+    let mut loaded = crate::providers::Loaded::default();
+    for row in rows {
+        let provides: serde_json::Value = row.try_get("", "provides")?;
+        match serde_json::from_value::<crate::providers::Loaded>(provides) {
+            Ok(theirs) => loaded.merge(&theirs),
+            Err(e) => {
+                tracing::warn!(error = %e, "A replica reported what it has loaded in a shape this build does not read")
+            }
+        }
+    }
+    Ok(loaded)
+}
+
 pub async fn heartbeat(db: &DatabaseConnection, server_id: &str) -> Result<(), DbErr> {
     db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,

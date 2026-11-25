@@ -153,7 +153,11 @@ test('a practice problem closed by an outage opens for submitting once the plugi
       : {
           ...problem(1),
           plugin_outage: DISABLED_OUTAGE,
-          closed_by: { plugin_id: 'icpc', provides: 'contest_type' },
+          closed_by: {
+            plugin_id: 'icpc',
+            provides: 'contest_type',
+            reason: 'disabled',
+          },
         },
   );
   await page.goto('/problems/1?tab=coding');
@@ -173,6 +177,7 @@ test('a practice problem closed by an outage opens for submitting once the plugi
 const EVALUATOR_CLOSED = {
   plugin_id: 'batch-evaluator',
   provides: 'problem_type',
+  reason: 'disabled',
 } as const;
 
 for (const [name, path, api] of [
@@ -221,14 +226,14 @@ for (const [name, locale, plugins, parkedBy, label] of [
     'its contest type plugin, by its translated name',
     'zh-CN',
     ['icpc'],
-    { plugin_id: 'icpc', provides: 'contest_type' },
+    { plugin_id: 'icpc', provides: 'contest_type', reason: 'disabled' },
     '等待中：其比赛插件「ICPC 赛制」已被禁用',
   ],
   [
     'its evaluator plugin, by its id when no pack names it',
     'en',
     [],
-    { plugin_id: 'some-plugin', provides: 'problem_type' },
+    { plugin_id: 'some-plugin', provides: 'problem_type', reason: 'disabled' },
     'Waiting: its evaluator plugin some-plugin is disabled',
   ],
 ] as const) {

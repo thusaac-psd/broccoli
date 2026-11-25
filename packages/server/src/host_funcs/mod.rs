@@ -622,11 +622,7 @@ fn register_config_functions(
 
     let db = host_db.clone();
     let manager = deps.plugin_manager.clone();
-    let types = crate::registry::TypeProviders::new(
-        deps.system.contest_type_registry.clone(),
-        deps.system.evaluator_registry.clone(),
-        deps.system.checker_stage_registry.clone(),
-    );
+    let types = deps.system.type_providers();
     let cache = deps.system.plugin_config_cache.clone();
     hr.register("config:write", move |plugin_id| {
         config::create_config_set_function(

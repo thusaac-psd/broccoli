@@ -376,7 +376,7 @@ async fn finish_judgement(
     fire_after_judging_hooks_for_detached_completion(
         &deps.db,
         deps.hook_registry.clone(),
-        &deps.contest_type_registry,
+        &deps.owners,
         completion,
     )
     .await;

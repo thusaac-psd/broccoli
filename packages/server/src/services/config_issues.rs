@@ -95,7 +95,7 @@ impl<'a> ConfigChecker<'a> {
     pub(crate) fn of(state: &'a AppState) -> Self {
         Self {
             plugins: state.plugins.as_ref(),
-            types: state.registries.type_providers(),
+            types: state.type_providers(),
         }
     }
 }
