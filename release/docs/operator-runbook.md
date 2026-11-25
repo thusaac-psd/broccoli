@@ -42,17 +42,33 @@ docker compose --env-file .env.gateway -f docker-compose.gateway.yaml logs --tai
 
 ### Health probes and metrics
 
-Each server answers `/livez` (the process is up), `/healthz` (it can also reach
-Postgres, Redis and blob storage) and `/metrics` on its main HTTP port. These
-share the runtime that serves API requests and judging, so a server saturated by
-a submission burst can answer a probe slowly and fail it even though it is still
-working. The gateway probes `/livez` every 5 s with a 2 s timeout and ejects a
-server after 2 misses (`health_interval`, `health_timeout` and `health_fails` in
-`examples/Caddyfile.gateway`, and in `airgap/caddy/Caddyfile.airgap` for an
-airgap install). If servers are ejected under load while their logs show them
-still serving, raise `health_timeout` or `health_fails` there and restart the
-gateway. A Prometheus scrape of `/metrics` can likewise time out under load;
-give it a scrape timeout of a few seconds.
+Each server answers three probes and `/metrics` on its main HTTP port:
+
+- `/livez`, liveness: the process is up and serving HTTP. It calls nothing else.
+- `/readyz`, readiness: this server should take browsers. It answers 503
+  `"not_ready"` while another live server can take submissions this one would
+  refuse: a contest type's plugin is loaded there but not here (its load keeps
+  failing, or its files are missing), so a submission or code run pinned here
+  would answer `CONTEST_TYPE_UNAVAILABLE` until the load succeeds. Servers that
+  each lack a different plugin, or a plugin no server could load, are all ready,
+  so the gateway always keeps a server. It makes no database or Redis call.
+- `/healthz`, the deep check for monitoring: it also reaches Postgres, Redis and
+  blob storage (below). It is never a gateway probe: the servers share those, so
+  one blip would fail it on every server at once.
+
+These share the runtime that serves API requests and judging, so a server
+saturated by a submission burst can answer a probe slowly and fail it even
+though it is still working. The gateway probes `/readyz` every 5 s with a 2 s
+timeout and ejects a server after 2 misses (`health_interval`, `health_timeout`
+and `health_fails` in `examples/Caddyfile.gateway`, and in
+`airgap/caddy/Caddyfile.airgap` for an airgap install). An ejected server's
+browsers are pinned to a ready one on their next request, and come back to it
+only if that one goes away. A server that stays not ready names the plugin in
+the admin plugin page (each server's state) and its logs; fix the load and click
+Reload. If servers are ejected under load while their logs show them still
+serving, raise `health_timeout` or `health_fails` there and restart the gateway.
+A Prometheus scrape of `/metrics` can likewise time out under load; give it a
+scrape timeout of a few seconds.
 
 `/healthz` answers 200 with `"status": "ok"` while no dependency is down, and
 503 with `"status": "degraded"` and the component that is (`"db"`, `"mq"` or

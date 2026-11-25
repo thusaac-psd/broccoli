@@ -118,35 +118,38 @@ pub async fn report(
     Ok(())
 }
 
-/// Touch this replica's heartbeat, leaving its report as it is. Only an
-/// existing row is touched: the first [`report`] creates it, and a row
-/// [`retire`] removed stays removed.
-/// What the live replicas have loaded, each key with every plugin that
-/// registered it on one of them: the union of their reported
-/// `plugin_replica.provides`, live by their heartbeat on the database clock.
-pub async fn live_loaded(db: &DatabaseConnection) -> Result<crate::providers::Loaded, DbErr> {
+/// What each live replica has loaded, by server id: its reported
+/// `plugin_replica.provides`, live by its heartbeat on the database clock.
+pub async fn live_replicas(
+    db: &DatabaseConnection,
+) -> Result<Vec<(String, crate::providers::Loaded)>, DbErr> {
     let rows = db
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT provides FROM plugin_replica \
+            "SELECT server_id, provides FROM plugin_replica \
               WHERE provides IS NOT NULL \
-                AND heartbeat_at > NOW() - make_interval(secs => $1)",
+                AND heartbeat_at > NOW() - make_interval(secs => $1) \
+              ORDER BY server_id",
             [(LIVE_WINDOW_SECS as f64).into()],
         ))
         .await?;
-    let mut loaded = crate::providers::Loaded::default();
+    let mut replicas = Vec::with_capacity(rows.len());
     for row in rows {
+        let server_id: String = row.try_get("", "server_id")?;
         let provides: serde_json::Value = row.try_get("", "provides")?;
         match serde_json::from_value::<crate::providers::Loaded>(provides) {
-            Ok(theirs) => loaded.merge(&theirs),
+            Ok(theirs) => replicas.push((server_id, theirs)),
             Err(e) => {
-                tracing::warn!(error = %e, "A replica reported what it has loaded in a shape this build does not read")
+                tracing::warn!(server_id, error = %e, "A replica reported what it has loaded in a shape this build does not read")
             }
         }
     }
-    Ok(loaded)
+    Ok(replicas)
 }
 
+/// Touch this replica's heartbeat, leaving its report as it is. Only an
+/// existing row is touched: the first [`report`] creates it, and a row
+/// [`retire`] removed stays removed.
 pub async fn heartbeat(db: &DatabaseConnection, server_id: &str) -> Result<(), DbErr> {
     db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,

@@ -23,7 +23,7 @@ The bundle covers four roles:
   servers, the first one is the infra node and the others join it (see
   "Multi-server topology" below).
 - **gateway** — a gateway-only node: just the internal-CA TLS Caddy gateway,
-  balancing across several servers and health-checking each on `/livez`.
+  balancing across several servers and health-checking each on `/readyz`.
 - **worker** — the judging box that runs the isolate sandbox and executes
   submissions.
 - **contestant** — a contestant's machine, which only needs the LAN root CA
@@ -453,13 +453,14 @@ Install the nodes in this order.
    ```
 
    The gateway gets a TLS leaf covering every `--lan-host` from the CA scripts,
-   reusing a current one. It checks each server on `GET /livez` every 5 s, stops
-   sending traffic to one after two failed checks, and retries a request that
-   cannot reach a server on another one. It also prints the address the servers
-   see it as; if that differs from what you passed as `--gateway-host`, re-run
-   the server installs with that address and `--reconfigure`. Run the gateway on
-   a host of its own: on a host that also runs a server, the server sees the
-   gateway's Docker bridge address instead.
+   reusing a current one. It checks each server on `GET /readyz` every 5 s (see
+   Health probes in the operator runbook), stops sending traffic to one after
+   two failed checks, and retries a request that cannot reach a server on
+   another one. It also prints the address the servers see it as; if that
+   differs from what you passed as `--gateway-host`, re-run the server installs
+   with that address and `--reconfigure`. Run the gateway on a host of its own:
+   on a host that also runs a server, the server sees the gateway's Docker
+   bridge address instead.
 
 4. **Workers.** Point each worker at the infra node:
 

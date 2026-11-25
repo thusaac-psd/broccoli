@@ -25,10 +25,12 @@
 	# documentation is for the operators, who reach a server directly.
 	@internal path /metrics /metrics/* /swagger-ui /swagger-ui/* /scalar /scalar/* /api-docs /api-docs/*
 	respond @internal 404
-	# Same upstream policy as examples/Caddyfile.gateway: probe the shallow
-	# /livez (not /healthz, which fails on every server at once when Postgres
-	# or Redis blips), eject an upstream after two misses, and retry requests
-	# that cannot reach an upstream on another one instead of returning 502.
+	# Same upstream policy as examples/Caddyfile.gateway: probe /readyz,
+	# which fails while another server can take submissions this one would
+	# refuse and makes no Postgres or Redis call (/healthz does, and fails on
+	# every server at once when they blip), eject an upstream after two
+	# misses, and retry requests that cannot reach an upstream on another one
+	# instead of returning 502.
 	reverse_proxy {$BROCCOLI_UPSTREAMS} {
 		# Each browser sticks to one server (the broccoli_upstream cookie), so
 		# during a rolling upgrade it loads the page and its chunks from one
@@ -40,7 +42,7 @@
 		lb_policy cookie broccoli_upstream {
 			fallback round_robin
 		}
-		health_uri /livez
+		health_uri /readyz
 		health_interval 5s
 		health_timeout 2s
 		health_fails 2

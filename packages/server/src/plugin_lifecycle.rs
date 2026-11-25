@@ -78,6 +78,9 @@ pub struct PluginLifecycle {
     /// registered it on one of them, as of the last reconcile
     /// (`plugin_replica.provides`); `None` before the first read.
     fleet_loaded: RwLock<Option<crate::providers::Loaded>>,
+    /// What each other live replica has loaded, as of the last reconcile
+    /// (its `plugin_replica.provides`), for [`Self::ready`].
+    fleet_peers: RwLock<Vec<crate::providers::Loaded>>,
     /// Set by [`stop`] at shutdown: no further report writes.
     stopped: std::sync::atomic::AtomicBool,
 }
@@ -366,6 +369,67 @@ impl PluginLifecycle {
         if let Ok(mut slot) = self.fleet_loaded.write() {
             *slot = Some(loaded);
         }
+    }
+
+    /// Records what each other live replica has loaded (see
+    /// [`Self::ready`]).
+    pub(crate) fn set_fleet_peers(&self, peers: Vec<crate::providers::Loaded>) {
+        if let Ok(mut slot) = self.fleet_peers.write() {
+            *slot = peers;
+        }
+    }
+
+    /// The `kind` keys whose fleet-wide provider ([`Self::provider`]) is not
+    /// loaded in `loaded`, each with that provider, sorted: the one "provider
+    /// missing here" rule. Work on such a key that reaches a replica with
+    /// `loaded` waits for another replica, or is refused there
+    /// (`CONTEST_TYPE_UNAVAILABLE` for a contest type, [`accepting_handler`]).
+    pub fn missing_here(
+        &self,
+        kind: Provided,
+        loaded: &crate::providers::Loaded,
+    ) -> std::collections::BTreeSet<(String, String)> {
+        use crate::providers::FleetProvider;
+        let Ok(governs) = self.governs.read() else {
+            return Default::default();
+        };
+        let keys: std::collections::BTreeSet<String> = governs
+            .values()
+            .flat_map(|g| g.provides.keys(kind))
+            .cloned()
+            .collect();
+        drop(governs);
+        keys.into_iter()
+            .filter_map(|key| match self.provider(kind, &key) {
+                FleetProvider::Plugin(id) if !loaded.has(kind, &key, &id) => Some((key, id)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether this replica, with `local` loaded, should take browsers: no
+    /// live peer misses only a strict part of the contest types it misses
+    /// ([`Self::missing_here`]). A peer that does serves every submission
+    /// this replica takes and more, so a gateway that health-checks
+    /// readiness re-pins this replica's browsers there instead of leaving
+    /// them refused. The order is partial, so some replica is always ready:
+    /// replicas that each lack a different type, or a type no replica has
+    /// loaded, are all ready, and a plugin failing everywhere never takes
+    /// the fleet out of rotation. Only contest types count, since they are
+    /// what a request on this replica needs loaded here; the other keys only
+    /// steer which replica claims judging work.
+    pub fn ready(&self, local: &crate::providers::Loaded) -> bool {
+        let mine = self.missing_here(Provided::ContestType, local);
+        if mine.is_empty() {
+            return true;
+        }
+        let Ok(peers) = self.fleet_peers.read() else {
+            return true;
+        };
+        !peers.iter().any(|peer| {
+            let theirs = self.missing_here(Provided::ContestType, peer);
+            theirs.len() < mine.len() && theirs.is_subset(&mine)
+        })
     }
 
     /// What closes new work on a problem whose `needs` name no language yet
@@ -995,9 +1059,19 @@ async fn reconcile_locked(
     }
     // What the live replicas have loaded, this one's own registrations
     // included before its next report lands.
-    let mut loaded = plugin_fleet::live_loaded(&state.db).await?;
-    loaded.merge(&crate::providers::Loaded::here(&state.registries).await);
+    let replicas = plugin_fleet::live_replicas(&state.db).await?;
+    let mut loaded = crate::providers::Loaded::here(&state.registries).await;
+    for (_, theirs) in &replicas {
+        loaded.merge(theirs);
+    }
     state.plugin_lifecycle.set_fleet_loaded(loaded);
+    state.plugin_lifecycle.set_fleet_peers(
+        replicas
+            .into_iter()
+            .filter(|(server_id, _)| *server_id != state.config.server.id)
+            .map(|(_, theirs)| theirs)
+            .collect(),
+    );
     Ok(failures)
 }
 
@@ -2342,6 +2416,62 @@ mod tests {
         lifecycle.set_desired("eval", eval_enabled);
         lifecycle.set_desired("check", check_enabled);
         lifecycle
+    }
+
+    /// A replica is ready unless a live peer serves every contest type it
+    /// serves on its fleet-wide provider and more: then a gateway sends its
+    /// browsers to a replica that takes their submissions. Replicas that
+    /// each lack a different type, and a type no replica has loaded, leave
+    /// every replica ready, so the gateways always keep one.
+    #[test]
+    fn a_replica_is_unready_only_while_a_peer_serves_strictly_more_contest_types() {
+        let lifecycle = PluginLifecycle::default();
+        for (plugin, types) in [
+            ("judge1", vec!["t1"]),
+            ("judge2", vec!["t2"]),
+            ("zz", vec!["t2"]),
+        ] {
+            lifecycle.set_governs(
+                plugin,
+                Governs {
+                    provides: Provides {
+                        contest_types: types.into_iter().map(String::from).collect(),
+                        ..Provides::default()
+                    },
+                    ..Governs::default()
+                },
+            );
+            lifecycle.set_desired(plugin, true);
+        }
+        let loaded = |types: &[(&str, &str)]| {
+            let mut loaded = crate::providers::Loaded::default();
+            for (key, plugin) in types {
+                loaded
+                    .of_mut(Provided::ContestType)
+                    .entry(key.to_string())
+                    .or_default()
+                    .push(plugin.to_string());
+            }
+            loaded
+        };
+        let here = loaded(&[("t1", "judge1")]);
+        assert_eq!(
+            lifecycle.missing_here(Provided::ContestType, &here),
+            [("t2".to_string(), "judge2".to_string())].into()
+        );
+
+        assert!(lifecycle.ready(&here), "no peer known yet");
+        lifecycle.set_fleet_peers(vec![loaded(&[("t1", "judge1"), ("t2", "judge2")])]);
+        assert!(!lifecycle.ready(&here), "a peer serves t2 as well");
+        assert!(lifecycle.ready(&loaded(&[("t1", "judge1"), ("t2", "judge2")])));
+
+        // t2 on a provider that is not its fleet-wide one serves nothing more.
+        lifecycle.set_fleet_peers(vec![loaded(&[("t1", "judge1"), ("t2", "zz")])]);
+        assert!(lifecycle.ready(&here));
+        // Each lacks what the other has: neither serves more.
+        lifecycle.set_fleet_peers(vec![loaded(&[("t2", "judge2")])]);
+        assert!(lifecycle.ready(&here));
+        assert!(lifecycle.ready(&loaded(&[("t2", "judge2")])));
     }
 
     /// A problem's submit is closed for each language whose providers are

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Both gateway Caddyfiles health-check upstreams on the shallow /livez, retry
-# unreachable upstreams and pin each browser to one upstream by cookie (so a
+# Both gateway Caddyfiles health-check upstreams on /readyz (which makes no
+# dependency call), retry unreachable upstreams and pin each browser to one upstream by cookie (so a
 # rolling upgrade never serves it one build's page and another's chunks),
 # every shipped Caddyfile keeps the internal
 # endpoints (/metrics, the API docs) off the public edge, and all parse with a
@@ -14,7 +14,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 
 for cf in "${files[@]}"; do
   name="$(basename "$cf")"
-  grep -Eq '^[[:space:]]*health_uri[[:space:]]+/livez$' "$cf" || fail "$name does not probe /livez"
+  grep -Eq '^[[:space:]]*health_uri[[:space:]]+/readyz$' "$cf" || fail "$name does not probe /readyz"
   [ "$(grep -Ec '^[[:space:]]*health_uri' "$cf")" = 1 ] || fail "$name has more than one health_uri"
   grep -Eq '^[[:space:]]*lb_policy[[:space:]]+cookie[[:space:]]' "$cf" || fail "$name does not pin browsers by cookie"
   grep -Eq '^[[:space:]]*fallback[[:space:]]+round_robin$' "$cf" || fail "$name has no round_robin fallback"
@@ -96,4 +96,4 @@ for p in proxies:
     assert not policy.get("secret"), policy
 ' || fail "$(basename "$cf") does not pick upstreams by cookie with a round-robin fallback"
 done
-echo "PASS: gateway Caddyfiles probe /livez and validate with $image"
+echo "PASS: gateway Caddyfiles probe /readyz and validate with $image"

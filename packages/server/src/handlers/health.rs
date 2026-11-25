@@ -179,9 +179,9 @@ pub async fn probe_dependencies(
 /// The deep readiness / monitoring check, shared between the documented
 /// `/api/v1/health` route and the plain `/healthz` route: the shared
 /// dependencies plus this replica's plugin readiness. Load balancers should
-/// probe [`livez`] instead: every server shares the same database and Redis, so
-/// a dependency blip would fail this check on every replica at once and leave
-/// the balancer with no upstream at all.
+/// probe [`readyz`] instead: every server shares the same database and Redis,
+/// so a dependency blip would fail this check on every replica at once and
+/// leave the balancer with no upstream at all.
 pub async fn compute_health(state: &AppState) -> HealthResponse {
     let deps = probe_dependencies(&state.db, &state.mq, state.blob_store.as_ref()).await;
     let plugins_ready = crate::plugin_lifecycle::not_ready(state).is_empty();
@@ -217,8 +217,9 @@ pub async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
 /// `GET /livez`: shallow liveness. The process is up and its HTTP stack is
 /// serving; no database, Redis or object-storage call is made, so it keeps
 /// answering while shared infrastructure is down and costs next to nothing at a
-/// 5 s probe interval. This is what a load balancer should probe; `/healthz`
-/// is the deep check for readiness and monitoring.
+/// 5 s probe interval. A load balancer probes [`readyz`], which adds whether
+/// this replica should take browsers; `/healthz` is the deep check for
+/// monitoring.
 pub async fn livez() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -229,17 +230,40 @@ pub async fn livez() -> impl IntoResponse {
     )
 }
 
+/// `GET /readyz`: whether this replica should take browsers, the probe the
+/// shipped gateways health-check. It fails (503 `not_ready`) while a live
+/// peer serves every contest type this replica serves on its fleet-wide
+/// provider and more (`PluginLifecycle::ready`): a submission or code run
+/// pinned here would be refused `CONTEST_TYPE_UNAVAILABLE` until the load
+/// here succeeds, so the gateway re-pins its browsers to a ready replica.
+/// It makes no dependency call, so a database or Redis blip never ejects
+/// every replica at once, and its public body names no plugin.
+pub async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    let local = crate::providers::Loaded::here(&state.registries).await;
+    if state.plugin_lifecycle.ready(&local) {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "ready" })),
+        )
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "status": "not_ready" })),
+        )
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/health",
     tag = "Meta",
     operation_id = "getHealth",
-    summary = "Server readiness and dependency health",
+    summary = "Server dependency health",
     description = "Public, unauthenticated. Pings the database, message queue and blob storage concurrently, \
                    within a 1.5s total budget. Returns 200 with `status: \"ok\"` when no probed \
                    component is down (a database whose pool is saturated reads `db: \"busy\"` \
                    and is not down); 503 with `status: \"degraded\"` otherwise. This is the \
-                   deep readiness check; load balancers should probe the shallow `GET /livez`, \
+                   deep check for monitoring; load balancers should probe `GET /readyz`, \
                    which makes no dependency calls.",
     responses(
         (status = 200, description = "All components healthy", body = HealthResponse),

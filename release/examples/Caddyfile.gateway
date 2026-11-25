@@ -17,10 +17,12 @@
 		lb_policy cookie broccoli_upstream {
 			fallback round_robin
 		}
-		# /livez checks only that the server process answers; /healthz also
-		# pings Postgres and Redis, so probing it would eject every server at
-		# once whenever the shared infra blips. Two misses eject an upstream.
-		health_uri /livez
+		# /readyz fails while another server can take submissions this one
+		# would refuse (it lacks a contest type's plugin a peer has loaded), so
+		# its browsers are re-pinned to a ready server. It makes no database
+		# or Redis call; /healthz does, so probing it would eject every server
+		# at once whenever the shared infra blips. Two misses eject an upstream.
+		health_uri /readyz
 		health_interval 5s
 		health_timeout 2s
 		health_fails 2
