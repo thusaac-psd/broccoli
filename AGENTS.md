@@ -385,10 +385,12 @@ binaries warn about every key they do not read.
   every enabled plugin it serves and more, of any kind: one rule,
   `PluginLifecycle::ready_among` on the one "missing here while a peer serves
   it" predicate, `PluginLifecycle::missing_here_served_by_peer`, over the one
-  fleet read, `plugin_fleet::live_loaded`. The admin system overview shows each
-  server's verdict and what it lacks through the same two; `/readyz` names no
-  plugin. `/livez` is liveness and `/healthz` the deep check for monitoring; no
-  gateway probe makes a dependency call.
+  fleet read, `plugin_fleet::live_loaded`. Admission reads the same predicate
+  over the same fresh peers (`PluginLifecycle::missing_here`, the
+  `PLUGIN_NOT_LOADED_HERE` branch of `PluginLifecycle::outage`), and the admin
+  system overview shows each server's verdict and what it lacks through it;
+  `/readyz` names no plugin. `/livez` is liveness and `/healthz` the deep check
+  for monitoring; no gateway probe makes a dependency call.
 - Every submit path (practice and contest submissions, code runs) accepts work
   through one rule, `plugin_lifecycle::accepting_handler`, which refuses a
   contest type no provider can judge now; a new submit path calls it too.
