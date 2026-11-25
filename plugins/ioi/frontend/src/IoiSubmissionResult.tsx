@@ -50,19 +50,55 @@ const TEST_CASE_OUTPUT_FIELDS = [
   'expected_output',
 ] as const;
 
-const METHOD_META: Record<string, { abbrKey: string; color: string }> = {
-  group_min: { abbrKey: 'ioi.submission.method.groupMin', color: '#ef4444' },
-  sum: { abbrKey: 'ioi.submission.method.sum', color: '#10b981' },
-  group_mul: { abbrKey: 'ioi.submission.method.groupMul', color: '#f59e0b' },
+/**
+ * Each scoring method's label: its text, tuned to read at WCAG AA in both
+ * themes, and the fill behind it.
+ */
+const METHOD_META: Record<
+  string,
+  { abbrKey: string; text: string; fill: string }
+> = {
+  group_min: {
+    abbrKey: 'ioi.submission.method.groupMin',
+    text: 'text-red-700 dark:text-red-300',
+    fill: '#ef4444',
+  },
+  sum: {
+    abbrKey: 'ioi.submission.method.sum',
+    text: 'text-emerald-700 dark:text-emerald-300',
+    fill: '#10b981',
+  },
+  group_mul: {
+    abbrKey: 'ioi.submission.method.groupMul',
+    text: 'text-amber-700 dark:text-amber-300',
+    fill: '#f59e0b',
+  },
 };
 
-function scoreColor(score: number, maxScore: number): string {
-  if (maxScore <= 0) return '#6b7280';
+/** How much of its maximum a score earned: all, part, or none. */
+type ScoreTone = 'full' | 'partial' | 'none';
+
+function scoreTone(score: number, maxScore: number): ScoreTone {
+  if (maxScore <= 0) return 'none';
   const frac = score / maxScore;
-  if (frac >= 1) return '#10b981';
-  if (frac > 0) return '#f59e0b';
-  return '#6b7280';
+  if (frac >= 1) return 'full';
+  if (frac > 0) return 'partial';
+  return 'none';
 }
+
+/** A tone's text, tuned to read at WCAG AA in both themes. */
+const TONE_TEXT: Record<ScoreTone, string> = {
+  full: 'text-emerald-700 dark:text-emerald-300',
+  partial: 'text-amber-700 dark:text-amber-300',
+  none: 'text-muted-foreground',
+};
+
+/** A tone's fill, for the bars and edges that carry no text. */
+const TONE_FILL: Record<ScoreTone, string> = {
+  full: '#10b981',
+  partial: '#f59e0b',
+  none: '#6b7280',
+};
 
 function formatMs(ms: number): string {
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(2)}s`;
@@ -129,8 +165,10 @@ function TestCaseDetailPanel({
         </span>
         {tc.score != null && (
           <span
-            className="ml-1 font-mono tabular-nums text-[11px] font-semibold"
-            style={{ color: tc.score > 0 ? '#10b981' : '#6b7280' }}
+            className={cn(
+              'ml-1 font-mono tabular-nums text-[11px] font-semibold',
+              TONE_TEXT[tc.score > 0 ? 'full' : 'none'],
+            )}
           >
             {t('ioi.submission.score', { score: tc.score })}
           </span>
@@ -191,8 +229,8 @@ function TestCaseTile({
   const Icon = tc.isMissing ? AlertCircle : style.icon;
   const clickable = tcHasDetails(tc);
   const tcScore = tc.score ?? 0;
-  const tcScoreColor =
-    tc.verdict === 'Accepted' ? '#10b981' : tcScore > 0 ? '#f59e0b' : '#6b7280';
+  const tcScoreTone: ScoreTone =
+    tc.verdict === 'Accepted' ? 'full' : tcScore > 0 ? 'partial' : 'none';
   return (
     <div
       role={clickable ? 'button' : undefined}
@@ -238,8 +276,10 @@ function TestCaseTile({
       )}
       {tc.score != null && (
         <span
-          className="font-mono tabular-nums text-[10px] font-semibold"
-          style={{ color: tcScoreColor }}
+          className={cn(
+            'font-mono tabular-nums text-[10px] font-semibold',
+            TONE_TEXT[tcScoreTone],
+          )}
         >
           {tc.score}
         </span>
@@ -360,12 +400,11 @@ function TotalScoreSummary({
           {tokened && <TokenedBadge />}
         </div>
         <div
-          className="flex items-baseline justify-center font-mono tabular-nums text-2xl font-bold"
-          style={
-            maxScore === undefined
-              ? undefined
-              : { color: scoreColor(totalScore, maxScore) }
-          }
+          className={cn(
+            'flex items-baseline justify-center font-mono tabular-nums text-2xl font-bold',
+            maxScore !== undefined &&
+              TONE_TEXT[scoreTone(totalScore, maxScore)],
+          )}
         >
           {totalScore.toFixed(totalScore === Math.floor(totalScore) ? 0 : 2)}
           {maxScore !== undefined && (
@@ -420,17 +459,20 @@ function SubtaskCard({
   const [selectedTcIndex, setSelectedTcIndex] = useState<number | null>(null);
   const maxScore = subtask.max_score;
   const frac = maxScore > 0 ? score / maxScore : 0;
-  const color = scoreColor(score, maxScore);
+  const tone = scoreTone(score, maxScore);
+  const color = TONE_FILL[tone];
   const { t } = useTranslation();
   const methodRaw = METHOD_META[subtask.scoring_method] ?? {
     abbrKey: '?',
-    color: '#6b7280',
+    text: 'text-muted-foreground',
+    fill: '#6b7280',
   };
   const method = {
     abbr: methodRaw.abbrKey.startsWith('ioi.')
       ? t(methodRaw.abbrKey)
       : methodRaw.abbrKey,
-    color: methodRaw.color,
+    text: methodRaw.text,
+    fill: methodRaw.fill,
   };
 
   const selectedTc =
@@ -452,18 +494,20 @@ function SubtaskCard({
             </div>
           </div>
           <span
-            className="rounded font-mono tabular-nums px-1.5 py-px text-[9px] font-bold tracking-wide"
-            style={{
-              background: `${method.color}14`,
-              color: method.color,
-            }}
+            className={cn(
+              'rounded font-mono tabular-nums px-1.5 py-px text-[9px] font-bold tracking-wide',
+              method.text,
+            )}
+            style={{ background: `${method.fill}14` }}
           >
             {method.abbr}
           </span>
         </div>
         <span
-          className="whitespace-nowrap font-mono tabular-nums text-sm font-bold mr-2"
-          style={{ color }}
+          className={cn(
+            'whitespace-nowrap font-mono tabular-nums text-sm font-bold mr-2',
+            TONE_TEXT[tone],
+          )}
         >
           {score.toFixed(score === Math.floor(score) ? 0 : 2)}
           <span className="text-xs font-normal text-muted-foreground">
@@ -547,7 +591,7 @@ function TokenedBadge() {
   return (
     <Badge
       variant="secondary"
-      className="rounded-full bg-blue-500/10 px-2 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-blue-500"
+      className="rounded-full bg-blue-500/10 px-2 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-blue-700 dark:text-blue-300"
     >
       {t('ioi.submission.tokened')}
     </Badge>
@@ -789,8 +833,10 @@ export function IoiSubmissionResult({
           </span>
         </div>
         <span
-          className="font-mono tabular-nums text-base font-bold mr-2"
-          style={{ color: scoreColor(totalScore, maxPossible) }}
+          className={cn(
+            'font-mono tabular-nums text-base font-bold mr-2',
+            TONE_TEXT[scoreTone(totalScore, maxPossible)],
+          )}
         >
           {totalScore.toFixed(totalScore === Math.floor(totalScore) ? 0 : 2)}
           <span className="text-[13px] font-normal text-muted-foreground">

@@ -1,3 +1,4 @@
+import AxeBuilder from '@axe-core/playwright';
 import { expect, type Page, test } from '@playwright/test';
 
 import {
@@ -598,3 +599,26 @@ test('a token spent in one tab shows the result in another tab already open on i
   await page.getByRole('button', { name: 'Confirm' }).click();
   await expect(other.getByText(/37\s?ms/).first()).toBeVisible();
 });
+
+for (const theme of ['light', 'dark']) {
+  test(`a tokened IOI result reads clearly (${theme})`, async ({ page }) => {
+    await serveTokenAtSubtaskScores(page, { tokened: true });
+    await page.addInitScript((t) => localStorage.setItem('theme', t), theme);
+    await page.goto('/contests/4/problems/1?tab=coding');
+    await page.getByText('#9').first().click();
+    // The whole result: the badge, the totals, the subtask and its rows.
+    await expect(page.getByText('Tokened').first()).toBeVisible();
+    await expect(page.getByText('Small')).toBeVisible();
+    await expect(page.getByText(/37\s?ms/).first()).toBeVisible();
+
+    const { violations } = await new AxeBuilder({ page })
+      .withTags(['wcag2a', 'wcag2aa'])
+      .analyze();
+    expect(
+      violations.map((v) => ({
+        rule: v.id,
+        nodes: v.nodes.map((n) => n.target.join(' ')),
+      })),
+    ).toEqual([]);
+  });
+}
