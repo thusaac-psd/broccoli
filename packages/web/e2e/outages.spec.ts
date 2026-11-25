@@ -8,6 +8,7 @@ import {
   runClockUntil,
   submission,
 } from './api';
+import registries from './fixture-registries.json' with { type: 'json' };
 
 // A plugin outage is temporary: what it closes or withholds is asked for
 // again, slowly, and opens or shows again once the plugin is back.
@@ -126,7 +127,7 @@ test('a contest problem closed by an outage opens for submitting once the plugin
   await expect(
     page
       .getByText(
-        'Results for this contest are unavailable while its plugin is disabled.',
+        'Results for this contest are unavailable while its plugin icpc is disabled.',
       )
       .first(),
   ).toBeVisible();
@@ -221,7 +222,7 @@ for (const [name, locale, plugins, parkedBy, label] of [
     'zh-CN',
     ['icpc'],
     { plugin_id: 'icpc', provides: 'contest_type' },
-    '等待中：其比赛插件 ICPC 赛制 已被禁用',
+    '等待中：其比赛插件「ICPC 赛制」已被禁用',
   ],
   [
     'its evaluator plugin, by its id when no pack names it',
@@ -253,3 +254,77 @@ for (const [name, locale, plugins, parkedBy, label] of [
     await expect(page.getByText(label).first()).toBeVisible();
   });
 }
+
+// A language plugin is a plugin a submission needs like any other: the
+// problem says so before any code is written, naming the plugin, and never
+// falls back to a plain-text editor whose submit the server refuses.
+const LANGUAGES_CLOSED = {
+  plugin_id: 'standard-languages',
+  provides: 'language',
+} as const;
+
+test('a problem whose every language is closed names the language plugin and offers no Submit', async ({
+  page,
+}) => {
+  await mockApi(page, 'contestant');
+  await answerGets(page, /\/api\/v1\/problems\/1(\?|$)/, () => ({
+    ...problem(1),
+    closed_by: LANGUAGES_CLOSED,
+    closed_languages: [
+      { language: 'c', closed_by: LANGUAGES_CLOSED },
+      { language: 'cpp', closed_by: LANGUAGES_CLOSED },
+    ],
+  }));
+  // The disabled plugin's languages are gone from the registries.
+  await page.route(/\/api\/v1\/plugins\/registries$/, (route) =>
+    route.fulfill({ headers, json: { ...registries, languages: [] } }),
+  );
+  await page.goto('/problems/1?tab=coding');
+  await expect(
+    page.getByText(
+      "Submitting is unavailable while standard-languages, the plugin for this problem's language, is disabled.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Submit' })).toHaveCount(0);
+  await expect(page.getByText('Plain Text')).toHaveCount(0);
+});
+
+test('a problem with no language registered at all says so instead of a plain-text editor', async ({
+  page,
+}) => {
+  await mockApi(page, 'contestant');
+  await page.route(/\/api\/v1\/plugins\/registries$/, (route) =>
+    route.fulfill({ headers, json: { ...registries, languages: [] } }),
+  );
+  await page.goto('/problems/1?tab=coding');
+  await expect(
+    page.getByText('No language is available to submit in right now.'),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Submit' })).toHaveCount(0);
+  await expect(page.getByText('Plain Text')).toHaveCount(0);
+});
+
+test('a language whose plugin is disabled is listed as unavailable, with the plugin, while others stay open', async ({
+  page,
+}) => {
+  await mockApi(page, 'contestant');
+  const closed = {
+    plugin_id: 'extra-languages',
+    provides: 'language',
+  } as const;
+  await answerGets(page, /\/api\/v1\/problems\/1(\?|$)/, () => ({
+    ...problem(1),
+    closed_languages: [{ language: 'java', closed_by: closed }],
+  }));
+  await page.goto('/problems/1?tab=coding');
+  await expect(page.getByRole('button', { name: 'Submit' })).toBeVisible();
+  await page
+    .getByRole('button', { name: /^C\+\+|^C$/ })
+    .first()
+    .click();
+  const item = page.getByRole('menuitem', {
+    name: 'java: unavailable while extra-languages is disabled',
+  });
+  await expect(item).toBeVisible();
+  await expect(item).toHaveAttribute('aria-disabled', 'true');
+});

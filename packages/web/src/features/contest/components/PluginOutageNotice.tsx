@@ -1,14 +1,9 @@
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { pluginName, useTranslation } from '@broccoli/web-sdk/i18n';
 import { closedByText, type PluginOutage } from '@broccoli/web-sdk/submission';
 import { cn } from '@broccoli/web-sdk/utils';
 import { PlugZap } from 'lucide-react';
 
 import type { SubmitClosure } from '@/features/problem/utils/submit-closure';
-
-const CONTEST_MESSAGES = {
-  disabled: 'contests.pluginOutage.disabled',
-  unavailable: 'contests.pluginOutage.unavailable',
-} as const;
 
 function Notice({ text, className }: { text: string; className?: string }) {
   return (
@@ -28,7 +23,8 @@ function Notice({ text, className }: { text: string; className?: string }) {
 /**
  * What a contest shows while the plugin that provides its contest type
  * cannot serve it (`plugin_outage`): its results are unavailable and its
- * submissions refused. Renders nothing otherwise.
+ * submissions refused. A disabled plugin is named (`pluginName`), so whoever
+ * can enable it knows which. Renders nothing otherwise.
  */
 export function PluginOutageNotice({
   outage,
@@ -37,11 +33,15 @@ export function PluginOutageNotice({
   outage: PluginOutage | null | undefined;
   className?: string;
 }) {
-  const { t } = useTranslation();
+  const { t, lookup } = useTranslation();
   if (!outage) return null;
-  return (
-    <Notice text={t(CONTEST_MESSAGES[outage.state])} className={className} />
-  );
+  const text =
+    outage.state === 'disabled'
+      ? t('contests.pluginOutage.disabled', {
+          plugin: pluginName(lookup, outage.plugin_id),
+        })
+      : t('contests.pluginOutage.unavailable');
+  return <Notice text={text} className={className} />;
 }
 
 /**
@@ -77,5 +77,7 @@ export function SubmitClosureNotice({
           className={className}
         />
       );
+    case 'noLanguage':
+      return <Notice text={t('problem.noLanguage')} className={className} />;
   }
 }

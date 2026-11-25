@@ -334,20 +334,19 @@ async fn get_problem_in(
     )
     .await?;
 
-    let mut response =
-        problem_response(state, find_problem(&state.db, scope.problem_id).await?).await;
-    // Under a contest, its work runs in the contest's type.
-    if let Some(contest) = contest {
-        response.closed_by = contest.contest_type.and_then(|contest_type| {
-            state
-                .plugin_lifecycle
-                .closed_by(state.plugin_lifecycle.needs(
-                    &contest_type,
-                    &response.problem_type,
-                    &response.checker_format,
-                    None,
-                ))
-        });
+    let model = find_problem(&state.db, scope.problem_id).await?;
+    // Under a contest, its work runs in the contest's type; a contest with
+    // none takes no work, which its submit refuses on its own terms.
+    let closure = contest.map(|contest| {
+        contest
+            .contest_type
+            .map(|contest_type| submit_closure(state, &contest_type, &model))
+            .unwrap_or_default()
+    });
+    let mut response = problem_response(state, model).await;
+    if let Some(closure) = closure {
+        response.closed_by = closure.closed_by;
+        response.closed_languages = closure.closed_languages;
     }
     response.samples = load_sample_test_cases(&state.db, scope.problem_id).await?;
 

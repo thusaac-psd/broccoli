@@ -1,5 +1,7 @@
 import type { components } from '@/api/schema';
 
+import { pluginName } from '../i18n/labels.ts';
+
 /**
  * The `{ code, message, details? }` error envelope returned by every API
  * endpoint on failure. Mirrors the server's `ErrorBody` schema component.
@@ -262,8 +264,12 @@ export function errorKindKey(kind: ErrorKind): string {
 /**
  * `details` as message parameters: its top-level strings and numbers, and its
  * lists of them (such as the `usernames` a conflict names) joined by commas.
+ * A `plugin_id` is also given as `plugin`, the plugin's name (`pluginName`).
  */
-function detailParams(details: unknown): Record<string, string | number> {
+function detailParams(
+  details: unknown,
+  lookup: ErrorTranslator['lookup'],
+): Record<string, string | number> {
   const params: Record<string, string | number> = {};
   if (typeof details !== 'object' || details === null) return params;
   for (const [key, value] of Object.entries(details)) {
@@ -272,6 +278,9 @@ function detailParams(details: unknown): Record<string, string | number> {
     } else if (Array.isArray(value) && value.every(isScalar)) {
       params[key] = value.join(', ');
     }
+  }
+  if (typeof params.plugin_id === 'string') {
+    params.plugin = pluginName(lookup, params.plugin_id);
   }
   return params;
 }
@@ -349,7 +358,8 @@ export function describeError(
   if (err instanceof TranslatedError) return { kind, message: err.message };
   const parsed = parseApiError(err);
   const byCode =
-    parsed && lookup(errorCodeKey(parsed.code), detailParams(parsed.details));
+    parsed &&
+    lookup(errorCodeKey(parsed.code), detailParams(parsed.details, lookup));
   if (byCode) return { kind, message: byCode };
   const detail = parsed?.message;
   if (isRefusal(kind) && detail) {

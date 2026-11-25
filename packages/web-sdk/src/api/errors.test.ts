@@ -272,3 +272,24 @@ test('a refusal of this viewer is nothing to show; any other failure stays', () 
     );
   }
 });
+
+test("an error that names a plugin says it by the plugin's translated name, else its id", () => {
+  const catalog: Record<string, string> = {
+    'apiError.PLUGIN_DISABLED': 'Enable {plugin}',
+    'plugin.icpc.name': 'ICPC',
+  };
+  const translator = {
+    lookup: (key: string, params?: Record<string, string | number>) =>
+      catalog[key]?.replace(/\{(\w+)\}/g, (_, name) => String(params?.[name])),
+  };
+  const disabled = (plugin_id: string) =>
+    new RequestError(503, 'PLUGIN_DISABLED', 'off', { plugin_id });
+  assert.equal(
+    describeError(disabled('icpc'), 'Failed', translator).message,
+    'Enable ICPC',
+  );
+  assert.equal(
+    describeError(disabled('other'), 'Failed', translator).message,
+    'Enable other',
+  );
+});

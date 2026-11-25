@@ -192,13 +192,7 @@ pub async fn problem_response(
 ) -> ProblemResponse {
     let plugin_outage =
         crate::plugin_lifecycle::contest_type_outage(state, &m.default_contest_type).await;
-    let closed_by = state
-        .plugin_lifecycle
-        .closed_by(
-            state
-                .plugin_lifecycle
-                .needs_on(&m.default_contest_type, &m, None),
-        );
+    let closure = submit_closure(state, &m.default_contest_type, &m);
     let submission_format: Option<std::collections::HashMap<String, Vec<String>>> = m
         .submission_format
         .and_then(|v| serde_json::from_value(v).ok());
@@ -218,8 +212,27 @@ pub async fn problem_response(
         created_at: m.created_at,
         updated_at: m.updated_at,
         plugin_outage,
-        closed_by,
+        closed_by: closure.closed_by,
+        closed_languages: closure.closed_languages,
     }
+}
+
+/// What closes new work on problem `m` in `contest_type`
+/// (`PluginLifecycle::problem_closure`): its languages are those its
+/// `submission_format` names, when it names any.
+pub fn submit_closure(
+    state: &crate::state::AppState,
+    contest_type: &str,
+    m: &crate::entity::problem::Model,
+) -> crate::plugin_lifecycle::ProblemClosure {
+    let format = m.get_submission_format().filter(|f| !f.is_empty());
+    let accepted: Option<std::collections::HashSet<&str>> = format
+        .as_ref()
+        .map(|f| f.keys().map(String::as_str).collect());
+    state.plugin_lifecycle.problem_closure(
+        state.plugin_lifecycle.needs_on(contest_type, m, None),
+        accepted.as_ref(),
+    )
 }
 
 impl FromStr for UploadTestCasesMergeStrategy {

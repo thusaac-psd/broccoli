@@ -34,6 +34,17 @@ export function identifierLabel(
   return lookup(identifierKey(kind, id)) ?? id;
 }
 
+/**
+ * What the user calls plugin `pluginId`: its translated name
+ * (`plugin.<id>.name`), or the id where no catalog names it. Every text that
+ * names a plugin (a parked submission, a closed submit, an outage, an error
+ * that names one) names it through this, so whoever can act on it sees the
+ * same name everywhere.
+ */
+export function pluginName(lookup: Lookup, pluginId: string): string {
+  return lookup(pluginKeys.name(pluginId)) ?? pluginId;
+}
+
 /** The catalog keys of a plugin's manifest text. */
 export const pluginKeys = {
   name: (pluginId: string) => `plugin.${pluginId}.name`,

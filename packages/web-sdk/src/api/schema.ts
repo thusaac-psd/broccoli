@@ -2721,6 +2721,16 @@ export interface components {
       plugin_id: string;
       provides: components['schemas']['Provided'];
     };
+    /**
+     * @description A language new work may be written in that no enabled plugin provides
+     *     now: work in it is refused, and what is queued in it waits, until
+     *     `closed_by` (or another provider) is enabled.
+     */
+    ClosedLanguage: {
+      closed_by: components['schemas']['ClosedBy'];
+      /** @example cpp */
+      language: string;
+    };
     CodeRunJudgeResult: {
       compile_output?: string | null;
       error_message?: string | null;
@@ -4267,6 +4277,11 @@ export interface components {
       /** @example lines */
       checker_format: string;
       closed_by?: components['schemas']['ClosedBy'] | null;
+      /**
+       * @description The languages whose work is refused while the rest stay open, each
+       *     with the plugin that closes it, sorted by language.
+       */
+      closed_languages: components['schemas']['ClosedLanguage'][];
       /** @example Given an array of integers... */
       content: string;
       /**

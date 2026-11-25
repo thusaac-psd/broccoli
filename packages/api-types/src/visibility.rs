@@ -61,6 +61,16 @@ pub struct ClosedBy {
     pub provides: Provided,
 }
 
+/// A language new work may be written in that no enabled plugin provides
+/// now: work in it is refused, and what is queued in it waits, until
+/// `closed_by` (or another provider) is enabled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ClosedLanguage {
+    #[schema(example = "cpp")]
+    pub language: String,
+    pub closed_by: ClosedBy,
+}
+
 /// Why the plugin-governed fields of a resource are left out (`null`) of a
 /// response. Every field the host decides alone is still present.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

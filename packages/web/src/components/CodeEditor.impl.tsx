@@ -1,11 +1,18 @@
 import '@/lib/monaco-setup';
 
-import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
+import { useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useQueryState } from '@broccoli/web-sdk/hooks';
-import { useIdentifierLabel, useTranslation } from '@broccoli/web-sdk/i18n';
+import {
+  pluginName,
+  useIdentifierLabel,
+  useTranslation,
+} from '@broccoli/web-sdk/i18n';
 import { Slot } from '@broccoli/web-sdk/slot';
-import { useSubmitGating } from '@broccoli/web-sdk/submission';
+import {
+  type ClosedLanguage,
+  useSubmitGating,
+} from '@broccoli/web-sdk/submission';
 import { useTheme } from '@broccoli/web-sdk/theme';
 import {
   Button,
@@ -18,7 +25,6 @@ import {
 import { formatKibibytes } from '@broccoli/web-sdk/utils';
 import type { Monaco } from '@monaco-editor/react';
 import Editor from '@monaco-editor/react';
-import { useQuery } from '@tanstack/react-query';
 import {
   ChevronDown,
   ChevronRight,
@@ -35,14 +41,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import { KeybindingModeDropdown } from '@/components/KeybindingModeDropdown';
-import {
-  fetchSupportedLanguages,
-  type SupportedLanguage,
-} from '@/features/problem/api/fetch-supported-languages';
+import type { SupportedLanguage } from '@/features/problem/api/fetch-supported-languages';
+import { useSupportedLanguages } from '@/features/problem/hooks/use-supported-languages';
 import type { SubmissionEntry } from '@/features/submission/hooks/use-submissions';
 import { useEditorKeybindings } from '@/lib/use-editor-keybindings';
 
 import {
+  acceptedLanguages,
   applyEditorUploads,
   type EditorDraft,
   type EditorFile,
@@ -57,14 +62,6 @@ import {
 export type { EditorFile } from './code-editor-draft';
 
 type Language = SupportedLanguage;
-
-const FALLBACK_LANGUAGE: Language = {
-  id: 'plaintext',
-  name: 'Plain Text',
-  defaultFilename: 'solution.txt',
-  template: '',
-  extensions: [],
-};
 
 export interface CodeEditorProps {
   onSubmit?: (files: EditorFile[], language: string) => void;
@@ -90,6 +87,11 @@ export interface CodeEditorProps {
    * Takes precedence over the language's default filename.
    */
   submissionFormat?: Record<string, string[]> | null;
+  /**
+   * Languages the problem would take but whose plugin is disabled: listed in
+   * the picker as unavailable, naming the plugin.
+   */
+  closedLanguages?: ClosedLanguage[];
 }
 
 const EXT_TO_MONACO: Record<string, string> = {
@@ -119,23 +121,15 @@ function getMonacoLanguage(filename: string): string {
 }
 
 export function CodeEditor(props: CodeEditorProps) {
-  const apiClient = useApiClient();
-  const languages = useQueryState(
-    useQuery({
-      queryKey: ['supported-languages'],
-      queryFn: () => fetchSupportedLanguages(apiClient),
-      staleTime: 5 * 60 * 1000,
-    }),
-  );
+  const languages = useQueryState(useSupportedLanguages());
 
-  // Editor state (saved language + draft file) must never initialize against
-  // the fallback language list: the saved language id would not be found, the
-  // draft for the real language would not load, and the auto-save effect would
-  // immediately overwrite the contestant's persisted draft with the template.
-  // Gate mounting the stateful editor on the supported-languages query so the
-  // initializers always see the real language list.
-  // A failed fetch is said for what it is, with a retry: the fallback list
-  // would cost the contestant their draft just the same.
+  // Editor state (saved language + draft file) initializes only against the
+  // real language list: against any other, the saved language id would not
+  // be found, the draft for the real language would not load, and the
+  // auto-save effect would overwrite the contestant's persisted draft with
+  // the template. So the stateful editor mounts only once the
+  // supported-languages query has answered, and a failed fetch is said for
+  // what it is, with a retry.
   if (languages.status === 'error') {
     return <QueryErrorState className="h-full" state={languages} />;
   }
@@ -147,9 +141,11 @@ export function CodeEditor(props: CodeEditorProps) {
     );
   }
 
-  return (
-    <CodeEditorContent {...props} supportedLanguages={languages.data ?? []} />
-  );
+  const available = acceptedLanguages(languages.data, props.submissionFormat);
+  // No language to write in: the problem view shows that as a closed submit
+  // (`submitClosure`), so no editor is offered for code the server refuses.
+  if (available.length === 0) return null;
+  return <CodeEditorContent {...props} availableLanguages={available} />;
 }
 
 function CodeEditorContent({
@@ -163,9 +159,10 @@ function CodeEditorContent({
   onContestTypeChange,
   contestTypes,
   submissionFormat,
-  supportedLanguages,
-}: CodeEditorProps & { supportedLanguages: Language[] }) {
-  const { t } = useTranslation();
+  closedLanguages = [],
+  availableLanguages,
+}: CodeEditorProps & { availableLanguages: Language[] }) {
+  const { t, lookup } = useTranslation();
   const label = useIdentifierLabel();
   const errorMessage = useErrorMessage();
   const { user, isLoading: authLoading } = useAuth();
@@ -181,16 +178,6 @@ function CodeEditorContent({
       : undefined;
   const gating = useSubmitGating();
   const isGated = gating?.isBlocked ?? false;
-
-  const availableLanguages = useMemo(() => {
-    if (supportedLanguages.length === 0) return [FALLBACK_LANGUAGE];
-    if (!submissionFormat) return supportedLanguages;
-    const configured = supportedLanguages.filter((lang) => {
-      const files = getConfiguredFilenames(lang.id, submissionFormat);
-      return files.length > 0;
-    });
-    return configured.length > 0 ? configured : supportedLanguages;
-  }, [submissionFormat, supportedLanguages]);
 
   const [draft, setDraft] = useState(() =>
     restoreEditorDraft(
@@ -646,6 +633,14 @@ function CodeEditorContent({
               onClick={() => handleLanguageChange(lang)}
             >
               {lang.name}
+            </DropdownMenuItem>
+          ))}
+          {closedLanguages.map(({ language, closed_by }) => (
+            <DropdownMenuItem key={language} disabled>
+              {t('problem.languageClosed', {
+                language,
+                plugin: pluginName(lookup, closed_by.plugin_id),
+              })}
             </DropdownMenuItem>
           ))}
         </DropdownMenuContent>

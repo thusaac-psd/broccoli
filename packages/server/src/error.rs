@@ -399,13 +399,14 @@ impl AppError {
             ),
             AppError::PluginDisabled(plugin_id) => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                simple(
-                    HostCode::PluginDisabled,
-                    format!(
+                ErrorBody {
+                    code: HostCode::PluginDisabled.as_str().into(),
+                    message: format!(
                         "The plugin '{plugin_id}' is disabled, so what it provides is \
                          unavailable until an administrator enables it"
                     ),
-                ),
+                    details: Some(serde_json::json!({ "plugin_id": plugin_id })),
+                },
             ),
             AppError::StorageUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -875,6 +876,9 @@ mod tests {
             body["message"].as_str().unwrap().contains("'ioi'"),
             "{body}"
         );
+        // The plugin is named in the details too, for clients that say it in
+        // the user's language.
+        assert_eq!(body["details"], serde_json::json!({ "plugin_id": "ioi" }));
 
         let response = AppError::from(PluginOutage::Unavailable).into_response();
         assert_eq!(

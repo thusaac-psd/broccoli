@@ -37,3 +37,21 @@ test('nothing closes submitting while every plugin it needs serves', () => {
   assert.equal(submitClosure('practice', null, {}), null);
   assert.equal(submitClosure('contest', null, undefined), null);
 });
+
+test('a problem with no language open to submit in is closed, never offered as plain text', () => {
+  assert.deepEqual(submitClosure('practice', null, {}, 0), {
+    kind: 'noLanguage',
+  });
+  // What the server closes says more, so it comes first.
+  const language = { plugin_id: 'langs', provides: 'language' } as const;
+  assert.deepEqual(
+    submitClosure('practice', null, { closed_by: language }, 0),
+    {
+      kind: 'closed',
+      closedBy: language,
+    },
+  );
+  // Languages still loading close nothing yet.
+  assert.equal(submitClosure('practice', null, {}, undefined), null);
+  assert.equal(submitClosure('practice', null, {}, 2), null);
+});
