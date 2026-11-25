@@ -187,9 +187,17 @@ impl Dispatch {
     /// Any other error is the plugin's to handle and records nothing.
     pub fn note_database_error(&self, err: &sea_orm::DbErr) {
         if common::db::is_outage(err) {
-            self.faults()
-                .record(DispatchFault::DatabaseUnavailable, err.to_string());
+            self.note_outage(err.to_string());
         }
+    }
+
+    /// Records that a statement for this dispatch found the database unable
+    /// to serve it, lost or with no connection free in time (described by
+    /// `message`): the attempt is handed back
+    /// ([`DispatchFault::DatabaseUnavailable`]).
+    pub fn note_outage(&self, message: String) {
+        self.faults()
+            .record(DispatchFault::DatabaseUnavailable, message);
     }
 
     /// Records that a plugin the unit needs did not resolve here
