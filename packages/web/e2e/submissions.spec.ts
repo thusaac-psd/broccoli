@@ -418,12 +418,14 @@ type TokenState = { tokened: boolean };
 /**
  * Serves `page` an IOI contest at feedback `feedback` with one token and
  * submission 9, whose test case rows read redacted until `state` says the
- * token is spent on it.
+ * token is spent on it. Its one subtask is `subtaskName`, the empty name
+ * of the default subtask of a problem with no subtask config.
  */
 async function serveTokenAt(
   page: Page,
   state: TokenState,
-  feedback: 'none' | 'subtask_scores' = 'subtask_scores',
+  feedback: 'none' | 'subtask_scores' | 'full' = 'subtask_scores',
+  subtaskName = 'Small',
 ) {
   await mockApi(page, 'contestant', { plugins: ['ioi'] });
   const judged = {
@@ -517,7 +519,7 @@ async function serveTokenAt(
       },
     }),
   );
-  const subtask = { name: 'Small', scoring_method: 'sum', max_score: 100 };
+  const subtask = { name: subtaskName, scoring_method: 'sum', max_score: 100 };
   await page.route(`${IOI}/problems/1/config`, (route) =>
     route.fulfill({
       json: {
@@ -635,6 +637,17 @@ test('a token spent in one tab shows the IOI breakdown in another tab that read 
     other.getByText('Results are not visible for this contest.'),
   ).toHaveCount(0);
 });
+
+for (const feedback of ['subtask_scores', 'full'] as const) {
+  test(`a problem with no subtask config names its one subtask in the viewer's language (${feedback})`, async ({
+    page,
+  }) => {
+    await serveTokenAt(page, { tokened: false }, feedback, '');
+    await page.goto('/contests/4/problems/1?tab=coding');
+    await page.getByText('#9').first().click();
+    await expect(page.getByText('All Tests')).toBeVisible();
+  });
+}
 
 for (const theme of ['light', 'dark']) {
   test(`a tokened IOI result reads clearly (${theme})`, async ({ page }) => {
