@@ -231,16 +231,16 @@ pub async fn livez() -> impl IntoResponse {
 }
 
 /// `GET /readyz`: whether this replica should take browsers, the probe the
-/// shipped gateways health-check. It fails (503 `not_ready`) while a live
-/// peer serves every contest type this replica serves on its fleet-wide
-/// provider and more (`PluginLifecycle::ready`): a submission or code run
-/// pinned here would be refused `CONTEST_TYPE_UNAVAILABLE` until the load
-/// here succeeds, so the gateway re-pins its browsers to a ready replica.
+/// shipped gateways health-check. It fails (503 `not_ready`) while a peer
+/// with a fresh heartbeat serves every enabled plugin this replica serves
+/// and more (`PluginLifecycle::ready`): a request pinned here would miss
+/// that plugin (its contest type, language, evaluator, checker or route)
+/// until the load here succeeds, so the gateway re-pins its browsers to a
+/// ready replica. The admin system overview names what each server lacks.
 /// It makes no dependency call, so a database or Redis blip never ejects
 /// every replica at once, and its public body names no plugin.
 pub async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
-    let local = crate::providers::Loaded::here(&state.registries).await;
-    if state.plugin_lifecycle.ready(&local) {
+    if state.plugin_lifecycle.ready() {
         (
             StatusCode::OK,
             Json(serde_json::json!({ "status": "ready" })),

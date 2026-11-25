@@ -1442,58 +1442,58 @@ async fn a_problem_whose_languages_are_all_disabled_names_the_language_plugin() 
     }
 }
 
-/// Registers contest type `ready-type` on `app` as `typed-judge` serves it.
-async fn serve_ready_type(app: &TestApp) {
-    app.state
-        .registries
-        .contest_type_registry
-        .write()
-        .await
-        .insert(
-            "ready-type".into(),
-            server::registry::ContestTypeHandlers {
-                plugin_id: "typed-judge".into(),
-                submission_fn: "noop".into(),
-                code_run_fn: "noop".into(),
-                submission_admission: false,
-            },
-        );
-}
-
-/// `/readyz` fails on a replica while a live peer serves every contest type
-/// it serves on the type's fleet-wide provider and more, so a gateway that
-/// health-checks it moves the browsers pinned there to a replica that takes
-/// their submissions; `/livez` keeps answering. It passes again once the
-/// replica has the provider loaded.
+/// `/readyz` fails on a replica while a peer with a fresh heartbeat
+/// serves every enabled plugin it serves and more, whatever the plugin
+/// provides (here a route-only plugin, no key at all), so a gateway that
+/// health-checks it moves the browsers pinned there to a replica that has
+/// the plugin; `/livez` keeps answering. The public body names no plugin.
+/// A peer whose
+/// heartbeat went stale, though still inside the live window, no longer
+/// counts.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_replica_lacking_a_contest_types_provider_a_peer_has_is_not_ready() {
+async fn a_replica_lacking_a_plugin_a_fresh_peer_serves_is_not_ready() {
     use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
-    let a = TestApp::spawn().await;
-    let b = a.spawn_replica(SpawnOptions::default()).await;
-    a.db.execute_raw(Statement::from_string(
-        DbBackend::Postgres,
-        "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
-         ('typed-judge', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [\"ready-type\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}')",
-    ))
-    .await
-    .unwrap();
-    serve_ready_type(&a).await;
-    plugin_lifecycle::reconcile(&a.state).await.unwrap();
-    plugin_lifecycle::reconcile(&b.state).await.unwrap();
-    plugin_lifecycle::reconcile(&a.state).await.unwrap();
+    let app = TestApp::spawn().await;
+    let here = app.state.config.server.id.clone();
+    app.db
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
+             ('route-plugin', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}')",
+        ))
+        .await
+        .unwrap();
+    plugin_lifecycle::reconcile(&app.state).await.unwrap();
+    // A peer serving all this replica serves, and the route plugin too.
+    app.db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO plugin_replica (server_id, plugins, provides, state_at, heartbeat_at) \
+             SELECT 'peer', plugins || '{\"route-plugin\": {\"status\": \"loaded\", \"generation\": 1}}', \
+                    provides, NOW(), NOW() \
+               FROM plugin_replica WHERE server_id = $1",
+            [here.clone().into()],
+        ))
+        .await
+        .unwrap();
+    plugin_lifecycle::reconcile(&app.state).await.unwrap();
 
-    let res = b.get_without_token("/readyz").await;
+    let res = app.get_without_token("/readyz").await;
     assert_eq!(res.status, 503, "{}", res.text);
     assert_eq!(res.body["status"], "not_ready", "{}", res.text);
-    assert!(!res.text.contains("typed-judge"), "{}", res.text);
-    assert_eq!(b.get_without_token("/livez").await.status, 200);
-    let res = a.get_without_token("/readyz").await;
-    assert_eq!(res.status, 200, "{}", res.text);
-    assert_eq!(res.body["status"], "ready", "{}", res.text);
+    assert!(!res.text.contains("route-plugin"), "{}", res.text);
+    assert_eq!(app.get_without_token("/livez").await.status, 200);
 
-    serve_ready_type(&b).await;
-    plugin_lifecycle::reconcile(&b.state).await.unwrap();
-    let res = b.get_without_token("/readyz").await;
+    app.db
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "UPDATE plugin_replica SET heartbeat_at = NOW() - INTERVAL '45 seconds' \
+              WHERE server_id = 'peer'",
+        ))
+        .await
+        .unwrap();
+    plugin_lifecycle::reconcile(&app.state).await.unwrap();
+    let res = app.get_without_token("/readyz").await;
     assert_eq!(res.status, 200, "{}", res.text);
 }
