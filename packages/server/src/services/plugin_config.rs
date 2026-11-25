@@ -1210,11 +1210,11 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
                 None => continue,
             }
         };
-        let errors = match manifest
+        let declared = manifest
             .config
             .get(namespace)
-            .filter(|ns| ns.scopes.contains(&scope))
-        {
+            .filter(|ns| ns.scopes.contains(&scope));
+        let errors = match declared {
             Some(ns) => match config_schema::validate(ns, &row.config) {
                 Ok(()) => continue,
                 Err(errors) => errors,
@@ -1231,6 +1231,10 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
             scope,
             row.ref_id,
             namespace.to_string(),
+            manifest
+                .config
+                .get(namespace)
+                .map(ConfigNamespace::to_json_schema),
             errors,
         ));
     }

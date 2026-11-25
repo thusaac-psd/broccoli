@@ -19,6 +19,7 @@ import type {
   InheritedConfig,
   JsonSchema,
 } from './types';
+import { useFieldName } from './use-field-name';
 import { useFieldProblemText } from './use-field-problem-text';
 import {
   deepMerge,
@@ -27,7 +28,6 @@ import {
   hasOwnDescendantValue,
   hasOwnValueAtPath,
   markSaved,
-  pathSteps,
   serverFieldErrors,
   setAtPath,
   unmarked,
@@ -182,24 +182,13 @@ function ConfigFormFields({
   }, []);
 
   /** A refused field as the form names it: its titles and its items. */
+  const nameField = useFieldName();
   function fieldName(path: string): string {
-    return pathSteps(path, jsonSchema, values)
-      .map((step) =>
-        step.kind === 'item'
-          ? (step.label ?? t('config.itemNumber', { n: step.index + 1 }))
-          : pluginId
-            ? pluginText(
-                pluginKeys.configField(
-                  pluginId,
-                  schema.namespace,
-                  step.path,
-                  'title',
-                ),
-                step.title,
-              )
-            : step.title,
-      )
-      .join(' › ');
+    return nameField(
+      { pluginId, namespace: schema.namespace, schema: jsonSchema },
+      path,
+      values,
+    );
   }
 
   async function handleSubmit(e: React.FormEvent) {

@@ -70,7 +70,8 @@ use crate::error::AppError;
 use crate::host_funcs::config::{extract_plugin_id, strip_namespace_prefix};
 use crate::registry::TypeProviders;
 use crate::services::plugin_config::{
-    ConfigScope, ConfigTarget, Findings, IncompatibleConfig, Reads, check_config, labelled,
+    ConfigScope, ConfigTarget, Findings, IncompatibleConfig, Reads, check_config, declared,
+    labelled,
 };
 use crate::state::AppState;
 
@@ -144,6 +145,9 @@ pub(crate) struct ConfigIssue {
     plugin_id: String,
     target: ConfigTarget,
     namespace: String,
+    /// The namespace's JSON schema as this server knows it, which names the
+    /// config and its fields.
+    schema: Option<serde_json::Value>,
     findings: Findings,
     /// Whether someone saved the config, rather than the namespace's
     /// defaults being checked where none is stored.
@@ -157,6 +161,7 @@ impl ConfigIssue {
             self.target.scope(),
             self.target.ref_id().to_string(),
             self.namespace.clone(),
+            self.schema.clone(),
             errors,
         )
     }
@@ -261,6 +266,12 @@ pub(crate) async fn issues_of<C: ConnectionTrait>(
             continue;
         }
         issues.push(ConfigIssue {
+            schema: declared(
+                checker.plugins.get_registry(),
+                &check.plugin_id,
+                &check.namespace,
+            )
+            .map(|ns| ns.to_json_schema()),
             plugin_id: check.plugin_id,
             target: check.target,
             namespace: check.namespace,

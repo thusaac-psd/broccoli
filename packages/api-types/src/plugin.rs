@@ -381,6 +381,10 @@ pub struct IncompatibleConfig {
     pub label: Option<String>,
     #[schema(example = "contest")]
     pub namespace: String,
+    /// The namespace's JSON schema as this server knows it, which names the
+    /// config (its `title`) and the fields `errors` point at; `None` when
+    /// the plugin no longer declares the namespace.
+    pub json_schema: Option<serde_json::Value>,
     /// What the plugin finds: what its schema or its namespace's validate
     /// function refuses in the config itself, then what the target's data
     /// does not meet yet. A namespace the plugin no longer declares at this
@@ -390,12 +394,14 @@ pub struct IncompatibleConfig {
 
 impl IncompatibleConfig {
     /// The issue of the config stored at `scope` and `ref_id`, with the ids
-    /// `ref_id` names. The label is the server's to fill in.
+    /// `ref_id` names, named by `json_schema` (see [`Self::json_schema`]).
+    /// The label is the server's to fill in.
     pub fn new(
         plugin_id: String,
         scope: broccoli_types::manifest::ConfigScope,
         ref_id: String,
         namespace: String,
+        json_schema: Option<serde_json::Value>,
         errors: Vec<FieldError>,
     ) -> Self {
         use broccoli_types::manifest::ConfigScope;
@@ -417,6 +423,7 @@ impl IncompatibleConfig {
             problem_id,
             label: None,
             namespace,
+            json_schema,
             errors,
         }
     }

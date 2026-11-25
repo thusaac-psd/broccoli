@@ -3745,6 +3745,12 @@ export interface components {
        */
       errors: components['schemas']['FieldError'][];
       /**
+       * @description The namespace's JSON schema as this server knows it, which names the
+       *     config (its `title`) and the fields `errors` point at; `None` when
+       *     the plugin no longer declares the namespace.
+       */
+      json_schema?: unknown;
+      /**
        * @description The problem's label in its contest (`A`), at the contest problem
        *     scope.
        * @example A
