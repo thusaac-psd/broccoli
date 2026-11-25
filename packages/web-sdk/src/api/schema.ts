@@ -4693,6 +4693,7 @@ export interface components {
        * @example 1024
        */
       memory_used?: number | null;
+      parked_by?: components['schemas']['ClosedBy'] | null;
       /**
        * Format: double
        * @example 100

@@ -577,7 +577,7 @@ pub(super) async fn build_submission_response_with_cases(
 /// is cut and handed back to `Queued` (`judging::fail_dispatch`), and no
 /// replica takes it until a provider opens, so `Queued` is where it is
 /// going and where it waits.
-fn shown_status(
+pub(super) fn shown_status(
     status: SubmissionStatus,
     parked_by: Option<&broccoli_api_types::visibility::ClosedBy>,
 ) -> SubmissionStatus {
@@ -643,6 +643,7 @@ pub(super) async fn build_judgement_response(
         withheld: None,
         config_issues: None,
         judged_on_earlier_inputs: None,
+        parked_by: None,
         test_case_results,
     })
 }

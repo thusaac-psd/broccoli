@@ -24,18 +24,17 @@ import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 
-import { acceptedLanguages } from '@/components/code-editor-draft';
 import type { EditorFile } from '@/components/CodeEditor';
 import { ContestRegisterGate } from '@/features/contest/components/ContestRegisterGate';
 import { SubmitClosureNotice } from '@/features/contest/components/PluginOutageNotice';
 import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
 import { useContestProblems } from '@/features/contest/hooks/use-contest-problems';
-import { useSupportedLanguages } from '@/features/problem/hooks/use-supported-languages';
+import { useProblemLanguages } from '@/features/problem/hooks/use-supported-languages';
 import { useRestoreSubmissionScroll } from '@/features/submission/hooks/use-submission-navigation';
 import { useSubmissions } from '@/features/submission/hooks/use-submissions';
 
 import { fetchProblem, fetchSampleCase } from '../api/problem-scope';
-import { submitClosure } from '../utils/submit-closure';
+import { problemClosed, submitClosure } from '../utils/submit-closure';
 import { ProblemCodingTab } from './ProblemCodingTab';
 import { ProblemContentTabs, type ProblemViewTab } from './ProblemContentTabs';
 import { ProblemDescriptionTab } from './ProblemDescriptionTab';
@@ -138,24 +137,22 @@ export default function ProblemView({
     // outage is polled by `useContestInfo`).
     refetchInterval: pollInterval<Awaited<ReturnType<typeof fetchProblem>>>(
       (problem) =>
-        submitClosure(scope, null, problem) ? PLUGIN_OUTAGE_POLL_MS : false,
+        problemClosed(scope, problem) ? PLUGIN_OUTAGE_POLL_MS : false,
     ),
   });
   const { data: problem, error } = problemQuery;
   // A first load that failed shows its failure while it is asked again.
   const problemState = useQueryState(problemQuery);
   const isLoading = problemState.status === 'loading';
-  // The editor's own language query: how many languages are open to write
-  // in decides whether there is anything to submit.
-  const supportedLanguages = useSupportedLanguages().data;
-  const openLanguages =
-    supportedLanguages &&
-    acceptedLanguages(supportedLanguages, problem?.submission_format).length;
+  // The languages open to write in, which the editor offers, read from the
+  // same answers as the closure: with none open there is nothing to submit.
+  const languagesQuery = useProblemLanguages(problem);
+  const languages = useQueryState(languagesQuery);
   const closure = submitClosure(
     scope,
     contest?.plugin_outage,
     problem,
-    openLanguages,
+    languagesQuery.data,
   );
   // What the contest's plugin governs of the problem is withheld with it.
   const contestOutage = closure?.kind === 'contest' ? closure.outage : null;
@@ -537,7 +534,7 @@ export default function ProblemView({
                     !contestId ? (registries?.contest_types ?? []) : undefined
                   }
                   submissionFormat={problem?.submission_format}
-                  closedLanguages={problem?.closed_languages}
+                  languages={languages}
                   latestSubmission={latestSubmission}
                   submissionHistory={submissionHistory}
                   submissionHistoryError={submissionHistoryError}

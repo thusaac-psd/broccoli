@@ -1,4 +1,3 @@
-import { useApiClient } from '@broccoli/web-sdk/api';
 import { useQueryState, useRegistries } from '@broccoli/web-sdk/hooks';
 import { useIdentifierLabel, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
@@ -17,7 +16,6 @@ import {
   SelectValue,
   Separator,
 } from '@broccoli/web-sdk/ui';
-import { useQuery } from '@tanstack/react-query';
 import { ChevronDown, Plus, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
@@ -29,10 +27,8 @@ import {
   type ProblemFormData,
 } from '@/features/admin/problem-form-values';
 import type { Attachment } from '@/features/problem/api/attachments';
-import {
-  fetchSupportedLanguages,
-  type SupportedLanguage,
-} from '@/features/problem/api/fetch-supported-languages';
+import { useSupportedLanguages } from '@/features/problem/hooks/use-supported-languages';
+import type { SupportedLanguage } from '@/features/problem/utils/supported-languages';
 
 // Template languages offered by the form; a failed load offers none and the
 // form still saves.
@@ -53,13 +49,8 @@ export function ProblemForm({
 }: ProblemFormProps) {
   const { t } = useTranslation();
   const label = useIdentifierLabel();
-  const apiClient = useApiClient();
   const { data: registries } = useRegistries();
-  const languagesQuery = useQuery({
-    queryKey: ['supported-languages'],
-    queryFn: () => fetchSupportedLanguages(apiClient),
-    staleTime: 5 * 60 * 1000,
-  });
+  const languagesQuery = useSupportedLanguages();
   // A language list that could not load says so instead of offering none.
   const languages = useQueryState(languagesQuery);
   const supportedLanguages = languagesQuery.data ?? NO_LANGUAGES;

@@ -1,20 +1,35 @@
-import { useQuery } from '@tanstack/react-query';
+import { queryOptions, useQuery } from '@tanstack/react-query';
 import { useCallback } from 'react';
 
-import { useApiClient } from '@/api';
+import { type ApiClient, useApiClient } from '@/api';
+import type { components } from '@/api/schema';
 
-export function useRegistries() {
-  const apiClient = useApiClient();
+/** What the plugins registered: contest types, languages, and the rest. */
+export type Registries = components['schemas']['RegistriesResponse'];
 
-  return useQuery({
-    queryKey: ['plugin-registries'],
+/**
+ * The one query of what the plugins registered (`GET /plugins/registries`):
+ * every reader shares its key, so a page asks for it once, and anything that
+ * changes what is registered (a plugin enabled or disabled, a submit refused
+ * for one) invalidates this key.
+ */
+export const REGISTRIES_QUERY_KEY = ['plugin-registries'] as const;
+
+/** The options of the registries query, for a reader that selects from it. */
+export function registriesQuery(apiClient: ApiClient) {
+  return queryOptions({
+    queryKey: REGISTRIES_QUERY_KEY,
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/plugins/registries');
       if (error) throw error;
-      return data;
+      return data satisfies Registries;
     },
     staleTime: 60_000,
   });
+}
+
+export function useRegistries() {
+  return useQuery(registriesQuery(useApiClient()));
 }
 
 /**

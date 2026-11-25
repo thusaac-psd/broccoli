@@ -1,6 +1,9 @@
 use anyhow::{Context, Result, bail};
 use broccoli_cli_core::api::plugin::LanguageRegistryItem;
+use broccoli_cli_core::api::visibility::{ClosedBy, ClosedLanguage};
 use broccoli_cli_core::client::{Client, ClientError};
+use broccoli_cli_core::ids::{ContestId, ProblemId};
+use broccoli_cli_core::model::{PluginNames, closed_by_text};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -102,15 +105,72 @@ pub fn server_languages(client: &Client) -> Result<Vec<LanguageRegistryItem>> {
     }
 }
 
+/// The languages of the problem a command works on that a plugin closes
+/// now (its `closed_languages`), and the names to call those plugins by.
+/// A language whose plugin is out is in no registry, so this is what says
+/// which plugin a contestant waits for.
+pub struct Closed<'a> {
+    pub languages: Vec<ClosedLanguage>,
+    pub names: PluginNames<'a>,
+}
+
+impl Default for Closed<'_> {
+    fn default() -> Self {
+        Self {
+            languages: Vec::new(),
+            names: PluginNames::ids(),
+        }
+    }
+}
+
+impl<'a> Closed<'a> {
+    /// The closed languages of `problem_id`, read through its contest when
+    /// there is one, with plugins named by the server's catalog. Read only
+    /// when detection fails; a problem that cannot be read closes none.
+    pub fn of(client: &'a Client, contest_id: Option<ContestId>, problem_id: ProblemId) -> Self {
+        let problem = match contest_id {
+            Some(cid) => client.get_contest_problem(cid, problem_id),
+            None => client.get_problem(problem_id),
+        };
+        Self {
+            languages: problem.map(|p| p.closed_languages).unwrap_or_default(),
+            names: client.plugin_names(),
+        }
+    }
+
+    /// One line per plugin that closes languages: `c, cpp: closed while ...`.
+    fn lines(&self) -> Vec<String> {
+        let mut groups: Vec<(&ClosedBy, Vec<&str>)> = Vec::new();
+        for closed in &self.languages {
+            match groups.iter_mut().find(|(by, _)| **by == closed.closed_by) {
+                Some((_, languages)) => languages.push(&closed.language),
+                None => groups.push((&closed.closed_by, vec![&closed.language])),
+            }
+        }
+        groups
+            .into_iter()
+            .map(|(by, languages)| {
+                format!(
+                    "{}: closed while {}",
+                    languages.join(", "),
+                    closed_by_text(by, &self.names)
+                )
+            })
+            .collect()
+    }
+}
+
 /// The language to judge `files` as: `explicit` when given (the server
 /// checks it and names the languages it supports when it is not one), else
 /// the one language whose registered extensions cover the files. The
 /// registry is the server's, fetched by `languages` only when detection
-/// needs it.
-pub fn resolve_language(
+/// needs it; what is closed for the problem (`closed`) is read only when
+/// detection fails, to say which plugin keeps a language out.
+pub fn resolve_language<'a>(
     files: &[String],
     explicit: Option<&str>,
     languages: impl FnOnce() -> Result<Vec<LanguageRegistryItem>>,
+    closed: impl FnOnce() -> Closed<'a>,
 ) -> Result<Language> {
     if let Some(language) = explicit {
         return Ok(Language {
@@ -156,18 +216,23 @@ pub fn resolve_language(
             extensions: l.extensions.clone(),
         })
         .ok_or_else(|| {
-            anyhow::anyhow!(
+            let mut message = format!(
                 "Cannot detect a language from the file extensions; specify --language. \
-             This server supports: {}",
+                 This server supports: {}.",
                 supported(&languages)
-            )
+            );
+            for line in closed().lines() {
+                message.push_str("\n  ");
+                message.push_str(&line);
+            }
+            anyhow::anyhow!(message)
         })
 }
 
 /// `id (.ext, .ext)` for each language, for error messages.
 fn supported(languages: &[LanguageRegistryItem]) -> String {
     if languages.is_empty() {
-        return "no languages (no language plugin is loaded)".into();
+        return "no language right now".into();
     }
     languages
         .iter()
@@ -201,6 +266,11 @@ mod tests {
         }
     }
 
+    /// A problem none of whose languages is closed.
+    fn open() -> Closed<'static> {
+        Closed::default()
+    }
+
     fn registry() -> Result<Vec<LanguageRegistryItem>> {
         Ok(vec![
             lang("cpp", &["cpp", "cc"]),
@@ -212,13 +282,13 @@ mod tests {
     #[test]
     fn detects_the_language_the_server_registered_for_the_extension() {
         assert_eq!(
-            resolve_language(&files(&["notes.txt", "main.py"]), None, registry)
+            resolve_language(&files(&["notes.txt", "main.py"]), None, registry, open)
                 .unwrap()
                 .id,
             "python3"
         );
         assert_eq!(
-            resolve_language(&files(&["Main.PAS"]), None, registry)
+            resolve_language(&files(&["Main.PAS"]), None, registry, open)
                 .unwrap()
                 .id,
             "pascal"
@@ -228,7 +298,7 @@ mod tests {
     #[test]
     fn rejects_ambiguous_languages() {
         assert!(
-            resolve_language(&files(&["main.py", "main.cpp"]), None, registry)
+            resolve_language(&files(&["main.py", "main.cpp"]), None, registry, open)
                 .unwrap_err()
                 .to_string()
                 .contains("different languages")
@@ -237,7 +307,7 @@ mod tests {
 
     #[test]
     fn an_unknown_extension_lists_the_servers_languages() {
-        let err = resolve_language(&files(&["main.rs"]), None, registry)
+        let err = resolve_language(&files(&["main.rs"]), None, registry, open)
             .unwrap_err()
             .to_string();
         assert!(
@@ -249,12 +319,65 @@ mod tests {
     #[test]
     fn an_explicit_language_needs_no_registry() {
         assert_eq!(
-            resolve_language(&files(&["main.py", "main.cpp"]), Some("rust"), || {
-                unreachable!("not fetched")
-            })
+            resolve_language(
+                &files(&["main.py", "main.cpp"]),
+                Some("rust"),
+                || unreachable!("not fetched"),
+                || unreachable!("not fetched")
+            )
             .unwrap()
             .id,
             "rust"
         );
+    }
+
+    /// With a problem's language plugin out, the server registers no
+    /// language for it: detection says which plugin closes which languages
+    /// and why, never that no language plugin is loaded.
+    #[test]
+    fn a_closed_language_names_the_plugin_that_closes_it() {
+        use broccoli_cli_core::api::visibility::{
+            ClosedBy, ClosedLanguage, ClosedReason, Provided,
+        };
+        let closed_by = |plugin_id: &str, reason| ClosedBy {
+            plugin_id: plugin_id.into(),
+            provides: Provided::Language,
+            reason,
+        };
+        let closed = || Closed {
+            languages: vec![
+                ClosedLanguage {
+                    language: "c".into(),
+                    closed_by: closed_by("standard-languages", ClosedReason::Disabled),
+                },
+                ClosedLanguage {
+                    language: "cpp".into(),
+                    closed_by: closed_by("standard-languages", ClosedReason::Disabled),
+                },
+                ClosedLanguage {
+                    language: "java".into(),
+                    closed_by: closed_by("extra-languages", ClosedReason::NotLoaded),
+                },
+            ],
+            names: broccoli_cli_core::model::PluginNames::ids(),
+        };
+        let err = resolve_language(&files(&["main.cpp"]), None, || Ok(Vec::new()), closed)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(
+                "c, cpp: closed while its language plugin standard-languages: \
+                 disabled until an administrator enables it"
+            ),
+            "{err}"
+        );
+        assert!(
+            err.contains(
+                "java: closed while its language plugin extra-languages: \
+                 loaded on no server until one loads it"
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("no language plugin is loaded"), "{err}");
     }
 }

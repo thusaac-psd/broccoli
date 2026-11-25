@@ -6,6 +6,8 @@ import type {
   Withheld,
 } from '@/submission/types';
 
+import { pluginName } from '../i18n/labels.ts';
+
 /** Statuses after which a submission, judgement or code run will never change again. */
 export const TERMINAL_STATUSES: ReadonlySet<SubmissionStatus> =
   new Set<SubmissionStatus>([
@@ -24,17 +26,26 @@ export function isTerminalStatus(status: SubmissionStatus): boolean {
   return TERMINAL_STATUSES.has(status);
 }
 
-/** What a submission whose outcome is withheld shows in place of it. */
+/**
+ * What a submission whose outcome is withheld shows in place of it. An
+ * outage that names its plugin says which (`pluginName`), as a parked
+ * submission does.
+ */
 export function withheldLabel(
   withheld: Withheld | null | undefined,
-  t: I18nContextValue['t'],
+  { t, lookup }: Pick<I18nContextValue, 't' | 'lookup'>,
 ): string {
   if (withheld?.reason !== 'plugin_outage') return t('submission.resultHidden');
-  switch (withheld.outage.state) {
+  const { outage } = withheld;
+  switch (outage.state) {
     case 'disabled':
-      return t('submission.resultUnavailableDisabled');
+      return t('submission.resultUnavailableDisabled', {
+        plugin: pluginName(lookup, outage.plugin_id),
+      });
     case 'not_loaded':
-      return t('submission.resultUnavailableNotLoaded');
+      return t('submission.resultUnavailableNotLoaded', {
+        plugin: pluginName(lookup, outage.plugin_id),
+      });
     case 'unavailable':
       return t('submission.resultUnavailable');
   }

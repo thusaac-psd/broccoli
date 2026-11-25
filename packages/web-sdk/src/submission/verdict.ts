@@ -83,7 +83,7 @@ export function getVerdictBadge(
 } {
   const { t } = i18n;
   if (status == null) {
-    return { label: withheldLabel(withheld, t), variant: 'outline' };
+    return { label: withheldLabel(withheld, i18n), variant: 'outline' };
   }
   if (parked_by) {
     return {

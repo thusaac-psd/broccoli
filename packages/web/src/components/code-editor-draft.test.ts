@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import type { SupportedLanguage } from '../features/problem/api/fetch-supported-languages';
+import type { SupportedLanguage } from '../features/problem/utils/supported-languages.ts';
 import {
   applyEditorUploads,
   type EditorDraft,

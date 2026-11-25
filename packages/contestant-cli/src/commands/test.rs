@@ -51,9 +51,26 @@ pub fn run(args: TestArgs) -> anyhow::Result<()> {
     let user_config = load_user_config();
     let ctx = context::discover_context();
 
-    let language = context::resolve_language(&args.files, args.language.as_deref(), || {
-        context::server_languages(&client)
-    })?;
+    let language = context::resolve_language(
+        &args.files,
+        args.language.as_deref(),
+        || context::server_languages(&client),
+        // The problem is resolved here only when detection fails, to say
+        // which plugin closes a language; a run resolves it again below.
+        || {
+            let problem_ref = args
+                .problem
+                .as_deref()
+                .or(ctx.as_ref().and_then(|c| c.problem.as_deref()));
+            let ids = problem_ref.zip(context::contest_ref(args.contest.as_deref()).ok());
+            ids.and_then(|(problem_ref, contest_ref)| {
+                let contest_id = resolve::contest_id(&client, &contest_ref).ok()?;
+                let problem = resolve::problem(&client, contest_id, problem_ref).ok()?;
+                Some(context::Closed::of(&client, Some(contest_id), problem.id))
+            })
+            .unwrap_or_default()
+        },
+    )?;
 
     let mut files = Vec::new();
     for path in &args.files {

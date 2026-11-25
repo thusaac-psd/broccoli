@@ -115,7 +115,8 @@ pub fn contest_named(client: &Client, input: &str) -> anyhow::Result<Option<Name
 pub struct ResolvedProblem {
     pub id: ProblemId,
     pub label: String,
-    pub title: String,
+    /// `None` while the contest's plugin withholds it.
+    pub title: Option<String>,
 }
 
 impl ResolvedProblem {
@@ -128,7 +129,7 @@ impl ResolvedProblem {
 
 impl std::fmt::Display for ResolvedProblem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({})", self.label, self.title)
+        f.write_str(&crate::model::ProblemTitle(self.title.as_deref()).after(&self.label))
     }
 }
 
@@ -176,7 +177,7 @@ pub fn problem(
     match_problem(&problems, input).map(|p| ResolvedProblem {
         id: ProblemId::from_server(p.problem_id),
         label: p.label.clone(),
-        title: crate::model::problem_title(p).to_string(),
+        title: p.problem_title.clone(),
     })
 }
 
@@ -207,12 +208,10 @@ fn match_problem<'a>(
     });
     match (by_label, by_position) {
         (Some(a), Some(b)) if a.problem_id != b.problem_id => bail!(
-            "'{q}' is both the label of {} ({}) and the position of {} ({}). \
+            "'{q}' is both the label of {} and the position of {}. \
              Use the label, or #<id> for a problem id.",
-            a.label,
-            crate::model::problem_title(a),
-            b.label,
-            crate::model::problem_title(b)
+            crate::model::problem_title(a).after(&a.label),
+            crate::model::problem_title(b).after(&b.label)
         ),
         (Some(p), _) | (None, Some(p)) => return Ok(p),
         (None, None) => {}
@@ -252,7 +251,7 @@ fn match_problem<'a>(
             "'{}' matches several problems: {}. Use the label.",
             q,
             many.iter()
-                .map(|p| format!("{} ({})", p.label, crate::model::problem_title(p)))
+                .map(|p| crate::model::problem_title(p).after(&p.label))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -262,7 +261,7 @@ fn match_problem<'a>(
 fn available(problems: &[crate::api::contest::ContestProblemResponse]) -> String {
     problems
         .iter()
-        .map(|p| format!("{} ({})", p.label, crate::model::problem_title(p)))
+        .map(|p| crate::model::problem_title(p).after(&p.label))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -322,6 +321,28 @@ mod tests {
             p(11, "B", 2, "Subarrays"),
             p(12, "C", 5, "Graph Walk"),
         ]
+    }
+
+    /// A title the contest's plugin withholds reads as unavailable once,
+    /// wherever it is shown: after its label, or on its own.
+    #[test]
+    fn a_withheld_title_reads_as_unavailable_without_doubled_parentheses() {
+        let mut withheld = p(13, "D", 6, "");
+        withheld.problem_title = None;
+        let problems = [p(10, "A", 0, "Two Sum"), withheld.clone()];
+        let err = match_problem(&problems, "nothing").unwrap_err().to_string();
+        assert!(err.contains("A (Two Sum), D (title unavailable)"), "{err}");
+        assert!(!err.contains("(("), "{err}");
+        assert_eq!(
+            crate::model::problem_title(&withheld).to_string(),
+            "(title unavailable)"
+        );
+        let resolved = super::ResolvedProblem {
+            id: crate::ids::ProblemId::from_server(13),
+            label: "D".into(),
+            title: None,
+        };
+        assert_eq!(resolved.to_string(), "D (title unavailable)");
     }
 
     fn id(problems: &[ContestProblemResponse], q: &str) -> i32 {

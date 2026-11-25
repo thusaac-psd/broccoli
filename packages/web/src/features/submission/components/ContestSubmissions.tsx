@@ -20,7 +20,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router';
 
 import { useContestProblems } from '@/features/contest/hooks/use-contest-problems';
-import { fetchSupportedLanguages } from '@/features/problem/api/fetch-supported-languages';
+import { useSupportedLanguages } from '@/features/problem/hooks/use-supported-languages';
 import {
   fetchAllPages,
   MAX_PER_PAGE,
@@ -131,11 +131,7 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
   // Filter options only; the list itself reports its own failure.
   const problems = useContestProblems(contestId).data;
 
-  const languages = useQuery({
-    queryKey: ['supported-languages'],
-    queryFn: () => fetchSupportedLanguages(apiClient),
-    staleTime: 5 * 60 * 1000,
-  });
+  const languages = useSupportedLanguages();
 
   const filters = {
     contestId,
