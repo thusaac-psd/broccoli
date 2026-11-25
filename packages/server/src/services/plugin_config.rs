@@ -1093,6 +1093,168 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
 mod tests {
     use super::*;
 
+    /// A caller with exactly `permissions`.
+    fn caller(permissions: &[&str]) -> crate::extractors::auth::AuthUser {
+        crate::extractors::auth::AuthUser {
+            user_id: 1,
+            session_id: 1,
+            username: "u".into(),
+            roles: Vec::new(),
+            permissions: permissions.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn each_scope_is_read_by_the_permission_its_config_routes_require() {
+        use broccoli_server_sdk::permissions as perm;
+        let all = Readable::of(&caller(&[
+            perm::PLUGIN_MANAGE,
+            perm::PROBLEM_EDIT,
+            perm::CONTEST_MANAGE,
+        ]));
+        assert_eq!(
+            all,
+            Readable {
+                plugin: true,
+                problem: true,
+                contest: true
+            }
+        );
+        let organizer = Readable::of(&caller(&[perm::CONTEST_MANAGE]));
+        assert!(organizer.reads(ConfigSource::Contest));
+        assert!(organizer.reads(ConfigSource::ContestProblem));
+        assert!(!organizer.reads(ConfigSource::Problem));
+        assert!(!organizer.reads(ConfigSource::Plugin));
+        let setter = Readable::of(&caller(&[perm::PROBLEM_EDIT]));
+        assert!(setter.reads(ConfigSource::Problem));
+        assert!(!setter.reads(ConfigSource::Contest));
+        assert!(!setter.reads(ConfigSource::ContestProblem));
+        assert!(!setter.reads(ConfigSource::Plugin));
+        let anyone = Readable::of(&caller(&[]));
+        for source in [
+            ConfigSource::ContestProblem,
+            ConfigSource::Contest,
+            ConfigSource::Problem,
+            ConfigSource::Plugin,
+        ] {
+            assert!(!anyone.reads(source), "{source:?}");
+        }
+        assert!(
+            anyone.reads(ConfigSource::Default),
+            "a schema's defaults are no one's"
+        );
+    }
+
+    /// A row of one scope that stores `key`.
+    fn level(key: &str) -> broccoli_server_sdk::types::CascadeLevel {
+        let row = serde_json::json!({ key: key });
+        broccoli_server_sdk::types::CascadeLevel {
+            config: row.clone(),
+            stored: Some(row),
+            is_default: false,
+            enabled: None,
+        }
+    }
+
+    /// The cascade of a contest problem where each scope sets its own
+    /// field: `cp`, `c`, `p` and `g` (plugin-wide).
+    fn every_scope() -> EffectiveConfig {
+        use broccoli_server_sdk::types::CascadeLevels;
+        EffectiveConfig {
+            config: serde_json::json!({ "cp": "cp", "c": "c", "p": "p", "g": "g" }),
+            source: ConfigSource::ContestProblem,
+            is_enabled: true,
+            fields: [
+                ("cp", ConfigSource::ContestProblem),
+                ("c", ConfigSource::Contest),
+                ("p", ConfigSource::Problem),
+                ("g", ConfigSource::Plugin),
+            ]
+            .into_iter()
+            .map(|(k, s)| (k.to_string(), s))
+            .collect(),
+            levels: CascadeLevels {
+                contest_problem: Some(level("cp")),
+                contest: Some(level("c")),
+                problem: level("p"),
+                plugin: level("g"),
+            },
+        }
+    }
+
+    #[test]
+    fn a_cascade_shows_each_role_only_the_scopes_it_reads() {
+        // (role, what it reads, the scopes whose rows it sees, its fields)
+        let cases = [
+            (
+                "admin",
+                (true, true, true),
+                ["cp", "c", "p", "g"].as_slice(),
+            ),
+            ("contest manager", (false, false, true), &["cp", "c"]),
+            ("problem editor", (false, true, false), &["p"]),
+            ("plugin manager", (true, false, false), &["g"]),
+            ("none", (false, false, false), &[]),
+        ];
+        for (role, (plugin, problem, contest), shown) in cases {
+            let view = cascade_view(
+                every_scope(),
+                Readable {
+                    plugin,
+                    problem,
+                    contest,
+                },
+                None,
+            );
+            let levels = [
+                ("cp", view.levels.contest_problem.is_some()),
+                ("c", view.levels.contest.is_some()),
+                ("p", view.levels.problem.is_some()),
+                ("g", view.levels.plugin.is_some()),
+            ];
+            for (key, visible) in levels {
+                assert_eq!(visible, shown.contains(&key), "{role}: the {key} row");
+                assert_eq!(
+                    view.config.get(key).is_some(),
+                    shown.contains(&key),
+                    "{role}: the {key} field"
+                );
+                assert_eq!(
+                    view.withheld.contains(&key.to_string()),
+                    !shown.contains(&key),
+                    "{role}: {key} named as withheld"
+                );
+            }
+            assert_eq!(
+                view.fields.len(),
+                4,
+                "{role}: every field's source is named"
+            );
+        }
+    }
+
+    #[test]
+    fn a_switched_off_row_the_caller_cannot_read_withholds_nothing() {
+        let mut cascade = every_scope();
+        cascade.levels.contest.as_mut().unwrap().enabled = Some(false);
+        cascade.fields.insert("c".into(), ConfigSource::Plugin);
+        let view = cascade_view(
+            cascade,
+            Readable {
+                plugin: true,
+                problem: true,
+                contest: false,
+            },
+            None,
+        );
+        assert!(view.levels.contest.is_none());
+        assert!(
+            !view.withheld.contains(&"c".to_string()),
+            "a switched-off row contributes nothing: {:?}",
+            view.withheld
+        );
+    }
+
     #[test]
     fn a_refusal_keeps_only_a_key_of_the_plugins_own_pack() {
         let violations = vec![
