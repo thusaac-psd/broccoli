@@ -6,7 +6,9 @@ use sea_orm_migration::prelude::*;
 /// spending nothing, but only up to `judging::fault::CONTENTION_HANDBACKS`
 /// times per unit, after which it is a judging failure within the
 /// submission's retry budget. Counted on the row, so the cap holds across
-/// replicas and restarts.
+/// replicas and restarts. Plugins read both tables, so the plugin group role
+/// may read the new columns as it reads every other column that is not
+/// content.
 ///
 /// Additive (release/docs/upgrade.md): defaulted columns servers of the
 /// previous release keep working against.
@@ -22,6 +24,21 @@ const UP: &str = r#"
 ALTER TABLE public.submission_judgement
     ADD COLUMN contended_handbacks integer NOT NULL DEFAULT 0;
 ALTER TABLE public.code_run ADD COLUMN contended_handbacks integer NOT NULL DEFAULT 0;
+DO $$
+DECLARE
+  plugin_group name;
+BEGIN
+  SELECT g.name INTO plugin_group FROM public.plugin_group_role g LIMIT 1;
+  IF plugin_group IS NULL THEN
+    RETURN;
+  END IF;
+  EXECUTE format('GRANT SELECT (contended_handbacks) ON public.submission_judgement TO %I',
+    plugin_group);
+  EXECUTE format('GRANT SELECT (contended_handbacks) ON public.code_run TO %I', plugin_group);
+EXCEPTION
+  WHEN insufficient_privilege THEN
+    RAISE WARNING 'plugin group grants skipped (insufficient privilege): %', SQLERRM;
+END $$;
 "#;
 
 const DOWN: &str = r#"
