@@ -12,23 +12,64 @@ pub enum PluginOutage {
         #[schema(example = "my-plugin")]
         plugin_id: String,
     },
+    /// The plugin is enabled and loaded on no live server (it failed to load
+    /// everywhere, or the fleet is reloading it). Nothing changes until a
+    /// server that loads it is live.
+    NotLoaded {
+        #[schema(example = "my-plugin")]
+        plugin_id: String,
+    },
     /// The plugin is enabled but cannot answer on this server right now (it
     /// is loading, reloading or busy). A retry may succeed.
     Unavailable,
 }
 
 impl PluginOutage {
-    /// The outage of two plugins at once: a disabled plugin outlasts an
-    /// unavailable one, so its outage is the one to report. Commutative.
-    pub fn worst(self, other: PluginOutage) -> PluginOutage {
-        match (self, other) {
-            (PluginOutage::Disabled { plugin_id: a }, PluginOutage::Disabled { plugin_id: b }) => {
-                PluginOutage::Disabled {
-                    plugin_id: a.min(b),
-                }
+    /// How long the outage lasts, longest first: a disabled plugin waits for
+    /// an administrator, a plugin loaded nowhere for a server to load it,
+    /// and an unavailable one for this server.
+    fn rank(&self) -> u8 {
+        match self {
+            PluginOutage::Disabled { .. } => 0,
+            PluginOutage::NotLoaded { .. } => 1,
+            PluginOutage::Unavailable => 2,
+        }
+    }
+
+    /// The plugin the outage names, if it names one.
+    pub fn plugin_id(&self) -> Option<&str> {
+        match self {
+            PluginOutage::Disabled { plugin_id } | PluginOutage::NotLoaded { plugin_id } => {
+                Some(plugin_id)
             }
-            (d @ PluginOutage::Disabled { .. }, _) | (_, d @ PluginOutage::Disabled { .. }) => d,
-            (PluginOutage::Unavailable, PluginOutage::Unavailable) => PluginOutage::Unavailable,
+            PluginOutage::Unavailable => None,
+        }
+    }
+
+    /// The outage of two plugins at once: the one that lasts longer
+    /// ([`Self::rank`]), and of two alike the plugin whose id sorts first.
+    /// Commutative.
+    pub fn worst(self, other: PluginOutage) -> PluginOutage {
+        let key = |o: &PluginOutage| (o.rank(), o.plugin_id().map(str::to_owned));
+        if key(&other) < key(&self) {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+impl From<ClosedBy> for PluginOutage {
+    /// What a plugin that closes work ([`ClosedBy`]) makes of what it
+    /// provides: the outage of the same plugin, for the same reason.
+    fn from(closed: ClosedBy) -> Self {
+        match closed.reason {
+            ClosedReason::Disabled => PluginOutage::Disabled {
+                plugin_id: closed.plugin_id,
+            },
+            ClosedReason::NotLoaded => PluginOutage::NotLoaded {
+                plugin_id: closed.plugin_id,
+            },
         }
     }
 }
@@ -139,5 +180,36 @@ mod tests {
         );
         assert_eq!(disabled("b").worst(disabled("a")), disabled("a"));
         assert_eq!(disabled("a").worst(disabled("b")), disabled("a"));
+    }
+
+    #[test]
+    fn a_plugin_loaded_nowhere_outlasts_an_unavailable_one_and_not_a_disabled_one() {
+        let not_loaded = |id: &str| PluginOutage::NotLoaded {
+            plugin_id: id.into(),
+        };
+        let disabled = PluginOutage::Disabled {
+            plugin_id: "z".into(),
+        };
+        for (a, b, worst) in [
+            (not_loaded("a"), PluginOutage::Unavailable, not_loaded("a")),
+            (not_loaded("a"), disabled.clone(), disabled.clone()),
+            (not_loaded("b"), not_loaded("a"), not_loaded("a")),
+        ] {
+            assert_eq!(a.clone().worst(b.clone()), worst);
+            assert_eq!(b.worst(a), worst);
+        }
+        assert_eq!(
+            serde_json::to_value(not_loaded("ioi")).unwrap(),
+            serde_json::json!({"state": "not_loaded", "plugin_id": "ioi"})
+        );
+        // A plugin that closes work is out for the same reason.
+        assert_eq!(
+            PluginOutage::from(ClosedBy {
+                plugin_id: "ioi".into(),
+                provides: Provided::ContestType,
+                reason: ClosedReason::NotLoaded,
+            }),
+            not_loaded("ioi")
+        );
     }
 }

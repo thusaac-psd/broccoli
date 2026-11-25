@@ -328,7 +328,7 @@ async fn blind_outages(
     let enabled_types: Vec<String> = blind
         .types
         .iter()
-        .filter(|(_, o)| matches!(o, PluginOutage::Unavailable))
+        .filter(|(_, o)| !matches!(o, PluginOutage::Disabled { .. }))
         .map(|(t, _)| t.clone())
         .collect();
     let mut contests = Vec::new();

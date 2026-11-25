@@ -644,6 +644,7 @@ impl From<broccoli_api_types::visibility::PluginOutage> for AppError {
         use broccoli_api_types::visibility::PluginOutage;
         match outage {
             PluginOutage::Disabled { plugin_id } => AppError::PluginDisabled(plugin_id),
+            PluginOutage::NotLoaded { plugin_id } => AppError::PluginNotLoaded(plugin_id),
             PluginOutage::Unavailable => AppError::PluginUnavailable,
         }
     }

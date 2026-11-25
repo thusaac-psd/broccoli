@@ -4152,6 +4152,12 @@ export interface components {
           state: 'disabled';
         }
       | {
+          /** @example my-plugin */
+          plugin_id: string;
+          /** @enum {string} */
+          state: 'not_loaded';
+        }
+      | {
           /** @enum {string} */
           state: 'unavailable';
         };

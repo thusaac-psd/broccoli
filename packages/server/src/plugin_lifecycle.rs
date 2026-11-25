@@ -323,29 +323,38 @@ impl PluginLifecycle {
     /// loads it. `None` when every key can run, or was never recorded by any
     /// plugin. `providers::runnable` states the same rule in SQL.
     pub fn closed_by(&self, needs: Needs<'_>) -> Option<ClosedBy> {
-        use crate::providers::FleetProvider;
-        use broccoli_api_types::visibility::ClosedReason;
         needs
             .each()
             .into_iter()
-            .find_map(|(provides, key)| match self.provider(provides, key) {
-                FleetProvider::Plugin(plugin_id) => {
-                    (!self.loaded_somewhere(provides, key, &plugin_id)).then_some(ClosedBy {
+            .find_map(|(provides, key)| self.key_closure(provides, key))
+    }
+
+    /// What keeps work needing `key` (a `provides` key) from running, if
+    /// anything: the one closure rule for a single key, which every reader
+    /// of a closure applies ([`Self::closed_by`], [`Self::problem_closure`],
+    /// [`contest_type_outage`]). Every provider disabled closes it by the
+    /// first of them (`Disabled`); a fleet-wide provider loaded on no live
+    /// replica closes it by that provider (`NotLoaded`).
+    pub fn key_closure(&self, provides: Provided, key: &str) -> Option<ClosedBy> {
+        use crate::providers::FleetProvider;
+        use broccoli_api_types::visibility::ClosedReason;
+        match self.provider(provides, key) {
+            FleetProvider::Plugin(plugin_id) => (!self.loaded_somewhere(provides, key, &plugin_id))
+                .then_some(ClosedBy {
+                    plugin_id,
+                    provides,
+                    reason: ClosedReason::NotLoaded,
+                }),
+            FleetProvider::Closed => {
+                self.disabled_provider(provides, key)
+                    .map(|plugin_id| ClosedBy {
                         plugin_id,
                         provides,
-                        reason: ClosedReason::NotLoaded,
+                        reason: ClosedReason::Disabled,
                     })
-                }
-                FleetProvider::Closed => {
-                    self.disabled_provider(provides, key)
-                        .map(|plugin_id| ClosedBy {
-                            plugin_id,
-                            provides,
-                            reason: ClosedReason::Disabled,
-                        })
-                }
-                FleetProvider::Unknown => None,
-            })
+            }
+            FleetProvider::Unknown => None,
+        }
     }
 
     /// Whether `plugin_id` has `key` (of `kind`) loaded on a live replica,
@@ -358,6 +367,24 @@ impl PluginLifecycle {
             .ok()
             .and_then(|loaded| loaded.as_ref().map(|l| l.has(kind, key, plugin_id)))
             .unwrap_or(true)
+    }
+
+    /// Whether `plugin_id` is loaded on no live replica, as far as the fleet
+    /// can tell: of the keys it last recorded providing, a live replica has
+    /// none loaded on it. A plugin that provides no key, or a fleet not yet
+    /// read, tells nothing, so it counts as loaded somewhere.
+    pub fn loaded_nowhere(&self, plugin_id: &str) -> bool {
+        let Some(governs) = self.governs(plugin_id) else {
+            return false;
+        };
+        let keys: Vec<(Provided, &String)> = crate::providers::KINDS
+            .iter()
+            .flat_map(|&kind| governs.provides.keys(kind).iter().map(move |k| (kind, k)))
+            .collect();
+        !keys.is_empty()
+            && keys
+                .iter()
+                .all(|(kind, key)| !self.loaded_somewhere(*kind, key, plugin_id))
     }
 
     /// Records what the live replicas have loaded (see
@@ -527,15 +554,22 @@ impl PluginLifecycle {
     // change them together.
 
     /// Why plugin `plugin_id`, known not to be loaded here, cannot serve:
-    /// the fleet disabled it, or it is enabled and missing on this replica
-    /// for now. This is the one place the two are told apart.
+    /// the fleet disabled it, it is enabled and loaded on no live replica
+    /// ([`Self::loaded_nowhere`]), or it is enabled and missing on this
+    /// replica for now. This is the one place the three are told apart, so
+    /// every answer about a plugin that is out (`AppError::from`) names the
+    /// plugin unless a retry here may serve.
     pub fn outage(&self, plugin_id: &str) -> PluginOutage {
-        if self.is_desired_enabled(plugin_id) {
-            PluginOutage::Unavailable
-        } else {
+        if !self.is_desired_enabled(plugin_id) {
             PluginOutage::Disabled {
                 plugin_id: plugin_id.to_string(),
             }
+        } else if self.loaded_nowhere(plugin_id) {
+            PluginOutage::NotLoaded {
+                plugin_id: plugin_id.to_string(),
+            }
+        } else {
+            PluginOutage::Unavailable
         }
     }
 
@@ -606,15 +640,17 @@ impl PluginLifecycle {
 }
 
 /// Why contests of `contest_type` cannot be served on this replica, if they
-/// cannot: the plugin providing the type is disabled fleet-wide, or the
-/// type's fleet-wide provider is not loaded here (`providers::resolve`). Submissions to such a contest are refused
-/// and its results are unavailable.
+/// cannot: the type is closed fleet-wide ([`PluginLifecycle::key_closure`]:
+/// every provider disabled, or its provider loaded on no live replica), or
+/// the type's fleet-wide provider is not loaded here (`providers::resolve`).
+/// Submissions to such a contest are refused and its results are
+/// unavailable.
 pub async fn contest_type_outage(state: &AppState, contest_type: &str) -> Option<PluginOutage> {
-    if let Some(plugin_id) = state
+    if let Some(closed) = state
         .plugin_lifecycle
-        .disabled_provider(Provided::ContestType, contest_type)
+        .key_closure(Provided::ContestType, contest_type)
     {
-        return Some(PluginOutage::Disabled { plugin_id });
+        return Some(closed.into());
     }
     let resolved = crate::providers::resolve(
         &*state.registries.contest_type_registry.read().await,
