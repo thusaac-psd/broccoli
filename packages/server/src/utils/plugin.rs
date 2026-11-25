@@ -150,7 +150,9 @@ pub async fn update_translations(state: &AppState) {
             }
         }
     }
-    state.plugins.update_translations(&owners);
+    state
+        .plugins
+        .update_translations(&owners, &state.plugin_lifecycle.recorded_names());
 }
 
 /// Drop everything a half-activated plugin registered and mark it `Failed`.

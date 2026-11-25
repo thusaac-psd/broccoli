@@ -74,6 +74,9 @@ pub struct PluginLifecycle {
     reported: std::sync::Mutex<Option<Reported>>,
     /// The recorded [`Governs`] per plugin, as of the last reconcile.
     governs: RwLock<HashMap<String, Governs>>,
+    /// Each plugin's recorded display name per locale (`plugin.names`), as
+    /// of the last reconcile.
+    names: RwLock<HashMap<String, std::collections::BTreeMap<String, String>>>,
     /// What the live replicas have loaded, each key with the plugins that
     /// registered it on one of them, as of the last reconcile
     /// (`plugin_replica.provides`); `None` before the first read.
@@ -852,6 +855,36 @@ impl PluginLifecycle {
         recorded
     }
 
+    /// Every plugin's display name per locale as the fleet recorded it
+    /// (`plugin.names`), for naming a plugin no pack here names.
+    pub fn recorded_names(&self) -> plugin_core::i18n::RecordedNames {
+        let mut recorded = plugin_core::i18n::RecordedNames::default();
+        if let Ok(names) = self.names.read() {
+            for (plugin_id, by_locale) in names.iter() {
+                for (locale, name) in by_locale {
+                    recorded.insert(plugin_id, locale, name);
+                }
+            }
+        }
+        recorded
+    }
+
+    /// `plugin_id`'s recorded display names, if any.
+    pub fn names_of(&self, plugin_id: &str) -> Option<std::collections::BTreeMap<String, String>> {
+        self.names.read().ok()?.get(plugin_id).cloned()
+    }
+
+    /// Records `plugin_id`'s display names; whether they changed.
+    pub(crate) fn set_names(
+        &self,
+        plugin_id: &str,
+        names: std::collections::BTreeMap<String, String>,
+    ) -> bool {
+        self.names
+            .write()
+            .is_ok_and(|mut map| map.insert(plugin_id.to_string(), names.clone()) != Some(names))
+    }
+
     pub(crate) fn set_governs(&self, plugin_id: &str, governs: Governs) {
         if let Ok(mut map) = self.governs.write() {
             map.insert(plugin_id.to_string(), governs);
@@ -865,6 +898,9 @@ impl PluginLifecycle {
         }
         if let Ok(mut g) = self.governs.write() {
             g.remove(plugin_id);
+        }
+        if let Ok(mut n) = self.names.write() {
+            n.remove(plugin_id);
         }
     }
 }
@@ -1264,6 +1300,7 @@ async fn reconcile_locked(
         forget(state, applied, id).await;
     }
     let published_archives = published_archives(&rows);
+    let mut renamed = false;
     for row in rows {
         if let Some(governs) = row.governs.clone() {
             match serde_json::from_value::<Governs>(governs) {
@@ -1273,6 +1310,16 @@ async fn reconcile_locked(
                     plugin_id = %row.id,
                     host_error = %e,
                     "A plugin's recorded governs does not have the one shape both readers share"
+                ),
+            }
+        }
+        if let Some(names) = row.names.clone() {
+            match serde_json::from_value(names) {
+                Ok(names) => renamed |= state.plugin_lifecycle.set_names(&row.id, names),
+                Err(e) => tracing::warn!(
+                    plugin_id = %row.id,
+                    host_error = %e,
+                    "A plugin's recorded names are not a map of locales to names"
                 ),
             }
         }
@@ -1291,6 +1338,10 @@ async fn reconcile_locked(
     }
     if fleet_changed || !gone.is_empty() {
         retain_cache(state, published_archives).await;
+    }
+    // A name another replica recorded names its plugin here too.
+    if renamed {
+        plugin_utils::update_translations(state).await;
     }
     // What the live replicas have loaded, this one's own registrations
     // included before its next report lands.
@@ -1365,9 +1416,9 @@ async fn forget(state: &AppState, applied: &mut HashMap<String, Applied>, plugin
     if let Ok(mut registry) = state.plugins.get_registry().write() {
         registry.remove(plugin_id);
     }
-    plugin_utils::update_translations(state).await;
     applied.remove(plugin_id);
     state.plugin_lifecycle.forget(plugin_id);
+    plugin_utils::update_translations(state).await;
     tracing::info!(plugin_id, "Plugin removed from the fleet; unloaded it here");
 }
 
@@ -1641,6 +1692,28 @@ fn registered_host_locale(state: &AppState, plugin_id: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The display name per locale `plugin_id`'s own packs give it
+/// (`plugin.<id>.name`), as registered here.
+fn registered_names(
+    state: &AppState,
+    plugin_id: &str,
+) -> std::collections::BTreeMap<String, String> {
+    let key = format!("plugin.{plugin_id}.name");
+    let Ok(registry) = state.plugins.get_registry().read() else {
+        return Default::default();
+    };
+    registry
+        .get(plugin_id)
+        .map(|entry| {
+            entry
+                .translations
+                .iter()
+                .filter_map(|(locale, map)| Some((locale.clone(), map.get(&key)?.clone())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// What the plugin loaded here governs.
 async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
     let declared = state
@@ -1739,7 +1812,8 @@ async fn record_declared(state: &AppState, ids: &[String]) -> Result<(), DbErr> 
 }
 
 /// Record what the published version of a plugin, just loaded here at
-/// `generation`, governs, if that changed: the first load of a bundled
+/// `generation`, governs and how its pack names it, if that changed: the
+/// first load of a bundled
 /// plugin, which no change published, records it this way. Fenced on the
 /// generation, so a replica applying an older generation never overwrites
 /// what a newer change published with it ([`publish`]). Best-effort: a
@@ -1747,24 +1821,38 @@ async fn record_declared(state: &AppState, ids: &[String]) -> Result<(), DbErr> 
 /// for a slightly different scope.
 async fn record_governs(state: &AppState, plugin_id: &str, generation: i64) {
     let governs = loaded_governs(state, plugin_id).await;
-    if state.plugin_lifecycle.governs(plugin_id).as_ref() == Some(&governs) {
+    let names = registered_names(state, plugin_id);
+    if state.plugin_lifecycle.governs(plugin_id).as_ref() == Some(&governs)
+        && state.plugin_lifecycle.names_of(plugin_id).as_ref() == Some(&names)
+    {
         return;
     }
-    let Ok(value) = serde_json::to_value(&governs) else {
+    let (Ok(value), Ok(names_value)) =
+        (serde_json::to_value(&governs), serde_json::to_value(&names))
+    else {
         return;
     };
     let result = state
         .db
         .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE plugin SET governs = $2 \
-              WHERE id = $1 AND generation = $3 AND governs IS DISTINCT FROM $2",
-            [plugin_id.into(), value.into(), generation.into()],
+            "UPDATE plugin SET governs = $2, names = $4 \
+              WHERE id = $1 AND generation = $3 \
+                AND (governs IS DISTINCT FROM $2 OR names IS DISTINCT FROM $4)",
+            [
+                plugin_id.into(),
+                value.into(),
+                generation.into(),
+                names_value.into(),
+            ],
         ))
         .await;
     match result {
         Ok(done) if done.rows_affected() > 0 => {
-            state.plugin_lifecycle.set_governs(plugin_id, governs)
+            state.plugin_lifecycle.set_governs(plugin_id, governs);
+            if state.plugin_lifecycle.set_names(plugin_id, names) {
+                plugin_utils::update_translations(state).await;
+            }
         }
         Ok(_) => {}
         Err(e) => {
@@ -1829,12 +1917,13 @@ async fn publish(
     let hash = loaded.fingerprint.map(|f| f.hash.clone());
     let governs = loaded.governs.and_then(|g| serde_json::to_value(g).ok());
     let host_locale = loaded.host_locale.map(str::to_string);
+    let names = loaded.names.and_then(|n| serde_json::to_value(n).ok());
     let archive = source.archive_hash().map(str::to_string);
     let statement = match change {
         Change::Enable => Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash, governs, host_locale)
-               VALUES ($1, TRUE, 1, NOW(), $2, $3, $4, $5, $6)
+            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash, governs, host_locale, names)
+               VALUES ($1, TRUE, 1, NOW(), $2, $3, $4, $5, $6, $7)
                ON CONFLICT (id) DO UPDATE
                  SET is_enabled = TRUE,
                      generation = plugin.generation + 1,
@@ -1843,7 +1932,9 @@ async fn publish(
                      content_hash = COALESCE(EXCLUDED.content_hash, plugin.content_hash),
                      governs = COALESCE(EXCLUDED.governs, plugin.governs),
                      host_locale = CASE WHEN EXCLUDED.governs IS NULL THEN plugin.host_locale
-                                        ELSE EXCLUDED.host_locale END
+                                        ELSE EXCLUDED.host_locale END,
+                     names = CASE WHEN EXCLUDED.governs IS NULL THEN plugin.names
+                                  ELSE EXCLUDED.names END
                  WHERE plugin.archive_hash IS NOT DISTINCT FROM EXCLUDED.archive_hash
                RETURNING generation"#,
             [
@@ -1853,6 +1944,7 @@ async fn publish(
                 archive.into(),
                 governs.into(),
                 host_locale.into(),
+                names.clone().into(),
             ],
         ),
         Change::Disable => Statement::from_sql_and_values(
@@ -1869,8 +1961,8 @@ async fn publish(
         // clause decides; without either, nothing is written.
         Change::Upload(replaces) => Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash, governs, host_locale)
-               SELECT $1, TRUE, 1, NOW(), $2, $3, $4, $7, $8
+            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash, governs, host_locale, names)
+               SELECT $1, TRUE, 1, NOW(), $2, $3, $4, $7, $8, $9
                 WHERE $5 OR EXISTS (SELECT 1 FROM plugin WHERE id = $1)
                ON CONFLICT (id) DO UPDATE
                  SET is_enabled = TRUE,
@@ -1881,7 +1973,9 @@ async fn publish(
                      archive_hash = EXCLUDED.archive_hash,
                      governs = COALESCE(EXCLUDED.governs, plugin.governs),
                      host_locale = CASE WHEN EXCLUDED.governs IS NULL THEN plugin.host_locale
-                                        ELSE EXCLUDED.host_locale END
+                                        ELSE EXCLUDED.host_locale END,
+                     names = CASE WHEN EXCLUDED.governs IS NULL THEN plugin.names
+                                  ELSE EXCLUDED.names END
                  WHERE NOT $5 AND plugin.archive_hash IS NOT DISTINCT FROM $6
                RETURNING generation"#,
             [
@@ -1896,6 +1990,7 @@ async fn publish(
                     .into(),
                 governs.into(),
                 host_locale.into(),
+                names.clone().into(),
             ],
         ),
         Change::Reload => Statement::from_sql_and_values(
@@ -1905,7 +2000,8 @@ async fn publish(
                       version = COALESCE($2, version),
                       content_hash = COALESCE($3, content_hash),
                       governs = COALESCE($5, governs),
-                      host_locale = CASE WHEN $5 IS NULL THEN host_locale ELSE $6 END
+                      host_locale = CASE WHEN $5 IS NULL THEN host_locale ELSE $6 END,
+                      names = CASE WHEN $5 IS NULL THEN names ELSE $7 END
                WHERE id = $1 AND is_enabled AND archive_hash IS NOT DISTINCT FROM $4
                RETURNING generation"#,
             [
@@ -1915,6 +2011,7 @@ async fn publish(
                 archive.into(),
                 governs.into(),
                 host_locale.into(),
+                names.clone().into(),
             ],
         ),
         Change::RemoveUpload(removed) => Statement::from_sql_and_values(
@@ -1924,7 +2021,8 @@ async fn publish(
                       version = COALESCE($2, version),
                       content_hash = COALESCE($3, content_hash),
                       governs = COALESCE($5, governs),
-                      host_locale = CASE WHEN $5 IS NULL THEN host_locale ELSE $6 END
+                      host_locale = CASE WHEN $5 IS NULL THEN host_locale ELSE $6 END,
+                      names = CASE WHEN $5 IS NULL THEN names ELSE $7 END
                WHERE id = $1 AND archive_hash = $4
                RETURNING generation"#,
             [
@@ -1934,6 +2032,7 @@ async fn publish(
                 removed.into(),
                 governs.into(),
                 host_locale.into(),
+                names.clone().into(),
             ],
         ),
     };
@@ -1985,6 +2084,9 @@ struct Loaded<'a> {
     /// The locale its manifest provides as a language pack; recorded with
     /// `governs`.
     host_locale: Option<&'a str>,
+    /// Its display name per locale ([`registered_names`]); recorded with
+    /// `governs`.
+    names: Option<&'a std::collections::BTreeMap<String, String>>,
 }
 
 /// Why a lifecycle change did not go through.
@@ -2082,10 +2184,12 @@ async fn load_then_publish(
     let fingerprint = plugin_utils::fingerprint(&root).await;
     let governs = loaded_governs(state, plugin_id).await;
     let host_locale = registered_host_locale(state, plugin_id);
+    let names = registered_names(state, plugin_id);
     let loaded = Loaded {
         fingerprint: fingerprint.as_ref(),
         governs: Some(&governs),
         host_locale: host_locale.as_deref(),
+        names: Some(&names),
     };
     let published = match publish(&state.db, plugin_id, change, loaded, source).await {
         Ok(Some(generation)) => Ok(generation),
@@ -2118,6 +2222,9 @@ async fn load_then_publish(
         }
     };
     state.plugin_lifecycle.set_governs(plugin_id, governs);
+    if state.plugin_lifecycle.set_names(plugin_id, names) {
+        plugin_utils::update_translations(state).await;
+    }
     applied.insert(
         plugin_id.to_string(),
         Applied {
@@ -2493,6 +2600,7 @@ pub async fn remove_upload(
                     fingerprint: fingerprint.as_ref(),
                     governs: None,
                     host_locale: None,
+                    names: None,
                 };
                 let generation = publish(&state.db, plugin_id, change, loaded, &PluginSource::Bundle)
                 .await?

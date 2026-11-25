@@ -1247,6 +1247,34 @@ async fn a_plugin_names_only_the_contest_types_it_provides() {
     );
 }
 
+/// Publishing a plugin records its name in each locale its pack names it,
+/// so a replica that never has its files still names it.
+#[tokio::test(flavor = "multi_thread")]
+async fn publishing_a_plugin_records_its_name_per_locale() {
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    let manifest = std::fs::read_to_string(fixture(BUNDLED).join("plugin.toml")).unwrap()
+        + "\n[translations]\nen = \"i18n/en.toml\"\nzh-CN = \"i18n/zh-CN.toml\"\n";
+    let wasm = std::fs::read(fixture(BUNDLED).join("server_plugin.wasm")).unwrap();
+    let en = format!("'plugin.{UPLOAD_ONLY}.name' = \"Uploaded\"\n");
+    let zh = format!("'plugin.{UPLOAD_ONLY}.name' = \"已上传\"\n");
+    upload(
+        &a,
+        &token,
+        tar_gz(&[
+            (&format!("{UPLOAD_ONLY}/plugin.toml"), manifest.as_bytes()),
+            (&format!("{UPLOAD_ONLY}/server_plugin.wasm"), &wasm),
+            (&format!("{UPLOAD_ONLY}/i18n/en.toml"), en.as_bytes()),
+            (&format!("{UPLOAD_ONLY}/i18n/zh-CN.toml"), zh.as_bytes()),
+        ]),
+    )
+    .await;
+    assert_eq!(
+        row(&a, UPLOAD_ONLY).await.unwrap().names,
+        Some(serde_json::json!({"en": "Uploaded", "zh-CN": "已上传"}))
+    );
+}
+
 /// A plugin whose id is a host key namespace would speak as the host: its
 /// own keys (`<id>.…`) are the host's. Such an upload is refused, so a
 /// plugin named `apiError` can never reword the host's error texts.

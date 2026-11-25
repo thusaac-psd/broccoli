@@ -62,6 +62,12 @@ the fleet still runs, in the table and in memory. The first load of a bundled
 plugin, which no change published, records it from the reconcile loop, fenced
 on the generation it loaded so it never overwrites a newer publish.
 
+The `names` column is recorded with `governs`, the same way: the plugin's
+display name in each locale its own pack names it (`plugin.<id>.name`). A
+server serves it for a plugin no pack it has names, its files missing there or
+the plugin loaded on no server, so a notice about the plugin shows its name, not
+its id (`plugin_core::i18n::served_translations`).
+
 ## Replica liveness
 
 Each server's `plugin_replica` row carries its report (per-plugin state and the

@@ -745,6 +745,31 @@ async fn a_practice_problem_reads_while_its_contest_plugin_is_loaded_nowhere() {
     );
 }
 
+/// A plugin no server here has the files of is named by the name the fleet
+/// recorded from its pack when it was last published, in every locale the
+/// server serves, not by its id.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_loaded_nowhere_is_named_by_its_recorded_name() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let app = E2eTestApp::spawn().await;
+    record_plugin_elsewhere(&app, "far-judge", false, "far-type", "far-lang").await;
+    app.db
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            r#"UPDATE plugin SET names = '{"en": "Far Judge", "zh-CN": "远方评测"}' WHERE id = 'far-judge'"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(app.reconcile_plugins_failing().await, ["far-judge"]);
+    for (locale, name) in [("en", "Far Judge"), ("zh-CN", "远方评测")] {
+        let res = app
+            .get_without_token(&format!("/api/v1/i18n/translations/{locale}"))
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        assert_eq!(res.body["plugin.far-judge.name"], name, "{locale}");
+    }
+}
+
 /// Work needing a key no enabled plugin provides (a checker format nothing
 /// registered) fails on its first attempt and stands: no replica will ever
 /// run it. Its system error names the role and the key (`NO_PROVIDER`); it
