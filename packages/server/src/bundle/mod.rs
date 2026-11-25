@@ -132,6 +132,10 @@ pub struct Summary {
     /// The secret fields an import left unset: the target holds no secret
     /// of the bundle's ref at the same item.
     pub secrets_unset: usize,
+    /// The problems a `--replace-problems` import removed that the bundle
+    /// does not carry, by id and title: replacing the target's problems
+    /// removes every one it had, not only those the bundle restores.
+    pub problems_removed: Vec<(i32, String)>,
     /// The plugins, and the `plugin:namespace` configs, an export left out:
     /// no manifest of the plugin is at hand, or it does not declare the
     /// namespace, so no one could say which of their fields are secret.
@@ -148,6 +152,19 @@ impl std::fmt::Display for Summary {
                 f,
                 "secret config fields left unset (the target stores none of the bundle's): {}",
                 self.secrets_unset
+            )?;
+        }
+        if !self.problems_removed.is_empty() {
+            let named: Vec<String> = self
+                .problems_removed
+                .iter()
+                .map(|(id, title)| format!("#{id} {title}"))
+                .collect();
+            writeln!(
+                f,
+                "problems removed (the bundle does not carry them): {}: {}",
+                named.len(),
+                named.join(", ")
             )?;
         }
         if !self.configs_left_out.is_empty() {
@@ -972,7 +989,7 @@ pub async fn import(
         known.last().map(String::as_str).unwrap_or_default()
     );
     let stored = stored_configs(&mut tx, &manifest.withheld).await?;
-    prepare_problem_tables(&mut tx, options).await?;
+    let had = prepare_problem_tables(&mut tx, options).await?;
 
     let mut summary = Summary::default();
     let mut loaded = Vec::new();
@@ -1029,6 +1046,20 @@ pub async fn import(
     if loaded.iter().any(|(table, _)| table.name == "contest") {
         prepare_contest(&mut tx, options).await?;
     }
+    let carried: Vec<i32> = if loaded.iter().any(|(table, _)| table.name == "problem") {
+        sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT id FROM {}",
+            staging("problem")
+        )))
+        .fetch_all(&mut *tx)
+        .await?
+    } else {
+        Vec::new()
+    };
+    summary.problems_removed = had
+        .into_iter()
+        .filter(|(id, _)| !carried.contains(id))
+        .collect();
 
     // Restore in table order, whatever order the archive held them in.
     loaded.sort_by_key(|(table, _)| TABLES.iter().position(|t| t.name == table.name));
@@ -1102,15 +1133,17 @@ async fn mark_for_recheck(
 /// problems unless asked to replace them, and refuse to replace problems
 /// anything references unless asked to delete that too. The referencing
 /// tables are read from the schema's foreign keys.
+/// Returns the problems the target had before, by id and title: those the
+/// bundle does not carry are reported removed ([`Summary::problems_removed`]).
 async fn prepare_problem_tables(
     tx: &mut Transaction<'_, Postgres>,
     options: ImportOptions,
-) -> anyhow::Result<()> {
-    let existing: i64 = sqlx::query_scalar("SELECT count(*) FROM problem")
-        .fetch_one(&mut **tx)
+) -> anyhow::Result<Vec<(i32, String)>> {
+    let existing: Vec<(i32, String)> = sqlx::query_as("SELECT id, title FROM problem ORDER BY id")
+        .fetch_all(&mut **tx)
         .await?;
-    if existing > 0 {
-        replace_problems(tx, options, existing).await?;
+    if !existing.is_empty() {
+        replace_problems(tx, options, existing.len()).await?;
     }
     // The bundle's problems keep the ids they had on the source. A config
     // names its problem by id in text, with no foreign key, so every problem
@@ -1123,7 +1156,7 @@ async fn prepare_problem_tables(
         ])
         .execute(&mut **tx)
         .await?;
-    Ok(())
+    Ok(existing)
 }
 
 /// Clear the target's contest that has the bundle's contest id. A contest
@@ -1246,7 +1279,7 @@ fn delete_with_dependents<'a>(
 async fn replace_problems(
     tx: &mut Transaction<'_, Postgres>,
     options: ImportOptions,
-    existing: i64,
+    existing: usize,
 ) -> anyhow::Result<()> {
     ensure!(
         options.replace_problems,

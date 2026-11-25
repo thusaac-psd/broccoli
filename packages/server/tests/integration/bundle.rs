@@ -1004,6 +1004,35 @@ async fn a_problem_replaced_at_its_id_keeps_none_of_the_secret_the_id_held() {
     assert_eq!(token(&target, problem).await, "unset");
 }
 
+/// `--replace-problems` removes every problem the target had: those the
+/// bundle does not carry are named in the summary, not only counted away.
+#[tokio::test(flavor = "multi_thread")]
+async fn replacing_problems_names_those_the_bundle_does_not_carry() {
+    let source = TestApp::spawn().await;
+    let problem = seed_problem_with_configs(&source, "source").await;
+    let target = TestApp::spawn().await;
+    let admin = target
+        .create_user_with_role("bundle_removed_admin", "pass1234", "admin")
+        .await;
+    let replaced = target.create_problem(&admin, "Replaced").await;
+    let other = target.create_problem(&admin, "Not in the bundle").await;
+    assert_eq!(
+        replaced, problem,
+        "both databases hand out the same first id"
+    );
+
+    let summary = replace_from(&target, &export_problem(&source, problem).await).await;
+    assert_eq!(
+        summary.problems_removed,
+        vec![(other, "Not in the bundle".to_string())],
+        "{summary}"
+    );
+    assert!(
+        summary.to_string().contains("Not in the bundle"),
+        "{summary}"
+    );
+}
+
 /// The archive's entries, uncompressed.
 fn unpacked(archive: &[u8]) -> Vec<u8> {
     use std::io::Read;
