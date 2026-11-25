@@ -647,6 +647,7 @@
 'admin.field.contestType' = "比赛类型"
 'admin.field.contestTypeMissing' = "未设置"
 'admin.field.selectPlaceholder' = "请选择…"
+'admin.field.unavailableOption' = "{name}（不可用）"
 'admin.field.submissionFormat' = "提交文件格式"
 'admin.field.showTestDetails' = "显示测试详情"
 'admin.field.problemIsPublic' = "公开题目"

@@ -184,6 +184,9 @@ const PROBLEM_TITLES = [
   'Matrix',
 ];
 
+/** The id that ends `url`'s path (`/api/v1/problems/2` to 2). */
+const trailingId = (url: URL) => Number(/(\d+)$/.exec(url.pathname)![1]);
+
 export const problem = (id: number) => ({
   id,
   title: PROBLEM_TITLES[id - 1],
@@ -517,16 +520,12 @@ const ROUTES: [string, RegExp, Handler][] = [
   [
     'GET',
     /^\/contests\/1\/problems\/(\d+)$/,
-    (url) => problem(Number(url.pathname.split('/')[4])),
+    (url) => problem(trailingId(url)),
   ],
   ['GET', /^\/contests\/1\/submissions$/, () => cursorPage(SUBMISSIONS)],
   ['GET', /^\/contests\/\d+\/clarifications$/, () => ({ data: [] })],
   ['GET', /^\/problems$/, () => numberedPage([3, 2, 1].map(problem))],
-  [
-    'GET',
-    /^\/problems\/(\d+)$/,
-    (url) => problem(Number(url.pathname.split('/')[2])),
-  ],
+  ['GET', /^\/problems\/(\d+)$/, (url) => problem(trailingId(url))],
   ['GET', /^\/submissions$/, () => cursorPage(SUBMISSIONS)],
   ['GET', /^\/submissions\/1$/, () => SUBMISSION_DETAIL],
   ['GET', /^\/submissions\/1\/judgements$/, () => []],

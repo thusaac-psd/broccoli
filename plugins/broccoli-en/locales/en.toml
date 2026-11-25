@@ -646,6 +646,7 @@
 'admin.field.contestType' = "Contest Type"
 'admin.field.contestTypeMissing' = "Not set"
 'admin.field.selectPlaceholder' = "Select…"
+'admin.field.unavailableOption' = "{name} (unavailable)"
 'admin.field.submissionFormat' = "Submission Format"
 'admin.field.showTestDetails' = "Show Test Details"
 'admin.field.problemIsPublic' = "Public Problem"

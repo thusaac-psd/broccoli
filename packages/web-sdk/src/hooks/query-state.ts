@@ -63,6 +63,17 @@ function shownFailure(query: QueryLike<unknown>, lastError: unknown): unknown {
 }
 
 /**
+ * The data `state` shows, once it arrived (`empty` or `data`, a failed
+ * refresh keeping the last good copy); undefined while it loads, after it
+ * failed, or while the query is idle.
+ */
+export function loadedData<T>(state: QueryState<T>): T | undefined {
+  return state.status === 'data' || state.status === 'empty'
+    ? state.data
+    : undefined;
+}
+
+/**
  * The state of `query`: once a first load has failed, its failure, whether
  * TanStack is still retrying it or a poll asks again behind it, and never a
  * load that seems to go on.

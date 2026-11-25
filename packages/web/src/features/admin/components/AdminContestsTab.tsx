@@ -7,6 +7,9 @@ import {
 import type { ContestProblem, ContestSummary } from '@broccoli/web-sdk/contest';
 import {
   isAlreadyDone,
+  loadedData,
+  registryChoiceLabel,
+  registryChoices,
   type ServerTableParams,
   useAsyncDialog,
   useIdempotentRequest,
@@ -308,7 +311,11 @@ function ContestForm({
   const queryClient = useQueryClient();
   const apiClient = useApiClient();
   const sendIdempotent = useIdempotentRequest();
-  const { data: registries } = useRegistries();
+  const registriesQuery = useRegistries();
+  // A stored contest type this server does not register stays chosen,
+  // shown as unavailable, and nothing is cleared while the registries load.
+  const registries = useQueryState(registriesQuery);
+  const registeredTypes = loadedData(registries)?.contest_types;
   const [values, setValues] = useState(initial);
   const isEdit = contestId !== undefined;
   // The server fixes a contest's type at its first submission
@@ -473,12 +480,21 @@ function ContestForm({
             <option value="" disabled>
               {t('admin.field.selectPlaceholder')}
             </option>
-            {(registries?.contest_types ?? []).map((opt) => (
-              <option key={opt} value={opt}>
-                {label('contestType', opt)}
-              </option>
-            ))}
+            {registryChoices(registeredTypes, values.contestType).map(
+              (choice) => (
+                <option key={choice.value} value={choice.value}>
+                  {registryChoiceLabel(
+                    choice,
+                    label('contestType', choice.value),
+                    t,
+                  )}
+                </option>
+              ),
+            )}
           </select>
+          {registries.status === 'error' && (
+            <QueryErrorState state={registries} className="py-4" />
+          )}
           {contestTypeLocked && (
             <p
               id="contest-type-locked"

@@ -46,16 +46,18 @@ export function problemFormValues(problem: Problem): ProblemFormData {
 }
 
 /**
- * The checker format the form shows: the chosen one while it is registered,
- * otherwise the server's default (`default_checker_format` of the
- * registries), otherwise the first registered format.
+ * The checker format the form shows: the chosen or stored one, whether or
+ * not this server registers it (a stored format is a judging input, kept
+ * until the admin changes it), otherwise the server's default
+ * (`default_checker_format` of the registries), otherwise the first
+ * registered format.
  */
 export function checkerFormatFor(
   current: string,
   registered: readonly string[],
   serverDefault: string | null | undefined,
 ): string {
-  if (registered.includes(current)) return current;
+  if (current) return current;
   if (serverDefault && registered.includes(serverDefault)) return serverDefault;
   return registered[0] ?? '';
 }

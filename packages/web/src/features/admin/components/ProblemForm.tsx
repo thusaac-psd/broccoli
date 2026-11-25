@@ -1,4 +1,10 @@
-import { useQueryState, useRegistries } from '@broccoli/web-sdk/hooks';
+import {
+  loadedData,
+  registryChoiceLabel,
+  registryChoices,
+  useQueryState,
+  useRegistries,
+} from '@broccoli/web-sdk/hooks';
 import { useIdentifierLabel, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -49,63 +55,32 @@ export function ProblemForm({
 }: ProblemFormProps) {
   const { t } = useTranslation();
   const label = useIdentifierLabel();
-  const { data: registries } = useRegistries();
+  const registriesQuery = useRegistries();
+  // What this server registers, once loaded: a stored type it does not list
+  // shows as unavailable, and nothing is cleared while the registries load
+  // or after they fail.
+  const registries = useQueryState(registriesQuery);
+  const registered = loadedData(registries);
   const languagesQuery = useSupportedLanguages();
   // A language list that could not load says so instead of offering none.
   const languages = useQueryState(languagesQuery);
-  const supportedLanguages = languagesQuery.data ?? NO_LANGUAGES;
+  const supportedLanguages = loadedData(languages) ?? NO_LANGUAGES;
   const [selectedLanguage, setSelectedLanguage] = useState('');
   const [newFilenameByLanguage, setNewFilenameByLanguage] = useState<
     Record<string, string>
   >({});
 
-  const problemTypes = useMemo(
-    () => registries?.problem_types ?? [],
-    [registries],
-  );
-  const checkerFormats = useMemo(
-    () => registries?.checker_formats ?? [],
-    [registries],
-  );
-  const contestTypes = useMemo(
-    () => registries?.contest_types ?? [],
-    [registries],
-  );
-
-  // Keep selected options in sync with the registered formats.
+  // A new problem starts with the server's default checker format, once the
+  // registries say what it is. A stored value is never replaced.
   useEffect(() => {
-    let changed = false;
-    const newData = { ...data };
-
-    if (data.problemType && !problemTypes.includes(data.problemType)) {
-      newData.problemType = '';
-      changed = true;
-    }
-    // A new problem starts with the server's default checker format.
+    if (!registered || data.checkerFormat) return;
     const checkerFormat = checkerFormatFor(
       data.checkerFormat,
-      checkerFormats,
-      registries?.default_checker_format,
+      registered.checker_formats,
+      registered.default_checker_format,
     );
-    if (data.checkerFormat !== checkerFormat) {
-      newData.checkerFormat = checkerFormat;
-      changed = true;
-    }
-    // Deliberately no auto-pick for the contest type: it decides who judges
-    // practice submissions, so the admin must choose it. An unknown value is
-    // cleared back to the placeholder instead of silently replaced.
-    if (
-      data.defaultContestType &&
-      !contestTypes.includes(data.defaultContestType)
-    ) {
-      newData.defaultContestType = '';
-      changed = true;
-    }
-
-    if (changed) {
-      onChange(newData);
-    }
-  }, [data, problemTypes, checkerFormats, registries, contestTypes, onChange]);
+    if (checkerFormat) onChange({ ...data, checkerFormat });
+  }, [data, registered, onChange]);
 
   const handleTitleChange = (title: string) => {
     onChange({ ...data, title });
@@ -286,70 +261,34 @@ export function ProblemForm({
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <div className="space-y-2">
-          <Label htmlFor="problem-type">{t('admin.field.problemType')}</Label>
-          <Select
-            value={data.problemType}
-            onValueChange={handleProblemTypeChange}
-            disabled={problemTypes.length === 0}
-          >
-            <SelectTrigger id="problem-type">
-              <SelectValue placeholder={t('admin.field.selectPlaceholder')} />
-            </SelectTrigger>
-            <SelectContent>
-              {problemTypes.map((opt) => (
-                <SelectItem key={opt} value={opt}>
-                  {label('problemType', opt)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor="checker-format">
-            {t('admin.field.checkerFormat')}
-          </Label>
-          <Select
-            value={data.checkerFormat}
-            onValueChange={handleCheckerFormatChange}
-            disabled={checkerFormats.length === 0}
-          >
-            <SelectTrigger id="checker-format">
-              <SelectValue placeholder={t('admin.field.selectPlaceholder')} />
-            </SelectTrigger>
-            <SelectContent>
-              {checkerFormats.map((opt) => (
-                <SelectItem key={opt} value={opt}>
-                  {label('checker', opt)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor="default-contest-type">
-            {t('admin.field.contestType')}
-          </Label>
-          <Select
-            value={data.defaultContestType}
-            onValueChange={handleDefaultContestTypeChange}
-            disabled={contestTypes.length === 0}
-          >
-            <SelectTrigger id="default-contest-type">
-              <SelectValue placeholder={t('admin.field.selectPlaceholder')} />
-            </SelectTrigger>
-            <SelectContent>
-              {contestTypes.map((opt) => (
-                <SelectItem key={opt} value={opt}>
-                  {label('contestType', opt)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+        <RegistrySelect
+          id="problem-type"
+          label={t('admin.field.problemType')}
+          value={data.problemType}
+          onChange={handleProblemTypeChange}
+          registered={registered?.problem_types}
+          name={(id) => label('problemType', id)}
+        />
+        <RegistrySelect
+          id="checker-format"
+          label={t('admin.field.checkerFormat')}
+          value={data.checkerFormat}
+          onChange={handleCheckerFormatChange}
+          registered={registered?.checker_formats}
+          name={(id) => label('checker', id)}
+        />
+        <RegistrySelect
+          id="default-contest-type"
+          label={t('admin.field.contestType')}
+          value={data.defaultContestType}
+          onChange={handleDefaultContestTypeChange}
+          registered={registered?.contest_types}
+          name={(id) => label('contestType', id)}
+        />
       </div>
+      {registries.status === 'error' && (
+        <QueryErrorState state={registries} className="py-4" />
+      )}
 
       <Separator />
 
@@ -487,5 +426,50 @@ export function ProblemForm({
         )}
       </div>
     </>
+  );
+}
+
+/**
+ * A field chosen from what the plugins registered: the stored value always
+ * shows, marked unavailable when this server does not register it.
+ */
+function RegistrySelect({
+  id,
+  label,
+  value,
+  onChange,
+  registered,
+  name,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  /** What this server registers; undefined until the registries load. */
+  registered: readonly string[] | undefined;
+  name: (id: string) => string;
+}) {
+  const { t } = useTranslation();
+  const choices = registryChoices(registered, value);
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={id}>{label}</Label>
+      <Select
+        value={value}
+        onValueChange={onChange}
+        disabled={registered === undefined || choices.length === 0}
+      >
+        <SelectTrigger id={id}>
+          <SelectValue placeholder={t('admin.field.selectPlaceholder')} />
+        </SelectTrigger>
+        <SelectContent>
+          {choices.map((choice) => (
+            <SelectItem key={choice.value} value={choice.value}>
+              {registryChoiceLabel(choice, name(choice.value), t)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
   );
 }

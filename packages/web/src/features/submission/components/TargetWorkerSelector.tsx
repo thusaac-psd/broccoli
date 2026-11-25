@@ -1,5 +1,6 @@
+import { loadedData, useQueryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { Badge, Button } from '@broccoli/web-sdk/ui';
+import { Badge, Button, QueryErrorState } from '@broccoli/web-sdk/ui';
 import { Pin, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
@@ -11,18 +12,28 @@ interface Props {
   disabled?: boolean;
 }
 
+type Worker = NonNullable<
+  ReturnType<typeof useSystemOverview>['data']
+>['workers'][number];
+
+/** Offered until the overview loads, and while it cannot. */
+const NO_WORKERS: Worker[] = [];
+
 /**
  * Admin-only chip multi-select for pinning a submission to specific workers.
- * Renders nothing if no live workers are visible. The parent component is
- * responsible for permission-gating; this component assumes it should render
- * when mounted.
+ * Renders nothing once the overview shows no live worker and none is
+ * pinned; a pinned worker always shows, so it can be removed, and an
+ * overview that cannot load says so. The parent component is responsible
+ * for permission-gating; this component assumes it should render when
+ * mounted.
  */
 export function TargetWorkerSelector({ selected, onChange, disabled }: Props) {
   const { t } = useTranslation();
-  const { data, isLoading } = useSystemOverview();
+  const overview = useQueryState(useSystemOverview());
   const [open, setOpen] = useState(false);
 
-  const liveWorkers = useMemo(() => data?.workers ?? [], [data]);
+  const loaded = loadedData(overview);
+  const liveWorkers = loaded?.workers ?? NO_WORKERS;
 
   const available = useMemo(
     () => liveWorkers.filter((w) => !selected.includes(w.id)),
@@ -38,7 +49,7 @@ export function TargetWorkerSelector({ selected, onChange, disabled }: Props) {
     onChange(selected.filter((x) => x !== id));
   }
 
-  if (!isLoading && liveWorkers.length === 0) {
+  if (loaded && liveWorkers.length === 0 && selected.length === 0) {
     // No reason to show the picker when there are no live workers to choose.
     return null;
   }
@@ -72,6 +83,10 @@ export function TargetWorkerSelector({ selected, onChange, disabled }: Props) {
           </button>
         </Badge>
       ))}
+
+      {overview.status === 'error' && (
+        <QueryErrorState state={overview} className="py-1" />
+      )}
 
       {available.length > 0 && (
         <div className="relative">
