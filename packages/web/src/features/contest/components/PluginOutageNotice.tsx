@@ -23,8 +23,8 @@ function Notice({ text, className }: { text: string; className?: string }) {
 /**
  * What a contest shows while the plugin that provides its contest type
  * cannot serve it (`plugin_outage`): its results are unavailable and its
- * submissions refused. A disabled plugin, or one loaded on no server, is
- * named (`pluginName`), so whoever can bring it back knows which. Renders
+ * submissions refused. A disabled plugin, one loaded on no server, or one
+ * this server lacks while another serves it, is named (`pluginName`), so whoever can bring it back knows which. Renders
  * nothing otherwise.
  */
 export function PluginOutageNotice({
@@ -44,6 +44,10 @@ export function PluginOutageNotice({
         });
       case 'not_loaded':
         return t('contests.pluginOutage.notLoaded', {
+          plugin: pluginName(lookup, outage.plugin_id),
+        });
+      case 'not_loaded_here':
+        return t('contests.pluginOutage.notLoadedHere', {
           plugin: pluginName(lookup, outage.plugin_id),
         });
       case 'unavailable':

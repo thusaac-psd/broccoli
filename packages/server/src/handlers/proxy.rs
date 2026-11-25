@@ -105,10 +105,16 @@ async fn handle_plugin_request_impl(
             .read()
             .map_err(|_| AppError::Internal("Failed to acquire plugin registry lock".into()))?;
 
-        let entry = registry.get(&plugin_id).ok_or_else(|| {
+        // A plugin the fleet has but this replica's files lack answers why
+        // it cannot serve here, like one installed and not loaded; only a
+        // plugin no replica knows is not found.
+        let Some(entry) = registry.get(&plugin_id) else {
+            if state.plugin_lifecycle.is_known(&plugin_id) {
+                return Err(state.plugin_lifecycle.outage(&plugin_id).into());
+            }
             warn!("Target plugin not found in registry");
-            AppError::NotFound("Plugin not found".into())
-        })?;
+            return Err(AppError::NotFound("Plugin not found".into()));
+        };
 
         let matched_route = entry.router.at(&normalized_path).map_err(|_| {
             warn!("No matching route found in plugin router");
@@ -316,7 +322,7 @@ macro_rules! proxy_handler {
                 (status = 413, description = "The plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
                 (status = 429, description = "The plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
                 (status = 500, description = "The plugin failed (INTERNAL_ERROR); the detail is logged, never returned", body = ErrorBody),
-                (status = 503, description = "The plugin is disabled (PLUGIN_DISABLED, carries Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After)", body = ErrorBody),
+                (status = 503, description = "The plugin is disabled (PLUGIN_DISABLED), loaded on no server (PLUGIN_NOT_LOADED), or served by another server but not this one (PLUGIN_NOT_LOADED_HERE), each naming it in details.plugin_id and carrying Retry-After; or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After)", body = ErrorBody),
             ),
             security(("jwt" = []))
         )]
@@ -356,7 +362,7 @@ macro_rules! proxy_handler {
                 (status = 413, description = "The plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
                 (status = 429, description = "The plugin refused the request (`<plugin_id>.<CODE>`)", body = ErrorBody),
                 (status = 500, description = "The plugin failed (INTERNAL_ERROR); the detail is logged, never returned", body = ErrorBody),
-                (status = 503, description = "The plugin is disabled (PLUGIN_DISABLED, carries Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After)", body = ErrorBody),
+                (status = 503, description = "The plugin is disabled (PLUGIN_DISABLED), loaded on no server (PLUGIN_NOT_LOADED), or served by another server but not this one (PLUGIN_NOT_LOADED_HERE), each naming it in details.plugin_id and carrying Retry-After; or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After)", body = ErrorBody),
             ),
             security(("jwt" = []))
         )]

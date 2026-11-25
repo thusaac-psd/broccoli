@@ -49,9 +49,13 @@ Each server answers three probes and `/metrics` on its main HTTP port:
   `"not_ready"` while another live server can take submissions this one would
   refuse: a contest type's plugin is loaded there but not here (its load keeps
   failing, or its files are missing), so a submission or code run pinned here
-  would answer `CONTEST_TYPE_UNAVAILABLE` until the load succeeds. Servers that
-  each lack a different plugin, or a plugin no server could load, are all ready,
-  so the gateway always keeps a server. It makes no database or Redis call.
+  would answer `503 PLUGIN_NOT_LOADED_HERE`, naming the plugin in
+  `details.plugin_id`, until the load succeeds. That answer, like every request
+  here that needs the plugin (its own routes, the results it governs), carries
+  `Retry-After: 10`: two failed probes five seconds apart, after which the
+  gateway sends the retry to a server that serves it. Servers that each lack a
+  different plugin, or a plugin no server could load, are all ready, so the
+  gateway always keeps a server. It makes no database or Redis call.
 - `/healthz`, the deep check for monitoring: it also reaches Postgres, Redis and
   blob storage (below). It is never a gateway probe: the servers share those, so
   one blip would fail it on every server at once.

@@ -175,9 +175,11 @@ host_codes! {
     PlatformToolMissing = "PLATFORM_TOOL_MISSING";
     /// No live worker takes work.
     NoCapableWorker = "NO_CAPABLE_WORKER";
-    /// A plugin the work needs stopped being loaded on the replica that
-    /// took it; the work goes back to the queue.
-    PluginNotLoadedHere = "PLUGIN_NOT_LOADED_HERE";
+    /// A plugin the request or work needs is enabled and served by another
+    /// live replica, but not loaded on this one: a request is retried once
+    /// the gateway moves it to a replica that serves the plugin, and work
+    /// this replica took goes back to the queue.
+    PluginNotLoadedHere = "PLUGIN_NOT_LOADED_HERE", names_plugin;
     /// No enabled plugin provides a key the work needs (its contest type,
     /// problem type, checker format or language), and the replica that took
     /// it had none loaded: no replica will ever run it, so it stands.

@@ -559,6 +559,127 @@ async fn record_plugin_elsewhere(
         .unwrap();
 }
 
+/// A live peer replica that serves `plugin_id`, which provides
+/// `contest_type` and `language` there.
+async fn peer_serving(app: &E2eTestApp, plugin_id: &str, contest_type: &str, language: &str) {
+    use server::plugin_fleet::{ReplicaPluginState, ReplicaPluginStatus};
+    let report = [(
+        plugin_id.to_string(),
+        ReplicaPluginState {
+            status: ReplicaPluginStatus::Loaded,
+            error: None,
+            generation: 1,
+            retry_in_ms: None,
+            version: None,
+        },
+    )]
+    .into();
+    let mut provides = server::providers::Loaded::default();
+    provides
+        .contest_types
+        .insert(contest_type.into(), vec![plugin_id.into()]);
+    provides
+        .languages
+        .insert(language.into(), vec![plugin_id.into()]);
+    server::plugin_fleet::report(&app.db, "a-peer", &report, &provides)
+        .await
+        .unwrap();
+}
+
+/// A plugin a live peer serves and this server lacks is refused by name
+/// wherever a request needs it: a submit under its contest type, its own
+/// routes. Each answer is a 503 naming it, retried once the gateway has
+/// moved the browser to a server that serves it. A language it provides is
+/// known here, and an administrator enables it from this server too:
+/// enabling is the fleet's state.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_a_peer_serves_and_this_server_lacks_is_refused_by_name() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("peer_only_admin", "pass1234", "admin")
+        .await;
+    let problem_id = app.create_public_problem(&admin, "Judged on a peer").await;
+    app.create_test_case(problem_id, &admin).await;
+    record_plugin_elsewhere(&app, "peer-judge", false, "peer-type", "peer-lang").await;
+    peer_serving(&app, "peer-judge", "peer-type", "peer-lang").await;
+    assert_eq!(app.reconcile_plugins_failing().await, ["peer-judge"]);
+    let contestant = app
+        .create_authenticated_user("peer_only_user", "pass1234")
+        .await;
+
+    let named = |res: &test_support::TestResponse| {
+        assert_eq!(res.status, 503, "{}", res.text);
+        assert_eq!(res.body["code"], "PLUGIN_NOT_LOADED_HERE", "{}", res.text);
+        assert_eq!(
+            res.body["details"]["plugin_id"], "peer-judge",
+            "{}",
+            res.text
+        );
+        assert_eq!(
+            res.headers.get("Retry-After").unwrap(),
+            &server::error::NOT_LOADED_HERE_RETRY_AFTER_SECS.to_string()
+        );
+    };
+    let submit = |language: &'static str, contest_type: Option<&'static str>| {
+        let mut body = json!({
+            "language": language,
+            "files": [{"filename": "main.cpp", "content": CPP_SUM}],
+        });
+        if let Some(contest_type) = contest_type {
+            body["contest_type"] = json!(contest_type);
+        }
+        body
+    };
+    let res = app
+        .post_with_token(
+            &format!("/api/v1/problems/{problem_id}/submissions"),
+            &submit("cpp", Some("peer-type")),
+            &contestant,
+        )
+        .await;
+    named(&res);
+    named(
+        &app.get_with_token("/api/v1/p/peer-judge/anything", &contestant)
+            .await,
+    );
+
+    // Its language is known here; a peer judges it.
+    let res = app
+        .post_with_token(
+            &format!("/api/v1/problems/{problem_id}/submissions"),
+            &submit("peer-lang", None),
+            &contestant,
+        )
+        .await;
+    assert!(res.status < 300, "{}", res.text);
+
+    app.db
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "UPDATE plugin SET is_enabled = FALSE, generation = generation + 1 \
+             WHERE id = 'peer-judge'",
+        ))
+        .await
+        .unwrap();
+    app.reconcile_plugins().await;
+    let res = app
+        .post_with_token(
+            "/api/v1/admin/plugins/peer-judge/enable",
+            &json!({}),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let enabled = server::entity::plugin::Entity::find_by_id("peer-judge")
+        .one(&app.db)
+        .await
+        .unwrap()
+        .unwrap()
+        .is_enabled;
+    assert!(enabled, "enabled for the fleet");
+}
+
 /// Reading a practice problem needs no contest plugin: while the plugin
 /// of its default contest type is loaded nowhere, its statement reads, its
 /// submit is closed by that plugin, and a submission in a language only

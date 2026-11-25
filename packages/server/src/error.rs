@@ -24,6 +24,12 @@ pub const PLUGIN_RETRY_AFTER_SECS: u64 = 2;
 /// a client asks again at this pace rather than a plugin call's.
 pub const DISABLED_RETRY_AFTER_SECS: u64 = 30;
 
+/// The `Retry-After` of a `PLUGIN_NOT_LOADED_HERE` answer: how long the
+/// shipped gateways take to stop sending this replica's browsers here once
+/// its readiness fails (two failed checks five seconds apart), after which
+/// the retry lands on a replica that serves the plugin.
+pub const NOT_LOADED_HERE_RETRY_AFTER_SECS: u64 = 10;
+
 /// The `Retry-After` of a `STORAGE_UNAVAILABLE` answer.
 pub const STORAGE_RETRY_AFTER_SECS: u64 = 5;
 
@@ -158,6 +164,11 @@ pub enum AppError {
     /// reloading it). A client asks again after [`DISABLED_RETRY_AFTER_SECS`]:
     /// it serves once a replica loads the plugin.
     PluginNotLoaded(String),
+    /// What the request needs is provided by plugin `id`, enabled and served
+    /// by another live replica but not loaded on this one. A client asks
+    /// again after [`NOT_LOADED_HERE_RETRY_AFTER_SECS`], by when the gateway
+    /// sends it to a replica that serves the plugin.
+    PluginNotLoadedHere(String),
     /// Blob storage did not answer through its retries: an outage, retried
     /// by the client after [`STORAGE_RETRY_AFTER_SECS`].
     StorageUnavailable,
@@ -443,6 +454,17 @@ impl AppError {
                     plugin_id,
                 ),
             ),
+            AppError::PluginNotLoadedHere(plugin_id) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                naming_plugin(
+                    HostCode::PluginNotLoadedHere,
+                    format!(
+                        "The plugin '{plugin_id}' is not loaded on this server; another server \
+                         serves it, and a retry is sent there"
+                    ),
+                    plugin_id,
+                ),
+            ),
             AppError::StorageUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 simple(
@@ -563,6 +585,7 @@ impl IntoResponse for AppError {
             AppError::PluginDisabled(_)
             | AppError::PluginNotLoaded(_)
             | AppError::ContestTypeDisabled { .. } => Some(DISABLED_RETRY_AFTER_SECS),
+            AppError::PluginNotLoadedHere(_) => Some(NOT_LOADED_HERE_RETRY_AFTER_SECS),
             AppError::StorageUnavailable => Some(STORAGE_RETRY_AFTER_SECS),
             AppError::DatabaseUnavailable => Some(DATABASE_RETRY_AFTER_SECS),
             AppError::DatabaseBusy => Some(DATABASE_BUSY_RETRY_AFTER_SECS),
@@ -731,6 +754,7 @@ impl From<broccoli_api_types::visibility::PluginOutage> for AppError {
         match outage {
             PluginOutage::Disabled { plugin_id } => AppError::PluginDisabled(plugin_id),
             PluginOutage::NotLoaded { plugin_id } => AppError::PluginNotLoaded(plugin_id),
+            PluginOutage::NotLoadedHere { plugin_id } => AppError::PluginNotLoadedHere(plugin_id),
             PluginOutage::Unavailable => AppError::PluginUnavailable,
         }
     }
@@ -991,6 +1015,7 @@ mod tests {
             },
             AppError::PluginDisabled("ioi".into()),
             AppError::PluginNotLoaded("ioi".into()),
+            AppError::PluginNotLoadedHere("ioi".into()),
         ];
         let mut answered = std::collections::BTreeSet::new();
         for answer in answers {
@@ -1010,6 +1035,27 @@ mod tests {
             answered, naming,
             "every code about a plugin is answered here"
         );
+    }
+
+    /// A plugin another replica serves but this one lacks is answered by
+    /// name, retried once the gateway has moved the browser to a replica
+    /// that serves it.
+    #[tokio::test]
+    async fn a_plugin_missing_here_is_a_503_naming_it_retried_after_the_gateway_moves() {
+        use broccoli_api_types::visibility::PluginOutage;
+        let response = AppError::from(PluginOutage::NotLoadedHere {
+            plugin_id: "ioi".into(),
+        })
+        .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get("Retry-After").unwrap(),
+            &NOT_LOADED_HERE_RETRY_AFTER_SECS.to_string()
+        );
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "PLUGIN_NOT_LOADED_HERE");
+        assert_eq!(body["details"], serde_json::json!({ "plugin_id": "ioi" }));
     }
 
     /// Every 503 is retryable and says when to ask again. A disabled plugin

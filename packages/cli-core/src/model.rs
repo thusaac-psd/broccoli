@@ -139,6 +139,11 @@ impl Standing {
             Self::WaitingForPlugin(PluginOutage::NotLoaded { plugin_id }) => {
                 Some(contest_plugin(plugin_id, ClosedReason::NotLoaded, names))
             }
+            Self::WaitingForPlugin(PluginOutage::NotLoadedHere { plugin_id }) => Some(format!(
+                "Waiting for its contest plugin {}: not loaded on this server; another \
+                 server serves it",
+                names.name(plugin_id)
+            )),
             Self::WaitingForPlugin(PluginOutage::Unavailable) => {
                 Some("Waiting for the contest's plugin, which cannot answer right now".into())
             }
@@ -417,6 +422,22 @@ mod tests {
             Some("Waiting for its contest plugin IOI: loaded on no server until one loads it")
         );
         assert!(not_loaded.is_in_progress());
+        // A contest plugin a peer serves and this server lacks names it too.
+        let not_here = Standing::new(
+            None,
+            Some(&Withheld::PluginOutage {
+                outage: PluginOutage::NotLoadedHere {
+                    plugin_id: "ioi".into(),
+                },
+            }),
+            None,
+        );
+        assert_eq!(
+            not_here.waiting_for(&names).as_deref(),
+            Some(
+                "Waiting for its contest plugin IOI: not loaded on this server; another server serves it"
+            )
+        );
         // An evaluator loaded nowhere withholds nothing: only parked says it.
         let evaluator = Standing::new(
             Some(SubmissionStatus::Queued),
