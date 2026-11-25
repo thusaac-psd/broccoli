@@ -949,12 +949,21 @@ impl ConfigNamespace {
         );
     }
 
-    /// Applies the secret rule ([`keep`]) to each secret field of a value a
-    /// client writes, against what is `stored`, and returns the refs of the
+    /// Applies the secret rule to each secret field of a value a client
+    /// writes, against what is `stored`, and returns the refs of the
     /// secrets the value holds once written, or every field refused. An
     /// item is matched by its key field, never its position, so a client
     /// that read the config writes it back unchanged whatever items it
     /// moved; a new item, or one renamed, holds no secret a read showed it.
+    ///
+    /// A string sets a secret (keeping the stored ref when it is the stored
+    /// value, else a new one from `mint`); the ref a read showed
+    /// (`{"$secret": "<ref>"}`, [`SECRET_REF`]) keeps the stored value at
+    /// that item while the item still holds it; `{"$clear": true}`
+    /// ([`CLEAR_SECRET`]) clears it; no secret (`null`, `""`, or the field
+    /// left out) is refused where one is stored and leaves the field unset
+    /// elsewhere. A secret its object requires is never cleared or left
+    /// without one.
     pub fn keep_secrets(
         &self,
         value: &mut serde_json::Value,
