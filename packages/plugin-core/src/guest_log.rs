@@ -1,16 +1,23 @@
 //! Every log line a plugin causes, through one sink: the lines a guest logs
 //! (extism's `log_*` imports, linked into every instance, and the `logger`
-//! capability's `log_info`) and the warning for a call that failed.
+//! capability's `log_info`), and every host line that carries a plugin's
+//! text (a failed call's reason, a route's server-error body: [`about`]).
 //!
 //! A plugin cannot flood the host's log or speak as the host:
 //!
 //! - each line names the plugin (`plugin_id`), the Broccoli id of the call
 //!   running on the thread, not extism's instance id;
+//! - a plugin's text draws nothing of its own: every control character
+//!   (a line break, a carriage return, an ANSI escape) is written as its
+//!   escape, so the text and pretty log formats show one line the host
+//!   wrote ([`plugin_text`]);
 //! - each line is at most [`MAX_LINE_BYTES`], cut at a character boundary
 //!   with the number of bytes left out;
 //! - each plugin has a budget of [`BURST`] lines, refilled at [`PER_SECOND`]
 //!   a second: a line over it is dropped, the first drop says so once, and
-//!   the next line admitted says how many were dropped;
+//!   the next line admitted says how many were dropped. A host line about a
+//!   plugin (a failed call, a route's server error: [`about`]) has a budget
+//!   of its own, so a plugin flooding its own lines never hides them;
 //! - a guest's lines go to the [`TARGET`] target, at most at `WARN`: a
 //!   guest's `error` is logged as a `WARN` with `guest_level = "error"`, so
 //!   no plugin writes a line that reads as the host's own error.
@@ -47,34 +54,79 @@ pub fn emit(plugin_id: &str, level: Level, message: &str) {
     LIMITS.emit(plugin_id, level, message, Instant::now());
 }
 
-/// Whether `plugin_id` may log one more line now. A host line a plugin causes
-/// (a failed call's warning) spends its budget too.
-pub(crate) fn admit(plugin_id: &str) -> bool {
-    LIMITS.admit(plugin_id, Instant::now())
+/// Log, as the host, `what` happened to `plugin_id`, with `text` the plugin
+/// gave (a call's failure reason, a route's answer): a warning to the
+/// [`TARGET`] target naming the plugin, with `text` as [`plugin_text`]
+/// makes it, under the plugin's budget for host lines. Every host line that
+/// carries a plugin's text goes through here, so none reads as the host's
+/// own error or floods the log.
+pub fn about(plugin_id: &str, what: &str, text: &str) {
+    LIMITS.about(plugin_id, what, text, Instant::now());
 }
 
-/// `message`, cut to at most [`MAX_LINE_BYTES`] at a character boundary,
-/// saying how many bytes were left out.
-pub fn bounded(message: &str) -> Cow<'_, str> {
-    if message.len() <= MAX_LINE_BYTES {
-        return Cow::Borrowed(message);
+/// Log that `plugin_id`'s call of `func_name` (at call depth `depth`)
+/// failed for `reason`, already [`plugin_text`]: a host line about the
+/// plugin, under its budget for those.
+pub(crate) fn failed_call(plugin_id: &str, func_name: &str, depth: u8, reason: &str) {
+    if LIMITS.admit(plugin_id, Source::Host, Instant::now()) {
+        tracing::warn!(
+            target: TARGET,
+            plugin_id,
+            func_name,
+            depth,
+            reason,
+            "Plugin call failed"
+        );
+    }
+}
+
+/// `message` as a log line may carry a plugin's text: every control
+/// character escaped (`\n`, `\r`, `\t`, `\u{1b}` and the like), then cut
+/// to at most [`MAX_LINE_BYTES`] at a character boundary, saying how many
+/// bytes were left out.
+pub fn plugin_text(message: &str) -> Cow<'_, str> {
+    let escaped = if message.chars().any(char::is_control) {
+        Cow::Owned(message.chars().fold(String::new(), |mut out, c| {
+            match c {
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if c.is_control() => out.push_str(&c.escape_unicode().to_string()),
+                c => out.push(c),
+            }
+            out
+        }))
+    } else {
+        Cow::Borrowed(message)
+    };
+    if escaped.len() <= MAX_LINE_BYTES {
+        return escaped;
     }
     let mut end = MAX_LINE_BYTES;
-    while !message.is_char_boundary(end) {
+    while !escaped.is_char_boundary(end) {
         end -= 1;
     }
     Cow::Owned(format!(
         "{}... [{} more bytes]",
-        &message[..end],
-        message.len() - end
+        &escaped[..end],
+        escaped.len() - end
     ))
 }
 
 static LIMITS: LazyLock<Limits> = LazyLock::new(Limits::default);
 
-/// Each plugin's line budget.
+/// Whose line a plugin's budget is spent on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Source {
+    /// A line the guest logged.
+    Guest,
+    /// A host line about the plugin ([`about`]).
+    Host,
+}
+
+/// Each plugin's line budgets, one per [`Source`].
 #[derive(Default)]
-struct Limits(Mutex<HashMap<String, Budget>>);
+struct Limits(Mutex<HashMap<(String, Source), Budget>>);
 
 struct Budget {
     /// Lines the plugin may log now, up to [`BURST`].
@@ -95,10 +147,10 @@ enum Taken {
 }
 
 impl Limits {
-    fn take(&self, plugin_id: &str, now: Instant) -> Taken {
+    fn take(&self, plugin_id: &str, source: Source, now: Instant) -> Taken {
         let mut budgets = self.0.lock().unwrap_or_else(|p| p.into_inner());
         let budget = budgets
-            .entry(plugin_id.to_string())
+            .entry((plugin_id.to_string(), source))
             .or_insert_with(|| Budget {
                 lines: f64::from(BURST),
                 refilled: now,
@@ -120,8 +172,8 @@ impl Limits {
         }
     }
 
-    fn admit(&self, plugin_id: &str, now: Instant) -> bool {
-        match self.take(plugin_id, now) {
+    fn admit(&self, plugin_id: &str, source: Source, now: Instant) -> bool {
+        match self.take(plugin_id, source, now) {
             Taken::Line { dropped_before } => {
                 if dropped_before > 0 {
                     tracing::warn!(
@@ -147,11 +199,20 @@ impl Limits {
         }
     }
 
-    fn emit(&self, plugin_id: &str, level: Level, message: &str, now: Instant) {
-        if !self.admit(plugin_id, now) {
+    fn about(&self, plugin_id: &str, what: &str, text: &str, now: Instant) {
+        if !self.admit(plugin_id, Source::Host, now) {
             return;
         }
-        let message = bounded(message);
+        let text = plugin_text(text);
+        let text = text.as_ref();
+        tracing::warn!(target: TARGET, plugin_id, text, "{what}");
+    }
+
+    fn emit(&self, plugin_id: &str, level: Level, message: &str, now: Instant) {
+        if !self.admit(plugin_id, Source::Guest, now) {
+            return;
+        }
+        let message = plugin_text(message);
         let message = message.as_ref();
         let guest_level = level.as_str().to_ascii_lowercase();
         let guest_level = guest_level.as_str();
@@ -173,9 +234,9 @@ mod tests {
 
     #[test]
     fn a_line_is_cut_at_a_character_boundary_and_says_how_much_was_left_out() {
-        assert_eq!(bounded("short"), "short");
+        assert_eq!(plugin_text("short"), "short");
         let long = "é".repeat(MAX_LINE_BYTES); // two bytes each
-        let cut = bounded(&long);
+        let cut = plugin_text(&long);
         assert!(cut.len() < MAX_LINE_BYTES + 32, "{}", cut.len());
         assert!(
             cut.ends_with(&format!("... [{} more bytes]", MAX_LINE_BYTES)),
@@ -185,27 +246,110 @@ mod tests {
     }
 
     #[test]
+    fn a_plugins_text_cannot_draw_lines_or_colours_of_its_own() {
+        assert_eq!(
+            plugin_text("one\nINFO server: forged\r\x1b[31mred\x1b[0m\tok\u{85}"),
+            "one\\nINFO server: forged\\r\\u{1b}[31mred\\u{1b}[0m\\tok\\u{85}"
+        );
+        // Escaping happens before the cut, so the line stays within its
+        // bound however many escapes the text needs.
+        let breaks = "\n".repeat(MAX_LINE_BYTES);
+        let cut = plugin_text(&breaks);
+        assert!(cut.len() < MAX_LINE_BYTES + 32, "{}", cut.len());
+        assert!(!cut.contains('\n'));
+    }
+
+    /// A host line about a plugin (its call failed, its route answered a
+    /// server error) has a budget of its own, so a plugin that floods its
+    /// own lines cannot hide the host's lines about it.
+    #[test]
+    fn a_plugin_over_its_rate_still_has_the_hosts_lines_about_it_logged() {
+        let limits = Limits::default();
+        let start = Instant::now();
+        for _ in 0..BURST {
+            assert_eq!(
+                limits.take("p", Source::Guest, start),
+                Taken::Line { dropped_before: 0 }
+            );
+        }
+        assert_eq!(
+            limits.take("p", Source::Guest, start),
+            Taken::Dropped { first: true }
+        );
+        assert_eq!(
+            limits.take("p", Source::Host, start),
+            Taken::Line { dropped_before: 0 }
+        );
+    }
+
+    #[test]
+    fn a_host_line_about_a_plugin_is_a_bounded_warning_naming_it() {
+        let logs = crate::test_logs::captured();
+        let limits = Limits::default();
+        limits.about(
+            "about-me",
+            "A plugin route answered a server error",
+            &format!("{}\nERROR forged", "x".repeat(4000)),
+            Instant::now(),
+        );
+        let logs = logs.lock();
+        let line = logs
+            .iter()
+            .find(|l| l.text.contains("plugin_id=about-me"))
+            .expect("the line is logged");
+        assert_eq!(line.level, Level::WARN);
+        assert_eq!(line.target, TARGET);
+        assert!(line.text.contains("A plugin route answered a server error"));
+        assert!(line.text.contains("more bytes]"), "{}", line.text);
+        assert!(!line.text.contains('\n'), "{}", line.text);
+    }
+
+    #[test]
     fn a_plugin_logs_its_burst_then_at_its_rate_and_hears_once_that_lines_dropped() {
         let limits = Limits::default();
         let start = Instant::now();
         for _ in 0..BURST {
-            assert_eq!(limits.take("p", start), Taken::Line { dropped_before: 0 });
+            assert_eq!(
+                limits.take("p", Source::Guest, start),
+                Taken::Line { dropped_before: 0 }
+            );
         }
-        assert_eq!(limits.take("p", start), Taken::Dropped { first: true });
-        assert_eq!(limits.take("p", start), Taken::Dropped { first: false });
+        assert_eq!(
+            limits.take("p", Source::Guest, start),
+            Taken::Dropped { first: true }
+        );
+        assert_eq!(
+            limits.take("p", Source::Guest, start),
+            Taken::Dropped { first: false }
+        );
         // Another plugin has a budget of its own.
-        assert_eq!(limits.take("q", start), Taken::Line { dropped_before: 0 });
+        assert_eq!(
+            limits.take("q", Source::Guest, start),
+            Taken::Line { dropped_before: 0 }
+        );
         // One line's worth of time later, one more line, which reports the
         // two dropped before it.
         let later = start + Duration::from_secs(1) / PER_SECOND;
-        assert_eq!(limits.take("p", later), Taken::Line { dropped_before: 2 });
-        assert_eq!(limits.take("p", later), Taken::Dropped { first: true });
+        assert_eq!(
+            limits.take("p", Source::Guest, later),
+            Taken::Line { dropped_before: 2 }
+        );
+        assert_eq!(
+            limits.take("p", Source::Guest, later),
+            Taken::Dropped { first: true }
+        );
         // A quiet plugin refills only up to its burst.
         let much_later = later + Duration::from_secs(3600);
         for _ in 0..BURST {
-            assert!(matches!(limits.take("p", much_later), Taken::Line { .. }));
+            assert!(matches!(
+                limits.take("p", Source::Guest, much_later),
+                Taken::Line { .. }
+            ));
         }
-        assert_eq!(limits.take("p", much_later), Taken::Dropped { first: true });
+        assert_eq!(
+            limits.take("p", Source::Guest, much_later),
+            Taken::Dropped { first: true }
+        );
     }
 
     #[test]

@@ -838,10 +838,7 @@ host_fn!(pub db_execute(user_data: Arc<(String, PluginSql)>; sql: String, args: 
     match exec_result {
         Ok(rows) => HostDbResponse::ok(JsonValue::from(rows)).to_json_string(),
         Err(e) => {
-            let sql_preview: String = sql.chars().take(800).collect();
-            let args_preview: String = args.chars().take(800).collect();
-            error!(plugin_id = %plugin_id, sql_len = sql.len(), args_len = args.len(), sql = %sql_preview, args = %args_preview, "DB execution error: {}", e);
-            super::host_db::refused(&e)
+            super::host_db::refused(plugin_id, &e)
         }
     }
 });
@@ -871,8 +868,7 @@ host_fn!(pub db_query(user_data: Arc<(String, PluginSql)>; sql: String, args: St
         },
         Ok(None) => HostDbResponse::ok(serde_json::json!([])).to_json_string(),
         Err(e) => {
-            error!("DB query error: {}", e);
-            super::host_db::refused(&e)
+            super::host_db::refused(plugin_id, &e)
         }
     }
 });
@@ -963,8 +959,7 @@ host_fn!(pub db_query_in(user_data: Arc<(String, PluginSql, TransactionMap)>; tx
         },
         Ok(None) => HostDbResponse::ok(serde_json::json!([])).to_json_string(),
         Err(e) => {
-            error!("DB query_in error: {}", e);
-            super::host_db::refused(&e)
+            super::host_db::refused(plugin_id, &e)
         }
     }
 });
@@ -985,8 +980,7 @@ host_fn!(pub db_execute_in(user_data: Arc<(String, PluginSql, TransactionMap)>; 
     match exec_result {
         Ok(res) => HostDbResponse::ok(JsonValue::from(res.rows_affected())).to_json_string(),
         Err(e) => {
-            error!("DB execute_in error: {}", e);
-            super::host_db::refused(&e)
+            super::host_db::refused(plugin_id, &e)
         }
     }
 });
@@ -1013,8 +1007,7 @@ host_fn!(pub db_commit(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_
     match result {
         Ok(()) => HostDbResponse::ok(serde_json::json!({"ok": true})).to_json_string(),
         Err(e) => {
-            error!("DB commit error: {}", e);
-            super::host_db::refused(&e)
+            super::host_db::refused(plugin_id, &e)
         }
     }
 });
@@ -1052,8 +1045,7 @@ host_fn!(pub db_rollback(user_data: Arc<(String, PluginSql, TransactionMap)>; tx
             match result {
                 Ok(()) => HostDbResponse::ok(serde_json::json!({"ok": true})).to_json_string(),
                 Err(e) => {
-                    error!("DB rollback error: {}", e);
-                    super::host_db::refused(&e)
+                    super::host_db::refused(plugin_id, &e)
                 }
             }
         }
@@ -1080,12 +1072,7 @@ pub(super) fn execute_on_pool(
 
     match exec_result {
         Ok(res) => HostDbResponse::ok(JsonValue::from(res.rows_affected())).to_json_string(),
-        Err(e) => {
-            let sql_preview: String = sql.chars().take(800).collect();
-            let args_preview: String = args.chars().take(800).collect();
-            error!(plugin_id = %plugin_id, sql_len = sql.len(), args_len = args.len(), sql = %sql_preview, args = %args_preview, "Submission DB execution error: {}", e);
-            super::host_db::refused(&e)
-        }
+        Err(e) => super::host_db::refused(plugin_id, &e),
     }
 }
 
@@ -1153,10 +1140,7 @@ pub(super) fn query_on_pool(
             HostDbResponse::ok(json_val).to_json_string()
         }
         Ok(None) => HostDbResponse::ok(serde_json::json!([])).to_json_string(),
-        Err(e) => {
-            error!(plugin_id, "Submission DB query error: {}", e);
-            super::host_db::refused(&e)
-        }
+        Err(e) => super::host_db::refused(plugin_id, &e),
     }
 }
 

@@ -339,17 +339,10 @@ fn run_guest(
             MarkedUnavailable::No if cancelled => return unavailable(),
             MarkedUnavailable::No => {}
         }
-        let message = crate::guest_log::bounded(&failure_reason(&e)).into_owned();
-        // The plugin causes the line, so it spends the plugin's log budget.
-        if crate::guest_log::admit(&plugin_id) {
-            warn!(
-                plugin_id = %plugin_id,
-                func_name = %func_name,
-                depth = resolved.depth,
-                reason = %message,
-                "Plugin call failed"
-            );
-        }
+        // The reason is the plugin's text: every log line and answer that
+        // carries it reads it escaped and bounded.
+        let message = crate::guest_log::plugin_text(&failure_reason(&e)).into_owned();
+        crate::guest_log::failed_call(&plugin_id, &func_name, resolved.depth, &message);
         PluginError::ExecutionFailed {
             plugin_id: plugin_id.clone(),
             func_name: func_name.clone(),

@@ -1273,8 +1273,11 @@ async fn dispatch_hooks_inner(
                         });
                     }
                     Err(e) => {
-                        tracing::error!(topic, "Hook execution error: {e}");
-                        return Err(AppError::Internal(format!("Hook execution failed: {e}")));
+                        return Err(AppError::PluginFailed {
+                            plugin_id: entry.plugin_id.clone(),
+                            what: "A hook failed",
+                            text: format!("{topic}: {e:#}"),
+                        });
                     }
                 };
 
@@ -1326,8 +1329,11 @@ async fn dispatch_hooks_inner(
                     HookAction::Reject(reason) => {
                         let reject = parse_reject_detail(&reason);
                         if reject.code == PLUGIN_RUNTIME_ERROR_CODE {
-                            tracing::error!(topic, code = %reject.code, message = %reject.message, "Hook infrastructure error");
-                            return Err(AppError::Internal(reject.message));
+                            return Err(AppError::PluginFailed {
+                                plugin_id: entry.plugin_id.clone(),
+                                what: "A hook's runtime failed",
+                                text: format!("{topic}: {}", reject.message),
+                            });
                         }
                         return Ok(HookOutcome::Rejected(PluginRefusal::new(
                             &entry.plugin_id,

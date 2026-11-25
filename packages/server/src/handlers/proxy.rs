@@ -201,11 +201,15 @@ fn plugin_answer(
         );
     }
     let Some(status) = status.filter(|status| status.is_success()) else {
-        return Err(AppError::Internal(format!(
-            "plugin '{plugin_id}' handler '{handler_name}' answered {}: {}",
-            response.status,
-            response.body.unwrap_or_default()
-        )));
+        return Err(AppError::PluginFailed {
+            plugin_id: plugin_id.to_string(),
+            what: "A plugin route answered a server error",
+            text: format!(
+                "{handler_name} answered {}: {}",
+                response.status,
+                response.body.unwrap_or_default()
+            ),
+        });
     };
     let body =
         serde_json::to_vec(&response.body.unwrap_or(serde_json::Value::Null)).map_err(|e| {
@@ -432,6 +436,29 @@ proxy_handler!(
 #[cfg(test)]
 mod tests {
     use super::is_forwardable_header;
+
+    /// A route's server error answers the host's internal error, and its
+    /// body, the plugin's text, goes only to a host line about the plugin.
+    #[test]
+    fn a_routes_server_error_body_is_the_plugins_text_never_the_hosts_error() {
+        let answer = super::plugin_answer(
+            "p",
+            "h",
+            plugin_core::http::PluginHttpResponse {
+                status: 500,
+                body: Some(serde_json::json!("x".repeat(100_000))),
+            },
+        );
+        match answer {
+            Err(crate::error::AppError::PluginFailed {
+                plugin_id, text, ..
+            }) => {
+                assert_eq!(plugin_id, "p");
+                assert!(text.starts_with("h answered 500: "), "{}", &text[..40]);
+            }
+            other => panic!("expected a plugin failure, got {other:?}"),
+        }
+    }
 
     #[test]
     fn drops_platform_bearer_token() {

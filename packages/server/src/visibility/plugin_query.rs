@@ -507,10 +507,10 @@ fn decisions_from_output(
         if let WireDecision::Redact { fields } = decision
             && let Err(reason) = validate_redact_fields(fields)
         {
-            tracing::error!(
-                plugin_id = %plugin_id,
+            plugin_core::guest_log::about(
+                plugin_id,
+                "A visibility plugin answered a malformed Redact field mask; denying the batch",
                 reason,
-                "visibility plugin returned a malformed Redact field mask; denying batch"
             );
             return deny_all();
         }
@@ -690,11 +690,10 @@ pub(crate) async fn query_plugins(
                 continue;
             }
             Err(e) => {
-                tracing::error!(
-                    plugin_id = %querier.plugin_id,
-                    func = %querier.function,
-                    error = %e,
-                    "visibility query plugin call failed"
+                plugin_core::guest_log::about(
+                    &querier.plugin_id,
+                    "A visibility query failed",
+                    &format!("{}: {e}", querier.function),
                 );
                 Err(e.to_string())
             }

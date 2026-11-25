@@ -161,6 +161,16 @@ pub enum AppError {
     /// Blob storage did not answer through its retries: an outage, retried
     /// by the client after [`STORAGE_RETRY_AFTER_SECS`].
     StorageUnavailable,
+    /// A plugin failed what the request needed of it (its call failed, its
+    /// route answered a server error): `what` happened, with `text` the
+    /// plugin gave. Answered as an internal error, which says nothing of the
+    /// plugin's text; the text is logged as a host line about the plugin
+    /// (`plugin_core::guest_log::about`), never as the host's own error.
+    PluginFailed {
+        plugin_id: String,
+        what: &'static str,
+        text: String,
+    },
     /// A plugin refused the request (a route's client error or a hook's
     /// rejection), confined to the plugin's namespace.
     PluginRefusal(crate::services::plugin_output::PluginRefusal),
@@ -518,6 +528,20 @@ impl AppError {
                         .into(),
                 ),
             ),
+            AppError::PluginFailed {
+                plugin_id,
+                what,
+                text,
+            } => {
+                plugin_core::guest_log::about(&plugin_id, what, &text);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    simple(
+                        HostCode::InternalError,
+                        "An unexpected error occurred".into(),
+                    ),
+                )
+            }
             AppError::Internal(detail) => {
                 tracing::error!("Internal error: {}", detail);
                 (
@@ -639,6 +663,17 @@ impl From<PluginError> for AppError {
                 tracing::warn!("{err}");
                 AppError::DatabaseBusy
             }
+            // The failure's reason is the plugin's text.
+            PluginError::ExecutionFailed {
+                ref plugin_id,
+                ref func_name,
+                ref message,
+                ..
+            } => AppError::PluginFailed {
+                plugin_id: plugin_id.clone(),
+                what: "A plugin call the request needed failed",
+                text: format!("{func_name}: {message}"),
+            },
             _ => AppError::Internal(err.to_string()),
         }
     }

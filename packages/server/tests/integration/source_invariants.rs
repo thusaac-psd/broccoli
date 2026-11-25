@@ -171,6 +171,79 @@ fn host_functions_keep_the_errors_they_meet_as_sources() {
     );
 }
 
+/// The ERROR-level log calls in `code` that name a plugin, or put a
+/// plugin's answer into an internal error, each by its first line.
+fn plugin_text_at_error(code: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (start, _) in code.match_indices("error!(") {
+        let call = &code[start..];
+        let end = call.find(");").map_or(call.len(), |end| end + 2);
+        let call = &call[..end];
+        if call.contains("plugin_id") {
+            found.push(call.lines().next().unwrap_or_default().trim().to_string());
+        }
+    }
+    for (start, _) in code.match_indices("AppError::Internal(") {
+        let call = &code[start..];
+        let end = call.find(");").map_or(call.len(), |end| end + 2);
+        let call = &call[..end];
+        if ["response.body", "reject.message", "Hook execution failed"]
+            .iter()
+            .any(|plugin_text| call.contains(plugin_text))
+        {
+            found.push(call.lines().next().unwrap_or_default().trim().to_string());
+        }
+    }
+    found
+}
+
+/// What a plugin says (a failed call's reason, a route's server-error body,
+/// a hook's error, its statement's error) reaches the host's log only
+/// through `plugin_core::guest_log` (escaped, bounded, rate-limited, at most
+/// a warning, naming the plugin): where the host calls plugins, no ERROR
+/// line names one and no internal error carries a plugin's answer. A
+/// plugin that fails a request answers `AppError::PluginFailed`.
+#[test]
+fn a_plugins_text_reaches_the_hosts_log_only_through_guest_log() {
+    let src = server_src_root();
+    let mut files = Vec::new();
+    collect_rs_files(&host_funcs_root(), &mut files);
+    files.extend(
+        [
+            "hooks.rs",
+            "handlers/proxy.rs",
+            "visibility/plugin_query.rs",
+            "error.rs",
+        ]
+        .iter()
+        .map(|file| src.join(file)),
+    );
+    let mut offenders = Vec::new();
+    for path in &files {
+        let contents = fs::read_to_string(path).unwrap();
+        let code = contents.split("#[cfg(test)]").next().unwrap();
+        for call in plugin_text_at_error(code) {
+            offenders.push(format!("{}: {call}", path.display()));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "log what a plugin says through `plugin_core::guest_log::about` or answer \
+         `AppError::PluginFailed`:\n{}",
+        offenders.join("\n")
+    );
+    // The scan sees each shape it forbids.
+    for shape in [
+        "tracing::error!(plugin_id = %id, \"failed\");",
+        "error!(plugin_id, \"x: {}\", e);",
+        "AppError::Internal(format!(\"{}\", response.body));",
+        "AppError::Internal(format!(\"Hook execution failed: {e}\"));",
+    ] {
+        assert_eq!(plugin_text_at_error(shape).len(), 1, "{shape}");
+    }
+    assert!(plugin_text_at_error("tracing::error!(\"Failed to roll back: {e}\");").is_empty());
+}
+
 #[derive(Debug)]
 struct Offender {
     path: PathBuf,

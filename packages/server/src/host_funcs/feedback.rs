@@ -14,7 +14,7 @@ host_fn!(pub submission_feedback_query(user_data: Arc<(String, DatabaseConnectio
         crate::services::submission_feedback::query(db, plugin_id, &query)))?;
     match records {
         Ok(records) => HostDbResponse::ok(serde_json::to_value(records)?).to_json_string(),
-        Err(e) => super::host_db::refused(&e),
+        Err(e) => super::host_db::refused(plugin_id, &e),
     }
 });
 
@@ -26,7 +26,7 @@ host_fn!(pub submission_feedback_update(user_data: Arc<(String, DatabaseConnecti
         crate::services::submission_feedback::update(db, plugin_id, input.submission_id, &input.action)))?;
     match result {
         Ok(outcome) => HostDbResponse::ok(serde_json::to_value(outcome)?).to_json_string(),
-        Err(e) => super::host_db::refused(&e),
+        Err(e) => super::host_db::refused(plugin_id, &e),
     }
 });
 
@@ -38,6 +38,6 @@ host_fn!(pub submission_slot_observe(user_data: Arc<(String, DatabaseConnection)
         crate::services::submission_feedback::observe_slot(db, plugin_id, &key)))?;
     match observation {
         Ok(observation) => HostDbResponse::ok(serde_json::to_value(observation)?).to_json_string(),
-        Err(e) => super::host_db::refused(&e),
+        Err(e) => super::host_db::refused(plugin_id, &e),
     }
 });
