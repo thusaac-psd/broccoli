@@ -992,6 +992,7 @@
 'config.keepSecret' = "保留"
 'config.moveUp' = "上移"
 'config.moveDown' = "下移"
+'config.itemNumber' = "第 {n} 项"
 
 # Language switcher
 'locale.switch' = "语言"

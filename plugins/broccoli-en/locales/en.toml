@@ -991,6 +991,7 @@
 'config.keepSecret' = "Keep it"
 'config.moveUp' = "Move up"
 'config.moveDown' = "Move down"
+'config.itemNumber' = "Item {n}"
 
 # Language switcher
 'locale.switch' = "Language"

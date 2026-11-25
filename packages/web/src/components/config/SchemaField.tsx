@@ -50,6 +50,7 @@ export function SchemaField({
   hasExplicitDescendant,
   isDirty,
   inherited,
+  itemLabel,
 }: Readonly<{
   name: string;
   prop: JsonSchemaProperty;
@@ -65,25 +66,34 @@ export function SchemaField({
   hasExplicitDescendant: (path: string[]) => boolean;
   isDirty?: (path: string[]) => boolean;
   inherited?: InheritedConfig;
+  /**
+   * The name of an array item, which an item shows in place of the array's
+   * title and description: its key field's value, or its number.
+   */
+  itemLabel?: string;
 }>) {
   const { t } = useTranslation();
   const pluginText = usePluginText();
+  const itemName = useItemName();
   const fieldId = `cfg-${path.join('-')}`;
   // A plugin can name its fields in its own translation pack.
   const label =
-    pluginId && namespace
+    itemLabel ??
+    (pluginId && namespace
       ? pluginText(
           pluginKeys.configField(pluginId, namespace, path, 'title'),
           prop.title ?? name,
         )
-      : (prop.title ?? name);
+      : (prop.title ?? name));
   const description =
-    pluginId && namespace
-      ? pluginText(
-          pluginKeys.configField(pluginId, namespace, path, 'description'),
-          prop.description,
-        )
-      : prop.description;
+    itemLabel !== undefined
+      ? undefined
+      : pluginId && namespace
+        ? pluginText(
+            pluginKeys.configField(pluginId, namespace, path, 'description'),
+            prop.description,
+          )
+        : prop.description;
   const unit =
     pluginId && namespace && prop['x-unit']
       ? pluginText(
@@ -400,6 +410,7 @@ export function SchemaField({
                     hasExplicitDescendant={hasExplicitDescendant}
                     isDirty={isDirty}
                     inherited={inherited}
+                    itemLabel={itemName(item, prop['x-key'], i)}
                   />
                 </div>
                 {/* An item moves with everything it holds, its secrets too:
@@ -556,6 +567,23 @@ function isClearMarker(value: unknown): boolean {
     Object.keys(value).length === 1 &&
     (value as Record<string, unknown>)[CLEAR_SECRET] === true
   );
+}
+
+/**
+ * What an array item is called: the value of its array's key field, or
+ * "Item N" when it has none yet.
+ */
+function useItemName() {
+  const { t } = useTranslation();
+  return (item: unknown, key: string | undefined, index: number) => {
+    const named =
+      key && item && typeof item === 'object'
+        ? (item as Record<string, unknown>)[key]
+        : undefined;
+    return typeof named === 'string' && named !== ''
+      ? named
+      : t('config.itemNumber', { n: index + 1 });
+  };
 }
 
 /** `items` with the items at `a` and `b` swapped. */

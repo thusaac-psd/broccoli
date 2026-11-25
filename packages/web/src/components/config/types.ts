@@ -18,6 +18,8 @@ export interface JsonSchemaProperty {
   'x-precision'?: number;
   'x-unit'?: string;
   'x-span'?: number;
+  /** For an array of objects: the field that names each item. */
+  'x-key'?: string;
   /** A secret: the server never sends its value back (it reads `null`). */
   writeOnly?: boolean;
 }
