@@ -24,11 +24,17 @@ test('a query read with a fallback renders its state', () => {
         'const q = useQuery(o); const n = q.data?.length ?? 0; const s = useQueryState(q);',
         'const q = useQuery(o); const xs = q.data ?? []; const failed = q.isError;',
         'function useX() { const query = useQuery(o); const xs = query.data ?? []; return { xs, query }; }',
+        'const { data: rows, isError } = useQuery(o); const xs = rows ?? [];',
+        'const { data, error } = useQuery(o); const xs = data ?? [];',
+        'const { data: rows } = useQuery(o); const n = rows?.length;',
       ],
       invalid: [
         'const q = useQuery(o); const xs = q.data ?? [];',
         'const q = useInfiniteQuery(o); const xs = q.data || [];',
         'const q = useQuery(o); const m = useMemo(() => f(q.data ?? []), [q.data]);',
+        'const { data: rows } = useQuery(o); const xs = rows ?? [];',
+        'const { data } = useQuery(o); const xs = data || [];',
+        'const { data: rows = [] } = useQuery(o);',
       ].map((code) => ({ code, errors: [{ messageId: 'defaulted' }] })),
     },
   );

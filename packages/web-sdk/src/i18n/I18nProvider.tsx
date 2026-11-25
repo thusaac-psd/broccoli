@@ -147,6 +147,7 @@ export function I18nProvider({
     () => ({
       locale,
       setLocale,
+      // eslint-disable-next-line query/no-defaulted-query-data -- the embedded catalogs name the locales until the server's list arrives, or if it cannot
       availableLocales: availableLocales ?? Object.keys(embeddedCatalogs),
       t,
       lookup,

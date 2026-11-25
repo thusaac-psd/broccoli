@@ -102,6 +102,7 @@
 # Submissions filters
 'submissions.filters.allProblems' = "全部题目"
 'submissions.filters.allLanguages' = "全部语言"
+'submissions.filters.allLanguagesUnavailable' = "全部语言（语言列表加载失败）"
 'submissions.filters.allStatuses' = "全部状态"
 'submissions.filters.search' = "搜索"
 'submissions.filters.searchPlaceholder' = "按用户、题目或比赛搜索…"

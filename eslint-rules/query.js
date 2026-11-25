@@ -5,6 +5,9 @@
  * which keep loading, failure and empty apart, or its failure is read
  * (`query.isError`); the fallback is then only what the view shows while the
  * state says why. A hook that returns the query leaves that to its caller.
+ * A destructured query (`const { data: x } = useQuery(...)`) is held to the
+ * same rule: its `data` read with a fallback, or given a default, needs the
+ * query's state taken beside it.
  */
 
 const QUERY_HOOKS = /^use(Suspense)?(Infinite)?Query$/;
@@ -40,7 +43,13 @@ function rendersState(ref) {
 }
 
 /** Reading these says what became of the fetch. */
-const STATE = new Set(['error', 'isError', 'status', 'isSuccess', 'failureReason']);
+const STATE = new Set([
+  'error',
+  'isError',
+  'status',
+  'isSuccess',
+  'failureReason',
+]);
 
 /**
  * Whether `ref` reads the query's state (`query.isError`), or hands the
@@ -85,6 +94,41 @@ function defaultedData(ref) {
     : null;
 }
 
+/** Whether `ref` reads its value with a fallback: `x ?? fallback` or `x || fallback`. */
+function fallsBack(ref) {
+  const logical = ref.identifier.parent;
+  return (
+    logical.type === 'LogicalExpression' &&
+    (logical.operator === '??' || logical.operator === '||') &&
+    logical.left === ref.identifier
+  );
+}
+
+/**
+ * `const { data: x } = useQuery(...)`, renamed or not: the `data` binding
+ * reported where it is read with a fallback, or the default it is given,
+ * unless the pattern also takes the query's state (`error`, `isError`, ...).
+ */
+function checkDestructured(context, node) {
+  const fields = node.id.properties.filter((p) => p.type === 'Property');
+  const named = (p) => (p.key.type === 'Identifier' ? p.key.name : null);
+  if (fields.some((p) => STATE.has(named(p)))) return;
+  const data = fields.find((p) => named(p) === 'data');
+  if (!data) return;
+  if (data.value.type === 'AssignmentPattern') {
+    context.report({ node: data.value, messageId: 'defaulted' });
+    return;
+  }
+  if (data.value.type !== 'Identifier') return;
+  const variable = context.sourceCode
+    .getDeclaredVariables(node)
+    .find((v) => v.name === data.value.name);
+  for (const ref of variable?.references ?? []) {
+    if (fallsBack(ref))
+      context.report({ node: ref.identifier, messageId: 'defaulted' });
+  }
+}
+
 const noDefaultedQueryData = {
   meta: {
     type: 'problem',
@@ -98,6 +142,15 @@ const noDefaultedQueryData = {
     return {
       VariableDeclarator(node) {
         if (
+          node.id.type === 'ObjectPattern' &&
+          node.init?.type === 'CallExpression' &&
+          node.init.callee.type === 'Identifier' &&
+          QUERY_HOOKS.test(node.init.callee.name)
+        ) {
+          checkDestructured(context, node);
+          return;
+        }
+        if (
           node.id.type !== 'Identifier' ||
           node.init?.type !== 'CallExpression' ||
           node.init.callee.type !== 'Identifier' ||
@@ -108,7 +161,9 @@ const noDefaultedQueryData = {
         const [variable] = context.sourceCode.getDeclaredVariables(node);
         if (
           !variable ||
-          variable.references.some((ref) => rendersState(ref) || handlesState(ref))
+          variable.references.some(
+            (ref) => rendersState(ref) || handlesState(ref),
+          )
         ) {
           return;
         }
