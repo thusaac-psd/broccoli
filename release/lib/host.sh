@@ -79,7 +79,7 @@ host_address() {
 source_ip_for() {
   command -v ip >/dev/null 2>&1 || return 0
   { ip route get "$1" 2>/dev/null || true; } \
-    | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }'
+    | awk '!found { for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); found = 1; break } }'
 }
 
 # upstream_list "HOST[:PORT] ...": a gateway's upstream servers as one

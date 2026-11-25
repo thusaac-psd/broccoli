@@ -49,7 +49,7 @@ env_unquote() {
 env_get() {
   local file="$1" key="$2" line val
   [ -f "$file" ] || return 0
-  line="$(grep -E "^${key}=" "$file" | head -n 1)" || true
+  line="$(grep -m 1 -E "^${key}=" "$file")" || true
   val="$(env_unquote "${line#*=}")"
   case "$val" in
     *change-me*) ;;
