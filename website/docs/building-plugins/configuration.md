@@ -72,23 +72,47 @@ above decides.
 ## Keep a secret
 
 Mark a string field `secret = true` when its value is a credential, such as a
-token a print station signs in with:
+token a print station signs in with. An array whose items hold a secret names
+its items by a key field with `key`: a string each item requires, which is not
+itself a secret. A manifest whose array holds a secret without one does not
+load.
 
 ```toml
+[config.print.properties.stations]
+type = "array"
+key = "name"
+
+[config.print.properties.stations.items]
+type = "object"
+required = ["name", "token"]
+
 [config.print.properties.stations.items.properties.token]
 type = "string"
 title = "Token"
 secret = true
 ```
 
-The JSON schema marks the field `writeOnly`. No read route sends its value:
-the admin config routes and the cascade answer the field as `null`, and the
-config's `secrets` list names each secret field that holds a value, by path
-(`stations[0].token`). A write that sends `null` for a secret field keeps the
-value stored at that path; a field inside an array item is matched by the
-item's position. Any other value replaces it, and an empty string clears it.
+The JSON schema marks the field `writeOnly` and the array `x-key`. No read
+route sends a secret's value: the admin config routes and the cascade answer
+the field as `null`, and the config's `secrets` list names each secret field
+that holds a value, by its path in the config as read (`stations[0].token`).
+
+A secret belongs to the item it was set on, never to a position. A write that
+sends `null` for a secret keeps what the stored config holds for the same
+item, the stored item whose key field has the same value, so saving the
+config back unchanged keeps every station's token whatever stations were
+added, removed or moved. A `null` secret whose item has no stored secret (a
+new station, or one whose name changed) is refused with a
+`secret_not_stored` field error: enter its secret again. A string replaces a
+secret, and the marker `{"$clear": true}` clears it, so the field reads unset.
 The settings form shows a set secret as an empty password field that keeps
-the stored value unless you type a new one.
+the stored value unless you type a new one, with a Clear action that sends the
+marker.
+
+A config whose namespace this server knows no schema for (its plugin is not
+installed here, or no longer declares the namespace) cannot say which of its
+fields are secret, so every read withholds it whole: `config` is `null` and
+`config_withheld` is `true`.
 
 Your plugin reads the real value: `host.config.get*` and the cascade a plugin
 reads are not redacted. A secret can still read unset, for example in a config
@@ -248,10 +272,13 @@ problem stays to configure the imported problem that takes its id.
 
 A bundle never carries a secret field (see _Keep a secret_). The export
 withholds each one by the namespace's schema, read from the plugin's published
-upload or the server's plugin directory, and lists where in the bundle. The
-configs of a plugin with neither stay out, and the export names the plugin. The
-import keeps the value the target already stores at that config and path, and
-otherwise leaves the field unset.
+upload or the server's plugin directory, and lists where in the bundle, each
+array item named by its key field. The configs of a plugin with neither, and a
+config whose namespace its manifest no longer declares, stay out, and the
+export names them. The import keeps the secret the target stored, before the
+import replaced anything, for the same item of the same config, and otherwise
+leaves the field unset: re-importing a server's own export keeps every secret
+it had.
 
 An import runs no plugin, so it checks none of the configs it restores, and
 the problems' `config_issues` flags do not travel: they describe the source's
