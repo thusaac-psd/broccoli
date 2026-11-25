@@ -146,8 +146,6 @@ pub struct LiveLoaded {
     /// The plugins one of them serves ([`ReplicaPluginStatus::serves`]), as
     /// their reported `plugin_replica.plugins` say.
     pub serving: std::collections::BTreeSet<String>,
-    /// The plugins each of them serves, by server id, sorted.
-    pub serving_by: Vec<(String, std::collections::BTreeSet<String>)>,
     /// Each of them, by server id, sorted.
     pub replicas: Vec<LiveReplicaLoaded>,
 }
@@ -161,7 +159,7 @@ pub struct LiveReplicaLoaded {
     /// The plugins it serves ([`ReplicaPluginStatus::serves`]).
     pub serving: std::collections::BTreeSet<String>,
     /// Whether its heartbeat is within [`PEER_FRESH_SECS`]: only then does
-    /// it count as a peer for readiness.
+    /// it count as a peer, for readiness and admission alike.
     pub fresh: bool,
 }
 
@@ -215,8 +213,6 @@ pub async fn live_loaded(db: &DatabaseConnection) -> Result<LiveLoaded, DbErr> {
             Ok(report) => {
                 replica.serving = serving(&report);
                 live.serving.extend(replica.serving.iter().cloned());
-                live.serving_by
-                    .push((server_id.clone(), replica.serving.clone()));
             }
             Err(e) => unread(e),
         }
