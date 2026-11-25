@@ -128,6 +128,45 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
         Ok(row)
     }
 
+    /// Files `envelope` as its message's whole current state: a new row, or
+    /// the existing one replaced by it (its payload, error and retry history)
+    /// and reopened, for a subject that dies again and whose history already
+    /// holds every occurrence. Not for a submission's letter, whose
+    /// settlement [`Self::send_to_dlq`] checks.
+    pub async fn refile(&self, envelope: &DlqEnvelope) -> Result<(), DbErr> {
+        let history = serde_json::to_value(&envelope.retry_history)
+            .map_err(|e| DbErr::Custom(format!("a dead letter's retry history: {e}")))?;
+        self.conn
+            .execute_raw(sea_orm::Statement::from_sql_and_values(
+                sea_orm::DbBackend::Postgres,
+                r#"INSERT INTO dead_letter_message AS d
+                       (message_id, direction, submission_id, payload, error_message, error_code,
+                        retry_count, retry_history, first_failed_at, created_at, resolved)
+                   VALUES ($1, $2, NULL, $3, $4, $5, jsonb_array_length($6), $6,
+                           COALESCE(($6 -> 0 ->> 'timestamp')::timestamptz, NOW()), NOW(), FALSE)
+                   ON CONFLICT (message_id) DO UPDATE SET
+                       payload = EXCLUDED.payload,
+                       error_message = EXCLUDED.error_message,
+                       error_code = EXCLUDED.error_code,
+                       retry_count = EXCLUDED.retry_count,
+                       retry_history = EXCLUDED.retry_history,
+                       last_failed_at = NOW(),
+                       resolved = FALSE,
+                       resolved_at = NULL,
+                       resolved_by = NULL"#,
+                [
+                    envelope.message_id.clone().into(),
+                    envelope.message_type.to_string().into(),
+                    envelope.payload.clone().into(),
+                    envelope.error_message.clone().into(),
+                    envelope.error_code.to_string().into(),
+                    history.into(),
+                ],
+            ))
+            .await?;
+        Ok(())
+    }
+
     /// Dead-letters `subject`: inserts its row, or reopens the existing one
     /// with the new error and payload, appends this occurrence to its retry
     /// history and restamps `last_failed_at`.
