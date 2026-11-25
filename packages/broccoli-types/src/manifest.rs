@@ -521,6 +521,9 @@ impl ConfigScope {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ConfigNamespace {
+    /// A short name for the namespace, which the settings form labels its
+    /// tab by (the namespace's id when absent); `description` says more.
+    pub title: Option<String>,
     pub description: Option<String>,
     /// Where this namespace can be configured. The host refuses a config for
     /// it anywhere else.
@@ -875,6 +878,9 @@ impl ConfigNamespace {
     pub fn to_json_schema(&self) -> serde_json::Value {
         let mut schema = serde_json::Map::new();
         schema.insert("type".into(), "object".into());
+        if let Some(ref title) = self.title {
+            schema.insert("title".into(), title.clone().into());
+        }
         if let Some(ref desc) = self.description {
             schema.insert("description".into(), desc.clone().into());
         }

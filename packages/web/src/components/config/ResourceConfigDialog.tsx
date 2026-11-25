@@ -862,9 +862,10 @@ function SinglePluginContent({
         <TabsList>
           {schemas.map((s) => (
             <TabsTrigger key={s.namespace} value={s.namespace}>
+              {/* A short title: the description shows below, in full. */}
               {pluginText(
-                pluginKeys.configDescription(pluginId, s.namespace),
-                s.description ?? s.namespace,
+                pluginKeys.configTitle(pluginId, s.namespace),
+                (s.json_schema as { title?: string }).title ?? s.namespace,
               )}
             </TabsTrigger>
           ))}

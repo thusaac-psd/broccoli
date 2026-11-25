@@ -54,9 +54,9 @@ test('a field at its default shows the default as its placeholder', async ({
   );
 });
 
-// The dialog names a namespace by its description in the user's language,
-// never its raw id, and each array item by its key field, or its number
-// while it has none, never by the array's own title.
+// The dialog names a namespace's tab by its short title (its id when it has
+// none), with its description below, and each array item by its key field,
+// or its number while it has none, never by the array's own title.
 test('config tabs and array items read as names, not ids', async ({ page }) => {
   await mockApi(page, 'admin', { plugins: ['print'] });
   await page.addInitScript(() =>
@@ -64,6 +64,7 @@ test('config tabs and array items read as names, not ids', async ({ page }) => {
   );
   const stations = {
     type: 'object',
+    title: 'Stations',
     properties: {
       stations: {
         type: 'array',
@@ -119,13 +120,14 @@ test('config tabs and array items read as names, not ids', async ({ page }) => {
   await page.goto('/admin/plugins');
   await page.getByRole('button', { name: '配置' }).click();
   const dialog = page.getByRole('dialog');
-  await expect(dialog.getByRole('tab', { name: '代码打印设置' })).toBeVisible();
+  await expect(dialog.getByRole('tab', { name: 'Stations' })).toBeVisible();
   await expect(
-    dialog.getByRole('tab', { name: 'Other settings' }),
+    dialog.getByRole('tab', { name: 'other', exact: true }),
   ).toBeVisible();
-  await expect(
-    dialog.getByRole('tab', { name: 'print', exact: true }),
-  ).toHaveCount(0);
+  await expect(dialog.getByRole('tab', { name: '代码打印设置' })).toHaveCount(
+    0,
+  );
+  await expect(dialog.getByText('代码打印设置')).toBeVisible();
   await expect(dialog.getByRole('heading', { name: 'desk' })).toBeVisible();
   await expect(dialog.getByRole('heading', { name: '第 2 项' })).toBeVisible();
   await expect(dialog.getByText('打印站', { exact: true })).toHaveCount(1);
