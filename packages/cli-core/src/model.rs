@@ -224,10 +224,32 @@ impl StatusDisplay for Standing {
     }
 }
 
-/// A contest problem row's title, or what stands in for it while the
-/// contest's plugin withholds it.
-pub fn problem_title(p: &broccoli_api_types::contest::ContestProblemResponse) -> &str {
-    p.problem_title.as_deref().unwrap_or("(unavailable)")
+/// A contest problem's title as the server shows it: the title, or none
+/// while the contest's plugin withholds it. It formats itself in each place
+/// it is shown, so what stands in for a withheld title is written once:
+/// `(title unavailable)` on its own, `D (title unavailable)` after a label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProblemTitle<'a>(pub Option<&'a str>);
+
+impl ProblemTitle<'_> {
+    /// `label (title)`, as a list of problems names each.
+    pub fn after(self, label: &str) -> String {
+        match self.0 {
+            Some(title) => format!("{label} ({title})"),
+            None => format!("{label} (title unavailable)"),
+        }
+    }
+}
+
+impl std::fmt::Display for ProblemTitle<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.unwrap_or("(title unavailable)"))
+    }
+}
+
+/// A contest problem row's title ([`ProblemTitle`]).
+pub fn problem_title(p: &broccoli_api_types::contest::ContestProblemResponse) -> ProblemTitle<'_> {
+    ProblemTitle(p.problem_title.as_deref())
 }
 
 /// The `clarification_type` string of a clarification.
