@@ -197,6 +197,14 @@ impl AppError {
             message,
             details: None,
         };
+        // A plugin the request needs keeps it from being served: the plugin
+        // is named in the details, so a client says it in the user's
+        // language.
+        let naming_plugin = |code: HostCode, message: String, plugin_id: String| ErrorBody {
+            code: code.as_str().into(),
+            message,
+            details: Some(serde_json::json!({ "plugin_id": plugin_id })),
+        };
 
         match self {
             AppError::Validation(msg) => (
@@ -404,23 +412,24 @@ impl AppError {
             ),
             AppError::PluginDisabled(plugin_id) => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                ErrorBody {
-                    code: HostCode::PluginDisabled.as_str().into(),
-                    message: format!(
+                naming_plugin(
+                    HostCode::PluginDisabled,
+                    format!(
                         "The plugin '{plugin_id}' is disabled, so what it provides is \
                          unavailable until an administrator enables it"
                     ),
-                    details: Some(serde_json::json!({ "plugin_id": plugin_id })),
-                },
+                    plugin_id,
+                ),
             ),
             AppError::PluginNotLoaded(plugin_id) => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                simple(
+                naming_plugin(
                     HostCode::PluginNotLoaded,
                     format!(
                         "The plugin '{plugin_id}' is loaded on no server, so what it provides \
                          is unavailable until one loads it"
                     ),
+                    plugin_id,
                 ),
             ),
             AppError::StorageUnavailable => (
@@ -893,6 +902,13 @@ mod tests {
         );
         // The plugin is named in the details too, for clients that say it in
         // the user's language.
+        assert_eq!(body["details"], serde_json::json!({ "plugin_id": "ioi" }));
+        // So is a plugin that is loaded on no server.
+        let response = AppError::PluginNotLoaded("ioi".into()).into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "PLUGIN_NOT_LOADED");
         assert_eq!(body["details"], serde_json::json!({ "plugin_id": "ioi" }));
 
         let response = AppError::from(PluginOutage::Unavailable).into_response();
