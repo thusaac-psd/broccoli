@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use plugin_core::executor::CallLocals;
 
-use super::fault::{DispatchFault, DispatchFaults};
+use super::fault::DispatchFaults;
 use super::unit::Unit;
 
 /// The unit a dispatch hands its plugin, at the epoch it was claimed under.
@@ -181,25 +181,6 @@ impl Dispatch {
         &self.0.faults
     }
 
-    /// Records that a statement this dispatch's plugins ran failed with
-    /// `err` because the database did not answer (`common::db::is_outage`):
-    /// the attempt is handed back ([`DispatchFault::DatabaseUnavailable`]).
-    /// Any other error is the plugin's to handle and records nothing.
-    pub fn note_database_error(&self, err: &sea_orm::DbErr) {
-        if common::db::is_outage(err) {
-            self.note_outage(err.to_string());
-        }
-    }
-
-    /// Records that a statement for this dispatch found the database unable
-    /// to serve it, lost or with no connection free in time (described by
-    /// `message`): the attempt is handed back
-    /// ([`DispatchFault::DatabaseUnavailable`]).
-    pub fn note_outage(&self, message: String) {
-        self.faults()
-            .record(DispatchFault::DatabaseUnavailable, message);
-    }
-
     /// Records that a plugin the unit needs did not resolve here
     /// (`unresolved`), as `judging::fault::missing_plugin` decides: handed
     /// back when the unit was claimed with every plugin it needs loaded
@@ -249,6 +230,7 @@ impl Dispatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::judging::DispatchFault;
     use common::worker::OperationFault;
 
     const UNIT: DispatchedUnit = DispatchedUnit::Judgement {
@@ -358,27 +340,6 @@ mod tests {
         assert_eq!(
             stands.message,
             "no checker plugin provides checker format \"lines\""
-        );
-    }
-
-    /// A database outage a dispatch's plugin meets loses the attempt; any
-    /// other statement error is the plugin's own.
-    #[test]
-    fn a_database_outage_loses_the_attempt() {
-        let faults = DispatchFaults::default();
-        let dispatch = Dispatch::new(
-            "p",
-            LiveDispatches::default().enter(UNIT, true),
-            faults.clone(),
-        );
-        dispatch.note_database_error(&sea_orm::DbErr::Custom("duplicate key".into()));
-        assert!(faults.get().is_none(), "a plugin's own error");
-        dispatch.note_database_error(&sea_orm::DbErr::ConnectionAcquire(
-            sea_orm::error::ConnAcquireErr::Timeout,
-        ));
-        assert_eq!(
-            faults.lost().map(|r| r.fault),
-            Some(DispatchFault::DatabaseUnavailable)
         );
     }
 }

@@ -116,7 +116,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(
                 code_run.id,
                 code_run.judge_epoch,
                 &faults,
-                DispatchFailure::database("fetch the problem", &e),
+                crate::host_funcs::host_db::dispatch_failed("fetch the problem", &e),
             )
             .await;
             return;

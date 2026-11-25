@@ -242,9 +242,9 @@ fn settle<T>(
 /// host's or the plugin's own SQL permits, as `DATABASE_BUSY`; a statement
 /// cut at its deadline, an unloaded plugin or an unprovisioned role as the
 /// plugin's `PLUGIN_UNAVAILABLE`. Under a dispatch the database's two are
-/// the platform's, not the submission's: they are also recorded on the
-/// dispatch (`judging::Dispatch::note_outage`), which hands the attempt back
-/// instead of spending its budget.
+/// the platform's, not the submission's: [`super::host_db::fail_under`] also
+/// records them on the dispatch, which hands the attempt back instead of
+/// spending its budget.
 fn unavailable(e: crate::plugin_db::Unavailable) -> extism::Error {
     unavailable_under(
         crate::services::judging::Dispatch::of_current_call().as_ref(),
@@ -258,15 +258,13 @@ fn unavailable_under(
     e: crate::plugin_db::Unavailable,
 ) -> extism::Error {
     tracing::warn!(error = %e, "Plugin SQL unavailable");
-    let unanswered = Unanswered::of(&e);
-    if let Some(dispatch) = dispatch
-        && unanswered != Unanswered::Plugin
-    {
-        dispatch.note_outage(e.to_string());
-    }
-    match unanswered {
-        Unanswered::DatabaseLost => plugin_core::executor::fail_database_unavailable(),
-        Unanswered::DatabaseBusy => plugin_core::executor::fail_database_busy(),
+    match Unanswered::of(&e) {
+        Unanswered::DatabaseLost => {
+            super::host_db::fail_under(dispatch, common::db::Outage::Lost, &e.to_string())
+        }
+        Unanswered::DatabaseBusy => {
+            super::host_db::fail_under(dispatch, common::db::Outage::Busy, &e.to_string())
+        }
         Unanswered::Plugin => plugin_core::executor::fail_unavailable(),
     }
     extism::Error::new(e)

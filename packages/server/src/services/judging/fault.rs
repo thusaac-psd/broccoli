@@ -324,20 +324,9 @@ impl CallEnd {
 }
 
 impl DispatchFailure {
-    /// A database error the dispatch's own statement (`what`, as "Failed to
-    /// {what}") met, by the outage rule: an outage ([`common::db::is_outage`])
-    /// hands the attempt back ([`DispatchFault::DatabaseUnavailable`]); any
-    /// other error is a judging failure.
-    pub(crate) fn database(what: &str, err: &sea_orm::DbErr) -> Self {
-        let message = format!("Failed to {what}: {err}");
-        if common::db::is_outage(err) {
-            Self::from(Recorded {
-                fault: DispatchFault::DatabaseUnavailable,
-                message,
-            })
-        } else {
-            Self::judging(HostCode::DatabaseError, message)
-        }
+    /// The dispatch met `fault` (described by `message`): it decides.
+    pub(crate) fn faulted(fault: DispatchFault, message: String) -> Self {
+        Self::from(Recorded { fault, message })
     }
 
     /// The dispatch's contest plugin did not resolve here (`unresolved`):
@@ -470,39 +459,6 @@ mod tests {
         assert_eq!(
             (missing.code, missing.class),
             (HostCode::NoProvider, SystemErrorClass::Stands)
-        );
-    }
-
-    /// The dispatch's own database errors follow the outage rule: an outage
-    /// hands the attempt back under the database's code; any other error is
-    /// a judging failure.
-    #[test]
-    fn a_dispatch_database_error_hands_back_only_an_outage() {
-        let lost = DispatchFailure::database(
-            "read the inputs",
-            &sea_orm::DbErr::ConnectionAcquire(sea_orm::error::ConnAcquireErr::Timeout),
-        );
-        assert_eq!(
-            (lost.code, lost.class),
-            (HostCode::DatabaseUnavailable, SystemErrorClass::HandBack)
-        );
-        let busy = DispatchFailure::database("read the inputs", &common::db::pool_busy());
-        assert_eq!(
-            (busy.code, busy.class),
-            (HostCode::DatabaseUnavailable, SystemErrorClass::HandBack)
-        );
-        let own = DispatchFailure::database(
-            "read the inputs",
-            &sea_orm::DbErr::Custom("syntax error".into()),
-        );
-        assert_eq!(
-            (own.code, own.class),
-            (HostCode::DatabaseError, SystemErrorClass::Judging)
-        );
-        assert!(
-            own.message.starts_with("Failed to read the inputs: "),
-            "{}",
-            own.message
         );
     }
 

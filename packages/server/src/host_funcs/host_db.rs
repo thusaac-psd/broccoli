@@ -23,8 +23,10 @@
 use common::db::Outage;
 use sea_orm::DbErr;
 
+use broccoli_api_types::error::HostCode;
+
 use crate::error::AppError;
-use crate::services::judging::{Dispatch, DispatchFault};
+use crate::services::judging::{Dispatch, DispatchFailure, DispatchFault};
 
 /// Fail the running call as `outage` makes it fail: the one mapping from an
 /// outage to the call's answer, shared by plugin SQL and the host's own.
@@ -98,13 +100,33 @@ pub(super) fn settle_call(error: &extism::Error) {
 /// Record `outage` on the running call's dispatch, if any, and fail the call
 /// as it makes it fail.
 fn noted(outage: Outage, message: &str) -> extism::Error {
-    if let Some(dispatch) = Dispatch::of_current_call() {
+    fail_under(Dispatch::of_current_call().as_ref(), outage, message);
+    extism::Error::msg(message.to_string())
+}
+
+/// Fail the running call as `outage` makes it fail and, when it runs under
+/// `dispatch`, record the outage there (described by `message`): the
+/// database's outage is the platform's, so the attempt is handed back
+/// ([`DispatchFault::DatabaseUnavailable`]) instead of spending its budget.
+pub(crate) fn fail_under(dispatch: Option<&Dispatch>, outage: Outage, message: &str) {
+    if let Some(dispatch) = dispatch {
         dispatch
             .faults()
             .record(DispatchFault::DatabaseUnavailable, message.to_string());
     }
     fail_call(outage);
-    extism::Error::msg(message.to_string())
+}
+
+/// What a dispatch's own statement (`what`, as "Failed to {what}") that met
+/// `e` fails its attempt with, by the same rule: an outage hands the attempt
+/// back ([`DispatchFault::DatabaseUnavailable`]); any other error is a
+/// judging failure.
+pub(crate) fn dispatch_failed(what: &str, e: &DbErr) -> DispatchFailure {
+    let message = format!("Failed to {what}: {e}");
+    match common::db::outage(e) {
+        Some(_) => DispatchFailure::faulted(DispatchFault::DatabaseUnavailable, message),
+        None => DispatchFailure::judging(HostCode::DatabaseError, message),
+    }
 }
 
 /// The outage a [`DbErr`] in `error`'s chain reports, if one does.
@@ -154,5 +176,47 @@ mod tests {
         ));
         assert!(settle::<()>(Err(lost())).is_err());
         assert!(matches!(settle(Ok(1)), Ok(Ok(1))));
+    }
+
+    /// The dispatch's own database errors follow the outage rule: an outage
+    /// hands the attempt back under the database's code; any other error is
+    /// a judging failure.
+    #[test]
+    fn a_dispatch_database_error_hands_back_only_an_outage() {
+        let lost = dispatch_failed(
+            "read the inputs",
+            &sea_orm::DbErr::ConnectionAcquire(sea_orm::error::ConnAcquireErr::Timeout),
+        );
+        assert_eq!(
+            (lost.code, lost.class),
+            (
+                HostCode::DatabaseUnavailable,
+                crate::services::judging::SystemErrorClass::HandBack
+            )
+        );
+        let busy = dispatch_failed("read the inputs", &common::db::pool_busy());
+        assert_eq!(
+            (busy.code, busy.class),
+            (
+                HostCode::DatabaseUnavailable,
+                crate::services::judging::SystemErrorClass::HandBack
+            )
+        );
+        let own = dispatch_failed(
+            "read the inputs",
+            &sea_orm::DbErr::Custom("syntax error".into()),
+        );
+        assert_eq!(
+            (own.code, own.class),
+            (
+                HostCode::DatabaseError,
+                crate::services::judging::SystemErrorClass::Judging
+            )
+        );
+        assert!(
+            own.message.starts_with("Failed to read the inputs: "),
+            "{}",
+            own.message
+        );
     }
 }

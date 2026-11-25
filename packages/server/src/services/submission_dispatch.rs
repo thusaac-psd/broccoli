@@ -340,7 +340,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &state.metrics,
                 judgement_ref,
                 &faults,
-                DispatchFailure::database("read the judging inputs", &e),
+                crate::host_funcs::host_db::dispatch_failed("read the judging inputs", &e),
             )
             .await;
             return;
@@ -373,7 +373,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 &state.metrics,
                 judgement_ref,
                 &faults,
-                DispatchFailure::database("fetch the problem", &e),
+                crate::host_funcs::host_db::dispatch_failed("fetch the problem", &e),
             )
             .await;
             return;
@@ -439,7 +439,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                     &state.metrics,
                     judgement_ref,
                     &faults,
-                    DispatchFailure::database("read the test cases", &e),
+                    crate::host_funcs::host_db::dispatch_failed("read the test cases", &e),
                 )
                 .await;
                 return;
@@ -567,7 +567,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             &state.metrics,
             judgement_ref,
             &faults,
-            DispatchFailure::database("record the judging inputs version", &e),
+            crate::host_funcs::host_db::dispatch_failed("record the judging inputs version", &e),
         )
         .await;
         return;
