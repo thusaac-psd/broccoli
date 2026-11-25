@@ -2688,6 +2688,15 @@ export interface components {
       /** Format: date-time */
       updated_at: string;
     };
+    /**
+     * @description What a config write sends in place of a secret field's value to clear
+     *     it: `{"$clear": true}`. Sending `null`, or leaving the field out, keeps
+     *     the stored secret; a string replaces it. Clients build the marker from
+     *     this schema, so its shape has one source.
+     */
+    ClearSecret: {
+      $clear: boolean;
+    };
     CliRefreshRequest: {
       /** @example a1b2c3...:d4e5f6... */
       refresh_token: string;

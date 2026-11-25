@@ -25,9 +25,10 @@ import type {
   JsonSchemaProperty,
 } from './types';
 import {
-  CLEAR_SECRET,
+  CLEAR_SECRET_MARKER,
   defaultForType,
   defaultText,
+  isClearMarker,
   isNewItem,
   valueText,
 } from './utils';
@@ -555,7 +556,7 @@ export function SchemaField({
                   variant="outline"
                   size="sm"
                   className="h-9 shrink-0"
-                  onClick={() => updateValue(path, { [CLEAR_SECRET]: true })}
+                  onClick={() => updateValue(path, { ...CLEAR_SECRET_MARKER })}
                 >
                   {t('config.clearSecret')}
                 </Button>
@@ -579,15 +580,6 @@ export function SchemaField({
       );
     }
   }
-}
-
-function isClearMarker(value: unknown): boolean {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    Object.keys(value).length === 1 &&
-    (value as Record<string, unknown>)[CLEAR_SECRET] === true
-  );
 }
 
 /**

@@ -398,8 +398,21 @@ export function defaultText(
  */
 export const SAVED = '$saved';
 
-/** What a write sends for a secret to clear it. */
-export const CLEAR_SECRET = '$clear';
+/**
+ * What a write sends in place of a secret to clear it, typed by the API's
+ * `ClearSecret` schema, which the server's marker generates: a change on
+ * either side fails the build rather than silently clearing nothing.
+ */
+export const CLEAR_SECRET_MARKER: ApiSchemas['ClearSecret'] = { $clear: true };
+
+/** Whether `value` is the marker that clears a secret. */
+export function isClearMarker(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === 1 &&
+    Object.entries(CLEAR_SECRET_MARKER).every(([k, v]) => value[k] === v)
+  );
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -457,7 +470,7 @@ export function forWrite(
   for (const [name, child] of Object.entries(prop.properties)) {
     const field = value[name];
     if (child.writeOnly && inNewItem && (field == null || field === '')) {
-      out[name] = { [CLEAR_SECRET]: true };
+      out[name] = { ...CLEAR_SECRET_MARKER };
     } else if (field !== undefined) {
       out[name] = forWrite(field, child, inNewItem);
     }
@@ -486,7 +499,7 @@ export function afterWrite(
     for (const [name, field] of Object.entries(value)) {
       const child = at.properties[name];
       if (child?.writeOnly) {
-        if (isRecord(field) && field[CLEAR_SECRET] === true) continue;
+        if (isClearMarker(field)) continue;
         out[name] = typeof field === 'string' && field !== '' ? null : field;
       } else {
         out[name] = child ? stored(field, child) : field;

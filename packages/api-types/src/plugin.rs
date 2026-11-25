@@ -335,6 +335,16 @@ impl std::fmt::Display for FieldErrorKind {
     }
 }
 
+/// What a config write sends in place of a secret field's value to clear
+/// it: `{"$clear": true}`. Sending `null`, or leaving the field out, keeps
+/// the stored secret; a string replaces it. Clients build the marker from
+/// this schema, so its shape has one source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ClearSecret {
+    #[serde(rename = "$clear")]
+    pub clear: bool,
+}
+
 /// A config its plugin finds something wrong with: a stored config it would
 /// no longer accept, or the defaults a namespace's `validate` function
 /// checks where no config is stored.
@@ -403,6 +413,14 @@ impl IncompatibleConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_clear_marker_schema_is_the_marker_the_host_reads() {
+        assert_eq!(
+            serde_json::to_value(ClearSecret { clear: true }).unwrap(),
+            serde_json::json!({ broccoli_types::manifest::CLEAR_SECRET: true })
+        );
+    }
 
     fn summary(current: Option<PublishedPluginResponse>) -> PluginArchiveSummary {
         PluginArchiveSummary {
