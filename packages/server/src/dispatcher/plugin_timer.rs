@@ -185,7 +185,7 @@ pub async fn tick_once(state: &AppState, config: &TimerConfig) -> Result<TickSta
     for row in &exhausted {
         error!(
             plugin_id = %row.plugin_id,
-            key = %row.key,
+            key = %plugin_core::guest_log::plugin_text(&row.key),
             attempts = row.attempts,
             "Dropping plugin timer after exhausting delivery attempts"
         );
@@ -213,7 +213,7 @@ pub async fn tick_once(state: &AppState, config: &TimerConfig) -> Result<TickSta
             Delivery::LeaseEnded => {
                 warn!(
                     plugin_id = %row.plugin_id,
-                    key = %row.key,
+                    key = %plugin_core::guest_log::plugin_text(&row.key),
                     attempts = row.attempts,
                     "Plugin timer delivery was cancelled at the end of its claim lease; it will be retried"
                 );
@@ -222,7 +222,7 @@ pub async fn tick_once(state: &AppState, config: &TimerConfig) -> Result<TickSta
             Delivery::Unanswered(cause) => {
                 warn!(
                     plugin_id = %row.plugin_id,
-                    key = %row.key,
+                    key = %plugin_core::guest_log::plugin_text(&row.key),
                     ?cause,
                     "Plugin could not answer a timer delivery; it is handed back"
                 );
@@ -426,7 +426,7 @@ async fn back_off_unanswered(
     if refund == 0 {
         warn!(
             plugin_id = %row.plugin_id,
-            key = %row.key,
+            key = %plugin_core::guest_log::plugin_text(&row.key),
             unanswered,
             "Plugin has not answered a timer's deliveries; each now spends an attempt"
         );
@@ -583,7 +583,7 @@ async fn deliver(
         Ok(None) => {
             warn!(
                 plugin_id = %row.plugin_id,
-                key = %row.key,
+                key = %plugin_core::guest_log::plugin_text(&row.key),
                 "Dropping plugin timer: plugin has no [[server.timers]] handler, or is not \
                  currently loaded. Reachable if a plugin drops the declaration (or is \
                  disabled/uninstalled) while timers are pending."
@@ -594,7 +594,7 @@ async fn deliver(
         Err(()) => {
             error!(
                 plugin_id = %row.plugin_id,
-                key = %row.key,
+                key = %plugin_core::guest_log::plugin_text(&row.key),
                 "Plugin registry lock poisoned while resolving the timer handler; leaving row \
                  claimed for lease-expiry redelivery"
             );
@@ -613,8 +613,8 @@ async fn deliver(
         Err(e) => {
             error!(
                 plugin_id = %row.plugin_id,
-                key = %row.key,
-                error = %e,
+                key = %plugin_core::guest_log::plugin_text(&row.key),
+                host_error = %e,
                 "Failed to serialize plugin timer callback input; leaving row claimed for \
                  lease-expiry redelivery"
             );
@@ -634,12 +634,13 @@ async fn deliver(
     let delivery = Delivery::of(&called, std::time::Instant::now() >= lease_ends);
     match called {
         Ok(_) => delete_timer(&state.db, row).await,
-        Err(e) if delivery == Delivery::Done => warn!(
-            plugin_id = %row.plugin_id,
-            key = %row.key,
-            attempts = row.attempts,
-            error = %e,
-            "Plugin timer delivery failed; will retry after lease expiry"
+        Err(e) if delivery == Delivery::Done => plugin_core::guest_log::about(
+            &row.plugin_id,
+            "A plugin timer's delivery failed; it is retried after its lease expires",
+            &format!(
+                "{function} (key {}, attempt {}): {e}",
+                row.key, row.attempts
+            ),
         ),
         Err(_) => {}
     }

@@ -426,11 +426,19 @@ async fn plugin_verdict(
         .call_raw(plugin_id, function, input, reads.call())
         .await
         .map_err(|e| {
-            tracing::warn!(plugin_id, function, error = %e, "config validate call failed");
+            plugin_core::guest_log::about(
+                plugin_id,
+                "A config validate call failed",
+                &format!("{function}: {e}"),
+            );
             AppError::from(e)
         })?;
     let output: ConfigValidateOutput = serde_json::from_slice(&output).map_err(|e| {
-        tracing::error!(plugin_id, function, error = %e, "config validate answer unreadable");
+        plugin_core::guest_log::about(
+            plugin_id,
+            "A config validate answer is unreadable",
+            &format!("{function}: {e}"),
+        );
         AppError::Internal(format!(
             "plugin '{plugin_id}' gave an unreadable answer from '{function}'"
         ))

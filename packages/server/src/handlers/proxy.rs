@@ -16,7 +16,7 @@ use axum::{
 use plugin_core::http::{PluginHttpAuth, PluginHttpRequest, PluginHttpResponse};
 use tracing::{info, instrument, warn};
 
-use crate::error::{AppError, ErrorBody};
+use crate::error::{AppError, ErrorBody, PluginFailure};
 use crate::extractors::auth::{AuthUser, fresh_user};
 use crate::extractors::path::AppPath;
 use crate::services::plugin_output::PluginRefusal;
@@ -201,15 +201,15 @@ fn plugin_answer(
         );
     }
     let Some(status) = status.filter(|status| status.is_success()) else {
-        return Err(AppError::PluginFailed {
-            plugin_id: plugin_id.to_string(),
-            what: "A plugin route answered a server error",
-            text: format!(
+        return Err(AppError::PluginFailed(PluginFailure::new(
+            plugin_id,
+            "A plugin route answered a server error",
+            &format!(
                 "{handler_name} answered {}: {}",
                 response.status,
                 response.body.unwrap_or_default()
             ),
-        });
+        )));
     };
     let body =
         serde_json::to_vec(&response.body.unwrap_or(serde_json::Value::Null)).map_err(|e| {
@@ -450,11 +450,15 @@ mod tests {
             },
         );
         match answer {
-            Err(crate::error::AppError::PluginFailed {
-                plugin_id, text, ..
-            }) => {
-                assert_eq!(plugin_id, "p");
+            Err(crate::error::AppError::PluginFailed(failure)) => {
+                assert_eq!(failure.plugin_id(), "p");
+                let text = failure.text();
                 assert!(text.starts_with("h answered 500: "), "{}", &text[..40]);
+                assert!(
+                    text.len() < plugin_core::guest_log::MAX_LINE_BYTES + 64,
+                    "the failure holds one bounded line of the plugin's text: {}",
+                    text.len()
+                );
             }
             other => panic!("expected a plugin failure, got {other:?}"),
         }

@@ -217,7 +217,7 @@ impl WindowedSession for EvaluateDriver {
             caller_plugin_id = %self.caller_plugin_id,
             session_id = %self.session_id,
             test_case_id = slot_id,
-            error = %error,
+            host_error = %error,
             "Failed to re-dispatch timed-out detached evaluate op; surfacing timeout"
         );
     }
@@ -470,7 +470,7 @@ async fn set_evaluate_cancel_op_keys(
         tracing::warn!(
             plugin_id = %plugin_id,
             batch_id = %batch_id,
-            error = %e,
+            host_error = %e,
             "Failed to set Redis op cancel keys for detached evaluate cancellation"
         );
     }

@@ -78,10 +78,10 @@ fn interpret_hook_output(
     let value = match serde_json::from_slice::<serde_json::Value>(output_bytes) {
         Ok(value) => value,
         Err(e) => {
-            tracing::error!(
-                plugin_id = %plugin_id,
-                function = %function_name,
-                "Hook returned non-JSON output (fail-closed): {e}",
+            crate::guest_log::about(
+                plugin_id,
+                "A hook returned non-JSON output (fail-closed)",
+                &format!("{function_name}: {e}"),
             );
             return runtime_error_reject(plugin_id, function_name, "returned a non-JSON response");
         }
@@ -97,10 +97,10 @@ fn interpret_hook_output(
     match serde_json::from_value::<HookResponse>(value) {
         Ok(hook_response) => into_hook_action(hook_response, topic),
         Err(e) => {
-            tracing::error!(
-                plugin_id = %plugin_id,
-                function = %function_name,
-                "Hook returned a malformed response (fail-closed): {e}",
+            crate::guest_log::about(
+                plugin_id,
+                "A hook returned a malformed response (fail-closed)",
+                &format!("{function_name}: {e}"),
             );
             runtime_error_reject(
                 plugin_id,
@@ -179,7 +179,8 @@ impl<M: PluginManager + Send + Sync + ?Sized + 'static> GenericHook for PluginHo
                 tracing::error!(
                     plugin_id = %self.plugin_id,
                     function = %self.function_name,
-                    "Failed to serialize hook payload (fail-closed): {e}",
+                    host_error = %e,
+                    "Failed to serialize hook payload (fail-closed)",
                 );
                 return Ok(runtime_error_reject(
                     &self.plugin_id,
@@ -205,10 +206,10 @@ impl<M: PluginManager + Send + Sync + ?Sized + 'static> GenericHook for PluginHo
             // again", never into a decision.
             Err(e) if e.is_unavailable() => Err(e.into()),
             Err(e) => {
-                tracing::error!(
-                    plugin_id = %self.plugin_id,
-                    function = %self.function_name,
-                    "Hook WASM call failed (fail-closed): {e}",
+                crate::guest_log::about(
+                    &self.plugin_id,
+                    "A hook's call failed (fail-closed)",
+                    &format!("{}: {e}", self.function_name),
                 );
                 Ok(runtime_error_reject(
                     &self.plugin_id,

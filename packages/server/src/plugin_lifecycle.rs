@@ -1207,7 +1207,7 @@ async fn reconcile_locked(
                 // The table's shape check stores only rows this reads.
                 Err(e) => tracing::error!(
                     plugin_id = %row.id,
-                    error = %e,
+                    host_error = %e,
                     "A plugin's recorded governs does not have the one shape both readers share"
                 ),
             }
@@ -1289,7 +1289,7 @@ async fn retain_cache(state: &AppState, mut keep: HashSet<String>) {
 /// recorded about it.
 async fn forget(state: &AppState, applied: &mut HashMap<String, Applied>, plugin_id: &str) {
     if let Err(e) = deactivate(state, plugin_id).await {
-        tracing::warn!(plugin_id, error = %e, "Could not unload a plugin the fleet forgot");
+        tracing::warn!(plugin_id, host_error = %e, "Could not unload a plugin the fleet forgot");
     }
     if let Ok(mut registry) = state.plugins.get_registry().write() {
         registry.remove(plugin_id);
@@ -1351,7 +1351,7 @@ async fn apply(
             match plugin_distribution::locate(state, id, &desired.source).await {
                 Ok(root) => plugin_utils::register_unloaded(state, plugin_id, &root),
                 Err(e) => {
-                    tracing::debug!(plugin_id, error = %e, "Disabled plugin's files are not available here");
+                    tracing::debug!(plugin_id, host_error = %e, "Disabled plugin's files are not available here");
                 }
             }
         }
@@ -1423,13 +1423,17 @@ async fn apply(
         },
         Err(failure) => {
             let r = Retry::after(retry, now);
-            tracing::warn!(
+            // Why it failed is the plugin's (its manifest, module or init).
+            plugin_core::guest_log::about(
                 plugin_id,
-                attempts = r.attempts,
-                retry_in_secs = retry_delay(r.attempts).as_secs(),
-                kept_previous = failure.kept_previous,
-                error = %failure.error,
-                "Plugin failed to load on this replica; will retry"
+                "A plugin failed to load on this replica; it is retried",
+                &format!(
+                    "attempt {}, next in {}s, previous version kept: {}: {}",
+                    r.attempts,
+                    retry_delay(r.attempts).as_secs(),
+                    failure.kept_previous,
+                    failure.error
+                ),
             );
             Applied {
                 generation: desired.generation,
@@ -1692,7 +1696,9 @@ async fn record_governs(state: &AppState, plugin_id: &str, generation: i64) {
             state.plugin_lifecycle.set_governs(plugin_id, governs)
         }
         Ok(_) => {}
-        Err(e) => tracing::warn!(plugin_id, error = %e, "Failed to record what a plugin governs"),
+        Err(e) => {
+            tracing::warn!(plugin_id, host_error = %e, "Failed to record what a plugin governs")
+        }
     }
 }
 
@@ -2032,7 +2038,7 @@ async fn load_then_publish(
                 Some(previous) => plugin_utils::roll_back(state, plugin_id, previous).await,
                 None => {
                     if let Err(e) = deactivate(state, plugin_id).await {
-                        tracing::warn!(plugin_id, error = %e, "Failed to unload an unpublished plugin");
+                        tracing::warn!(plugin_id, host_error = %e, "Failed to unload an unpublished plugin");
                     }
                     before.restore(state, plugin_id).await;
                 }
@@ -2225,7 +2231,7 @@ async fn delete_timers(state: &AppState, plugin_id: &str) {
     {
         tracing::error!(
             plugin_id,
-            error = %e,
+            host_error = %e,
             "Failed to delete pending timers for a plugin that is off"
         );
     }
@@ -2401,7 +2407,7 @@ pub async fn remove_upload(
                 forget(state, applied, plugin_id).await;
                 delete_timers(state, plugin_id).await;
                 if let Err(e) = crate::plugin_db::schema::retire(&state.db, plugin_id).await {
-                    tracing::warn!(plugin_id, error = %e, "Could not retire the plugin's database role");
+                    tracing::warn!(plugin_id, host_error = %e, "Could not retire the plugin's database role");
                 }
                 UploadRemoval::Removed
             }
@@ -2435,7 +2441,7 @@ pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError>
             match load_then_publish(state, applied, &id, Change::Reload, &source).await {
                 Ok(()) => reloaded.push(id.to_string()),
                 Err(e) => {
-                    tracing::error!(plugin_id = %id, error = %e, "Failed to reload plugin");
+                    plugin_core::guest_log::about(&id, "A plugin failed to reload", &e.to_string());
                     failed.push(ReloadFailure {
                         id: id.to_string(),
                         error: e.to_string(),
@@ -2457,7 +2463,11 @@ pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError>
             let Some(id) = row_id(&row) else { continue };
             let desired = Desired::of(&row);
             if let Err(e) = apply(state, applied, &id, desired, now).await {
-                tracing::error!(plugin_id = %row.id, error = %e, "Failed to load new plugin");
+                plugin_core::guest_log::about(
+                    &row.id,
+                    "A new plugin failed to load",
+                    &e.to_string(),
+                );
                 failed.push(ReloadFailure {
                     id: row.id.clone(),
                     error: e.to_string(),

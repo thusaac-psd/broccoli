@@ -423,13 +423,13 @@ impl PluginSqlPools {
                 if first {
                     tracing::error!(
                         plugin_id,
-                        error = %e,
+                        host_error = %e,
                         "Could not provision the plugin's database role; its SQL is \
                          unavailable and is retried every {}s",
                         PROVISION_BACKOFF.as_secs()
                     );
                 } else {
-                    tracing::debug!(plugin_id, error = %e, "Plugin provisioning failed again");
+                    tracing::debug!(plugin_id, host_error = %e, "Plugin provisioning failed again");
                 }
                 Err(Unavailable::Unprovisioned(e.to_string()))
             }

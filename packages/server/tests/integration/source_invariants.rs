@@ -203,14 +203,35 @@ fn call_at(code: &str) -> &str {
     code
 }
 
-/// The ERROR-level log calls in `code` that name a plugin, or put a
-/// plugin's answer into an internal error, each by its first line.
-fn plugin_text_at_error(code: &str) -> Vec<String> {
+/// The log macros, at every level.
+const LOG_MACROS: [&str; 5] = ["error!(", "warn!(", "info!(", "debug!(", "trace!("];
+
+/// What in a log call's arguments carries an error's text. A host's own
+/// error on a line about a plugin is logged as the `host_error` field.
+const ERROR_VALUES: [&str; 11] = [
+    "error = ", "error=", "{e}", "{e:", "{err", "{error", "%e,", "?e,", "%err", "{:?}", ", error)",
+];
+
+/// The log calls in `code`, at any level, that name a plugin and carry an
+/// error's text, and the internal errors that carry a plugin's answer, each
+/// by its first line.
+fn plugin_text_in_log(code: &str) -> Vec<String> {
     let mut found = Vec::new();
-    for (start, _) in code.match_indices("error!(") {
-        let call = call_at(&code[start..]);
-        if call.contains("plugin_id") {
-            found.push(call.lines().next().unwrap_or_default().trim().to_string());
+    for log in LOG_MACROS {
+        for (start, _) in code.match_indices(log) {
+            // `tracing::error!(`, `error!(`, but not `my_error!(`.
+            let before = code[..start].chars().next_back();
+            if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            let call = call_at(&code[start..]);
+            let call_without_host_errors = without_host_errors(call);
+            let carries_error = ERROR_VALUES
+                .iter()
+                .any(|value| call_without_host_errors.contains(value));
+            if call.contains("plugin_id") && carries_error {
+                found.push(call.lines().next().unwrap_or_default().trim().to_string());
+            }
         }
     }
     for (start, _) in code.match_indices("AppError::Internal(") {
@@ -225,57 +246,89 @@ fn plugin_text_at_error(code: &str) -> Vec<String> {
     found
 }
 
+/// `call` without its `host_error = <value>` fields.
+fn without_host_errors(call: &str) -> String {
+    let mut rest = call;
+    let mut out = String::new();
+    while let Some(at) = rest.find("host_error") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at..];
+        let end = after.find([',', ')']).unwrap_or(after.len());
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `contents` up to its test module.
+fn production_code(contents: &str) -> &str {
+    contents
+        .split("\n#[cfg(test)]\nmod ")
+        .next()
+        .unwrap_or(contents)
+}
+
 /// What a plugin says (a failed call's reason, a route's server-error body,
-/// a hook's error, its statement's error) reaches the host's log only
-/// through `plugin_core::guest_log` (escaped, bounded, rate-limited, at most
-/// a warning, naming the plugin): where the host calls plugins, no ERROR
-/// line names one and no internal error carries a plugin's answer. A
-/// plugin that fails a request answers `AppError::PluginFailed`.
+/// a hook's answer or error, its statement's error, its config check's
+/// answer) reaches the host's log only through `plugin_core::guest_log`
+/// (escaped, bounded, rate-limited, at most a warning, naming the plugin):
+/// in the server and the plugin runtime, no log line at any level names a
+/// plugin and carries an error's text, unless it is the host's own error
+/// (`host_error`), and no internal error carries a plugin's answer. A plugin
+/// that fails a request answers `AppError::PluginFailed`.
 #[test]
 fn a_plugins_text_reaches_the_hosts_log_only_through_guest_log() {
-    let src = server_src_root();
     let mut files = Vec::new();
-    collect_rs_files(&host_funcs_root(), &mut files);
-    files.extend(
-        [
-            "hooks.rs",
-            "handlers/proxy.rs",
-            "visibility/plugin_query.rs",
-            "error.rs",
-        ]
-        .iter()
-        .map(|file| src.join(file)),
-    );
+    collect_rs_files(&server_src_root(), &mut files);
+    let plugin_core = server_src_root().join("../../plugin-core/src");
+    collect_rs_files(&plugin_core, &mut files);
+    // The sink itself.
+    files.retain(|path| !path.ends_with("plugin-core/src/guest_log.rs"));
+    assert!(files.iter().any(|path| path.ends_with("hook.rs")));
     let mut offenders = Vec::new();
     for path in &files {
         let contents = fs::read_to_string(path).unwrap();
-        let code = contents.split("#[cfg(test)]").next().unwrap();
-        for call in plugin_text_at_error(code) {
+        for call in plugin_text_in_log(production_code(&contents)) {
             offenders.push(format!("{}: {call}", path.display()));
         }
     }
     assert!(
         offenders.is_empty(),
-        "log what a plugin says through `plugin_core::guest_log::about` or answer \
-         `AppError::PluginFailed`:\n{}",
+        "log what a plugin says through `plugin_core::guest_log::about`, answer \
+         `AppError::PluginFailed`, or log the host's own error as `host_error`:\n{}",
         offenders.join("\n")
     );
     // The scan sees each shape it forbids.
     for shape in [
-        "tracing::error!(plugin_id = %id, \"failed\");",
-        "error!(plugin_id, \"x: {}\", e);",
+        "tracing::error!(plugin_id = %id, \"failed\": {e});",
+        "error!(plugin_id, \"x: {}\", e, error = %e);",
+        "tracing::warn!(topic, plugin_id, \"Background hook dispatch failed: {e:?}\")",
+        "debug!(plugin_id = %id, error = %e, \"x\")",
+        "info!(\"Plugin '{}' failed: {}\", plugin_id, error);",
         "AppError::Internal(format!(\"{}\", response.body));",
         "AppError::Internal(format!(\"Hook execution failed: {e}\"));",
     ] {
-        assert_eq!(plugin_text_at_error(shape).len(), 1, "{shape}");
+        assert_eq!(plugin_text_in_log(shape).len(), 1, "{shape}");
     }
-    assert!(plugin_text_at_error("tracing::error!(\"Failed to roll back: {e}\");").is_empty());
+    for allowed in [
+        "tracing::error!(\"Failed to roll back: {e}\");",
+        "warn!(plugin_id, host_error = %e, \"Recording failed\");",
+        "warn!(plugin_id = %id, open, cap, \"cap reached\");",
+        "my_error!(plugin_id, error = %e);",
+    ] {
+        assert!(plugin_text_in_log(allowed).is_empty(), "{allowed}");
+    }
     // A call ends at its own closing parenthesis, not at a later statement.
     assert!(
-        plugin_text_at_error(
-            "error!(reason = %why, \"(dead)\"),\nErr(e) => {}\nquery(\"d.plugin_id\");"
+        plugin_text_in_log(
+            "error!(reason = %why, \"(dead)\"),\nErr(e) => {}\nquery(\"d.plugin_id\", error = 1);"
         )
         .is_empty()
+    );
+    // The scan reads up to the test module, past a test-only item.
+    assert_eq!(
+        production_code("a\n    #[cfg(test)]\n    fn t() {}\nb\n#[cfg(test)]\nmod tests {}"),
+        "a\n    #[cfg(test)]\n    fn t() {}\nb"
     );
 }
 

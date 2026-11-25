@@ -424,7 +424,7 @@ impl Drop for EventClaim {
 }
 
 use crate::entity::plugin_config;
-use crate::error::AppError;
+use crate::error::{AppError, PluginFailure};
 use crate::host_funcs::config::{extract_plugin_id, strip_namespace_prefix};
 use crate::services::plugin_output::PluginRefusal;
 use plugin_core::manifest::ConfigScope;
@@ -1018,7 +1018,7 @@ async fn deliver(
             }
             Err(e) => {
                 if let Some(claim) = claim.take() {
-                    tracing::warn!(event_id = %claim.id, plugin_id, error = %e, "Recording a hook event's delivery failed");
+                    tracing::warn!(event_id = %claim.id, plugin_id, host_error = %e, "Recording a hook event's delivery failed");
                     claim
                         .retry_later(format!("recording its delivery to {plugin_id} failed: {e}"))
                         .await;
@@ -1086,7 +1086,11 @@ async fn deliver_to(
             code = refusal.code(),
             "Background hook returned Reject (ignored)"
         ),
-        Err(e) => tracing::warn!(topic, plugin_id, "Background hook dispatch failed: {e:?}"),
+        // A plugin's failure is its own text; anything else is the host's.
+        Err(AppError::PluginFailed(failure)) => failure.log(),
+        Err(e) => {
+            tracing::warn!(topic, plugin_id, host_error = ?e, "Background hook dispatch failed")
+        }
         Ok(HookOutcome::Allowed(_)) => {}
     }
     if answers.answered().contains(plugin_id) {
@@ -1425,7 +1429,7 @@ async fn dispatch_hooks_inner(
                 let action = match entry.hook.on_event(hook_call(class), &generic_event).await {
                     Ok(action) => action,
                     Err(e) if is_unavailable(&e) => {
-                        tracing::warn!(topic, plugin_id = %entry.plugin_id, "Hook unavailable: {e}");
+                        tracing::warn!(topic, plugin_id = %entry.plugin_id, host_error = %e, "Hook unavailable");
                         answers.failed(&e);
                         // What stopped it (the plugin, or the database it
                         // needed) keeps its own code and Retry-After.
@@ -1437,11 +1441,11 @@ async fn dispatch_hooks_inner(
                     }
                     Err(e) => {
                         answers.failed(format!("{e:#}"));
-                        return Err(AppError::PluginFailed {
-                            plugin_id: entry.plugin_id.clone(),
-                            what: "A hook failed",
-                            text: format!("{topic}: {e:#}"),
-                        });
+                        return Err(AppError::PluginFailed(PluginFailure::new(
+                            &entry.plugin_id,
+                            "A hook failed",
+                            &format!("{topic}: {e:#}"),
+                        )));
                     }
                 };
 
@@ -1494,11 +1498,11 @@ async fn dispatch_hooks_inner(
                         let reject = parse_reject_detail(&reason);
                         if reject.code == PLUGIN_RUNTIME_ERROR_CODE {
                             answers.failed(&reject.message);
-                            return Err(AppError::PluginFailed {
-                                plugin_id: entry.plugin_id.clone(),
-                                what: "A hook's runtime failed",
-                                text: format!("{topic}: {}", reject.message),
-                            });
+                            return Err(AppError::PluginFailed(PluginFailure::new(
+                                &entry.plugin_id,
+                                "A hook's runtime failed",
+                                &format!("{topic}: {}", reject.message),
+                            )));
                         }
                         return Ok(HookOutcome::Rejected(PluginRefusal::new(
                             &entry.plugin_id,

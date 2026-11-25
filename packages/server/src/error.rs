@@ -166,11 +166,7 @@ pub enum AppError {
     /// plugin gave. Answered as an internal error, which says nothing of the
     /// plugin's text; the text is logged as a host line about the plugin
     /// (`plugin_core::guest_log::about`), never as the host's own error.
-    PluginFailed {
-        plugin_id: String,
-        what: &'static str,
-        text: String,
-    },
+    PluginFailed(PluginFailure),
     /// A plugin refused the request (a route's client error or a hook's
     /// rejection), confined to the plugin's namespace.
     PluginRefusal(crate::services::plugin_output::PluginRefusal),
@@ -528,12 +524,8 @@ impl AppError {
                         .into(),
                 ),
             ),
-            AppError::PluginFailed {
-                plugin_id,
-                what,
-                text,
-            } => {
-                plugin_core::guest_log::about(&plugin_id, what, &text);
+            AppError::PluginFailed(failure) => {
+                failure.log();
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     simple(
@@ -669,13 +661,49 @@ impl From<PluginError> for AppError {
                 ref func_name,
                 ref message,
                 ..
-            } => AppError::PluginFailed {
-                plugin_id: plugin_id.clone(),
-                what: "A plugin call the request needed failed",
-                text: format!("{func_name}: {message}"),
-            },
+            } => AppError::PluginFailed(PluginFailure::new(
+                plugin_id,
+                "A plugin call the request needed failed",
+                &format!("{func_name}: {message}"),
+            )),
             _ => AppError::Internal(err.to_string()),
         }
+    }
+}
+
+/// What a plugin failed ([`AppError::PluginFailed`]): `what` happened to
+/// `plugin_id`, with `text` the plugin gave. Built only by
+/// [`PluginFailure::new`], which keeps `text` as
+/// `plugin_core::guest_log::plugin_text` makes it, so no log line or debug
+/// print of the error carries more of the plugin's text than one escaped,
+/// bounded line.
+#[derive(Debug)]
+pub struct PluginFailure {
+    plugin_id: String,
+    what: &'static str,
+    text: String,
+}
+
+impl PluginFailure {
+    pub fn new(plugin_id: &str, what: &'static str, text: &str) -> Self {
+        Self {
+            plugin_id: plugin_id.to_string(),
+            what,
+            text: plugin_core::guest_log::plugin_text(text).into_owned(),
+        }
+    }
+
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    /// Log the failure as a host line about its plugin.
+    pub fn log(&self) {
+        plugin_core::guest_log::about(&self.plugin_id, self.what, &self.text);
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
     }
 }
 
@@ -735,6 +763,7 @@ impl From<TypedMultipartError> for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use axum::body::to_bytes;
 
     #[tokio::test]
