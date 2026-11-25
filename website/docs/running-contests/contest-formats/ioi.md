@@ -46,9 +46,11 @@ there. The problem's config issues list the entry until the config is fixed.
   weak test drags the whole subtask down.
 
 A problem's total is the sum of its subtask scores. A problem with no
-subtask config gets one `sum` subtask named All Tests, covering every test
-case that is not a sample and is worth more than zero points, with a max
-score equal to the sum of those points.
+subtask config gets one `sum` subtask, shown as All Tests in each viewer's
+language, covering every test case that is not a sample and is worth more than
+zero points, with a max score equal to the sum of those points. It has no
+stored name: the plugin's routes give it an empty `name`, which no configured
+subtask can have.
 
 A problem none of whose subtasks can score is not judged: every submission
 to it ends as a system error that stands (`NOTHING_TO_SCORE`), as does every

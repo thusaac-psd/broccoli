@@ -446,8 +446,9 @@ function SubtaskCard({
         <div className="flex min-w-0 items-center gap-2">
           <div className="min-w-0">
             <div className="text-[13px] font-semibold text-foreground ml-2">
-              {subtask.name ||
-                t('ioi.submission.subtaskFallback', { index: index + 1 })}
+              {/* The default subtask is stored nameless, for each viewer's
+                  language to name. */}
+              {subtask.name || t('ioi.subtask.allTests')}
             </div>
           </div>
           <span

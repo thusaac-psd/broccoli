@@ -289,8 +289,12 @@ pub fn can_score(def: &SubtaskDef, members: &MemberIndex<'_>) -> bool {
             .any(|tc| def.scoring_method != SubtaskScoringMethod::Sum || tc.score > 0.0)
 }
 
+/// The name of the default subtask: empty, which the frontend shows as
+/// "All Tests" in the viewer's language (`ioi.subtask.allTests`).
+pub const DEFAULT_SUBTASK_NAME: &str = "";
+
 /// The subtasks a problem is scored by: its configured subtasks, or the
-/// default "All Tests" subtask when none are configured. Scoring, feedback
+/// default subtask over all tests when none are configured. Scoring, feedback
 /// and the scoreboard all read a problem's subtasks through this.
 pub fn effective_subtasks(
     configured: &[SubtaskDef],
@@ -321,8 +325,12 @@ pub fn subtask_max_score(def: &SubtaskDef, members: &MemberIndex<'_>) -> f64 {
     }
 }
 
-/// Build a default "All Tests" subtask (Sum scoring) over the non-sample,
+/// Build the default subtask (Sum scoring) over the non-sample,
 /// positive-score test cases. Returns no subtasks when none qualify.
+///
+/// It is named by [`DEFAULT_SUBTASK_NAME`], the empty name no configured
+/// subtask can have (the schema's `min_length`), so each viewer's language
+/// names it and no stored record carries one language's words.
 fn build_default_subtasks(test_cases: &[TestCaseRow]) -> Vec<SubtaskDef> {
     let scoring_test_cases: Vec<&TestCaseRow> = test_cases
         .iter()
@@ -336,7 +344,7 @@ fn build_default_subtasks(test_cases: &[TestCaseRow]) -> Vec<SubtaskDef> {
     // names it alone: its label, else its id.
     let members = MemberIndex::new(test_cases);
     vec![SubtaskDef {
-        name: "All Tests".into(),
+        name: DEFAULT_SUBTASK_NAME.into(),
         scoring_method: SubtaskScoringMethod::Sum,
         max_score,
         test_cases: scoring_test_cases

@@ -271,7 +271,8 @@ mod tests {
         let scores = score_submission_subtask_details(&test_cases, &subtasks, &ratios);
 
         assert_eq!(scores.len(), 1);
-        assert_eq!(scores[0].name, "All Tests");
+        // The default subtask is stored nameless: each viewer's language names it.
+        assert_eq!(scores[0].name, "");
         assert_eq!(scores[0].score, 10.0);
         assert_eq!(scores[0].max_score, 100.0);
     }

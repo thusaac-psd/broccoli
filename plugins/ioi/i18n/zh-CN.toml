@@ -48,7 +48,7 @@
 'ioi.submission.showLess' = '收起'
 'ioi.submission.showAll' = '显示全部 {count} 个测试点'
 'ioi.submission.missingTestCase' = "{label} 未对应任何测试点"
-'ioi.submission.subtaskFallback' = '子任务 {index}'
+'ioi.subtask.allTests' = '全部测试点'
 'ioi.submission.tokened' = '已使用令牌'
 'ioi.submission.status.Pending' = '等待评测'
 'ioi.submission.status.Running' = '评测中'
