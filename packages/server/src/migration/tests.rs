@@ -617,10 +617,12 @@ async fn a_problems_checker_language_follows_its_stored_checker_source() {
 /// Every change to what judging reads of a problem counts in its
 /// `inputs_version`, whatever path makes it: its limits, type and checker
 /// format, its test cases, its additional files, the type of a contest it is
-/// in, and the configs of a namespace its plugin declares a judging input at
-/// every scope the cascade reads (the problem's, its contest problem's, its
-/// contest's, the plugin's). A change to anything else (its title, a config
-/// of a namespace judging does not read) does not.
+/// in and its default contest type, which contests it is in, and the
+/// configs of a namespace its plugin declares a judging input at every scope
+/// the cascade reads (the problem's, its contest problem's, its contest's;
+/// the plugin's moves that plugin's inputs epoch instead). A change to
+/// anything else (its title, its label in a contest, a config of a namespace
+/// judging does not read) does not.
 #[tokio::test]
 async fn every_change_to_a_problems_judging_inputs_counts_in_its_version() {
     use sea_orm::EntityTrait;
@@ -760,11 +762,13 @@ async fn every_change_to_a_problems_judging_inputs_counts_in_its_version() {
             false,
         ),
         (
+            // A plugin-scope config moves its plugin's epoch, not every
+            // problem's version (below).
             "plugin config",
             "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
              VALUES ('plugin', 'judge', 'checker', '{{}}', 0, NOW())"
                 .into(),
-            true,
+            false,
         ),
         (
             "a config judging does not read",
@@ -786,6 +790,30 @@ async fn every_change_to_a_problems_judging_inputs_counts_in_its_version() {
             false,
         ),
         (
+            "default contest type",
+            "UPDATE problem SET default_contest_type = 'other' WHERE id = {p}".into(),
+            true,
+        ),
+        (
+            "added to a contest",
+            "INSERT INTO contest_problem (contest_id, problem_id, label, position) \
+             VALUES (8, {p}, 'B', 1)"
+                .into(),
+            true,
+        ),
+        (
+            "relabelled in a contest",
+            "UPDATE contest_problem SET label = 'C', position = 2 \
+             WHERE contest_id = 8 AND problem_id = {p}"
+                .into(),
+            false,
+        ),
+        (
+            "removed from a contest",
+            "DELETE FROM contest_problem WHERE contest_id = 8 AND problem_id = {p}".into(),
+            true,
+        ),
+        (
             "another problem's config",
             "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
              VALUES ('problem', '999999', 'judge:checker', '{{}}', 0, NOW())"
@@ -803,6 +831,29 @@ async fn every_change_to_a_problems_judging_inputs_counts_in_its_version() {
         assert_eq!(now > last, counts, "{what}: {last} -> {now}");
         last = now;
     }
+
+    // Each plugin-scope judging-input config moved exactly its plugin's
+    // epoch: one for `judge`, none for `display`, whose namespace judging
+    // does not read.
+    let epochs: Vec<(String, i32)> = db
+        .query_all_raw(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            "SELECT id, inputs_epoch FROM plugin ORDER BY id",
+        ))
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r.try_get("", "id").unwrap(),
+                r.try_get("", "inputs_epoch").unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        epochs,
+        [("display".to_string(), 0), ("judge".to_string(), 1)]
+    );
 
     // A restore (a bundle import) puts rows back as they were: it counts
     // nothing.

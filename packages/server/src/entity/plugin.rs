@@ -31,6 +31,12 @@ pub struct Model {
     /// it still knows what to fail closed for. `None` until first loaded.
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub governs: Option<Json>,
+    /// Counts each change to a plugin-scope config of one of its judging
+    /// input namespaces (the `broccoli_inputs_changed` trigger): a judgement
+    /// it judged records the epoch it read (`plugin_epochs`), so applying
+    /// one judged before a change needs `force`.
+    #[sea_orm(default_value = 0)]
+    pub inputs_epoch: i32,
     /// The locale whose host text the plugin provides as a language pack
     /// (`[language_pack] locale`), from its manifest when it was registered
     /// or last published. The partial unique index

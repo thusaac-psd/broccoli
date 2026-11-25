@@ -3,11 +3,16 @@ use sea_orm_migration::prelude::*;
 /// The version of everything judging reads of a problem
 /// (`entity::problem::Model::inputs_version`): its test cases, its time and
 /// memory limits, its type, its checker format, its additional files
-/// (graders), the type of each contest it is in, and the stored configs of
-/// every namespace a plugin declares judging reads (`judging_input`, recorded
-/// in `plugin.governs -> 'judging_inputs'`; a checker source is one) at every
-/// scope the config cascade reads for it: its own, each contest problem's,
-/// each contest's it is in, and the plugin's own. The triggers below count
+/// (graders), its default contest type, which contests it is in and each
+/// one's type, and the stored configs of every namespace a plugin declares
+/// judging reads (`judging_input`, recorded in
+/// `plugin.governs -> 'judging_inputs'`; a checker source is one) at its
+/// own, each contest problem's and each contest's scope. A plugin-scope
+/// config of a judging input moves that plugin's `inputs_epoch` instead, and
+/// a judgement records the epochs of the plugins it is judged by
+/// (`submission_judgement.plugin_epochs`): such a change reaches only the
+/// work its plugin judges, and locks one plugin row, not every problem's.
+/// The triggers below count
 /// every change to any of them, whatever path makes it, so no write path can
 /// forget to (`services::judging::inputs::expected` states them as the code
 /// expects them); a config of any other namespace, or a rewrite that changes
@@ -53,6 +58,9 @@ ALTER TABLE public.problem ADD COLUMN checker_language character varying;
 ALTER TABLE public.submission_judgement ADD COLUMN inputs_version integer NOT NULL DEFAULT 0;
 ALTER TABLE public.submission_judgement
     ADD COLUMN judged_on_earlier_inputs boolean NOT NULL DEFAULT false;
+ALTER TABLE public.submission_judgement
+    ADD COLUMN plugin_epochs jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE public.plugin ADD COLUMN inputs_epoch integer NOT NULL DEFAULT 0;
 DO $$
 DECLARE
   plugin_group name;
@@ -64,7 +72,7 @@ BEGIN
   EXECUTE format('GRANT SELECT (inputs_version, checker_language) ON public.problem TO %I',
     plugin_group);
   EXECUTE format(
-    'GRANT SELECT (inputs_version, judged_on_earlier_inputs) ON public.submission_judgement TO %I',
+    'GRANT SELECT (inputs_version, judged_on_earlier_inputs, plugin_epochs) ON public.submission_judgement TO %I',
     plugin_group);
 EXCEPTION
   WHEN insufficient_privilege THEN
@@ -79,7 +87,8 @@ BEGIN
   IF NEW.time_limit IS DISTINCT FROM OLD.time_limit
      OR NEW.memory_limit IS DISTINCT FROM OLD.memory_limit
      OR NEW.problem_type IS DISTINCT FROM OLD.problem_type
-     OR NEW.checker_format IS DISTINCT FROM OLD.checker_format THEN
+     OR NEW.checker_format IS DISTINCT FROM OLD.checker_format
+     OR NEW.default_contest_type IS DISTINCT FROM OLD.default_contest_type THEN
     NEW.inputs_version := OLD.inputs_version + 1;
   END IF;
   RETURN NEW;
@@ -133,7 +142,7 @@ BEGIN
                        WHERE cp.contest_id
                              = substring(changed->>'ref_id' FROM '^([0-9]+)$')::integer);
       WHEN 'plugin' THEN
-        UPDATE public.problem SET inputs_version = inputs_version + 1;
+        UPDATE public.plugin SET inputs_epoch = inputs_epoch + 1 WHERE id = config_plugin;
       ELSE
         NULL;
     END CASE;
@@ -145,6 +154,9 @@ CREATE TRIGGER broccoli_inputs_changed AFTER INSERT OR UPDATE OR DELETE ON publi
 CREATE TRIGGER broccoli_inputs_changed AFTER INSERT OR UPDATE OR DELETE ON public.additional_file
   FOR EACH ROW EXECUTE FUNCTION public.broccoli_inputs_changed();
 CREATE TRIGGER broccoli_inputs_changed AFTER INSERT OR UPDATE OR DELETE ON public.plugin_config
+  FOR EACH ROW EXECUTE FUNCTION public.broccoli_inputs_changed();
+CREATE TRIGGER broccoli_inputs_changed
+  AFTER INSERT OR DELETE OR UPDATE OF contest_id, problem_id ON public.contest_problem
   FOR EACH ROW EXECUTE FUNCTION public.broccoli_inputs_changed();
 CREATE OR REPLACE FUNCTION public.broccoli_contest_inputs_changed() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -209,11 +221,14 @@ DROP TRIGGER IF EXISTS broccoli_inputs_changed ON public.test_case;
 DROP TRIGGER IF EXISTS broccoli_inputs_changed ON public.additional_file;
 DROP TRIGGER IF EXISTS broccoli_inputs_changed ON public.plugin_config;
 DROP TRIGGER IF EXISTS broccoli_inputs_changed ON public.contest;
+DROP TRIGGER IF EXISTS broccoli_inputs_changed ON public.contest_problem;
 DROP TRIGGER IF EXISTS broccoli_checker_language ON public.plugin_config;
 DROP FUNCTION IF EXISTS public.broccoli_checker_language();
 DROP FUNCTION IF EXISTS public.broccoli_contest_inputs_changed();
 DROP FUNCTION IF EXISTS public.broccoli_problem_inputs_changed();
 DROP FUNCTION IF EXISTS public.broccoli_inputs_changed();
+ALTER TABLE public.plugin DROP COLUMN inputs_epoch;
+ALTER TABLE public.submission_judgement DROP COLUMN plugin_epochs;
 ALTER TABLE public.submission_judgement DROP COLUMN judged_on_earlier_inputs;
 ALTER TABLE public.submission_judgement DROP COLUMN inputs_version;
 ALTER TABLE public.problem DROP COLUMN checker_language;

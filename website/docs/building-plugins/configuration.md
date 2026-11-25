@@ -340,7 +340,8 @@ scopes = ["plugin"]
 A change to one of its stored configs then counts as a change to the
 judging inputs of every problem the config reaches: a problem's or contest
 problem's config that problem, a contest's config each problem of the
-contest, and a plugin-scope config every problem. A judgement judged before
+contest, and a plugin-scope config everything your plugin judges. A
+judgement judged before
 the change is applied only with `force` and shows as judged on earlier
 inputs. A change to any other namespace (standings, display settings) leaves
 judgements as they are. A `checker_source` namespace is a judging input

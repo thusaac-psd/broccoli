@@ -69,6 +69,24 @@ impl Unit {
         )
     }
 
+    /// SQL over a judgement's [`Unit::scan_from`] scan: each plugin the
+    /// judgement is judged by (the fleet-wide provider of each key it needs)
+    /// with its inputs epoch (`plugin.inputs_epoch`), as a JSON object. A
+    /// plugin-scope judging-input config moves only its plugin's epoch, so
+    /// it reaches exactly the judgements that plugin judges.
+    pub(crate) fn plugin_epochs() -> String {
+        let providers: Vec<String> = Unit::Judgement
+            .needs()
+            .iter()
+            .map(|(kind, key)| crate::providers::provider(*kind, key))
+            .collect();
+        format!(
+            "(SELECT COALESCE(jsonb_object_agg(e.id, e.inputs_epoch), '{{}}'::jsonb) \
+               FROM plugin e WHERE e.id IN ({}))",
+            providers.join(", ")
+        )
+    }
+
     /// SQL over a [`Unit::scan_from`] scan: the unit may run now, every
     /// key it needs having a provider enabled fleet-wide
     /// ([`crate::providers::runnable`]). A unit that may not is parked.

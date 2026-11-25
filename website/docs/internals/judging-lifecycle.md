@@ -299,14 +299,20 @@ are keyed on it.
 - Everything judging reads of a problem is versioned as one:
   `problem.inputs_version` counts every change to its test cases, its time
   and memory limits, its type, its checker format, its additional files
-  (graders), the type of each contest it is in, and the stored configs of
-  every namespace a plugin declares a judging input (`judging_input`, its
-  checker source among them) at each scope the config cascade reads: the
-  problem's, a contest problem's, a contest's (every problem of the contest)
-  and the plugin's (every problem). A config of any other namespace counts
-  nothing. Database triggers count them (`judging::inputs`), reading which
-  namespaces are judging inputs from each plugin's recorded `governs`, so
-  every write path counts a change without knowing to. The dispatch reads the
+  (graders), its default contest type, which contests it is in and each
+  one's type, and the stored configs of every namespace a plugin declares a
+  judging input (`judging_input`, its checker source among them) at the
+  problem's, a contest problem's and a contest's scope (every problem of the
+  contest). A plugin-scope config of a judging input moves that plugin's own
+  `inputs_epoch` instead, and a judgement records the epoch of each plugin it
+  is judged by (`plugin_epochs`, the fleet-wide providers of its needs), so
+  such a change reaches exactly the work that plugin judges and locks no
+  problem row. A config of any other namespace counts nothing. Database
+  triggers count them (`judging::inputs`), reading which namespaces are
+  judging inputs from each plugin's recorded `governs`, which a replica
+  records from the manifest as it registers the plugin and again whenever a
+  change is published, so a plugin no replica loads still declares its
+  inputs; every write path counts a change without knowing to. The dispatch reads the
   problem and its test cases in one snapshot and stamps the judgement with
   that snapshot's version (`judging::stamp_inputs_version`). A plugin reads
   its configs later, while it judges, so a change between the stamp and that

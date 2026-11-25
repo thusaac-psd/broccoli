@@ -373,15 +373,19 @@ binaries warn about every key they do not read.
   through one rule, `plugin_lifecycle::accepting_handler`, which refuses a
   contest type no provider can judge now; a new submit path calls it too.
 - Everything judging reads of a problem (test cases, limits, type, checker
-  format, additional files, its contests' types, and the configs of every
-  namespace a manifest marks `judging_input` at each scope the cascade reads:
-  problem, contest problem, contest, plugin) is versioned as one in
+  format, additional files, its default contest type, its contests and their
+  types, and the configs of every namespace a manifest marks `judging_input` at
+  the problem, contest problem and contest scopes) is versioned as one in
   `problem.inputs_version`, counted by database triggers
   (`services::judging::inputs`), never by a write path: a new input table gets
-  the trigger. A namespace judging reads is marked `judging_input`, or its
-  changes count nothing. The dispatch stamps the version it read the inputs at
-  on the judgement; applying a judgement of another version needs `force` and
-  marks it `judged_on_earlier_inputs`.
+  the trigger. A plugin-scope judging-input config moves its plugin's
+  `inputs_epoch` instead, recorded per judgement for the plugins that judge it
+  (`plugin_epochs`). A namespace judging reads is marked `judging_input`, or its
+  changes count nothing; what a manifest declares is recorded in `governs` at
+  registration and at every publish (`record_declared`, `publish`). The dispatch
+  stamps the version and epochs it read the inputs at on the judgement; applying
+  a judgement of another version needs `force` and marks it
+  `judged_on_earlier_inputs`.
 - A change to a problem's test data goes through
   `services::test_data::TestDataEdit`, whose commit checks the problem's stored
   configs against the data as the change leaves it and refuses a change that
