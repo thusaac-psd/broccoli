@@ -51,7 +51,11 @@ test('a problem with no language open to submit in is closed, never offered as p
     kind: 'noLanguage',
   });
   // What the server closes says more, so it comes first.
-  const language = { plugin_id: 'langs', provides: 'language' } as const;
+  const language = {
+    plugin_id: 'langs',
+    provides: 'language',
+    reason: 'disabled',
+  } as const;
   assert.deepEqual(
     submitClosure('practice', null, { closed_by: language }, 0),
     {

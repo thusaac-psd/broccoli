@@ -266,6 +266,7 @@ for (const [name, locale, plugins, parkedBy, label] of [
 const LANGUAGES_CLOSED = {
   plugin_id: 'standard-languages',
   provides: 'language',
+  reason: 'disabled',
 } as const;
 
 test('a problem whose every language is closed names the language plugin and offers no Submit', async ({
@@ -316,6 +317,7 @@ test('a language whose plugin is disabled is listed as unavailable, with the plu
   const closed = {
     plugin_id: 'extra-languages',
     provides: 'language',
+    reason: 'disabled',
   } as const;
   await answerGets(page, /\/api\/v1\/problems\/1(\?|$)/, () => ({
     ...problem(1),
