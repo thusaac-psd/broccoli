@@ -455,6 +455,7 @@ async fn an_upgrade_reports_the_stored_configs_its_schemas_refuse() {
             ref_id: Set(ref_id.into()),
             namespace: Set(namespace.into()),
             config: Set(config),
+            secret_refs: sea_orm::NotSet,
             enabled: Set(None),
             position: Set(0),
             updated_at: sea_orm::NotSet,

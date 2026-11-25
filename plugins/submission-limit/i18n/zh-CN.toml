@@ -32,6 +32,7 @@
 'submission-limit.apiError.SIGN_IN_REQUIRED' = '请先登录。'
 
 # Config schema text
+'config.submission-limit.limits.title' = '提交限制'
 'config.submission-limit.limits.description' = '提交次数限制设置'
 'config.submission-limit.limits.max_submissions.title' = '最大提交次数'
 'config.submission-limit.limits.max_submissions.description' = '每道题的最大提交次数。设为 0 表示不限制。'

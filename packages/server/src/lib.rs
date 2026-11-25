@@ -106,7 +106,10 @@ pub(crate) fn metrics_test_lock() -> std::sync::MutexGuard<'static, ()> {
         (name = "Telemetry", description = "Public client error and web-vitals reporting"),
         (name = "Users", description = "User account management"),
     ),
-    components(schemas(broccoli_api_types::plugin::ClearSecret)),
+    components(schemas(
+        broccoli_api_types::plugin::ClearSecret,
+        broccoli_api_types::plugin::KeptSecret
+    )),
     modifiers(&SecurityAddon),
 )]
 struct ApiDoc;

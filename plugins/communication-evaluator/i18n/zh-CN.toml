@@ -5,11 +5,14 @@
 'communication-evaluator.config.managerFilenameTaken' = '已有名为“{filename}”的交互器源文件。'
 
 # Config schema text
+'config.communication-evaluator.communication.title' = '交互通信'
 'config.communication-evaluator.communication.description' = '交互评测器设置'
 'config.communication-evaluator.communication.num_processes.title' = '选手进程数'
 'config.communication-evaluator.communication.num_processes.description' = '通过 FIFO 并行运行的选手进程实例数'
 'config.communication-evaluator.communication.communication_mode.title' = '通信方式'
 'config.communication-evaluator.communication.communication_mode.description' = 'redirect：选手使用标准输入输出（FIFO 被重定向）。fifo_args：选手以命令行参数接收 FIFO 路径。'
+'config.communication-evaluator.communication.communication_mode.options.redirect' = '标准输入输出'
+'config.communication-evaluator.communication.communication_mode.options.fifo_args' = '以参数传入 FIFO 路径'
 'config.communication-evaluator.communication.manager_language.title' = '管理程序语言'
 'config.communication-evaluator.communication.manager_language.description' = '编译管理程序源代码所用的语言 ID（例如 cpp）'
 'config.communication-evaluator.communication.manager_sources.title' = '管理程序源文件'
@@ -24,6 +27,7 @@
 'config.communication-evaluator.communication.manager_memory_limit_kb.title' = '管理程序内存限制（KB）'
 'config.communication-evaluator.communication.manager_memory_limit_kb.description' = '管理程序进程的最大内存'
 'config.communication-evaluator.communication.manager_memory_limit_kb.unit' = 'KB'
+'config.communication-evaluator.sandbox.title' = '沙箱'
 'config.communication-evaluator.sandbox.description' = '编译和运行步骤的沙箱资源限制'
 'config.communication-evaluator.sandbox.compile_time_limit_s.title' = '编译时间限制'
 'config.communication-evaluator.sandbox.compile_time_limit_s.unit' = '秒'

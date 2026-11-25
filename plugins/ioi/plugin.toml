@@ -77,6 +77,7 @@ en = "i18n/en.toml"
 zh-CN = "i18n/zh-CN.toml"
 
 [config.contest]
+title = "IOI rules"
 description = "IOI contest-level configuration: scoring mode, feedback, tokens"
 scopes = ["contest"]
 
@@ -85,6 +86,7 @@ type = "string"
 title = "Scoring Mode"
 description = "How the task score is computed across submissions"
 enum = ["max_submission", "sum_best_subtask", "best_tokened_or_last"]
+enum_titles = ["Best submission", "Best of each subtask", "Best tokened or last"]
 default = "max_submission"
 
 [config.contest.properties.feedback_level]
@@ -92,6 +94,7 @@ type = "string"
 title = "Feedback Level"
 description = "Baseline submission feedback visible before a token is used"
 enum = ["full", "subtask_scores", "total_only", "none"]
+enum_titles = ["Full", "Subtask scores", "Total only", "None"]
 default = "full"
 
 [config.contest.properties.scoreboard_visibility]
@@ -99,6 +102,7 @@ type = "string"
 title = "Scoreboard Visibility Before End"
 description = "Who can see the full scoreboard before the contest ends"
 enum = ["admins_only", "all_contest_viewers"]
+enum_titles = ["Administrators only", "Everyone who can view the contest"]
 default = "admins_only"
 
 [config.contest.properties.scoreboard_tiebreaker]
@@ -106,6 +110,7 @@ type = "string"
 title = "Scoreboard Tiebreaker"
 description = "How tied total scores are ranked on the scoreboard"
 enum = ["equal_rank", "sum_score_time", "max_score_time"]
+enum_titles = ["Equal rank", "Total time of scoring submissions", "Latest scoring submission"]
 default = "max_score_time"
 
 [config.contest.properties.tokens]
@@ -117,6 +122,7 @@ description = "Token system that can unlock full feedback on a submission"
 type = "string"
 title = "Token Mode"
 enum = ["none", "fixed_budget", "regenerating"]
+enum_titles = ["No tokens", "Fixed budget", "Regenerating"]
 default = "none"
 
 [config.contest.properties.tokens.properties.initial]
@@ -144,6 +150,7 @@ max = 1440
 unit = "min"
 
 [config.task]
+title = "Subtasks"
 judging_input = true
 description = "Per-task configuration: subtask definitions"
 scopes = ["contest_problem"]
@@ -170,6 +177,7 @@ max_length = 50
 type = "string"
 title = "Scoring Method"
 enum = ["group_min", "sum", "group_mul"]
+enum_titles = ["Minimum of the group", "Sum", "Product of the group"]
 default = "group_min"
 
 [config.task.properties.subtasks.items.properties.max_score]

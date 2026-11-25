@@ -45,6 +45,7 @@ topic = "visibility"
 function = "decide_visibility"
 
 [config.contest]
+title = "ICPC rules"
 description = "ICPC contest-level configuration"
 scopes = ["contest"]
 

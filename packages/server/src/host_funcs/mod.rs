@@ -39,29 +39,22 @@ impl HostFnContext for String {
     }
 }
 
-impl<A> HostFnContext for (String, A) {
-    fn plugin_id(&self) -> &str {
-        &self.0
-    }
+/// A tuple context whose first field is the plugin id.
+macro_rules! tuple_context {
+    ($($field:ident),+) => {
+        impl<$($field),+> HostFnContext for (String, $($field),+) {
+            fn plugin_id(&self) -> &str {
+                &self.0
+            }
+        }
+    };
 }
 
-impl<A, B> HostFnContext for (String, A, B) {
-    fn plugin_id(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<A, B, C> HostFnContext for (String, A, B, C) {
-    fn plugin_id(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<A, B, C, D> HostFnContext for (String, A, B, C, D) {
-    fn plugin_id(&self) -> &str {
-        &self.0
-    }
-}
+tuple_context!(A);
+tuple_context!(A, B);
+tuple_context!(A, B, C);
+tuple_context!(A, B, C, D);
+tuple_context!(A, B, C, D, E);
 
 /// Wrap a host fn context for `Function::new`.
 ///
@@ -623,6 +616,7 @@ fn register_config_functions(
     let manager = deps.plugin_manager.clone();
     let types = deps.system.type_providers();
     let cache = deps.system.plugin_config_cache.clone();
+    let lifecycle = deps.system.plugin_lifecycle.clone();
     hr.register("config:write", move |plugin_id| {
         config::create_config_set_function(
             plugin_id.to_string(),
@@ -630,6 +624,7 @@ fn register_config_functions(
             manager.clone(),
             types.clone(),
             cache.clone(),
+            lifecycle.clone(),
         )
     });
 }

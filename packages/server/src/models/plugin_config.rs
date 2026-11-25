@@ -8,12 +8,11 @@ pub struct PluginConfigResponse {
     pub plugin_id: String,
     #[schema(example = "checker")]
     pub namespace: String,
-    /// The stored config, each secret field (`writeOnly` in `json_schema`)
-    /// `null`: a secret never leaves the server.
+    /// The stored config, each set secret field (`writeOnly` in
+    /// `json_schema`) its ref, `{"$secret": "<ref>"}` (`KeptSecret`): a
+    /// secret never leaves the server. Writing the ref back at the same item
+    /// keeps the stored secret.
     pub config: serde_json::Value,
-    /// The paths of the secret fields that hold a value (`stations[0].token`).
-    /// Writing `null` at one keeps the stored secret.
-    pub secrets: Vec<String>,
     /// Whether `config` is withheld whole (`null`): this server knows no
     /// schema for the namespace (its plugin is not installed here, or no
     /// longer declares it), so it cannot tell which fields are secret.

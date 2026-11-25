@@ -1,8 +1,8 @@
 use axum::Json;
 use sea_orm::sea_query::{LockType, OnConflict};
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect, Set, TransactionSession,
-    TransactionTrait,
+    ColumnTrait, Condition, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+    Set, TransactionSession, TransactionTrait,
 };
 
 use broccoli_server_sdk::types::{
@@ -11,7 +11,9 @@ use broccoli_server_sdk::types::{
 };
 use plugin_core::config_schema::{self, FieldError, FieldErrorKind};
 pub(crate) use plugin_core::manifest::ConfigScope;
-use plugin_core::manifest::{ConfigNamespace, PluginManifest, SecretRefusal};
+use plugin_core::manifest::{
+    ConfigNamespace, PluginManifest, SecretRef, SecretRefusal, StoredSecrets,
+};
 use plugin_core::registry::PluginRegistry;
 use plugin_core::traits::PluginManager;
 
@@ -162,11 +164,12 @@ pub(crate) fn declared(
         .cloned()
 }
 
-/// The schemas a read shows configs by: this replica's registry, trusted
-/// for a plugin only while this replica serves the version the fleet
-/// published (`PluginLifecycle::serves_published`). An outdated replica's
-/// manifest may lack a field the published one marks secret, so a read
-/// there shows nothing of the plugin's configs.
+/// The schemas a read shows configs by and a write stores them by: this
+/// replica's registry, trusted for a plugin only while this replica serves
+/// the version the fleet published (`PluginLifecycle::serves_published`).
+/// An outdated replica's manifest may lack a field the published one marks
+/// secret, so a read there shows nothing of the plugin's configs, and a
+/// write there is refused ([`SchemaSource::writable`]).
 #[derive(Clone, Copy)]
 pub(crate) struct SchemaSource<'a> {
     registry: &'a PluginRegistry,
@@ -174,20 +177,35 @@ pub(crate) struct SchemaSource<'a> {
 }
 
 impl<'a> SchemaSource<'a> {
-    /// The schemas a request on this server reads by.
+    /// The schemas a request on this server reads and writes by.
     pub(crate) fn of(state: &'a crate::state::AppState) -> Self {
+        Self::serving(state.plugins.get_registry(), &state.plugin_lifecycle)
+    }
+
+    /// The schemas of `registry`, trusted for the plugins `lifecycle` says
+    /// this replica serves at their published version.
+    pub(crate) fn serving(
+        registry: &'a PluginRegistry,
+        lifecycle: &'a crate::plugin_lifecycle::PluginLifecycle,
+    ) -> Self {
         Self {
-            registry: state.plugins.get_registry(),
-            lifecycle: Some(&state.plugin_lifecycle),
+            registry,
+            lifecycle: Some(lifecycle),
         }
     }
 
-    /// The schemas of this replica's registry, trusted as they are: for a
-    /// config a client just wrote, whose values it knows.
-    pub(crate) fn local(registry: &'a PluginRegistry) -> Self {
-        Self {
-            registry,
-            lifecycle: None,
+    /// Refuses a write of `plugin_id`'s configs on a replica that does not
+    /// serve the plugin's published version
+    /// ([`AppError::PluginOutdatedHere`]): the schema it knows may not mark
+    /// a field the published one marks secret, so a write by it could drop
+    /// a stored secret, or answer one in clear. The client retries on a
+    /// replica that serves it, or once this one does.
+    pub(crate) fn writable(&self, plugin_id: &str) -> Result<(), AppError> {
+        match self.lifecycle {
+            Some(lifecycle) if !lifecycle.serves_published(plugin_id) => {
+                Err(AppError::PluginOutdatedHere(plugin_id.to_string()))
+            }
+            _ => Ok(()),
         }
     }
 
@@ -205,21 +223,31 @@ impl<'a> SchemaSource<'a> {
     }
 }
 
+/// The refs a stored row's `secret_refs` holds.
+pub(crate) fn secret_refs(stored: &serde_json::Value) -> Vec<SecretRef> {
+    serde_json::from_value(stored.clone()).unwrap_or_default()
+}
+
+/// A new secret's ref: opaque, and never the same twice.
+pub(crate) fn mint_secret_ref() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
 /// A stored config as a read shows it.
 pub(crate) struct Shown {
-    /// Each secret field `null`; `null` whole when `withheld`.
+    /// Each set secret field its ref (`{"$secret": "<ref>"}`); `null` whole
+    /// when `withheld`.
     pub(crate) config: serde_json::Value,
-    /// The paths of the secret fields that hold a value.
-    pub(crate) secrets: Vec<String>,
     /// No schema for the namespace is known here, so nothing of it shows.
     pub(crate) withheld: bool,
 }
 
-/// A stored config as a read shows it: each secret field its namespace
-/// declares `null`, with the paths of those that hold a value, and nothing
-/// at all when this server knows no schema for the namespace it may trust
-/// ([`SchemaSource::namespace`]), since no one here can say which of its
-/// fields are secret. Every route that answers a
+/// A stored config as a read shows it: each set secret field its namespace
+/// declares replaced by its ref in `refs`
+/// ([`ConfigNamespace::show_secrets`]), which a write sends back to keep
+/// it, and nothing at all when this server knows no schema for the
+/// namespace it may trust ([`SchemaSource::namespace`]), since no one here
+/// can say which of its fields are secret. Every route that answers a
 /// stored config builds its answer here, so a secret never leaves the
 /// server.
 pub(crate) fn shown(
@@ -227,19 +255,18 @@ pub(crate) fn shown(
     plugin_id: &str,
     namespace: &str,
     mut config: serde_json::Value,
+    refs: &[SecretRef],
 ) -> Shown {
     match schemas.namespace(plugin_id, namespace) {
         Some(ns) => {
-            let secrets = ns.withhold_secrets(&mut config);
+            ns.show_secrets(&mut config, refs);
             Shown {
                 config,
-                secrets: secrets.into_iter().map(|set| set.path).collect(),
                 withheld: false,
             }
         }
         None => Shown {
             config: serde_json::Value::Null,
-            secrets: Vec::new(),
             withheld: true,
         },
     }
@@ -264,12 +291,12 @@ pub(crate) async fn get_config<C: ConnectionTrait>(
     match row {
         Some(r) => {
             let namespace = strip_namespace_prefix(&r.namespace).to_string();
-            let shown = shown(schemas, plugin_id, &namespace, r.config);
+            let refs = secret_refs(&r.secret_refs);
+            let shown = shown(schemas, plugin_id, &namespace, r.config, &refs);
             Ok(Json(PluginConfigResponse {
                 plugin_id: plugin_id.to_string(),
                 namespace,
                 config: shown.config,
-                secrets: shown.secrets,
                 config_withheld: shown.withheld,
                 enabled: r.enabled,
                 position: r.position,
@@ -609,11 +636,16 @@ async fn problems_of_contest<C: ConnectionTrait>(
 /// problem or contest-problem config holds the problem's row lock, the lock
 /// a test-data change holds ([`crate::services::test_data::TestDataEdit`]),
 /// from its check until the write commits: no test-data change lands between
-/// the check and the stored config.
+/// the check and the stored config. The write takes it in the order every
+/// config write and delete takes its rows ([`lock_reached`]).
+///
+/// A replica that does not serve the plugin's published version writes
+/// none of its configs ([`SchemaSource::writable`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     plugins: &dyn PluginManager,
+    schemas: SchemaSource<'_>,
     reads: Reads<'_>,
     target: &ConfigTarget,
     plugin_id: &str,
@@ -621,20 +653,16 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     config: serde_json::Value,
     settings: RowSettings,
 ) -> Result<(PluginConfigResponse, ConfigChange), AppError> {
+    schemas.writable(plugin_id)?;
     let txn = db.begin().await?;
-    if let Some(problem_id) = target.problem_id {
-        problem::Entity::find_by_id(problem_id)
-            .lock(LockType::Update)
-            .one(&txn)
-            .await?;
-    }
-    // A secret the client sends back as `null` (it reads them so) keeps what
+    lock_reached(&txn, target).await?;
+    // A secret the client sends back as the ref a read showed it keeps what
     // the stored config holds for the same item.
     let mut config = config;
-    if let Some(ns) = declared(plugins.get_registry(), plugin_id, namespace) {
+    let mut refs = Vec::new();
+    if let Some(ns) = declared(schemas.registry, plugin_id, namespace) {
         // Under the row's lock: a save that rotates a secret meanwhile is
-        // waited for, so this one keeps the new secret instead of reverting
-        // it.
+        // waited for, so this one, holding the old ref, keeps nothing.
         let stored = plugin_config::Entity::find_by_id((
             target.scope().as_str().to_string(),
             target.ref_id().to_string(),
@@ -643,7 +671,16 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
         .lock(LockType::Update)
         .one(&txn)
         .await?;
-        ns.keep_secrets(&mut config, stored.as_ref().map(|row| &row.config))
+        let stored_refs = stored
+            .as_ref()
+            .map(|row| secret_refs(&row.secret_refs))
+            .unwrap_or_default();
+        let stored = StoredSecrets {
+            config: stored.as_ref().map(|row| &row.config),
+            refs: &stored_refs,
+        };
+        refs = ns
+            .keep_secrets(&mut config, stored, &mut mint_secret_ref)
             .map_err(|refused| {
                 AppError::InvalidConfig(
                     refused
@@ -666,6 +703,7 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     }
     let mut updated = vec![
         plugin_config::Column::Config,
+        plugin_config::Column::SecretRefs,
         plugin_config::Column::UpdatedAt,
     ];
     if settings.enabled.is_some() {
@@ -680,6 +718,7 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
         ref_id: Set(target.ref_id().to_string()),
         namespace: Set(target.stored_namespace(plugin_id, namespace)),
         config: Set(config),
+        secret_refs: Set(serde_json::to_value(&refs).expect("refs serialize")),
         enabled: Set(enabled),
         position: Set(position),
         updated_at: sea_orm::NotSet,
@@ -697,18 +736,12 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     .await?;
     let change = ConfigChange::of(&txn, target).await?;
     txn.commit().await?;
-    let shown = shown(
-        SchemaSource::local(plugins.get_registry()),
-        plugin_id,
-        namespace,
-        row.config,
-    );
+    let shown = shown(schemas, plugin_id, namespace, row.config, &refs);
     Ok((
         PluginConfigResponse {
             plugin_id: plugin_id.to_string(),
             namespace: strip_namespace_prefix(&row.namespace).to_string(),
             config: shown.config,
-            secrets: shown.secrets,
             config_withheld: shown.withheld,
             enabled: row.enabled,
             position: row.position,
@@ -720,19 +753,63 @@ pub(crate) async fn write_config<C: ConnectionTrait + TransactionTrait>(
     ))
 }
 
+/// Locks the rows of the problems a config write or delete at `target`
+/// counts on (the inputs triggers update them as the config row changes):
+/// the problem of a problem or contest-problem config, every problem of a
+/// contest's. Every config write and delete takes them here, by id, before
+/// it touches a config row, and the triggers take a contest's problems by
+/// id too, so two config writes, two deletes, or a write and a delete never
+/// hold each other's rows in opposite orders. A plugin-scope config counts
+/// on its plugin's row alone, which every path takes after the config row.
+async fn lock_reached<C: ConnectionTrait>(db: &C, target: &ConfigTarget) -> Result<(), AppError> {
+    let reached = match (target.scope(), target.problem_id, target.contest_id) {
+        (_, Some(problem_id), _) => problem::Column::Id.eq(problem_id),
+        (ConfigScope::Contest, None, Some(contest_id)) => {
+            problem::Column::Id.in_subquery(problems_in_contest(contest_id))
+        }
+        _ => return Ok(()),
+    };
+    lock_problems(db, reached.into()).await
+}
+
+/// The ids of contest `contest_id`'s problems, as a subquery.
+fn problems_in_contest(contest_id: i32) -> sea_orm::sea_query::SelectStatement {
+    sea_orm::sea_query::Query::select()
+        .column(contest_problem::Column::ProblemId)
+        .from(contest_problem::Entity)
+        .and_where(contest_problem::Column::ContestId.eq(contest_id))
+        .to_owned()
+}
+
+/// Locks the problems `which` selects, in id order ([`lock_reached`]).
+async fn lock_problems<C: ConnectionTrait>(db: &C, which: Condition) -> Result<(), AppError> {
+    problem::Entity::find()
+        .select_only()
+        .column(problem::Column::Id)
+        .filter(which)
+        .order_by_asc(problem::Column::Id)
+        .lock(LockType::Update)
+        .into_tuple::<i32>()
+        .all(db)
+        .await?;
+    Ok(())
+}
+
 /// Deletes one stored config; [`AppError::NotFound`] when there is none.
-pub(crate) async fn delete_config<C: ConnectionTrait>(
+pub(crate) async fn delete_config<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     target: &ConfigTarget,
     plugin_id: &str,
     namespace: &str,
 ) -> Result<ConfigChange, AppError> {
+    let txn = db.begin().await?;
+    lock_reached(&txn, target).await?;
     let stored_namespace = target.stored_namespace(plugin_id, namespace);
     let deleted = plugin_config::Entity::delete_many()
         .filter(plugin_config::Column::Scope.eq(target.scope().as_str()))
         .filter(plugin_config::Column::RefId.eq(target.ref_id()))
         .filter(plugin_config::Column::Namespace.eq(&stored_namespace))
-        .exec(db)
+        .exec(&txn)
         .await?;
     if deleted.rows_affected == 0 {
         let display_ns = strip_namespace_prefix(&stored_namespace);
@@ -740,7 +817,9 @@ pub(crate) async fn delete_config<C: ConnectionTrait>(
             "Config '{display_ns}' not found"
         )));
     }
-    ConfigChange::of(db, target).await
+    let change = ConfigChange::of(&txn, target).await?;
+    txn.commit().await?;
+    Ok(change)
 }
 
 /// Deletes every config of problem `problem_id`, at the problem scope and in
@@ -749,6 +828,7 @@ pub(crate) async fn delete_configs_of_problem<C: ConnectionTrait>(
     db: &C,
     problem_id: i32,
 ) -> Result<ConfigChange, AppError> {
+    lock_problems(db, problem::Column::Id.eq(problem_id).into()).await?;
     delete_configs_at(db, &ConfigTarget::problem(problem_id)).await?;
     delete_configs_like(
         db,
@@ -765,6 +845,7 @@ pub(crate) async fn delete_configs_of_contest<C: ConnectionTrait>(
     contest_id: i32,
 ) -> Result<ConfigChange, AppError> {
     let target = ConfigTarget::contest(contest_id);
+    lock_reached(db, &target).await?;
     let change = ConfigChange::of_contest(db, contest_id).await?;
     delete_configs_at(db, &target).await?;
     delete_configs_like(
@@ -783,6 +864,13 @@ pub(crate) async fn delete_configs_of_contest_problems<C: ConnectionTrait>(
     problem_ids: &[i32],
 ) -> Result<ConfigChange, AppError> {
     if !problem_ids.is_empty() {
+        lock_problems(
+            db,
+            problem::Column::Id
+                .is_in(problem_ids.iter().copied())
+                .into(),
+        )
+        .await?;
         plugin_config::Entity::delete_many()
             .filter(plugin_config::Column::Scope.eq(ConfigScope::ContestProblem.as_str()))
             .filter(
@@ -1130,11 +1218,11 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
                 None => continue,
             }
         };
-        let errors = match manifest
+        let declared = manifest
             .config
             .get(namespace)
-            .filter(|ns| ns.scopes.contains(&scope))
-        {
+            .filter(|ns| ns.scopes.contains(&scope));
+        let errors = match declared {
             Some(ns) => match config_schema::validate(ns, &row.config) {
                 Ok(()) => continue,
                 Err(errors) => errors,
@@ -1151,6 +1239,10 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
             scope,
             row.ref_id,
             namespace.to_string(),
+            manifest
+                .config
+                .get(namespace)
+                .map(ConfigNamespace::to_json_schema),
             errors,
         ));
     }
@@ -1211,6 +1303,10 @@ mod tests {
         use crate::plugin_lifecycle::PluginLifecycle;
         let registry = registry_with_a_secret();
         let config = serde_json::json!({ "token": "t", "other": "o" });
+        let refs = [SecretRef {
+            identity: vec![plugin_core::manifest::SecretStep::Field("token".into())],
+            id: "r".into(),
+        }];
         let reporting = |status| {
             PluginLifecycle::reporting(
                 [(
@@ -1236,9 +1332,13 @@ mod tests {
             "p",
             "ns",
             config.clone(),
+            &refs,
         );
         assert!(!served.withheld);
-        assert_eq!(served.config["token"], serde_json::Value::Null);
+        assert_eq!(
+            served.config["token"],
+            serde_json::json!({ "$secret": "r" })
+        );
         assert_eq!(served.config["other"], "o");
 
         for status in [
@@ -1254,9 +1354,58 @@ mod tests {
                 "p",
                 "ns",
                 config.clone(),
+                &refs,
             );
             assert!(served.withheld, "{status:?}");
             assert_eq!(served.config, serde_json::Value::Null, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn a_replica_that_does_not_serve_the_published_version_writes_none_of_its_configs() {
+        use crate::plugin_fleet::{ReplicaPluginState, ReplicaPluginStatus};
+        use crate::plugin_lifecycle::PluginLifecycle;
+        let registry = registry_with_a_secret();
+        let reporting = |status| {
+            PluginLifecycle::reporting(
+                [(
+                    "p".to_string(),
+                    ReplicaPluginState {
+                        status,
+                        error: None,
+                        generation: 1,
+                        retry_in_ms: None,
+                        version: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            )
+        };
+        let current = reporting(ReplicaPluginStatus::Loaded);
+        assert!(
+            SchemaSource::serving(&registry, &current)
+                .writable("p")
+                .is_ok()
+        );
+        for status in [
+            ReplicaPluginStatus::Outdated,
+            ReplicaPluginStatus::Mismatched,
+        ] {
+            let behind = reporting(status);
+            assert!(
+                matches!(
+                    SchemaSource::serving(&registry, &behind).writable("p"),
+                    Err(AppError::PluginOutdatedHere(plugin)) if plugin == "p"
+                ),
+                "{status:?}"
+            );
+            assert!(
+                SchemaSource::serving(&registry, &behind)
+                    .writable("other")
+                    .is_ok(),
+                "another plugin's configs are written as ever"
+            );
         }
     }
 

@@ -126,7 +126,14 @@ export function progressLabel(
       return t('result.waitingForJudge');
     case 'Compiling':
       return t('result.compiling');
-    default:
+    case 'Pending':
+    case 'Running':
+    case 'Judged':
+    case 'CompilationError':
+    case 'SystemError':
+    case 'Superseded':
+    case null:
+    case undefined:
       return t('result.judging');
   }
 }

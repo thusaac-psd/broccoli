@@ -93,27 +93,36 @@ secret = true
 ```
 
 The JSON schema marks the field `writeOnly` and the array `x-key`. No read
-route sends a secret's value: the admin config routes and the cascade answer
-the field as `null`, and the config's `secrets` list names each secret field
-that holds a value, by its path in the config as read (`stations[0].token`).
+route sends a secret's value. The admin config routes answer a set secret as
+its ref, `{"$secret": "<ref>"}` (the API schema's `KeptSecret`): an opaque id
+the server mints each time it stores a new value, and keeps while the value
+stays. The cascade answers the field as `null`.
 
-A secret belongs to the item it was set on, never to a position. A write that
-sends `null` for a secret, or leaves the field out, keeps what the stored
-config holds for the same item, the stored item whose key field has the same
-value, so saving the config back unchanged, or from a file that holds no
-secrets, keeps every station's token whatever stations were added, removed
-or moved. A `null` secret whose item has no stored secret (a new station, or
-one whose name changed) is refused with a `secret_not_stored` field error:
-enter its secret again. Once a save drops an item, its secret is gone: a
-later item with the same key starts without one. A string replaces a secret,
-and only the marker `{"$clear": true}` clears it, so the field reads unset; a
-secret its item requires is never cleared, and the marker is refused with a
-`secret_required` field error. Two items of a keyed array with the same key
-are refused with a `duplicate_key` field error at the second. The marker's
-shape is the API schema's `ClearSecret`.
+A write keeps a stored secret only where it sends that ref back, on the item
+the read showed it on (the stored item whose key field has the same value,
+never the same position). Saving the config back as read keeps every
+station's token whatever stations were added, removed or moved. Anything else
+is the writer's own:
 
-The settings form shows a set secret as an empty password field that keeps
-the stored value unless you type a new one, with a Clear action that sends the
+- A string sets the secret. Sending the stored value again keeps its ref; any
+  other value gets a new one.
+- `{"$clear": true}` (the API schema's `ClearSecret`) clears it, so the field
+  reads unset.
+- No secret (`null`, the empty string, or the field left out) where one is
+  stored is refused with a `secret_not_stored` field error, and so is a ref
+  the stored secret at that item does not hold: the writer never read that
+  secret. A client that deletes a station and adds one of the same name, a
+  station renamed, or a ref read before the secret was set again, gets
+  nothing back. Where nothing is stored, no secret leaves the field unset.
+- A secret its item requires is set or kept, never cleared or left without
+  one: the marker, or no secret, is refused with a `secret_required` field
+  error.
+
+Two items of a keyed array with the same key are refused with a
+`duplicate_key` field error at the second.
+
+The settings form shows a set secret as an empty password field that sends
+its ref back unless you type a new value, with a Clear action that sends the
 marker (none for a required secret). An item the form adds, or one whose key
 you change, is new even if a saved item had that key: its secret is entered,
 and a blank one is sent as the marker, so no saved item's secret passes to it.
@@ -288,13 +297,15 @@ withholds each one by the namespace's schema, read from the plugin's published
 upload or the server's plugin directory, and lists where in the bundle, each
 array item named by its key field. The configs of a plugin with neither, and a
 config whose namespace its manifest no longer declares, stay out, and the
-export names them. The bundle records the installation that wrote it (an id
-each database is given once). An import onto that installation keeps the
-secret it stored, before the import replaced anything, for the same item of
-the same config, so re-importing a server's own export keeps every secret it
-had. An import onto any other installation keeps none of its own secrets for
-the bundle's configs: each withheld secret is left unset, and the import's
-summary says how many.
+export names them. The rows carry each secret's ref, never its value. An import
+keeps the secret the target stored, before the import replaced anything, at
+the same item of the same config only where the target's ref is the bundle's:
+the same stored secret. Re-importing a server's own export keeps every secret
+it had, unless one was set again since. Every other withheld secret is left
+unset, and the import's summary says how many. A database restored from
+another's dump shares the other's refs only for the secrets neither set again
+since, and a problem replaced at an id another problem held keeps none of
+that problem's secrets.
 
 An import runs no plugin, so it checks none of the configs it restores, and
 the problems' `config_issues` flags do not travel: they describe the source's

@@ -10,6 +10,26 @@ const ISSUE = {
   problem_id: 1,
   label: 'B',
   namespace: 'task',
+  json_schema: {
+    type: 'object',
+    title: 'Subtasks',
+    properties: {
+      subtasks: {
+        type: 'array',
+        title: 'Subtask list',
+        items: {
+          type: 'object',
+          properties: {
+            test_cases: {
+              type: 'array',
+              title: 'Test cases',
+              items: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
+  },
   errors: [
     {
       path: 'subtasks[1].test_cases[0]',
@@ -76,8 +96,11 @@ test('deleting a test case a config names lists the configs it breaks and delete
 
   const prompt = page.getByRole('dialog', { name: 'Save this change anyway?' });
   await expect(prompt).toBeVisible();
-  await expect(prompt.getByText('ioi/task in contest 1')).toBeVisible();
-  await expect(prompt.getByText('subtasks[1].test_cases[0]')).toBeVisible();
+  // The config reads as its plugin and its tab, each field by its title.
+  await expect(prompt.getByText('ioi › Subtasks in contest 1')).toBeVisible();
+  await expect(
+    prompt.getByText('Subtask list › Item 2 › Test cases › Item 1'),
+  ).toBeVisible();
   await prompt.getByRole('button', { name: 'Save anyway' }).click();
 
   await expect(prompt).toHaveCount(0);
@@ -116,6 +139,7 @@ test("the contest's problems dialog shows the contest's config issues", async ({
           problem_id: null,
           label: null,
           namespace: 'contest',
+          json_schema: null,
           errors: [
             {
               path: 'advancement_slots',
@@ -139,9 +163,12 @@ test("the contest's problems dialog shows the contest's config issues", async ({
   await page.getByRole('menuitem', { name: 'Contest Problems' }).click();
 
   const alert = page.getByRole('dialog').getByRole('alert');
+  // A namespace this server knows no schema for reads by its id, each field
+  // by its path.
   await expect(alert).toContainText(
-    'codelink-qualifier/contest on this contest',
+    'codelink-qualifier › contest on this contest',
   );
   await expect(alert).toContainText('advancement_slots');
-  await expect(alert).toContainText('ioi/task for problem B');
+  await expect(alert).toContainText('ioi › Subtasks for problem B');
+  await expect(alert).toContainText('Subtask list:');
 });

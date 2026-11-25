@@ -24,6 +24,7 @@ position = "replace"
 component = "ManagerLanguageSelector"
 
 [config.communication]
+title = "Communication"
 judging_input = true
 description = "Communication evaluator settings"
 scopes = ["problem"]
@@ -42,6 +43,7 @@ type = "string"
 title = "Communication Mode"
 description = "redirect: contestant uses stdin/stdout (FIFOs redirected). fifo_args: contestant receives FIFO paths as arguments."
 enum = ["redirect", "fifo_args"]
+enum_titles = ["Standard input and output", "FIFO paths as arguments"]
 default = "redirect"
 
 [config.communication.properties.manager_language]
@@ -92,6 +94,7 @@ step = 1024
 unit = "KB"
 
 [config.sandbox]
+title = "Sandbox"
 judging_input = true
 description = "Sandbox resource limits for compilation and execution steps"
 scopes = ["plugin"]

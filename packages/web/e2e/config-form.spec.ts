@@ -108,7 +108,6 @@ test('config tabs and array items read as names, not ids', async ({ page }) => {
           plugin_id: 'print',
           namespace: 'print',
           config: { stations: [{ name: 'desk' }, { name: '' }] },
-          secrets: [],
           config_withheld: false,
           enabled: null,
           position: 0,
@@ -120,7 +119,10 @@ test('config tabs and array items read as names, not ids', async ({ page }) => {
   await page.goto('/admin/plugins');
   await page.getByRole('button', { name: '配置' }).click();
   const dialog = page.getByRole('dialog');
-  await expect(dialog.getByRole('tab', { name: 'Stations' })).toBeVisible();
+  // The tab reads the title in the plugin's pack, its schema's title else.
+  await expect(
+    dialog.getByRole('tab', { name: '打印', exact: true }),
+  ).toBeVisible();
   await expect(
     dialog.getByRole('tab', { name: 'other', exact: true }),
   ).toBeVisible();
@@ -174,4 +176,55 @@ test('an unset boolean reads its default in words', async ({ page }) => {
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByText('(否)')).toBeVisible();
   await expect(dialog.getByText('(false)')).toHaveCount(0);
+});
+
+// An enum's options, and its default, read as their titles, never as their
+// raw values.
+test('enum options read as their titles', async ({ page }) => {
+  await mockApi(page, 'admin', { plugins: ['print'] });
+  await page.route('**/api/v1/admin/plugins', (route) =>
+    route.fulfill({
+      json: [
+        {
+          ...plugin,
+          config_schemas: [
+            {
+              namespace: 'print',
+              description: 'Code printing settings',
+              scopes: ['plugin'],
+              json_schema: {
+                type: 'object',
+                properties: {
+                  mode: {
+                    type: 'string',
+                    title: 'Mode',
+                    enum: ['redirect', 'fifo_args'],
+                    'x-enum-titles': [
+                      'Standard input and output',
+                      'FIFO paths as arguments',
+                    ],
+                    default: 'redirect',
+                  },
+                },
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  await page.route('**/api/v1/admin/plugins/print/config', (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await page.goto('/admin/plugins');
+  await page.getByRole('button', { name: 'Configure' }).click();
+  const select = page.getByRole('dialog').locator('#cfg-mode');
+  await expect(select.locator('option')).toHaveText([
+    'Standard input and output',
+    'Standard input and output',
+    'FIFO paths as arguments',
+  ]);
+  await expect(select.locator('option', { hasText: 'redirect' })).toHaveCount(
+    0,
+  );
 });

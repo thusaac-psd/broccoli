@@ -12,6 +12,7 @@
 'plugin.standard-languages.description' = '评测镜像自带的语言：C、C++、Python 3、Java、Kotlin、Rust、Go、Pascal 与 JavaScript。'
 
 # Config schema text
+'config.standard-languages.compilation.title' = '编译'
 'config.standard-languages.compilation.description' = '编译器与解释器路径及默认选项'
 'config.standard-languages.compilation.cpp.title' = 'C++'
 'config.standard-languages.compilation.cpp.compiler.title' = '编译器路径'
@@ -40,6 +41,7 @@
 'config.standard-languages.compilation.pascal.flags.title' = '编译选项'
 'config.standard-languages.compilation.javascript.title' = 'JavaScript (Node.js)'
 'config.standard-languages.compilation.javascript.interpreter.title' = '解释器路径'
+'config.standard-languages.entry-points.title' = '入口点'
 'config.standard-languages.entry-points.description' = '按语言覆盖入口文件和额外编译选项'
 'config.standard-languages.entry-points.cpp.title' = 'C++'
 'config.standard-languages.entry-points.cpp.entry_point.title' = '入口文件'

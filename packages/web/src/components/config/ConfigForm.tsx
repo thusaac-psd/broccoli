@@ -19,16 +19,15 @@ import type {
   InheritedConfig,
   JsonSchema,
 } from './types';
+import { useFieldName } from './use-field-name';
 import { useFieldProblemText } from './use-field-problem-text';
 import {
-  afterWrite,
   deepMerge,
   extractDefaults,
   forWrite,
   hasOwnDescendantValue,
   hasOwnValueAtPath,
   markSaved,
-  pathSteps,
   serverFieldErrors,
   setAtPath,
   unmarked,
@@ -44,7 +43,11 @@ export interface ConfigFormProps {
   scope?: ConfigScope;
   inherited?: InheritedConfig;
   getConfig: () => Promise<Record<string, unknown>>;
-  putConfig: (config: Record<string, unknown>) => Promise<{ error?: unknown }>;
+  /** Writes `config`, answering the stored config as the server shows it
+   * (each set secret its ref) or the error. */
+  putConfig: (
+    config: Record<string, unknown>,
+  ) => Promise<{ error?: unknown; config?: Record<string, unknown> }>;
   deleteConfig: () => Promise<{ error?: unknown }>;
   invalidateQueryKeys?: string[][];
 }
@@ -179,24 +182,13 @@ function ConfigFormFields({
   }, []);
 
   /** A refused field as the form names it: its titles and its items. */
+  const nameField = useFieldName();
   function fieldName(path: string): string {
-    return pathSteps(path, jsonSchema, values)
-      .map((step) =>
-        step.kind === 'item'
-          ? (step.label ?? t('config.itemNumber', { n: step.index + 1 }))
-          : pluginId
-            ? pluginText(
-                pluginKeys.configField(
-                  pluginId,
-                  schema.namespace,
-                  step.path,
-                  'title',
-                ),
-                step.title,
-              )
-            : step.title,
-      )
-      .join(' › ');
+    return nameField(
+      { pluginId, namespace: schema.namespace, schema: jsonSchema },
+      path,
+      values,
+    );
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -224,7 +216,7 @@ function ConfigFormFields({
     }
 
     const written = forWrite(payload, jsonSchema) as Record<string, unknown>;
-    const { error } = await putConfig(written);
+    const { error, config: saved } = await putConfig(written);
 
     setLoading(false);
     if (error) {
@@ -236,8 +228,10 @@ function ConfigFormFields({
         fields: Object.entries(fieldErrors),
       });
     } else {
+      // The server's answer: each secret it stores shows the ref it now
+      // holds, which the next save sends back to keep it.
       setStoredValues(
-        afterWrite(written, jsonSchema) as Record<string, unknown>,
+        markSaved(saved ?? {}, jsonSchema) as Record<string, unknown>,
       );
       setFromDefaults(false);
       setEdits(new Map());

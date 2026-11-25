@@ -228,7 +228,7 @@ test('staff see that a judgement ran while its problem had config issues, with t
     .getByRole('alert')
     .filter({ hasText: JUDGED_WITH_ISSUES });
   await expect(notice).toBeVisible();
-  await expect(notice).toContainText('ioi/task on this problem');
+  await expect(notice).toContainText('ioi › task on this problem');
 });
 
 test('the notice says a rejudge scores the submission once its problem has no config issues', async ({

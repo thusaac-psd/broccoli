@@ -518,10 +518,9 @@ async fn a_secret_config_field_is_never_read_back_and_survives_an_unchanged_save
         );
     }
     let res = app.get_with_token(config, &admin).await;
-    assert_eq!(
-        res.body["config"]["stations"][0]["token"],
-        json!(null),
-        "{}",
+    assert!(
+        res.body["config"]["stations"][0]["token"]["$secret"].is_string(),
+        "a set secret reads as its ref: {}",
         res.text
     );
     assert_eq!(
@@ -529,14 +528,8 @@ async fn a_secret_config_field_is_never_read_back_and_survives_an_unchanged_save
         "{}",
         res.text
     );
-    assert_eq!(
-        res.body["secrets"],
-        json!(["stations[0].token"]),
-        "{}",
-        res.text
-    );
 
-    // The form saves what it read: the secret comes back as null.
+    // The form saves what it read: the secret comes back as its ref.
     let mut unchanged = res.body["config"].clone();
     unchanged["banner"] = json!("Renamed banner");
     let res = app
@@ -652,7 +645,6 @@ async fn a_bundle_withholds_a_secret_config_field() {
     let res = target.get_with_token(&config, &target_admin).await;
     assert_eq!(res.status, 200, "{}", res.text);
     assert_eq!(res.body["config"]["stations"], json!([{ "name": "desk" }]));
-    assert_eq!(res.body["secrets"], json!([]), "{}", res.text);
 
     let res = target
         .put_with_token(&config, &stations, &target_admin)
@@ -662,9 +654,9 @@ async fn a_bundle_withholds_a_secret_config_field() {
 }
 
 /// A secret belongs to the item it was set on: saving the stations back
-/// with their tokens `null` keeps each station's own token whatever the
+/// with the refs a read showed keeps each station's own token whatever the
 /// form deleted, inserted or moved, and a station whose name changed has no
-/// stored token to keep.
+/// stored token its ref keeps.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_secret_stays_with_its_item_through_delete_insert_and_reorder() {
     let app = E2eTestApp::spawn().await;
@@ -701,6 +693,15 @@ async fn a_secret_stays_with_its_item_through_delete_insert_and_reorder() {
         }
     };
 
+    // The ref a response shows for station `name`'s token.
+    let shown = |res: &test_support::TestResponse, name: &str| {
+        res.body["config"]["stations"]
+            .as_array()
+            .and_then(|stations| stations.iter().find(|s| s["name"] == name))
+            .map(|station| station["token"].clone())
+            .unwrap_or_else(|| panic!("no station {name}: {}", res.text))
+    };
+
     let res = save(json!([
         { "name": "alpha", "token": "token-a" },
         { "name": "beta", "token": "token-b" },
@@ -708,9 +709,10 @@ async fn a_secret_stays_with_its_item_through_delete_insert_and_reorder() {
     .await;
     assert_eq!(res.status, 200, "{}", res.text);
     assert!(signs_in("token-a").await && signs_in("token-b").await);
+    let beta = shown(&res, "beta");
 
     // alpha deleted: beta keeps its own token, and alpha's no longer signs in.
-    let res = save(json!([{ "name": "beta", "token": null }])).await;
+    let res = save(json!([{ "name": "beta", "token": beta }])).await;
     assert_eq!(res.status, 200, "{}", res.text);
     assert!(
         !signs_in("token-a").await,
@@ -721,16 +723,17 @@ async fn a_secret_stays_with_its_item_through_delete_insert_and_reorder() {
     // A station inserted before beta.
     let res = save(json!([
         { "name": "gamma", "token": "token-g" },
-        { "name": "beta", "token": null },
+        { "name": "beta", "token": beta },
     ]))
     .await;
     assert_eq!(res.status, 200, "{}", res.text);
     assert!(signs_in("token-g").await && signs_in("token-b").await);
+    let gamma = shown(&res, "gamma");
 
     // Reordered.
     let res = save(json!([
-        { "name": "beta", "token": null },
-        { "name": "gamma", "token": null },
+        { "name": "beta", "token": beta },
+        { "name": "gamma", "token": gamma },
     ]))
     .await;
     assert_eq!(res.status, 200, "{}", res.text);
@@ -738,15 +741,16 @@ async fn a_secret_stays_with_its_item_through_delete_insert_and_reorder() {
     let read = app.get_with_token(config, &admin).await;
     assert_eq!(
         read.body["config"]["stations"],
-        json!([{ "name": "beta", "token": null }, { "name": "gamma", "token": null }]),
+        json!([{ "name": "beta", "token": beta }, { "name": "gamma", "token": gamma }]),
         "{}",
         read.text
     );
 
-    // Renamed: no stored station has the new name, so there is no token to keep.
+    // Renamed: the stored station of the new name holds no token beta's ref
+    // keeps.
     let res = save(json!([
-        { "name": "renamed", "token": null },
-        { "name": "gamma", "token": null },
+        { "name": "renamed", "token": beta },
+        { "name": "gamma", "token": gamma },
     ]))
     .await;
     assert_eq!(res.status, 400, "{}", res.text);

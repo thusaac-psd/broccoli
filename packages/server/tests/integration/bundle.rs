@@ -865,56 +865,171 @@ async fn a_bundle_leaves_out_the_configs_of_a_plugin_without_a_manifest() {
     );
 }
 
-/// A bundle never carries a secret, and an import keeps what the target
-/// stores for the same config: re-importing a server's own export over its
-/// problems leaves their secrets as they were, though replacing the
-/// problems deletes their configs first.
-#[tokio::test]
-async fn reimporting_an_export_over_its_own_problems_keeps_their_secrets() {
-    let app = TestApp::spawn().await;
-    let problem = seed_problem_with_configs(&app, "source").await;
+/// Sets the token of problem `problem`'s bundled config to `token`, stored
+/// with ref `id`, as a save does.
+async fn set_token(app: &TestApp, problem: i32, token: &str, id: &str) {
     exec(
-        &app,
+        app,
         &format!(
-            "UPDATE plugin_config SET config = config || '{{\"token\": \"problem-secret\"}}' \
-             WHERE scope = 'problem' AND ref_id = '{problem}'"
+            "UPDATE plugin_config SET config = config || '{{\"token\": \"{token}\"}}', \
+             secret_refs = '[{{\"identity\": [{{\"field\": \"token\"}}], \"ref\": \"{id}\"}}]' \
+             WHERE scope = 'problem' AND ref_id = '{problem}' \
+             AND namespace = 'server-plugin:bundled'"
         ),
     )
     .await;
-    let archive = export(
-        &app,
+}
+
+/// The token of problem `problem`'s bundled config, `unset` for none.
+async fn token(app: &TestApp, problem: i32) -> String {
+    text(
+        app,
+        &format!(
+            "SELECT coalesce(config->>'token', 'unset') AS v FROM plugin_config \
+             WHERE scope = 'problem' AND ref_id = '{problem}' \
+             AND namespace = 'server-plugin:bundled'"
+        ),
+    )
+    .await
+}
+
+async fn export_problem(app: &TestApp, problem: i32) -> Vec<u8> {
+    export(
+        app,
         ExportOptions {
             selection: Selection::Problems(vec![problem]),
             with_secrets: false,
         },
     )
     .await
-    .expect("export");
+    .expect("export")
+}
+
+async fn replace_from(app: &TestApp, archive: &[u8]) -> server::bundle::Summary {
+    let store: Arc<dyn BlobStore> = app.state.blob_store.clone();
+    server::bundle::import(
+        &app.db,
+        store,
+        ImportOptions {
+            replace_problems: true,
+            ..Default::default()
+        },
+        archive,
+    )
+    .await
+    .expect("import")
+}
+
+/// A bundle never carries a secret, and an import keeps what the target
+/// stores where it holds the bundle's ref: re-importing a server's own
+/// export over its problems leaves their secrets as they were, though
+/// replacing the problems deletes their configs first.
+#[tokio::test]
+async fn reimporting_an_export_over_its_own_problems_keeps_their_secrets() {
+    let app = TestApp::spawn().await;
+    let problem = seed_problem_with_configs(&app, "source").await;
+    set_token(&app, problem, "problem-secret", "r1").await;
+    let archive = export_problem(&app, problem).await;
     assert!(
         !String::from_utf8_lossy(&unpacked(&archive)).contains("problem-secret"),
         "the bundle carries the secret"
     );
 
-    import(
-        &app,
-        &archive,
-        ImportOptions {
-            replace_problems: true,
-            ..Default::default()
-        },
+    let summary = replace_from(&app, &archive).await;
+    assert_eq!(summary.secrets_unset, 0, "{summary}");
+    assert_eq!(token(&app, problem).await, "problem-secret");
+}
+
+/// A staging database restored from production's dump holds production's
+/// rows, refs included: its bundle keeps production's secret where staging
+/// still holds it, and never once staging set it again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dump_restored_copy_keeps_only_the_secrets_it_still_shares() {
+    let production = TestApp::spawn().await;
+    let problem = seed_problem_with_configs(&production, "production").await;
+    set_token(&production, problem, "production-secret", "r1").await;
+
+    let staging = TestApp::spawn().await;
+    replace_from(&staging, &export_problem(&production, problem).await).await;
+    let dumped = text(
+        &production,
+        &format!(
+            "SELECT json_build_array(config, secret_refs)::text AS v FROM plugin_config \
+             WHERE scope = 'problem' AND ref_id = '{problem}'"
+        ),
     )
-    .await
-    .expect("re-import");
+    .await;
+    exec(
+        &staging,
+        &format!(
+            "UPDATE plugin_config SET config = ('{dumped}'::jsonb)->0, \
+             secret_refs = ('{dumped}'::jsonb)->1 \
+             WHERE scope = 'problem' AND ref_id = '{problem}'"
+        ),
+    )
+    .await;
+
+    let summary = replace_from(&production, &export_problem(&staging, problem).await).await;
+    assert_eq!(summary.secrets_unset, 0, "{summary}");
+    assert_eq!(token(&production, problem).await, "production-secret");
+
+    set_token(&staging, problem, "staging-secret", "r2").await;
+    let summary = replace_from(&production, &export_problem(&staging, problem).await).await;
+    assert_eq!(summary.secrets_unset, 1, "{summary}");
     assert_eq!(
-        text(
-            &app,
-            &format!(
-                "SELECT config->>'token' AS v FROM plugin_config \
-                 WHERE scope = 'problem' AND ref_id = '{problem}'"
-            )
-        )
-        .await,
-        "problem-secret"
+        token(&production, problem).await,
+        "unset",
+        "production's token never stands for the one staging set"
+    );
+}
+
+/// `--replace-problems` restores the bundle's problems at their own ids: a
+/// target problem the import replaces at the same id held its own secret,
+/// never the bundle's, so none of it is kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_problem_replaced_at_its_id_keeps_none_of_the_secret_the_id_held() {
+    let target = TestApp::spawn().await;
+    let replaced = seed_problem_with_configs(&target, "target").await;
+    set_token(&target, replaced, "target-secret", "rt").await;
+    let source = TestApp::spawn().await;
+    let problem = seed_problem_with_configs(&source, "source").await;
+    assert_eq!(
+        problem, replaced,
+        "both databases hand out the same first id"
+    );
+    set_token(&source, problem, "source-secret", "rs").await;
+
+    let summary = replace_from(&target, &export_problem(&source, problem).await).await;
+    assert_eq!(summary.secrets_unset, 1, "{summary}");
+    assert_eq!(token(&target, problem).await, "unset");
+}
+
+/// `--replace-problems` removes every problem the target had: those the
+/// bundle does not carry are named in the summary, not only counted away.
+#[tokio::test(flavor = "multi_thread")]
+async fn replacing_problems_names_those_the_bundle_does_not_carry() {
+    let source = TestApp::spawn().await;
+    let problem = seed_problem_with_configs(&source, "source").await;
+    let target = TestApp::spawn().await;
+    let admin = target
+        .create_user_with_role("bundle_removed_admin", "pass1234", "admin")
+        .await;
+    let replaced = target.create_problem(&admin, "Replaced").await;
+    let other = target.create_problem(&admin, "Not in the bundle").await;
+    assert_eq!(
+        replaced, problem,
+        "both databases hand out the same first id"
+    );
+
+    let summary = replace_from(&target, &export_problem(&source, problem).await).await;
+    assert_eq!(
+        summary.problems_removed,
+        vec![(other, "Not in the bundle".to_string())],
+        "{summary}"
+    );
+    assert!(
+        summary.to_string().contains("Not in the bundle"),
+        "{summary}"
     );
 }
 
@@ -926,59 +1041,4 @@ fn unpacked(archive: &[u8]) -> Vec<u8> {
         .read_to_end(&mut out)
         .expect("a gzip archive");
     out
-}
-
-/// A secret the target stores for a config of the same id belongs to the
-/// target, never to a bundle another installation wrote: importing such a
-/// bundle leaves every withheld secret unset, says how many, and keeps no
-/// token of the target's for the imported contest.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_bundle_from_another_installation_keeps_none_of_the_targets_secrets() {
-    let source = TestApp::spawn().await;
-    let (contest, _) = seed_contest(&source).await;
-    exec(
-        &source,
-        &format!(
-            "UPDATE plugin_config SET config = config || '{{\"token\": \"source-secret\"}}' \
-             WHERE scope = 'contest' AND ref_id = '{contest}'"
-        ),
-    )
-    .await;
-    let archive = export(
-        &source,
-        ExportOptions {
-            selection: Selection::Contest(contest),
-            with_secrets: false,
-        },
-    )
-    .await
-    .expect("export");
-
-    let target = TestApp::spawn().await;
-    exec(
-        &target,
-        &format!(
-            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position, updated_at) \
-             VALUES ('contest', '{contest}', 'server-plugin:bundled', \
-             '{{\"token\": \"target-secret\"}}', 0, now())"
-        ),
-    )
-    .await;
-    let store: Arc<dyn BlobStore> = target.state.blob_store.clone();
-    let summary = server::bundle::import(&target.db, store, ImportOptions::default(), &archive[..])
-        .await
-        .expect("import");
-    assert_eq!(summary.secrets_unset, 1, "{summary}");
-    assert_eq!(
-        text(
-            &target,
-            &format!(
-                "SELECT coalesce(config->>'token', 'unset') AS v FROM plugin_config \
-                 WHERE scope = 'contest' AND ref_id = '{contest}'"
-            )
-        )
-        .await,
-        "unset",
-        "the target's own token never authorises the imported contest"
-    );
 }

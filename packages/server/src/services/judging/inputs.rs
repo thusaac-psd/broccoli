@@ -97,6 +97,10 @@ END $$";
     /// plugin-scoped one. A config of another namespace, or a rewrite that
     /// changes only `updated_at` (a config saved as it was), changes nothing
     /// judging reads, so it counts nothing.
+    ///
+    /// A contest's problems are locked by id before they are counted, here
+    /// and in [`CONTEST_FUNCTION`], so two statements that count on
+    /// overlapping contests take their rows in one order and never deadlock.
     const ROW_FUNCTION: &str =
         "CREATE OR REPLACE FUNCTION public.broccoli_inputs_changed() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -141,9 +145,11 @@ BEGIN
          WHERE id = substring(changed->>'ref_id' FROM '^[0-9]+:([0-9]+)$')::integer;
       WHEN 'contest' THEN
         UPDATE public.problem SET inputs_version = inputs_version + 1
-         WHERE id IN (SELECT cp.problem_id FROM public.contest_problem cp
+         WHERE id IN (SELECT p.id FROM public.problem p
+                        JOIN public.contest_problem cp ON cp.problem_id = p.id
                        WHERE cp.contest_id
-                             = substring(changed->>'ref_id' FROM '^([0-9]+)$')::integer);
+                             = substring(changed->>'ref_id' FROM '^([0-9]+)$')::integer
+                       ORDER BY p.id FOR UPDATE OF p);
       WHEN 'plugin' THEN
         UPDATE public.plugin SET inputs_epoch = inputs_epoch + 1 WHERE id = config_plugin;
       ELSE
@@ -164,8 +170,10 @@ BEGIN
   END IF;
   IF NEW.contest_type IS DISTINCT FROM OLD.contest_type THEN
     UPDATE public.problem SET inputs_version = inputs_version + 1
-     WHERE id IN (SELECT cp.problem_id FROM public.contest_problem cp
-                   WHERE cp.contest_id = NEW.id);
+     WHERE id IN (SELECT p.id FROM public.problem p
+                    JOIN public.contest_problem cp ON cp.problem_id = p.id
+                   WHERE cp.contest_id = NEW.id
+                   ORDER BY p.id FOR UPDATE OF p);
   END IF;
   RETURN NULL;
 END $$";

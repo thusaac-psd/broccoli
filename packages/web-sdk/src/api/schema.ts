@@ -2690,9 +2690,9 @@ export interface components {
     };
     /**
      * @description What a config write sends in place of a secret field's value to clear
-     *     it: `{"$clear": true}`. Sending `null`, or leaving the field out, keeps
-     *     the stored secret; a string replaces it. Clients build the marker from
-     *     this schema, so its shape has one source.
+     *     it: `{"$clear": true}`. A string replaces the secret, and the ref a read
+     *     showed (`KeptSecret`) keeps it. Clients build the marker from this
+     *     schema, so its shape has one source.
      */
     ClearSecret: {
       $clear: boolean;
@@ -3745,6 +3745,12 @@ export interface components {
        */
       errors: components['schemas']['FieldError'][];
       /**
+       * @description The namespace's JSON schema as this server knows it, which names the
+       *     config (its `title`) and the fields `errors` point at; `None` when
+       *     the plugin no longer declares the namespace.
+       */
+      json_schema?: unknown;
+      /**
        * @description The problem's label in its contest (`A`), at the contest problem
        *     scope.
        * @example A
@@ -3801,6 +3807,16 @@ export interface components {
       time_used?: number | null;
       /** @example Accepted */
       verdict?: string | null;
+    };
+    /**
+     * @description What a config read shows in place of a set secret field's value, and
+     *     what a write sends back at the same item to keep the stored secret:
+     *     `{"$secret": "<ref>"}`, the opaque ref the server minted when it stored
+     *     that value. A ref keeps nothing on another item, or once the secret was
+     *     set again.
+     */
+    KeptSecret: {
+      $secret: string;
     };
     /** @description An enabled language pack and the locale it provides. */
     LanguagePackHolder: {
@@ -4037,8 +4053,10 @@ export interface components {
     };
     PluginConfigResponse: {
       /**
-       * @description The stored config, each secret field (`writeOnly` in `json_schema`)
-       *     `null`: a secret never leaves the server.
+       * @description The stored config, each set secret field (`writeOnly` in
+       *     `json_schema`) its ref, `{"$secret": "<ref>"}` (`KeptSecret`): a
+       *     secret never leaves the server. Writing the ref back at the same item
+       *     keeps the stored secret.
        */
       config: unknown;
       /**
@@ -4056,11 +4074,6 @@ export interface components {
       plugin_id: string;
       /** Format: int32 */
       position: number;
-      /**
-       * @description The paths of the secret fields that hold a value (`stations[0].token`).
-       *     Writing `null` at one keeps the stored secret.
-       */
-      secrets: string[];
       /** Format: date-time */
       updated_at?: string | null;
     };

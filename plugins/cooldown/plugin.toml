@@ -64,6 +64,7 @@ en = "i18n/en.toml"
 zh-CN = "i18n/zh-CN.toml"
 
 [config.cooldown]
+title = "Cooldown"
 description = "Cooldown timer settings"
 scopes = ["problem", "contest", "contest_problem"]
 

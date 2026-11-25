@@ -21,7 +21,10 @@ function markdownCellAlignClass(
       return 'text-center';
     case 'right':
       return 'text-right';
-    default:
+    case 'left':
+    case 'justify':
+    case 'char':
+    case undefined:
       return 'text-left';
   }
 }

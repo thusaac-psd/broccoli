@@ -53,7 +53,7 @@ mod m0018_judging_inputs_version;
 mod m0019_replica_provides;
 mod m0020_hook_event;
 mod m0021_plugin_timer_backoff;
-mod m0022_installation;
+mod m0022_secret_refs;
 mod m0023_dispatch_contention;
 mod m0024_plugin_names;
 
@@ -208,7 +208,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0019_replica_provides::Migration),
             Box::new(m0020_hook_event::Migration),
             Box::new(m0021_plugin_timer_backoff::Migration),
-            Box::new(m0022_installation::Migration),
+            Box::new(m0022_secret_refs::Migration),
             Box::new(m0023_dispatch_contention::Migration),
             Box::new(m0024_plugin_names::Migration),
         ]

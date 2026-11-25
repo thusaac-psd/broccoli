@@ -187,6 +187,12 @@ host_codes! {
     /// A plugin the request needs is enabled and loaded on no live replica:
     /// what it provides waits for a replica to load it; retried.
     PluginNotLoaded = "PLUGIN_NOT_LOADED", names_plugin;
+    /// This server does not run a plugin at the version the fleet published
+    /// (it still runs the previous one, or files that are not the published
+    /// ones), so it writes none of that plugin's configs: the schema it
+    /// knows may not mark the published one's secrets. Retried once the
+    /// server loads the published version.
+    PluginOutdatedHere = "PLUGIN_OUTDATED_HERE", names_plugin;
     /// The problem's checker program failed.
     CheckerFailed = "CHECKER_FAILED";
     /// A program the problem supplies besides its checker (an interactor or

@@ -15,6 +15,14 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub config: Json,
 
+    /// The refs of the secrets `config` holds, a list of
+    /// `broccoli_types::manifest::SecretRef`.
+    #[sea_orm(
+        column_type = "JsonBinary",
+        default_expr = "Expr::cust(\"'[]'::jsonb\")"
+    )]
+    pub secret_refs: Json,
+
     #[sea_orm(nullable)]
     pub enabled: Option<bool>,
 

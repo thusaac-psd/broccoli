@@ -13,11 +13,13 @@
 //!
 //! No bundle carries a secret config field (`secret = true` in its plugin's
 //! schema): the export withholds each one as the read routes do and lists
-//! where in [`Manifest::withheld`]. An import onto the installation that
-//! wrote the bundle ([`Manifest::installation`]) keeps what it stores there;
-//! onto any other, a withheld secret is left unset, since another
-//! installation's secret for a config of the same id was never this
-//! bundle's.
+//! where in [`Manifest::withheld`]. The rows carry each secret's ref
+//! (`plugin_config.secret_refs`), never its value: an import keeps what the
+//! target stores for a withheld secret only where the target holds the
+//! bundle's ref at the same item, the same stored secret, and leaves every
+//! other one unset. A database restored from another's dump, or a problem
+//! replaced at an id another held, holds no ref a bundle of the other names
+//! unless it is the same secret.
 //!
 //! Columns are read from the database at export and named at import, so a
 //! bundle restores onto any build that knows its schema version: a column
@@ -43,8 +45,8 @@ use crate::entity::user::username_key_sql;
 use crate::host_funcs::config::{extract_plugin_id, strip_namespace_prefix};
 use crate::migration::{Migrator, known_migrations};
 use crate::plugin_archive::PluginArchive;
-use crate::services::plugin_config::ConfigScope;
-use plugin_core::manifest::{ConfigNamespace, SecretStep, keep_withheld};
+use crate::services::plugin_config::{ConfigScope, secret_refs};
+use plugin_core::manifest::{ConfigNamespace, SecretRef, SecretStep, StoredSecrets, keep_withheld};
 
 /// [`Manifest::format`] of every bundle this build writes and reads.
 pub const FORMAT: &str = "broccoli-bundle/v1";
@@ -101,10 +103,6 @@ pub struct Manifest {
     pub blobs: Vec<String>,
     /// The secret config fields the export withheld.
     pub withheld: Vec<Withheld>,
-    /// The id of the installation that wrote the bundle
-    /// (`entity::installation`): only an import onto it keeps the secrets
-    /// the export withheld.
-    pub installation: String,
 }
 
 /// The secret fields of one `plugin_config` row that an export withheld:
@@ -131,9 +129,13 @@ pub struct TableRows {
 pub struct Summary {
     pub tables: Vec<(String, u64)>,
     pub blobs: usize,
-    /// The secret fields an import left unset: the bundle comes from another
-    /// installation, so the secrets the target stores are not its own.
+    /// The secret fields an import left unset: the target holds no secret
+    /// of the bundle's ref at the same item.
     pub secrets_unset: usize,
+    /// The problems a `--replace-problems` import removed that the bundle
+    /// does not carry, by id and title: replacing the target's problems
+    /// removes every one it had, not only those the bundle restores.
+    pub problems_removed: Vec<(i32, String)>,
     /// The plugins, and the `plugin:namespace` configs, an export left out:
     /// no manifest of the plugin is at hand, or it does not declare the
     /// namespace, so no one could say which of their fields are secret.
@@ -148,8 +150,21 @@ impl std::fmt::Display for Summary {
         if self.secrets_unset > 0 {
             writeln!(
                 f,
-                "secret config fields left unset (the bundle comes from another installation): {}",
+                "secret config fields left unset (the target stores none of the bundle's): {}",
                 self.secrets_unset
+            )?;
+        }
+        if !self.problems_removed.is_empty() {
+            let named: Vec<String> = self
+                .problems_removed
+                .iter()
+                .map(|(id, title)| format!("#{id} {title}"))
+                .collect();
+            writeln!(
+                f,
+                "problems removed (the bundle does not carry them): {}: {}",
+                named.len(),
+                named.join(", ")
             )?;
         }
         if !self.configs_left_out.is_empty() {
@@ -457,7 +472,6 @@ pub async fn export(
         ensure!(exists, "there is no contest {id}");
     }
     let schema = schema_version(&mut tx).await?;
-    let installation = installation_id(&mut tx).await?;
     let schemas = config_schemas(&mut tx, store, plugins_dir, &scope).await?;
     let mut withheld = Vec::new();
     let mut config_hashes = BTreeSet::new();
@@ -541,7 +555,6 @@ pub async fn export(
         tables: tables.iter().map(|(t, _)| t.clone()).collect(),
         blobs: sizes.keys().cloned().collect(),
         withheld,
-        installation,
     };
     let gz = flate2::write::GzEncoder::new(out, flate2::Compression::default());
     let mut archive = tar::Builder::new(gz);
@@ -842,36 +855,28 @@ mod copy_text {
     }
 }
 
-/// This database's installation id (`entity::installation`).
-async fn installation_id(tx: &mut Transaction<'_, Postgres>) -> anyhow::Result<String> {
-    sqlx::query_scalar("SELECT installation_id FROM installation WHERE id = $1")
-        .bind(crate::entity::installation::ROW_ID)
-        .fetch_one(&mut **tx)
-        .await
-        .context("read the installation id")
-}
-
 /// The configs the target stores for the rows whose secrets the export
 /// withheld, read before the import replaces anything: replacing a problem
 /// deletes its configs, and the secrets they hold are what the import keeps.
 async fn stored_configs(
     tx: &mut Transaction<'_, Postgres>,
     withheld: &[Withheld],
-) -> anyhow::Result<BTreeMap<(String, String, String), serde_json::Value>> {
+) -> anyhow::Result<BTreeMap<(String, String, String), (serde_json::Value, Vec<SecretRef>)>> {
     let mut stored = BTreeMap::new();
     for row in withheld {
-        let config: Option<serde_json::Value> = sqlx::query_scalar(
-            "SELECT config FROM plugin_config WHERE scope = $1 AND ref_id = $2 AND namespace = $3",
+        let config: Option<(serde_json::Value, serde_json::Value)> = sqlx::query_as(
+            "SELECT config, secret_refs FROM plugin_config \
+             WHERE scope = $1 AND ref_id = $2 AND namespace = $3",
         )
         .bind(&row.scope)
         .bind(&row.ref_id)
         .bind(&row.namespace)
         .fetch_optional(&mut **tx)
         .await?;
-        if let Some(config) = config {
+        if let Some((config, refs)) = config {
             stored.insert(
                 (row.scope.clone(), row.ref_id.clone(), row.namespace.clone()),
-                config,
+                (config, secret_refs(&refs)),
             );
         }
     }
@@ -879,41 +884,56 @@ async fn stored_configs(
 }
 
 /// Keeps, in the staged `plugin_config` rows, each secret the export
-/// withheld: the value the target stored for the same item of the same
-/// config before the import (`stored`), else nothing, so the field reads
-/// unset until someone sets it.
+/// withheld whose ref the target held at the same item of the same config
+/// before the import (`stored`): the value stored with it. Every other one
+/// is left unset, its ref dropped, so the field reads unset until someone
+/// sets it. Returns how many were left unset.
 async fn keep_withheld_secrets(
     tx: &mut Transaction<'_, Postgres>,
     withheld: &[Withheld],
-    stored: &BTreeMap<(String, String, String), serde_json::Value>,
-) -> anyhow::Result<()> {
+    stored: &BTreeMap<(String, String, String), (serde_json::Value, Vec<SecretRef>)>,
+) -> anyhow::Result<usize> {
     let staged = staging("plugin_config");
+    let mut unset = 0;
     for row in withheld {
-        let found: Option<serde_json::Value> = sqlx::query_scalar(AssertSqlSafe(format!(
-            "SELECT config FROM {staged} WHERE scope = $1 AND ref_id = $2 AND namespace = $3"
-        )))
-        .bind(&row.scope)
-        .bind(&row.ref_id)
-        .bind(&row.namespace)
-        .fetch_optional(&mut **tx)
-        .await?;
-        let Some(mut config) = found else {
+        let found: Option<(serde_json::Value, serde_json::Value)> =
+            sqlx::query_as(AssertSqlSafe(format!(
+                "SELECT config, secret_refs FROM {staged} \
+                 WHERE scope = $1 AND ref_id = $2 AND namespace = $3"
+            )))
+            .bind(&row.scope)
+            .bind(&row.ref_id)
+            .bind(&row.namespace)
+            .fetch_optional(&mut **tx)
+            .await?;
+        let Some((mut config, refs)) = found else {
             continue;
         };
+        let mut refs = secret_refs(&refs);
         let key = (row.scope.clone(), row.ref_id.clone(), row.namespace.clone());
-        keep_withheld(&mut config, stored.get(&key), &row.secrets);
+        let target = stored.get(&key);
+        unset += keep_withheld(
+            &mut config,
+            &mut refs,
+            StoredSecrets {
+                config: target.map(|(config, _)| config),
+                refs: target.map(|(_, refs)| refs.as_slice()).unwrap_or_default(),
+            },
+            &row.secrets,
+        );
         sqlx::query(AssertSqlSafe(format!(
-            "UPDATE {staged} SET config = $4 \
+            "UPDATE {staged} SET config = $4, secret_refs = $5 \
              WHERE scope = $1 AND ref_id = $2 AND namespace = $3"
         )))
         .bind(&row.scope)
         .bind(&row.ref_id)
         .bind(&row.namespace)
         .bind(&config)
+        .bind(serde_json::to_value(&refs)?)
         .execute(&mut **tx)
         .await?;
     }
-    Ok(())
+    Ok(unset)
 }
 
 /// Restore the bundle in `input` onto the database and `store`. The rows go
@@ -968,25 +988,10 @@ pub async fn import(
          so it migrates the database",
         known.last().map(String::as_str).unwrap_or_default()
     );
-    // Only this installation's own export may keep what it stores: another
-    // installation's secret for a config of the same id was never the
-    // bundle's.
-    let own = manifest.installation == installation_id(&mut tx).await?;
-    let stored = if own {
-        stored_configs(&mut tx, &manifest.withheld).await?
-    } else {
-        BTreeMap::new()
-    };
-    prepare_problem_tables(&mut tx, options).await?;
+    let stored = stored_configs(&mut tx, &manifest.withheld).await?;
+    let had = prepare_problem_tables(&mut tx, options).await?;
 
-    let mut summary = Summary {
-        secrets_unset: if own {
-            0
-        } else {
-            manifest.withheld.iter().map(|row| row.secrets.len()).sum()
-        },
-        ..Summary::default()
-    };
+    let mut summary = Summary::default();
     let mut loaded = Vec::new();
     for entry in entries {
         let mut entry = entry?;
@@ -1036,11 +1041,25 @@ pub async fn import(
         .iter()
         .any(|(table, _)| table.name == "plugin_config")
     {
-        keep_withheld_secrets(&mut tx, &manifest.withheld, &stored).await?;
+        summary.secrets_unset = keep_withheld_secrets(&mut tx, &manifest.withheld, &stored).await?;
     }
     if loaded.iter().any(|(table, _)| table.name == "contest") {
         prepare_contest(&mut tx, options).await?;
     }
+    let carried: Vec<i32> = if loaded.iter().any(|(table, _)| table.name == "problem") {
+        sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT id FROM {}",
+            staging("problem")
+        )))
+        .fetch_all(&mut *tx)
+        .await?
+    } else {
+        Vec::new()
+    };
+    summary.problems_removed = had
+        .into_iter()
+        .filter(|(id, _)| !carried.contains(id))
+        .collect();
 
     // Restore in table order, whatever order the archive held them in.
     loaded.sort_by_key(|(table, _)| TABLES.iter().position(|t| t.name == table.name));
@@ -1114,15 +1133,17 @@ async fn mark_for_recheck(
 /// problems unless asked to replace them, and refuse to replace problems
 /// anything references unless asked to delete that too. The referencing
 /// tables are read from the schema's foreign keys.
+/// Returns the problems the target had before, by id and title: those the
+/// bundle does not carry are reported removed ([`Summary::problems_removed`]).
 async fn prepare_problem_tables(
     tx: &mut Transaction<'_, Postgres>,
     options: ImportOptions,
-) -> anyhow::Result<()> {
-    let existing: i64 = sqlx::query_scalar("SELECT count(*) FROM problem")
-        .fetch_one(&mut **tx)
+) -> anyhow::Result<Vec<(i32, String)>> {
+    let existing: Vec<(i32, String)> = sqlx::query_as("SELECT id, title FROM problem ORDER BY id")
+        .fetch_all(&mut **tx)
         .await?;
-    if existing > 0 {
-        replace_problems(tx, options, existing).await?;
+    if !existing.is_empty() {
+        replace_problems(tx, options, existing.len()).await?;
     }
     // The bundle's problems keep the ids they had on the source. A config
     // names its problem by id in text, with no foreign key, so every problem
@@ -1135,7 +1156,7 @@ async fn prepare_problem_tables(
         ])
         .execute(&mut **tx)
         .await?;
-    Ok(())
+    Ok(existing)
 }
 
 /// Clear the target's contest that has the bundle's contest id. A contest
@@ -1258,7 +1279,7 @@ fn delete_with_dependents<'a>(
 async fn replace_problems(
     tx: &mut Transaction<'_, Postgres>,
     options: ImportOptions,
-    existing: i64,
+    existing: usize,
 ) -> anyhow::Result<()> {
     ensure!(
         options.replace_problems,

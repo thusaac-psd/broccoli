@@ -57,6 +57,7 @@
 'codelink-qualifier.apiError.CODELINK_NO_TEST_CASES' = 'Codelink 题目需要测试点，而该题目没有。请联系比赛工作人员添加测试点。'
 
 # Config schema text
+'config.codelink-qualifier.contest.title' = '资格赛'
 'config.codelink-qualifier.contest.description' = 'Codelink 晋级规则与排行榜设置'
 'config.codelink-qualifier.contest.expected_problem_count.title' = '预期题目数量'
 'config.codelink-qualifier.contest.expected_problem_count.description' = '实际题目数量不同时显示设置提示。设为 0 则不做此检查。'
@@ -68,6 +69,7 @@
 'config.codelink-qualifier.contest.advancement_slots.description' = '总名额，包括直接晋级者和比赛结束时的递补者。递补者按分数选出，分数相同时按最后一次得分提交较早者优先。'
 'config.codelink-qualifier.contest.scoreboard_refresh_seconds.title' = '排行榜刷新间隔'
 'config.codelink-qualifier.contest.scoreboard_refresh_seconds.description' = '自动刷新的间隔（秒）。设为 0 则仅手动刷新。'
+'config.codelink-qualifier.problem.title' = '题目分值'
 'config.codelink-qualifier.problem.description' = '本比赛题目每个计分名额获得的分数。请将二十道题中的四道设为 2 分。'
 'config.codelink-qualifier.problem.points.title' = '每个计分名额的分数'
 'config.codelink-qualifier.problem.points.description' = '每位获得计分名额的有资格解题者获得的分数。'

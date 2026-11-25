@@ -10,6 +10,8 @@ export interface JsonSchemaProperty {
   minLength?: number;
   maxLength?: number;
   enum?: unknown[];
+  /** What each `enum` value reads as, in order (`enum_titles`). */
+  'x-enum-titles'?: string[];
   format?: string;
   items?: JsonSchemaProperty;
   properties?: Record<string, JsonSchemaProperty>;

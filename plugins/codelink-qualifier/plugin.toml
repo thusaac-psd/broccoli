@@ -25,6 +25,7 @@ contest_type = "codelink-qualifier"
 handler = "api_standings"
 
 [config.contest]
+title = "Qualification"
 description = "Codelink qualification rules and scoreboard settings"
 scopes = ["contest"]
 validate = "validate_contest_config"
@@ -70,6 +71,7 @@ min = 0
 max = 3600
 
 [config.problem]
+title = "Problem points"
 description = "Points awarded for a scoring slot on this contest problem. Set four of the twenty problems to 2 points."
 scopes = ["contest_problem"]
 

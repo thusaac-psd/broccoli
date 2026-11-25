@@ -75,7 +75,12 @@ export function QueryErrorState({
         <FileQuestion className={iconClass} aria-hidden />,
         notFound ?? described,
       );
-    default:
+    case 'conflict':
+    case 'invalid':
+    case 'network':
+    case 'rateLimited':
+    case 'server':
+    case 'temporary':
       return box(
         <AlertTriangle className={iconClass} aria-hidden />,
         described,

@@ -64,6 +64,7 @@ position = "prepend"
 component = "SubmissionLimitStatus"
 
 [config.limits]
+title = "Limits"
 description = "Submission limit settings"
 scopes = ["problem", "contest", "contest_problem"]
 

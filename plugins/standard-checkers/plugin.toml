@@ -17,6 +17,7 @@ default_checker_format = "lines"
 # page. The host stores them here for every problem whose checker format this
 # plugin provides.
 [config.checker_source]
+title = "Checker source"
 description = "Checker source files of the problem: one .c or .cpp file, plus headers such as testlib.h."
 scopes = ["problem"]
 checker_source = true
@@ -44,6 +45,7 @@ type = "string"
 title = "Content"
 
 [config.testlib]
+title = "Testlib"
 judging_input = true
 description = "Testlib checker compiler and resource limit settings."
 scopes = ["plugin"]
@@ -119,6 +121,7 @@ step = 1024
 unit = "KB"
 
 [config.checker]
+title = "Checker"
 judging_input = true
 description = "Tolerances of the tokens-float checker format: a token matches when it differs from the answer by at most max(abs_tol, rel_tol * max(|answer|, |output|))."
 scopes = ["problem"]

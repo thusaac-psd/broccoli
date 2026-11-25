@@ -29,7 +29,7 @@ use crate::services::config_issues::ConfigChecker;
 use crate::services::config_issues::{Subject, config_issues};
 use crate::services::plugin_config::{
     ConfigScope, ConfigTarget, IncompatibleConfig, Readable, Reads, SchemaSource, cascade_view,
-    config_cascade, declared, delete_config, get_config, shown, write_config,
+    config_cascade, declared, delete_config, get_config, secret_refs, shown, write_config,
 };
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, find_contest_problem};
@@ -123,12 +123,12 @@ async fn list_config_inner<C: ConnectionTrait>(
 
             seen_keys.insert((plugin_id.clone(), namespace.clone()));
 
-            let shown = shown(schemas, &plugin_id, &namespace, r.config);
+            let refs = secret_refs(&r.secret_refs);
+            let shown = shown(schemas, &plugin_id, &namespace, r.config, &refs);
             PluginConfigResponse {
                 plugin_id,
                 namespace,
                 config: shown.config,
-                secrets: shown.secrets,
                 config_withheld: shown.withheld,
                 enabled: r.enabled,
                 position: r.position,
@@ -146,7 +146,6 @@ async fn list_config_inner<C: ConnectionTrait>(
                 plugin_id: schema.plugin_id.clone(),
                 namespace: schema.namespace.clone(),
                 config: serde_json::Value::Null,
-                secrets: Vec::new(),
                 config_withheld: false,
                 enabled: None,
                 position: 0,
@@ -308,6 +307,7 @@ pub async fn upsert_plugin_global_config(
     let (result, change) = write_config(
         &state.db,
         state.plugins.as_ref(),
+        SchemaSource::of(&state),
         Reads::Committed,
         &target,
         &plugin_id,
@@ -543,6 +543,7 @@ pub async fn upsert_problem_config(
     let (result, change) = write_config(
         &txn,
         state.plugins.as_ref(),
+        SchemaSource::of(&state),
         Reads::Committed,
         &target,
         &plugin_id,
@@ -752,6 +753,7 @@ pub async fn upsert_contest_problem_config(
     let (result, change) = write_config(
         &txn,
         state.plugins.as_ref(),
+        SchemaSource::of(&state),
         Reads::Committed,
         &target,
         &plugin_id,
@@ -991,6 +993,7 @@ pub async fn upsert_contest_config(
     let (result, change) = write_config(
         &txn,
         state.plugins.as_ref(),
+        SchemaSource::of(&state),
         Reads::Committed,
         &target,
         &plugin_id,

@@ -15,7 +15,12 @@ function retriesFor(error: unknown): number {
     case 'network':
     case 'server':
       return 1;
-    default:
+    case 'conflict':
+    case 'forbidden':
+    case 'invalid':
+    case 'notFound':
+    case 'rateLimited':
+    case 'unauthenticated':
       return 0;
   }
 }
