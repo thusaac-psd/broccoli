@@ -17,7 +17,7 @@ pg="$(env_get "$infra" BROCCOLI_DB_PASSWORD)"
 [ "$(env_get "$server" BROCCOLI__DATABASE__URL)" = "postgres://broccoli:${pg}@db:5432/broccoli" ] \
   || { echo "FAIL: DB URL password/host mismatch"; exit 1; }
 # endpoints default to service names; phantom IP gone
-env_get "$server" BROCCOLI__MQ__URL | grep -qE '^redis://:.+@redis:6379$' || { echo "FAIL: MQ endpoint"; exit 1; }
+grep -qE '^redis://:.+@redis:6379$' <<<"$(env_get "$server" BROCCOLI__MQ__URL)" || { echo "FAIL: MQ endpoint"; exit 1; }
 [ "$(env_get "$server" BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT)" = http://seaweedfs:8333 ] || { echo "FAIL: S3 endpoint"; exit 1; }
 grep -q '10.0.0.10' "$server" && { echo "FAIL: phantom 10.0.0.10 remains"; exit 1; } || true
 # infra file also has service-name endpoint, no phantom IP

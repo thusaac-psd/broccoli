@@ -51,7 +51,7 @@ inst="$native/install-native.sh"
 # Run the installer's own functions against stubbed dpkg, apt, Redis and PostgreSQL.
 fns="$(awk '/^ubuntu_version\(\)\{/,/\}$/; /^first_match\(\)\{/,/^\}/; /^die_unstaged\(\)\{/,/^\}/; /^install_bundled_set\(\)\{/,/^\}/; /^redis_major\(\)\{/,/\}$/; /^ensure_redis7\(\)\{/,/^\}/; /^ensure_postgres\(\)\{/,/^\}/; /^ensure_toolchain\(\)\{/,/^\}/' "$inst")"
 for f in ubuntu_version first_match die_unstaged install_bundled_set ensure_redis7 ensure_postgres ensure_toolchain; do
-  printf '%s\n' "$fns" | grep -q "^$f(){" || fail "$f not found"
+  grep -q "^$f(){" <<<"$fns" || fail "$f not found"
 done
 
 ver="$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}")"

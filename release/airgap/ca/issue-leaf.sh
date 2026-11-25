@@ -47,8 +47,8 @@ is_ip() {
   # IPv4 dotted-quad, or an IPv6 literal (hex groups + colons). The old
   # colon-anywhere test mislabeled any colon-bearing string as an IP. Inputs
   # are already char-allowlisted above, so this only decides IP: vs DNS:.
-  if printf '%s' "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then return 0; fi
-  if printf '%s' "$1" | grep -Eq '^[0-9A-Fa-f:]+$' && printf '%s' "$1" | grep -q ':'; then return 0; fi
+  if grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' <<<"$1"; then return 0; fi
+  if grep -Eq '^[0-9A-Fa-f:]+$' <<<"$1" && grep -q ':' <<<"$1"; then return 0; fi
   return 1
 }
 
@@ -103,7 +103,7 @@ leaf_is_current() {
   openssl x509 -in "$OUT/server.crt" -noout -checkend 86400 >/dev/null 2>&1 || return 1
   sans="$(leaf_sans "$OUT/server.crt")"
   for h in "${HOSTS[@]}"; do
-    printf '%s\n' "$sans" | grep -qxF "$(san_key "$(san_entry "$h")")" || return 1
+    grep -qxF "$(san_key "$(san_entry "$h")")" <<<"$sans" || return 1
   done
 }
 
