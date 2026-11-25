@@ -178,21 +178,24 @@ A plugin's SQL runs within the deadline of the call that runs it
   `503 DATABASE_BUSY`);
 - every statement, in a transaction or not, is cut at the deadline, and the
   call answers then: a cut is unavailable (a retryable 503) within the
-  request's budget whatever the cancel costs. The statement is cancelled on
-  its backend (`pg_cancel_backend`, through the app role, which holds every
-  plugin role) by a task that owns its connection: one still running when the
-  cancel lands is rolled back, and one that finished between the deadline and
-  the cancel has applied, so a write retried after an unavailable answer must
-  tolerate having applied. A statement outside a transaction runs on a
-  connection the host leased for it and whose backend pid it read first (one
-  round trip per statement: sqlx keeps a connection's pid private and gives
-  it no slot to keep one in, and the read is not reported to the metric
-  callback); a
-  transaction records its backend's pid when it begins, and a cut statement
-  of it ends the transaction: it leaves the map and its lock at once, and the
-  task rolls it back after the cancel, returning its connection and permit.
-  No later statement can reach the connection before the cancel is sent, so
-  the cancel never lands on one;
+  request's budget whatever stopping it costs. A task that owns the
+  statement's connection stops it on its backend: one still running is rolled
+  back, and one that finished between the deadline and its stop has applied,
+  so a write retried after an unavailable answer must tolerate having
+  applied. A statement outside a transaction runs on a connection the host
+  leased for it, with nothing read before it: the plugin pools' sessions set
+  `client_connection_check_interval` (`plugin_db::CUT_CHECK_INTERVAL`), so a
+  cut one's connection is closed and its backend stops the statement within
+  that interval (`plugin_db::CutBy::Closing`). The pools ask the database
+  once, before the first opens, whether it takes the setting (its platform
+  must tell a closed client); on one that does not, a statement's backend pid
+  is read at checkout and a cut one is cancelled there (`pg_cancel_backend`,
+  through the app role, which holds every plugin role) before its connection
+  returns (`CutBy::Cancelling`). A transaction records its backend's pid when
+  it begins, and a cut statement of it ends the transaction: it leaves the
+  map and its lock at once, and the task cancels it and rolls it back,
+  returning its connection and permit. No later statement can reach the
+  connection before it is stopped, so the stop never lands on one;
 - an outage of the database on a plugin's statement, its transaction's
   begin, commit or rollback (`common::db::is_outage`) says nothing about the
   statement: the call fails as the database's outage
@@ -207,7 +210,10 @@ A plugin's SQL runs within the deadline of the call that runs it
   when no plugin SQL permit is free in time. One
   rule decides both (`host_funcs::sql::settle`), for raw plugin SQL and the
   host-pool writes of `host.submission.*` and `host.code_run.*` alike; any
-  other error goes back to the plugin in its response. The host's own SQL in
+  other error goes back to the plugin in its response, and is logged as a
+  host line about the plugin (`host_db::refused`, through
+  `plugin_core::guest_log`: escaped, bounded, rate-limited, a warning), never
+  as the host's own error. The host's own SQL in
   every other host function (`host.storage.*`, `host.timer.*`, `config_get`,
   `config_set`, `submission_feedback_*`, `submission_slot_observe`) answers an outage the same way,
   through `host_funcs::host_db` (`failed`, `settle`, `failed_service`, and

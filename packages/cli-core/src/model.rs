@@ -138,6 +138,10 @@ impl Standing {
                  enables it",
                 names.name(plugin_id)
             )),
+            Self::WaitingForPlugin(PluginOutage::NotLoaded { plugin_id }) => Some(format!(
+                "Waiting for the contest's plugin {}: loaded on no server until one loads it",
+                names.name(plugin_id)
+            )),
             Self::WaitingForPlugin(PluginOutage::Unavailable) => {
                 Some("Waiting for the contest's plugin, which cannot answer right now".into())
             }
@@ -359,9 +363,15 @@ mod tests {
                 .starts_with("Waiting for its language plugin standard-languages:")
         );
         // A provider loaded on no server says so, not that it is disabled.
+        // A contest plugin loaded nowhere also withholds the outcome, as the
+        // server sends it: both name the plugin and why.
         let not_loaded = Standing::new(
             Some(SubmissionStatus::Queued),
-            None,
+            Some(&Withheld::PluginOutage {
+                outage: PluginOutage::NotLoaded {
+                    plugin_id: "ioi".into(),
+                },
+            }),
             Some(&ClosedBy {
                 plugin_id: "ioi".into(),
                 provides: Provided::ContestType,
@@ -370,7 +380,22 @@ mod tests {
         );
         assert_eq!(
             not_loaded.waiting_for(&names).as_deref(),
-            Some("Waiting for its contest plugin IOI: loaded on no server until one loads it")
+            Some("Waiting for the contest's plugin IOI: loaded on no server until one loads it")
+        );
+        assert!(not_loaded.is_in_progress());
+        // An evaluator loaded nowhere withholds nothing: only parked says it.
+        let evaluator = Standing::new(
+            Some(SubmissionStatus::Queued),
+            None,
+            Some(&ClosedBy {
+                plugin_id: "batch".into(),
+                provides: Provided::ProblemType,
+                reason: ClosedReason::NotLoaded,
+            }),
+        );
+        assert_eq!(
+            evaluator.waiting_for(&names).as_deref(),
+            Some("Waiting for its evaluator plugin batch: loaded on no server until one loads it")
         );
         // A finished submission is finished whatever its plugin does now.
         let judged = Standing::new(

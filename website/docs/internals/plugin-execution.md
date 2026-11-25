@@ -227,20 +227,34 @@ extism logs a failed call only at `debug`.
 
 ## Plugin log lines
 
-Every line a plugin causes passes one sink, `plugin_core::guest_log`: the
-lines a guest logs through extism's `log_*` imports (linked into every
-instance, whatever its permissions) and the `logger` capability's
-`log_info`, and the `Plugin call failed` warning. Each line names the plugin
+Every line that carries a plugin's text passes one sink,
+`plugin_core::guest_log`: the lines a guest logs through extism's `log_*`
+imports (linked into every instance, whatever its permissions) and the
+`logger` capability's `log_info`, and every host line about a plugin
+(`guest_log::about`): the `Plugin call failed` warning, a route's
+server-error body, a hook's failure, a visibility query's failure and a
+plugin statement's own error (`host_db::refused`). Each line names the plugin
 by its Broccoli id (`plugin_id`, from the call scope, not extism's instance
-id) and is cut to `MAX_LINE_BYTES` (2 KiB) at a character boundary, saying
-how many bytes it left out; a failed call's reason is cut the same way. Each
-plugin has a budget of `BURST` lines (100), refilled at `PER_SECOND` (20) a
-second: a line over it is dropped, the first drop logs one warning that the
-plugin logs over its rate, and the next line admitted is preceded by one that
-says how many were dropped. A guest's lines go to the `plugin` target, and a
-guest's `error` and `warn` are both logged at `WARN` with `guest_level` naming
-what it asked for, so no plugin writes a line that reads as the host's own
-error.
+id). The plugin's text is written as `guest_log::plugin_text` makes it: every
+control character escaped (`\n`, `\r`, `\t`, `\u{1b}`), so a plugin cannot
+draw a line, a colour or a fake host line in the text and pretty formats,
+then cut to `MAX_LINE_BYTES` (2 KiB) at a character boundary, saying how many
+bytes it left out; a failed call's reason, which every answer and log line
+about the failure carries, is made the same way. Each plugin has a budget of
+`BURST` lines (100), refilled at `PER_SECOND` (20) a second, for its guest's
+lines and another for the host's lines about it, so a plugin that floods its
+own lines never hides the host's warnings about its failures: a line over a
+budget is dropped, the first drop logs one warning that the plugin logs over
+its rate, and the next line admitted is preceded by one that says how many
+were dropped. Every such line goes to the `plugin` target at most at `WARN`:
+a guest's `error` and `warn` are both logged at `WARN` with `guest_level`
+naming what it asked for, and a host line about a plugin is a `WARN`, so no
+plugin writes a line that reads as the host's own error. A plugin that fails
+what a request needed of it answers `AppError::PluginFailed`: the client sees
+the host's internal error, and the plugin's text goes only to the host's line
+about the plugin. `tests/integration/source_invariants.rs` checks that where
+the host calls plugins no ERROR line names a plugin and no internal error
+carries a plugin's answer.
 
 ## Unloaded instances
 

@@ -65,10 +65,16 @@ pub(crate) fn settle<T>(answer: Result<T, DbErr>) -> Result<Result<T, DbErr>, ex
     }
 }
 
-/// The plugin's answer to its statement that failed with `e`, an error of
+/// The answer to `plugin_id`'s statement that failed with `e`, an error of
 /// the statement's own (an outage never reaches here: [`settle`] took it).
-pub(crate) fn refused(e: &DbErr) -> Result<String, extism::Error> {
-    super::sql::HostDbResponse::err(e.to_string()).to_json_string()
+/// The error is the plugin's: the database's words about the plugin's SQL,
+/// so it is logged as a host line about the plugin
+/// (`plugin_core::guest_log::about`: escaped, bounded, under its budget, at
+/// most a warning), never as the host's own error.
+pub(crate) fn refused(plugin_id: &str, e: &DbErr) -> Result<String, extism::Error> {
+    let text = e.to_string();
+    plugin_core::guest_log::about(plugin_id, "A plugin's statement failed", &text);
+    super::sql::HostDbResponse::err(text).to_json_string()
 }
 
 /// The error a host function returns for `e`, an [`AppError`] a service it

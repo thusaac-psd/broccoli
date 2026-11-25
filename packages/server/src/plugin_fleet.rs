@@ -56,6 +56,17 @@ pub enum ReplicaPluginStatus {
 }
 
 impl ReplicaPluginStatus {
+    /// Whether the replica serves the plugin in this state: some version of
+    /// it is loaded there.
+    pub fn serves(self) -> bool {
+        matches!(
+            self,
+            ReplicaPluginStatus::Loaded
+                | ReplicaPluginStatus::Outdated
+                | ReplicaPluginStatus::Mismatched
+        )
+    }
+
     /// Whether this state means the replica is not running the plugin's
     /// latest version and will not converge without a retry.
     pub fn is_failure(self) -> bool {
@@ -118,33 +129,58 @@ pub async fn report(
     Ok(())
 }
 
-/// What each live replica has loaded, by server id: its reported
-/// `plugin_replica.provides`, live by its heartbeat on the database clock.
-pub async fn live_replicas(
-    db: &DatabaseConnection,
-) -> Result<Vec<(String, crate::providers::Loaded)>, DbErr> {
+/// What the live replicas have loaded, live by their heartbeat on the
+/// database clock.
+#[derive(Debug, Default)]
+pub struct LiveLoaded {
+    /// Each key with every plugin that registered it on one of them: the
+    /// union of their reported `plugin_replica.provides`.
+    pub provides: crate::providers::Loaded,
+    /// The plugins one of them serves ([`ReplicaPluginStatus::serves`]), as
+    /// their reported `plugin_replica.plugins` say.
+    pub serving: std::collections::BTreeSet<String>,
+    /// What each of them has loaded, by server id, sorted: its own reported
+    /// `plugin_replica.provides`.
+    pub replicas: Vec<(String, crate::providers::Loaded)>,
+}
+
+/// What the live replicas have loaded ([`LiveLoaded`]).
+pub async fn live_loaded(db: &DatabaseConnection) -> Result<LiveLoaded, DbErr> {
     let rows = db
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT server_id, provides FROM plugin_replica \
-              WHERE provides IS NOT NULL \
-                AND heartbeat_at > NOW() - make_interval(secs => $1) \
+            "SELECT server_id, provides, plugins FROM plugin_replica \
+              WHERE heartbeat_at > NOW() - make_interval(secs => $1) \
               ORDER BY server_id",
             [(LIVE_WINDOW_SECS as f64).into()],
         ))
         .await?;
-    let mut replicas = Vec::with_capacity(rows.len());
+    let mut live = LiveLoaded::default();
     for row in rows {
         let server_id: String = row.try_get("", "server_id")?;
-        let provides: serde_json::Value = row.try_get("", "provides")?;
-        match serde_json::from_value::<crate::providers::Loaded>(provides) {
-            Ok(theirs) => replicas.push((server_id, theirs)),
-            Err(e) => {
-                tracing::warn!(server_id, error = %e, "A replica reported what it has loaded in a shape this build does not read")
+        let unread = |e: serde_json::Error| tracing::warn!(server_id, error = %e, "A replica reported what it has loaded in a shape this build does not read");
+        let provides: Option<serde_json::Value> = row.try_get("", "provides")?;
+        if let Some(provides) = provides {
+            match serde_json::from_value::<crate::providers::Loaded>(provides) {
+                Ok(theirs) => {
+                    live.provides.merge(&theirs);
+                    live.replicas.push((server_id.clone(), theirs));
+                }
+                Err(e) => unread(e),
             }
         }
+        let plugins: serde_json::Value = row.try_get("", "plugins")?;
+        match serde_json::from_value::<ReplicaReport>(plugins) {
+            Ok(report) => live.serving.extend(
+                report
+                    .into_iter()
+                    .filter(|(_, p)| p.status.serves())
+                    .map(|(id, _)| id),
+            ),
+            Err(e) => unread(e),
+        }
     }
-    Ok(replicas)
+    Ok(live)
 }
 
 /// Touch this replica's heartbeat, leaving its report as it is. Only an

@@ -78,6 +78,10 @@ pub struct PluginLifecycle {
     /// registered it on one of them, as of the last reconcile
     /// (`plugin_replica.provides`); `None` before the first read.
     fleet_loaded: RwLock<Option<crate::providers::Loaded>>,
+    /// The plugins a live replica serves, this one's included, as of the
+    /// last reconcile (`plugin_replica.plugins`); `None` before the first
+    /// read.
+    fleet_serving: RwLock<Option<std::collections::BTreeSet<String>>>,
     /// What each other live replica has loaded, as of the last reconcile
     /// (its `plugin_replica.provides`), for [`Self::ready`].
     fleet_peers: RwLock<Vec<crate::providers::Loaded>>,
@@ -326,29 +330,38 @@ impl PluginLifecycle {
     /// loads it. `None` when every key can run, or was never recorded by any
     /// plugin. `providers::runnable` states the same rule in SQL.
     pub fn closed_by(&self, needs: Needs<'_>) -> Option<ClosedBy> {
-        use crate::providers::FleetProvider;
-        use broccoli_api_types::visibility::ClosedReason;
         needs
             .each()
             .into_iter()
-            .find_map(|(provides, key)| match self.provider(provides, key) {
-                FleetProvider::Plugin(plugin_id) => {
-                    (!self.loaded_somewhere(provides, key, &plugin_id)).then_some(ClosedBy {
+            .find_map(|(provides, key)| self.key_closure(provides, key))
+    }
+
+    /// What keeps work needing `key` (a `provides` key) from running, if
+    /// anything: the one closure rule for a single key, which every reader
+    /// of a closure applies ([`Self::closed_by`], [`Self::problem_closure`],
+    /// [`contest_type_outage`]). Every provider disabled closes it by the
+    /// first of them (`Disabled`); a fleet-wide provider loaded on no live
+    /// replica closes it by that provider (`NotLoaded`).
+    pub fn key_closure(&self, provides: Provided, key: &str) -> Option<ClosedBy> {
+        use crate::providers::FleetProvider;
+        use broccoli_api_types::visibility::ClosedReason;
+        match self.provider(provides, key) {
+            FleetProvider::Plugin(plugin_id) => (!self.loaded_somewhere(provides, key, &plugin_id))
+                .then_some(ClosedBy {
+                    plugin_id,
+                    provides,
+                    reason: ClosedReason::NotLoaded,
+                }),
+            FleetProvider::Closed => {
+                self.disabled_provider(provides, key)
+                    .map(|plugin_id| ClosedBy {
                         plugin_id,
                         provides,
-                        reason: ClosedReason::NotLoaded,
+                        reason: ClosedReason::Disabled,
                     })
-                }
-                FleetProvider::Closed => {
-                    self.disabled_provider(provides, key)
-                        .map(|plugin_id| ClosedBy {
-                            plugin_id,
-                            provides,
-                            reason: ClosedReason::Disabled,
-                        })
-                }
-                FleetProvider::Unknown => None,
-            })
+            }
+            FleetProvider::Unknown => None,
+        }
     }
 
     /// Whether `plugin_id` has `key` (of `kind`) loaded on a live replica,
@@ -361,6 +374,67 @@ impl PluginLifecycle {
             .ok()
             .and_then(|loaded| loaded.as_ref().map(|l| l.has(kind, key, plugin_id)))
             .unwrap_or(true)
+    }
+
+    /// Every key recorded fleet-wide whose fleet-wide provider
+    /// ([`Self::provider`]) `local` (what this replica has loaded,
+    /// `providers::Loaded::here`) does not have loaded, sorted: work on such
+    /// a key is never run here (`providers::runs_here`). The one readiness
+    /// rule for a replica's plugins; `loaded_elsewhere` says whether a live
+    /// replica serves the provider ([`Self::loaded_nowhere`]), so a probe can
+    /// tell a replica behind the fleet from a plugin no replica can load.
+    pub fn providers_missing_here(&self, local: &crate::providers::Loaded) -> Vec<MissingProvider> {
+        use crate::providers::FleetProvider;
+        let mut keys: Vec<(Provided, String)> = self
+            .governs
+            .read()
+            .map(|governs| {
+                governs
+                    .values()
+                    .flat_map(|g| {
+                        crate::providers::KINDS.iter().flat_map(move |&kind| {
+                            g.provides.keys(kind).iter().map(move |k| (kind, k.clone()))
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let order = |kind: &Provided| crate::providers::KINDS.iter().position(|k| k == kind);
+        keys.sort_by(|a, b| (order(&a.0), &a.1).cmp(&(order(&b.0), &b.1)));
+        keys.dedup();
+        keys.into_iter()
+            .filter_map(|(provides, key)| match self.provider(provides, &key) {
+                FleetProvider::Plugin(plugin_id) if !local.has(provides, &key, &plugin_id) => {
+                    Some(MissingProvider {
+                        loaded_elsewhere: !self.loaded_nowhere(&plugin_id),
+                        provides,
+                        key,
+                        plugin_id,
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether `plugin_id` is loaded on no live replica: no live replica,
+    /// this one included, reports serving it, as of the last reconcile's
+    /// read of the fleet. Before the first read every plugin counts as
+    /// loaded somewhere.
+    pub fn loaded_nowhere(&self, plugin_id: &str) -> bool {
+        self.fleet_serving
+            .read()
+            .ok()
+            .and_then(|serving| serving.as_ref().map(|s| !s.contains(plugin_id)))
+            .unwrap_or(false)
+    }
+
+    /// Records the plugins a live replica serves (see
+    /// [`Self::loaded_nowhere`]).
+    pub(crate) fn set_fleet_serving(&self, serving: std::collections::BTreeSet<String>) {
+        if let Ok(mut slot) = self.fleet_serving.write() {
+            *slot = Some(serving);
+        }
     }
 
     /// Records what the live replicas have loaded (see
@@ -379,37 +453,22 @@ impl PluginLifecycle {
         }
     }
 
-    /// The `kind` keys whose fleet-wide provider ([`Self::provider`]) is not
-    /// loaded in `loaded`, each with that provider, sorted: the one "provider
-    /// missing here" rule. Work on such a key that reaches a replica with
-    /// `loaded` waits for another replica, or is refused there
-    /// (`CONTEST_TYPE_UNAVAILABLE` for a contest type, [`accepting_handler`]).
-    pub fn missing_here(
+    /// The contest types whose fleet-wide provider `loaded` does not have
+    /// loaded ([`Self::providers_missing_here`]), each with that provider.
+    fn contest_types_missing(
         &self,
-        kind: Provided,
         loaded: &crate::providers::Loaded,
     ) -> std::collections::BTreeSet<(String, String)> {
-        use crate::providers::FleetProvider;
-        let Ok(governs) = self.governs.read() else {
-            return Default::default();
-        };
-        let keys: std::collections::BTreeSet<String> = governs
-            .values()
-            .flat_map(|g| g.provides.keys(kind))
-            .cloned()
-            .collect();
-        drop(governs);
-        keys.into_iter()
-            .filter_map(|key| match self.provider(kind, &key) {
-                FleetProvider::Plugin(id) if !loaded.has(kind, &key, &id) => Some((key, id)),
-                _ => None,
-            })
+        self.providers_missing_here(loaded)
+            .into_iter()
+            .filter(|missing| missing.provides == Provided::ContestType)
+            .map(|missing| (missing.key, missing.plugin_id))
             .collect()
     }
 
     /// Whether this replica, with `local` loaded, should take browsers: no
     /// live peer misses only a strict part of the contest types it misses
-    /// ([`Self::missing_here`]). A peer that does serves every submission
+    /// ([`Self::providers_missing_here`]). A peer that does serves every submission
     /// this replica takes and more, so a gateway that health-checks
     /// readiness re-pins this replica's browsers there instead of leaving
     /// them refused. The order is partial, so some replica is always ready:
@@ -419,7 +478,7 @@ impl PluginLifecycle {
     /// what a request on this replica needs loaded here; the other keys only
     /// steer which replica claims judging work.
     pub fn ready(&self, local: &crate::providers::Loaded) -> bool {
-        let mine = self.missing_here(Provided::ContestType, local);
+        let mine = self.contest_types_missing(local);
         if mine.is_empty() {
             return true;
         }
@@ -427,7 +486,7 @@ impl PluginLifecycle {
             return true;
         };
         !peers.iter().any(|peer| {
-            let theirs = self.missing_here(Provided::ContestType, peer);
+            let theirs = self.contest_types_missing(peer);
             theirs.len() < mine.len() && theirs.is_subset(&mine)
         })
     }
@@ -435,7 +494,8 @@ impl PluginLifecycle {
     /// What closes new work on a problem whose `needs` name no language yet
     /// (a problem view, before the contestant picks one): each language it
     /// accepts (recorded fleet-wide, and among `accepted` when the problem
-    /// names its languages) whose providers are all disabled, and the work
+    /// names its languages) that is closed ([`Self::key_closure`]: its
+    /// providers all disabled, or its provider loaded nowhere), and the work
     /// outright when what it needs besides a language is closed
     /// ([`Self::closed_by`]) or none of its languages is left open (the
     /// first closed one's plugin). A fleet that recorded none of them closes
@@ -460,14 +520,9 @@ impl PluginLifecycle {
         let closed_languages: Vec<ClosedLanguage> = languages
             .iter()
             .filter_map(|language| {
-                let plugin_id = self.disabled_provider(Provided::Language, language)?;
                 Some(ClosedLanguage {
                     language: language.clone(),
-                    closed_by: ClosedBy {
-                        plugin_id,
-                        provides: Provided::Language,
-                        reason: broccoli_api_types::visibility::ClosedReason::Disabled,
-                    },
+                    closed_by: self.key_closure(Provided::Language, language)?,
                 })
             })
             .collect();
@@ -591,15 +646,22 @@ impl PluginLifecycle {
     // change them together.
 
     /// Why plugin `plugin_id`, known not to be loaded here, cannot serve:
-    /// the fleet disabled it, or it is enabled and missing on this replica
-    /// for now. This is the one place the two are told apart.
+    /// the fleet disabled it, it is enabled and loaded on no live replica
+    /// ([`Self::loaded_nowhere`]), or it is enabled and missing on this
+    /// replica for now. This is the one place the three are told apart, so
+    /// every answer about a plugin that is out (`AppError::from`) names the
+    /// plugin unless a retry here may serve.
     pub fn outage(&self, plugin_id: &str) -> PluginOutage {
-        if self.is_desired_enabled(plugin_id) {
-            PluginOutage::Unavailable
-        } else {
+        if !self.is_desired_enabled(plugin_id) {
             PluginOutage::Disabled {
                 plugin_id: plugin_id.to_string(),
             }
+        } else if self.loaded_nowhere(plugin_id) {
+            PluginOutage::NotLoaded {
+                plugin_id: plugin_id.to_string(),
+            }
+        } else {
+            PluginOutage::Unavailable
         }
     }
 
@@ -669,16 +731,29 @@ impl PluginLifecycle {
     }
 }
 
+/// A key whose fleet-wide provider this replica does not have loaded
+/// ([`PluginLifecycle::providers_missing_here`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingProvider {
+    pub provides: Provided,
+    pub key: String,
+    pub plugin_id: String,
+    /// A live replica serves the provider: this one is behind the fleet.
+    pub loaded_elsewhere: bool,
+}
+
 /// Why contests of `contest_type` cannot be served on this replica, if they
-/// cannot: the plugin providing the type is disabled fleet-wide, or the
-/// type's fleet-wide provider is not loaded here (`providers::resolve`). Submissions to such a contest are refused
-/// and its results are unavailable.
+/// cannot: the type is closed fleet-wide ([`PluginLifecycle::key_closure`]:
+/// every provider disabled, or its provider loaded on no live replica), or
+/// the type's fleet-wide provider is not loaded here (`providers::resolve`).
+/// Submissions to such a contest are refused and its results are
+/// unavailable.
 pub async fn contest_type_outage(state: &AppState, contest_type: &str) -> Option<PluginOutage> {
-    if let Some(plugin_id) = state
+    if let Some(closed) = state
         .plugin_lifecycle
-        .disabled_provider(Provided::ContestType, contest_type)
+        .key_closure(Provided::ContestType, contest_type)
     {
-        return Some(PluginOutage::Disabled { plugin_id });
+        return Some(closed.into());
     }
     let resolved = crate::providers::resolve(
         &*state.registries.contest_type_registry.read().await,
@@ -711,10 +786,15 @@ pub async fn accepting_handler(
     let contest_type = needs.contest_type;
     match state.plugin_lifecycle.closed_by(needs) {
         Some(ClosedBy {
+            plugin_id,
             provides: Provided::ContestType,
             reason: ClosedReason::Disabled,
-            ..
-        }) => return Err(AppError::ContestTypeDisabled(contest_type.to_string())),
+        }) => {
+            return Err(AppError::ContestTypeDisabled {
+                contest_type: contest_type.to_string(),
+                plugin_id,
+            });
+        }
         Some(ClosedBy {
             plugin_id,
             reason: ClosedReason::Disabled,
@@ -1059,14 +1139,21 @@ async fn reconcile_locked(
     }
     // What the live replicas have loaded, this one's own registrations
     // included before its next report lands.
-    let replicas = plugin_fleet::live_replicas(&state.db).await?;
-    let mut loaded = crate::providers::Loaded::here(&state.registries).await;
-    for (_, theirs) in &replicas {
-        loaded.merge(theirs);
+    let mut live = plugin_fleet::live_loaded(&state.db).await?;
+    live.provides
+        .merge(&crate::providers::Loaded::here(&state.registries).await);
+    if let Ok(registry) = state.plugins.get_registry().read() {
+        live.serving.extend(
+            registry
+                .iter()
+                .filter(|(_, entry)| entry.status == PluginStatus::Loaded)
+                .map(|(id, _)| id.clone()),
+        );
     }
-    state.plugin_lifecycle.set_fleet_loaded(loaded);
+    state.plugin_lifecycle.set_fleet_loaded(live.provides);
+    state.plugin_lifecycle.set_fleet_serving(live.serving);
     state.plugin_lifecycle.set_fleet_peers(
-        replicas
+        live.replicas
             .into_iter()
             .filter(|(server_id, _)| *server_id != state.config.server.id)
             .map(|(_, theirs)| theirs)
@@ -2456,7 +2543,7 @@ mod tests {
         };
         let here = loaded(&[("t1", "judge1")]);
         assert_eq!(
-            lifecycle.missing_here(Provided::ContestType, &here),
+            lifecycle.contest_types_missing(&here),
             [("t2".to_string(), "judge2".to_string())].into()
         );
 
@@ -2546,6 +2633,113 @@ mod tests {
                 provides: Provided::ContestType,
                 reason: broccoli_api_types::visibility::ClosedReason::Disabled,
             })
+        );
+    }
+
+    /// A replica misses a provider exactly where a key's fleet-wide provider
+    /// is not loaded here, and says whether another replica serves it.
+    #[test]
+    fn a_replica_misses_each_fleet_wide_provider_it_has_not_loaded() {
+        let lifecycle = providers(true, true, true);
+        lifecycle.set_fleet_serving(["eval".to_string()].into());
+        let mut local = crate::providers::Loaded::default();
+        for (kind, key, plugin) in [
+            (Provided::ContestType, "t", "judge"),
+            (Provided::CheckerFormat, "c", "check"),
+        ] {
+            local
+                .of_mut(kind)
+                .insert(key.to_string(), vec![plugin.to_string()]);
+        }
+        assert_eq!(
+            lifecycle.providers_missing_here(&local),
+            vec![MissingProvider {
+                provides: Provided::ProblemType,
+                key: "p".into(),
+                plugin_id: "eval".into(),
+                loaded_elsewhere: true,
+            }]
+        );
+        // A disabled provider is nobody's to load.
+        lifecycle.set_desired("eval", false);
+        assert_eq!(lifecycle.providers_missing_here(&local), vec![]);
+    }
+
+    /// A plugin is out as loaded nowhere only while no live replica serves
+    /// it, whatever keys it last recorded: one a live replica serves is out
+    /// on this replica alone, which a retry elsewhere may serve.
+    #[test]
+    fn a_plugin_is_loaded_nowhere_only_while_no_live_replica_serves_it() {
+        let lifecycle = PluginLifecycle::default();
+        lifecycle.set_desired("p", true);
+        // Before the fleet is read nothing is out as loaded nowhere.
+        assert_eq!(lifecycle.outage("p"), PluginOutage::Unavailable);
+        lifecycle.set_fleet_serving(["q".to_string()].into());
+        assert_eq!(
+            lifecycle.outage("p"),
+            PluginOutage::NotLoaded {
+                plugin_id: "p".into()
+            }
+        );
+        lifecycle.set_fleet_serving(["p".to_string()].into());
+        assert_eq!(lifecycle.outage("p"), PluginOutage::Unavailable);
+        lifecycle.set_desired("p", false);
+        assert_eq!(
+            lifecycle.outage("p"),
+            PluginOutage::Disabled {
+                plugin_id: "p".into()
+            }
+        );
+    }
+
+    /// A language whose fleet-wide provider is enabled but loaded on no live
+    /// replica closes the problem's submit for it as a disabled one does,
+    /// naming that provider as not loaded: one closure rule for each key.
+    #[test]
+    fn a_language_whose_provider_is_loaded_nowhere_is_closed_by_it() {
+        use broccoli_api_types::visibility::{ClosedLanguage, ClosedReason};
+        let lifecycle = providers(true, true, true);
+        lifecycle.set_governs(
+            "langs-a",
+            Governs {
+                provides: Provides {
+                    languages: vec!["cpp".into()],
+                    ..Provides::default()
+                },
+                ..Governs::default()
+            },
+        );
+        lifecycle.set_desired("langs-a", true);
+        let mut fleet = crate::providers::Loaded::default();
+        for (kind, key, plugin) in [
+            (Provided::ContestType, "t", "judge"),
+            (Provided::ProblemType, "p", "eval"),
+            (Provided::CheckerFormat, "c", "check"),
+        ] {
+            fleet
+                .of_mut(kind)
+                .insert(key.to_string(), vec![plugin.to_string()]);
+        }
+        lifecycle.set_fleet_loaded(fleet);
+        let not_loaded = ClosedBy {
+            plugin_id: "langs-a".into(),
+            provides: Provided::Language,
+            reason: ClosedReason::NotLoaded,
+        };
+        let closure = lifecycle.problem_closure(lifecycle.needs("t", "p", "c", None), None);
+        assert_eq!(
+            closure.closed_languages,
+            vec![ClosedLanguage {
+                language: "cpp".into(),
+                closed_by: not_loaded.clone(),
+            }]
+        );
+        assert_eq!(closure.closed_by, Some(not_loaded.clone()));
+        // Work in the language is closed by the same plugin, for the same
+        // reason.
+        assert_eq!(
+            lifecycle.closed_by(lifecycle.needs("t", "p", "c", Some("cpp"))),
+            Some(not_loaded)
         );
     }
 

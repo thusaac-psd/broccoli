@@ -1900,6 +1900,7 @@ async fn cut_by_a_disable(change: Change) {
         .await;
     assert_eq!(res.status, 503, "{}", res.text);
     assert_eq!(res.body["code"], "CONTEST_TYPE_DISABLED", "{}", res.text);
+    assert_eq!(res.body["details"]["plugin_id"], "ioi", "{}", res.text);
     assert_eq!(
         res.headers.get("retry-after").map(|v| v.to_str().unwrap()),
         Some(
@@ -1922,6 +1923,7 @@ async fn cut_by_a_disable(change: Change) {
         .await;
     assert_eq!(res.status, 503, "{}", res.text);
     assert_eq!(res.body["code"], "CONTEST_TYPE_DISABLED", "{}", res.text);
+    assert_eq!(res.body["details"]["plugin_id"], "ioi", "{}", res.text);
     let res = app
         .post_with_token(
             &format!("/api/v1/problems/{problem_id}/code-runs"),
@@ -1935,6 +1937,7 @@ async fn cut_by_a_disable(change: Change) {
         .await;
     assert_eq!(res.status, 503, "{}", res.text);
     assert_eq!(res.body["code"], "CONTEST_TYPE_DISABLED", "{}", res.text);
+    assert_eq!(res.body["details"]["plugin_id"], "ioi", "{}", res.text);
     let res = app
         .get_with_token(&format!("/api/v1/problems/{problem_id}"), &admin)
         .await;

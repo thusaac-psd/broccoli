@@ -30,6 +30,16 @@ describe('a withheld status', () => {
     );
     assert.equal(
       withheldLabel(
+        {
+          reason: 'plugin_outage',
+          outage: { state: 'not_loaded', plugin_id: 'ioi' },
+        },
+        t,
+      ),
+      'submission.resultUnavailableNotLoaded',
+    );
+    assert.equal(
+      withheldLabel(
         { reason: 'plugin_outage', outage: { state: 'unavailable' } },
         t,
       ),

@@ -196,16 +196,24 @@ impl PooledConnection {
     /// The pid of the backend this connection is attached to, so the caller
     /// can cancel a statement of its own there. It is one round trip per
     /// checkout: sqlx keeps the backend's pid private and gives a pooled
-    /// connection no identity or slot to keep it in between checkouts. The
-    /// read is the caller's bookkeeping, not one of its statements, so it
-    /// settles as every statement does but is not reported to the metric
-    /// callback.
+    /// connection no identity or slot to keep it in between checkouts, so a
+    /// caller that can stop its statement by closing the connection instead
+    /// ([`Self::close`]) reads none. The read is the caller's bookkeeping,
+    /// not one of its statements, so it settles as every statement does but
+    /// is not reported to the metric callback.
     pub async fn backend_pid(&mut self) -> Result<i32, DbErr> {
         let outcome = sea_orm::sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *self.conn)
             .await
             .map_err(query_err);
         self.settle(outcome)
+    }
+
+    /// Close the connection instead of returning it to the pool: its
+    /// backend sees its client gone, and a statement it still runs stops at
+    /// its next check (`PgSession::client_check_interval`).
+    pub async fn close(self) {
+        let _ = self.conn.close().await;
     }
 
     /// The raw connection, for bulk work sea-orm has no statement for

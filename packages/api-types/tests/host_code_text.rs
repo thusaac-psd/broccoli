@@ -57,6 +57,45 @@ fn every_language_pack_translates_every_host_code() {
     }
 }
 
+/// A code about one plugin says which in every pack: its text has
+/// `{plugin}`, the plugin's name a client fills from `details.plugin_id`, and
+/// the zh-CN pack quotes it as 「{plugin}」.
+#[test]
+fn every_code_about_a_plugin_names_it_in_every_pack() {
+    let plugins = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
+    let naming: Vec<HostCode> = HostCode::ALL
+        .iter()
+        .copied()
+        .filter(|code| code.names_plugin())
+        .collect();
+    assert!(naming.contains(&HostCode::ContestTypeDisabled));
+    for (locale, file) in &language_packs(&plugins) {
+        let catalog: toml::Table = std::fs::read_to_string(file)
+            .expect("read catalog")
+            .parse()
+            .expect("catalog parses");
+        let placeholder = if locale == "zh-CN" {
+            "「{plugin}」"
+        } else {
+            "{plugin}"
+        };
+        let unnamed: Vec<&str> = naming
+            .iter()
+            .map(|code| code.as_str())
+            .filter(|code| {
+                catalog
+                    .get(&format!("apiError.{code}"))
+                    .and_then(|text| text.as_str())
+                    .is_none_or(|text| !text.contains(placeholder))
+            })
+            .collect();
+        assert!(
+            unnamed.is_empty(),
+            "the {locale} pack does not say {placeholder} for: {unnamed:?}"
+        );
+    }
+}
+
 #[test]
 fn a_host_code_serializes_as_its_wire_string() {
     for code in HostCode::ALL {

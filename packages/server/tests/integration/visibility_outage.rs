@@ -61,6 +61,14 @@ async fn fixture(app: &TestApp) -> Fixture {
             "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"{GOVERNED_TYPE}\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}' \
              WHERE id = '{PLUGIN}'"
         ),
+        // The replica that loaded the plugin registered the type, so it
+        // reports the type loaded.
+        format!(
+            "UPDATE plugin_replica SET provides = jsonb_set(\
+               COALESCE(provides::jsonb, '{{\"contest_types\": {{}}}}'::jsonb), \
+               '{{contest_types,{GOVERNED_TYPE}}}', '[\"{PLUGIN}\"]') \
+             WHERE plugins::jsonb -> '{PLUGIN}' ->> 'status' = 'loaded'"
+        ),
         format!("UPDATE contest SET contest_type = '{GOVERNED_TYPE}' WHERE id = {governed}"),
     ] {
         exec(app, sql).await;

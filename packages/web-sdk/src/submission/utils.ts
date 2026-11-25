@@ -30,9 +30,14 @@ export function withheldLabel(
   t: I18nContextValue['t'],
 ): string {
   if (withheld?.reason !== 'plugin_outage') return t('submission.resultHidden');
-  return withheld.outage.state === 'disabled'
-    ? t('submission.resultUnavailableDisabled')
-    : t('submission.resultUnavailable');
+  switch (withheld.outage.state) {
+    case 'disabled':
+      return t('submission.resultUnavailableDisabled');
+    case 'not_loaded':
+      return t('submission.resultUnavailableNotLoaded');
+    case 'unavailable':
+      return t('submission.resultUnavailable');
+  }
 }
 
 function parseSubmissionErrorValue(value: unknown): SubmissionError | null {

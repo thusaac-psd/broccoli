@@ -1291,6 +1291,52 @@ mod unknown_checks {
         problem_id
     }
 
+    /// Only a target's providers decide its checks: a plugin that also
+    /// records providing the problem's types, but is not their fleet-wide
+    /// provider, is never run on them, so its being loaded nowhere leaves
+    /// nothing undecided.
+    #[tokio::test]
+    async fn a_plugin_that_is_not_the_types_provider_leaves_nothing_undecided() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("second_governor_admin", "password123", "admin")
+            .await;
+        let problem_id = app.insert_public_problem("P").await;
+        let row = app
+            .db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                format!(
+                    "SELECT problem_type, default_contest_type FROM problem WHERE id = {problem_id}"
+                ),
+            ))
+            .await
+            .unwrap()
+            .expect("the problem");
+        let problem_type: String = row.try_get("", "problem_type").unwrap();
+        let contest_type: String = row.try_get("", "default_contest_type").unwrap();
+        // A plugin whose id sorts after every shipped one records providing
+        // both types; it has no files, so it is loaded on no replica.
+        app.db
+            .execute_unprepared(&format!(
+                "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
+                 ('zzz-governor', TRUE, 1, NOW(), '{{\"visibility\": false, \
+                   \"contest_types\": [\"{contest_type}\"], \"problem_types\": [\"{problem_type}\"], \
+                   \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \
+                   \"hooks\": [], \"judging_inputs\": []}}')"
+            ))
+            .await
+            .unwrap();
+
+        // A test-data change rechecks the problem on this replica.
+        app.create_test_case(problem_id, &admin).await;
+        assert_eq!(
+            flags(&app, problem_id).await,
+            "false/none",
+            "a plugin that does not provide the problem's types decides nothing of it"
+        );
+    }
+
     #[tokio::test]
     async fn a_replica_without_the_plugin_leaves_the_problem_flagged_and_marked() {
         let app = TestApp::spawn_with_plugins().await;

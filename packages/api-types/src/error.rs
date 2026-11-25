@@ -40,7 +40,7 @@ pub struct ErrorBody {
 macro_rules! host_codes {
     ($(
         $(#[$doc:meta])*
-        $variant:ident = $code:literal $(, $generic:ident)?;
+        $variant:ident = $code:literal $(, $flag:ident)*;
     )*) => {
         /// Every error code the host itself sends or records: an API error's
         /// `code`, and the error code of a judgement or code run that the
@@ -49,7 +49,10 @@ macro_rules! host_codes {
         ///
         /// Each code has its own text in every language pack
         /// (`apiError.<CODE>`), except a `generic` one, which a client
-        /// describes by its kind and the server's detail.
+        /// describes by its kind and the server's detail. A code marked
+        /// `names_plugin` is about one plugin: its answer names it in
+        /// `details.plugin_id`, and its text says it as `{plugin}`, which a
+        /// client fills with the plugin's name.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
         pub enum HostCode {
             $(
@@ -74,13 +77,25 @@ macro_rules! host_codes {
             /// describing it by its kind and the server's detail.
             pub const fn has_own_text(self) -> bool {
                 match self {
-                    $(Self::$variant => host_codes!(@own $($generic)?),)*
+                    $(Self::$variant => !host_codes!(@has generic; $($flag)*),)*
+                }
+            }
+
+            /// Whether an answer with this code is about one plugin, which
+            /// it names in `details.plugin_id` and its text as `{plugin}`.
+            pub const fn names_plugin(self) -> bool {
+                match self {
+                    $(Self::$variant => host_codes!(@has names_plugin; $($flag)*),)*
                 }
             }
         }
     };
-    (@own generic) => { false };
-    (@own) => { true };
+    (@has $want:ident;) => { false };
+    (@has generic; generic $($rest:ident)*) => { true };
+    (@has names_plugin; names_plugin $($rest:ident)*) => { true };
+    (@has $want:ident; $other:ident $($rest:ident)*) => {
+        host_codes!(@has $want; $($rest)*)
+    };
 }
 
 host_codes! {
@@ -104,8 +119,8 @@ host_codes! {
     Conflict = "CONFLICT", generic;
     RegistrationClosed = "REGISTRATION_CLOSED";
     UsernameTaken = "USERNAME_TAKEN";
-    PluginExists = "PLUGIN_EXISTS";
-    LanguagePackTaken = "LANGUAGE_PACK_TAKEN";
+    PluginExists = "PLUGIN_EXISTS", names_plugin;
+    LanguagePackTaken = "LANGUAGE_PACK_TAKEN", names_plugin;
     PluginNotReady = "PLUGIN_NOT_READY";
     PluginLoadFailed = "PLUGIN_LOAD_FAILED";
     PluginUploadDisabled = "PLUGIN_UPLOAD_DISABLED";
@@ -113,10 +128,10 @@ host_codes! {
     CheckerSourceUnsupported = "CHECKER_SOURCE_UNSUPPORTED";
     ContestTypeLocked = "CONTEST_TYPE_LOCKED";
     ContestTypeUnavailable = "CONTEST_TYPE_UNAVAILABLE";
-    ContestTypeDisabled = "CONTEST_TYPE_DISABLED";
+    ContestTypeDisabled = "CONTEST_TYPE_DISABLED", names_plugin;
     QueueOverloaded = "QUEUE_OVERLOADED";
     PluginUnavailable = "PLUGIN_UNAVAILABLE";
-    PluginDisabled = "PLUGIN_DISABLED";
+    PluginDisabled = "PLUGIN_DISABLED", names_plugin;
     StorageUnavailable = "STORAGE_UNAVAILABLE";
     /// The server's database cannot be reached or cannot serve connections.
     DatabaseUnavailable = "DATABASE_UNAVAILABLE";
@@ -169,7 +184,7 @@ host_codes! {
     NoProvider = "NO_PROVIDER";
     /// A plugin the request needs is enabled and loaded on no live replica:
     /// what it provides waits for a replica to load it; retried.
-    PluginNotLoaded = "PLUGIN_NOT_LOADED";
+    PluginNotLoaded = "PLUGIN_NOT_LOADED", names_plugin;
     /// The problem's checker program failed.
     CheckerFailed = "CHECKER_FAILED";
     /// A program the problem supplies besides its checker (an interactor or

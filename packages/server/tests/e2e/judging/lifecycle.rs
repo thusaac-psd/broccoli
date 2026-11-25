@@ -401,6 +401,132 @@ async fn a_submission_whose_plugin_is_loaded_nowhere_is_refused_until_one_loads_
     assert!(res.headers.contains_key("retry-after"), "{:?}", res.headers);
 }
 
+/// A contest whose type's fleet-wide provider is enabled but loaded on no
+/// replica names that plugin wherever it is out: a submission to the
+/// contest is refused, retryably, as `PLUGIN_NOT_LOADED` with the plugin in
+/// its details, and a submission already in the contest is withheld as
+/// waiting for that plugin to load, not as a brief outage of this server.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_contest_whose_plugin_is_loaded_nowhere_names_it_wherever_it_is_out() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("nowhere_ct_admin", "pass1234", "admin")
+        .await;
+    let problem_id = app.create_problem(&admin, "Contest loaded nowhere").await;
+    app.create_test_case(problem_id, &admin).await;
+    let contest_id = app
+        .create_typed_contest(&admin, "Loaded nowhere", "icpc", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    let contestant = app
+        .create_authenticated_user("nowhere_ct_user", "pass1234")
+        .await;
+    app.register_for_contest(contest_id, &contestant).await;
+    let queued =
+        seed_contest_submission(&app, "nowhere_ct_user", problem_id, contest_id, "icpc").await;
+
+    // A plugin whose id sorts before the shipped one provides the type, so
+    // it is the type's fleet-wide provider; it has no files, so it loads on
+    // no replica.
+    app.db
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
+             ('aaa-judge', TRUE, 1, NOW(), '{\"visibility\": true, \"contest_types\": [\"icpc\"], \
+               \"problem_types\": [], \"checker_formats\": [], \
+               \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}')"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(app.reconcile_plugins_failing().await, ["aaa-judge"]);
+
+    let res = app
+        .post_with_token(
+            &format!("/api/v1/contests/{contest_id}/problems/{problem_id}/submissions"),
+            &json!({
+                "language": "cpp",
+                "files": [{"filename": "main.cpp", "content": CPP_SUM}],
+            }),
+            &contestant,
+        )
+        .await;
+    assert_eq!(res.status, 503, "{}", res.text);
+    assert_eq!(res.body["code"], "PLUGIN_NOT_LOADED", "{}", res.text);
+    assert_eq!(
+        res.body["details"]["plugin_id"], "aaa-judge",
+        "{}",
+        res.text
+    );
+    assert!(res.headers.contains_key("retry-after"), "{:?}", res.headers);
+
+    let view = app
+        .get_with_token(&format!("/api/v1/submissions/{queued}"), &contestant)
+        .await;
+    assert_eq!(view.status, 200, "{}", view.text);
+    assert_eq!(
+        view.body["withheld"],
+        json!({
+            "reason": "plugin_outage",
+            "outage": {"state": "not_loaded", "plugin_id": "aaa-judge"},
+        }),
+        "{}",
+        view.text
+    );
+}
+
+/// A practice submission in a contest type only a plugin loaded on no
+/// replica provides is refused naming that plugin, retryably, not as a type
+/// nothing provides.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_practice_type_whose_only_plugin_is_loaded_nowhere_names_it() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("nowhere_pt_admin", "pass1234", "admin")
+        .await;
+    let problem_id = app
+        .create_public_problem(&admin, "Practice loaded nowhere")
+        .await;
+    app.create_test_case(problem_id, &admin).await;
+    app.db
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
+             ('elsewhere-judge', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [\"elsewhere\"], \
+               \"problem_types\": [], \"checker_formats\": [], \
+               \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}')"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(app.reconcile_plugins_failing().await, ["elsewhere-judge"]);
+    let contestant = app
+        .create_authenticated_user("nowhere_pt_user", "pass1234")
+        .await;
+
+    let res = app
+        .post_with_token(
+            &format!("/api/v1/problems/{problem_id}/submissions"),
+            &json!({
+                "language": "cpp",
+                "contest_type": "elsewhere",
+                "files": [{"filename": "main.cpp", "content": CPP_SUM}],
+            }),
+            &contestant,
+        )
+        .await;
+    assert_eq!(res.status, 503, "{}", res.text);
+    assert_eq!(res.body["code"], "PLUGIN_NOT_LOADED", "{}", res.text);
+    assert_eq!(
+        res.body["details"]["plugin_id"], "elsewhere-judge",
+        "{}",
+        res.text
+    );
+}
+
 /// Work needing a key no enabled plugin provides (a checker format nothing
 /// registered) fails on its first attempt and stands: no replica will ever
 /// run it. Its system error names the role and the key (`NO_PROVIDER`); it

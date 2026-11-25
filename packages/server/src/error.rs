@@ -127,11 +127,14 @@ pub enum AppError {
     /// The plugin providing the problem's checker format declares no checker
     /// source, so the problem `id` has none to set.
     CheckerSourceUnsupported(i32),
-    /// The plugin providing this contest type is disabled fleet-wide. The
-    /// work waits parked; a client asks again after
+    /// Plugin `plugin_id`, the first provider of `contest_type`, and every
+    /// other one are disabled fleet-wide. The work waits parked; a client asks again after
     /// [`DISABLED_RETRY_AFTER_SECS`], since it serves once an admin enables
     /// the plugin.
-    ContestTypeDisabled(String),
+    ContestTypeDisabled {
+        contest_type: String,
+        plugin_id: String,
+    },
     /// The judgement to apply was judged against inputs its problem has
     /// changed since; `force=true` applies it anyway.
     JudgedOnOtherInputs,
@@ -158,6 +161,16 @@ pub enum AppError {
     /// Blob storage did not answer through its retries: an outage, retried
     /// by the client after [`STORAGE_RETRY_AFTER_SECS`].
     StorageUnavailable,
+    /// A plugin failed what the request needed of it (its call failed, its
+    /// route answered a server error): `what` happened, with `text` the
+    /// plugin gave. Answered as an internal error, which says nothing of the
+    /// plugin's text; the text is logged as a host line about the plugin
+    /// (`plugin_core::guest_log::about`), never as the host's own error.
+    PluginFailed {
+        plugin_id: String,
+        what: &'static str,
+        text: String,
+    },
     /// A plugin refused the request (a route's client error or a hook's
     /// rejection), confined to the plugin's namespace.
     PluginRefusal(crate::services::plugin_output::PluginRefusal),
@@ -326,13 +339,11 @@ impl AppError {
             ),
             AppError::PluginExists(id) => (
                 StatusCode::CONFLICT,
-                ErrorBody {
-                    code: HostCode::PluginExists.as_str().into(),
-                    message: format!(
-                        "Plugin '{id}' already exists; upload it as a replacement instead"
-                    ),
-                    details: Some(serde_json::json!({ "plugin_id": id })),
-                },
+                naming_plugin(
+                    HostCode::PluginExists,
+                    format!("Plugin '{id}' already exists; upload it as a replacement instead"),
+                    id,
+                ),
             ),
             AppError::PluginNotReady(msg) => (
                 StatusCode::BAD_REQUEST,
@@ -380,14 +391,18 @@ impl AppError {
                     ),
                 ),
             ),
-            AppError::ContestTypeDisabled(contest_type) => (
+            AppError::ContestTypeDisabled {
+                contest_type,
+                plugin_id,
+            } => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                simple(
+                naming_plugin(
                     HostCode::ContestTypeDisabled,
                     format!(
-                        "'{contest_type}' submissions are closed: the plugin that judges them \
-                         is disabled"
+                        "'{contest_type}' submissions are closed: the plugin '{plugin_id}' that \
+                         judges them is disabled"
                     ),
+                    plugin_id,
                 ),
             ),
             AppError::Overloaded { retry_after } => (
@@ -513,6 +528,20 @@ impl AppError {
                         .into(),
                 ),
             ),
+            AppError::PluginFailed {
+                plugin_id,
+                what,
+                text,
+            } => {
+                plugin_core::guest_log::about(&plugin_id, what, &text);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    simple(
+                        HostCode::InternalError,
+                        "An unexpected error occurred".into(),
+                    ),
+                )
+            }
             AppError::Internal(detail) => {
                 tracing::error!("Internal error: {}", detail);
                 (
@@ -541,7 +570,7 @@ impl IntoResponse for AppError {
             AppError::PluginUnavailable => Some(PLUGIN_RETRY_AFTER_SECS),
             AppError::PluginDisabled(_)
             | AppError::PluginNotLoaded(_)
-            | AppError::ContestTypeDisabled(_) => Some(DISABLED_RETRY_AFTER_SECS),
+            | AppError::ContestTypeDisabled { .. } => Some(DISABLED_RETRY_AFTER_SECS),
             AppError::StorageUnavailable => Some(STORAGE_RETRY_AFTER_SECS),
             AppError::DatabaseUnavailable => Some(DATABASE_RETRY_AFTER_SECS),
             AppError::DatabaseBusy => Some(DATABASE_BUSY_RETRY_AFTER_SECS),
@@ -634,6 +663,17 @@ impl From<PluginError> for AppError {
                 tracing::warn!("{err}");
                 AppError::DatabaseBusy
             }
+            // The failure's reason is the plugin's text.
+            PluginError::ExecutionFailed {
+                ref plugin_id,
+                ref func_name,
+                ref message,
+                ..
+            } => AppError::PluginFailed {
+                plugin_id: plugin_id.clone(),
+                what: "A plugin call the request needed failed",
+                text: format!("{func_name}: {message}"),
+            },
             _ => AppError::Internal(err.to_string()),
         }
     }
@@ -644,6 +684,7 @@ impl From<broccoli_api_types::visibility::PluginOutage> for AppError {
         use broccoli_api_types::visibility::PluginOutage;
         match outage {
             PluginOutage::Disabled { plugin_id } => AppError::PluginDisabled(plugin_id),
+            PluginOutage::NotLoaded { plugin_id } => AppError::PluginNotLoaded(plugin_id),
             PluginOutage::Unavailable => AppError::PluginUnavailable,
         }
     }
@@ -872,13 +913,55 @@ mod tests {
         assert_eq!(body["code"], "DATABASE_BUSY");
     }
 
+    /// Every answer about one plugin (a code marked `names_plugin`) names
+    /// it in `details.plugin_id`, which a client turns into the plugin's
+    /// name in the user's language.
+    #[tokio::test]
+    async fn every_answer_about_a_plugin_names_it_in_its_details() {
+        let answers = [
+            AppError::PluginExists("ioi".into()),
+            AppError::LanguagePackTaken {
+                locale: "en".into(),
+                plugin_id: "ioi".into(),
+            },
+            AppError::ContestTypeDisabled {
+                contest_type: "icpc".into(),
+                plugin_id: "ioi".into(),
+            },
+            AppError::PluginDisabled("ioi".into()),
+            AppError::PluginNotLoaded("ioi".into()),
+        ];
+        let mut answered = std::collections::BTreeSet::new();
+        for answer in answers {
+            let body = to_bytes(answer.into_response().into_body(), 4096)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["details"]["plugin_id"], "ioi", "{body}");
+            answered.insert(body["code"].as_str().unwrap().to_string());
+        }
+        let naming: std::collections::BTreeSet<String> = HostCode::ALL
+            .iter()
+            .filter(|code| code.names_plugin())
+            .map(|code| code.as_str().to_string())
+            .collect();
+        assert_eq!(
+            answered, naming,
+            "every code about a plugin is answered here"
+        );
+    }
+
     /// Every 503 is retryable and says when to ask again. A disabled plugin
     /// is one: what needs it is parked, not failed, and serves again once an
     /// administrator enables it, so the answer carries Retry-After.
     #[tokio::test]
     async fn a_disabled_plugin_is_a_503_naming_it_with_retry_after() {
         use broccoli_api_types::visibility::PluginOutage;
-        let disabled = AppError::ContestTypeDisabled("icpc".into()).into_response();
+        let disabled = AppError::ContestTypeDisabled {
+            contest_type: "icpc".into(),
+            plugin_id: "ioi".into(),
+        }
+        .into_response();
         assert_eq!(disabled.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             disabled.headers().get("Retry-After").unwrap(),
