@@ -1,7 +1,7 @@
 import type { I18nContextValue, TranslationKey } from '@/i18n';
 import type { ClosedBy, Provided } from '@/submission/types';
 
-import { pluginKeys } from '../i18n/labels.ts';
+import { pluginName } from '../i18n/labels.ts';
 
 /**
  * Where work a plugin holds back is spoken of: a parked submission
@@ -45,6 +45,7 @@ export function closedByText(
   place: ClosedByPlace,
   { t, lookup }: Pick<I18nContextValue, 't' | 'lookup'>,
 ): string {
-  const plugin = lookup(pluginKeys.name(plugin_id)) ?? plugin_id;
-  return t(ROLE_TEXT[provides][place], { plugin });
+  return t(ROLE_TEXT[provides][place], {
+    plugin: pluginName(lookup, plugin_id),
+  });
 }
