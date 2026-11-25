@@ -344,7 +344,7 @@
 'contests.unregisterConfirmDescription' = "确定要取消参加此比赛吗？如果比赛仍在报名期，你可以稍后重新报名。"
 'contests.unregisterConfirm' = "确认取消报名"
 'contests.notFound' = "未找到比赛。"
-'contests.pluginOutage.disabled' = "比赛插件已停用，本场比赛的结果暂不可用。在管理员重新启用之前，提交已关闭。"
+'contests.pluginOutage.disabled' = "比赛插件「{plugin}」已停用，本场比赛的结果暂不可用。在管理员重新启用之前，提交已关闭。"
 'contests.pluginOutage.unavailable' = "本场比赛的结果当前不可用，请稍后重试。"
 'problems.titleWithheld' = "不可用"
 'submission.resultHidden' = "结果已隐藏"

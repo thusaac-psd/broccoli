@@ -184,7 +184,7 @@ test('a running contest page notices an outage that starts while it is open, and
   });
   const notice = page
     .getByText(
-      'Results for this contest are unavailable while its plugin is disabled.',
+      'Results for this contest are unavailable while its plugin icpc is disabled.',
     )
     .first();
   await page.goto('/contests/1');

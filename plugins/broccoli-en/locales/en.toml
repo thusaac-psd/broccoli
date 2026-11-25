@@ -343,7 +343,7 @@
 'contests.unregisterConfirmDescription' = "Are you sure you want to cancel your registration for this contest? You can re-register later if the contest is still open."
 'contests.unregisterConfirm' = "Yes, Cancel Registration"
 'contests.notFound' = "Contest not found."
-'contests.pluginOutage.disabled' = "Results for this contest are unavailable while its plugin is disabled. Submissions are closed until an administrator enables it."
+'contests.pluginOutage.disabled' = "Results for this contest are unavailable while its plugin {plugin} is disabled. Submissions are closed until an administrator enables it."
 'contests.pluginOutage.unavailable' = "Results for this contest are unavailable right now. Try again in a moment."
 'problems.titleWithheld' = "Unavailable"
 'submission.resultHidden' = "Result hidden"

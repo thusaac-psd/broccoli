@@ -127,7 +127,7 @@ test('a contest problem closed by an outage opens for submitting once the plugin
   await expect(
     page
       .getByText(
-        'Results for this contest are unavailable while its plugin is disabled.',
+        'Results for this contest are unavailable while its plugin icpc is disabled.',
       )
       .first(),
   ).toBeVisible();

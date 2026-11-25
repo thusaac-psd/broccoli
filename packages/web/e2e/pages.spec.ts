@@ -159,7 +159,7 @@ test('a contest whose plugin is disabled says so on every page', async ({
 }) => {
   await mockApi(page, 'contestant');
   const notice =
-    'Results for this contest are unavailable while its plugin is disabled.';
+    'Results for this contest are unavailable while its plugin icpc is disabled.';
 
   await page.goto('/contests/3');
   await expect(page.getByText(notice)).toBeVisible();
