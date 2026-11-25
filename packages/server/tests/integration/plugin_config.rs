@@ -314,6 +314,12 @@ mod clear_secret {
         assert_eq!(saved["secrets"], json!(["token"]), "{saved}");
         let kept = save(json!({ "token": null })).await;
         assert_eq!(kept["secrets"], json!(["token"]), "null keeps it: {kept}");
+        let left_out = save(json!({ "from": "a file without the secret" })).await;
+        assert_eq!(
+            left_out["secrets"],
+            json!(["token"]),
+            "a write that leaves the secret out keeps it too: {left_out}"
+        );
         let cleared = save(json!({ "token": { "$clear": true } })).await;
         assert_eq!(cleared["secrets"], json!([]), "{cleared}");
         assert_eq!(cleared["config"], json!({}), "{cleared}");

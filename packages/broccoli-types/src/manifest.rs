@@ -696,33 +696,41 @@ fn at_identity_mut<'a>(
 }
 
 /// Keeps, at field `key` of `fields`, the secret `identity` names in
-/// `stored` when a write sends `null` for it, and clears it on the
-/// [`CLEAR_SECRET`] marker. `false` when the write keeps a secret `stored`
-/// does not hold.
+/// `stored` when a write sends `null` for it or leaves it out, and clears it
+/// only on the [`CLEAR_SECRET`] marker: a write from a file that holds no
+/// secrets never wipes one. `false` when the write sends `null` for a
+/// secret `stored` does not hold.
 fn keep(
     fields: &mut serde_json::Map<String, serde_json::Value>,
     key: &str,
     identity: &[SecretStep],
     stored: Option<&serde_json::Value>,
 ) -> bool {
+    let kept = || {
+        stored
+            .and_then(|stored| at_identity(stored, identity))
+            .filter(|kept| !unset(kept))
+            .cloned()
+    };
     match fields.get(key) {
         Some(marker) if clears(marker) => {
             fields.remove(key);
             true
         }
-        Some(serde_json::Value::Null) => {
-            match stored
-                .and_then(|stored| at_identity(stored, identity))
-                .filter(|kept| !unset(kept))
-            {
-                Some(kept) => {
-                    fields.insert(key.to_string(), kept.clone());
-                    true
-                }
-                None => false,
+        Some(serde_json::Value::Null) => match kept() {
+            Some(kept) => {
+                fields.insert(key.to_string(), kept);
+                true
             }
+            None => false,
+        },
+        None => {
+            if let Some(kept) = kept() {
+                fields.insert(key.to_string(), kept);
+            }
+            true
         }
-        _ => true,
+        Some(_) => true,
     }
 }
 
@@ -780,7 +788,7 @@ impl ConfigNamespace {
     }
 
     /// Restores, in a value a client writes, each secret field it sends as
-    /// `null` from what `stored` holds for the same item, matched by the
+    /// `null` or leaves out from what `stored` holds for the same item, matched by the
     /// item's key field, never its position: a client that read the config
     /// back writes it unchanged, whatever items it added, removed or moved.
     /// A field sent as `{"$clear": true}` ([`CLEAR_SECRET`]) is cleared.
@@ -1092,6 +1100,24 @@ mod tests {
         stations()
             .keep_secrets(&mut write, Some(&stored_pair()))
             .map(|()| write)
+    }
+
+    #[test]
+    fn a_secret_a_write_leaves_out_is_kept_like_null() {
+        assert_eq!(
+            kept(json!({"stations": [{"name": "beta"}, {"name": "alpha"}]})),
+            Ok(json!({"stations": [
+                {"name": "beta", "token": "B"},
+                {"name": "alpha", "token": "A"},
+            ]}))
+        );
+        let mut new = json!({"stations": [{"name": "new"}]});
+        assert_eq!(
+            stations().keep_secrets(&mut new, Some(&stored_pair())),
+            Ok(()),
+            "an item with no stored secret just has none"
+        );
+        assert_eq!(new, json!({"stations": [{"name": "new"}]}));
     }
 
     #[test]
