@@ -186,7 +186,8 @@ pub fn problem_json(
         "submission_format": null,
         "samples": [],
         "created_at": "2026-05-01T00:00:00Z",
-        "updated_at": "2026-05-01T00:00:00Z"
+        "updated_at": "2026-05-01T00:00:00Z",
+        "closed_languages": []
     })
 }
 
