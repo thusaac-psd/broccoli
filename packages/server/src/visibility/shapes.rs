@@ -220,7 +220,8 @@ mod tests {
             }],
             "test_case_pagination": {"page": 1, "per_page": 20, "total": 1, "total_pages": 1}
         });
-        let parked_by = serde_json::json!({"plugin_id": "p", "provides": "contest_type"});
+        let parked_by =
+            serde_json::json!({"plugin_id": "p", "provides": "contest_type", "reason": "disabled"});
         assert_every_answer_parses::<SubmissionResponse>(serde_json::json!({
             "id": 1, "files": [{"filename": "a.cpp", "content": "int main(){}"}],
             "language": "cpp", "status": "Judged", "user_id": 2, "username": "alice",
