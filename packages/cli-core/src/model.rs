@@ -133,17 +133,19 @@ impl Standing {
                 Some(format!("Judging: {}", status.human()))
             }
             Self::Status(_) | Self::Hidden => None,
-            Self::WaitingForPlugin(PluginOutage::Disabled { plugin_id }) => {
-                Some(contest_plugin(plugin_id, ClosedReason::Disabled, names))
-            }
-            Self::WaitingForPlugin(PluginOutage::NotLoaded { plugin_id }) => {
-                Some(contest_plugin(plugin_id, ClosedReason::NotLoaded, names))
-            }
-            Self::WaitingForPlugin(PluginOutage::NotLoadedHere { plugin_id }) => Some(format!(
-                "Waiting for its contest plugin {}: not loaded on this server; another \
-                 server serves it",
-                names.name(plugin_id)
+            Self::WaitingForPlugin(PluginOutage::Disabled { plugin_id }) => Some(contest_plugin(
+                plugin_id,
+                reason_text(ClosedReason::Disabled),
+                names,
             )),
+            Self::WaitingForPlugin(PluginOutage::NotLoaded { plugin_id }) => Some(contest_plugin(
+                plugin_id,
+                reason_text(ClosedReason::NotLoaded),
+                names,
+            )),
+            Self::WaitingForPlugin(PluginOutage::NotLoadedHere { plugin_id }) => Some(
+                contest_plugin(plugin_id, "loaded on another server, not this one", names),
+            ),
             Self::WaitingForPlugin(PluginOutage::Unavailable) => {
                 Some("Waiting for the contest's plugin, which cannot answer right now".into())
             }
@@ -152,15 +154,13 @@ impl Standing {
     }
 }
 
-/// A wait line for a contest plugin that is out for `reason`, worded as
+/// A wait line for a contest plugin that is out (`why`), worded as
 /// [`closed_by_text`] words it.
-fn contest_plugin(plugin_id: &str, reason: ClosedReason, names: &PluginNames<'_>) -> String {
-    let closed = ClosedBy {
-        plugin_id: plugin_id.to_string(),
-        provides: Provided::ContestType,
-        reason,
-    };
-    format!("Waiting for {}", closed_by_text(&closed, names))
+fn contest_plugin(plugin_id: &str, why: &str, names: &PluginNames<'_>) -> String {
+    format!(
+        "Waiting for {}",
+        plugin_phrase(Provided::ContestType, plugin_id, why, names)
+    )
 }
 
 /// What keeps work from running (`closed`), as a phrase: the plugin by its
@@ -169,21 +169,36 @@ fn contest_plugin(plugin_id: &str, reason: ClosedReason, names: &PluginNames<'_>
 /// line that names a plugin closing work says it this way, and the phrase
 /// holds no colon, so a line can lead with its own.
 pub fn closed_by_text(closed: &ClosedBy, names: &PluginNames<'_>) -> String {
-    let ClosedBy {
-        plugin_id,
-        provides,
-        reason,
-    } = closed;
+    plugin_phrase(
+        closed.provides,
+        &closed.plugin_id,
+        reason_text(closed.reason),
+        names,
+    )
+}
+
+/// Why a plugin closes work (`reason`), as the parenthesis of a phrase.
+fn reason_text(reason: ClosedReason) -> &'static str {
+    match reason {
+        ClosedReason::Disabled => "disabled until an administrator enables it",
+        ClosedReason::NotLoaded => "loaded on no server until one loads it",
+    }
+}
+
+/// The one shape of a phrase naming a plugin work waits for: its role for
+/// the work (`provides`), its name (`names`) and `why` in parentheses.
+fn plugin_phrase(
+    provides: Provided,
+    plugin_id: &str,
+    why: &str,
+    names: &PluginNames<'_>,
+) -> String {
     let role = match provides {
         Provided::ContestType => "its contest plugin",
         Provided::ProblemType => "its evaluator plugin",
         Provided::CheckerFormat => "its checker plugin",
         Provided::Language => "its language plugin",
         Provided::CheckerLanguage => "its checker's language plugin",
-    };
-    let why = match reason {
-        ClosedReason::Disabled => "disabled until an administrator enables it",
-        ClosedReason::NotLoaded => "loaded on no server until one loads it",
     };
     format!("{role} {} ({why})", names.name(plugin_id))
 }
@@ -442,9 +457,7 @@ mod tests {
         );
         assert_eq!(
             not_here.waiting_for(&names).as_deref(),
-            Some(
-                "Waiting for its contest plugin IOI: not loaded on this server; another server serves it"
-            )
+            Some("Waiting for its contest plugin IOI (loaded on another server, not this one)")
         );
         // An evaluator loaded nowhere withholds nothing: only parked says it.
         let evaluator = Standing::new(
