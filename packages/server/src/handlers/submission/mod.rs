@@ -87,7 +87,7 @@ use response::{
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
         (status = 429, description = "Per-user rate limit (RATE_LIMITED), or a submission hook refused the submission (`<plugin_id>.<CODE>`; a hook may also refuse with 400, 403, 404, 409 or 413)", body = ErrorBody),
-        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, carries Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, carries Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),
+        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest type is disabled (CONTEST_TYPE_DISABLED, carries Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, carries Retry-After), loaded on no server (PLUGIN_NOT_LOADED, carries Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE); an answer about one plugin names it in details.plugin_id", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -683,7 +683,7 @@ pub async fn get_submission_judgement(
         (status = 404, description = "Contest or problem not found (NOT_FOUND)", body = ErrorBody),
         (status = 409, description = "What the contest's plugin admitted the submission against changed before it was stored (SUBMISSION_IN_FLIGHT, SUBMISSION_STATE_CHANGED, SUBMISSION_TOO_LATE)", body = ErrorBody),
         (status = 429, description = "Per-user rate limit (RATE_LIMITED), or a submission hook refused the submission (`<plugin_id>.<CODE>`; a hook may also refuse with 400, 403, 404, 409 or 413)", body = ErrorBody),
-        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest's type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest's type is disabled (CONTEST_TYPE_DISABLED, carries Retry-After); or a plugin it needs could not answer in time (PLUGIN_UNAVAILABLE)", body = ErrorBody),
+        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest's type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After; or the plugin judging the contest's type is disabled (CONTEST_TYPE_DISABLED, carries Retry-After); or a plugin it needs is disabled (PLUGIN_DISABLED, carries Retry-After), loaded on no server (PLUGIN_NOT_LOADED, carries Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE); an answer about one plugin names it in details.plugin_id", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -745,10 +745,13 @@ pub async fn create_contest_submission(
         .await;
     // A plugin the decision needs is disabled: for a submission that is the
     // contest type being closed, and it is not an answer to retry.
-    if matches!(decision, Err(AppError::PluginDisabled(_)))
+    if let Err(AppError::PluginDisabled(plugin_id)) = &decision
         && let Some(contest_type) = contest_model.contest_type.as_deref()
     {
-        return Err(AppError::ContestTypeDisabled(contest_type.to_string()));
+        return Err(AppError::ContestTypeDisabled {
+            contest_type: contest_type.to_string(),
+            plugin_id: plugin_id.clone(),
+        });
     }
     if decision?.is_denied() {
         return Err(AppError::NotFound(

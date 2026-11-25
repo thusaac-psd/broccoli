@@ -679,10 +679,15 @@ pub async fn accepting_handler(
     let contest_type = needs.contest_type;
     match state.plugin_lifecycle.closed_by(needs) {
         Some(ClosedBy {
+            plugin_id,
             provides: Provided::ContestType,
             reason: ClosedReason::Disabled,
-            ..
-        }) => return Err(AppError::ContestTypeDisabled(contest_type.to_string())),
+        }) => {
+            return Err(AppError::ContestTypeDisabled {
+                contest_type: contest_type.to_string(),
+                plugin_id,
+            });
+        }
         Some(ClosedBy {
             plugin_id,
             reason: ClosedReason::Disabled,
