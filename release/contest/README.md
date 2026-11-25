@@ -158,9 +158,15 @@ to another server.
   cannot log in until an admin sets its password.
 - **Secret plugin settings never travel.** A print station's token, or any
   setting a plugin marks secret, stays out of the archive even with
-  `--with-secrets`. The target keeps the token it already has for the same
-  station (by its name) of that contest; otherwise set the stations' tokens
-  again before they can sign in.
+  `--with-secrets`. The archive names the installation it came from, and only a
+  re-import into that same installation keeps the secrets it already stores, for
+  the same item (a print station is the same item by its name) of the same
+  config. On any other installation the secrets are unset, whatever it stored
+  before: set the stations' tokens there before they can sign in.
+- **Secret settings follow their item.** A renamed or re-added item (a print
+  station) is a new item, so its secret is entered again. A save that leaves a
+  secret absent or null keeps the stored one; a secret the plugin requires
+  cannot be cleared.
 - **Schema versions.** The archive records the source database's schema version
   and each table's columns. It restores onto a server of the same or a newer
   build, which has started once (so its database is migrated); a column the

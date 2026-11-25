@@ -278,11 +278,21 @@ with a bundle_ section (`website/docs/building-plugins/configuration.md`,
 carries its problems' and contest's configs, never a plugin-wide one, and an
 import replaces the configs of every problem it replaces. A config field its
 plugin marks secret, such as a print station's token, never travels, with or
-without `--with-secrets`: an import keeps the secret the target stored before
-the import for the same item of the same config (a print station is the same
-item by its name), else leaves it unset. Re-importing a server's own export
-keeps every secret it had, `--replace-problems` included; on another server a
-contest's print stations need their tokens set again before they can sign in.
+without `--with-secrets`. A bundle names the installation it was exported from,
+and the secrets an import keeps follow these rules:
+
+- Re-importing into the same installation keeps every secret it stores for the
+  same item of the same config (a print station is the same item by its name),
+  `--replace-problems` included.
+- Importing into any other installation leaves every secret unset, even for an
+  item of the same name there: set a contest's print station tokens again before
+  the stations can sign in.
+- A renamed or re-added item is a new item: its secret is entered again.
+
+When an admin saves a config, a secret the save leaves absent or null keeps the
+stored value, so a form never has to show it, and a secret the plugin requires
+cannot be cleared.
+
 The export reads each plugin's schema from its published upload or the server's
 plugin directory. The configs of a plugin with neither (removed, or never
 installed on the source), and a config whose namespace its plugin no longer
