@@ -47,6 +47,57 @@ async fn admin(app: &TestApp) -> String {
         .await
 }
 
+/// What a plugin's manifest declares of what it governs (its visibility
+/// query, its hooks, its judging inputs) is recorded from the copy the fleet
+/// publishes when a replica registers it, not only when one loads it: a
+/// disabled plugin no replica loads, or a row an upgrade reset, still names
+/// them, while what it provides stays as recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_no_replica_loads_still_records_what_its_manifest_declares() {
+    use sea_orm::ConnectionTrait;
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    let res = a
+        .post_with_token(&routes::admin_plugin_disable(PLUGIN), &json!({}), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    a.db.execute_unprepared(&format!(
+        "UPDATE plugin SET governs = jsonb_set(jsonb_set(governs, '{{visibility}}', 'false'), \
+                                     '{{contest_types}}', '[\"kept-x\"]') \
+          WHERE id = '{PLUGIN}'"
+    ))
+    .await
+    .unwrap();
+
+    let _b = a.spawn_replica(SpawnOptions::default()).await;
+    let row =
+        a.db.query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            format!(
+                "SELECT (governs->>'visibility')::boolean AS visibility, \
+                        governs->'contest_types' AS contest_types, is_enabled \
+                   FROM plugin WHERE id = '{PLUGIN}'"
+            ),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !row.try_get::<bool>("", "is_enabled").unwrap(),
+        "still disabled"
+    );
+    assert!(
+        row.try_get::<bool>("", "visibility").unwrap(),
+        "its manifest's visibility query is recorded from its registration"
+    );
+    assert_eq!(
+        row.try_get::<serde_json::Value>("", "contest_types")
+            .unwrap(),
+        json!(["kept-x"]),
+        "what it provides stays as recorded"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn disable_and_enable_through_one_replica_reach_the_other() {
     let a = TestApp::spawn_with_plugins().await;

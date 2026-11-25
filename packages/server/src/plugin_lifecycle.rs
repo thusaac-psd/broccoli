@@ -781,6 +781,7 @@ pub async fn boot(state: &AppState) -> anyhow::Result<Vec<PluginActivationFailur
         .map(|p| p.id)
         .collect();
     register_rows(&state.db, &registrations(state, &ids)).await?;
+    record_declared(state, &ids).await?;
     let failures = with_applied(state, async |applied| {
         reconcile_locked(state, applied).await
     })
@@ -1353,6 +1354,7 @@ async fn register_new_dirs(state: &AppState) -> Result<bool, DbErr> {
         Vec::new()
     });
     register_rows(&state.db, &registrations(state, &new_ids)).await?;
+    record_declared(state, &new_ids).await?;
     Ok(!new_ids.is_empty())
 }
 
@@ -1372,13 +1374,13 @@ fn registered_host_locale(state: &AppState, plugin_id: &str) -> Option<String> {
 
 /// What the plugin loaded here governs.
 async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
-    let visibility = state
+    let declared = state
         .plugins
         .get_registry()
         .read()
         .ok()
-        .and_then(|r| r.get(plugin_id).map(|e| declares_visibility(&e.manifest)))
-        .unwrap_or(false);
+        .and_then(|r| r.get(plugin_id).map(|e| Declared::of(&e.manifest)))
+        .unwrap_or_default();
     let mut unchecked_problem_types: Vec<String> = state
         .registries
         .evaluator_registry
@@ -1390,29 +1392,81 @@ async fn loaded_governs(state: &AppState, plugin_id: &str) -> Governs {
         .map(|(problem_type, _)| problem_type)
         .collect();
     unchecked_problem_types.sort();
-    let (hooks, judging_inputs, checker_languages) = state
-        .plugins
-        .get_registry()
-        .read()
-        .ok()
-        .and_then(|r| {
-            r.get(plugin_id).map(|e| {
-                (
-                    declared_hooks(&e.manifest),
-                    declared_judging_inputs(&e.manifest),
-                    declared_checker_languages(&e.manifest),
-                )
-            })
-        })
-        .unwrap_or_default();
     Governs {
-        visibility,
+        visibility: declared.visibility,
         provides: Provides::registered_by(&state.registries, plugin_id).await,
         unchecked_problem_types,
-        hooks,
-        judging_inputs,
-        checker_languages,
+        hooks: declared.hooks,
+        judging_inputs: declared.judging_inputs,
+        checker_languages: declared.checker_languages,
     }
+}
+
+/// What a plugin's manifest itself declares of what it governs, without
+/// loading it: the parts of [`Governs`] that are not registrations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+struct Declared {
+    visibility: bool,
+    hooks: Vec<HookTopic>,
+    judging_inputs: Vec<String>,
+    checker_languages: Vec<CheckerLanguage>,
+}
+
+impl Declared {
+    fn of(manifest: &plugin_core::manifest::PluginManifest) -> Self {
+        Self {
+            visibility: declares_visibility(manifest),
+            hooks: declared_hooks(manifest),
+            judging_inputs: declared_judging_inputs(manifest),
+            checker_languages: declared_checker_languages(manifest),
+        }
+    }
+}
+
+/// Record, for each of `ids` registered here from a bundled copy, what its
+/// manifest declares (`Declared`) in its recorded [`Governs`], keeping what
+/// it provides: a plugin no replica ever loaded (a disabled one) and a row
+/// an upgrade brought to the current shape know their hooks and judging
+/// inputs from the manifest the fleet publishes, not only once a replica
+/// loads it. Only where the fleet runs the bundled copy this replica has (no
+/// upload, and the published content hash this copy's, or none published
+/// yet), so a replica with another copy never records its manifest. In id
+/// order, as [`register_rows`] writes.
+async fn record_declared(state: &AppState, ids: &[String]) -> Result<(), DbErr> {
+    let mut ids: Vec<&String> = ids.iter().collect();
+    ids.sort();
+    let empty = serde_json::to_value(Governs::default())
+        .map_err(|e| DbErr::Custom(format!("the empty governs shape: {e}")))?;
+    for id in ids {
+        let Some((declared, root)) = state.plugins.get_registry().read().ok().and_then(|r| {
+            r.get(id)
+                .map(|e| (Declared::of(&e.manifest), e.root_dir.clone()))
+        }) else {
+            continue;
+        };
+        let Some(fingerprint) = plugin_utils::fingerprint(&root).await else {
+            continue;
+        };
+        let declared = serde_json::to_value(&declared)
+            .map_err(|e| DbErr::Custom(format!("a manifest's declared governs: {e}")))?;
+        state
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE plugin SET governs = COALESCE(governs, $2) || $3 \
+                  WHERE id = $1 AND archive_hash IS NULL \
+                    AND (content_hash IS NULL OR content_hash = $4) \
+                    AND governs IS DISTINCT FROM COALESCE(governs, $2) || $3",
+                [
+                    id.as_str().into(),
+                    empty.clone().into(),
+                    declared.into(),
+                    fingerprint.hash.into(),
+                ],
+            ))
+            .await?;
+    }
+    Ok(())
 }
 
 /// Record what the published version of a plugin, just loaded here at
