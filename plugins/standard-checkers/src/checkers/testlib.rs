@@ -471,6 +471,38 @@ mod tests {
         assert_eq!(v.score, 1.0);
     }
 
+    /// The host reads a problem's checker language from the manifest's
+    /// `checker_languages`; it must name the language this module compiles
+    /// each extension in, and only the extensions it compiles.
+    #[test]
+    fn the_manifest_maps_checker_languages_as_the_code_does() {
+        let manifest: toml::Value =
+            toml::from_str(include_str!("../../plugin.toml")).expect("plugin.toml");
+        let languages = manifest["config"]["checker_source"]["checker_languages"]
+            .as_table()
+            .expect("checker_languages");
+        let mut mapped = 0;
+        for (language, extensions) in languages {
+            for extension in extensions.as_array().expect("extensions") {
+                let file = format!("checker.{}", extension.as_str().expect("extension"));
+                assert!(is_checker_source(&file), "{file} is compiled");
+                assert_eq!(checker_language_id(&file).unwrap(), language, "{file}");
+                mapped += 1;
+            }
+        }
+        for extension in ["cpp", "cc", "cxx", "c"] {
+            assert!(
+                languages.values().any(|e| e
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|x| x.as_str() == Some(extension))),
+                "{extension} is mapped"
+            );
+        }
+        assert_eq!(mapped, 4);
+    }
+
     #[test]
     fn checker_language_id_cpp() {
         assert_eq!(checker_language_id("checker.cpp").unwrap(), "cpp");

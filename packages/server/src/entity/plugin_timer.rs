@@ -29,9 +29,14 @@ pub struct Model {
     #[sea_orm(default_value = 0)]
     pub attempts: i32,
 
-    /// How many deliveries in a row the plugin could not answer.
+    /// How many deliveries in a row the plugin could not answer for its own
+    /// reason.
     #[sea_orm(default_value = 0)]
     pub unanswered: i32,
+
+    /// How many deliveries in a row a host outage kept from answering.
+    #[sea_orm(default_value = 0)]
+    pub outages: i32,
 
     /// When the timer may be delivered next, after an unanswered delivery;
     /// `None` once scheduled anew.

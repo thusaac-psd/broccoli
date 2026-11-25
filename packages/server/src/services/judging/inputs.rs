@@ -2,12 +2,14 @@
 //!
 //! Everything judging reads of a problem is one versioned whole: its test
 //! cases, its time and memory limits, its type, its checker format, its
-//! additional files (graders), the type of each contest it is in, and the
-//! stored configs of every namespace a plugin declares judging reads
-//! (`ConfigNamespace::is_judging_input`, recorded in its `Governs`) at each
-//! scope the config cascade reads: the problem's, a contest problem's, a
-//! contest's (every problem of the contest) and the plugin's (every problem).
-//! A config of any other namespace counts nothing.
+//! additional files (graders), its default contest type, which contests it
+//! is in and each one's type, and the stored configs of every namespace a
+//! plugin declares judging reads (`ConfigNamespace::is_judging_input`,
+//! recorded in its `Governs`) at the problem's, a contest problem's and a
+//! contest's scope (every problem of the contest). A plugin-scope config of
+//! one moves its plugin's `inputs_epoch`, which the stamp records for each
+//! plugin the judgement is judged by (`Unit::plugin_epochs`) and the apply
+//! check compares. A config of any other namespace counts nothing.
 //! `problem.inputs_version` counts every change to any of them, counted by
 //! database triggers (see [`expected`]), so every write path counts it
 //! without knowing to. A transaction that restores rows as they were (a
@@ -30,8 +32,9 @@ pub const RESTORING: &str = "SET LOCAL broccoli.restoring = 'on'";
 
 /// Records that judgement `judgement_id`, at epoch `judge_epoch`, is judged
 /// against inputs version `version`, read in the same snapshot as the
-/// inputs. Fenced on the epoch: a dispatch the platform took back stamps
-/// nothing.
+/// inputs, and the inputs epoch of each plugin it is judged by
+/// (`Unit::plugin_epochs`). Fenced on the epoch: a dispatch the platform
+/// took back stamps nothing.
 pub(crate) async fn stamp_inputs_version(
     db: &DatabaseConnection,
     judgement_id: i32,
@@ -40,8 +43,13 @@ pub(crate) async fn stamp_inputs_version(
 ) -> Result<(), DbErr> {
     db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE submission_judgement SET inputs_version = $3 \
-          WHERE id = $1 AND judge_epoch = $2 AND NOT is_finalized",
+        format!(
+            "UPDATE submission_judgement u SET inputs_version = $3, plugin_epochs = {epochs} \
+               FROM submission s \
+              WHERE s.id = u.submission_id AND u.id = $1 AND u.judge_epoch = $2 \
+                AND NOT u.is_finalized",
+            epochs = super::Unit::plugin_epochs(),
+        ),
         [judgement_id.into(), judge_epoch.into(), version.into()],
     ))
     .await?;
@@ -74,7 +82,8 @@ BEGIN
   IF NEW.time_limit IS DISTINCT FROM OLD.time_limit
      OR NEW.memory_limit IS DISTINCT FROM OLD.memory_limit
      OR NEW.problem_type IS DISTINCT FROM OLD.problem_type
-     OR NEW.checker_format IS DISTINCT FROM OLD.checker_format THEN
+     OR NEW.checker_format IS DISTINCT FROM OLD.checker_format
+     OR NEW.default_contest_type IS DISTINCT FROM OLD.default_contest_type THEN
     NEW.inputs_version := OLD.inputs_version + 1;
   END IF;
   RETURN NEW;
@@ -136,7 +145,7 @@ BEGIN
                        WHERE cp.contest_id
                              = substring(changed->>'ref_id' FROM '^([0-9]+)$')::integer);
       WHEN 'plugin' THEN
-        UPDATE public.problem SET inputs_version = inputs_version + 1;
+        UPDATE public.plugin SET inputs_epoch = inputs_epoch + 1 WHERE id = config_plugin;
       ELSE
         NULL;
     END CASE;
@@ -161,12 +170,64 @@ BEGIN
   RETURN NULL;
 END $$";
 
+    /// Keeps `problem.checker_language`: the language the first file of a
+    /// problem's stored checker source compiles in, by the extensions its
+    /// plugin declares (`governs -> 'checker_languages'`); NULL when none
+    /// maps or the source is gone.
+    const CHECKER_LANGUAGE_FUNCTION: &str =
+        "CREATE OR REPLACE FUNCTION public.broccoli_checker_language() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  changed jsonb;
+  target integer;
+  config_plugin text;
+  config_namespace text;
+  language text;
+BEGIN
+  IF current_setting('broccoli.restoring', true) = 'on' THEN
+    RETURN NULL;
+  END IF;
+  changed := CASE WHEN TG_OP = 'DELETE' THEN to_jsonb(OLD) ELSE to_jsonb(NEW) END;
+  IF changed->>'scope' IS DISTINCT FROM 'problem' THEN
+    RETURN NULL;
+  END IF;
+  target := substring(changed->>'ref_id' FROM '^([0-9]+)$')::integer;
+  config_plugin := split_part(changed->>'namespace', ':', 1);
+  config_namespace := substring(changed->>'namespace' FROM '^[^:]*:(.*)$');
+  IF target IS NULL OR NOT EXISTS (
+       SELECT 1 FROM public.plugin p, jsonb_array_elements(p.governs -> 'checker_languages') l
+        WHERE p.id = config_plugin AND l->>'namespace' = config_namespace) THEN
+    RETURN NULL;
+  END IF;
+  IF TG_OP <> 'DELETE' THEN
+    SELECT l->>'language' INTO language
+      FROM jsonb_array_elements(changed->'config'->'files') WITH ORDINALITY AS f(file, n)
+      JOIN public.plugin p ON p.id = config_plugin
+      CROSS JOIN jsonb_array_elements(p.governs -> 'checker_languages') l
+     WHERE l->>'namespace' = config_namespace
+       AND lower(f.file->>'filename') LIKE '%.' || (l->>'extension')
+     ORDER BY f.n
+     LIMIT 1;
+  END IF;
+  UPDATE public.problem SET checker_language = language
+   WHERE id = target AND checker_language IS DISTINCT FROM language;
+  RETURN NULL;
+END $$";
+
     async fn has_trigger<C: ConnectionTrait>(db: &C, table: &str) -> Result<bool, DbErr> {
+        has_named_trigger(db, TRIGGER, table).await
+    }
+
+    async fn has_named_trigger<C: ConnectionTrait>(
+        db: &C,
+        trigger: &str,
+        table: &str,
+    ) -> Result<bool, DbErr> {
         Ok(db
             .query_one_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "SELECT 1 FROM pg_trigger WHERE tgname = $1 AND tgrelid = $2::regclass",
-                [TRIGGER.into(), table.into()],
+                [trigger.into(), table.into()],
             ))
             .await?
             .is_some())
@@ -178,6 +239,15 @@ END $$";
         db.execute_unprepared(PROBLEM_FUNCTION).await?;
         db.execute_unprepared(ROW_FUNCTION).await?;
         db.execute_unprepared(CONTEST_FUNCTION).await?;
+        db.execute_unprepared(CHECKER_LANGUAGE_FUNCTION).await?;
+        if !has_named_trigger(db, "broccoli_checker_language", "plugin_config").await? {
+            db.execute_unprepared(
+                "CREATE TRIGGER broccoli_checker_language \
+                 AFTER INSERT OR UPDATE OR DELETE ON public.plugin_config \
+                 FOR EACH ROW EXECUTE FUNCTION public.broccoli_checker_language()",
+            )
+            .await?;
+        }
         if !has_trigger(db, "contest").await? {
             db.execute_unprepared(&format!(
                 "CREATE TRIGGER {TRIGGER} AFTER UPDATE ON public.contest \
@@ -189,6 +259,15 @@ END $$";
             db.execute_unprepared(&format!(
                 "CREATE TRIGGER {TRIGGER} BEFORE UPDATE ON public.problem \
                  FOR EACH ROW EXECUTE FUNCTION public.broccoli_problem_inputs_changed()"
+            ))
+            .await?;
+        }
+        if !has_trigger(db, "contest_problem").await? {
+            db.execute_unprepared(&format!(
+                "CREATE TRIGGER {TRIGGER} \
+                 AFTER INSERT OR DELETE OR UPDATE OF contest_id, problem_id \
+                 ON public.contest_problem \
+                 FOR EACH ROW EXECUTE FUNCTION public.broccoli_inputs_changed()"
             ))
             .await?;
         }

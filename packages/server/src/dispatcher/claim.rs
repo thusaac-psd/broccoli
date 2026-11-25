@@ -435,7 +435,8 @@ fn start_claimed<T, F, Fut>(
         let live = state
             .registries
             .live_dispatches
-            .enter(claim.unit.dispatched(), needs_loaded);
+            .enter(claim.unit.dispatched(), needs_loaded)
+            .needing(claim.needs(&state.plugin_lifecycle));
         slot.spawn(label, dispatch(state.clone(), claim.unit, live));
     }
 }

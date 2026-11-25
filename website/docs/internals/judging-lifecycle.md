@@ -166,7 +166,13 @@ A unit of work needs exactly the plugins it uses (`providers::Needs`, built by
 evaluator of its problem's type, the resolver of its language, and the checker
 of its problem's checker format only when the evaluator registered with
 `uses_checker` (an evaluator that does not is recorded in
-`unchecked_problem_types`). It is parked while every plugin that recorded one
+`unchecked_problem_types`), and, when that checker compiles the problem's
+checker source, the language the source is in (`problem.checker_language`,
+kept by the `broccoli_checker_language` trigger from the extensions the
+checker's `checker_source` namespace declares in `checker_languages`). A
+plugin the dispatch reaches for outside those needs stands at once
+(`NO_PROVIDER`) instead of being handed back, since no parking waits for it.
+It is parked while every plugin that recorded one
 of those keys (`plugin.governs`: `contest_types`, `problem_types`,
 `checker_formats`, `languages`) is disabled fleet-wide; `providers::runnable` states that in SQL
 (`judging::Unit::runnable` over a unit's scan) and
@@ -234,9 +240,13 @@ is delivered at least once to each hook plugin it is for, and once while
 every write lands. The replica that dispatches it first records it in
 `hook_event` (its id, topic, payload and enablements) with a lease and a
 claim token, before its hooks run, so a duplicate dispatch on any replica, or
-after a restart, is skipped. Each plugin whose hooks answered is recorded in
-`hook_event_delivery`, and a later attempt calls only the plugins not
-recorded there. The event is complete once every hook plugin enabled
+after a restart, is skipped. Each hook plugin the event is owed to runs on
+its own, in plugin id order: a background event's rejections and stops
+change nothing, so one plugin's failure (an error, a trap, no answer) never
+holds back another's delivery in that attempt. Each plugin whose hooks
+answered is recorded delivered in `hook_event_delivery`, and a later attempt
+calls only the plugins not delivered; a plugin whose hooks failed keeps its
+last error there and stays owed. The event is complete once every hook plugin enabled
 fleet-wide that it is for has it, loaded on this replica or not: each
 plugin's recorded `governs` lists the hooks its manifest declares, so a
 replica that does not load one delivers what it loads and leaves the rest to
@@ -247,7 +257,10 @@ plugin not loaded here) gives the lease back and sets `next_attempt_at` 10 s
 later, doubling with each attempt up to an hour; after 12 attempts the event
 is dead-lettered: `dead_at` is set and a `hook_event` message, which
 administrators see in the dead letter queue, is filed in the same
-transaction. A dispatch that is dropped gives its lease back at once, without
+transaction, with each attempt and why it failed as its retry history and
+each still-owed plugin's last error in its payload. Retrying that message
+gives the event a fresh run for the plugins still owed it, and the event
+completing resolves the message. A dispatch that is dropped gives its lease back at once, without
 waiting on the database, so shutdown is never held up. Every replica
 re-scans the table every 10 s: it takes the events whose next attempt is due
 and whose lease is free or has lapsed (10 min, so the event of a replica that
@@ -286,14 +299,20 @@ are keyed on it.
 - Everything judging reads of a problem is versioned as one:
   `problem.inputs_version` counts every change to its test cases, its time
   and memory limits, its type, its checker format, its additional files
-  (graders), the type of each contest it is in, and the stored configs of
-  every namespace a plugin declares a judging input (`judging_input`, its
-  checker source among them) at each scope the config cascade reads: the
-  problem's, a contest problem's, a contest's (every problem of the contest)
-  and the plugin's (every problem). A config of any other namespace counts
-  nothing. Database triggers count them (`judging::inputs`), reading which
-  namespaces are judging inputs from each plugin's recorded `governs`, so
-  every write path counts a change without knowing to. The dispatch reads the
+  (graders), its default contest type, which contests it is in and each
+  one's type, and the stored configs of every namespace a plugin declares a
+  judging input (`judging_input`, its checker source among them) at the
+  problem's, a contest problem's and a contest's scope (every problem of the
+  contest). A plugin-scope config of a judging input moves that plugin's own
+  `inputs_epoch` instead, and a judgement records the epoch of each plugin it
+  is judged by (`plugin_epochs`, the fleet-wide providers of its needs), so
+  such a change reaches exactly the work that plugin judges and locks no
+  problem row. A config of any other namespace counts nothing. Database
+  triggers count them (`judging::inputs`), reading which namespaces are
+  judging inputs from each plugin's recorded `governs`, which a replica
+  records from the manifest as it registers the plugin and again whenever a
+  change is published, so a plugin no replica loads still declares its
+  inputs; every write path counts a change without knowing to. The dispatch reads the
   problem and its test cases in one snapshot and stamps the judgement with
   that snapshot's version (`judging::stamp_inputs_version`). A plugin reads
   its configs later, while it judges, so a change between the stamp and that
@@ -344,8 +363,7 @@ refused (`QUEUE_UNREACHABLE`), an operation the queue lost
 (`NO_CAPABLE_WORKER`), a plugin the unit needs that stopped being loaded on
 the replica that claimed it (`PLUGIN_NOT_LOADED_HERE`), a statement the
 dispatch or its plugins ran that the database could not serve
-(`DATABASE_UNAVAILABLE`): the database lost, its pool or the plugin's own SQL
-permits with nothing free in time. One rule records it,
+(`DATABASE_UNAVAILABLE`): the database lost. One rule records it,
 `host_funcs::host_db`: plugin SQL where every unavailable statement ends
 (`host_funcs::sql::unavailable`, through `host_db::fail_under`), the host's
 own SQL in a host function through `host_db::failed`, and the dispatch's own
@@ -353,7 +371,15 @@ statements (reading the inputs, stamping their version) through
 `host_db::dispatch_failed`, as `common::db::outage` decides it. Each of these
 faults is a hand-back
 (`SystemErrorClass::HandBack`): the platform lost the attempt, and it never
-becomes a verdict. The judging session ends as `Lost` before another result
+becomes a verdict. Plugin SQL that found no connection or permit free in
+time, for a call that held none, is contention with the work running beside
+it (`DATABASE_BUSY`, `DispatchFault::SqlContended`): it hands back the same
+way, but only `CONTENTION_HANDBACKS` (5) times per unit, counted on the
+unit's row (`contended_handbacks`) so the cap holds across replicas, and is a
+failure judging the submission after that, within its retry budget. A plugin
+that waits for a connection while its own call already holds one (an open
+transaction) is failing on its own: the call answers it an error, and the
+attempt spends the submission's budget as any plugin error does. The judging session ends as `Lost` before another result
 reaches the plugin, a plugin write that would finalize the judgement is fenced
 out like a stale dispatch's, and the dispatch ends through `fail_dispatch`,
 which sends the judgement back to `Queued` under a fresh epoch spending

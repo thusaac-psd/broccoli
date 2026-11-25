@@ -1490,6 +1490,63 @@ async fn a_type_change_after_a_pending_submission_finds_it() {
     assert!(change.await.unwrap(), "the change sees the submission");
 }
 
+/// An attempt that found no plugin SQL connection free (contention with the
+/// work beside it) is handed back spending nothing, but only
+/// `CONTENTION_HANDBACKS` times per unit, counted on its row: the next one
+/// is a failure judging the submission, so contention that never clears
+/// cannot hand a unit back forever.
+#[tokio::test]
+async fn a_contended_attempt_is_handed_back_only_up_to_its_cap() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    new_submission(&db).await;
+    let contended = || {
+        DispatchFailure::from(super::fault::Recorded {
+            fault: DispatchFault::SqlContended,
+            message: "no plugin SQL connection was free".into(),
+        })
+    };
+    for handed_back in 1..=super::fault::CONTENTION_HANDBACKS {
+        let claimed = claim_one(&db, "srv").await;
+        assert_eq!(
+            fail_dispatch(
+                &db,
+                Unit::Judgement,
+                claimed.judgement.id,
+                claimed.judgement.judge_epoch,
+                &contended(),
+            )
+            .await
+            .unwrap(),
+            DispatchFailed::HandedBack,
+            "hand-back {handed_back}"
+        );
+        let j = judgement(&db, claimed.judgement.id).await;
+        assert_eq!(j.status, SubmissionStatus::Queued);
+        assert_eq!(j.contended_handbacks, handed_back);
+    }
+    let claimed = claim_one(&db, "srv").await;
+    assert_eq!(
+        fail_dispatch(
+            &db,
+            Unit::Judgement,
+            claimed.judgement.id,
+            claimed.judgement.judge_epoch,
+            &contended(),
+        )
+        .await
+        .unwrap(),
+        DispatchFailed::SystemError,
+        "past the cap the failure is the submission's"
+    );
+    let j = judgement(&db, claimed.judgement.id).await;
+    assert_eq!(j.status, SubmissionStatus::SystemError);
+    assert_eq!(
+        j.error_code.as_deref(),
+        Some(HostCode::DatabaseBusy.as_str())
+    );
+    assert!(!j.error_stands, "within its retry budget");
+}
+
 /// An attempt the platform lost (the queue was unreachable or lost an
 /// operation, its worker lacks a platform tool, or no worker takes work)
 /// goes back to the queue however often it happens, never finalized and with
@@ -1542,7 +1599,7 @@ async fn provider(db: &DatabaseConnection, enabled: bool) {
         db,
         &format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
-             VALUES ('std', {enabled}, '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}') \
+             VALUES ('std', {enabled}, '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         ),
     )
@@ -1692,7 +1749,7 @@ async fn a_replica_runs_a_key_only_on_its_fleet_wide_provider() {
         format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
              VALUES ('{id}', {enabled}, \
-                     '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}') \
+                     '{{\"visibility\": false, \"contest_types\": [\"standard\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         )
     };
@@ -1736,7 +1793,7 @@ async fn work_needs_its_language_and_a_checker_only_when_its_evaluator_uses_one(
             "INSERT INTO plugin (id, is_enabled, governs) VALUES ('{id}', {enabled}, \
                jsonb_build_object('visibility', false, 'contest_types', '[]'::jsonb, \
                  'problem_types', '[]'::jsonb, 'checker_formats', '[]'::jsonb, \
-                 'languages', '[]'::jsonb, 'unchecked_problem_types', '{unchecked}'::jsonb, 'hooks', '[]'::jsonb, 'judging_inputs', '[]'::jsonb) \
+                 'languages', '[]'::jsonb, 'unchecked_problem_types', '{unchecked}'::jsonb, 'hooks', '[]'::jsonb, 'judging_inputs', '[]'::jsonb, 'checker_languages', '[]'::jsonb) \
                || jsonb_build_object('{field}', jsonb_build_array('{key}'))) \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled, \
                                             governs = EXCLUDED.governs"
@@ -1818,7 +1875,7 @@ async fn evaluator(db: &DatabaseConnection, enabled: bool) {
         &format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
              VALUES ('eval', {enabled}, \
-                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"standard\"], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}') \
+                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"standard\"], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         ),
     )
@@ -1842,13 +1899,69 @@ async fn work_whose_checker_plugin_is_disabled_is_parked_until_it_is_enabled() {
         format!(
             "INSERT INTO plugin (id, is_enabled, governs) \
              VALUES ('checkers', {enabled}, \
-                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [\"{format}\"], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}') \
+                     '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [\"{format}\"], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}') \
              ON CONFLICT (id) DO UPDATE SET is_enabled = EXCLUDED.is_enabled"
         )
     };
     exec(&db, &checker(false)).await;
     assert_eq!(claimable(&db).await, 0, "parked work is not claimed");
     exec(&db, &checker(true)).await;
+    assert_eq!(claimable(&db).await, 1, "it resumes");
+}
+
+/// A unit whose checker compiles the problem's checker source needs that
+/// source's language as much as its own (`problem.checker_language`, kept by
+/// the database from the stored source), and while
+/// every provider of that language is disabled the work is parked, unclaimed,
+/// until one is enabled. A checker that declares no languages needs none.
+#[tokio::test]
+async fn work_whose_checker_language_plugin_is_disabled_is_parked_until_it_is_enabled() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (sub, _) = new_submission(&db).await;
+    let problem_id = sub.problem_id;
+    let format = crate::entity::problem::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap()
+        .checker_format;
+    let languages = serde_json::json!([
+        {"namespace": "checker_source", "extension": "cpp", "language": "checker-cpp"},
+    ]);
+    exec(
+        &db,
+        &format!(
+            "INSERT INTO plugin (id, is_enabled, governs) VALUES \
+               ('checkers', TRUE, '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [\"{format}\"], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": {languages}}}'), \
+               ('compilers', FALSE, '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [], \"languages\": [\"checker-cpp\"], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}')"
+        ),
+    )
+    .await;
+    // The language its checker source compiles in, as the database keeps it
+    // from the stored source (`broccoli_checker_language`, pinned by
+    // `a_problems_checker_language_follows_its_stored_checker_source`).
+    exec(
+        &db,
+        &format!("UPDATE problem SET checker_language = 'checker-cpp' WHERE id = {problem_id}"),
+    )
+    .await;
+    let checker_language = crate::entity::problem::Entity::find_by_id(problem_id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap()
+        .checker_language;
+    assert_eq!(checker_language.as_deref(), Some("checker-cpp"),);
+    assert_eq!(
+        claimable(&db).await,
+        0,
+        "parked while its compiler is disabled"
+    );
+    exec(
+        &db,
+        "UPDATE plugin SET is_enabled = TRUE WHERE id = 'compilers'",
+    )
+    .await;
     assert_eq!(claimable(&db).await, 1, "it resumes");
 }
 

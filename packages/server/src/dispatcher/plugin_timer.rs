@@ -22,9 +22,12 @@
 //! of their lease. A delivery the plugin could not answer (its SQL met a
 //! database outage, the server is draining, the plugin is between loads)
 //! is handed back with its attempt refunded and its next delivery backed off
-//! (`retry_at`, [`unanswered_backoff`]); after [`MAX_UNANSWERED`] in a row
-//! the refund stops, so a plugin that never answers spends the timer's
-//! budget and the timer is dropped loudly. The claim statement is the
+//! (`retry_at`, [`unanswered_backoff`]). A host outage (the database lost or
+//! saturated, the server draining) is the platform's, so it refunds for as
+//! long as it lasts and never spends the row; after [`MAX_UNANSWERED`]
+//! deliveries in a row the plugin left unanswered for its own reason the
+//! refund stops, so a plugin that never answers spends the timer's budget
+//! and the timer is dropped loudly. The claim statement is the
 //! single owner of the retry budget: it never claims a row whose budget is
 //! spent and, in the same statement, deletes every such row whose last
 //! claim's lease has expired, however that last delivery ended (a trap, a
@@ -57,8 +60,9 @@ use crate::state::AppState;
 /// the delivery to wait for admission before its guest starts.
 pub const LEASE_MARGIN: StdDuration = StdDuration::from_secs(30);
 
-/// How many deliveries in a row the plugin may leave unanswered with their
-/// attempt refunded; past this each unanswered delivery spends one.
+/// How many deliveries in a row the plugin may leave unanswered for its own
+/// reason with their attempt refunded; past this each one spends one. A host
+/// outage never counts here.
 pub const MAX_UNANSWERED: i32 = 12;
 
 /// The wait before delivering a timer again after its `unanswered`th
@@ -215,19 +219,20 @@ pub async fn tick_once(state: &AppState, config: &TimerConfig) -> Result<TickSta
                 );
                 break;
             }
-            Delivery::Unanswered => {
+            Delivery::Unanswered(cause) => {
                 warn!(
                     plugin_id = %row.plugin_id,
                     key = %row.key,
-                    "Plugin could not answer a timer delivery; it is handed back with its attempt refunded"
+                    ?cause,
+                    "Plugin could not answer a timer delivery; it is handed back"
                 );
-                unanswered.push(row);
+                unanswered.push((row, cause));
                 break;
             }
         }
     }
-    for row in &unanswered {
-        back_off_unanswered(&state.db, row).await;
+    for (row, cause) in &unanswered {
+        back_off_unanswered(&state.db, row, *cause).await;
     }
     let unreached: Vec<plugin_timer::Model> = rows.collect();
     if !unreached.is_empty() {
@@ -256,6 +261,7 @@ struct ClaimRow {
     attempts: i32,
     created_at: chrono::DateTime<chrono::Utc>,
     unanswered: i32,
+    outages: i32,
     retry_at: Option<chrono::DateTime<chrono::Utc>>,
     exhausted: bool,
 }
@@ -302,7 +308,7 @@ async fn claim_due(
           WHERE attempts >= $4
             AND claimed_at < now() - ($1 || ' seconds')::interval
           RETURNING id, plugin_id, key, fire_at, payload, claimed_at, attempts, created_at,
-                    unanswered, retry_at
+                    unanswered, outages, retry_at
         ), due AS (
           UPDATE plugin_timer
           SET claimed_at = now(), attempts = attempts + 1
@@ -318,7 +324,7 @@ async fn claim_due(
             FOR UPDATE SKIP LOCKED
           )
           RETURNING id, plugin_id, key, fire_at, payload, claimed_at, attempts, created_at,
-                    unanswered, retry_at
+                    unanswered, outages, retry_at
         )
         SELECT *, FALSE AS exhausted FROM due
         UNION ALL
@@ -348,6 +354,7 @@ async fn claim_due(
             attempts: row.attempts,
             created_at: row.created_at,
             unanswered: row.unanswered,
+            outages: row.outages,
             retry_at: row.retry_at,
         };
         if row.exhausted {
@@ -389,18 +396,33 @@ async fn release_unreached(db: &DatabaseConnection, rows: &[plugin_timer::Model]
     }
 }
 
-/// Hands a claimed row whose plugin could not answer back, its next delivery
-/// backed off by [`unanswered_backoff`]: with its attempt refunded while the
-/// plugin has left fewer than [`MAX_UNANSWERED`] deliveries in a row
-/// unanswered, and with it spent after that. Only a row still holding this
-/// claim is touched. Errors are logged: the row then stays claimed and is
-/// retried after the lease with one attempt spent.
-async fn back_off_unanswered(db: &DatabaseConnection, row: &plugin_timer::Model) {
+/// Hands a claimed row whose delivery went unanswered for `cause` back, its
+/// next delivery backed off by [`unanswered_backoff`] of how many in a row
+/// went unanswered for that cause. A host outage always refunds the attempt.
+/// The plugin's own unanswered delivery refunds it while the plugin has left
+/// no more than [`MAX_UNANSWERED`] in a row unanswered, and spends it after
+/// that. Only a row still holding this claim is touched. Errors are logged:
+/// the row then stays claimed and is retried after the lease with one
+/// attempt spent.
+async fn back_off_unanswered(
+    db: &DatabaseConnection,
+    row: &plugin_timer::Model,
+    cause: Unanswered,
+) {
     let Some(claimed_at) = row.claimed_at else {
         return;
     };
-    let unanswered = row.unanswered.saturating_add(1);
-    let refund = i32::from(unanswered <= MAX_UNANSWERED);
+    let (unanswered, outages, in_a_row) = match cause {
+        Unanswered::HostOutage => {
+            let outages = row.outages.saturating_add(1);
+            (row.unanswered, outages, outages)
+        }
+        Unanswered::Plugin => {
+            let unanswered = row.unanswered.saturating_add(1);
+            (unanswered, 0, unanswered)
+        }
+    };
+    let refund = i32::from(cause == Unanswered::HostOutage || unanswered <= MAX_UNANSWERED);
     if refund == 0 {
         warn!(
             plugin_id = %row.plugin_id,
@@ -411,8 +433,8 @@ async fn back_off_unanswered(db: &DatabaseConnection, row: &plugin_timer::Model)
     }
     let sql = r#"
         UPDATE plugin_timer
-        SET claimed_at = NULL, attempts = attempts - $3, unanswered = $4,
-            retry_at = now() + make_interval(secs => $5)
+        SET claimed_at = NULL, attempts = attempts - $3, unanswered = $4, outages = $5,
+            retry_at = now() + make_interval(secs => $6)
         WHERE id = $1 AND claimed_at = $2
     "#;
     if let Err(e) = db
@@ -424,7 +446,8 @@ async fn back_off_unanswered(db: &DatabaseConnection, row: &plugin_timer::Model)
                 claimed_at.into(),
                 refund.into(),
                 unanswered.into(),
-                unanswered_backoff(unanswered).as_secs_f64().into(),
+                outages.into(),
+                unanswered_backoff(in_a_row).as_secs_f64().into(),
             ],
         ))
         .await
@@ -519,7 +542,18 @@ enum Delivery {
     /// database outage, the server is draining, the plugin is between
     /// loads): nothing about the timer, so the row goes back with its
     /// attempt refunded, as an unreached one does.
-    Unanswered,
+    Unanswered(Unanswered),
+}
+
+/// Why a delivery went unanswered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unanswered {
+    /// The host database was lost or saturated, or the server is draining:
+    /// the platform's, never the timer's to pay for.
+    HostOutage,
+    /// The plugin had no instance free, was between loads, or its instance
+    /// would not build.
+    Plugin,
 }
 
 impl Delivery {
@@ -528,7 +562,8 @@ impl Delivery {
     fn of<T>(called: &Result<T, PluginError>, lease_ended: bool) -> Self {
         match called {
             Err(e) if e.is_unavailable() && lease_ended => Self::LeaseEnded,
-            Err(e) if e.is_unavailable() => Self::Unanswered,
+            Err(e) if e.is_host_outage() => Self::Unanswered(Unanswered::HostOutage),
+            Err(e) if e.is_unavailable() => Self::Unanswered(Unanswered::Plugin),
             _ => Self::Done,
         }
     }
@@ -907,7 +942,7 @@ mod tests {
         let db = test_db().await;
         seed_timer(&db, "p", "t", now() - Duration::seconds(5), None).await;
         let claimed = claim(&db, 64).await;
-        back_off_unanswered(&db, &claimed[0]).await;
+        back_off_unanswered(&db, &claimed[0], Unanswered::Plugin).await;
         let row = find(&db, "t").await.unwrap();
         assert_eq!((row.attempts, row.unanswered, row.claimed_at), (0, 1, None));
         let wait = (row.retry_at.expect("backed off") - now()).num_milliseconds();
@@ -924,7 +959,7 @@ mod tests {
         .await;
         let claimed = claim(&db, 64).await;
         assert_eq!(claimed.len(), 1, "claimed again once due");
-        back_off_unanswered(&db, &claimed[0]).await;
+        back_off_unanswered(&db, &claimed[0], Unanswered::Plugin).await;
         let row = find(&db, "t").await.unwrap();
         assert_eq!((row.attempts, row.unanswered), (0, 2));
         assert!(unanswered_backoff(2) > unanswered_backoff(1));
@@ -938,7 +973,7 @@ mod tests {
         )
         .await;
         let claimed = claim(&db, 64).await;
-        back_off_unanswered(&db, &claimed[0]).await;
+        back_off_unanswered(&db, &claimed[0], Unanswered::Plugin).await;
         let row = find(&db, "t").await.unwrap();
         assert_eq!(
             (row.attempts, row.unanswered),
@@ -957,6 +992,55 @@ mod tests {
         .unwrap();
         let row = find(&db, "t").await.unwrap();
         assert_eq!((row.attempts, row.unanswered, row.retry_at), (0, 0, None));
+    }
+
+    /// A host outage never spends a timer, however long it lasts: each
+    /// delivery it keeps from answering refunds its attempt and backs off
+    /// (capped), even past [`MAX_UNANSWERED`], and does not count toward the
+    /// plugin's own unanswered deliveries.
+    #[tokio::test]
+    async fn a_host_outage_refunds_a_timer_for_as_long_as_it_lasts() {
+        let db = test_db().await;
+        seed_timer(&db, "p", "t", now() - Duration::seconds(5), None).await;
+        exec(
+            &db,
+            &format!("UPDATE plugin_timer SET unanswered = {MAX_UNANSWERED}"),
+        )
+        .await;
+        for outage in 1..=MAX_UNANSWERED * 2 {
+            exec(
+                &db,
+                "UPDATE plugin_timer SET retry_at = now() - interval '1 second'",
+            )
+            .await;
+            let claimed = claim(&db, 64).await;
+            assert_eq!(claimed.len(), 1, "outage {outage}: still due");
+            back_off_unanswered(&db, &claimed[0], Unanswered::HostOutage).await;
+            let row = find(&db, "t").await.unwrap();
+            assert_eq!(
+                (row.attempts, row.unanswered, row.outages),
+                (0, MAX_UNANSWERED, outage),
+                "outage {outage}: refunded, the plugin's own count untouched"
+            );
+            let wait = (row.retry_at.expect("backed off") - now()).num_milliseconds();
+            assert!(wait <= unanswered_backoff(outage).as_millis() as i64);
+        }
+        assert_eq!(
+            unanswered_backoff(MAX_UNANSWERED * 2),
+            StdDuration::from_secs(300),
+            "the backoff is capped"
+        );
+
+        // The plugin's own miss after the outage resets the outage count.
+        exec(
+            &db,
+            "UPDATE plugin_timer SET unanswered = 0, retry_at = NULL",
+        )
+        .await;
+        let claimed = claim(&db, 64).await;
+        back_off_unanswered(&db, &claimed[0], Unanswered::Plugin).await;
+        let row = find(&db, "t").await.unwrap();
+        assert_eq!((row.attempts, row.unanswered, row.outages), (0, 1, 0));
     }
 
     /// A timer backed off after unanswered deliveries never holds back one
@@ -1042,11 +1126,21 @@ mod tests {
         assert_eq!(Delivery::of(&Err::<(), _>(failed()), false), Delivery::Done);
         assert_eq!(
             Delivery::of(&Err::<(), _>(unavailable()), false),
-            Delivery::Unanswered
+            Delivery::Unanswered(Unanswered::Plugin)
         );
         assert_eq!(
             Delivery::of(&Err::<(), _>(PluginError::ShuttingDown), false),
-            Delivery::Unanswered
+            Delivery::Unanswered(Unanswered::HostOutage)
+        );
+        assert_eq!(
+            Delivery::of(
+                &Err::<(), _>(PluginError::DatabaseUnavailable {
+                    plugin_id: "p".into(),
+                    func_name: "on_timer".into(),
+                }),
+                false
+            ),
+            Delivery::Unanswered(Unanswered::HostOutage)
         );
         assert_eq!(
             Delivery::of(&Err::<(), _>(unavailable()), true),

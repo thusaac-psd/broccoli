@@ -49,7 +49,7 @@ export function messageTypeMeta(type: string): MessageTypeMeta {
     return {
       labelKey: 'dlq.type.hookEvent',
       icon: Webhook,
-      retryable: false,
+      retryable: true,
     };
   }
   return { labelKey: null, icon: Cog, retryable: false };

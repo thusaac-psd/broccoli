@@ -1306,7 +1306,7 @@ export interface paths {
     put?: never;
     /**
      * Bulk-retry DLQ messages
-     * @description Retries multiple dead letter messages by resetting their submissions to Queued (the claim fiber then promotes each to Pending) and re-dispatching to the plugin-based judging system. Supports either specific message IDs or filter-based selection. Only stuck_submission messages with a known submission_id in SystemError state are retryable; other message types are skipped. Requires `dlq:manage` permission.
+     * @description Retries multiple dead letter messages by resetting their submissions to Queued (the claim fiber then promotes each to Pending) and re-dispatching to the plugin-based judging system. Supports either specific message IDs or filter-based selection. Only stuck_submission messages with a known submission_id in SystemError state, and hook_event messages whose event is dead, are retryable; other message types are skipped. Requires `dlq:manage` permission.
      */
     post: operations['bulkRetryDlq'];
     delete?: never;
@@ -1370,7 +1370,7 @@ export interface paths {
     put?: never;
     /**
      * Retry a DLQ message
-     * @description Retries a dead letter message by resetting the submission to Queued (the claim fiber then promotes it to Pending) and re-dispatching it to the plugin-based judging system. Only stuck_submission messages can be retried; operation_task, stuck_code_run, stuck_submission_judgement and hook_event messages are visibility-only from here. The message stays unresolved with the retry recorded in its history until the rejudge ends with a verdict other than a system error, which resolves it. Requires `dlq:manage` permission.
+     * @description Retries a dead letter message by resetting the submission to Queued (the claim fiber then promotes it to Pending) and re-dispatching it to the plugin-based judging system. A hook_event message gives its event a fresh run: its attempts start over and it is delivered to the hook plugins still owed it; the message stays unresolved until the event completes, which resolves it. Only stuck_submission and hook_event messages can be retried; operation_task, stuck_code_run and stuck_submission_judgement messages are visibility-only from here. A stuck_submission message stays unresolved with the retry recorded in its history until the rejudge ends with a verdict other than a system error, which resolves it. Requires `dlq:manage` permission.
      */
     post: operations['retryDlqMessage'];
     delete?: never;
@@ -10095,7 +10095,7 @@ export interface operations {
           'application/json': components['schemas']['DlqRetryResponse'];
         };
       };
-      /** @description Only stuck_submission messages can be retried, or submission is not in a retryable state (VALIDATION_ERROR) */
+      /** @description Only stuck_submission and hook_event messages can be retried, or submission is not in a retryable state (VALIDATION_ERROR) */
       400: {
         headers: {
           [name: string]: unknown;
@@ -10131,7 +10131,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Message already resolved (CONFLICT) */
+      /** @description Message already resolved, or its hook event is no longer dead (CONFLICT) */
       409: {
         headers: {
           [name: string]: unknown;

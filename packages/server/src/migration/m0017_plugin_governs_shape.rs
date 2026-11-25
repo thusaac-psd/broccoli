@@ -3,8 +3,8 @@ use sea_orm_migration::prelude::*;
 /// What `plugin.governs` holds has one shape, the one
 /// `plugin_lifecycle::Governs` reads: an object with exactly the keys
 /// `visibility` (a boolean), `contest_types`, `problem_types`,
-/// `checker_formats`, `languages`, `unchecked_problem_types`, `hooks` and
-/// `judging_inputs` (arrays). The
+/// `checker_formats`, `languages`, `unchecked_problem_types`, `hooks`,
+/// `judging_inputs` and `checker_languages` (arrays). The
 /// SQL that reads the column and the Rust that deserializes it therefore never
 /// read a row differently: a row
 /// missing a key is refused when it is written instead of being read as "no
@@ -48,7 +48,9 @@ UPDATE public.plugin SET governs = CASE
         'hooks', CASE WHEN jsonb_typeof(governs -> 'hooks') = 'array'
             THEN governs -> 'hooks' ELSE '[]'::jsonb END,
         'judging_inputs', CASE WHEN jsonb_typeof(governs -> 'judging_inputs') = 'array'
-            THEN governs -> 'judging_inputs' ELSE '[]'::jsonb END)
+            THEN governs -> 'judging_inputs' ELSE '[]'::jsonb END,
+        'checker_languages', CASE WHEN jsonb_typeof(governs -> 'checker_languages') = 'array'
+            THEN governs -> 'checker_languages' ELSE '[]'::jsonb END)
     END
 WHERE governs IS NOT NULL;
 ALTER TABLE public.plugin ADD CONSTRAINT plugin_governs_shape CHECK (
@@ -56,10 +58,10 @@ ALTER TABLE public.plugin ADD CONSTRAINT plugin_governs_shape CHECK (
         jsonb_typeof(governs) = 'object'
         AND governs ?& ARRAY['visibility', 'contest_types', 'problem_types', 'checker_formats',
                              'languages', 'unchecked_problem_types', 'hooks',
-                             'judging_inputs']
+                             'judging_inputs', 'checker_languages']
         AND governs - ARRAY['visibility', 'contest_types', 'problem_types', 'checker_formats',
                             'languages', 'unchecked_problem_types', 'hooks',
-                            'judging_inputs'] = '{}'::jsonb
+                            'judging_inputs', 'checker_languages'] = '{}'::jsonb
         AND jsonb_typeof(governs -> 'visibility') = 'boolean'
         AND jsonb_typeof(governs -> 'contest_types') = 'array'
         AND jsonb_typeof(governs -> 'problem_types') = 'array'
@@ -68,6 +70,7 @@ ALTER TABLE public.plugin ADD CONSTRAINT plugin_governs_shape CHECK (
         AND jsonb_typeof(governs -> 'unchecked_problem_types') = 'array'
         AND jsonb_typeof(governs -> 'hooks') = 'array'
         AND jsonb_typeof(governs -> 'judging_inputs') = 'array'
+        AND jsonb_typeof(governs -> 'checker_languages') = 'array'
     )
 );
 "#;

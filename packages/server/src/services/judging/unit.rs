@@ -65,6 +65,25 @@ impl Unit {
             &format!("(SELECT pt.problem_type FROM problem pt WHERE pt.id = {row}.problem_id)"),
             &format!("(SELECT pt.checker_format FROM problem pt WHERE pt.id = {row}.problem_id)"),
             &format!("{row}.language"),
+            &format!("(SELECT pt.checker_language FROM problem pt WHERE pt.id = {row}.problem_id)"),
+        )
+    }
+
+    /// SQL over a judgement's [`Unit::scan_from`] scan: each plugin the
+    /// judgement is judged by (the fleet-wide provider of each key it needs)
+    /// with its inputs epoch (`plugin.inputs_epoch`), as a JSON object. A
+    /// plugin-scope judging-input config moves only its plugin's epoch, so
+    /// it reaches exactly the judgements that plugin judges.
+    pub(crate) fn plugin_epochs() -> String {
+        let providers: Vec<String> = Unit::Judgement
+            .needs()
+            .iter()
+            .map(|(kind, key)| crate::providers::provider(*kind, key))
+            .collect();
+        format!(
+            "(SELECT COALESCE(jsonb_object_agg(e.id, e.inputs_epoch), '{{}}'::jsonb) \
+               FROM plugin e WHERE e.id IN ({}))",
+            providers.join(", ")
         )
     }
 
@@ -406,6 +425,8 @@ pub(crate) struct Claim<T> {
     pub problem_type: String,
     /// Its problem's checker format (`problem.checker_format`).
     pub checker_format: String,
+    /// Its problem's checker language (`problem.checker_language`).
+    pub checker_language: Option<String>,
     /// Seconds from its creation to the claim, on the database clock.
     pub queued_secs: f64,
 }
@@ -421,6 +442,7 @@ impl<T: ClaimedUnit> Claim<T> {
             &self.problem_type,
             &self.checker_format,
             Some(self.unit.language()),
+            self.checker_language.as_deref(),
         )
     }
 }
@@ -510,6 +532,7 @@ fn claim_statement(unit: Unit, server_id: &str, limit: ClaimLimit, local: &Loade
                         FROM picked WHERE t.id = picked.id RETURNING t.*){mirror} \
          SELECT room.n AS claim_room, (SELECT last_value FROM {epoch}) AS claim_epoch, \
                 p.problem_type AS claim_problem_type, p.checker_format AS claim_checker_format, \
+                p.checker_language AS claim_checker_language, \
                 GREATEST(EXTRACT(EPOCH FROM NOW() - moved.created_at), 0)::float8 \
                     AS claim_queued_secs, \
                 moved.*{columns} \
@@ -575,6 +598,7 @@ async fn run_claim<T>(
                     checker_format: row
                         .try_get::<Option<String>>("", "claim_checker_format")?
                         .unwrap_or_default(),
+                    checker_language: row.try_get("", "claim_checker_language")?,
                     queued_secs: row.try_get("", "claim_queued_secs")?,
                 })
             })
@@ -1283,6 +1307,21 @@ pub(crate) async fn fail_dispatch(
     if failure.class == SystemErrorClass::HandBack {
         return hand_back(db, unit, id, judge_epoch, None).await;
     }
+    let past_cap;
+    let failure = if failure.class == SystemErrorClass::Contended {
+        if counted_contention(db, unit, id, judge_epoch).await? {
+            return hand_back(db, unit, id, judge_epoch, None).await;
+        }
+        // The unit used its contention hand-backs: the failure is the
+        // submission's to spend a retry on.
+        past_cap = DispatchFailure {
+            class: SystemErrorClass::Judging,
+            ..failure.clone()
+        };
+        &past_cap
+    } else {
+        failure
+    };
     let open_now = unit.open_dispatch("t", "$1", "$2");
     let sql = match unit {
         // A judgement locks its submission first, as every judgement
@@ -1339,6 +1378,34 @@ pub(crate) async fn fail_dispatch(
 /// the in-flight unit. With `unless_open`, the failure is the disable's only
 /// while the unit's type is still parked: if a provider was enabled since, it
 /// is finalized with that failure instead.
+/// Counts one contention hand-back on unit `id` at `judge_epoch`, if it has
+/// any left (`super::fault::CONTENTION_HANDBACKS`): whether it was counted,
+/// so the attempt is handed back.
+async fn counted_contention(
+    db: &DatabaseConnection,
+    unit: Unit,
+    id: i32,
+    judge_epoch: i32,
+) -> Result<bool, DbErr> {
+    Ok(db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!(
+                "UPDATE {table} SET contended_handbacks = contended_handbacks + 1 \
+                  WHERE id = $1 AND judge_epoch = $2 AND contended_handbacks < $3",
+                table = unit.table(),
+            ),
+            [
+                id.into(),
+                judge_epoch.into(),
+                super::fault::CONTENTION_HANDBACKS.into(),
+            ],
+        ))
+        .await?
+        .rows_affected()
+        == 1)
+}
+
 async fn hand_back(
     db: &DatabaseConnection,
     unit: Unit,

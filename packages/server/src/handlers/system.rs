@@ -173,11 +173,11 @@ async fn read_backlog(db: &common::db::DatabaseConnection) -> Result<Backlog, se
             DbBackend::Postgres,
             format!(
                 "WITH waiting AS (SELECT s.contest_type, p.problem_type, p.checker_format, \
-                                         s.language, \
+                                         s.language, p.checker_language, \
                                          s.status IN {queued} AS queued, COUNT(*) AS n \
                                   FROM submission s JOIN problem p ON p.id = s.problem_id \
                                   WHERE s.status IN {queued} OR s.status IN {in_flight} \
-                                  GROUP BY 1, 2, 3, 4, 5), \
+                                  GROUP BY 1, 2, 3, 4, 5, 6), \
                       typed AS (SELECT queued, {open} AS open, n FROM waiting) \
                  SELECT COALESCE(SUM(n) FILTER (WHERE NOT queued), 0)::bigint AS in_progress, \
                         COALESCE(SUM(n) FILTER (WHERE queued AND open), 0)::bigint AS queued, \
@@ -192,6 +192,7 @@ async fn read_backlog(db: &common::db::DatabaseConnection) -> Result<Backlog, se
                     "waiting.problem_type",
                     "waiting.checker_format",
                     "waiting.language",
+                    "waiting.checker_language",
                 )),
             ),
         ))

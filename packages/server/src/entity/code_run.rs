@@ -56,6 +56,10 @@ pub struct Model {
     /// the budget is `max_dispatch_retries`.
     #[sea_orm(default_value = 0)]
     pub dispatch_retries: i32,
+    /// How many times its attempt was handed back for plugin SQL contention
+    /// (`judging::fault::CONTENTION_HANDBACKS` caps it).
+    #[sea_orm(default_value = 0)]
+    pub contended_handbacks: i32,
     #[sea_orm(default_value = 0)]
     pub judge_epoch: i32,
 

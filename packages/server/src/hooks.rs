@@ -65,6 +65,38 @@ struct Unrecorded {
     enabled_plugins: Option<ResourceEnablements>,
 }
 
+/// The dead letter message id of hook event `event_id`.
+pub(crate) fn dlq_message_id(event_id: &str) -> String {
+    format!("hook_event:{event_id}")
+}
+
+/// The hook event a dead letter message id names, if it names one.
+pub(crate) fn event_of_dlq_message(message_id: &str) -> Option<&str> {
+    message_id.strip_prefix("hook_event:")
+}
+
+/// Gives dead-lettered hook event `event_id` a fresh run: its attempts
+/// start over and it is due now, so the re-scan delivers it to the hook
+/// plugins still owed it (the delivered ones are not called again). Its dead
+/// letter stays open until the event completes. `false` when the event is
+/// not dead (gone, completed, or revived already).
+pub(crate) async fn revive_dead_event<C: sea_orm::ConnectionTrait>(
+    conn: &C,
+    event_id: &str,
+) -> Result<bool, sea_orm::DbErr> {
+    Ok(conn
+        .execute_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Postgres,
+            "UPDATE hook_event SET dead_at = NULL, attempts = 0, next_attempt_at = now(), \
+                    claimed_at = NULL, claim_token = NULL \
+              WHERE event_id = $1 AND dead_at IS NOT NULL AND completed_at IS NULL",
+            [event_id.into()],
+        ))
+        .await?
+        .rows_affected()
+        == 1)
+}
+
 /// One dispatch's lease on a background event, fleet-wide: its row of
 /// `hook_event`, which records the event (topic, payload, enablements)
 /// before its hooks run, and a token that fences every write the dispatch
@@ -142,7 +174,8 @@ impl EventClaim {
             .db
             .query_all_raw(sea_orm::Statement::from_sql_and_values(
                 sea_orm::DbBackend::Postgres,
-                "SELECT plugin_id FROM hook_event_delivery WHERE event_id = $1",
+                "SELECT plugin_id FROM hook_event_delivery \
+                  WHERE event_id = $1 AND delivered_at IS NOT NULL",
                 [self.id.clone().into()],
             ))
             .await?;
@@ -164,10 +197,50 @@ impl EventClaim {
                                 WHERE event_id = $1 AND claim_token = $2 \
                                   AND completed_at IS NULL AND dead_at IS NULL \
                                RETURNING event_id), \
-                      marked AS (INSERT INTO hook_event_delivery (event_id, plugin_id) \
-                                 SELECT event_id, $3 FROM held ON CONFLICT DO NOTHING) \
+                      marked AS (INSERT INTO hook_event_delivery \
+                                        (event_id, plugin_id, delivered_at) \
+                                 SELECT event_id, $3, now() FROM held \
+                                 ON CONFLICT (event_id, plugin_id) DO UPDATE \
+                                   SET delivered_at = COALESCE(hook_event_delivery.delivered_at, \
+                                                               now())) \
                  SELECT COUNT(*)::bigint AS held FROM held",
                 [self.id.clone().into(), self.token.into(), plugin_id.into()],
+            ))
+            .await?;
+        Ok(row
+            .map(|r| r.try_get::<i64>("", "held"))
+            .transpose()?
+            .unwrap_or(0)
+            == 1)
+    }
+
+    /// Records that `plugin_id`'s hooks failed the event, for `why`: it
+    /// stays owed the event, and its last error is kept for the record (the
+    /// dead letter names it). `false` when the lease is no longer this
+    /// dispatch's, as for [`Self::mark_delivered`].
+    async fn mark_failed(&self, plugin_id: &str, why: &str) -> Result<bool, sea_orm::DbErr> {
+        let row = self
+            .db
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
+                sea_orm::DbBackend::Postgres,
+                "WITH held AS (UPDATE hook_event SET claimed_at = now() \
+                                WHERE event_id = $1 AND claim_token = $2 \
+                                  AND completed_at IS NULL AND dead_at IS NULL \
+                               RETURNING event_id), \
+                      marked AS (INSERT INTO hook_event_delivery \
+                                        (event_id, plugin_id, last_error, failed_at) \
+                                 SELECT event_id, $3, $4, now() FROM held \
+                                 ON CONFLICT (event_id, plugin_id) DO UPDATE \
+                                   SET last_error = EXCLUDED.last_error, \
+                                       failed_at = EXCLUDED.failed_at \
+                                 WHERE hook_event_delivery.delivered_at IS NULL) \
+                 SELECT COUNT(*)::bigint AS held FROM held",
+                [
+                    self.id.clone().into(),
+                    self.token.into(),
+                    plugin_id.into(),
+                    why.into(),
+                ],
             ))
             .await?;
         Ok(row
@@ -184,16 +257,25 @@ impl EventClaim {
     }
 
     /// Ends the lease with the event complete: every hook plugin it is for
-    /// has it delivered.
+    /// has it delivered. An event an operator revived from the dead letter
+    /// queue resolves its dead letter as it completes.
     async fn complete(mut self) {
         self.settled = true;
         let completed = self
             .db
             .execute_raw(sea_orm::Statement::from_sql_and_values(
                 sea_orm::DbBackend::Postgres,
-                "UPDATE hook_event SET completed_at = now(), claimed_at = NULL \
-                  WHERE event_id = $1 AND claim_token = $2 AND completed_at IS NULL",
-                [self.id.clone().into(), self.token.into()],
+                "WITH done AS (UPDATE hook_event SET completed_at = now(), claimed_at = NULL \
+                                WHERE event_id = $1 AND claim_token = $2 \
+                                  AND completed_at IS NULL \
+                               RETURNING event_id) \
+                 UPDATE dead_letter_message SET resolved = TRUE, resolved_at = now() \
+                  WHERE message_id = $3 AND NOT resolved AND EXISTS (SELECT 1 FROM done)",
+                [
+                    self.id.clone().into(),
+                    self.token.into(),
+                    dlq_message_id(&self.id).into(),
+                ],
             ))
             .await;
         if let Err(e) = completed {
@@ -215,7 +297,9 @@ impl EventClaim {
             .execute_raw(sea_orm::Statement::from_sql_and_values(
                 sea_orm::DbBackend::Postgres,
                 "UPDATE hook_event SET claimed_at = NULL, last_error = $3, \
-                        next_attempt_at = now() + make_interval(secs => $4) \
+                        next_attempt_at = now() + make_interval(secs => $4), \
+                        history = history || jsonb_build_array(jsonb_build_object( \
+                            'attempt', attempts, 'error', $3::text, 'timestamp', now())) \
                   WHERE event_id = $1 AND claim_token = $2 AND completed_at IS NULL",
                 [
                     self.id.clone().into(),
@@ -264,10 +348,16 @@ impl EventClaim {
         let dead = txn
             .query_one_raw(sea_orm::Statement::from_sql_and_values(
                 sea_orm::DbBackend::Postgres,
-                "UPDATE hook_event SET claimed_at = NULL, last_error = $3, dead_at = now() \
+                "UPDATE hook_event SET claimed_at = NULL, last_error = $3, dead_at = now(), \
+                        history = history || jsonb_build_array(jsonb_build_object( \
+                            'attempt', attempts, 'error', $3::text, 'timestamp', now())) \
                   WHERE event_id = $1 AND claim_token = $2 AND completed_at IS NULL \
                     AND dead_at IS NULL \
-                 RETURNING payload",
+                 RETURNING payload, history, \
+                   (SELECT COALESCE(jsonb_object_agg(d.plugin_id, d.last_error), '{}'::jsonb) \
+                      FROM hook_event_delivery d \
+                     WHERE d.event_id = $1 AND d.delivered_at IS NULL \
+                       AND d.last_error IS NOT NULL) AS failures",
                 [self.id.clone().into(), self.token.into(), why.into()],
             ))
             .await?;
@@ -275,8 +365,12 @@ impl EventClaim {
             return Ok(false);
         };
         let payload: serde_json::Value = row.try_get("", "payload")?;
+        let history: serde_json::Value = row.try_get("", "history")?;
+        let failures: serde_json::Value = row.try_get("", "failures")?;
+        let retry_history: Vec<common::retry::RetryAttempt> = serde_json::from_value(history)
+            .map_err(|e| sea_orm::DbErr::Custom(format!("a hook event's history: {e}")))?;
         let envelope = common::dlq::DlqEnvelope {
-            message_id: format!("hook_event:{}", self.id),
+            message_id: dlq_message_id(&self.id),
             message_type: common::DlqMessageType::HookEvent,
             submission_id: None,
             payload: serde_json::json!({
@@ -284,10 +378,11 @@ impl EventClaim {
                 "topic": self.topic,
                 "payload": payload,
                 "attempts": self.attempt,
+                "failures": failures,
             }),
             error_code: common::dlq::DlqErrorCode::MaxRetriesExceeded,
             error_message: why.to_string(),
-            retry_history: Vec::new(),
+            retry_history,
         };
         crate::dlq::DlqService::new(&txn)
             .send_to_dlq(&envelope)
@@ -405,18 +500,29 @@ impl ServerHookRegistry {
         enabled_plugins: Option<&ResourceEnablements>,
     ) -> std::collections::BTreeSet<String> {
         let mut owed = self.lifecycle.hook_plugins(topic, enabled_plugins);
-        for entry in self.hooks.get(topic).into_iter().flatten() {
-            let runs = match entry.scope {
+        owed.extend(self.run_here(topic, enabled_plugins));
+        owed
+    }
+
+    /// The plugins registered here whose hooks a `topic` event with
+    /// `enabled_plugins` runs.
+    fn run_here(
+        &self,
+        topic: &str,
+        enabled_plugins: Option<&ResourceEnablements>,
+    ) -> std::collections::BTreeSet<String> {
+        self.hooks
+            .get(topic)
+            .into_iter()
+            .flatten()
+            .filter(|entry| match entry.scope {
                 HookScope::Global => true,
                 HookScope::Resource => {
                     enabled_plugins.is_some_and(|e| e.contains_key(&entry.plugin_id))
                 }
-            };
-            if runs {
-                owed.insert(entry.plugin_id.clone());
-            }
-        }
-        owed
+            })
+            .map(|entry| entry.plugin_id.clone())
+            .collect()
     }
 
     /// Keeps `event` for the next re-scan; past [`UNRECORDED_MAX`] the
@@ -751,7 +857,7 @@ pub async fn dispatch_hooks(
             hook_registry,
             admission_owner: None,
             class,
-            skip: None,
+            only: None,
         },
         0,
         &mut Answers::default(),
@@ -778,7 +884,7 @@ pub(crate) async fn dispatch_submission_hooks(
             hook_registry,
             admission_owner,
             class: CallClass::Interactive,
-            skip: None,
+            only: None,
         },
         0,
         &mut Answers::default(),
@@ -853,13 +959,16 @@ pub async fn dispatch_hooks_once(
     }
 }
 
-/// Runs an event's hooks under `claim`: only the hook plugins that do not
-/// have it delivered yet, each recorded delivered once its hooks answered.
-/// The event completes once every hook plugin it is for has it delivered;
-/// one that could not answer, or is not loaded here, leaves it for a later
-/// attempt.
+/// Runs an event's hooks under `claim`, each hook plugin it is owed to on
+/// its own, in plugin id order: a plugin's hooks run only if it does not
+/// have the event yet, and its failure (an error, a trap, no answer) holds
+/// back no other plugin, since a background event's rejections and stops
+/// change nothing. Each plugin whose hooks answered is recorded delivered,
+/// each that failed keeps its error and stays owed. The event completes once
+/// every hook plugin it is owed to has it; one that failed, or is not loaded
+/// here, leaves it for a later attempt.
 async fn deliver(
-    claim: Option<EventClaim>,
+    mut claim: Option<EventClaim>,
     topic: &str,
     event_payload: serde_json::Value,
     enabled_plugins: Option<&ResourceEnablements>,
@@ -880,6 +989,79 @@ async fn deliver(
         },
         None => Default::default(),
     };
+    let here = hook_registry.read().await.run_here(topic, enabled_plugins);
+    let mut failures: std::collections::BTreeMap<String, String> = Default::default();
+    for plugin_id in here.iter().filter(|id| !delivered.contains(*id)) {
+        let failure = deliver_to(
+            topic,
+            event_payload.clone(),
+            enabled_plugins,
+            hook_registry,
+            plugin_id,
+        )
+        .await;
+        let Some(held) = &claim else {
+            continue;
+        };
+        let recorded = match &failure {
+            None => held.mark_delivered(plugin_id).await,
+            Some(why) => held.mark_failed(plugin_id, why).await,
+        };
+        match recorded {
+            Ok(true) => {}
+            Ok(false) => {
+                if let Some(claim) = claim.take() {
+                    tracing::info!(event_id = %claim.id, "A hook event's lease passed to another dispatch; this one stops");
+                    claim.lost().await;
+                }
+                return;
+            }
+            Err(e) => {
+                if let Some(claim) = claim.take() {
+                    tracing::warn!(event_id = %claim.id, plugin_id, error = %e, "Recording a hook event's delivery failed");
+                    claim
+                        .retry_later(format!("recording its delivery to {plugin_id} failed: {e}"))
+                        .await;
+                }
+                return;
+            }
+        }
+        if let Some(why) = failure {
+            failures.insert(plugin_id.clone(), why);
+        }
+    }
+    let Some(claim) = claim else {
+        return;
+    };
+    let owed = hook_registry.read().await.owed(topic, enabled_plugins);
+    let pending: Vec<String> = owed
+        .iter()
+        .filter(|id| {
+            !delivered.contains(*id) && !(here.contains(*id) && !failures.contains_key(*id))
+        })
+        .map(|id| match failures.get(id) {
+            Some(why) => format!("{id} ({why})"),
+            None => format!("{id} (not loaded on this replica)"),
+        })
+        .collect();
+    if pending.is_empty() {
+        claim.complete().await;
+    } else {
+        claim
+            .retry_later(format!("not yet delivered to {}", pending.join(", ")))
+            .await;
+    }
+}
+
+/// Runs `plugin_id`'s hooks on a background event; why they failed, or
+/// `None` when every one of them answered.
+async fn deliver_to(
+    topic: &str,
+    event_payload: serde_json::Value,
+    enabled_plugins: Option<&ResourceEnablements>,
+    hook_registry: &SharedHookRegistry,
+    plugin_id: &str,
+) -> Option<String> {
     let mut answers = Answers::default();
     let dispatched = dispatch_hooks_inner(
         topic,
@@ -889,60 +1071,32 @@ async fn deliver(
             hook_registry,
             admission_owner: None,
             class: CallClass::Background,
-            skip: Some(&delivered),
+            only: Some(plugin_id),
         },
         0,
         &mut answers,
     )
     .await;
-    // The hook the dispatch stopped at answered unless it could not.
+    // The hook the dispatch stopped at answered unless it failed.
     answers.settle();
     match dispatched {
+        Ok(HookOutcome::Rejected(refusal)) => tracing::debug!(
+            topic,
+            plugin_id,
+            code = refusal.code(),
+            "Background hook returned Reject (ignored)"
+        ),
+        Err(e) => tracing::warn!(topic, plugin_id, "Background hook dispatch failed: {e:?}"),
         Ok(HookOutcome::Allowed(_)) => {}
-        Ok(HookOutcome::Rejected(refusal)) => {
-            tracing::warn!(
-                topic,
-                code = refusal.code(),
-                "Background hook returned Reject (no effect — response already sent)",
-            );
-        }
-        Err(e) => {
-            tracing::warn!(topic, "Background hook dispatch failed: {e:?}");
-        }
     }
-    let Some(claim) = claim else {
-        return;
-    };
-    for plugin_id in answers.answered() {
-        match claim.mark_delivered(&plugin_id).await {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::info!(event_id = %claim.id, "A hook event's lease passed to another dispatch; this one stops");
-                claim.lost().await;
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(event_id = %claim.id, plugin_id, error = %e, "Recording a hook event delivered failed");
-                claim
-                    .retry_later(format!("recording it delivered to {plugin_id} failed: {e}"))
-                    .await;
-                return;
-            }
-        }
-    }
-    let answered = answers.answered();
-    let owed = hook_registry.read().await.owed(topic, enabled_plugins);
-    let pending: Vec<&String> = owed
-        .iter()
-        .filter(|id| !delivered.contains(*id) && !answered.contains(*id))
-        .collect();
-    if pending.is_empty() {
-        claim.complete().await;
+    if answers.answered().contains(plugin_id) {
+        None
     } else {
-        let names: Vec<&str> = pending.iter().map(|id| id.as_str()).collect();
-        claim
-            .retry_later(format!("not yet delivered to {}", names.join(", ")))
-            .await;
+        Some(
+            answers
+                .failure
+                .unwrap_or_else(|| "its hooks did not all answer".to_string()),
+        )
     }
 }
 
@@ -1085,16 +1239,19 @@ struct DispatchScope<'a> {
     hook_registry: &'a SharedHookRegistry,
     admission_owner: Option<&'a str>,
     class: CallClass,
-    /// Plugins whose hooks on the dispatched event are skipped (not its
-    /// chained events'): a background event's re-run skips the plugins
-    /// that have it delivered.
-    skip: Option<&'a std::collections::BTreeSet<String>>,
+    /// The one plugin whose hooks on the dispatched event run (not its
+    /// chained events'): a background event is delivered to each plugin it
+    /// is owed to on its own, so one plugin's failure never holds back
+    /// another's delivery.
+    only: Option<&'a str>,
 }
 
 /// Which plugins' hooks answered one dispatch. A plugin answered when every
 /// one of its hooks on the dispatched event ran and none, nor any hook of an
-/// event it chained, could not answer; a plugin whose hook the dispatch
-/// stopped before (a rejection or an error ended it) did not.
+/// event it chained, failed (could not answer, or answered with an error, a
+/// notify hook's too); a plugin whose hook the dispatch stopped before (a
+/// rejection or an error ended it) did not. The first failure's reason is
+/// kept, for the record of why the plugin does not have the event.
 #[derive(Default)]
 struct Answers {
     /// The dispatched event's hooks per plugin.
@@ -1103,15 +1260,20 @@ struct Answers {
     answered: HashMap<String, usize>,
     /// The plugin of the dispatched event's hook running now.
     running: Option<String>,
-    /// Whether a hook could not answer since `running` started.
+    /// Whether a hook failed since `running` started.
     running_unanswered: bool,
+    /// Why the first hook that failed did.
+    failure: Option<String>,
 }
 
 impl Answers {
-    /// A hook (the running one, or one of an event it chained) could not
-    /// answer.
-    fn could_not_answer(&mut self) {
+    /// A hook (the running one, or one of an event it chained) failed, for
+    /// `why`.
+    fn failed(&mut self, why: impl std::fmt::Display) {
         self.running_unanswered = true;
+        if self.failure.is_none() {
+            self.failure = Some(why.to_string());
+        }
     }
 
     /// The dispatched event's next hook, of `plugin_id`, starts: the one
@@ -1155,9 +1317,9 @@ async fn dispatch_hooks_inner(
         hook_registry,
         admission_owner,
         class,
-        skip,
+        only,
     } = scope;
-    let skip = skip.filter(|_| depth == 0);
+    let only = only.filter(|_| depth == 0);
     if depth >= MAX_CHAIN_DEPTH {
         tracing::warn!(
             topic,
@@ -1214,8 +1376,8 @@ async fn dispatch_hooks_inner(
             }
         }
 
-        if let Some(skip) = skip {
-            list.retain(|entry| !skip.contains(&entry.plugin_id));
+        if let Some(only) = only {
+            list.retain(|entry| entry.plugin_id == only);
         }
         list
     };
@@ -1263,7 +1425,7 @@ async fn dispatch_hooks_inner(
                     Ok(action) => action,
                     Err(e) if is_unavailable(&e) => {
                         tracing::warn!(topic, plugin_id = %entry.plugin_id, "Hook unavailable: {e}");
-                        answers.could_not_answer();
+                        answers.failed(&e);
                         // What stopped it (the plugin, or the database it
                         // needed) keeps its own code and Retry-After.
                         return Err(match e.downcast::<PluginError>() {
@@ -1273,6 +1435,7 @@ async fn dispatch_hooks_inner(
                         });
                     }
                     Err(e) => {
+                        answers.failed(format!("{e:#}"));
                         return Err(AppError::PluginFailed {
                             plugin_id: entry.plugin_id.clone(),
                             what: "A hook failed",
@@ -1329,6 +1492,7 @@ async fn dispatch_hooks_inner(
                     HookAction::Reject(reason) => {
                         let reject = parse_reject_detail(&reason);
                         if reject.code == PLUGIN_RUNTIME_ERROR_CODE {
+                            answers.failed(&reject.message);
                             return Err(AppError::PluginFailed {
                                 plugin_id: entry.plugin_id.clone(),
                                 what: "A hook's runtime failed",
@@ -1377,9 +1541,9 @@ async fn dispatch_hooks_inner(
                     }
                 },
                 Err(e) => {
-                    if is_unavailable(&e) {
-                        answers.could_not_answer();
-                    }
+                    // The dispatch goes on without it; a background event
+                    // keeps the plugin owed and runs it again.
+                    answers.failed(&e);
                     tracing::warn!(topic, "Notify hook error (ignored): {e}");
                 }
             },
@@ -1920,7 +2084,8 @@ mod tests {
         );
         let delivered: String = scalar(
             &db,
-            "SELECT string_agg(plugin_id, ',' ORDER BY plugin_id) AS v FROM hook_event_delivery",
+            "SELECT string_agg(plugin_id, ',' ORDER BY plugin_id) AS v FROM hook_event_delivery \
+              WHERE delivered_at IS NOT NULL",
         )
         .await;
         assert_eq!(delivered, "observer");
@@ -1948,7 +2113,10 @@ mod tests {
 
     /// An event a hook plugin never answers is retried each time later than
     /// the last, and after its last attempt is dead-lettered: it leaves the
-    /// re-scan and stands in the dead letter queue as a `hook_event`.
+    /// re-scan and stands in the dead letter queue as a `hook_event`, with
+    /// each attempt and why it failed in its retry history and the plugin's
+    /// last error in its payload. Retrying the dead letter gives the event a
+    /// fresh run, and the event completing resolves the dead letter.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_event_never_answered_backs_off_and_is_dead_lettered_at_its_cap() {
         let (_pg, db) = crate::test_support::postgres().await;
@@ -2002,14 +2170,25 @@ mod tests {
         assert_eq!(attempts, MAX_EVENT_ATTEMPTS);
         let letter: String = scalar(
             &db,
-            "SELECT direction || ' ' || message_id || ' ' || error_message AS v \
-               FROM dead_letter_message WHERE NOT resolved",
+            "SELECT direction || ' ' || message_id AS v FROM dead_letter_message WHERE NOT resolved",
         )
         .await;
-        assert_eq!(
-            letter,
-            "hook_event hook_event:after_judging:1:1 not yet delivered to down"
+        assert_eq!(letter, "hook_event hook_event:after_judging:1:1");
+        let (why, retries, last_error): (String, i32, String) = (
+            scalar(&db, "SELECT error_message AS v FROM dead_letter_message").await,
+            scalar(&db, "SELECT retry_count AS v FROM dead_letter_message").await,
+            scalar(
+                &db,
+                "SELECT payload -> 'failures' ->> 'down' AS v FROM dead_letter_message",
+            )
+            .await,
         );
+        assert!(why.starts_with("not yet delivered to down ("), "{why}");
+        assert_eq!(
+            retries, MAX_EVENT_ATTEMPTS,
+            "every attempt is in its history"
+        );
+        assert!(why.contains(&last_error), "{why} names {last_error}");
 
         due_now(&db).await;
         redeliver_once(&db, &registry).await.unwrap();
@@ -2018,6 +2197,85 @@ mod tests {
             MAX_EVENT_ATTEMPTS as usize,
             "a dead event is never run again"
         );
+
+        // Retried from the dead letter queue, it runs again once the plugin
+        // answers, and completing resolves the dead letter.
+        assert!(revive_dead_event(&db, "after_judging:1:1").await.unwrap());
+        assert!(
+            !revive_dead_event(&db, "after_judging:1:1").await.unwrap(),
+            "a revived event is not dead"
+        );
+        let up = Arc::new(MockHook::new(
+            "down",
+            "after_judging",
+            GenericHookAction::Pass,
+        ));
+        redeliver_once(&db, &replica_with(up.clone()).await)
+            .await
+            .unwrap();
+        assert_eq!(up.calls(), 1);
+        let (completed, resolved): (bool, bool) = (
+            scalar(&db, "SELECT completed_at IS NOT NULL AS v FROM hook_event").await,
+            scalar(&db, "SELECT resolved AS v FROM dead_letter_message").await,
+        );
+        assert!(completed && resolved);
+    }
+
+    /// One owed plugin's failure holds back no other: on a background event
+    /// each plugin's hooks run on their own in the same attempt, so a plugin
+    /// sorted after one that traps still gets the event at once. The plugin
+    /// whose hook trapped is not counted delivered: it keeps its error and
+    /// is run again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failing_hook_plugin_holds_back_no_other_and_stays_owed() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let failing: Arc<dyn GenericHook<Context = CallOptions>> = Arc::new(FailingHook {
+            id: "a-traps".into(),
+            topics: vec!["after_judging".into()],
+        });
+        let after = Arc::new(MockHook::new(
+            "b-answers",
+            "after_judging",
+            GenericHookAction::Pass,
+        ));
+        let registry = new_shared_registry();
+        for (hook, mode) in [
+            (failing.clone(), HookMode::Blocking),
+            (
+                after.clone() as Arc<dyn GenericHook<Context = CallOptions>>,
+                HookMode::Notify,
+            ),
+        ] {
+            register_direct(&mut *registry.write().await, hook, HookScope::Global, mode);
+        }
+        dispatch_once(&db, &registry).await;
+        assert_eq!(after.calls(), 1, "delivered in the same attempt");
+        let (delivered, failed): (String, String) = (
+            scalar(
+                &db,
+                "SELECT string_agg(plugin_id, ',') AS v FROM hook_event_delivery \
+                  WHERE delivered_at IS NOT NULL",
+            )
+            .await,
+            scalar(
+                &db,
+                "SELECT plugin_id || ': ' || last_error AS v FROM hook_event_delivery \
+                  WHERE delivered_at IS NULL",
+            )
+            .await,
+        );
+        assert_eq!(delivered, "b-answers");
+        assert!(
+            failed.starts_with("a-traps: ") && failed.contains("WASM crash"),
+            "{failed}"
+        );
+        let completed: bool =
+            scalar(&db, "SELECT completed_at IS NOT NULL AS v FROM hook_event").await;
+        assert!(!completed, "the trapped plugin is still owed it");
+
+        due_now(&db).await;
+        redeliver_once(&db, &registry).await.unwrap();
+        assert_eq!(after.calls(), 1, "the delivered plugin is not called again");
     }
 
     /// Events that keep failing never starve newer ones: the re-scan takes
@@ -2129,7 +2387,12 @@ mod tests {
         running.await.unwrap();
         let (completed, delivered, attempts): (bool, i64, i32) = (
             scalar(&db, "SELECT completed_at IS NOT NULL AS v FROM hook_event").await,
-            scalar(&db, "SELECT COUNT(*)::bigint AS v FROM hook_event_delivery").await,
+            scalar(
+                &db,
+                "SELECT COUNT(*)::bigint AS v FROM hook_event_delivery \
+                  WHERE delivered_at IS NOT NULL",
+            )
+            .await,
             scalar(&db, "SELECT attempts AS v FROM hook_event").await,
         );
         assert!(!completed, "the stale dispatch did not complete it");
@@ -2187,7 +2450,10 @@ mod tests {
             scalar(&db, "SELECT last_error AS v FROM hook_event").await,
         );
         assert!(!completed, "the event is owed to a plugin not loaded here");
-        assert_eq!(why, "not yet delivered to elsewhere");
+        assert_eq!(
+            why,
+            "not yet delivered to elsewhere (not loaded on this replica)"
+        );
 
         let there = replica(elsewhere.clone()).await;
         due_now(&db).await;

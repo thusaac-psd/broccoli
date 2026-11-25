@@ -542,11 +542,20 @@ pub struct ConfigNamespace {
     /// Whether judging reads this namespace: a change to one of its stored
     /// configs changes what a problem is judged with, so it counts in the
     /// inputs version of every problem the config reaches (a contest-scope
-    /// config each problem of the contest, a plugin-scope one every
-    /// problem). A `checker_source` namespace is one whether it says so or
+    /// config each problem of the contest), and a plugin-scope one in the
+    /// plugin's own inputs epoch, which every judgement it judges records. A
+    /// `checker_source` namespace is one whether it says so or
     /// not ([`ConfigNamespace::is_judging_input`]).
     #[serde(default)]
     pub judging_input: bool,
+    /// For a `checker_source` namespace: the languages its checker source
+    /// compiles in, each with the file extensions (without the dot, in
+    /// lower case) of a primary file in that language. The host reads a
+    /// problem's checker language from the extension of its first stored
+    /// file, and work on the problem then needs that language's provider as
+    /// it needs its own language's, so a closed language parks it.
+    #[serde(default)]
+    pub checker_languages: std::collections::BTreeMap<String, Vec<String>>,
     /// The plugin function that checks an admin's write to this namespace
     /// beyond its schema (see `types::ConfigValidateInput`). The host stores
     /// nothing it refuses, and lists stored configs it now refuses on the

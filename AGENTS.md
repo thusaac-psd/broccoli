@@ -219,8 +219,12 @@ binaries warn about every key they do not read.
   fails the call as the database's and, under a dispatch, hands the attempt
   back; any other error is the statement's. Plugin SQL that cannot run names why
   by one mapping (`host_funcs::sql::Unanswered`): a lost database answers
-  `DATABASE_UNAVAILABLE`, a pool or plugin SQL permit with nothing free
-  `DATABASE_BUSY`, a deadline cut `PLUGIN_UNAVAILABLE`.
+  `DATABASE_UNAVAILABLE` (a hand-back), a plugin SQL pool or permit with nothing
+  free for a call that held none `DATABASE_BUSY` (contention:
+  `DispatchFault::SqlContended` hands back only `CONTENTION_HANDBACKS` times per
+  unit, counted on its row, then spends the submission's budget), a wait for a
+  connection while the call holds one of its own the plugin's own error, a
+  deadline cut `PLUGIN_UNAVAILABLE`.
 - `packages/plugin-core` holds the plugin abstractions shared by the host:
   manifest parsing, the registry, instance pools, hooks, admission, config, i18n
   and the plugin HTTP proxy types.
@@ -299,14 +303,17 @@ binaries warn about every key they do not read.
 - A unit of work runs only while every plugin it needs has an enabled provider.
   It needs exactly the plugins it uses (`providers::Needs`, built by
   `PluginLifecycle::needs`): its contest type's plugin, its problem type's
-  evaluator, its language's resolver, and its checker format's checker only when
-  the evaluator registered with `uses_checker`. Work that cannot run because one
-  is disabled fleet-wide is parked, not failed: the claim, the system-error
-  retry, the stuck detector and the overview's parked count read one predicate
-  (`judging::Unit::runnable`, built on `providers::runnable`;
-  `PluginLifecycle::closed_by` in Rust), the submit paths refuse it
-  (`accepting_handler`), and it resumes when a provider is enabled. A replica
-  takes a unit only when it has every key's fleet-wide provider loaded
+  evaluator, its language's resolver, its checker format's checker only when the
+  evaluator registered with `uses_checker`, and the language that checker
+  compiles the problem's checker source in (`problem.checker_language`, by the
+  `checker_languages` its `checker_source` namespace declares). A plugin a
+  dispatch reaches for outside its needs stands, never hands back. Work that
+  cannot run because one is disabled fleet-wide is parked, not failed: the
+  claim, the system-error retry, the stuck detector and the overview's parked
+  count read one predicate (`judging::Unit::runnable`, built on
+  `providers::runnable`; `PluginLifecycle::closed_by` in Rust), the submit paths
+  refuse it (`accepting_handler`), and it resumes when a provider is enabled. A
+  replica takes a unit only when it has every key's fleet-wide provider loaded
   (`providers::runs_here`, local registrations from `Loaded::here`). A provider
   enabled but loaded on no live replica parks the work the same way
   (`ClosedReason::NotLoaded`; the submit paths answer `PLUGIN_NOT_LOADED`),
@@ -375,15 +382,19 @@ binaries warn about every key they do not read.
   through one rule, `plugin_lifecycle::accepting_handler`, which refuses a
   contest type no provider can judge now; a new submit path calls it too.
 - Everything judging reads of a problem (test cases, limits, type, checker
-  format, additional files, its contests' types, and the configs of every
-  namespace a manifest marks `judging_input` at each scope the cascade reads:
-  problem, contest problem, contest, plugin) is versioned as one in
+  format, additional files, its default contest type, its contests and their
+  types, and the configs of every namespace a manifest marks `judging_input` at
+  the problem, contest problem and contest scopes) is versioned as one in
   `problem.inputs_version`, counted by database triggers
   (`services::judging::inputs`), never by a write path: a new input table gets
-  the trigger. A namespace judging reads is marked `judging_input`, or its
-  changes count nothing. The dispatch stamps the version it read the inputs at
-  on the judgement; applying a judgement of another version needs `force` and
-  marks it `judged_on_earlier_inputs`.
+  the trigger. A plugin-scope judging-input config moves its plugin's
+  `inputs_epoch` instead, recorded per judgement for the plugins that judge it
+  (`plugin_epochs`). A namespace judging reads is marked `judging_input`, or its
+  changes count nothing; what a manifest declares is recorded in `governs` at
+  registration and at every publish (`record_declared`, `publish`). The dispatch
+  stamps the version and epochs it read the inputs at on the judgement; applying
+  a judgement of another version needs `force` and marks it
+  `judged_on_earlier_inputs`.
 - A change to a problem's test data goes through
   `services::test_data::TestDataEdit`, whose commit checks the problem's stored
   configs against the data as the change leaves it and refuses a change that

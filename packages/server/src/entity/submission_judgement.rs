@@ -94,6 +94,19 @@ pub struct Model {
     /// verdicts show beside inputs it was not judged with.
     #[sea_orm(default_value = false)]
     pub judged_on_earlier_inputs: bool,
+    /// The inputs epoch (`plugin.inputs_epoch`) of each plugin it is judged
+    /// by, read with its inputs version: a plugin-scope judging-input config
+    /// changes only its own plugin's epoch, so it reaches only the work that
+    /// plugin judges.
+    #[sea_orm(
+        column_type = "JsonBinary",
+        default_expr = "Expr::cust(\"'{}'::jsonb\")"
+    )]
+    pub plugin_epochs: Json,
+    /// How many times its attempt was handed back for plugin SQL contention
+    /// (`judging::fault::CONTENTION_HANDBACKS` caps it).
+    #[sea_orm(default_value = 0)]
+    pub contended_handbacks: i32,
 
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeUtc,

@@ -60,6 +60,14 @@ pub struct Model {
     #[sea_orm(default_value = 0)]
     pub inputs_version: i32,
 
+    /// The language the problem's checker source compiles in, kept by the
+    /// `broccoli_checker_language` trigger (migration m0018) from the
+    /// extension of its first stored file; `None` without one. Work on the
+    /// problem needs this language's provider when its checker format's
+    /// provider declares checker languages.
+    #[sea_orm(nullable)]
+    pub checker_language: Option<String>,
+
     #[sea_orm(has_many)]
     pub submissions: HasMany<super::submission::Entity>,
 

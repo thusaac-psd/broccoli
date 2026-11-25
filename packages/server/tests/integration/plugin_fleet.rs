@@ -47,6 +47,57 @@ async fn admin(app: &TestApp) -> String {
         .await
 }
 
+/// What a plugin's manifest declares of what it governs (its visibility
+/// query, its hooks, its judging inputs) is recorded from the copy the fleet
+/// publishes when a replica registers it, not only when one loads it: a
+/// disabled plugin no replica loads, or a row an upgrade reset, still names
+/// them, while what it provides stays as recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_no_replica_loads_still_records_what_its_manifest_declares() {
+    use sea_orm::ConnectionTrait;
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    let res = a
+        .post_with_token(&routes::admin_plugin_disable(PLUGIN), &json!({}), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    a.db.execute_unprepared(&format!(
+        "UPDATE plugin SET governs = jsonb_set(jsonb_set(governs, '{{visibility}}', 'false'), \
+                                     '{{contest_types}}', '[\"kept-x\"]') \
+          WHERE id = '{PLUGIN}'"
+    ))
+    .await
+    .unwrap();
+
+    let _b = a.spawn_replica(SpawnOptions::default()).await;
+    let row =
+        a.db.query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            format!(
+                "SELECT (governs->>'visibility')::boolean AS visibility, \
+                        governs->'contest_types' AS contest_types, is_enabled \
+                   FROM plugin WHERE id = '{PLUGIN}'"
+            ),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !row.try_get::<bool>("", "is_enabled").unwrap(),
+        "still disabled"
+    );
+    assert!(
+        row.try_get::<bool>("", "visibility").unwrap(),
+        "its manifest's visibility query is recorded from its registration"
+    );
+    assert_eq!(
+        row.try_get::<serde_json::Value>("", "contest_types")
+            .unwrap(),
+        json!(["kept-x"]),
+        "what it provides stays as recorded"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn disable_and_enable_through_one_replica_reach_the_other() {
     let a = TestApp::spawn_with_plugins().await;
@@ -602,7 +653,7 @@ async fn a_missing_visibility_plugin_fails_closed_only_for_its_contest_types() {
     // The plugin, when it last loaded, registered the `fleet-only` type.
     for sql in [
         format!(
-            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}' \
+            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}' \
              WHERE id = '{PLUGIN}'"
         ),
         // The replica that loaded the plugin registered the type, so it
@@ -649,7 +700,7 @@ async fn a_disabled_visibility_plugin_fails_closed_for_its_contest_types() {
     assert_eq!(res.status, 200, "{}", res.text);
     for sql in [
         format!(
-            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}' \
+            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}' \
              WHERE id = '{PLUGIN}'"
         ),
         // The replica that loaded the plugin registered the type, so it
@@ -713,12 +764,12 @@ async fn a_type_another_enabled_plugin_provides_is_not_withheld_by_a_disabled_on
     assert_eq!(res.status, 200, "{}", res.text);
     for sql in [
         format!(
-            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}' \
+            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}' \
              WHERE id = '{PLUGIN}'"
         ),
         // Another plugin provides the same type and is enabled.
         "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
-         ('second-provider', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}')"
+         ('second-provider', TRUE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}')"
             .to_string(),
         // The replica that loaded the plugin registered the type, so it
         // reports the type loaded.
@@ -799,7 +850,7 @@ async fn a_plugin_lists_its_running_contests_while_disabled() {
     let running = a.create_contest(&token, "Running", true, true).await;
     for sql in [
         format!(
-            "UPDATE plugin SET governs = '{{\"visibility\": false, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}' \
+            "UPDATE plugin SET governs = '{{\"visibility\": false, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}' \
              WHERE id = '{PLUGIN}'"
         ),
         format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {running}"),
@@ -904,7 +955,7 @@ async fn a_missing_visibility_plugin_also_hides_its_contests_problems_outside_th
         format!(
             "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
              ('{PLUGIN}', TRUE, 1, NOW(), \
-              '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}}')"
+              '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"], \"problem_types\": [], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}')"
         ),
         // The replica that loaded the plugin registered the type, so it
         // reports the type loaded.
@@ -1247,7 +1298,7 @@ async fn work_on_a_problem_type_whose_evaluator_is_disabled_is_refused_and_parke
     for sql in [
         "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
          ('evaluator-off', FALSE, 1, NOW(), \
-          '{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"evaluated-x\"], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}')"
+          '{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"evaluated-x\"], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}')"
             .to_string(),
         format!(
             "UPDATE problem SET problem_type = 'evaluated-x', is_public = TRUE WHERE id = {problem_id}"
@@ -1323,7 +1374,7 @@ async fn a_problem_whose_evaluator_is_disabled_names_what_closes_its_submissions
         .await;
     for sql in [
         "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
-         ('off-evaluator', FALSE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"closed-type\"], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}')"
+         ('off-evaluator', FALSE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [], \"problem_types\": [\"closed-type\"], \"checker_formats\": [], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}')"
             .to_string(),
         format!("UPDATE problem SET problem_type = 'closed-type' WHERE id = {problem_id}"),
     ] {
@@ -1360,7 +1411,7 @@ async fn a_problem_whose_languages_are_all_disabled_names_the_language_plugin() 
         .await;
     for sql in [
         "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
-         ('off-languages', FALSE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [], \"languages\": [\"closed-lang\"], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": []}')"
+         ('off-languages', FALSE, 1, NOW(), '{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [], \"languages\": [\"closed-lang\"], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}')"
             .to_string(),
         format!(
             "UPDATE problem SET submission_format = '{{\"closed-lang\": [\"main.x\"]}}' \

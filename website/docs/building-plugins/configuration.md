@@ -356,7 +356,8 @@ scopes = ["plugin"]
 A change to one of its stored configs then counts as a change to the
 judging inputs of every problem the config reaches: a problem's or contest
 problem's config that problem, a contest's config each problem of the
-contest, and a plugin-scope config every problem. A judgement judged before
+contest, and a plugin-scope config everything your plugin judges. A
+judgement judged before
 the change is applied only with `force` and shows as judged on earlier
 inputs. A change to any other namespace (standings, display settings) leaves
 judgements as they are. A `checker_source` namespace is a judging input
@@ -384,6 +385,21 @@ default = []
 The plugin reads it like any other problem config:
 `host.config.get_problem(problem_id, "checker_source")`. A manifest may mark at
 most one namespace, and only with `scopes = ["problem"]`.
+
+If the checker compiles the source, declare which language each primary
+file's extension compiles in, with `checker_languages` on the same namespace:
+
+```toml
+[config.checker_source]
+scopes = ["problem"]
+checker_source = true
+checker_languages = { cpp = ["cpp", "cc", "cxx"], c = ["c"] }
+```
+
+The host reads a problem's checker language from the first stored file whose
+extension is listed, and work on the problem then needs that language's
+plugin as it needs its own language's: while it is disabled, the work waits
+queued instead of failing.
 
 ## Test it
 

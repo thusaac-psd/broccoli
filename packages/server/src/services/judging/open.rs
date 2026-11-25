@@ -286,7 +286,23 @@ pub(crate) async fn apply_judgement(
         .into_tuple()
         .one(txn)
         .await?;
-    let earlier_inputs = inputs_version != Some(judgement.inputs_version);
+    // The plugins it is judged by as they are now: a plugin-scope
+    // judging-input config changed since moves its plugin's epoch.
+    let epochs_now: Option<serde_json::Value> = txn
+        .query_one_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Postgres,
+            format!(
+                "SELECT {epochs} AS epochs FROM {from} WHERE u.id = $1",
+                epochs = super::Unit::plugin_epochs(),
+                from = super::Unit::Judgement.scan_from(),
+            ),
+            [judgement.id.into()],
+        ))
+        .await?
+        .map(|row| row.try_get("", "epochs"))
+        .transpose()?;
+    let earlier_inputs = inputs_version != Some(judgement.inputs_version)
+        || epochs_moved(&judgement.plugin_epochs, epochs_now.as_ref());
     if earlier_inputs && !force {
         return Ok(ApplyJudgement::OtherInputs);
     }
@@ -360,4 +376,45 @@ pub(crate) async fn discard_judgement(
         .resolve_subject(DlqSubject::Judgement(judgement_id), operator_id)
         .await?;
     Ok(DiscardJudgement::Discarded)
+}
+
+/// Whether any plugin's inputs epoch differs between `stamped` (what a
+/// judgement recorded) and `now` (its plugins' epochs as they are), a plugin
+/// one of them does not name reading as epoch 0: an epoch only moves when a
+/// plugin-scope judging-input config changes, so a plugin that never had one
+/// changed is at 0 on both sides.
+fn epochs_moved(stamped: &serde_json::Value, now: Option<&serde_json::Value>) -> bool {
+    let epoch = |map: Option<&serde_json::Value>, plugin: &str| {
+        map.and_then(|m| m.get(plugin))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+    };
+    let names = |map: Option<&serde_json::Value>| {
+        map.and_then(serde_json::Value::as_object)
+            .map(|m| m.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    names(Some(stamped))
+        .into_iter()
+        .chain(names(now))
+        .any(|plugin| epoch(Some(stamped), &plugin) != epoch(now, &plugin))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::epochs_moved;
+    use serde_json::json;
+
+    /// A plugin's epoch moved only when the two sides name it at different
+    /// epochs, a plugin one side does not name reading as 0.
+    #[test]
+    fn only_a_plugin_whose_epoch_changed_moves_the_epochs() {
+        let stamped = json!({"judge": 2});
+        assert!(!epochs_moved(&stamped, Some(&json!({"judge": 2}))));
+        assert!(epochs_moved(&stamped, Some(&json!({"judge": 3}))));
+        assert!(!epochs_moved(&json!({}), Some(&json!({"judge": 0}))));
+        assert!(epochs_moved(&json!({}), Some(&json!({"judge": 1}))));
+        assert!(epochs_moved(&stamped, Some(&json!({}))));
+        assert!(!epochs_moved(&json!({}), None));
+    }
 }

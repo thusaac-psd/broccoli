@@ -35,6 +35,14 @@ pub enum DispatchFault {
     /// A busy pool and a lost database are one fault, since both hand back
     /// without spending a retry; only a client's answer tells them apart.
     DatabaseUnavailable,
+    /// No plugin SQL connection was free in time for a statement the
+    /// dispatch's plugins ran while their call held none: contention with
+    /// the work running beside it, not the submission's fault, so it hands
+    /// back, but only `CONTENTION_HANDBACKS` times per unit; after that it
+    /// is a judging failure, within the submission's retry budget. A plugin
+    /// that waits for a connection while its own call already holds one is
+    /// failing on its own: that is the plugin's error, never this fault.
+    SqlContended,
     /// The problem's checker program failed (crashed, was killed by a
     /// signal, exited with a code its format gives no meaning), as its
     /// checker plugin reported through `CheckerVerdict::checker_failure`.
@@ -53,6 +61,7 @@ impl DispatchFault {
             Self::NotLoadedHere => HostCode::PluginNotLoadedHere,
             Self::NotLoaded => HostCode::NoProvider,
             Self::DatabaseUnavailable => HostCode::DatabaseUnavailable,
+            Self::SqlContended => HostCode::DatabaseBusy,
             Self::CheckerFailed => HostCode::CheckerFailed,
             Self::ProblemFailed => HostCode::ProblemFailed,
         }
@@ -117,11 +126,26 @@ impl DispatchFaults {
 /// and the unit waits, parked while its provider is loaded nowhere, for a
 /// replica that runs it. Only a key no enabled plugin provides, taken by a
 /// replica that did not have it loaded either, stands on its first attempt
-/// ([`DispatchFault::NotLoaded`]): no replica will ever run it.
+/// ([`DispatchFault::NotLoaded`]): no replica will ever run it. A key outside
+/// the unit's needs (`needed`, when the claim knows them) stands too:
+/// parking waits only for the keys a unit needs, so handing it back would
+/// hand it back forever.
 pub(crate) fn missing_plugin(
     needs_loaded: bool,
+    needed: Option<&[(crate::providers::Provided, String)]>,
     unresolved: &crate::providers::Unresolved,
 ) -> Recorded {
+    let outside = needed.is_some_and(|needed| {
+        !needed
+            .iter()
+            .any(|(kind, key)| *kind == unresolved.kind && *key == unresolved.key)
+    });
+    if outside {
+        return Recorded {
+            fault: DispatchFault::NotLoaded,
+            message: format!("{unresolved}, and the work does not declare it as a need"),
+        };
+    }
     if needs_loaded || unresolved.provider.is_some() {
         Recorded {
             fault: DispatchFault::NotLoadedHere,
@@ -137,8 +161,13 @@ pub(crate) fn missing_plugin(
 
 /// Whether `fault` loses the attempt it meets.
 fn loses(fault: DispatchFault) -> bool {
-    SystemErrorClass::of_fault(fault) == SystemErrorClass::HandBack
+    SystemErrorClass::of_fault(fault).hands_back()
 }
+
+/// How many times one unit's attempt is handed back for plugin SQL
+/// contention ([`DispatchFault::SqlContended`]); counted on the unit's row
+/// (`contended_handbacks`), so it holds across replicas and restarts.
+pub(crate) const CONTENTION_HANDBACKS: i32 = 5;
 
 /// What becomes of a unit whose attempt ended in a system error. The class is
 /// decided where the failure is observed (a dispatch fault, the dispatcher's
@@ -157,6 +186,11 @@ pub(crate) enum SystemErrorClass {
     /// its platform tools takes no work, so the next attempt goes to one that
     /// has them.
     HandBack,
+    /// The attempt met contention for plugin SQL connections: handed back
+    /// like [`Self::HandBack`] while the unit has handed back fewer than
+    /// [`CONTENTION_HANDBACKS`] times for it, a [`Self::Judging`] failure
+    /// after that (`judging::fail_dispatch`).
+    Contended,
     /// A failure every attempt repeats: the contest plugin refused the
     /// submission or found the problem cannot be judged, or the problem's
     /// checker fails. It stands at once (`error_stands`).
@@ -164,6 +198,12 @@ pub(crate) enum SystemErrorClass {
 }
 
 impl SystemErrorClass {
+    /// Whether the attempt it ends is handed back rather than finalized
+    /// (for [`Self::Contended`], while its cap allows).
+    pub(crate) fn hands_back(self) -> bool {
+        matches!(self, Self::HandBack | Self::Contended)
+    }
+
     pub(crate) fn of_fault(fault: DispatchFault) -> Self {
         match fault {
             DispatchFault::Operation(
@@ -174,6 +214,7 @@ impl SystemErrorClass {
             )
             | DispatchFault::NotLoadedHere
             | DispatchFault::DatabaseUnavailable => Self::HandBack,
+            DispatchFault::SqlContended => Self::Contended,
             DispatchFault::NotLoaded
             | DispatchFault::CheckerFailed
             | DispatchFault::ProblemFailed => Self::Stands,
@@ -335,7 +376,8 @@ impl DispatchFailure {
         needs_loaded: bool,
         unresolved: &crate::providers::Unresolved,
     ) -> Self {
-        Self::from(missing_plugin(needs_loaded, unresolved))
+        // The contest plugin is always a need of the unit.
+        Self::from(missing_plugin(needs_loaded, None, unresolved))
     }
 }
 

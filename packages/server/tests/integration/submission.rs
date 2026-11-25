@@ -1618,12 +1618,13 @@ mod judgement_history {
         let admin_token = app
             .create_user_with_role("admin_jhist_data", "pass1234", "admin")
             .await;
-        let changes: [&str; 5] = [
+        let changes: [&str; 6] = [
             "test data",
             "time limit",
             "checker format",
             "additional file",
             "problem config",
+            "plugin config",
         ];
         for change in changes {
             let problem_id = app.create_problem(&admin_token, change).await;
@@ -1656,6 +1657,30 @@ mod judgement_history {
                         .await;
                     assert!(res.status < 300, "{change}: {}", res.text);
                 }
+                "plugin config" => {
+                    // A plugin-scope config of a judging input of the plugin
+                    // that judges it (the provider of its contest type).
+                    use sea_orm::ConnectionTrait;
+                    app.db
+                        .execute_unprepared(
+                            "INSERT INTO plugin (id, is_enabled, generation, updated_at, \
+                                                 governs) \
+                             VALUES ('standard-judge', TRUE, 0, NOW(), \
+                                     '{\"visibility\": false, \"contest_types\": [\"standard\"], \
+                                       \"problem_types\": [], \"checker_formats\": [], \
+                                       \"languages\": [], \"unchecked_problem_types\": [], \
+                                       \"hooks\": [], \"judging_inputs\": [\"limits\"], \
+                                       \"checker_languages\": []}') \
+                             ON CONFLICT (id) DO NOTHING; \
+                             INSERT INTO plugin_config (scope, ref_id, namespace, config, \
+                                                        position, updated_at) \
+                             VALUES ('plugin', 'standard-judge', 'limits', '{}', 0, NOW()) \
+                             ON CONFLICT (scope, ref_id, namespace) \
+                               DO UPDATE SET config = '{\"k\": 1}'",
+                        )
+                        .await
+                        .unwrap();
+                }
                 _ => {
                     use sea_orm::ConnectionTrait;
                     app.db
@@ -1669,7 +1694,7 @@ mod judgement_history {
                                          '{{\"visibility\": false, \"contest_types\": [], \
                                            \"problem_types\": [], \"checker_formats\": [], \
                                            \"languages\": [], \"unchecked_problem_types\": [], \
-                                           \"hooks\": [], \"judging_inputs\": [\"checker\"]}}'); \
+                                           \"hooks\": [], \"judging_inputs\": [\"checker\"], \"checker_languages\": []}}'); \
                                  INSERT INTO plugin_config (scope, ref_id, namespace, config, \
                                                             position, updated_at) \
                                  VALUES ('problem', '{problem_id}', 'inputs-plugin:checker', \
