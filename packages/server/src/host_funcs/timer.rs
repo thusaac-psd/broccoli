@@ -90,7 +90,9 @@ pub(crate) async fn schedule(
                  SET fire_at = EXCLUDED.fire_at,
                      payload = EXCLUDED.payload,
                      claimed_at = EXCLUDED.claimed_at,
-                     attempts = EXCLUDED.attempts"#,
+                     attempts = EXCLUDED.attempts,
+                     unanswered = 0,
+                     retry_at = NULL"#,
             [
                 plugin_id.into(),
                 key.into(),

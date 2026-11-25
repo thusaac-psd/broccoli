@@ -228,8 +228,7 @@ impl Retry {
 }
 
 fn retry_delay(attempts: u32) -> Duration {
-    let factor = 1u32 << attempts.saturating_sub(1).min(16);
-    RETRY_BASE.saturating_mul(factor).min(RETRY_MAX)
+    common::retry::doubling_backoff(attempts, RETRY_BASE, RETRY_MAX)
 }
 
 impl PluginLifecycle {

@@ -48,10 +48,12 @@ pub const MAX_EVENT_ATTEMPTS: i32 = 12;
 /// The wait before the next attempt of an event whose `attempts` attempts
 /// left it unfinished.
 pub(crate) fn backoff_secs(attempts: i32) -> i64 {
-    let doublings = attempts.saturating_sub(1).clamp(0, 20) as u32;
-    BACKOFF_BASE_SECS
-        .saturating_mul(1i64 << doublings)
-        .min(BACKOFF_MAX_SECS)
+    common::retry::doubling_backoff(
+        attempts.max(0) as u32,
+        std::time::Duration::from_secs(BACKOFF_BASE_SECS as u64),
+        std::time::Duration::from_secs(BACKOFF_MAX_SECS as u64),
+    )
+    .as_secs() as i64
 }
 
 /// A background event this replica could not record (the database refused
