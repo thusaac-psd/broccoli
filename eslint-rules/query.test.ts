@@ -1,6 +1,8 @@
+import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { RuleTester } from 'eslint';
+import tseslint from 'typescript-eslint';
 
 import query from './query.js';
 
@@ -31,6 +33,11 @@ test('a query read with a fallback renders its state', () => {
         'const { data: rows, error } = useQuery(o); const xs = rows?.items ?? [];',
         'const { isError, ...rest } = useQuery(o); const xs = rest.data ?? [];',
         'const xs = useQuery(o).data;',
+        'const q = useQuery(o); const n = q.data?.max ?? undefined;',
+        'const q = useQuery(o); const n = q.data ?? null;',
+        'const q = useQuery(o); const rows = q.data; const xs = rows ?? []; const s = useQueryState(q);',
+        'const q = useQuery(o); const xs = q.data ? q.data : []; const failed = q.isError;',
+        'const q = useQuery(o); const n = q.data ? 1 : 0; const s = useQueryState(q);',
       ],
       invalid: [
         'const q = useQuery(o); const xs = q.data ?? [];',
@@ -44,7 +51,80 @@ test('a query read with a fallback renders its state', () => {
         'const { data: rows } = useQuery(o); const xs = rows?.items ?? [];',
         'const { isLoading, ...rest } = useQuery(o); const xs = rest.data ?? [];',
         'const q = useQuery(o); const xs = q.data?.items ?? [];',
+        'const q = useQuery(o); const xs = q.data ? q.data.map(f) : [];',
+        'const q = useQuery(o); const xs = !q.data ? [] : q.data;',
+        'const q = useQuery(o); const xs = q.data === undefined ? [] : q.data;',
+        'const q = useQuery(o); const rows = q.data; const xs = rows ?? [];',
+        'const rows = useQuery(o).data; const xs = rows ?? [];',
       ].map((code) => ({ code, errors: [{ messageId: 'defaulted' }] })),
     },
   );
+});
+
+// With types, a query result is whatever has one's shape, whoever made it.
+const PRELUDE = `
+type Result<T> = {
+  data: T | undefined;
+  isError: boolean;
+  error: unknown;
+  fetchStatus: 'idle' | 'fetching' | 'paused';
+  refetch: () => void;
+};
+type State<T> = { status: 'data'; data: T } | { status: 'loading' };
+declare function useQuery(o: unknown): Result<string[]>;
+declare function useRegistries(): Result<{ languages: string[] }>;
+declare function useQueries(o: unknown): Result<string[]>[];
+declare function useQueryState<T>(q: Result<T>): State<T>;
+declare function useView(): State<string[]>;
+declare const apiClient: { GET(p: string): Promise<{ data?: string[]; error?: unknown }> };
+declare const a: boolean;
+declare function f(x: unknown): string[];
+`;
+
+test('with types, any query result read with a fallback renders its state', () => {
+  const typed = new RuleTester({
+    languageOptions: {
+      parser: tseslint.parser,
+      parserOptions: {
+        projectService: {
+          allowDefaultProject: ['eslint-rules/*.tsx'],
+          defaultProject: 'tsconfig.json',
+        },
+        tsconfigRootDir: join(import.meta.dirname, '..'),
+      },
+    },
+  });
+  const cases = (codes: string[]) =>
+    codes.map((code) => ({
+      code: PRELUDE + code,
+      filename: join(import.meta.dirname, 'typed.tsx'),
+    }));
+  typed.run('no-defaulted-query-data', query.rules['no-defaulted-query-data'], {
+    valid: cases([
+      'const q = useRegistries(); const s = useQueryState(q); const xs = q.data?.languages ?? [];',
+      'const q = useRegistries(); const xs = q.data?.languages; ',
+      'const v = useView(); const xs = v.status === "data" ? v.data : [];',
+      'async function g() { const r = await apiClient.GET("p"); return r.data ?? []; }',
+      'const qs = useQueries(o); const s = useQueryState(qs[0]); const xs = qs[0].data ?? [];',
+      'function useX() { const query = useRegistries(); return query; }',
+      'const { data, isError } = useRegistries(); const xs = data?.languages ?? [];',
+      'function V({ query }: { query: Result<string[]> }) { const s = useQueryState(query); return query.data ?? []; }',
+      'const q = useRegistries(); const xs = q.data && (q.data.languages[0] ?? "none");',
+      'const q = useRegistries(); if (q.data) { const xs = q.data.languages ?? []; }',
+    ]),
+    invalid: cases([
+      'const q = useRegistries(); const xs = q.data?.languages ?? [];',
+      'const { data: registries } = useRegistries(); const xs = registries?.languages ?? [];',
+      'const xs = useRegistries().data?.languages ?? [];',
+      'const q = useRegistries(); const p = q; const xs = p.data ?? [];',
+      'const q = a ? useQuery(1) : useQuery(2); const xs = q.data ?? [];',
+      'const qs = useQueries(o); const xs = qs[0].data ?? [];',
+      'const [first] = useQueries(o); const xs = first.data ?? [];',
+      'const qs = useQueries(o); const xs = qs.map((q) => q.data ?? []);',
+      'const [{ data }] = useQueries(o); const xs = data ?? [];',
+      'function V({ query }: { query: Result<string[]> }) { return query.data ?? []; }',
+      'const q = useRegistries(); const rows = q.data; const xs = rows ?? f(0);',
+      'const q = useRegistries(); const xs = q.data ? q.data.languages : [];',
+    ]).map((c) => ({ ...c, errors: [{ messageId: 'defaulted' }] })),
+  });
 });

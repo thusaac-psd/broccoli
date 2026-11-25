@@ -20,6 +20,7 @@
 # Sidebar
 'sidebar.platform' = "Platform"
 'sidebar.dashboard' = "Dashboard"
+'sidebar.problemsRetry' = "Problems could not load: retry"
 'sidebar.account' = "Account"
 'sidebar.problems' = "Problems"
 'sidebar.contests' = "Contests"
@@ -100,6 +101,7 @@
 
 # Submissions filters
 'submissions.filters.allProblems' = "All Problems"
+'submissions.filters.allProblemsUnavailable' = "All problems (the list could not load)"
 'submissions.filters.allLanguages' = "All Languages"
 'submissions.filters.allLanguagesUnavailable' = "All languages (the list could not load)"
 'submissions.filters.allStatuses' = "All Statuses"
@@ -278,6 +280,7 @@
 'submissionDetail.versionsLoadFailed' = "Could not load the judging history."
 'submissionDetail.workerPreserveRouting' = "Keep current routing"
 'submissionDetail.workerSharedPool' = "Shared worker pool"
+'submissionDetail.workersUnavailable' = "The live workers could not load"
 'submissionDetail.regradeCandidate' = "Regrade Candidate"
 'submissionDetail.rejudgeNow' = "Rejudge Now"
 'submissionDetail.currentVersion' = "Current"

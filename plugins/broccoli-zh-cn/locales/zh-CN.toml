@@ -21,6 +21,7 @@
 # Sidebar
 'sidebar.platform' = "平台"
 'sidebar.dashboard' = "仪表盘"
+'sidebar.problemsRetry' = "题目加载失败：重试"
 'sidebar.account' = "账户"
 'sidebar.problems' = "题目"
 'sidebar.contests' = "比赛"
@@ -101,6 +102,7 @@
 
 # Submissions filters
 'submissions.filters.allProblems' = "全部题目"
+'submissions.filters.allProblemsUnavailable' = "全部题目（题目列表加载失败）"
 'submissions.filters.allLanguages' = "全部语言"
 'submissions.filters.allLanguagesUnavailable' = "全部语言（语言列表加载失败）"
 'submissions.filters.allStatuses' = "全部状态"
@@ -279,6 +281,7 @@
 'submissionDetail.versionsLoadFailed' = "无法加载评测历史。"
 'submissionDetail.workerPreserveRouting' = "保持当前路由"
 'submissionDetail.workerSharedPool' = "共享评测机池"
+'submissionDetail.workersUnavailable' = "在线评测机列表加载失败"
 'submissionDetail.regradeCandidate' = "重测候选版本"
 'submissionDetail.rejudgeNow' = "立即重测"
 'submissionDetail.currentVersion' = "当前"

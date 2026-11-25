@@ -1,4 +1,8 @@
-import type { QueryFailure, QueryState } from '@broccoli/web-sdk/hooks';
+import type {
+  QueryFailure,
+  QueryState,
+  RegistryChoice,
+} from '@broccoli/web-sdk/hooks';
 import { Slot } from '@broccoli/web-sdk/slot';
 import type {
   Submission,
@@ -24,7 +28,8 @@ interface ProblemCodingTabProps {
   storageKey: string;
   contestType: string;
   onContestTypeChange?: (value: string) => void;
-  contestTypes?: string[];
+  /** The contest types to judge a practice submission as, the chosen one kept. */
+  contestTypes?: RegistryChoice[];
   submissionFormat?: Record<string, string[]> | null;
   languages: QueryState<ProblemLanguages>;
   latestSubmission: Submission | null;
