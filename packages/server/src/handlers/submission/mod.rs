@@ -178,11 +178,15 @@ pub async fn create_submission(
         Some(ref ct) => ct.clone(),
         None => problem.default_contest_type.clone(),
     };
+    let checker_language = crate::providers::checker_language_of(&state.db, problem.id).await?;
     crate::plugin_lifecycle::accepting_handler(
         &state,
-        state
-            .plugin_lifecycle
-            .needs_on(&contest_type, &problem, Some(&payload.language)),
+        state.plugin_lifecycle.needs_on(
+            &contest_type,
+            &problem,
+            Some(&payload.language),
+            checker_language.as_deref(),
+        ),
     )
     .await?;
 
@@ -561,10 +565,15 @@ async fn build_visible_judgement(
     response.judged_on_earlier_inputs = judged_on_earlier_inputs;
     // A judgement waits on what its submission waits on: the same needs, by
     // the same rule (`PluginLifecycle::parked_by`), shown the same way.
+    let checker_language =
+        crate::providers::checker_language_of(&state.db, problem_model.id).await?;
     response.parked_by = state.plugin_lifecycle.parked_by(
-        state
-            .plugin_lifecycle
-            .needs_on(&sub.contest_type, &problem_model, Some(&sub.language)),
+        state.plugin_lifecycle.needs_on(
+            &sub.contest_type,
+            &problem_model,
+            Some(&sub.language),
+            checker_language.as_deref(),
+        ),
         response.status,
     );
     response.status = response::shown_status(response.status, response.parked_by.as_ref());
@@ -781,11 +790,15 @@ pub async fn create_contest_submission(
     let contest_type = required_contest_type(&contest_model)?;
     // The handler owns admission, so it is pinned here, before any hook
     // runs, to authorize hook effects through admission commit.
+    let checker_language = crate::providers::checker_language_of(&state.db, problem.id).await?;
     let handler = crate::plugin_lifecycle::accepting_handler(
         &state,
-        state
-            .plugin_lifecycle
-            .needs_on(&contest_type, &problem, Some(&payload.language)),
+        state.plugin_lifecycle.needs_on(
+            &contest_type,
+            &problem,
+            Some(&payload.language),
+            checker_language.as_deref(),
+        ),
     )
     .await?;
     let admission_owner = handler

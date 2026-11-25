@@ -40,13 +40,31 @@ impl TestlibConfig {
     }
 }
 
+/// The languages a checker source compiles in, each with the extensions of
+/// its compile units: exactly the manifest's `checker_languages` (pinned by
+/// `the_manifest_maps_checker_languages_as_the_code_does`), so the host and
+/// this plugin read a problem's checker language alike.
+pub const CHECKER_LANGUAGES: &[(&str, &[&str])] = &[("c", &["c"]), ("cpp", &["cpp", "cc", "cxx"])];
+
+fn checker_languages() -> std::collections::BTreeMap<String, Vec<String>> {
+    CHECKER_LANGUAGES
+        .iter()
+        .map(|(language, extensions)| {
+            (
+                language.to_string(),
+                extensions.iter().map(|e| e.to_string()).collect(),
+            )
+        })
+        .collect()
+}
+
 /// True for a C/C++ compile unit - the only files that belong on the compiler
-/// command line. Everything else in a checker bundle (headers like testlib.h,
-/// and any auxiliary data files) is mounted for `#include`/runtime use but never
-/// compiled.
+/// command line: a file the checker language rule reads a language from
+/// (`broccoli_server_sdk::checker_language`). Everything else in a checker
+/// bundle (headers like testlib.h, and any auxiliary data files) is mounted
+/// for `#include`/runtime use but never compiled.
 pub fn is_checker_source(filename: &str) -> bool {
-    let f = filename.to_ascii_lowercase();
-    f.ends_with(".cpp") || f.ends_with(".cc") || f.ends_with(".cxx") || f.ends_with(".c")
+    broccoli_server_sdk::checker_language(&checker_languages(), [filename]).is_some()
 }
 
 /// Split a checker bundle into compile units (`.c`/`.cpp`/`.cc`/`.cxx`) and
@@ -72,21 +90,19 @@ pub fn partition_checker_sources(
     Ok((sources, others))
 }
 
-/// Map checker source file extension to a language ID for the resolver.
-pub fn checker_language_id(primary_filename: &str) -> Result<&str, String> {
-    if primary_filename.ends_with(".cpp")
-        || primary_filename.ends_with(".cc")
-        || primary_filename.ends_with(".cxx")
-    {
-        Ok("cpp")
-    } else if primary_filename.ends_with(".c") {
-        Ok("c")
-    } else {
-        Err(format!(
-            "Unsupported checker source language for '{}'. Only C (.c) and C++ (.cpp/.cc/.cxx) are supported.",
-            primary_filename
-        ))
-    }
+/// The language the checker source of `filenames` (in stored order) compiles
+/// in, by the one rule the host reads it by
+/// (`broccoli_server_sdk::checker_language`): the first file whose extension,
+/// compared case-insensitively, `CHECKER_LANGUAGES` lists.
+pub fn checker_language_id(filenames: &[String]) -> Result<String, String> {
+    broccoli_server_sdk::checker_language(&checker_languages(), filenames.iter().map(String::as_str))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!(
+                "Unsupported checker source language for '{}'. Only C (.c) and C++ (.cpp/.cc/.cxx) are supported.",
+                filenames.join(", ")
+            )
+        })
 }
 
 /// Fold every file of the checker bundle into the compile cache inputs. The
@@ -300,9 +316,9 @@ pub(crate) fn resolve_testlib_compile(
     // checker env for #include but must not appear on the compile command line and
     // must not drive language detection.
     let (sources, _headers) = partition_checker_sources(&filenames)?;
-    let lang_id = checker_language_id(&sources[0])?;
+    let lang_id = checker_language_id(&filenames)?;
     let config = load_testlib_config(host)?;
-    let checker_compiler = match lang_id {
+    let checker_compiler = match lang_id.as_str() {
         "cpp" => &config.cpp,
         "c" => &config.c,
         _ => &config.cpp, // unreachable for testlib (always C/C++)
@@ -478,46 +494,72 @@ mod tests {
     fn the_manifest_maps_checker_languages_as_the_code_does() {
         let manifest: toml::Value =
             toml::from_str(include_str!("../../plugin.toml")).expect("plugin.toml");
-        let languages = manifest["config"]["checker_source"]["checker_languages"]
-            .as_table()
-            .expect("checker_languages");
-        let mut mapped = 0;
-        for (language, extensions) in languages {
-            for extension in extensions.as_array().expect("extensions") {
-                let file = format!("checker.{}", extension.as_str().expect("extension"));
-                assert!(is_checker_source(&file), "{file} is compiled");
-                assert_eq!(checker_language_id(&file).unwrap(), language, "{file}");
-                mapped += 1;
-            }
-        }
-        for extension in ["cpp", "cc", "cxx", "c"] {
-            assert!(
-                languages.values().any(|e| e
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|x| x.as_str() == Some(extension))),
-                "{extension} is mapped"
+        let namespace = &manifest["config"]["checker_source"];
+        let declared: std::collections::BTreeMap<String, Vec<String>> =
+            namespace["checker_languages"]
+                .as_table()
+                .expect("checker_languages")
+                .iter()
+                .map(|(language, extensions)| {
+                    let extensions = extensions
+                        .as_array()
+                        .expect("extensions")
+                        .iter()
+                        .map(|e| e.as_str().expect("an extension").to_string())
+                        .collect();
+                    (language.clone(), extensions)
+                })
+                .collect();
+        assert_eq!(
+            declared,
+            checker_languages(),
+            "the manifest declares the code's table"
+        );
+        assert_eq!(
+            namespace["compiles"].as_array().expect("compiles"),
+            &vec![toml::Value::String("testlib".into())],
+            "the testlib format compiles its source"
+        );
+    }
+
+    /// The primary file is the first one whose extension, in any case, the
+    /// table lists, whatever comes before it: the rule the host reads a
+    /// problem's checker language by.
+    #[test]
+    fn the_checker_language_is_the_first_listed_files_in_any_case() {
+        let files = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        for (names, language) in [
+            (&["Checker.CPP"][..], "cpp"),
+            (&["testlib.h", "check.c", "other.cpp"][..], "c"),
+            (&["README", "x.Cxx"][..], "cpp"),
+        ] {
+            assert_eq!(
+                checker_language_id(&files(names)).unwrap(),
+                language,
+                "{names:?}"
             );
         }
-        assert_eq!(mapped, 4);
+        assert!(checker_language_id(&files(&["testlib.h"])).is_err());
     }
 
     #[test]
     fn checker_language_id_cpp() {
-        assert_eq!(checker_language_id("checker.cpp").unwrap(), "cpp");
-        assert_eq!(checker_language_id("checker.cc").unwrap(), "cpp");
-        assert_eq!(checker_language_id("checker.cxx").unwrap(), "cpp");
+        for file in ["checker.cpp", "checker.cc", "checker.cxx"] {
+            assert_eq!(checker_language_id(&[file.to_string()]).unwrap(), "cpp");
+        }
     }
 
     #[test]
     fn checker_language_id_c() {
-        assert_eq!(checker_language_id("checker.c").unwrap(), "c");
+        assert_eq!(
+            checker_language_id(&["checker.c".to_string()]).unwrap(),
+            "c"
+        );
     }
 
     #[test]
     fn checker_language_id_unsupported() {
-        let err = checker_language_id("checker.py").unwrap_err();
+        let err = checker_language_id(&["checker.py".to_string()]).unwrap_err();
         assert!(err.contains("Unsupported"));
     }
 
@@ -541,7 +583,7 @@ mod tests {
         let (sources, others) = partition_checker_sources(&files).unwrap();
         assert_eq!(sources, vec!["checker.cpp".to_string()]);
         assert_eq!(others, vec!["testlib.h".to_string()]);
-        assert_eq!(checker_language_id(&sources[0]).unwrap(), "cpp");
+        assert_eq!(checker_language_id(&sources).unwrap(), "cpp");
     }
 
     #[test]

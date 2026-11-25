@@ -397,20 +397,26 @@ The plugin reads it like any other problem config:
 `host.config.get_problem(problem_id, "checker_source")`. A manifest may mark at
 most one namespace, and only with `scopes = ["problem"]`.
 
-If the checker compiles the source, declare which language each primary
-file's extension compiles in, with `checker_languages` on the same namespace:
+If the checker compiles the source, name the checker formats that do with
+`compiles`, and declare which language each primary file's extension compiles
+in with `checker_languages`, both on the same namespace:
 
 ```toml
 [config.checker_source]
 scopes = ["problem"]
 checker_source = true
+compiles = ["testlib"]
 checker_languages = { cpp = ["cpp", "cc", "cxx"], c = ["c"] }
 ```
 
-The host reads a problem's checker language from the first stored file whose
-extension is listed, and work on the problem then needs that language's
-plugin as it needs its own language's: while it is disabled, the work waits
-queued instead of failing.
+A problem's checker language is the language of the first stored file whose
+extension, compared case-insensitively, is listed. The host derives it each
+time it needs it, only for a problem whose checker format is listed in
+`compiles` and whose fleet-wide provider is your plugin, so it always follows
+the stored source. Work on the problem then needs that language's plugin as it
+needs its own language's: while it is disabled, the work waits queued instead
+of failing. Compile by the same rule, `broccoli_server_sdk::checker_language`,
+so the language you compile in is the one the host waits for.
 
 ## Test it
 

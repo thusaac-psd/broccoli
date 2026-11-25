@@ -179,6 +179,7 @@ pub fn closed_by_text(closed: &ClosedBy, names: &PluginNames<'_>) -> String {
         Provided::ProblemType => "its evaluator plugin",
         Provided::CheckerFormat => "its checker plugin",
         Provided::Language => "its language plugin",
+        Provided::CheckerLanguage => "its checker's language plugin",
     };
     let why = match reason {
         ClosedReason::Disabled => "disabled until an administrator enables it",
@@ -401,6 +402,12 @@ mod tests {
                 .waiting_for(&names)
                 .unwrap()
                 .starts_with("Waiting for its language plugin standard-languages (")
+        );
+        assert!(
+            parked("standard-languages", Provided::CheckerLanguage)
+                .waiting_for(&names)
+                .unwrap()
+                .starts_with("Waiting for its checker's language plugin standard-languages")
         );
         // A provider loaded on no server says so, not that it is disabled.
         // A contest plugin loaded nowhere also withholds the outcome, as the

@@ -114,6 +114,10 @@ pub async fn reset_session(
         .map(drop)
 }
 
+/// How long the probe that confirms a lost plugin connection waits for the
+/// host database ([`PluginSqlPools::confirmed`]).
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// How long a plugin's SQL stays unavailable after its provisioning failed,
 /// before the next call tries again.
 const PROVISION_BACKOFF: Duration = Duration::from_secs(30);
@@ -137,6 +141,11 @@ pub enum Unavailable {
     Unprovisioned(String),
     #[error("the database cannot serve the statement: {1}")]
     Outage(common::db::Outage, String),
+    /// The plugin's connection was cut while the host database answers (a
+    /// backend terminated under it): the plugin's own failure, not an outage
+    /// ([`PluginSqlPools::confirmed`]).
+    #[error("the plugin's database connection was cut while the database answers: {0}")]
+    Dropped(String),
 }
 
 impl Unavailable {
@@ -347,6 +356,30 @@ impl PluginSqlPools {
         let _ = conn.close().await;
         let shown = shown.map_err(|e| DbErr::Conn(sea_orm::RuntimeErr::SqlxError(e.into())))?;
         Ok(shown == format!("{}ms", CUT_CHECK_INTERVAL.as_millis()))
+    }
+
+    /// `e` as the platform takes it: a lost database a plugin's statement met
+    /// is confirmed with one probe on the host's own pool, and if the host
+    /// database answers, the plugin's connection was cut under it (a backend
+    /// it or its role's sibling ended), its own failure
+    /// ([`Unavailable::Dropped`]) and never an outage. A host outage stays
+    /// one. Blocks on the probe; runs where the host function already
+    /// blocks on its statement.
+    pub fn confirmed(&self, e: Unavailable) -> Unavailable {
+        let Unavailable::Outage(common::db::Outage::Lost, message) = e else {
+            return e;
+        };
+        let host = self.inner.host.clone();
+        let answers = tokio::runtime::Handle::current().block_on(async move {
+            tokio::time::timeout(PROBE_TIMEOUT, host.execute_unprepared("SELECT 1"))
+                .await
+                .is_ok_and(|answer| answer.is_ok())
+        });
+        if answers {
+            Unavailable::Dropped(message)
+        } else {
+            Unavailable::Outage(common::db::Outage::Lost, message)
+        }
     }
 
     /// A lease on `plugin_id`'s pool for `call`, provisioning the plugin's

@@ -335,6 +335,12 @@ fn run_guest(
                     func_name: func_name.clone(),
                 };
             }
+            MarkedUnavailable::SqlBusy => {
+                return PluginError::SqlBusy {
+                    plugin_id: plugin_id.clone(),
+                    func_name: func_name.clone(),
+                };
+            }
             MarkedUnavailable::Busy => return unavailable(),
             MarkedUnavailable::No if cancelled => return unavailable(),
             MarkedUnavailable::No => {}

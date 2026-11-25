@@ -384,9 +384,9 @@ impl EventClaim {
             error_message: why.to_string(),
             retry_history,
         };
-        crate::dlq::DlqService::new(&txn)
-            .send_to_dlq(&envelope)
-            .await?;
+        // An event revived and dead again refiles its letter: this death's
+        // error, every attempt so far.
+        crate::dlq::DlqService::new(&txn).refile(&envelope).await?;
         txn.commit().await?;
         Ok(true)
     }
@@ -1125,11 +1125,17 @@ pub async fn redeliver_once(
         .await;
     }
 
+    // A purged dead event can never be retried, so its dead letter is
+    // resolved with it.
     db.execute_raw(sea_orm::Statement::from_sql_and_values(
         sea_orm::DbBackend::Postgres,
-        "DELETE FROM hook_event \
-          WHERE COALESCE(completed_at, dead_at) < now() - make_interval(secs => $1)",
-        [(SETTLED_KEPT_SECS as f64).into()],
+        "WITH purged AS (DELETE FROM hook_event \
+                          WHERE COALESCE(completed_at, dead_at) \
+                                < now() - make_interval(secs => $1) \
+                         RETURNING event_id) \
+         UPDATE dead_letter_message SET resolved = TRUE, resolved_at = now() \
+          WHERE NOT resolved AND message_id IN (SELECT $2 || event_id FROM purged)",
+        [(SETTLED_KEPT_SECS as f64).into(), dlq_message_id("").into()],
     ))
     .await?;
 
@@ -2001,6 +2007,86 @@ mod tests {
         .await;
         redeliver_once(&db, &registry).await.unwrap();
         assert_eq!(rows(&db).await, 1, "the old completed row is purged");
+    }
+
+    /// A dead letter follows its event: each time the event dies its dead
+    /// letter is refiled with that death's error and every attempt so far,
+    /// reopened if it was resolved; when the event's row is purged past the
+    /// horizon, nothing can retry it any more, so its dead letter is
+    /// resolved.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dead_letter_is_refiled_at_each_death_and_resolved_at_the_purge() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let die = |hook: Arc<DownHook>| {
+            let db = db.clone();
+            async move {
+                let registry = replica_with(hook).await;
+                execute(
+                    &db,
+                    &format!(
+                        "UPDATE hook_event SET attempts = {}, next_attempt_at = now()",
+                        MAX_EVENT_ATTEMPTS - 1
+                    ),
+                )
+                .await;
+                redeliver_once(&db, &registry).await.unwrap();
+            }
+        };
+        let first = Arc::new(DownHook::new("first-down"));
+        dispatch_once(&db, &replica_with(first.clone()).await).await;
+        die(first).await;
+        let letter = || {
+            let db = db.clone();
+            async move {
+                db.query_one_raw(sea_orm::Statement::from_string(
+                    sea_orm::DbBackend::Postgres,
+                    "SELECT error_message, retry_count, resolved FROM dead_letter_message",
+                ))
+                .await
+                .unwrap()
+                .map(|r| {
+                    (
+                        r.try_get::<String>("", "error_message").unwrap(),
+                        r.try_get::<i32>("", "retry_count").unwrap(),
+                        r.try_get::<bool>("", "resolved").unwrap(),
+                    )
+                })
+                .expect("a dead letter")
+            }
+        };
+        let (why, retries, resolved) = letter().await;
+        assert!(why.contains("first-down"), "{why}");
+        assert!(!resolved);
+
+        // Revived, it dies again for another plugin: the letter says so.
+        assert!(revive_dead_event(&db, "after_judging:1:1").await.unwrap());
+        execute(
+            &db,
+            "UPDATE dead_letter_message SET resolved = TRUE, resolved_at = now()",
+        )
+        .await;
+        die(Arc::new(DownHook::new("second-down"))).await;
+        let (why, again, resolved) = letter().await;
+        assert!(
+            why.contains("second-down"),
+            "the second death's error: {why}"
+        );
+        assert!(
+            again > retries,
+            "every attempt so far: {retries} -> {again}"
+        );
+        assert!(!resolved, "reopened");
+
+        // Past the horizon the dead event is purged, and its letter with it.
+        execute(
+            &db,
+            "UPDATE hook_event SET dead_at = dead_at - interval '30 days'",
+        )
+        .await;
+        redeliver_once(&db, &new_shared_registry()).await.unwrap();
+        assert_eq!(rows(&db).await, 0, "purged");
+        let (_, _, resolved) = letter().await;
+        assert!(resolved, "nothing can retry a purged event");
     }
 
     /// Makes every unfinished event's next attempt due now, as if its

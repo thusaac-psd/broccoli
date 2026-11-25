@@ -548,12 +548,18 @@ pub struct ConfigNamespace {
     /// not ([`ConfigNamespace::is_judging_input`]).
     #[serde(default)]
     pub judging_input: bool,
+    /// For a `checker_source` namespace: the checker formats whose checker
+    /// compiles the stored source. Work on a problem of one of these formats
+    /// needs the language its source compiles in ([`Self::checker_languages`]);
+    /// a format not listed compiles nothing, whatever its source holds.
+    #[serde(default)]
+    pub compiles: Vec<String>,
     /// For a `checker_source` namespace: the languages its checker source
-    /// compiles in, each with the file extensions (without the dot, in
-    /// lower case) of a primary file in that language. The host reads a
-    /// problem's checker language from the extension of its first stored
-    /// file, and work on the problem then needs that language's provider as
-    /// it needs its own language's, so a closed language parks it.
+    /// compiles in, each with the file extensions (without the dot) of a
+    /// primary file in that language. The primary file is the first stored
+    /// file whose extension, compared case-insensitively, is listed here
+    /// ([`checker_language`]); the host reads a problem's checker language
+    /// from it, and the plugin compiles the source by the same rule.
     #[serde(default)]
     pub checker_languages: std::collections::BTreeMap<String, Vec<String>>,
     /// The plugin function that checks an admin's write to this namespace
@@ -895,6 +901,32 @@ pub fn keep_withheld(
         }
     }
     unset_count
+}
+
+/// The language a checker source of `filenames` (in stored order) compiles
+/// in, by `languages` (language to the extensions of a primary file, without
+/// the dot): the language of the first file whose extension, compared
+/// case-insensitively, one of them lists; `None` when no file's does. The one
+/// rule for a problem's checker language: the host derives it in SQL
+/// (`providers::checker_language_sql`) and the checker plugin compiles by it,
+/// both pinned to this function.
+pub fn checker_language<'a>(
+    languages: &'a std::collections::BTreeMap<String, Vec<String>>,
+    filenames: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    filenames.into_iter().find_map(|filename| {
+        let (_, extension) = filename.rsplit_once('.')?;
+        languages
+            .iter()
+            .find(|(_, extensions)| {
+                extensions.iter().any(|listed| {
+                    listed
+                        .trim_start_matches('.')
+                        .eq_ignore_ascii_case(extension)
+                })
+            })
+            .map(|(language, _)| language.as_str())
+    })
 }
 
 impl ConfigNamespace {

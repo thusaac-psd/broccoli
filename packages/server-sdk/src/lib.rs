@@ -7,6 +7,10 @@ pub mod visibility;
 // crate at the bottom of the graph. Re-export them here so the published guest SDK
 // surface (`broccoli_server_sdk::types::*`, `::error`, and the prelude) is unchanged
 // for every plugin and downstream crate.
+/// The one rule for the language a checker source compiles in: the checker
+/// plugin compiles by it, and the host derives a problem's checker language
+/// by it from the plugin's declared `checker_languages`.
+pub use broccoli_types::manifest::checker_language;
 pub use broccoli_types::{error, permissions, refusal_codes, types};
 
 #[cfg(not(target_arch = "wasm32"))]

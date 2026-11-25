@@ -134,7 +134,7 @@ pub(crate) fn contended_under(dispatch: Option<&Dispatch>, message: &str) {
             .faults()
             .record(DispatchFault::SqlContended, message.to_string());
     }
-    fail_call(Outage::Busy);
+    plugin_core::executor::fail_sql_busy();
 }
 
 /// What a dispatch's own statement (`what`, as "Failed to {what}") that met

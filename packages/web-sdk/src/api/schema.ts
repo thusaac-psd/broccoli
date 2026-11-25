@@ -4398,7 +4398,12 @@ export interface components {
      *     provide to run.
      * @enum {string}
      */
-    Provided: 'contest_type' | 'problem_type' | 'checker_format' | 'language';
+    Provided:
+      | 'contest_type'
+      | 'problem_type'
+      | 'checker_format'
+      | 'language'
+      | 'checker_language';
     /** @description What the fleet currently publishes for a plugin id. */
     PublishedPluginResponse: {
       /**

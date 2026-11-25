@@ -65,7 +65,7 @@ impl Unit {
             &format!("(SELECT pt.problem_type FROM problem pt WHERE pt.id = {row}.problem_id)"),
             &format!("(SELECT pt.checker_format FROM problem pt WHERE pt.id = {row}.problem_id)"),
             &format!("{row}.language"),
-            &format!("(SELECT pt.checker_language FROM problem pt WHERE pt.id = {row}.problem_id)"),
+            &format!("{row}.problem_id"),
         )
     }
 
@@ -425,7 +425,8 @@ pub(crate) struct Claim<T> {
     pub problem_type: String,
     /// Its problem's checker format (`problem.checker_format`).
     pub checker_format: String,
-    /// Its problem's checker language (`problem.checker_language`).
+    /// Its problem's checker language, derived as the claim takes it
+    /// (`providers::checker_language_sql`).
     pub checker_language: Option<String>,
     /// Seconds from its creation to the claim, on the database clock.
     pub queued_secs: f64,
@@ -525,19 +526,21 @@ fn claim_statement(unit: Unit, server_id: &str, limit: ClaimLimit, local: &Loade
     };
     b.statement(format!(
         "WITH room AS (SELECT ({room})::bigint AS n), \
-              picked AS (SELECT u.id FROM {from} WHERE u.{queued} AND {handled} AND {open} \
+              picked AS (SELECT u.id FROM {from} \
+                         WHERE u.{queued} AND u.queued_at <= NOW() AND {handled} AND {open} \
                          ORDER BY {order} LIMIT {take} {lock}), \
               moved AS (UPDATE {table} t SET status = '{pending}', owner_server_id = {owner}, \
                             lease_heartbeat_at = NOW(), leased_at = NOW(){claim_sets} \
                         FROM picked WHERE t.id = picked.id RETURNING t.*){mirror} \
          SELECT room.n AS claim_room, (SELECT last_value FROM {epoch}) AS claim_epoch, \
                 p.problem_type AS claim_problem_type, p.checker_format AS claim_checker_format, \
-                p.checker_language AS claim_checker_language, \
+                {checker_language} AS claim_checker_language, \
                 GREATEST(EXTRACT(EPOCH FROM NOW() - moved.created_at), 0)::float8 \
                     AS claim_queued_secs, \
                 moved.*{columns} \
          FROM room LEFT JOIN moved ON TRUE {joins}",
         from = unit.scan_from(),
+        checker_language = crate::providers::checker_language_sql("p.id", "p.checker_format"),
         queued = crate::dispatcher::QUEUED_PREDICATE,
         handled = unit.runs_here(&local),
         open = unit.runnable(),
@@ -754,6 +757,12 @@ async fn pick(
         .collect()
 }
 
+/// How long work handed back for a database outage waits before a claim may
+/// take it again ([`Requeue::HandedBackAfterOutage`]): long enough that an
+/// outage, real or a plugin's own failure, cannot hand one unit back in a
+/// hot loop, short enough that recovered work runs at once.
+pub(crate) const OUTAGE_HANDBACK_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Why a unit goes back to `Queued`: the one place a retry budget is
 /// charged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -762,6 +771,11 @@ enum Requeue {
     /// after a crash), or the platform lost the attempt (a system error of
     /// [`SystemErrorClass::HandBack`]). No retry is spent.
     HandedBack,
+    /// The platform lost the attempt to a database outage (the host
+    /// database lost, or no plugin SQL connection free): handed back like
+    /// [`Self::HandedBack`], but queued [`OUTAGE_HANDBACK_DELAY`] ahead, so
+    /// an outage that persists never hands the same work back and forth.
+    HandedBackAfterOutage,
     /// Its owner was lost or the job is stuck. Spends one dispatch retry.
     Abandoned,
     /// Its judgement finalized as `SystemError`. Spends one of the
@@ -773,7 +787,7 @@ enum Requeue {
 impl Requeue {
     fn dispatch_retries(self) -> &'static str {
         match self {
-            Requeue::HandedBack => "t.dispatch_retries",
+            Requeue::HandedBack | Requeue::HandedBackAfterOutage => "t.dispatch_retries",
             Requeue::Abandoned => "t.dispatch_retries + 1",
             Requeue::SystemErrorRetry => "0",
         }
@@ -792,8 +806,15 @@ async fn requeue(
     if ids.is_empty() {
         return Ok(0);
     }
+    let queued_at = match why {
+        Requeue::HandedBackAfterOutage => format!(
+            "NOW() + make_interval(secs => {})",
+            OUTAGE_HANDBACK_DELAY.as_secs_f64()
+        ),
+        _ => "NOW()".to_string(),
+    };
     let sets = format!(
-        "status = '{queued}', queued_at = NOW(), owner_server_id = NULL, \
+        "status = '{queued}', queued_at = {queued_at}, owner_server_id = NULL, \
          lease_heartbeat_at = NULL, leased_at = NULL, dispatch_retries = {retries}, {cleared}",
         queued = SubmissionStatus::Queued,
         retries = why.dispatch_retries(),
@@ -1304,13 +1325,17 @@ pub(crate) async fn fail_dispatch(
     judge_epoch: i32,
     failure: &DispatchFailure,
 ) -> Result<DispatchFailed, DbErr> {
+    let outage = matches!(
+        failure.code,
+        HostCode::DatabaseUnavailable | HostCode::DatabaseBusy
+    );
     if failure.class == SystemErrorClass::HandBack {
-        return hand_back(db, unit, id, judge_epoch, None).await;
+        return hand_back(db, unit, id, judge_epoch, None, outage).await;
     }
     let past_cap;
     let failure = if failure.class == SystemErrorClass::Contended {
         if counted_contention(db, unit, id, judge_epoch).await? {
-            return hand_back(db, unit, id, judge_epoch, None).await;
+            return hand_back(db, unit, id, judge_epoch, None, outage).await;
         }
         // The unit used its contention hand-backs: the failure is the
         // submission's to spend a retry on.
@@ -1371,7 +1396,7 @@ pub(crate) async fn fail_dispatch(
     if row.try_get::<i64>("", "parked")? == 0 {
         return Ok(DispatchFailed::Stale);
     }
-    hand_back(db, unit, id, judge_epoch, Some(failure)).await
+    hand_back(db, unit, id, judge_epoch, Some(failure), outage).await
 }
 
 /// The second pass of [`fail_dispatch`]: under the unit's locks, hands back
@@ -1412,6 +1437,7 @@ async fn hand_back(
     id: i32,
     judge_epoch: i32,
     unless_open: Option<&DispatchFailure>,
+    outage: bool,
 ) -> Result<DispatchFailed, DbErr> {
     let txn = db.begin().await?;
     let row = txn
@@ -1451,7 +1477,12 @@ async fn hand_back(
             DispatchFailed::SystemError
         }
         (Some(_), _) => {
-            requeue(&txn, unit, &[id], Requeue::HandedBack).await?;
+            let why = if outage {
+                Requeue::HandedBackAfterOutage
+            } else {
+                Requeue::HandedBack
+            };
+            requeue(&txn, unit, &[id], why).await?;
             DispatchFailed::HandedBack
         }
     };

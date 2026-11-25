@@ -29,14 +29,6 @@ use sea_orm_migration::prelude::*;
 /// config. That only over-labels; a judgement is never labelled current
 /// when it read inputs older than its stamp.
 ///
-/// `problem.checker_language` is the language of the problem's checker
-/// source: the language its first stored file in a `checker_source`
-/// namespace compiles in, by the extensions the plugin declares
-/// (`plugin.governs -> 'checker_languages'`), kept by the
-/// `broccoli_checker_language` trigger on every write of such a config, and
-/// a need of every unit of the problem whose checker format's provider
-/// declares languages (`providers::Needs::checker_language`).
-///
 /// Plugins read both tables, so the plugin group role (named in
 /// `plugin_group_role`, see m0001) may read the new columns as it reads every
 /// other column that is not content.
@@ -54,7 +46,6 @@ impl MigrationName for Migration {
 
 const UP: &str = r#"
 ALTER TABLE public.problem ADD COLUMN inputs_version integer NOT NULL DEFAULT 0;
-ALTER TABLE public.problem ADD COLUMN checker_language character varying;
 ALTER TABLE public.submission_judgement ADD COLUMN inputs_version integer NOT NULL DEFAULT 0;
 ALTER TABLE public.submission_judgement
     ADD COLUMN judged_on_earlier_inputs boolean NOT NULL DEFAULT false;
@@ -69,8 +60,7 @@ BEGIN
   IF plugin_group IS NULL THEN
     RETURN;
   END IF;
-  EXECUTE format('GRANT SELECT (inputs_version, checker_language) ON public.problem TO %I',
-    plugin_group);
+  EXECUTE format('GRANT SELECT (inputs_version) ON public.problem TO %I', plugin_group);
   EXECUTE format(
     'GRANT SELECT (inputs_version, judged_on_earlier_inputs, plugin_epochs) ON public.submission_judgement TO %I',
     plugin_group);
@@ -177,46 +167,6 @@ BEGIN
 END $$;
 CREATE TRIGGER broccoli_inputs_changed AFTER UPDATE ON public.contest
   FOR EACH ROW EXECUTE FUNCTION public.broccoli_contest_inputs_changed();
-CREATE OR REPLACE FUNCTION public.broccoli_checker_language() RETURNS trigger
-LANGUAGE plpgsql AS $$
-DECLARE
-  changed jsonb;
-  target integer;
-  config_plugin text;
-  config_namespace text;
-  language text;
-BEGIN
-  IF current_setting('broccoli.restoring', true) = 'on' THEN
-    RETURN NULL;
-  END IF;
-  changed := CASE WHEN TG_OP = 'DELETE' THEN to_jsonb(OLD) ELSE to_jsonb(NEW) END;
-  IF changed->>'scope' IS DISTINCT FROM 'problem' THEN
-    RETURN NULL;
-  END IF;
-  target := substring(changed->>'ref_id' FROM '^([0-9]+)$')::integer;
-  config_plugin := split_part(changed->>'namespace', ':', 1);
-  config_namespace := substring(changed->>'namespace' FROM '^[^:]*:(.*)$');
-  IF target IS NULL OR NOT EXISTS (
-       SELECT 1 FROM public.plugin p, jsonb_array_elements(p.governs -> 'checker_languages') l
-        WHERE p.id = config_plugin AND l->>'namespace' = config_namespace) THEN
-    RETURN NULL;
-  END IF;
-  IF TG_OP <> 'DELETE' THEN
-    SELECT l->>'language' INTO language
-      FROM jsonb_array_elements(changed->'config'->'files') WITH ORDINALITY AS f(file, n)
-      JOIN public.plugin p ON p.id = config_plugin
-      CROSS JOIN jsonb_array_elements(p.governs -> 'checker_languages') l
-     WHERE l->>'namespace' = config_namespace
-       AND lower(f.file->>'filename') LIKE '%.' || (l->>'extension')
-     ORDER BY f.n
-     LIMIT 1;
-  END IF;
-  UPDATE public.problem SET checker_language = language
-   WHERE id = target AND checker_language IS DISTINCT FROM language;
-  RETURN NULL;
-END $$;
-CREATE TRIGGER broccoli_checker_language AFTER INSERT OR UPDATE OR DELETE ON public.plugin_config
-  FOR EACH ROW EXECUTE FUNCTION public.broccoli_checker_language();
 "#;
 
 const DOWN: &str = r#"
@@ -226,8 +176,6 @@ DROP TRIGGER IF EXISTS broccoli_inputs_changed ON public.additional_file;
 DROP TRIGGER IF EXISTS broccoli_inputs_changed ON public.plugin_config;
 DROP TRIGGER IF EXISTS broccoli_inputs_changed ON public.contest;
 DROP TRIGGER IF EXISTS broccoli_inputs_changed ON public.contest_problem;
-DROP TRIGGER IF EXISTS broccoli_checker_language ON public.plugin_config;
-DROP FUNCTION IF EXISTS public.broccoli_checker_language();
 DROP FUNCTION IF EXISTS public.broccoli_contest_inputs_changed();
 DROP FUNCTION IF EXISTS public.broccoli_problem_inputs_changed();
 DROP FUNCTION IF EXISTS public.broccoli_inputs_changed();
@@ -235,7 +183,6 @@ ALTER TABLE public.plugin DROP COLUMN inputs_epoch;
 ALTER TABLE public.submission_judgement DROP COLUMN plugin_epochs;
 ALTER TABLE public.submission_judgement DROP COLUMN judged_on_earlier_inputs;
 ALTER TABLE public.submission_judgement DROP COLUMN inputs_version;
-ALTER TABLE public.problem DROP COLUMN checker_language;
 ALTER TABLE public.problem DROP COLUMN inputs_version;
 "#;
 

@@ -49,6 +49,8 @@ pub(super) async fn build_submission_list_items(
         .into_iter()
         .map(|p| (p.id, p))
         .collect();
+    let problem_ids: Vec<i32> = problems.keys().copied().collect();
+    let checker_languages = crate::providers::checker_languages_of(db, &problem_ids).await?;
 
     let mut data = Vec::with_capacity(submissions.len());
     for (sub, user_opt) in submissions {
@@ -58,9 +60,14 @@ pub(super) async fn build_submission_list_items(
             .ok_or_else(|| AppError::Internal("Problem not found".into()))?;
         let score = submission_score_for_status(&sub.status, sub.score);
         let parked_by = state.plugin_lifecycle.parked_by(
-            state
-                .plugin_lifecycle
-                .needs_on(&sub.contest_type, problem_model, Some(&sub.language)),
+            state.plugin_lifecycle.needs_on(
+                &sub.contest_type,
+                problem_model,
+                Some(&sub.language),
+                checker_languages
+                    .get(&problem_model.id)
+                    .and_then(Option::as_deref),
+            ),
             sub.status,
         );
 
@@ -409,7 +416,9 @@ impl SubmissionContext {
         let row = db
             .query_one_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                r#"SELECT u.username, p.title, p.problem_type, p.checker_format, p.checker_language,
+                format!(
+                    r#"SELECT u.username, p.title, p.problem_type, p.checker_format,
+                          {checker_language} AS checker_language,
                           p.show_test_details,
                           CASE WHEN c.id IS NULL THEN NULL ELSE to_jsonb(c) END AS contest,
                           (SELECT j.id FROM submission_judgement j
@@ -418,6 +427,9 @@ impl SubmissionContext {
                    JOIN problem p ON p.id = $2
                    LEFT JOIN contest c ON c.id = $4
                    WHERE u.id = $1"#,
+                    checker_language =
+                        crate::providers::checker_language_sql("p.id", "p.checker_format"),
+                ),
                 [
                     sub.user_id.into(),
                     sub.problem_id.into(),

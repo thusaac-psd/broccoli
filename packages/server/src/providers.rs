@@ -49,7 +49,7 @@ pub(crate) fn field(kind: Provided) -> &'static str {
         Provided::ContestType => "contest_types",
         Provided::ProblemType => "problem_types",
         Provided::CheckerFormat => "checker_formats",
-        Provided::Language => "languages",
+        Provided::Language | Provided::CheckerLanguage => "languages",
     }
 }
 
@@ -68,7 +68,7 @@ impl Provides {
             Provided::ContestType => &self.contest_types,
             Provided::ProblemType => &self.problem_types,
             Provided::CheckerFormat => &self.checker_formats,
-            Provided::Language => &self.languages,
+            Provided::Language | Provided::CheckerLanguage => &self.languages,
         }
     }
 
@@ -130,7 +130,7 @@ impl Loaded {
             Provided::ContestType => &self.contest_types,
             Provided::ProblemType => &self.problem_types,
             Provided::CheckerFormat => &self.checker_formats,
-            Provided::Language => &self.languages,
+            Provided::Language | Provided::CheckerLanguage => &self.languages,
         }
     }
 
@@ -140,7 +140,7 @@ impl Loaded {
             Provided::ContestType => &mut self.contest_types,
             Provided::ProblemType => &mut self.problem_types,
             Provided::CheckerFormat => &mut self.checker_formats,
-            Provided::Language => &mut self.languages,
+            Provided::Language | Provided::CheckerLanguage => &mut self.languages,
         }
     }
 
@@ -219,6 +219,7 @@ pub fn role(kind: Provided) -> &'static str {
         Provided::ProblemType => "evaluator",
         Provided::CheckerFormat => "checker",
         Provided::Language => "language",
+        Provided::CheckerLanguage => "checker's language",
     }
 }
 
@@ -227,7 +228,7 @@ fn noun(kind: Provided) -> &'static str {
         Provided::ContestType => "contest type",
         Provided::ProblemType => "problem type",
         Provided::CheckerFormat => "checker format",
-        Provided::Language => "language",
+        Provided::Language | Provided::CheckerLanguage => "language",
     }
 }
 
@@ -285,8 +286,8 @@ pub struct Needs<'a> {
     /// none).
     pub language: Option<&'a str>,
     /// The language the problem's checker source compiles in
-    /// (`problem.checker_language`), when the checker format is a need and
-    /// its fleet-wide provider declares checker languages: the checker
+    /// (`providers::checker_language_of`), when the checker format is a need and its
+    /// fleet-wide provider declares its checker compiles: the checker
     /// resolves it to compile its source, so a closed one parks the work
     /// as the unit's own language would.
     pub checker_language: Option<&'a str>,
@@ -300,7 +301,7 @@ impl<'a> Needs<'a> {
             (Provided::ProblemType, Some(self.problem_type)),
             (Provided::CheckerFormat, self.checker_format),
             (Provided::Language, self.language),
-            (Provided::Language, self.checker_language),
+            (Provided::CheckerLanguage, self.checker_language),
         ]
         .into_iter()
         .filter_map(|(kind, key)| Some((kind, key?)))
@@ -317,7 +318,7 @@ pub(crate) fn sql_needs(
     problem_type: &str,
     checker_format: &str,
     language: &str,
-    checker_language: &str,
+    problem_id: &str,
 ) -> Vec<(Provided, String)> {
     let checker_format = format!(
         "(CASE WHEN EXISTS (SELECT 1 FROM plugin e \
@@ -327,20 +328,81 @@ pub(crate) fn sql_needs(
                THEN NULL ELSE {checker_format} END)",
         evaluator = provider(Provided::ProblemType, problem_type),
     );
-    let checker_language = format!(
-        "(CASE WHEN EXISTS (SELECT 1 FROM plugin c \
-                             WHERE c.id = {checker} \
-                               AND jsonb_array_length(c.governs->'checker_languages') > 0) \
-               THEN {checker_language} END)",
-        checker = provider(Provided::CheckerFormat, &checker_format),
-    );
+    let checker_language = checker_language_sql(problem_id, &checker_format);
     vec![
         (Provided::ContestType, contest_type.to_string()),
         (Provided::ProblemType, problem_type.to_string()),
         (Provided::CheckerFormat, checker_format),
         (Provided::Language, language.to_string()),
-        (Provided::Language, checker_language),
+        (Provided::CheckerLanguage, checker_language),
     ]
+}
+
+/// SQL: the language problem `problem_id`'s checker compiles its checker
+/// source in, when its `checker_format` (each an SQL expression) has a
+/// fleet-wide provider whose checker compiles the source
+/// (`Governs::checker_languages` entries of that format): the language of
+/// the first file of the problem's stored source, in stored order, whose
+/// extension, compared case-insensitively, the provider declares; NULL
+/// otherwise. Derived wherever it is needed, never stored, so it follows the
+/// source, the declaration and the provider as they are now. The SQL form
+/// of `broccoli_types::manifest::checker_language`, pinned to it by
+/// `migration::tests::the_checker_language_is_derived_by_the_one_rule`.
+/// Both inputs are bound first, in `input`, so the aliases inside (the
+/// provider's `p` among them) never shadow what they name.
+pub(crate) fn checker_language_sql(problem_id: &str, checker_format: &str) -> String {
+    format!(
+        "(SELECT l->>'language' \
+            FROM (SELECT ({problem_id})::text AS problem, {checker_format} AS format) input \
+            JOIN plugin c ON c.id = {checker} \
+            CROSS JOIN LATERAL jsonb_array_elements(c.governs->'checker_languages') l \
+            JOIN plugin_config pc ON pc.scope = 'problem' \
+                                 AND pc.ref_id = input.problem \
+                                 AND pc.namespace = c.id || ':' || (l->>'namespace') \
+            CROSS JOIN LATERAL jsonb_array_elements( \
+                CASE WHEN jsonb_typeof(pc.config->'files') = 'array' \
+                     THEN pc.config->'files' ELSE '[]'::jsonb END) \
+              WITH ORDINALITY AS f(file, n) \
+           WHERE l->>'format' = input.format \
+             AND lower(f.file->>'filename') LIKE '%.' || lower(l->>'extension') \
+           ORDER BY f.n LIMIT 1)",
+        checker = provider(Provided::CheckerFormat, "input.format"),
+    )
+}
+
+/// The language problem `problem_id`'s checker compiles its source in
+/// ([`checker_language_sql`]), as the database holds them now.
+pub(crate) async fn checker_language_of<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    problem_id: i32,
+) -> Result<Option<String>, sea_orm::DbErr> {
+    Ok(checker_languages_of(db, &[problem_id])
+        .await?
+        .remove(&problem_id)
+        .flatten())
+}
+
+/// [`checker_language_of`] for each of `problem_ids`, in one statement.
+pub(crate) async fn checker_languages_of<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    problem_ids: &[i32],
+) -> Result<std::collections::HashMap<i32, Option<String>>, sea_orm::DbErr> {
+    if problem_ids.is_empty() {
+        return Ok(Default::default());
+    }
+    let rows = db
+        .query_all_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Postgres,
+            format!(
+                "SELECT p.id, {language} AS language FROM problem p WHERE p.id = ANY($1)",
+                language = checker_language_sql("p.id", "p.checker_format"),
+            ),
+            [problem_ids.to_vec().into()],
+        ))
+        .await?;
+    rows.iter()
+        .map(|row| Ok((row.try_get("", "id")?, row.try_get("", "language")?)))
+        .collect()
 }
 
 /// SQL: the unit may run now. For every key of `needs` (each an SQL
@@ -353,23 +415,47 @@ pub(crate) fn sql_needs(
 /// rows it reads (`plugin.is_enabled`, `plugin.governs`,
 /// `plugin_replica.provides`).
 pub(crate) fn runnable(needs: &[(Provided, String)]) -> String {
-    let each: Vec<String> = needs
-        .iter()
-        .map(|(kind, key)| {
-            format!(
-                "({key} IS NULL OR CASE \
-                   WHEN {provider} IS NOT NULL THEN EXISTS ({live} AND {there}) \
-                   ELSE NOT EXISTS (SELECT 1 FROM plugin p \
-                                     WHERE p.governs->'{field}' @> jsonb_build_array({key})) \
-                 END)",
-                provider = provider(*kind, key),
-                live = live_replicas(),
-                there = loads(*kind, key, "r.provides"),
-                field = field(*kind),
-            )
-        })
-        .collect();
-    format!("({})", each.join(" AND "))
+    bound(needs, |kind, key, provider| {
+        format!(
+            "({key} IS NULL OR CASE \
+               WHEN {provider} IS NOT NULL THEN EXISTS ({live} AND {there}) \
+               ELSE NOT EXISTS (SELECT 1 FROM plugin p \
+                                 WHERE p.governs->'{field}' @> jsonb_build_array({key})) \
+             END)",
+            live = live_replicas(),
+            there = loads(kind, key, provider, "r.provides"),
+            field = field(kind),
+        )
+    })
+}
+
+/// SQL: `predicate` over every need of `needs` (each an SQL expression, with
+/// its kind), AND-ed, with each need's key and its fleet-wide [`provider`]
+/// bound once (`predicate` gets the kind and the SQL names of the bound key
+/// and provider): a key derived by a subquery (a problem's checker language)
+/// is computed once per row, however often the predicate reads it.
+fn bound(
+    needs: &[(Provided, String)],
+    predicate: impl Fn(Provided, &str, &str) -> String,
+) -> String {
+    if needs.is_empty() {
+        return "TRUE".into();
+    }
+    let mut binds = Vec::new();
+    let mut each = Vec::new();
+    for (i, (kind, key)) in needs.iter().enumerate() {
+        let (key_name, provider_name) = (format!("need{i}.k"), format!("need{i}.p"));
+        binds.push(format!(
+            "LATERAL (SELECT k, {provider} AS p FROM (SELECT {key} AS k) bound_key) need{i}",
+            provider = provider(*kind, "bound_key.k"),
+        ));
+        each.push(predicate(*kind, &key_name, &provider_name));
+    }
+    format!(
+        "(SELECT {} FROM {})",
+        each.join(" AND "),
+        binds.join(" CROSS JOIN ")
+    )
 }
 
 /// SQL: the live replicas, as `r`, a `SELECT 1 FROM plugin_replica r WHERE`
@@ -385,11 +471,15 @@ fn live_replicas() -> String {
 /// SQL: the fleet-wide provider of `key` (an SQL expression) of `kind`: the
 /// enabled plugin providing it whose id sorts first, bytewise as Rust sorts
 /// it; NULL when none is enabled. The SQL form of
-/// `PluginLifecycle::provider`.
+/// `PluginLifecycle::provider`. The key is bound before the plugin table is
+/// named, so a caller's alias in `key` is never shadowed.
 pub(crate) fn provider(kind: Provided, key: &str) -> String {
     format!(
-        "(SELECT min(p.id COLLATE \"C\") FROM plugin p \
-           WHERE p.is_enabled AND p.governs->'{field}' @> jsonb_build_array({key}))",
+        "(SELECT min(provider_plugin.id COLLATE \"C\") \
+            FROM (SELECT {key} AS key) provider_key \
+            JOIN plugin provider_plugin \
+              ON provider_plugin.is_enabled \
+             AND provider_plugin.governs->'{field}' @> jsonb_build_array(provider_key.key))",
         field = field(kind),
     )
 }
@@ -402,32 +492,27 @@ pub(crate) fn provider(kind: Provided, key: &str) -> String {
 /// takes it fails it visibly. A runnable unit ([`runnable`]) has every
 /// provider loaded on some live replica, so it waits for one of them.
 pub(crate) fn runs_here(needs: &[(Provided, String)], local: &str) -> String {
-    let each: Vec<String> = needs
-        .iter()
-        .map(|(kind, key)| {
-            format!(
-                "({key} IS NULL OR CASE \
-                   WHEN {provider} IS NOT NULL THEN {here} \
-                   ELSE {here} OR NOT EXISTS ({live} AND {there}) \
-                 END)",
-                provider = provider(*kind, key),
-                here = loads(*kind, key, local),
-                live = live_replicas(),
-                there = loads(*kind, key, "r.provides"),
-            )
-        })
-        .collect();
-    format!("({})", each.join(" AND "))
+    bound(needs, |kind, key, provider| {
+        format!(
+            "({key} IS NULL OR CASE \
+               WHEN {provider} IS NOT NULL THEN {here} \
+               ELSE {here} OR NOT EXISTS ({live} AND {there}) \
+             END)",
+            here = loads(kind, key, provider, local),
+            live = live_replicas(),
+            there = loads(kind, key, provider, "r.provides"),
+        )
+    })
 }
 
-/// SQL: `loaded` has `key` of `kind` loaded on its fleet-wide provider, or,
+/// SQL: `loaded` has `key` of `kind` loaded on its fleet-wide `provider` (the
+/// SQL of [`provider`] for it, bound by the caller), or,
 /// for a key none provides fleet-wide, on any plugin.
-fn loads(kind: Provided, key: &str, loaded: &str) -> String {
+fn loads(kind: Provided, key: &str, provider: &str, loaded: &str) -> String {
     format!(
         "COALESCE(CASE WHEN {provider} IS NULL \
                        THEN ({loaded})->'{field}' ? ({key}) \
                        ELSE ({loaded})->'{field}'->({key}) ? {provider} END, FALSE)",
-        provider = provider(kind, key),
         field = field(kind),
     )
 }

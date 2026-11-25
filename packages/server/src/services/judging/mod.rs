@@ -105,7 +105,7 @@ mod unit;
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // Fixtures are stamped with real time.
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) use budget::RetryBudget;
 pub use dispatch::{Dispatch, DispatchedUnit, LiveDispatches, LiveUnit, NotOwned};

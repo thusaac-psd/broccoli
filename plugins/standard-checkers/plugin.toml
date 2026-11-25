@@ -22,9 +22,12 @@ description = "Checker source files of the problem: one .c or .cpp file, plus he
 scopes = ["problem"]
 checker_source = true
 # The language each primary file compiles in, by extension: the host reads a
-# problem's checker language from them, and `checkers::testlib` maps files
-# the same way (pinned by `the_manifest_maps_checker_languages_as_the_code_does`).
+# problem's checker language from them, and `checkers::testlib` compiles by
+# the same rule (`broccoli_server_sdk::checker_language`), from a table
+# pinned to this one by `the_manifest_maps_checker_languages_as_the_code_does`.
 checker_languages = { cpp = ["cpp", "cc", "cxx"], c = ["c"] }
+# The formats whose checker compiles this source.
+compiles = ["testlib"]
 
 [config.checker_source.properties.files]
 type = "array"

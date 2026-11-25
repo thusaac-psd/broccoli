@@ -81,7 +81,7 @@ async fn owner_ids(db: &DatabaseConnection) -> (i32, i32) {
     }
 }
 
-async fn new_submission(
+pub(crate) async fn new_submission(
     db: &DatabaseConnection,
 ) -> (submission::Model, submission_judgement::Model) {
     let (user_id, problem_id) = owner_ids(db).await;
@@ -1490,6 +1490,47 @@ async fn a_type_change_after_a_pending_submission_finds_it() {
     assert!(change.await.unwrap(), "the change sees the submission");
 }
 
+/// Work handed back for a database outage waits `OUTAGE_HANDBACK_DELAY`
+/// before a claim takes it again, so an outage that persists, or a plugin
+/// that fakes one, can never hand one unit back and forth in a hot loop.
+/// It spends nothing, and once the delay passes it is claimed as before.
+#[tokio::test]
+async fn work_handed_back_for_an_outage_waits_before_it_is_claimed_again() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    new_submission(&db).await;
+    let claimed = claim_one(&db, "srv").await;
+    assert_eq!(
+        fail_dispatch(
+            &db,
+            Unit::Judgement,
+            claimed.judgement.id,
+            claimed.judgement.judge_epoch,
+            &DispatchFailure::from(super::fault::Recorded {
+                fault: DispatchFault::DatabaseUnavailable,
+                message: "the database is lost".into(),
+            }),
+        )
+        .await
+        .unwrap(),
+        DispatchFailed::HandedBack
+    );
+    let j = judgement(&db, claimed.judgement.id).await;
+    assert_eq!(
+        (j.status, j.dispatch_retries),
+        (SubmissionStatus::Queued, 0)
+    );
+    assert_eq!(claimable(&db).await, 0, "not before its delay");
+    exec(
+        &db,
+        &format!(
+            "UPDATE submission_judgement SET queued_at = queued_at - make_interval(secs => {})",
+            super::unit::OUTAGE_HANDBACK_DELAY.as_secs_f64()
+        ),
+    )
+    .await;
+    assert_eq!(claimable(&db).await, 1, "claimed once it passed");
+}
+
 /// An attempt that found no plugin SQL connection free (contention with the
 /// work beside it) is handed back spending nothing, but only
 /// `CONTENTION_HANDBACKS` times per unit, counted on its row: the next one
@@ -1523,6 +1564,7 @@ async fn a_contended_attempt_is_handed_back_only_up_to_its_cap() {
         let j = judgement(&db, claimed.judgement.id).await;
         assert_eq!(j.status, SubmissionStatus::Queued);
         assert_eq!(j.contended_handbacks, handed_back);
+        exec(&db, "UPDATE submission_judgement SET queued_at = NOW()").await;
     }
     let claimed = claim_one(&db, "srv").await;
     assert_eq!(
@@ -1606,7 +1648,7 @@ async fn provider(db: &DatabaseConnection, enabled: bool) {
     .await;
 }
 
-async fn claimable(db: &DatabaseConnection) -> usize {
+pub(crate) async fn claimable(db: &DatabaseConnection) -> usize {
     claim_running_everything(db, "srv").await.units.len()
 }
 
@@ -1906,62 +1948,6 @@ async fn work_whose_checker_plugin_is_disabled_is_parked_until_it_is_enabled() {
     exec(&db, &checker(false)).await;
     assert_eq!(claimable(&db).await, 0, "parked work is not claimed");
     exec(&db, &checker(true)).await;
-    assert_eq!(claimable(&db).await, 1, "it resumes");
-}
-
-/// A unit whose checker compiles the problem's checker source needs that
-/// source's language as much as its own (`problem.checker_language`, kept by
-/// the database from the stored source), and while
-/// every provider of that language is disabled the work is parked, unclaimed,
-/// until one is enabled. A checker that declares no languages needs none.
-#[tokio::test]
-async fn work_whose_checker_language_plugin_is_disabled_is_parked_until_it_is_enabled() {
-    let (_pg, db) = crate::test_support::postgres().await;
-    let (sub, _) = new_submission(&db).await;
-    let problem_id = sub.problem_id;
-    let format = crate::entity::problem::Entity::find()
-        .one(&db)
-        .await
-        .unwrap()
-        .unwrap()
-        .checker_format;
-    let languages = serde_json::json!([
-        {"namespace": "checker_source", "extension": "cpp", "language": "checker-cpp"},
-    ]);
-    exec(
-        &db,
-        &format!(
-            "INSERT INTO plugin (id, is_enabled, governs) VALUES \
-               ('checkers', TRUE, '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [\"{format}\"], \"languages\": [], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": {languages}}}'), \
-               ('compilers', FALSE, '{{\"visibility\": false, \"contest_types\": [], \"problem_types\": [], \"checker_formats\": [], \"languages\": [\"checker-cpp\"], \"unchecked_problem_types\": [], \"hooks\": [], \"judging_inputs\": [], \"checker_languages\": []}}')"
-        ),
-    )
-    .await;
-    // The language its checker source compiles in, as the database keeps it
-    // from the stored source (`broccoli_checker_language`, pinned by
-    // `a_problems_checker_language_follows_its_stored_checker_source`).
-    exec(
-        &db,
-        &format!("UPDATE problem SET checker_language = 'checker-cpp' WHERE id = {problem_id}"),
-    )
-    .await;
-    let checker_language = crate::entity::problem::Entity::find_by_id(problem_id)
-        .one(&db)
-        .await
-        .unwrap()
-        .unwrap()
-        .checker_language;
-    assert_eq!(checker_language.as_deref(), Some("checker-cpp"),);
-    assert_eq!(
-        claimable(&db).await,
-        0,
-        "parked while its compiler is disabled"
-    );
-    exec(
-        &db,
-        "UPDATE plugin SET is_enabled = TRUE WHERE id = 'compilers'",
-    )
-    .await;
     assert_eq!(claimable(&db).await, 1, "it resumes");
 }
 

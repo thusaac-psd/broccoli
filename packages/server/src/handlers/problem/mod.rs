@@ -134,7 +134,7 @@ pub async fn create_problem(
 
     Ok((
         StatusCode::CREATED,
-        Json(problem_response(&state, model).await),
+        Json(problem_response(&state, model).await?),
     ))
 }
 
@@ -343,15 +343,18 @@ async fn get_problem_in(
     .await?;
 
     let model = find_problem(&state.db, scope.problem_id).await?;
+    let checker_language = crate::providers::checker_language_of(&state.db, model.id).await?;
     // Under a contest, its work runs in the contest's type; a contest with
     // none takes no work, which its submit refuses on its own terms.
     let closure = contest.map(|contest| {
         contest
             .contest_type
-            .map(|contest_type| submit_closure(state, &contest_type, &model))
+            .map(|contest_type| {
+                submit_closure(state, &contest_type, &model, checker_language.as_deref())
+            })
             .unwrap_or_default()
     });
-    let mut response = problem_response(state, model).await;
+    let mut response = problem_response(state, model).await?;
     if let Some(closure) = closure {
         response.closed_by = closure.closed_by;
         response.closed_languages = closure.closed_languages;
@@ -420,7 +423,7 @@ pub async fn update_problem(
     }
 
     if payload == UpdateProblemRequest::default() {
-        let mut existing = problem_response(&state, find_problem(&state.db, id).await?).await;
+        let mut existing = problem_response(&state, find_problem(&state.db, id).await?).await?;
         existing.samples = load_sample_test_cases(&state.db, id).await?;
         return Ok(Json(existing));
     }
@@ -482,7 +485,7 @@ pub async fn update_problem(
             .await;
     }
 
-    let mut response = problem_response(&state, model).await;
+    let mut response = problem_response(&state, model).await?;
     response.samples = load_sample_test_cases(&state.db, id).await?;
     Ok(Json(response))
 }
