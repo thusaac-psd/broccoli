@@ -120,3 +120,11 @@ export function formatRelativeTime(
 ): string {
   return formatRelativeSeconds((toDate(value).getTime() - now) / 1000, locale);
 }
+
+/** Names joined as the locale lists them: "a, b and c", or "a、b和c". */
+export function formatList(items: readonly string[], locale: string): string {
+  return new Intl.ListFormat(locale, {
+    style: 'long',
+    type: 'conjunction',
+  }).format(items);
+}

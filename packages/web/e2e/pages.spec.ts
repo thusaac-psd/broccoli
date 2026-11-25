@@ -345,8 +345,51 @@ test('a plugin failing on a server says why in the UI language, with the raw err
     }),
   );
   await page.goto('/admin/plugins');
-  const card = page.getByText('此服务器上找不到该插件的文件。');
+  const card = page.getByText('在 server-2 上找不到该插件的文件。');
   await expect(card).toBeVisible();
-  await expect(card).toHaveAttribute('title', raw);
+  await expect(card).toHaveAttribute('title', `server-2: ${raw}`);
   await expect(page.getByText(raw)).toHaveCount(0);
+});
+
+// The card names the servers a plugin fails on, never "this server": the
+// server that answered may be one it runs on.
+test('a plugin failing on other servers names each of them by status', async ({
+  page,
+}) => {
+  await mockApi(page, 'admin');
+  const replica = (server_id: string, status: string, error: string) => ({
+    server_id,
+    status,
+    error,
+    up_to_date: true,
+    retry_at: null,
+    version: null,
+  });
+  await page.route(/\/api\/v1\/admin\/plugins$/, (route) =>
+    route.fulfill({
+      json: [
+        {
+          ...fixturePlugin,
+          fleet: {
+            state: 'failed',
+            replicas_total: 4,
+            replicas_loaded: 1,
+            replicas_failed: 3,
+            replicas: [
+              fixturePlugin.fleet.replicas[0],
+              replica('server-2', 'failed', 'init() trapped'),
+              replica('server-3', 'failed', 'init() trapped'),
+              replica('server-4', 'not_installed', 'Plugin not found'),
+            ],
+          },
+        },
+      ],
+    }),
+  );
+  await page.goto('/admin/plugins');
+  const card = page.getByText(
+    "It failed to load or start on server-2 and server-3. The plugin's files could not be found on server-4.",
+  );
+  await expect(card).toBeVisible();
+  await expect(page.getByText(/this server/)).toHaveCount(0);
 });
