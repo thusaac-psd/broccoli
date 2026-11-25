@@ -117,6 +117,23 @@ pub struct SystemOverviewResponse {
     /// DLQ messages with `resolved = false`.
     #[schema(example = 0)]
     pub dlq_unresolved_count: u64,
+    /// Each server with a fresh heartbeat, by id: whether it is ready
+    /// (`GET /readyz`) and the plugins it lacks while another serves them,
+    /// as each last reported.
+    pub servers: Vec<ServerReadiness>,
+}
+
+/// One server's readiness, with the reason `GET /readyz` leaves out.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct ServerReadiness {
+    pub server_id: String,
+    /// Whether it passes `GET /readyz`: no other server serves every
+    /// enabled plugin it serves and more.
+    pub ready: bool,
+    /// The enabled plugins it does not serve while another server does,
+    /// sorted. Not empty while it is not ready; it can be non-empty on a
+    /// ready server that serves a plugin the others lack.
+    pub missing: Vec<String>,
 }
 
 /// Whether the live workers take work, as the claim gate decides it.

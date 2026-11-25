@@ -1446,8 +1446,8 @@ async fn a_problem_whose_languages_are_all_disabled_names_the_language_plugin() 
 /// serves every enabled plugin it serves and more, whatever the plugin
 /// provides (here a route-only plugin, no key at all), so a gateway that
 /// health-checks it moves the browsers pinned there to a replica that has
-/// the plugin; `/livez` keeps answering. The public body names no plugin.
-/// A peer whose
+/// the plugin; `/livez` keeps answering. The public body names no plugin;
+/// the admin overview says, per server, what it lacks. A peer whose
 /// heartbeat went stale, though still inside the live window, no longer
 /// counts.
 #[tokio::test(flavor = "multi_thread")]
@@ -1455,6 +1455,7 @@ async fn a_replica_lacking_a_plugin_a_fresh_peer_serves_is_not_ready() {
     use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
     let app = TestApp::spawn().await;
+    let token = admin(&app).await;
     let here = app.state.config.server.id.clone();
     app.db
         .execute_raw(Statement::from_string(
@@ -1485,6 +1486,27 @@ async fn a_replica_lacking_a_plugin_a_fresh_peer_serves_is_not_ready() {
     assert!(!res.text.contains("route-plugin"), "{}", res.text);
     assert_eq!(app.get_without_token("/livez").await.status, 200);
 
+    let res = app.get_with_token(routes::SYSTEM_OVERVIEW, &token).await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let server = |id: &str| {
+        res.body["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["server_id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} missing: {}", res.text))
+    };
+    assert_eq!(server(&here)["ready"], false, "{}", res.text);
+    assert_eq!(
+        server(&here)["missing"],
+        json!(["route-plugin"]),
+        "{}",
+        res.text
+    );
+    assert_eq!(server("peer")["ready"], true, "{}", res.text);
+    assert_eq!(server("peer")["missing"], json!([]), "{}", res.text);
+
     app.db
         .execute_raw(Statement::from_string(
             DbBackend::Postgres,
@@ -1496,4 +1518,10 @@ async fn a_replica_lacking_a_plugin_a_fresh_peer_serves_is_not_ready() {
     plugin_lifecycle::reconcile(&app.state).await.unwrap();
     let res = app.get_without_token("/readyz").await;
     assert_eq!(res.status, 200, "{}", res.text);
+    let res = app.get_with_token(routes::SYSTEM_OVERVIEW, &token).await;
+    assert!(
+        !res.text.contains("\"peer\""),
+        "a stale peer is not listed: {}",
+        res.text
+    );
 }

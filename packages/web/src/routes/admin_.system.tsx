@@ -9,11 +9,12 @@ import {
   CardTitle,
   Skeleton,
 } from '@broccoli/web-sdk/ui';
-import { AlertCircle, Inbox, Server } from 'lucide-react';
+import { AlertCircle, Inbox, Network, Server } from 'lucide-react';
 
 import { PageLayout } from '@/components/PageLayout';
 import { Unauthorized } from '@/components/Unauthorized';
 import { QueueDepthList } from '@/features/system/components/QueueDepthList';
+import { ServerReadinessList } from '@/features/system/components/ServerReadinessList';
 import { SystemHealthSummary } from '@/features/system/components/SystemHealthSummary';
 import { WorkersGrid } from '@/features/system/components/WorkersGrid';
 import { useSystemOverview } from '@/features/system/hooks/useSystemOverview';
@@ -158,6 +159,21 @@ export default function AdminSystemPage() {
               </CardHeader>
               <CardContent>
                 <QueueDepthList queues={data.queues} />
+              </CardContent>
+            </Card>
+
+            <Card className="lg:col-span-3">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Network className="h-4 w-4" />
+                  {t('system.servers.title')}
+                </CardTitle>
+                <CardDescription>
+                  {t('system.servers.description')}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ServerReadinessList servers={data.servers} />
               </CardContent>
             </Card>
           </div>
