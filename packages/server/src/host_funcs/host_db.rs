@@ -4,8 +4,8 @@
 //!
 //! An outage ([`common::db::outage`]) says nothing about what the plugin
 //! asked for, so it fails the plugin's call as the database's: a lost
-//! database as `DATABASE_UNAVAILABLE` ([`plugin_core::PluginError::DatabaseUnavailable`]),
-//! a saturated pool as `DATABASE_BUSY` ([`plugin_core::PluginError::DatabaseBusy`]).
+//! database as `DATABASE_UNAVAILABLE` ([`plugin_core::error::PluginError::DatabaseUnavailable`]),
+//! a saturated pool as `DATABASE_BUSY` ([`plugin_core::error::PluginError::DatabaseBusy`]).
 //! Both are `is_unavailable`, so a route answers a retryable 503, a timer
 //! delivery is handed back with its attempt refunded and a hook is skipped
 //! or answers 503; under a judging dispatch the outage is the platform's and

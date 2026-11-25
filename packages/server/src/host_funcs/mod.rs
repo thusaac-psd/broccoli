@@ -4,7 +4,7 @@ pub mod context;
 pub mod dispatch;
 pub mod evaluate;
 pub mod feedback;
-pub mod host_db;
+pub(crate) mod host_db;
 pub mod language;
 pub mod logger;
 pub mod registry;
